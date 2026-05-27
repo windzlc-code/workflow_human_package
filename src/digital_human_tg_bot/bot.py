@@ -42,8 +42,9 @@ DIGITAL_HUMAN_CUSTOM_BUTTON = "自定义数字人要求"
 ORAL_UPLOAD_BUTTON = DIGITAL_HUMAN_VIDEO_BUTTON
 LEGACY_ORAL_UPLOAD_BUTTON = "口播数字人：上传素材"
 WORKFLOW_CONFIG_BUTTON = "查看后台工作流配置"
-IMAGE_WORKFLOW_BUTTON = "图片编辑"
-TEXT_TO_IMAGE_BUTTON = "文生图片"
+IMAGE_WORKFLOW_BUTTON = "图像编辑"
+TEXT_TO_IMAGE_BUTTON = "文生图"
+VIDEO_GENERAL_EDIT_BUTTON = "视频编辑任务"
 LEGACY_IMAGE_WORKFLOW_BUTTON = "图像编辑工作流"
 LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "图片生成工作流"
 VIDEO_EDIT_BUTTON = "视频编辑"
@@ -75,6 +76,7 @@ TRADITIONAL_BUTTON_ALIASES = {
     "圖像編輯工作流": LEGACY_IMAGE_WORKFLOW_BUTTON,
     "圖片生成工作流": LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON,
     "視頻編輯": VIDEO_EDIT_BUTTON,
+    "視頻編輯任務": VIDEO_GENERAL_EDIT_BUTTON,
     "返回主菜單": MAIN_MENU_BUTTON,
     "視頻模特替換": REPLACE_MODEL_WORKFLOW_BUTTON,
     "模特替換工作流": LEGACY_REPLACE_MODEL_WORKFLOW_BUTTON,
@@ -172,11 +174,18 @@ def _build_bot(config: AppConfig) -> Bot:
 def _menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=DIGITAL_HUMAN_VIDEO_BUTTON)],
-            [KeyboardButton(text=TEXT_TO_IMAGE_BUTTON), KeyboardButton(text=IMAGE_WORKFLOW_BUTTON)],
-            [KeyboardButton(text=VIDEO_EDIT_BUTTON)],
-            [KeyboardButton(text=RERUN_BUTTON), KeyboardButton(text=STATUS_BUTTON)],
-            [KeyboardButton(text=STOP_BUTTON)],
+            [KeyboardButton(text=IMAGE_WORKFLOW_BUTTON), KeyboardButton(text=VIDEO_EDIT_BUTTON)],
+            [KeyboardButton(text=STATUS_BUTTON), KeyboardButton(text=STOP_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _image_edit_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=TEXT_TO_IMAGE_BUTTON)],
+            [KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
     )
@@ -185,8 +194,8 @@ def _menu_keyboard() -> ReplyKeyboardMarkup:
 def _video_edit_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=REPLACE_PRODUCT_WORKFLOW_BUTTON), KeyboardButton(text=REPLACE_MODEL_WORKFLOW_BUTTON)],
-            [KeyboardButton(text=REPLACE_UNION_WORKFLOW_BUTTON), KeyboardButton(text=MAIN_MENU_BUTTON)],
+            [KeyboardButton(text=VIDEO_GENERAL_EDIT_BUTTON)],
+            [KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
     )
@@ -338,7 +347,7 @@ def _workflow_config_text(service: WorkspaceService, selected_button: str = "") 
 
     if display_selected_button and display_selected_button != WORKFLOW_CONFIG_BUTTON:
         selected_map = {
-            IMAGE_WORKFLOW_BUTTON: _format_chain("图片编辑", image_chain),
+            IMAGE_WORKFLOW_BUTTON: _format_chain("图像编辑", image_chain),
             REPLACE_MODEL_WORKFLOW_BUTTON: _format_chain("视频模特替换", replace_model_original_chain),
             REPLACE_PRODUCT_WORKFLOW_BUTTON: _format_chain("视频商品替换", replace_product_chain),
             REPLACE_UNION_WORKFLOW_BUTTON: "\n".join(
@@ -363,14 +372,14 @@ def _workflow_config_text(service: WorkspaceService, selected_button: str = "") 
         [
             "后台工作流配置：",
             _format_chain("口播数字人工作流", oral_chain),
-            _format_chain("图片编辑", image_chain),
+            _format_chain("图像编辑", image_chain),
             _format_chain("视频模特替换", replace_model_original_chain),
             _format_chain("视频商品替换", replace_product_chain),
             _format_chain("联合替换·视频模特链", replace_union_model_chain),
             _format_chain("联合替换·视频商品链", replace_union_product_chain),
             "",
             selected_note,
-            "TG 面板可直接建立任务：口播数字人、文生图片、图片编辑、视频编辑。",
+            "TG 面板可直接建立任务：图像编辑、视频编辑。",
             f"工作台网址: {config.public_base_url}",
         ]
     ).strip()
@@ -382,18 +391,13 @@ def _quick_start_text(service: WorkspaceService) -> str:
             f"🌟 {service.get_app_title()} 已启动",
             "",
             "🌟 可用工作流",
-            f"1. {DIGITAL_HUMAN_VIDEO_BUTTON}",
-            "   上传视频、文案、人像图或人像提示词；人像步骤可跳过。",
-            f"2. {TEXT_TO_IMAGE_BUTTON}",
-            "   输入需求后由 Grok 生成提示词；接入远程 ComfyUI 工作流后提交生成。",
-            f"3. {IMAGE_WORKFLOW_BUTTON}",
-            "   上传参考图，然后输入图片修改提示词。",
-            f"4. {VIDEO_EDIT_BUTTON}",
-            "   进入子菜单后，可选视频商品替换、视频模特替换、联合替换。",
+            f"1. {IMAGE_WORKFLOW_BUTTON}",
+            "   点击后选择图像参数；当前已接入：文生图。",
+            f"2. {VIDEO_EDIT_BUTTON}",
+            "   点击后选择视频编辑参数；当前保留通用视频编辑入口。",
             "",
             "🌟 直接对话",
-            "你也可以直接描述任务并附上素材。",
-            "Bot 会先用后台文字模型理解需求，再引导或建立对应工作流。",
+            "也可以发送 /status 查看后台任务进度，发送 /stop 停止当前任务。",
             "",
             "🌟 常用操作",
             f"- {RERUN_BUTTON}：重跑最近一次任务。",
@@ -734,20 +738,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await message.answer("\n\n".join(parts), reply_markup=_menu_keyboard())
 
     async def start_image_generate_flow(message: Message, state: FSMContext) -> None:
-        work_dir = service.create_job_dir(prefix="tg_image")
         await state.clear()
-        await state.set_state(ProductionWorkflowForm.image_waiting_for_product_image)
-        await state.update_data(work_dir=str(work_dir))
         await message.answer(
-            "\n".join(
-                [
-                    "🌟 图片编辑",
-                    "步骤 1/2：上传图片",
-                    "",
-                    "请上传 1 张商品图或参考图。",
-                ]
-            ),
-            reply_markup=_menu_keyboard(),
+            "图像编辑：请选择要执行的图像参数。",
+            reply_markup=_image_edit_keyboard(),
         )
 
     async def start_text_to_image_flow(message: Message, state: FSMContext) -> None:
@@ -755,7 +749,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
         await message.answer(
             "请输入文生图需求。Grok 会先生成最终提示词；远程 ComfyUI 工作流接入后会用于实际生成。",
-            reply_markup=_menu_keyboard(),
+            reply_markup=_image_edit_keyboard(),
         )
     async def start_replace_model_flow(message: Message, state: FSMContext) -> None:
         work_dir = service.create_job_dir(prefix="tg_replace_model")
@@ -1061,7 +1055,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await message.answer("请直接输入这次数字人视频的客制化要求；收到后我会继续让你上传素材。", reply_markup=_digital_human_keyboard())
 
     @router.message(F.text == TEXT_TO_IMAGE_BUTTON)
+    @router.message(F.text == "文生图")
     @router.message(F.text == "文生图片")
+    @router.message(F.text == "文生圖")
     @router.message(F.text == "文生圖片")
     async def on_text_to_image_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
@@ -1091,6 +1087,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "视频编辑：请选择要建立的任务。",
             reply_markup=_video_edit_keyboard(),
         )
+
+    @router.message(F.text == VIDEO_GENERAL_EDIT_BUTTON)
+    async def on_video_general_edit_button(message: Message, state: FSMContext) -> None:
+        if not await ensure_authorized(message):
+            return
+        await start_replace_product_flow(message, state)
 
     @router.message(F.text == MAIN_MENU_BUTTON)
     @router.message(F.text == "返回主菜单")
@@ -1279,9 +1281,8 @@ class TelegramWorkbenchBot:
                         "\n".join(
                             [
                                 f"{self.service.get_app_title()} 已上线。",
-                                f"首次使用可按「{DIGITAL_HUMAN_VIDEO_BUTTON}」，再依序传视频、文案、人像图/人像提示词、秒数；人像步骤可跳过。",
-                                f"图片任务按「{IMAGE_WORKFLOW_BUTTON}」；视频替换任务按「{VIDEO_EDIT_BUTTON}」后选择子工作流。",
-                                "也可以直接描述任务并附上素材，Bot 会用后台文字模型理解需求并生成提示词。",
+                                f"图像任务按「{IMAGE_WORKFLOW_BUTTON}」后选择「{TEXT_TO_IMAGE_BUTTON}」。",
+                                f"视频任务按「{VIDEO_EDIT_BUTTON}」后选择「{VIDEO_GENERAL_EDIT_BUTTON}」。",
                                 "提交后任务会进入后台队列；可按「查看工作台状态」，并在 Web 任务详情查看进度与成品。",
                             ]
                         ),
