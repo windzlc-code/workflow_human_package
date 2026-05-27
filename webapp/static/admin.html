@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>运营后台 - 电商带货视频生成平台</title>
+  <link rel="stylesheet" href="/assets/style.css?v=__STYLE_VERSION__">
+</head>
+<body class="page-admin">
+  <div class="layout admin-layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>运营后台</h1>
+        <p>管理员：<span id="adminName">...</span></p>
+      </div>
+
+      <div class="admin-rail-note">
+        <div class="small">运营工作台</div>
+        <div class="admin-rail-note-title">客户、记录、额度、配置集中管理</div>
+        <div class="small">敏感配置仅管理员账号可见</div>
+        <div class="admin-rail-status">
+          <div class="small">当前页</div>
+          <div class="admin-rail-status-title" id="adminCurrentPageLabel">运营概览</div>
+        </div>
+      </div>
+
+      <div class="nav admin-nav">
+        <button type="button" data-page="overview">运营概览</button>
+        <button type="button" data-page="users">客户账号 <span class="small" id="adminUserCount">0</span></button>
+        <button type="button" data-page="tasks">生成记录 <span class="small" id="adminTaskCount">0</span></button>
+        <button type="button" data-page="pricing">额度与计费</button>
+        <button type="button" data-page="runtime">系统配置</button>
+        <button type="button" data-page="account">账号设置</button>
+      </div>
+
+      <div class="sidebar-actions admin-sidebar-actions">
+        <button id="btnToUser" class="ghost" type="button">返回客户端</button>
+        <button id="btnLogout" class="danger" type="button">退出</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <section class="section page-title admin-page-title">
+        <div class="page-title-copy">
+          <div class="section-kicker">运营与配置中心</div>
+          <h2>电商素材生产后台</h2>
+          <div class="meta">优先处理客户账号、生成记录和额度策略，供应商配置集中放在后段维护。</div>
+        </div>
+        <div class="workspace-overview admin-overview-strip">
+          <div class="overview-pod">
+            <div class="overview-label">客户账号</div>
+            <div class="overview-value" id="overviewUserCount">0</div>
+          </div>
+          <div class="overview-pod">
+            <div class="overview-label">生成记录</div>
+            <div class="overview-value" id="overviewTaskCount">0</div>
+          </div>
+          <div class="overview-pod">
+            <div class="overview-label">失败记录</div>
+            <div class="overview-value" id="overviewFailedCount">0</div>
+          </div>
+          <div class="overview-pod">
+            <div class="overview-label">运行中</div>
+            <div class="overview-value" id="overviewRunningCount">0</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card section admin-page-view" id="secOverview" data-page-view="overview">
+        <div class="section-head">
+          <div>
+            <h2>运营概览</h2>
+            <div class="meta">从客户开通、失败排查和处理中任务三个方向看当前工作量。</div>
+          </div>
+        </div>
+        <div class="task-summary-shell">
+          <div class="task-summary overview-summary">
+            <div class="kpi task-kpi">
+              <div class="label">客户账号</div>
+              <div class="num" id="overviewUserCountMirror">0</div>
+              <div class="small">已开通账号</div>
+            </div>
+            <div class="kpi task-kpi">
+              <div class="label">生成记录</div>
+              <div class="num" id="overviewTaskCountMirror">0</div>
+              <div class="small">最近生成记录</div>
+            </div>
+            <div class="kpi task-kpi">
+              <div class="label">失败记录</div>
+              <div class="num" id="overviewFailedCountMirror">0</div>
+              <div class="small">需排查</div>
+            </div>
+            <div class="kpi task-kpi">
+              <div class="label">运行中</div>
+              <div class="num" id="overviewRunningCountMirror">0</div>
+              <div class="small">排队 / 生成中</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card section admin-page-view" id="secUsers" data-page-view="users">
+        <div class="section-head">
+          <div>
+            <h2>客户账号</h2>
+            <div class="meta">开通客户、分配额度、控制账号状态。常用动作放前，破坏性操作收敛到表格内。</div>
+          </div>
+        </div>
+        <div class="admin-compose-shell">
+          <div class="grid-2 admin-user-grid">
+            <div>
+              <label>客户用户名</label>
+              <input id="newUserName" placeholder="customer001">
+              <label>密码（至少 6 位）</label>
+              <input id="newUserPassword" type="password" placeholder="password">
+            </div>
+            <div>
+              <label>初始额度（分）</label>
+              <input id="newUserBalance" type="number" value="0">
+              <label>账号权限</label>
+              <div class="admin-create-actions">
+                <label class="switch"><input id="newUserIsAdmin" type="checkbox"> 设为管理员</label>
+                <button id="btnCreateUser" class="primary" type="button">创建客户账号</button>
+              </div>
+            </div>
+          </div>
+          <div id="userMsg" class="msg"></div>
+        </div>
+        <div class="table-wrap admin-table-shell">
+          <table class="table admin-user-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>客户用户名</th>
+                <th>角色</th>
+                <th>状态</th>
+                <th>额度(分)</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="userBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card section admin-page-view" id="secTasks" data-page-view="tasks">
+        <div class="section-head">
+          <div>
+            <h2>生成记录</h2>
+            <div class="meta">按状态、类型、客户快速筛选任务，优先处理失败任务和高频客户记录。</div>
+          </div>
+          <div class="section-head-side">
+            <div class="small" id="taskLastUpdated">尚未刷新</div>
+            <div class="task-inline-actions">
+              <label class="switch"><input id="taskAutoRefresh" type="checkbox" checked> 自动刷新</label>
+              <button id="btnTaskRefresh" class="ghost" type="button">刷新记录</button>
+            </div>
+          </div>
+        </div>
+        <div class="task-stack">
+          <div class="task-summary-shell">
+            <div class="task-summary" id="taskSummary"></div>
+          </div>
+          <div class="task-toolbar">
+            <div class="task-filter-grid">
+              <div>
+                <label>搜索记录</label>
+                <input id="taskSearch" type="search" placeholder="生成编号 / 客户 / 类型 / 异常提示">
+              </div>
+              <div>
+                <label>状态</label>
+                <select id="taskStatusFilter">
+                  <option value="">全部状态</option>
+                </select>
+              </div>
+              <div>
+                <label>生成类型</label>
+                <select id="taskWorkflowFilter">
+                  <option value="">全部类型</option>
+                </select>
+              </div>
+              <div>
+                <label>客户</label>
+                <select id="taskUserFilter">
+                  <option value="">全部客户</option>
+                </select>
+              </div>
+            </div>
+            <div class="task-inline-actions">
+              <button id="btnTaskFilterReset" class="ghost" type="button">清空筛选</button>
+            </div>
+          </div>
+        </div>
+        <div id="taskMsg" class="msg"></div>
+        <div class="small task-meta-line" id="taskMetaLine">正在加载生成记录...</div>
+        <div id="taskEmpty" class="task-empty" style="display:none">当前筛选条件下没有生成记录</div>
+        <div id="taskList" class="task-list"></div>
+      </section>
+
+      <section class="card section admin-page-view" id="secPricing" data-page-view="pricing">
+        <div class="section-head">
+          <div>
+            <h2>额度与计费</h2>
+            <div class="meta">统一维护服务点换算、汇率和图像 / 识别成本，减少客户额度策略的频繁手算。</div>
+          </div>
+        </div>
+        <div class="admin-config-grid">
+          <div class="admin-config-card">
+            <div class="admin-config-card-title">换算规则</div>
+            <label>视频生成额度换算：10 RMB = ? 服务点</label>
+            <input id="priceRhCoins" type="number" value="2500">
+            <label>USD→RMB 汇率</label>
+            <input id="priceUsdRmb" type="number" step="0.01" value="7.2">
+            <label>图片生成成本（USD/张）</label>
+            <input id="priceNanoUsd" type="number" step="0.001" value="0.134">
+          </div>
+          <div class="admin-config-card">
+            <div class="admin-config-card-title">识别成本</div>
+            <label>素材识别输入成本（USD/1M tokens）</label>
+            <input id="priceGemIn" type="number" step="0.01" value="4.0">
+            <label>素材识别输出成本（USD/1M tokens）</label>
+            <input id="priceGemOut" type="number" step="0.01" value="18.0">
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="btnSavePricing" class="primary" type="button">保存额度配置</button>
+          <div id="pricingMsg" class="msg"></div>
+        </div>
+      </section>
+
+      <section class="card section admin-page-view" id="secRuntime" data-page-view="runtime">
+        <div class="section-head">
+          <div>
+            <h2>系统配置</h2>
+            <div class="meta">把供应商密钥、工作流编号和清理规则分层管理，避免整页成为一堵长表单。</div>
+          </div>
+        </div>
+        <div class="admin-runtime-stack">
+          <div class="admin-config-card admin-runtime-panel">
+            <div class="admin-runtime-panel-head">
+              <div>
+                <div class="admin-config-card-title">闭源模型配置</div>
+                <div class="small">把文字模型和图片模型集中管理，避免和远程 ComfyUI 工作流混在一起。</div>
+              </div>
+            </div>
+            <div class="admin-runtime-grid">
+              <div class="admin-runtime-column">
+                <div class="admin-runtime-block">
+                  <div class="admin-config-card-title">文字模型</div>
+                  <div class="small">用于自动生成口播文案、视频提示词、素材识别和错误分析。</div>
+                  <label>API Base URL</label>
+                  <input id="rtLlmBaseUrl" placeholder="http://202.90.21.53:3008">
+                  <input id="rtLlmApiKeyGemini" type="hidden">
+                  <label>Grok 文字模型密钥</label>
+                  <input id="rtLlmApiKeyGpt" type="password" placeholder="Grok API Key">
+                  <div class="admin-model-list-editor" style="display:none">
+                    <div id="rtLlmGeminiModelList" class="admin-model-list"></div>
+                    <div class="admin-model-list-input-row">
+                      <input id="rtLlmGeminiModelInput" type="text" placeholder="输入 Gemini 文字模型后回车或点击添加">
+                      <button id="btnAddLlmGeminiModel" type="button" class="ghost admin-model-add-btn">+</button>
+                    </div>
+                  </div>
+                  <label>Grok 候选模型</label>
+                  <div class="admin-model-list-editor">
+                    <div id="rtLlmGptModelList" class="admin-model-list"></div>
+                    <div class="admin-model-list-input-row admin-model-list-input-row-picker">
+                      <input id="rtLlmGptModelInput" type="text" placeholder="输入 Grok 文字模型后回车或点击添加">
+                      <button id="btnBrowseLlmGrokModels" type="button" class="ghost admin-model-picker-btn">可用模型</button>
+                      <button id="btnAddLlmGptModel" type="button" class="ghost admin-model-add-btn">+</button>
+                    </div>
+                    <div id="rtLlmGrokModelPicker" class="admin-model-picker" hidden></div>
+                  </div>
+                  <label>Grok 调用顺序</label>
+                  <div class="admin-model-list-editor">
+                    <div id="rtLlmPriorityModelList" class="admin-model-priority-list"></div>
+                    <div class="admin-model-list-input-row">
+                      <input id="rtLlmPriorityModelInput" type="text" placeholder="输入 Grok 模型名后回车或点击添加">
+                      <button id="btnAddLlmPriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                    </div>
+                  </div>
+                  <div id="rtLlmModelSummary" class="admin-model-summary small"></div>
+                </div>
+              </div>
+              <div class="admin-runtime-column">
+                <div class="admin-runtime-block">
+                  <div class="admin-config-card-title">图片模型</div>
+                  <div class="small">闭源图片模型与默认候选模型统一在这里维护。</div>
+                  <label>闭源图像 API Base URL</label>
+                  <input id="rtImageModelProviderBaseUrl" placeholder="http://202.90.21.53:3008">
+                  <label>Gemini 生图服务密钥</label>
+                  <input id="rtImageModelProviderApiKeyGemini" type="password" placeholder="Gemini Image API Key">
+                  <label>GPT 生图服务密钥</label>
+                  <input id="rtImageModelProviderApiKeyGpt" type="password" placeholder="GPT Image API Key">
+                  <label>Gemini 候选模型</label>
+                  <div class="admin-model-list-editor">
+                    <div id="rtImageGeminiModelList" class="admin-model-list"></div>
+                    <div class="admin-model-list-input-row">
+                      <input id="rtImageGeminiModelInput" type="text" placeholder="输入 Gemini 图片模型后回车或点击添加">
+                      <button id="btnAddImageGeminiModel" type="button" class="ghost admin-model-add-btn">+</button>
+                    </div>
+                  </div>
+                  <label>GPT 候选模型</label>
+                  <div class="admin-model-list-editor">
+                    <div id="rtImageGptModelList" class="admin-model-list"></div>
+                    <div class="admin-model-list-input-row">
+                      <input id="rtImageGptModelInput" type="text" placeholder="输入 GPT 图片模型后回车或点击添加">
+                      <button id="btnAddImageGptModel" type="button" class="ghost admin-model-add-btn">+</button>
+                    </div>
+                  </div>
+                  <label>优先级调用顺序（失败自动降级）</label>
+                  <div class="admin-model-list-editor">
+                    <div id="rtImagePriorityModelList" class="admin-model-priority-list"></div>
+                    <div class="admin-model-list-input-row">
+                      <input id="rtImagePriorityModelInput" type="text" placeholder="输入模型名后回车或点击添加到优先级列表">
+                      <button id="btnAddImagePriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                    </div>
+                  </div>
+                  <div id="rtImageModelSummary" class="admin-model-summary small"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="admin-config-card admin-runtime-panel">
+            <div class="admin-runtime-panel-head">
+              <div>
+                <div class="admin-config-card-title">&#36828;&#31243; ComfyUI &#24037;&#20316;&#27969;</div>
+                <div class="small">&#36830;&#25509; 4090 &#30005;&#33041;&#19978;&#30340; ComfyUI &#32593;&#20851;&#65292;&#21047;&#26032;&#21518;&#21487;&#38543;&#26102;&#20999;&#25442;&#19981;&#21516; API Format &#24037;&#20316;&#27969;&#24182;&#23454;&#26102;&#29983;&#25928;&#12290;</div>
+              </div>
+              <button id="btnRemoteComfyWorkflows" type="button" class="ghost">&#21047;&#26032; 4090 &#24037;&#20316;&#27969;</button>
+              <button id="btnRemoteComfyConvertWorkflows" type="button" class="blue">&#19968;&#38190;&#36716;&#25442; API &#26684;&#24335;</button>
+              <button id="btnRemoteComfyForceConvertWorkflows" type="button" class="ghost">&#24378;&#21046;&#37325;&#26032;&#36716;&#25442;</button>
+            </div>
+            <div class="admin-runtime-grid admin-runtime-grid-remote">
+              <div class="admin-runtime-column">
+                <div class="admin-runtime-block">
+                  <div class="admin-config-card-title">&#32593;&#20851;&#36830;&#25509;</div>
+                  <label>&#20844;&#32593;&#32593;&#20851;&#22320;&#22336;</label>
+                  <input id="rtRemoteComfyGatewayUrl" type="text" placeholder="http://47.243.99.2/gpu">
+                  <label>&#32593;&#20851;&#35775;&#38382; Token</label>
+                  <input id="rtRemoteComfyGatewayToken" type="password" placeholder="Bearer Token">
+                  <div class="remote-comfy-toolbar">
+                    <button id="btnRemoteComfyHealth" type="button" class="ghost">&#26816;&#27979;&#36828;&#31243;&#32593;&#20851;</button>
+                    <button id="btnRemoteComfyRunTest" type="button" class="blue">&#27979;&#35797;&#24403;&#21069;&#26144;&#23556;</button>
+                  </div>
+                  <div id="rtRemoteComfyHealthStatus" class="small"></div>
+                  <div class="small remote-comfy-status" id="rtRemoteComfyWorkflowStatus">&#23578;&#26410;&#21047;&#26032;&#24037;&#20316;&#27969;</div>
+                </div>
+              </div>
+              <div class="admin-runtime-column">
+                <div class="admin-runtime-block">
+                  <div class="admin-config-card-title">&#20219;&#21153;&#24037;&#20316;&#27969;&#26144;&#23556;</div>
+                  <div class="small">&#27599;&#19968;&#31867;&#21069;&#21488;/TG &#20219;&#21153;&#37117;&#21487;&#20197;&#36873;&#25321; 4090 &#19978;&#19981;&#21516;&#30340;&#21487;&#36816;&#34892;&#24037;&#20316;&#27969;&#65307;&#20445;&#23384;&#21518;&#31435;&#21363;&#25353;&#26032;&#26144;&#23556;&#25552;&#20132;&#12290;</div>
+                  <div id="rtRemoteComfyWorkflowMappings" class="remote-comfy-mapping-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="admin-config-card admin-runtime-panel">
+            <div class="admin-runtime-panel-head">
+              <div>
+                <div class="admin-config-card-title">TG Bot 设置</div>
+                <div class="small">维护 Telegram Bot 授权用户。只有信任名单里的 TG 用户 ID 可以操作机器人。</div>
+              </div>
+              <button id="btnRefreshTgTrustedUsers" class="ghost" type="button">刷新</button>
+            </div>
+            <div class="tg-config-grid">
+              <div class="tg-config-status">
+                <div class="overview-pod">
+                  <div class="overview-label">Bot Token</div>
+                  <div class="overview-value overview-value-small" id="tgBotTokenStatus">-</div>
+                </div>
+                <div class="overview-pod">
+                  <div class="overview-label">信任用户</div>
+                  <div class="overview-value" id="tgTrustedUserCount">0</div>
+                </div>
+                <div class="overview-pod tg-config-path">
+                  <div class="overview-label">授权数据库</div>
+                  <div class="small" id="tgBotDbPath">-</div>
+                </div>
+                <div class="overview-pod tg-config-path">
+                  <div class="overview-label">环境默认 ID</div>
+                  <div class="small" id="tgBotAllowedIds">-</div>
+                </div>
+              </div>
+              <div class="tg-config-compose">
+                <label>TG 用户 ID</label>
+                <input id="tgTrustedChatId" type="number" min="1" placeholder="例如：601992552">
+                <label>备注名称</label>
+                <input id="tgTrustedLabel" type="text" placeholder="例如：Ricky / Frank">
+                <div class="tg-config-switches">
+                  <label class="switch"><input id="tgTrustedEnabled" type="checkbox" checked> 启用</label>
+                  <label class="switch"><input id="tgTrustedNotifyBusy" type="checkbox" checked> 任务占用通知</label>
+                  <label class="switch"><input id="tgTrustedNotifyAvailable" type="checkbox" checked> 空闲通知</label>
+                </div>
+                <button id="btnAddTgTrustedUser" class="primary" type="button">保存信任用户</button>
+              </div>
+            </div>
+            <div id="tgSettingsMsg" class="msg"></div>
+            <div class="table-wrap admin-table-shell tg-member-shell">
+              <table class="table tg-member-table">
+                <thead>
+                  <tr>
+                    <th>TG 用户 ID</th>
+                    <th>备注</th>
+                    <th>状态</th>
+                    <th>任务占用通知</th>
+                    <th>空闲通知</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="tgTrustedUserBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="admin-config-card admin-runtime-panel admin-runtime-card-compact">
+            <div class="admin-config-card-title">磁盘自动清理</div>
+            <div class="small">定时清理过期的生成产物（图片、视频、音频），防止磁盘被历史任务撑满。</div>
+            <label>自动清理</label>
+            <label class="switch"><input id="rtCleanupEnabled" type="checkbox"> 启用</label>
+            <label>每天清理时间</label>
+            <input id="rtCleanupTime" type="time" value="03:30">
+            <label>保留最近几天的文件</label>
+            <input id="rtCleanupRetentionDays" type="number" min="1" value="7">
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="btnSaveRuntime" class="primary" type="button">保存运行配置</button>
+          <div id="runtimeMsg" class="msg"></div>
+        </div>
+      </section>
+
+      <section class="card section admin-page-view" id="secAccount" data-page-view="account">
+        <div class="section-head">
+          <div>
+            <h2>账号设置</h2>
+            <div class="meta">只针对当前管理员账号，用户名修改与密码更新拆成两个独立动作。</div>
+          </div>
+        </div>
+        <div class="grid-2 account-grid">
+          <div>
+            <h3>修改用户名</h3>
+            <label>当前用户名</label>
+            <input id="accCurrentUsername" type="text" disabled>
+            <label>新用户名</label>
+            <input id="accNewUsername" type="text" placeholder="3-32 位，字母/数字/.-_">
+            <label>当前密码（用于确认）</label>
+            <input id="accUsernamePassword" type="password" placeholder="输入当前密码">
+            <div class="row" style="margin-top:12px">
+              <button id="btnChangeUsername" class="primary" type="button">修改用户名</button>
+            </div>
+            <div id="accountUsernameMsg" class="msg" style="margin-top:10px"></div>
+          </div>
+          <div>
+            <h3>修改密码</h3>
+            <label>原密码</label>
+            <input id="accOldPassword" type="password" placeholder="输入原密码">
+            <label>新密码</label>
+            <input id="accNewPassword" type="password" placeholder="至少 6 位">
+            <label>确认新密码</label>
+            <input id="accNewPassword2" type="password" placeholder="再次输入新密码">
+            <div class="row" style="margin-top:12px">
+              <button id="btnChangePassword" class="primary" type="button">修改密码</button>
+            </div>
+            <div id="accountPasswordMsg" class="msg" style="margin-top:10px"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="taskInspectModal" class="modal-overlay" style="display:none" aria-hidden="true">
+    <div class="modal-card admin-task-modal" role="dialog" aria-modal="true" aria-labelledby="taskInspectTitle">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title" id="taskInspectTitle">生成详情</div>
+          <div class="small" id="taskInspectSub">-</div>
+        </div>
+        <button id="btnTaskInspectClose" type="button" class="ghost">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div id="taskInspectBody"></div>
+      </div>
+      <div class="modal-footer">
+        <div class="small">支持复制当前面板内容，便于排查与归档</div>
+        <div class="task-inline-actions">
+          <button id="btnTaskInspectCopy" type="button" class="ghost">复制内容</button>
+          <button id="btnTaskInspectDone" type="button" class="primary">完成</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="rechargeModal" class="modal-overlay" style="display:none" aria-hidden="true">
+    <div class="modal-card modal-card-narrow" role="dialog" aria-modal="true" aria-labelledby="rechargeTitle">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title" id="rechargeTitle">额度分配</div>
+          <div class="small" id="rechargeSub">-</div>
+        </div>
+        <button id="btnRechargeClose" type="button" class="ghost">关闭</button>
+      </div>
+      <div class="modal-body">
+        <label for="rechargeAmount">分配额度（分）</label>
+        <input id="rechargeAmount" type="number" min="1" value="1000">
+        <label for="rechargeNote">备注</label>
+        <input id="rechargeNote" placeholder="例如：首次开通额度">
+        <div id="rechargeMsg" class="msg"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="btnRechargeSubmit" type="button" class="primary">确认分配</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/assets/admin.js?v=__ADMIN_JS_VERSION__"></script>
+</body>
+</html>
