@@ -1074,12 +1074,19 @@ def _notify_tg_task_finished(
             "后台生成任务失败。",
             f"工作流: {task_type}",
             f"任务编号: {task_id}",
-            f"原因: {str(error or output_data.get('error') or output_data.get('message') or '未知错误').strip()}",
+            f"原因: {_format_user_visible_task_error(str(error or output_data.get('error') or output_data.get('message') or '未知错误').strip())}",
             f"工作台: {task_url}" if task_url else "",
         ]
         if part
     )
     _send_telegram_message(chat_id, message)
+
+
+def _format_user_visible_task_error(error: str) -> str:
+    text = str(error or "").strip()
+    if "MuleRouter" in text and ("External service request failed" in text or '"code": 3002' in text):
+        return "MuleRouter 下游生成失败（3002）。常见原因是提示词或参考图触发供应商限制、图文不匹配，或供应商服务临时异常；请换成更清晰、合规的动作描述后重试。"
+    return text or "未知错误"
 
 
 def _truncate_text(value: Any, max_len: int = 1200) -> str:
@@ -5905,6 +5912,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         or enhanced.get("product_name")
         or ""
     ).strip()
+    user_request = re.sub(r"^\s*用户(?:文生图|图生视频)?需求[:：]\s*", "", user_request).strip()
     if not user_request:
         return enhanced
 
@@ -5919,7 +5927,9 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     system_prompt = "\n".join(
         [
             "你是图像和视频生成工作流的提示词工程师。",
-            "请根据用户原始中文需求，改写成适合 ComfyUI 工作流直接使用的生成提示词。",
+            "请根据用户原始中文需求，改写成适合 ComfyUI 或图生视频 API 直接使用的生成提示词。",
+            "必须用中文输出 prompt_text，不要输出英文。",
+            "如果本次请求附带参考图片，必须先识别图片中的主体、构图、环境、服装、动作和可见物体，再结合用户需求写提示词；不能凭空编造图片中不存在的场景、服装或物体。",
             "必须输出严格 JSON，不要代码块，不要解释。",
             "字段：prompt_text。",
             "prompt_text 只允许普通提示词文本，不要 Markdown、emoji、标题、列表、引用符号或解释语。",
@@ -5931,11 +5941,23 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             f"当前任务类型：{task_labels.get(typ, typ)}。",
         ]
     )
+    image_hint_paths: list[str] = []
+    for image_key in (
+        "image_local_path",
+        "input_image_local_path",
+        "product_image_local_path",
+        "model_image_local_path",
+        "generated_scene_image_local_path",
+    ):
+        image_path = str(enhanced.get(image_key) or "").strip()
+        if image_path and Path(image_path).exists() and image_path not in image_hint_paths:
+            image_hint_paths.append(image_path)
     llm_result, selected, attempts = _request_llm_json_with_fallback(
         source=enhanced,
         user_input=user_request,
         system_prompt=system_prompt,
         parameters="",
+        image_paths=image_hint_paths or None,
         allow_builtin=False,
         request_label="Telegram Grok 提示词改写",
     )
