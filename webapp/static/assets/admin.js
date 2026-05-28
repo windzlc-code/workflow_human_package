@@ -22,6 +22,7 @@ const SENSITIVE_RUNTIME_INPUT_IDS = [
   "rtImageModelProviderApiKeyGemini",
   "rtImageModelProviderApiKeyGpt",
   "rtRemoteComfyGatewayToken",
+  "rtLocalComfyGatewayToken",
   "rtMuleRouterApiKey",
 ];
 
@@ -522,6 +523,8 @@ const adminState = {
   workflowChains: {},
   remoteComfyWorkflowMappings: {},
   remoteComfyWorkflows: [],
+  localComfyWorkflowMappings: {},
+  localComfyWorkflows: [],
   tgTrustedUsers: [],
 };
 const REMOTE_COMFY_TASKS = [
@@ -532,6 +535,7 @@ const REMOTE_COMFY_TASKS = [
   ["replace_productANDmodel", "联合替换"],
   ["create_audio", "生成音频"],
   ["create_video", "生成视频"],
+  ["video_i2v", "图生视频"],
   ["commerce_video", "带货视频"],
   ["get_nano_banana", "图片编辑"],
 ];
@@ -1240,21 +1244,46 @@ function renderTasks() {
   list.innerHTML = visibleRows.map((task) => renderTaskCard(task)).join("");
 }
 
-function collectRemoteComfyWorkflowMappings() {
+function comfySourceConfig(source) {
+  const isLocal = source === "local";
+  return {
+    source: isLocal ? "local" : "remote",
+    label: isLocal ? "本地 ComfyUI" : "4090",
+    urlId: isLocal ? "rtLocalComfyGatewayUrl" : "rtRemoteComfyGatewayUrl",
+    tokenId: isLocal ? "rtLocalComfyGatewayToken" : "rtRemoteComfyGatewayToken",
+    mappingsId: isLocal ? "rtLocalComfyWorkflowMappings" : "rtRemoteComfyWorkflowMappings",
+    statusId: isLocal ? "rtLocalComfyWorkflowStatus" : "rtRemoteComfyWorkflowStatus",
+    workflowsKey: isLocal ? "localComfyWorkflows" : "remoteComfyWorkflows",
+    mappingsKey: isLocal ? "localComfyWorkflowMappings" : "remoteComfyWorkflowMappings",
+    selectPrefix: isLocal ? "rtLocalComfyWorkflow" : "rtRemoteComfyWorkflow",
+  };
+}
+
+function collectComfyWorkflowMappings(source = "remote") {
+  const cfg = comfySourceConfig(source);
   const result = {};
   REMOTE_COMFY_TASKS.forEach(([key]) => {
-    const node = el(`rtRemoteComfyWorkflow_${key}`);
+    const node = el(`${cfg.selectPrefix}_${key}`);
     const value = String((node && node.value) || "").trim();
     if (value) result[key] = value;
   });
-  adminState.remoteComfyWorkflowMappings = result;
+  adminState[cfg.mappingsKey] = result;
   return result;
 }
 
-function renderRemoteComfyWorkflowMappings() {
-  const host = el("rtRemoteComfyWorkflowMappings");
+function collectRemoteComfyWorkflowMappings() {
+  return collectComfyWorkflowMappings("remote");
+}
+
+function collectLocalComfyWorkflowMappings() {
+  return collectComfyWorkflowMappings("local");
+}
+
+function renderComfyWorkflowMappings(source = "remote") {
+  const cfg = comfySourceConfig(source);
+  const host = el(cfg.mappingsId);
   if (!host) return;
-  const workflows = Array.isArray(adminState.remoteComfyWorkflows) ? adminState.remoteComfyWorkflows : [];
+  const workflows = Array.isArray(adminState[cfg.workflowsKey]) ? adminState[cfg.workflowsKey] : [];
   const runnable = workflows.filter((item) => item && item.can_run);
   const convertible = workflows.filter((item) => item && item.kind === "ui_workflow");
   const apiWorkflows = workflows.filter((item) => item && item.root === "api");
@@ -1266,25 +1295,33 @@ function renderRemoteComfyWorkflowMappings() {
       return `<option value="${escapeHtml(path)}">${escapeHtml(label)}</option>`;
     }),
   ].join("");
-  const mappings = adminState.remoteComfyWorkflowMappings || {};
+  const mappings = adminState[cfg.mappingsKey] || {};
   host.innerHTML = REMOTE_COMFY_TASKS.map(([key, label]) => {
     const value = String(mappings[key] || "");
     return `
       <div class="remote-comfy-map-row">
-        <label for="rtRemoteComfyWorkflow_${escapeHtml(key)}">${escapeHtml(label)}</label>
-        <select id="rtRemoteComfyWorkflow_${escapeHtml(key)}" data-remote-comfy-task="${escapeHtml(key)}">
+        <label for="${cfg.selectPrefix}_${escapeHtml(key)}">${escapeHtml(label)}</label>
+        <select id="${cfg.selectPrefix}_${escapeHtml(key)}" data-${cfg.source}-comfy-task="${escapeHtml(key)}">
           ${options}
         </select>
       </div>
     `;
   }).join("");
   REMOTE_COMFY_TASKS.forEach(([key]) => {
-    const node = el(`rtRemoteComfyWorkflow_${key}`);
+    const node = el(`${cfg.selectPrefix}_${key}`);
     if (node) node.value = String(mappings[key] || "");
   });
-  setRemoteComfyStatus("", workflows.length
+  setComfyStatus(source, "", workflows.length
     ? escapeHtml(`\u5df2\u8bfb\u53d6 API \u5de5\u4f5c\u6d41 ${apiWorkflows.length} \u4e2a\uff0c\u53ef\u76f4\u63a5\u8fd0\u884c ${runnable.length} \u4e2a\u3002\u539f\u59cb UI \u5de5\u4f5c\u6d41\u53ea\u7528\u4e8e\u4e00\u952e\u8f6c\u6362\uff0c\u4e0d\u8ba1\u5165\u8fd9\u91cc\u7684\u603b\u6570\u3002\u4e0b\u62c9\u6846\u4ec5\u663e\u793a\u53ef\u8fd0\u884c\u7684 API \u5de5\u4f5c\u6d41\uff0c\u4fdd\u5b58\u540e\u5b9e\u65f6\u751f\u6548\u3002`)
     : escapeHtml("\u5c1a\u672a\u5237\u65b0\u5de5\u4f5c\u6d41"));
+}
+
+function renderRemoteComfyWorkflowMappings() {
+  renderComfyWorkflowMappings("remote");
+}
+
+function renderLocalComfyWorkflowMappings() {
+  renderComfyWorkflowMappings("local");
 }
 
 function remoteComfyDisplayName(path) {
@@ -1302,7 +1339,11 @@ function remoteComfyDisplayName(path) {
 }
 
 function setRemoteComfyStatus(kind, html) {
-  const status = el("rtRemoteComfyWorkflowStatus");
+  setComfyStatus("remote", kind, html);
+}
+
+function setComfyStatus(source, kind, html) {
+  const status = el(comfySourceConfig(source).statusId);
   if (!status) return;
   const suffix = kind ? ` is-${kind}` : "";
   status.className = `small remote-comfy-status${suffix}`;
@@ -1311,6 +1352,10 @@ function setRemoteComfyStatus(kind, html) {
 
 function setRemoteComfyTextStatus(kind, text) {
   setRemoteComfyStatus(kind, escapeHtml(text || ""));
+}
+
+function setComfyTextStatus(source, kind, text) {
+  setComfyStatus(source, kind, escapeHtml(text || ""));
 }
 
 function setButtonLoading(buttonId, loading, loadingText) {
@@ -1377,38 +1422,55 @@ function renderRemoteComfyConvertResult(resp) {
   `;
 }
 
-async function refreshRemoteComfyWorkflows() {
-  setRemoteComfyTextStatus("running", "\u6b63\u5728\u8bfb\u53d6 4090 \u5de5\u4f5c\u6d41...");
+async function refreshComfyWorkflows(source = "remote") {
+  const cfg = comfySourceConfig(source);
+  setComfyTextStatus(source, "running", `正在读取${cfg.label}工作流...`);
   const resp = await api("/api/admin/remote_comfy/workflows", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
-      remote_comfy_gateway_token: el("rtRemoteComfyGatewayToken").value.trim(),
+      comfy_workflow_source: cfg.source,
+      remote_comfy_gateway_url: cfg.source === "remote" ? el(cfg.urlId).value.trim() : "",
+      remote_comfy_gateway_token: cfg.source === "remote" ? el(cfg.tokenId).value.trim() : "",
+      local_comfy_gateway_url: cfg.source === "local" ? el(cfg.urlId).value.trim() : "",
+      local_comfy_gateway_token: cfg.source === "local" ? el(cfg.tokenId).value.trim() : "",
     }),
   });
-  adminState.remoteComfyWorkflows = Array.isArray(resp.items) ? resp.items : [];
-  renderRemoteComfyWorkflowMappings();
+  adminState[cfg.workflowsKey] = Array.isArray(resp.items) ? resp.items : [];
+  renderComfyWorkflowMappings(source);
   return resp;
 }
 
-async function convertRemoteComfyWorkflows(force = false) {
-  const workflows = Array.isArray(adminState.remoteComfyWorkflows) ? adminState.remoteComfyWorkflows : [];
+async function refreshRemoteComfyWorkflows() {
+  return refreshComfyWorkflows("remote");
+}
+
+async function refreshLocalComfyWorkflows() {
+  return refreshComfyWorkflows("local");
+}
+
+async function convertComfyWorkflows(source = "remote", force = false) {
+  const cfg = comfySourceConfig(source);
+  const workflows = Array.isArray(adminState[cfg.workflowsKey]) ? adminState[cfg.workflowsKey] : [];
   const paths = workflows
     .filter((item) => item && item.kind === "ui_workflow")
     .map((item) => String(item.path || "").trim())
     .filter(Boolean);
   if (!paths.length) {
-    const message = "\u5f53\u524d\u6ca1\u6709\u9700\u8981\u8f6c\u6362\u7684 UI \u5de5\u4f5c\u6d41\u3002\u8bf7\u5148\u5237\u65b0 4090 \u5de5\u4f5c\u6d41\u3002";
-    setRemoteComfyTextStatus("error", message);
+    const message = `当前没有需要转换的 UI 工作流。请先刷新${cfg.label}工作流。`;
+    setComfyTextStatus(source, "error", message);
     throw new Error(message);
   }
-  const buttonId = force ? "btnRemoteComfyForceConvertWorkflows" : "btnRemoteComfyConvertWorkflows";
-  const otherButtonId = force ? "btnRemoteComfyConvertWorkflows" : "btnRemoteComfyForceConvertWorkflows";
+  const buttonId = cfg.source === "local"
+    ? (force ? "btnLocalComfyForceConvertWorkflows" : "btnLocalComfyConvertWorkflows")
+    : (force ? "btnRemoteComfyForceConvertWorkflows" : "btnRemoteComfyConvertWorkflows");
+  const otherButtonId = cfg.source === "local"
+    ? (force ? "btnLocalComfyConvertWorkflows" : "btnLocalComfyForceConvertWorkflows")
+    : (force ? "btnRemoteComfyConvertWorkflows" : "btnRemoteComfyForceConvertWorkflows");
   const otherButton = el(otherButtonId);
   if (otherButton) otherButton.disabled = true;
   setButtonLoading(buttonId, true, force ? "\u91cd\u65b0\u8f6c\u6362\u4e2d..." : "\u8f6c\u6362\u4e2d...");
-  setRemoteComfyStatus("running", `
+  setComfyStatus(source, "running", `
     <div class="remote-comfy-status-title">${force ? "\u6b63\u5728\u5f3a\u5236\u91cd\u65b0\u8f6c\u6362 API \u683c\u5f0f" : "\u6b63\u5728\u589e\u91cf\u8f6c\u6362 API \u683c\u5f0f"}</div>
     <div>\u5171 ${escapeHtml(String(paths.length))} \u4e2a UI \u5de5\u4f5c\u6d41\uff0c${force ? "\u5c06\u5ffd\u7565\u7f13\u5b58\u5e76\u91cd\u65b0\u751f\u6210\u3002" : "\u672a\u53d8\u5316\u7684\u5de5\u4f5c\u6d41\u4f1a\u81ea\u52a8\u8df3\u8fc7\u3002"}</div>
   `);
@@ -1417,19 +1479,22 @@ async function convertRemoteComfyWorkflows(force = false) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
-        remote_comfy_gateway_token: el("rtRemoteComfyGatewayToken").value.trim(),
+        comfy_workflow_source: cfg.source,
+        remote_comfy_gateway_url: cfg.source === "remote" ? el(cfg.urlId).value.trim() : "",
+        remote_comfy_gateway_token: cfg.source === "remote" ? el(cfg.tokenId).value.trim() : "",
+        local_comfy_gateway_url: cfg.source === "local" ? el(cfg.urlId).value.trim() : "",
+        local_comfy_gateway_token: cfg.source === "local" ? el(cfg.tokenId).value.trim() : "",
         paths,
         overwrite: true,
         force,
       }),
     });
-    await refreshRemoteComfyWorkflows();
+    await refreshComfyWorkflows(source);
     const failed = Number(resp.failed || 0);
-    setRemoteComfyStatus(failed ? "error" : "ok", renderRemoteComfyConvertResult(resp));
+    setComfyStatus(source, failed ? "error" : "ok", renderRemoteComfyConvertResult(resp));
     return resp;
   } catch (err) {
-    setRemoteComfyTextStatus("error", `\u8f6c\u6362\u5931\u8d25\uff1a${getErrorMessage(err)}`);
+    setComfyTextStatus(source, "error", `转换失败：${getErrorMessage(err)}`);
     throw err;
   } finally {
     setButtonLoading(buttonId, false);
@@ -1437,23 +1502,36 @@ async function convertRemoteComfyWorkflows(force = false) {
   }
 }
 
-async function runRemoteComfyMappedTest() {
-  const mappings = collectRemoteComfyWorkflowMappings();
+async function convertRemoteComfyWorkflows(force = false) {
+  return convertComfyWorkflows("remote", force);
+}
+
+async function convertLocalComfyWorkflows(force = false) {
+  return convertComfyWorkflows("local", force);
+}
+
+async function runComfyMappedTest(source = "remote") {
+  const cfg = comfySourceConfig(source);
+  const mappings = collectComfyWorkflowMappings(source);
   const workflowPath = mappings.text_to_image || Object.values(mappings).find(Boolean) || "";
   if (!workflowPath) {
-    const message = "\u8bf7\u5148\u7ed9\u81f3\u5c11\u4e00\u4e2a\u4efb\u52a1\u7c7b\u578b\u9009\u62e9\u53ef\u8fd0\u884c\u7684 4090 \u5de5\u4f5c\u6d41";
-    setRemoteComfyTextStatus("error", message);
+    const message = `请先给至少一个任务类型选择可运行的${cfg.label}工作流`;
+    setComfyTextStatus(source, "error", message);
     throw new Error(message);
   }
-  setButtonLoading("btnRemoteComfyRunTest", true, "\u6d4b\u8bd5\u4e2d...");
-  setRemoteComfyTextStatus("running", `\u6b63\u5728\u6d4b\u8bd5 ${workflowPath}...`);
+  const buttonId = cfg.source === "local" ? "btnLocalComfyRunTest" : "btnRemoteComfyRunTest";
+  setButtonLoading(buttonId, true, "\u6d4b\u8bd5\u4e2d...");
+  setComfyTextStatus(source, "running", `正在测试 ${workflowPath}...`);
   try {
     const resp = await api("/api/admin/remote_comfy/run_test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
-        remote_comfy_gateway_token: el("rtRemoteComfyGatewayToken").value.trim(),
+        comfy_workflow_source: cfg.source,
+        remote_comfy_gateway_url: cfg.source === "remote" ? el(cfg.urlId).value.trim() : "",
+        remote_comfy_gateway_token: cfg.source === "remote" ? el(cfg.tokenId).value.trim() : "",
+        local_comfy_gateway_url: cfg.source === "local" ? el(cfg.urlId).value.trim() : "",
+        local_comfy_gateway_token: cfg.source === "local" ? el(cfg.tokenId).value.trim() : "",
         workflow_path: workflowPath,
         prompt_text: "a simple red apple on a wooden table, studio lighting, high quality",
         negative_prompt: "low quality, blurry, distorted",
@@ -1466,16 +1544,24 @@ async function runRemoteComfyMappedTest() {
     });
     const outputs = Array.isArray(resp.local_outputs) ? resp.local_outputs : [];
     const firstPath = outputs.map((item) => item && item.local_path).find(Boolean) || "";
-    setRemoteComfyStatus("ok", firstPath
+    setComfyStatus(source, "ok", firstPath
       ? `<div class="remote-comfy-status-title">\u6d4b\u8bd5\u6210\u529f</div><div>\u5df2\u4e0b\u8f7d\u7ed3\u679c\uff1a${escapeHtml(firstPath)}</div>`
       : `<div class="remote-comfy-status-title">\u6d4b\u8bd5\u6210\u529f</div><div>prompt_id=${escapeHtml(String(resp.prompt_id || "-"))}</div>`);
     return resp;
   } catch (err) {
-    setRemoteComfyTextStatus("error", `\u6d4b\u8bd5\u5931\u8d25\uff1a${getErrorMessage(err)}`);
+    setComfyTextStatus(source, "error", `测试失败：${getErrorMessage(err)}`);
     throw err;
   } finally {
-    setButtonLoading("btnRemoteComfyRunTest", false);
+    setButtonLoading(buttonId, false);
   }
+}
+
+async function runRemoteComfyMappedTest() {
+  return runComfyMappedTest("remote");
+}
+
+async function runLocalComfyMappedTest() {
+  return runComfyMappedTest("local");
 }
 
 
@@ -1538,9 +1624,13 @@ function runtimeFormToPayload() {
   const llmPriorityModels = stringifyModelList(adminState.llmPriorityModels);
   const imagePriorityModels = stringifyModelList(adminState.imagePriorityModels);
   return {
+    comfy_workflow_source: el("rtComfyWorkflowSource").value || "remote",
     remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
     remote_comfy_gateway_token: el("rtRemoteComfyGatewayToken").value.trim(),
     remote_comfy_workflow_mappings: collectRemoteComfyWorkflowMappings(),
+    local_comfy_gateway_url: el("rtLocalComfyGatewayUrl").value.trim(),
+    local_comfy_gateway_token: el("rtLocalComfyGatewayToken").value.trim(),
+    local_comfy_workflow_mappings: collectLocalComfyWorkflowMappings(),
     image_generate_mode_default: "closed_model_api",
     digital_human_workflow_ids: digitalHumanChain,
     oral_digital_human_workflow_ids: [],
@@ -1588,10 +1678,17 @@ function fillRuntimeForm(data) {
   const v = data || {};
   el("rtRemoteComfyGatewayUrl").value = v.remote_comfy_gateway_url || "";
   el("rtRemoteComfyGatewayToken").value = v.remote_comfy_gateway_token || "";
+  el("rtLocalComfyGatewayUrl").value = v.local_comfy_gateway_url || "http://127.0.0.1:9001";
+  el("rtLocalComfyGatewayToken").value = v.local_comfy_gateway_token || "";
+  el("rtComfyWorkflowSource").value = v.comfy_workflow_source === "local" ? "local" : "remote";
   adminState.remoteComfyWorkflowMappings = (v.remote_comfy_workflow_mappings && typeof v.remote_comfy_workflow_mappings === "object")
     ? { ...v.remote_comfy_workflow_mappings }
     : {};
+  adminState.localComfyWorkflowMappings = (v.local_comfy_workflow_mappings && typeof v.local_comfy_workflow_mappings === "object")
+    ? { ...v.local_comfy_workflow_mappings }
+    : {};
   renderRemoteComfyWorkflowMappings();
+  renderLocalComfyWorkflowMappings();
   el("rtImageModelProviderBaseUrl").value = v.image_model_provider_base_url || "http://202.90.21.53:3008";
   el("rtImageModelProviderApiKeyGemini").value = v.image_model_provider_api_key_gemini || "";
   el("rtImageModelProviderApiKeyGpt").value = v.image_model_provider_api_key_gpt || "";
@@ -1648,17 +1745,29 @@ async function saveRuntime() {
 }
 
 async function checkRemoteComfyHealth() {
-  const statusNode = el("rtRemoteComfyHealthStatus");
+  return checkComfyHealth("remote");
+}
+
+async function checkLocalComfyHealth() {
+  return checkComfyHealth("local");
+}
+
+async function checkComfyHealth(source = "remote") {
+  const cfg = comfySourceConfig(source);
+  const statusNode = el(source === "local" ? "rtLocalComfyHealthStatus" : "rtRemoteComfyHealthStatus");
   if (statusNode) {
     statusNode.className = "small";
-    statusNode.textContent = "正在检测远程 ComfyUI 网关...";
+    statusNode.textContent = `正在检测${cfg.label}网关...`;
   }
   const resp = await api("/api/admin/remote_comfy/health", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
-      remote_comfy_gateway_token: el("rtRemoteComfyGatewayToken").value.trim(),
+      comfy_workflow_source: cfg.source,
+      remote_comfy_gateway_url: cfg.source === "remote" ? el(cfg.urlId).value.trim() : "",
+      remote_comfy_gateway_token: cfg.source === "remote" ? el(cfg.tokenId).value.trim() : "",
+      local_comfy_gateway_url: cfg.source === "local" ? el(cfg.urlId).value.trim() : "",
+      local_comfy_gateway_token: cfg.source === "local" ? el(cfg.tokenId).value.trim() : "",
     }),
   });
   const health = resp && typeof resp.health === "object" ? resp.health : {};
@@ -1670,7 +1779,7 @@ async function checkRemoteComfyHealth() {
   const ramText = ramTotal > 0 ? `${Math.round(ramFree / 1024 / 1024 / 1024)}GB / ${Math.round(ramTotal / 1024 / 1024 / 1024)}GB` : "-";
   if (statusNode) {
     statusNode.className = "msg ok";
-    statusNode.textContent = `远程网关可用：ComfyUI ${comfyVersion}，${osName}，内存 ${ramText}`;
+    statusNode.textContent = `${cfg.label}网关可用：ComfyUI ${comfyVersion}，${osName}，内存 ${ramText}`;
   }
   return resp;
 }
@@ -2022,6 +2131,56 @@ function bindActions() {
       try {
         await runRemoteComfyMappedTest();
         setMsg("runtimeMsg", "远程 ComfyUI 测试完成", true);
+      } catch (err) {
+        setMsg("runtimeMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnLocalComfyWorkflows")) {
+    el("btnLocalComfyWorkflows").addEventListener("click", async () => {
+      try {
+        await refreshLocalComfyWorkflows();
+        setMsg("runtimeMsg", "本地 ComfyUI 工作流已刷新", true);
+      } catch (err) {
+        setMsg("runtimeMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnLocalComfyConvertWorkflows")) {
+    el("btnLocalComfyConvertWorkflows").addEventListener("click", async () => {
+      try {
+        await convertLocalComfyWorkflows(false);
+        setMsg("runtimeMsg", "本地 ComfyUI 增量转换完成", true);
+      } catch (err) {
+        setMsg("runtimeMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnLocalComfyForceConvertWorkflows")) {
+    el("btnLocalComfyForceConvertWorkflows").addEventListener("click", async () => {
+      try {
+        await convertLocalComfyWorkflows(true);
+        setMsg("runtimeMsg", "本地 ComfyUI 强制重新转换完成", true);
+      } catch (err) {
+        setMsg("runtimeMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnLocalComfyHealth")) {
+    el("btnLocalComfyHealth").addEventListener("click", async () => {
+      try {
+        await checkLocalComfyHealth();
+        setMsg("runtimeMsg", "本地 ComfyUI 网关可用", true);
+      } catch (err) {
+        setMsg("runtimeMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnLocalComfyRunTest")) {
+    el("btnLocalComfyRunTest").addEventListener("click", async () => {
+      try {
+        await runLocalComfyMappedTest();
+        setMsg("runtimeMsg", "本地 ComfyUI 测试完成", true);
       } catch (err) {
         setMsg("runtimeMsg", getErrorMessage(err), false);
       }

@@ -73,6 +73,10 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "remote_comfy_gateway_url": "",
     "remote_comfy_gateway_token": "",
     "remote_comfy_workflow_mappings": {},
+    "local_comfy_gateway_url": "http://127.0.0.1:9001",
+    "local_comfy_gateway_token": "",
+    "local_comfy_workflow_mappings": {},
+    "comfy_workflow_source": "remote",
     "upload_server_ip": "",
     "upload_file_api_key": "",
     "image_generate_mode_default": "closed_model_api",
@@ -1693,6 +1697,10 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         merged[legacy_workflow_key] = ""
     merged["remote_comfy_gateway_url"] = str(merged.get("remote_comfy_gateway_url") or "").strip().rstrip("/")
     merged["remote_comfy_gateway_token"] = str(merged.get("remote_comfy_gateway_token") or "").strip()
+    merged["local_comfy_gateway_url"] = str(merged.get("local_comfy_gateway_url") or "http://127.0.0.1:9001").strip().rstrip("/")
+    merged["local_comfy_gateway_token"] = str(merged.get("local_comfy_gateway_token") or "").strip()
+    source = str(merged.get("comfy_workflow_source") or "remote").strip().lower()
+    merged["comfy_workflow_source"] = source if source in {"remote", "local"} else "remote"
     raw_remote_mappings = current.get("remote_comfy_workflow_mappings")
     remote_mappings: dict[str, str] = {}
     if isinstance(raw_remote_mappings, dict):
@@ -1702,6 +1710,15 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
             if task_key and workflow_path:
                 remote_mappings[task_key] = workflow_path
     merged["remote_comfy_workflow_mappings"] = remote_mappings
+    raw_local_mappings = current.get("local_comfy_workflow_mappings")
+    local_mappings: dict[str, str] = {}
+    if isinstance(raw_local_mappings, dict):
+        for key, value in raw_local_mappings.items():
+            task_key = str(key or "").strip()
+            workflow_path = str(value or "").strip()
+            if task_key and workflow_path:
+                local_mappings[task_key] = workflow_path
+    merged["local_comfy_workflow_mappings"] = local_mappings
     merged["image_generate_mode_default"] = str(merged.get("image_generate_mode_default") or "closed_model_api").strip() or "closed_model_api"
     if merged["image_generate_mode_default"] not in {"closed_model_api"}:
         merged["image_generate_mode_default"] = "closed_model_api"
@@ -2469,11 +2486,15 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
         "llm_api_key_gemini",
         "llm_api_key_gpt",
         "remote_comfy_gateway_token",
+        "local_comfy_gateway_token",
         "mulerouter_api_key",
     }
     runtime_fill_keys = [
+        "comfy_workflow_source",
         "remote_comfy_gateway_url",
         "remote_comfy_gateway_token",
+        "local_comfy_gateway_url",
+        "local_comfy_gateway_token",
         "upload_server_ip",
         "upload_file_api_key",
         "image_generate_mode_default",
@@ -2510,6 +2531,10 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
             merged[key] = runtime.get(key)
     if not isinstance(merged.get("remote_comfy_workflow_mappings"), dict):
         merged["remote_comfy_workflow_mappings"] = runtime.get("remote_comfy_workflow_mappings") if isinstance(runtime.get("remote_comfy_workflow_mappings"), dict) else {}
+    if not isinstance(merged.get("local_comfy_workflow_mappings"), dict):
+        merged["local_comfy_workflow_mappings"] = runtime.get("local_comfy_workflow_mappings") if isinstance(runtime.get("local_comfy_workflow_mappings"), dict) else {}
+    source = str(merged.get("comfy_workflow_source") or runtime.get("comfy_workflow_source") or "remote").strip().lower()
+    merged["comfy_workflow_source"] = source if source in {"remote", "local"} else "remote"
 
     if task_type in {"create_video", "commerce_video", "batch_create_video", "create_audio"}:
         oral_chain = _workflow_chain_from_payload(
@@ -2956,12 +2981,10 @@ def _normalize_remote_comfy_gateway_url(gateway_url: str) -> str:
 
 def _remote_comfy_gateway_headers(token: str) -> dict[str, str]:
     cleaned = str(token or "").strip()
-    if not cleaned:
-        raise ValueError("远程 ComfyUI 网关 Token 不能为空")
-    return {
-        "Authorization": f"Bearer {cleaned}",
-        "Accept": "application/json",
-    }
+    headers = {"Accept": "application/json"}
+    if cleaned:
+        headers["Authorization"] = f"Bearer {cleaned}"
+    return headers
 
 
 def _remote_comfy_gateway_health(*, gateway_url: str, token: str) -> dict[str, Any]:
@@ -3121,17 +3144,20 @@ REMOTE_COMFY_TASK_LABELS = {
     "replace_productANDmodel": "联合替换",
     "create_audio": "生成音频",
     "create_video": "生成视频",
+    "video_i2v": "图生视频",
     "commerce_video": "带货视频",
     "get_nano_banana": "图片编辑",
 }
 
 
 def _remote_comfy_workflow_mapping(payload: dict[str, Any], task_type: str) -> str:
-    mappings = payload.get("remote_comfy_workflow_mappings")
+    source = _comfy_workflow_source(payload)
+    mappings = payload.get("local_comfy_workflow_mappings") if source == "local" else payload.get("remote_comfy_workflow_mappings")
     if not isinstance(mappings, dict):
         mappings = {}
     candidates = [
         payload.get("remote_comfy_workflow_path"),
+        payload.get("local_comfy_workflow_path"),
         mappings.get(task_type),
         mappings.get("default"),
     ]
@@ -3140,6 +3166,43 @@ def _remote_comfy_workflow_mapping(payload: dict[str, Any], task_type: str) -> s
         if text:
             return text
     return ""
+
+
+def _comfy_workflow_source(payload: dict[str, Any]) -> str:
+    source = str(payload.get("comfy_workflow_source") or "remote").strip().lower()
+    return source if source in {"remote", "local"} else "remote"
+
+
+def _comfy_gateway_from_payload(payload: dict[str, Any]) -> tuple[str, str, str]:
+    source = _comfy_workflow_source(payload)
+    if source == "local":
+        return (
+            source,
+            str(payload.get("local_comfy_gateway_url") or "").strip(),
+            str(payload.get("local_comfy_gateway_token") or "").strip(),
+        )
+    return (
+        source,
+        str(payload.get("remote_comfy_gateway_url") or "").strip(),
+        str(payload.get("remote_comfy_gateway_token") or "").strip(),
+    )
+
+
+def _admin_comfy_gateway_values(payload: RemoteComfyGatewayPayload, runtime: dict[str, Any] | None = None) -> tuple[str, str, str]:
+    source = str(payload.comfy_workflow_source or "remote").strip().lower()
+    source = source if source in {"remote", "local"} else "remote"
+    runtime = runtime or {}
+    if source == "local":
+        return (
+            source,
+            str(payload.local_comfy_gateway_url or runtime.get("local_comfy_gateway_url") or "http://127.0.0.1:9001").strip(),
+            str(payload.local_comfy_gateway_token or runtime.get("local_comfy_gateway_token") or "").strip(),
+        )
+    return (
+        source,
+        str(payload.remote_comfy_gateway_url or runtime.get("remote_comfy_gateway_url") or "").strip(),
+        str(payload.remote_comfy_gateway_token or runtime.get("remote_comfy_gateway_token") or "").strip(),
+    )
 
 
 def _remote_comfy_prompt_from_payload(task_type: str, payload: dict[str, Any]) -> str:
@@ -3186,13 +3249,13 @@ def _first_remote_comfy_output_path(result: dict[str, Any]) -> str:
 
 
 def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_type: str) -> dict[str, Any]:
-    gateway_url = str(payload.get("remote_comfy_gateway_url") or "").strip()
-    token = str(payload.get("remote_comfy_gateway_token") or "").strip()
+    source, gateway_url, token = _comfy_gateway_from_payload(payload)
+    source_label = "本地 ComfyUI" if source == "local" else "远程 ComfyUI"
     workflow_path = _remote_comfy_workflow_mapping(payload, task_type)
-    if not gateway_url or not token:
-        raise RuntimeError("远程 ComfyUI 网关未配置，请先在后台保存网关地址和 Token")
+    if not gateway_url:
+        raise RuntimeError(f"{source_label} 网关未配置，请先在后台保存网关地址")
     if not workflow_path:
-        raise RuntimeError(f"{REMOTE_COMFY_TASK_LABELS.get(task_type, task_type)} 未映射远程 ComfyUI 工作流")
+        raise RuntimeError(f"{REMOTE_COMFY_TASK_LABELS.get(task_type, task_type)} 未映射{source_label}工作流")
 
     prompt_text = _remote_comfy_prompt_from_payload(task_type, payload)
     negative_prompt = str(payload.get("negative_prompt") or payload.get("negative") or "low quality, blurry, distorted").strip()
@@ -3200,7 +3263,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     width = _to_int(payload.get("width"), 512)
     height = _to_int(payload.get("height"), 512)
     batch_size = _to_int(payload.get("batch_size"), 1)
-    _emit_stage(payload, stage="remote_comfy", status="running", message=f"提交远程 ComfyUI 工作流: {workflow_path}")
+    _emit_stage(payload, stage="remote_comfy", status="running", message=f"提交{source_label}工作流: {workflow_path}")
     result = _run_remote_comfy_gateway_test(
         gateway_url=gateway_url,
         token=token,
@@ -3215,7 +3278,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
     )
     if not _to_bool(result.get("ok"), False):
-        raise RuntimeError(str(result.get("message") or "远程 ComfyUI 工作流执行失败"))
+        raise RuntimeError(str(result.get("message") or f"{source_label} 工作流执行失败"))
     output_path = _first_remote_comfy_output_path(result)
     output_key = "download_path"
     suffix = Path(output_path).suffix.lower() if output_path else ""
@@ -3227,7 +3290,8 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         output_key = "audio_path"
     output: dict[str, Any] = {
         "ok": True,
-        "message": "远程 ComfyUI 工作流完成",
+        "message": f"{source_label} 工作流完成",
+        "comfy_workflow_source": source,
         "remote_comfy_prompt_id": str(result.get("prompt_id") or "").strip(),
         "remote_comfy_workflow_path": workflow_path,
         "runninghub_task_id": str(result.get("prompt_id") or "").strip(),
@@ -3238,6 +3302,12 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     if output_path:
         output[output_key] = output_path
     return output
+
+
+def _run_video_i2v(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if _remote_comfy_workflow_mapping(payload, "video_i2v"):
+        return _run_remote_comfy_mapped_task(task_id, payload, "video_i2v")
+    return _run_mulerouter_wan_i2v(task_id, payload)
 
 
 def _resolve_digital_human_reference_image(task_id: str, payload: dict[str, Any], workdir: Path) -> Path:
@@ -6029,7 +6099,7 @@ TASK_RUNNERS = {
     "replace_product": _run_replace_product,
     "create_audio": _run_create_audio,
     "get_nano_banana": _run_get_nano_banana,
-    "video_i2v": _run_mulerouter_wan_i2v,
+    "video_i2v": _run_video_i2v,
     "image_generate": _run_image_generate,
     "get_gemini": _run_get_gemini,
     "replace_productANDmodel": _run_replace_product_and_model,
@@ -6630,9 +6700,13 @@ class PricingPayload(BaseModel):
 
 
 class RuntimeConfigPayload(BaseModel):
+    comfy_workflow_source: str = "remote"
     remote_comfy_gateway_url: str = ""
     remote_comfy_gateway_token: str = ""
     remote_comfy_workflow_mappings: dict[str, Any] = Field(default_factory=dict)
+    local_comfy_gateway_url: str = "http://127.0.0.1:9001"
+    local_comfy_gateway_token: str = ""
+    local_comfy_workflow_mappings: dict[str, Any] = Field(default_factory=dict)
     upload_server_ip: str = ""
     upload_file_api_key: str = ""
     image_generate_mode_default: str = "closed_model_api"
@@ -6685,6 +6759,9 @@ class LlmModelsPayload(BaseModel):
 class RemoteComfyGatewayPayload(BaseModel):
     remote_comfy_gateway_url: str = ""
     remote_comfy_gateway_token: str = ""
+    local_comfy_gateway_url: str = ""
+    local_comfy_gateway_token: str = ""
+    comfy_workflow_source: str = "remote"
 
 
 class RemoteComfyWorkflowTestPayload(RemoteComfyGatewayPayload):
@@ -8118,13 +8195,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/admin/remote_comfy/health")
     def api_admin_remote_comfy_health(payload: RemoteComfyGatewayPayload, user: dict[str, Any] = Depends(require_admin)):
-        gateway_url = str(payload.remote_comfy_gateway_url or "").strip()
-        token = str(payload.remote_comfy_gateway_token or "").strip()
-        if not gateway_url or not token:
-            with db() as conn:
-                runtime = _get_runtime_config(conn)
-            gateway_url = gateway_url or str(runtime.get("remote_comfy_gateway_url") or "").strip()
-            token = token or str(runtime.get("remote_comfy_gateway_token") or "").strip()
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+        _source, gateway_url, token = _admin_comfy_gateway_values(payload, runtime)
         try:
             health = _remote_comfy_gateway_health(gateway_url=gateway_url, token=token)
         except ValueError as exc:
@@ -8135,13 +8208,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/admin/remote_comfy/workflows")
     def api_admin_remote_comfy_workflows(payload: RemoteComfyGatewayPayload, user: dict[str, Any] = Depends(require_admin)):
-        gateway_url = str(payload.remote_comfy_gateway_url or "").strip()
-        token = str(payload.remote_comfy_gateway_token or "").strip()
-        if not gateway_url or not token:
-            with db() as conn:
-                runtime = _get_runtime_config(conn)
-            gateway_url = gateway_url or str(runtime.get("remote_comfy_gateway_url") or "").strip()
-            token = token or str(runtime.get("remote_comfy_gateway_token") or "").strip()
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+        _source, gateway_url, token = _admin_comfy_gateway_values(payload, runtime)
         try:
             return _remote_comfy_gateway_json(
                 gateway_url=gateway_url,
@@ -8157,13 +8226,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/admin/remote_comfy/run_test")
     def api_admin_remote_comfy_run_test(payload: RemoteComfyWorkflowTestPayload, user: dict[str, Any] = Depends(require_admin)):
-        gateway_url = str(payload.remote_comfy_gateway_url or "").strip()
-        token = str(payload.remote_comfy_gateway_token or "").strip()
-        if not gateway_url or not token:
-            with db() as conn:
-                runtime = _get_runtime_config(conn)
-            gateway_url = gateway_url or str(runtime.get("remote_comfy_gateway_url") or "").strip()
-            token = token or str(runtime.get("remote_comfy_gateway_token") or "").strip()
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+        _source, gateway_url, token = _admin_comfy_gateway_values(payload, runtime)
         workflow_path = str(payload.workflow_path or "").strip()
         if not workflow_path:
             raise HTTPException(status_code=400, detail="workflow_path 不能为空")
@@ -8188,13 +8253,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/admin/remote_comfy/convert_workflows")
     def api_admin_remote_comfy_convert_workflows(payload: RemoteComfyConvertPayload, user: dict[str, Any] = Depends(require_admin)):
-        gateway_url = str(payload.remote_comfy_gateway_url or "").strip()
-        token = str(payload.remote_comfy_gateway_token or "").strip()
-        if not gateway_url or not token:
-            with db() as conn:
-                runtime = _get_runtime_config(conn)
-            gateway_url = gateway_url or str(runtime.get("remote_comfy_gateway_url") or "").strip()
-            token = token or str(runtime.get("remote_comfy_gateway_token") or "").strip()
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+        _source, gateway_url, token = _admin_comfy_gateway_values(payload, runtime)
         body = {
             "paths": [str(path).strip() for path in payload.paths if str(path).strip()],
             "overwrite": bool(payload.overwrite),

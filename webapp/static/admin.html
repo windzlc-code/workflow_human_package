@@ -351,6 +351,16 @@
             </div>
           </div>
 
+          <div class="admin-config-card admin-runtime-panel admin-runtime-card-compact">
+            <div class="admin-config-card-title">ComfyUI 工作流来源</div>
+            <div class="small">选择前台和 Telegram 提交任务时使用远程 4090 还是本地 ComfyUI。保存运行配置后立即生效。</div>
+            <label>当前执行来源</label>
+            <select id="rtComfyWorkflowSource">
+              <option value="remote">远程 4090 ComfyUI</option>
+              <option value="local">本地 ComfyUI</option>
+            </select>
+          </div>
+
           <div class="admin-config-card admin-runtime-panel">
             <div class="admin-runtime-panel-head">
               <div>
@@ -382,6 +392,42 @@
                   <div class="admin-config-card-title">&#20219;&#21153;&#24037;&#20316;&#27969;&#26144;&#23556;</div>
                   <div class="small">&#27599;&#19968;&#31867;&#21069;&#21488;/TG &#20219;&#21153;&#37117;&#21487;&#20197;&#36873;&#25321; 4090 &#19978;&#19981;&#21516;&#30340;&#21487;&#36816;&#34892;&#24037;&#20316;&#27969;&#65307;&#20445;&#23384;&#21518;&#31435;&#21363;&#25353;&#26032;&#26144;&#23556;&#25552;&#20132;&#12290;</div>
                   <div id="rtRemoteComfyWorkflowMappings" class="remote-comfy-mapping-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="admin-config-card admin-runtime-panel">
+            <div class="admin-runtime-panel-head">
+              <div>
+                <div class="admin-config-card-title">本地 ComfyUI 工作流</div>
+                <div class="small">连接本机 ComfyUI 网关，格式和 4090 网关一致。刷新后可选择本地 API Format 工作流；保存并切换来源后 Telegram 会走本地 ComfyUI。</div>
+              </div>
+              <button id="btnLocalComfyWorkflows" type="button" class="ghost">刷新本地工作流</button>
+              <button id="btnLocalComfyConvertWorkflows" type="button" class="blue">一键转换 API 格式</button>
+              <button id="btnLocalComfyForceConvertWorkflows" type="button" class="ghost">强制重新转换</button>
+            </div>
+            <div class="admin-runtime-grid admin-runtime-grid-remote">
+              <div class="admin-runtime-column">
+                <div class="admin-runtime-block">
+                  <div class="admin-config-card-title">本地网关连接</div>
+                  <label>本地网关地址</label>
+                  <input id="rtLocalComfyGatewayUrl" type="text" placeholder="http://127.0.0.1:9001">
+                  <label>网关访问 Token（可选）</label>
+                  <input id="rtLocalComfyGatewayToken" type="password" placeholder="未启用鉴权可留空">
+                  <div class="remote-comfy-toolbar">
+                    <button id="btnLocalComfyHealth" type="button" class="ghost">检测本地网关</button>
+                    <button id="btnLocalComfyRunTest" type="button" class="blue">测试当前映射</button>
+                  </div>
+                  <div id="rtLocalComfyHealthStatus" class="small"></div>
+                  <div class="small remote-comfy-status" id="rtLocalComfyWorkflowStatus">尚未刷新工作流</div>
+                </div>
+              </div>
+              <div class="admin-runtime-column">
+                <div class="admin-runtime-block">
+                  <div class="admin-config-card-title">任务工作流映射</div>
+                  <div class="small">本地工作流映射与 4090 分开保存。把来源切到“本地 ComfyUI”后，前台/TG 任务会按这里的映射提交。</div>
+                  <div id="rtLocalComfyWorkflowMappings" class="remote-comfy-mapping-list"></div>
                 </div>
               </div>
             </div>
