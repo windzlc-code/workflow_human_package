@@ -324,6 +324,47 @@
           <div class="admin-config-card admin-runtime-panel">
             <div class="admin-runtime-panel-head">
               <div>
+                <div class="admin-config-card-title">MuleRouter 视频 API</div>
+                <div class="small">用于 Telegram「视频编辑」里的图生视频任务，请求记录会进入任务详情日志。</div>
+              </div>
+            </div>
+            <div class="admin-runtime-grid">
+              <div class="admin-runtime-column">
+                <div class="admin-runtime-block">
+                  <label>API Name</label>
+                  <input id="rtMuleRouterApiName" type="text" placeholder="api-key0526">
+                  <label>API Key</label>
+                  <input id="rtMuleRouterApiKey" type="password" placeholder="MuleRouter API Key">
+                  <label>API Base URL</label>
+                  <input id="rtMuleRouterBaseUrl" type="text" placeholder="https://api.mulerouter.ai">
+                  <label>Wan 2.7 I2V Endpoint</label>
+                  <input id="rtMuleRouterWanI2vEndpoint" type="text" placeholder="/vendors/carrothub/v1/wan2.7-i2v-spicy/generation">
+                </div>
+              </div>
+              <div class="admin-runtime-column">
+                <div class="admin-runtime-block">
+                  <label>默认分辨率</label>
+                  <select id="rtMuleRouterWanI2vResolution">
+                    <option value="720p">720p（最小资源）</option>
+                    <option value="1080p">1080p</option>
+                  </select>
+                  <label>默认时长（秒）</label>
+                  <input id="rtMuleRouterWanI2vDuration" type="number" min="2" max="15" step="1" value="2">
+                  <label>接口自动扩写</label>
+                  <select id="rtMuleRouterWanI2vPromptExtend">
+                    <option value="0">关闭（使用 Grok 改写结果）</option>
+                    <option value="1">开启</option>
+                  </select>
+                  <label>默认负面提示词</label>
+                  <textarea id="rtMuleRouterWanI2vNegativePrompt" rows="3" placeholder="low quality, blurry, distorted, watermark, text, logo"></textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="admin-config-card admin-runtime-panel">
+            <div class="admin-runtime-panel-head">
+              <div>
                 <div class="admin-config-card-title">&#36828;&#31243; ComfyUI &#24037;&#20316;&#27969;</div>
                 <div class="small">&#36830;&#25509; 4090 &#30005;&#33041;&#19978;&#30340; ComfyUI &#32593;&#20851;&#65292;&#21047;&#26032;&#21518;&#21487;&#38543;&#26102;&#20999;&#25442;&#19981;&#21516; API Format &#24037;&#20316;&#27969;&#24182;&#23454;&#26102;&#29983;&#25928;&#12290;</div>
               </div>

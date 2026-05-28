@@ -44,7 +44,13 @@ LEGACY_ORAL_UPLOAD_BUTTON = "口播数字人：上传素材"
 WORKFLOW_CONFIG_BUTTON = "查看后台工作流配置"
 IMAGE_WORKFLOW_BUTTON = "图像编辑"
 TEXT_TO_IMAGE_BUTTON = "文生图"
-VIDEO_GENERAL_EDIT_BUTTON = "视频编辑任务"
+VIDEO_GENERAL_EDIT_BUTTON = "图生视频"
+VIDEO_I2V_RES_PREFIX = "分辨率："
+VIDEO_I2V_DURATION_PREFIX = "时长："
+VIDEO_I2V_GROK_ON = "Grok提示词：开"
+VIDEO_I2V_GROK_OFF = "Grok提示词：关"
+VIDEO_I2V_EXTEND_ON = "接口扩写：开"
+VIDEO_I2V_EXTEND_OFF = "接口扩写：关"
 LEGACY_IMAGE_WORKFLOW_BUTTON = "图像编辑工作流"
 LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "图片生成工作流"
 VIDEO_EDIT_BUTTON = "视频编辑"
@@ -77,6 +83,7 @@ TRADITIONAL_BUTTON_ALIASES = {
     "圖片生成工作流": LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON,
     "視頻編輯": VIDEO_EDIT_BUTTON,
     "視頻編輯任務": VIDEO_GENERAL_EDIT_BUTTON,
+    "圖生視頻": VIDEO_GENERAL_EDIT_BUTTON,
     "返回主菜單": MAIN_MENU_BUTTON,
     "視頻模特替換": REPLACE_MODEL_WORKFLOW_BUTTON,
     "模特替換工作流": LEGACY_REPLACE_MODEL_WORKFLOW_BUTTON,
@@ -132,6 +139,8 @@ class ProductionWorkflowForm(StatesGroup):
     text_to_image_waiting_for_prompt = State()
     image_waiting_for_product_image = State()
     image_waiting_for_prompt = State()
+    video_i2v_waiting_for_image = State()
+    video_i2v_waiting_for_prompt = State()
     replace_model_waiting_for_video = State()
     replace_model_waiting_for_image = State()
     replace_model_waiting_for_prompt = State()
@@ -195,6 +204,21 @@ def _video_edit_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=VIDEO_GENERAL_EDIT_BUTTON)],
+            [KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _video_i2v_keyboard(*, resolution: str = "720p", duration: int = 2, use_grok: bool = True, prompt_extend: bool = False) -> ReplyKeyboardMarkup:
+    resolution = "1080p" if str(resolution or "").strip() == "1080p" else "720p"
+    duration = int(duration or 2)
+    if duration not in {2, 5, 8, 15}:
+        duration = 2
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=f"{VIDEO_I2V_RES_PREFIX}{resolution}"), KeyboardButton(text=f"{VIDEO_I2V_DURATION_PREFIX}{duration}秒")],
+            [KeyboardButton(text=VIDEO_I2V_GROK_ON if use_grok else VIDEO_I2V_GROK_OFF), KeyboardButton(text=VIDEO_I2V_EXTEND_ON if prompt_extend else VIDEO_I2V_EXTEND_OFF)],
             [KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
@@ -394,7 +418,7 @@ def _quick_start_text(service: WorkspaceService) -> str:
             f"1. {IMAGE_WORKFLOW_BUTTON}",
             "   点击后选择图像参数；当前已接入：文生图。",
             f"2. {VIDEO_EDIT_BUTTON}",
-            "   点击后选择视频编辑参数；当前保留通用视频编辑入口。",
+            "   点击后选择图生视频，可用按钮切换分辨率、时长、Grok 提示词和接口扩写。",
             "",
             "🌟 直接对话",
             "也可以发送 /status 查看后台任务进度，发送 /stop 停止当前任务。",
@@ -751,6 +775,90 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "请输入文生图需求。Grok 会先生成最终提示词；远程 ComfyUI 工作流接入后会用于实际生成。",
             reply_markup=_image_edit_keyboard(),
         )
+
+    def _video_i2v_defaults() -> dict[str, Any]:
+        return {"resolution": "720p", "duration": 2, "use_grok": True, "prompt_extend": False}
+
+    async def _answer_video_i2v_prompt(message: Message, state: FSMContext, *, text: str) -> None:
+        data = await state.get_data()
+        params = _video_i2v_defaults()
+        params.update({k: data.get(k) for k in params.keys() if k in data})
+        await message.answer(
+            text,
+            reply_markup=_video_i2v_keyboard(
+                resolution=str(params["resolution"]),
+                duration=int(params["duration"]),
+                use_grok=bool(params["use_grok"]),
+                prompt_extend=bool(params["prompt_extend"]),
+            ),
+        )
+
+    async def _handle_video_i2v_param_button(message: Message, state: FSMContext) -> bool:
+        text = _message_text(message)
+        if not text:
+            return False
+        data = await state.get_data()
+        params = _video_i2v_defaults()
+        params.update({k: data.get(k) for k in params.keys() if k in data})
+        changed = False
+        if text.startswith(VIDEO_I2V_RES_PREFIX):
+            params["resolution"] = "1080p" if str(params["resolution"]) == "720p" else "720p"
+            changed = True
+        elif text.startswith(VIDEO_I2V_DURATION_PREFIX):
+            order = [2, 5, 8, 15]
+            current = int(params.get("duration") or 2)
+            params["duration"] = order[(order.index(current) + 1) % len(order)] if current in order else 2
+            changed = True
+        elif text in {VIDEO_I2V_GROK_ON, VIDEO_I2V_GROK_OFF}:
+            params["use_grok"] = not bool(params["use_grok"])
+            changed = True
+        elif text in {VIDEO_I2V_EXTEND_ON, VIDEO_I2V_EXTEND_OFF}:
+            params["prompt_extend"] = not bool(params["prompt_extend"])
+            changed = True
+        if not changed:
+            return False
+        await state.update_data(**params)
+        await _answer_video_i2v_prompt(message, state, text="参数已更新。请继续上传参考图片或输入提示词。")
+        return True
+
+    async def start_video_i2v_flow(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_image)
+        await state.update_data(**_video_i2v_defaults())
+        await _answer_video_i2v_prompt(
+            message,
+            state,
+            text="图生视频：请先上传一张参考图片。可点击按钮切换分辨率、时长、Grok 提示词和接口扩写。",
+        )
+
+    async def _submit_video_i2v_from_state(message: Message, state: FSMContext, prompt: str) -> None:
+        data = await state.get_data()
+        image_path = str(data.get("image_local_path") or "").strip()
+        if not image_path:
+            await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_image)
+            await _answer_video_i2v_prompt(message, state, text="缺少参考图，请先上传一张图片。")
+            return
+        params = _video_i2v_defaults()
+        params.update({k: data.get(k) for k in params.keys() if k in data})
+        payload = {
+            "image_local_path": image_path,
+            "prompt": prompt,
+            "prompt_text": prompt,
+            "message": prompt,
+            "resolution": str(params["resolution"]),
+            "duration_seconds": int(params["duration"]),
+            "mulerouter_wan_i2v_resolution": str(params["resolution"]),
+            "mulerouter_wan_i2v_duration": int(params["duration"]),
+            "mulerouter_wan_i2v_prompt_extend": bool(params["prompt_extend"]),
+            "tg_use_llm_prompt": bool(params["use_grok"]),
+            "tg_user_instruction": f"用户图生视频需求：{prompt}",
+        }
+        await state.clear()
+        try:
+            await submit_webapp_task_and_reply(message, "video_i2v", payload)
+        except Exception as exc:
+            await message.answer(f"图生视频任务提交失败：{exc}", reply_markup=_menu_keyboard())
+
     async def start_replace_model_flow(message: Message, state: FSMContext) -> None:
         work_dir = service.create_job_dir(prefix="tg_replace_model")
         await state.clear()
@@ -921,6 +1029,48 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         except Exception as exc:
             await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
 
+    @router.message(ProductionWorkflowForm.video_i2v_waiting_for_image)
+    async def on_video_i2v_image(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        if await _handle_video_i2v_param_button(message, state):
+            return
+        suffix = _image_ext_from_message(message)
+        if suffix is None:
+            await _answer_video_i2v_prompt(message, state, text="请上传一张参考图片，或点击按钮调整参数。")
+            return
+        data = await state.get_data()
+        work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
+        target = work_dir / f"reference{suffix}"
+        await _download_message_media(message, target)
+        await state.update_data(work_dir=str(work_dir), image_local_path=str(target.resolve()))
+        caption = _message_text(message)
+        if caption:
+            await _submit_video_i2v_from_state(message, state, caption)
+            return
+        await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
+        await _answer_video_i2v_prompt(message, state, text="已收到参考图。现在请输入视频需求，Grok 会先生成最终视频提示词。")
+
+    @router.message(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
+    async def on_video_i2v_prompt(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        if await _handle_video_i2v_param_button(message, state):
+            return
+        prompt = _message_text(message)
+        if not prompt:
+            await _answer_video_i2v_prompt(message, state, text="请直接输入这次图生视频的画面和动作需求。")
+            return
+        await _submit_video_i2v_from_state(message, state, prompt)
+
     @router.message(ProductionWorkflowForm.replace_model_waiting_for_video)
     async def on_replace_model_video(message: Message, state: FSMContext) -> None:
         if await handle_entry_keyword(message, state):
@@ -1089,10 +1239,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         )
 
     @router.message(F.text == VIDEO_GENERAL_EDIT_BUTTON)
+    @router.message(F.text == "视频编辑任务")
+    @router.message(F.text == "圖生視頻")
+    @router.message(F.text == "視頻編輯任務")
     async def on_video_general_edit_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
-        await start_replace_product_flow(message, state)
+        await start_video_i2v_flow(message, state)
 
     @router.message(F.text == MAIN_MENU_BUTTON)
     @router.message(F.text == "返回主菜单")

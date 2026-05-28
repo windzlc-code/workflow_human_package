@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import queue
@@ -90,6 +91,14 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "llm_default_model_gemini": "gemini-3.1-pro-preview",
     "llm_default_model_gpt": "gpt-4.1",
     "llm_model_priority_order": "gemini-3.1-pro-preview, gpt-4.1",
+    "mulerouter_api_name": "",
+    "mulerouter_api_key": "",
+    "mulerouter_base_url": "https://api.mulerouter.ai",
+    "mulerouter_wan_i2v_endpoint": "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation",
+    "mulerouter_wan_i2v_resolution": "720p",
+    "mulerouter_wan_i2v_duration": 2,
+    "mulerouter_wan_i2v_prompt_extend": False,
+    "mulerouter_wan_i2v_negative_prompt": "low quality, blurry, distorted, watermark, text, logo",
     "oral_digital_human_workflow_ids": [],
     "digital_human_workflow_ids": [],
     "image_generate_workflow_ids": [],
@@ -1737,6 +1746,19 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     )
     merged["llm_model_priority_order"] = ", ".join(llm_priority_models)
 
+    merged["mulerouter_api_name"] = str(merged.get("mulerouter_api_name") or "").strip()
+    merged["mulerouter_api_key"] = str(merged.get("mulerouter_api_key") or "").strip()
+    merged["mulerouter_base_url"] = str(merged.get("mulerouter_base_url") or "https://api.mulerouter.ai").strip().rstrip("/") or "https://api.mulerouter.ai"
+    endpoint = str(merged.get("mulerouter_wan_i2v_endpoint") or "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation").strip()
+    if not endpoint.startswith("/"):
+        endpoint = "/" + endpoint
+    merged["mulerouter_wan_i2v_endpoint"] = endpoint
+    resolution = str(merged.get("mulerouter_wan_i2v_resolution") or "720p").strip()
+    merged["mulerouter_wan_i2v_resolution"] = resolution if resolution in {"720p", "1080p"} else "720p"
+    merged["mulerouter_wan_i2v_duration"] = min(max(_to_int(merged.get("mulerouter_wan_i2v_duration"), 2), 2), 15)
+    merged["mulerouter_wan_i2v_prompt_extend"] = _to_bool(merged.get("mulerouter_wan_i2v_prompt_extend"), False)
+    merged["mulerouter_wan_i2v_negative_prompt"] = str(merged.get("mulerouter_wan_i2v_negative_prompt") or "").strip()
+
     image_model_priority_order = current.get("image_model_priority_order") if "image_model_priority_order" in current else None
     image_gemini_models = parse_model_list(merged.get("image_model_default_model_gemini"))
     image_gpt_models = parse_model_list(merged.get("image_model_default_model_gpt"))
@@ -2440,6 +2462,7 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
         "llm_api_key_gemini",
         "llm_api_key_gpt",
         "remote_comfy_gateway_token",
+        "mulerouter_api_key",
     }
     runtime_fill_keys = [
         "remote_comfy_gateway_url",
@@ -2462,6 +2485,14 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
         "llm_default_model_gemini",
         "llm_default_model_gpt",
         "llm_model_priority_order",
+        "mulerouter_api_name",
+        "mulerouter_api_key",
+        "mulerouter_base_url",
+        "mulerouter_wan_i2v_endpoint",
+        "mulerouter_wan_i2v_resolution",
+        "mulerouter_wan_i2v_duration",
+        "mulerouter_wan_i2v_prompt_extend",
+        "mulerouter_wan_i2v_negative_prompt",
     ]
     for key in runtime_fill_keys:
         current_value = str(merged.get(key) or "").strip()
@@ -2691,6 +2722,134 @@ def _download_to_file(url: str, output_path: Path) -> None:
             for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+
+
+def _mulerouter_url(base_url: str, endpoint: str) -> str:
+    base = str(base_url or "").strip().rstrip("/") or "https://api.mulerouter.ai"
+    path = str(endpoint or "").strip() or "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation"
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{base}{path}"
+
+
+def _image_file_to_mulerouter_base64(image_path: str, workdir: Path) -> tuple[str, Path]:
+    src = Path(str(image_path or "")).expanduser()
+    if not src.exists() or not src.is_file():
+        raise RuntimeError(f"图生视频参考图不存在: {src}")
+    target = workdir / "mulerouter_input.jpg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with Image.open(src) as img:
+            rgb = img.convert("RGB")
+            max_side = max(rgb.size or (0, 0))
+            if max_side > 1600:
+                rgb.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+            rgb.save(target, format="JPEG", quality=90, optimize=True)
+    except Exception as exc:
+        raise RuntimeError(f"图生视频参考图处理失败: {exc}") from exc
+    if target.stat().st_size > 20 * 1024 * 1024:
+        raise RuntimeError("图生视频参考图超过 MuleRouter 20MB 限制")
+    return base64.b64encode(target.read_bytes()).decode("ascii"), target
+
+
+def _run_mulerouter_wan_i2v(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    api_key = str(payload.get("mulerouter_api_key") or "").strip()
+    if not api_key:
+        raise RuntimeError("MuleRouter 图生视频需要配置 API Key")
+    base_url = str(payload.get("mulerouter_base_url") or "https://api.mulerouter.ai").strip().rstrip("/")
+    endpoint = str(payload.get("mulerouter_wan_i2v_endpoint") or "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation").strip()
+    create_url = _mulerouter_url(base_url, endpoint)
+    prompt = str(payload.get("prompt_text") or payload.get("prompt") or payload.get("message") or "").strip()
+    if not prompt:
+        raise RuntimeError("MuleRouter 图生视频需要 prompt")
+    workdir = _build_task_workdir(task_id, fallback_username="telegram")
+    image_b64, normalized_image = _image_file_to_mulerouter_base64(str(payload.get("image_local_path") or payload.get("input_image_local_path") or ""), workdir)
+    resolution = str(payload.get("mulerouter_wan_i2v_resolution") or payload.get("resolution") or "720p").strip()
+    if resolution not in {"720p", "1080p"}:
+        resolution = "720p"
+    duration = min(max(_to_int(payload.get("mulerouter_wan_i2v_duration") or payload.get("duration_seconds"), 2), 2), 15)
+    prompt_extend = _to_bool(payload.get("mulerouter_wan_i2v_prompt_extend", payload.get("prompt_extend")), False)
+    negative_prompt = str(payload.get("mulerouter_wan_i2v_negative_prompt") or payload.get("negative_prompt") or "").strip()
+    seed_raw = payload.get("seed")
+    seed = None if str(seed_raw or "").strip() in {"", "auto", "None", "null"} else min(max(_to_int(seed_raw, 0), 0), 2147483647)
+    request_body: dict[str, Any] = {
+        "prompt": prompt,
+        "image": image_b64,
+        "negative_prompt": negative_prompt,
+        "resolution": resolution,
+        "duration": duration,
+        "prompt_extend": prompt_extend,
+        "seed": seed,
+    }
+    audio_url = str(payload.get("audio_url") or "").strip()
+    if audio_url:
+        request_body["audio_url"] = audio_url
+    request_log = dict(request_body)
+    request_log["image"] = f"base64:{normalized_image.name}:{normalized_image.stat().st_size} bytes"
+    provider_meta = {
+        "provider": "mulerouter",
+        "api_name": str(payload.get("mulerouter_api_name") or "").strip(),
+        "base_url": base_url,
+        "endpoint": endpoint,
+        "create_url": create_url,
+        "api_key_masked": _mask_secret(api_key),
+        "request": request_log,
+    }
+    _emit_stage(payload, stage="mulerouter_request", status="running", message="正在提交 MuleRouter 图生视频请求", data=provider_meta)
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        resp = requests.post(create_url, headers=headers, json=request_body, timeout=120)
+        response_json = resp.json() if resp.content else {}
+    except Exception as exc:
+        raise RuntimeError(f"MuleRouter 图生视频提交失败: {exc}") from exc
+    if resp.status_code >= 400:
+        raise RuntimeError(f"MuleRouter 图生视频提交失败 HTTP {resp.status_code}: {json.dumps(_sanitize_payload(response_json), ensure_ascii=False)[:800]}")
+    task_info = response_json.get("task_info") if isinstance(response_json, dict) else {}
+    mule_task_id = str((task_info or {}).get("id") or response_json.get("id") or "").strip()
+    if not mule_task_id:
+        raise RuntimeError(f"MuleRouter 图生视频未返回 task_id: {json.dumps(_sanitize_payload(response_json), ensure_ascii=False)[:800]}")
+    _emit_stage(payload, stage="mulerouter_task", status="running", message=f"MuleRouter 任务已创建: {mule_task_id}", data={"mulerouter_task_id": mule_task_id, "response": _sanitize_payload(response_json), **provider_meta})
+    poll_url = create_url.rstrip("/") + f"/{mule_task_id}"
+    final_json: dict[str, Any] = {}
+    status = ""
+    deadline = time.time() + max(_to_int(payload.get("timeout_seconds"), 1800), 60)
+    while time.time() < deadline:
+        time.sleep(max(_to_float(payload.get("poll_interval_seconds"), 8.0), 2.0))
+        resp = requests.get(poll_url, headers={"Authorization": f"Bearer {api_key}"}, timeout=60)
+        try:
+            final_json = resp.json() if resp.content else {}
+        except Exception:
+            final_json = {"raw": resp.text[:800]}
+        if resp.status_code >= 400:
+            raise RuntimeError(f"MuleRouter 图生视频查询失败 HTTP {resp.status_code}: {json.dumps(_sanitize_payload(final_json), ensure_ascii=False)[:800]}")
+        task_info = final_json.get("task_info") if isinstance(final_json, dict) else {}
+        status = str((task_info or {}).get("status") or final_json.get("status") or "").strip().lower()
+        _emit_stage(payload, stage="mulerouter_poll", status="running", message=f"MuleRouter 状态: {status or 'unknown'}", data={"mulerouter_task_id": mule_task_id, "status": status})
+        if status == "completed":
+            break
+        if status == "failed":
+            error_detail = (task_info or {}).get("error") if isinstance(task_info, dict) else None
+            raise RuntimeError(f"MuleRouter 图生视频失败: {json.dumps(error_detail or final_json, ensure_ascii=False)[:800]}")
+    if status != "completed":
+        raise RuntimeError(f"MuleRouter 图生视频超时，最后状态: {status or 'unknown'}")
+    videos = final_json.get("videos") if isinstance(final_json, dict) else []
+    video_url = str((videos or [""])[0] or "").strip() if isinstance(videos, list) else ""
+    if not video_url:
+        raise RuntimeError(f"MuleRouter 图生视频完成但未返回视频 URL: {json.dumps(final_json, ensure_ascii=False)[:800]}")
+    suffix = Path(urlsplit(video_url).path).suffix or ".mp4"
+    output_path = workdir / f"mulerouter_wan_i2v{suffix}"
+    _emit_stage(payload, stage="download", status="running", message="正在下载 MuleRouter 视频结果", data={"mulerouter_task_id": mule_task_id, "video_url": video_url})
+    _download_to_file(video_url, output_path)
+    return {
+        "ok": True,
+        "message": "MuleRouter 图生视频完成",
+        "download_path": str(output_path),
+        "video_path": str(output_path),
+        "mulerouter_task_id": mule_task_id,
+        "mulerouter": _sanitize_payload({**provider_meta, "poll_url": poll_url, "response": final_json}),
+        "skip_billing": True,
+        "billing": {"mode": "external_mulerouter", "cost_cents": 0},
+    }
 
 
 def _json_object_from_text(text: Any, *, label: str) -> dict[str, Any]:
@@ -5735,7 +5894,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             pass
 
     typ = str(task_type or "").strip()
-    if typ not in {"text_to_image", "image_generate", "replace_model", "replace_product", "replace_productANDmodel"}:
+    if typ not in {"text_to_image", "image_generate", "replace_model", "replace_product", "replace_productANDmodel", "video_i2v"}:
         return enhanced
 
     user_request = str(
@@ -5755,6 +5914,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         "replace_model": "视频模特替换",
         "replace_product": "视频商品替换",
         "replace_productANDmodel": "视频模特和商品联合替换",
+        "video_i2v": "图生视频",
     }
     system_prompt = "\n".join(
         [
@@ -5847,6 +6007,7 @@ TASK_RUNNERS = {
     "replace_product": _run_replace_product,
     "create_audio": _run_create_audio,
     "get_nano_banana": _run_get_nano_banana,
+    "video_i2v": _run_mulerouter_wan_i2v,
     "image_generate": _run_image_generate,
     "get_gemini": _run_get_gemini,
     "replace_productANDmodel": _run_replace_product_and_model,
@@ -6255,6 +6416,20 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         payload = _enhance_tg_payload_with_llm_prompt(typ, payload)
         return payload
 
+    if typ == "video_i2v":
+        image_path = payload.get("image_local_path") or payload.get("input_image_local_path")
+        payload["image_local_path"] = _validated_local_file(image_path, label="图生视频参考图")
+        payload["prompt"] = str(payload.get("prompt") or payload.get("prompt_text") or payload.get("message") or payload.get("tg_user_instruction") or "").strip()
+        if not payload["prompt"]:
+            raise HTTPException(status_code=400, detail="video_i2v 需要 prompt")
+        payload["duration_seconds"] = min(max(_to_int(payload.get("duration_seconds") or payload.get("mulerouter_wan_i2v_duration"), 2), 2), 15)
+        payload["mulerouter_wan_i2v_duration"] = payload["duration_seconds"]
+        resolution = str(payload.get("resolution") or payload.get("mulerouter_wan_i2v_resolution") or "720p").strip()
+        payload["mulerouter_wan_i2v_resolution"] = resolution if resolution in {"720p", "1080p"} else "720p"
+        payload["mulerouter_wan_i2v_prompt_extend"] = _to_bool(payload.get("mulerouter_wan_i2v_prompt_extend", payload.get("prompt_extend")), False)
+        payload = _enhance_tg_payload_with_llm_prompt(typ, payload)
+        return payload
+
     if typ == "replace_model":
         payload = _normalize_replace_model_payload(payload)
         payload["video_local_path"] = _validated_local_file(payload.get("video_local_path"), label="原视频")
@@ -6454,6 +6629,14 @@ class RuntimeConfigPayload(BaseModel):
     llm_default_model_gemini: str = "gemini-3.1-pro-preview"
     llm_default_model_gpt: str = "gpt-4.1"
     llm_model_priority_order: str = "gemini-3.1-pro-preview, gpt-4.1"
+    mulerouter_api_name: str = ""
+    mulerouter_api_key: str = ""
+    mulerouter_base_url: str = "https://api.mulerouter.ai"
+    mulerouter_wan_i2v_endpoint: str = "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation"
+    mulerouter_wan_i2v_resolution: str = "720p"
+    mulerouter_wan_i2v_duration: int = 2
+    mulerouter_wan_i2v_prompt_extend: bool = False
+    mulerouter_wan_i2v_negative_prompt: str = "low quality, blurry, distorted, watermark, text, logo"
     oral_digital_human_workflow_ids: list[Any] = Field(default_factory=list)
     digital_human_workflow_ids: list[Any] = Field(default_factory=list)
     image_generate_workflow_ids: list[Any] = Field(default_factory=list)
