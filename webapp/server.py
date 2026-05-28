@@ -5918,7 +5918,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
 
     task_labels = {
         "text_to_image": "文生图",
-        "image_generate": "图像编辑",
+        "image_generate": "图像生成",
         "replace_model": "视频模特替换",
         "replace_product": "视频商品替换",
         "replace_productANDmodel": "视频模特和商品联合替换",

@@ -42,8 +42,10 @@ DIGITAL_HUMAN_CUSTOM_BUTTON = "自定义数字人要求"
 ORAL_UPLOAD_BUTTON = DIGITAL_HUMAN_VIDEO_BUTTON
 LEGACY_ORAL_UPLOAD_BUTTON = "口播数字人：上传素材"
 WORKFLOW_CONFIG_BUTTON = "查看后台工作流配置"
-IMAGE_WORKFLOW_BUTTON = "图像编辑"
+IMAGE_WORKFLOW_BUTTON = "图像生成"
 TEXT_TO_IMAGE_BUTTON = "文生图"
+MULTI_IMAGE_BUTTON = "多图生成"
+IMAGE_REPLACE_BUTTON = "图片替换"
 VIDEO_GENERAL_EDIT_BUTTON = "图生视频"
 VIDEO_I2V_RES_PREFIX = "分辨率："
 VIDEO_I2V_DURATION_PREFIX = "时长："
@@ -53,7 +55,7 @@ VIDEO_I2V_EXTEND_ON = "接口扩写：开"
 VIDEO_I2V_EXTEND_OFF = "接口扩写：关"
 LEGACY_IMAGE_WORKFLOW_BUTTON = "图像编辑工作流"
 LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "图片生成工作流"
-VIDEO_EDIT_BUTTON = "视频编辑"
+VIDEO_EDIT_BUTTON = "视频生成"
 MAIN_MENU_BUTTON = "返回主菜单"
 REPLACE_MODEL_WORKFLOW_BUTTON = "视频模特替换"
 LEGACY_REPLACE_MODEL_WORKFLOW_BUTTON = "模特替换工作流"
@@ -77,10 +79,18 @@ TRADITIONAL_BUTTON_ALIASES = {
     "口播數字人：上傳素材": LEGACY_ORAL_UPLOAD_BUTTON,
     "上傳素材建立任務": LEGACY_UPLOAD_BUTTON,
     "查看後台工作流配置": WORKFLOW_CONFIG_BUTTON,
+    "图像编辑": IMAGE_WORKFLOW_BUTTON,
+    "圖像生成": IMAGE_WORKFLOW_BUTTON,
+    "圖片生成": IMAGE_WORKFLOW_BUTTON,
     "圖片編輯": IMAGE_WORKFLOW_BUTTON,
+    "圖像編輯": IMAGE_WORKFLOW_BUTTON,
     "文生圖片": TEXT_TO_IMAGE_BUTTON,
+    "多圖生成": MULTI_IMAGE_BUTTON,
+    "圖片替換": IMAGE_REPLACE_BUTTON,
     "圖像編輯工作流": LEGACY_IMAGE_WORKFLOW_BUTTON,
     "圖片生成工作流": LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON,
+    "视频编辑": VIDEO_EDIT_BUTTON,
+    "視頻生成": VIDEO_EDIT_BUTTON,
     "視頻編輯": VIDEO_EDIT_BUTTON,
     "視頻編輯任務": VIDEO_GENERAL_EDIT_BUTTON,
     "圖生視頻": VIDEO_GENERAL_EDIT_BUTTON,
@@ -138,6 +148,7 @@ class UploadFlowForm(StatesGroup):
 class ProductionWorkflowForm(StatesGroup):
     text_to_image_waiting_for_prompt = State()
     image_waiting_for_product_image = State()
+    image_waiting_for_model_image = State()
     image_waiting_for_prompt = State()
     video_i2v_waiting_for_image = State()
     video_i2v_waiting_for_prompt = State()
@@ -193,7 +204,8 @@ def _menu_keyboard() -> ReplyKeyboardMarkup:
 def _image_edit_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=TEXT_TO_IMAGE_BUTTON)],
+            [KeyboardButton(text=TEXT_TO_IMAGE_BUTTON), KeyboardButton(text=MULTI_IMAGE_BUTTON)],
+            [KeyboardButton(text=IMAGE_REPLACE_BUTTON)],
             [KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
@@ -392,7 +404,7 @@ def _workflow_config_text(service: WorkspaceService, selected_button: str = "") 
 
     if display_selected_button and display_selected_button != WORKFLOW_CONFIG_BUTTON:
         selected_map = {
-            IMAGE_WORKFLOW_BUTTON: _format_chain("图像编辑", image_chain),
+            IMAGE_WORKFLOW_BUTTON: _format_chain("图像生成", image_chain),
             REPLACE_MODEL_WORKFLOW_BUTTON: _format_chain("视频模特替换", replace_model_original_chain),
             REPLACE_PRODUCT_WORKFLOW_BUTTON: _format_chain("视频商品替换", replace_product_chain),
             REPLACE_UNION_WORKFLOW_BUTTON: "\n".join(
@@ -417,14 +429,14 @@ def _workflow_config_text(service: WorkspaceService, selected_button: str = "") 
         [
             "后台工作流配置：",
             _format_chain("口播数字人工作流", oral_chain),
-            _format_chain("图像编辑", image_chain),
+            _format_chain("图像生成", image_chain),
             _format_chain("视频模特替换", replace_model_original_chain),
             _format_chain("视频商品替换", replace_product_chain),
             _format_chain("联合替换·视频模特链", replace_union_model_chain),
             _format_chain("联合替换·视频商品链", replace_union_product_chain),
             "",
             selected_note,
-            "TG 面板可直接建立任务：图像编辑、视频编辑。",
+            "TG 面板可直接建立任务：图像生成、视频生成。",
             f"工作台网址: {config.public_base_url}",
         ]
     ).strip()
@@ -437,7 +449,7 @@ def _quick_start_text(service: WorkspaceService) -> str:
             "",
             "🌟 可用工作流",
             f"1. {IMAGE_WORKFLOW_BUTTON}",
-            "   点击后选择图像参数；当前已接入：文生图。",
+            "   点击后选择图像模式：文生图、多图生成、图片替换。",
             f"2. {VIDEO_EDIT_BUTTON}",
             "   点击后选择图生视频，可用按钮切换分辨率、时长、Grok 提示词和接口扩写。",
             "",
@@ -699,15 +711,29 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
 
     async def handle_entry_keyword(message: Message, state: FSMContext) -> bool:
         text = _canonical_button_text(_message_text(message))
-        if text not in {"多智能体数字人", IMAGE_WORKFLOW_BUTTON, VIDEO_EDIT_BUTTON, VIDEO_GENERAL_EDIT_BUTTON}:
+        if text not in {
+            "多智能体数字人",
+            IMAGE_WORKFLOW_BUTTON,
+            TEXT_TO_IMAGE_BUTTON,
+            MULTI_IMAGE_BUTTON,
+            IMAGE_REPLACE_BUTTON,
+            VIDEO_EDIT_BUTTON,
+            VIDEO_GENERAL_EDIT_BUTTON,
+        }:
             return False
         if not await ensure_authorized(message):
             return True
         await state.clear()
         if text == IMAGE_WORKFLOW_BUTTON:
             await start_image_generate_flow(message, state)
+        elif text == TEXT_TO_IMAGE_BUTTON:
+            await start_text_to_image_flow(message, state)
+        elif text == MULTI_IMAGE_BUTTON:
+            await start_image_reference_flow(message, state, mode="multi_image")
+        elif text == IMAGE_REPLACE_BUTTON:
+            await start_image_reference_flow(message, state, mode="image_replace")
         elif text == VIDEO_EDIT_BUTTON:
-            await message.answer("视频编辑：请选择要建立的任务。", reply_markup=_video_edit_keyboard())
+            await message.answer("视频生成：请选择要建立的任务。", reply_markup=_video_edit_keyboard())
         elif text == VIDEO_GENERAL_EDIT_BUTTON:
             await start_video_i2v_flow(message, state)
         else:
@@ -793,7 +819,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def start_image_generate_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
-            "图像编辑：请选择要执行的图像参数。",
+            "图像生成：请选择要执行的图片模式。",
             reply_markup=_image_edit_keyboard(),
         )
 
@@ -801,7 +827,22 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.clear()
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
         await message.answer(
-            "请输入文生图需求。Grok 会先生成最终提示词；远程 ComfyUI 工作流接入后会用于实际生成。",
+            "文生图\n步骤 1/1：请输入图片需求。Grok 会先生成中文最终提示词，再提交到后台工作流。",
+            reply_markup=_image_edit_keyboard(),
+        )
+
+    def _image_mode_title(mode: str) -> str:
+        return "图片替换" if mode == "image_replace" else "多图生成"
+
+    async def start_image_reference_flow(message: Message, state: FSMContext, *, mode: str) -> None:
+        mode = "image_replace" if mode == "image_replace" else "multi_image"
+        title = _image_mode_title(mode)
+        await state.clear()
+        await state.set_state(ProductionWorkflowForm.image_waiting_for_product_image)
+        await state.update_data(image_mode=mode, work_dir=str(service.create_job_dir(prefix=f"tg_{mode}")))
+        first_step = "请上传原图。" if mode == "image_replace" else "请上传第一张参考图。"
+        await message.answer(
+            f"{title}\n步骤 1/3：{first_step}",
             reply_markup=_image_edit_keyboard(),
         )
 
@@ -1182,6 +1223,108 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         except Exception as exc:
             await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
 
+    @router.message(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
+    async def on_text_to_image_prompt(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        prompt = _message_text(message)
+        if not prompt:
+            await message.answer("文生图\n步骤 1/1：请直接输入图片需求。", reply_markup=_image_edit_keyboard())
+            return
+        params = {
+            "prompt": prompt,
+            "prompt_text": prompt,
+            "message": prompt,
+            "tg_use_llm_prompt": True,
+            "tg_user_instruction": f"用户文生图需求：{prompt}",
+        }
+        await state.clear()
+        try:
+            await submit_webapp_task_and_reply(message, "text_to_image", params)
+        except Exception as exc:
+            await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
+
+    @router.message(ProductionWorkflowForm.image_waiting_for_product_image)
+    async def on_image_first_reference(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        suffix = _image_ext_from_message(message)
+        data = await state.get_data()
+        mode = str(data.get("image_mode") or "multi_image")
+        title = _image_mode_title(mode)
+        if suffix is None:
+            first_step = "请上传原图。" if mode == "image_replace" else "请上传第一张参考图。"
+            await message.answer(f"{title}\n步骤 1/3：{first_step}", reply_markup=_image_edit_keyboard())
+            return
+        work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix=f"tg_{mode}")))
+        target = work_dir / f"primary{suffix}"
+        await _download_message_media(message, target)
+        await state.update_data(work_dir=str(work_dir), product_image_local_path=str(target.resolve()))
+        await state.set_state(ProductionWorkflowForm.image_waiting_for_model_image)
+        second_step = "请上传要替换成的参考图。" if mode == "image_replace" else "请上传第二张参考图。"
+        await message.answer(f"{title}\n步骤 2/3：{second_step}", reply_markup=_image_edit_keyboard())
+
+    @router.message(ProductionWorkflowForm.image_waiting_for_model_image)
+    async def on_image_second_reference(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        suffix = _image_ext_from_message(message)
+        data = await state.get_data()
+        mode = str(data.get("image_mode") or "multi_image")
+        title = _image_mode_title(mode)
+        if suffix is None:
+            second_step = "请上传要替换成的参考图。" if mode == "image_replace" else "请上传第二张参考图。"
+            await message.answer(f"{title}\n步骤 2/3：{second_step}", reply_markup=_image_edit_keyboard())
+            return
+        work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix=f"tg_{mode}")))
+        target = work_dir / f"secondary{suffix}"
+        await _download_message_media(message, target)
+        await state.update_data(work_dir=str(work_dir), model_image_local_path=str(target.resolve()))
+        await state.set_state(ProductionWorkflowForm.image_waiting_for_prompt)
+        await message.answer(f"{title}\n步骤 3/3：请输入这次图片生成需求。", reply_markup=_image_edit_keyboard())
+
+    @router.message(ProductionWorkflowForm.image_waiting_for_prompt)
+    async def on_image_reference_prompt(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        prompt = _message_text(message)
+        data = await state.get_data()
+        mode = str(data.get("image_mode") or "multi_image")
+        title = _image_mode_title(mode)
+        if not prompt:
+            await message.answer(f"{title}\n步骤 3/3：请直接输入这次图片生成需求。", reply_markup=_image_edit_keyboard())
+            return
+        params = {
+            "product_image_local_path": str(data.get("product_image_local_path") or ""),
+            "model_image_local_path": str(data.get("model_image_local_path") or ""),
+            "prompt": prompt,
+            "prompt_text": prompt,
+            "message": prompt,
+            "tg_use_llm_prompt": True,
+            "tg_user_instruction": f"用户{title}需求：{prompt}",
+        }
+        await state.clear()
+        try:
+            await submit_webapp_task_and_reply(message, "image_generate", params)
+        except Exception as exc:
+            await message.answer(f"{title}任务提交失败：{exc}", reply_markup=_menu_keyboard())
+
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_image)
     async def on_video_i2v_image(message: Message, state: FSMContext) -> None:
         if await handle_entry_keyword(message, state):
@@ -1367,7 +1510,22 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await start_text_to_image_flow(message, state)
 
+    @router.message(F.text == MULTI_IMAGE_BUTTON)
+    @router.message(F.text == "多圖生成")
+    async def on_multi_image_button(message: Message, state: FSMContext) -> None:
+        if not await ensure_authorized(message):
+            return
+        await start_image_reference_flow(message, state, mode="multi_image")
+
+    @router.message(F.text == IMAGE_REPLACE_BUTTON)
+    @router.message(F.text == "圖片替換")
+    async def on_image_replace_button(message: Message, state: FSMContext) -> None:
+        if not await ensure_authorized(message):
+            return
+        await start_image_reference_flow(message, state, mode="image_replace")
+
     @router.message(F.text == IMAGE_WORKFLOW_BUTTON)
+    @router.message(F.text == "图像编辑")
     @router.message(F.text == "图片编辑")
     @router.message(F.text == "圖片編輯")
     @router.message(F.text == LEGACY_IMAGE_WORKFLOW_BUTTON)
@@ -1387,7 +1545,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await state.clear()
         await message.answer(
-            "视频编辑：请选择要建立的任务。",
+            "视频生成：请选择要建立的任务。",
             reply_markup=_video_edit_keyboard(),
         )
 
