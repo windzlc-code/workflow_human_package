@@ -5710,7 +5710,104 @@ def _collect_batch_usage(output_dir: Any) -> dict[str, Any]:
 
 
 def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return dict(payload or {})
+    enhanced = dict(payload or {})
+    if enhanced.get("tg_llm_prompt_enhanced"):
+        return enhanced
+    if not _to_bool(enhanced.get("tg_use_llm_prompt"), False):
+        return enhanced
+    if not str(enhanced.get("llm_base_url") or "").strip():
+        try:
+            with db() as conn:
+                runtime = _get_runtime_config(conn)
+            for key in (
+                "llm_base_url",
+                "llm_api_key",
+                "llm_api_key_gemini",
+                "llm_api_key_gpt",
+                "llm_default_model",
+                "llm_default_model_gemini",
+                "llm_default_model_gpt",
+                "llm_model_priority_order",
+            ):
+                if not str(enhanced.get(key) or "").strip():
+                    enhanced[key] = runtime.get(key)
+        except Exception:
+            pass
+
+    typ = str(task_type or "").strip()
+    if typ not in {"text_to_image", "image_generate", "replace_model", "replace_product", "replace_productANDmodel"}:
+        return enhanced
+
+    user_request = str(
+        enhanced.get("tg_user_instruction")
+        or enhanced.get("message")
+        or enhanced.get("prompt_text")
+        or enhanced.get("prompt")
+        or enhanced.get("product_name")
+        or ""
+    ).strip()
+    if not user_request:
+        return enhanced
+
+    task_labels = {
+        "text_to_image": "文生图",
+        "image_generate": "图像编辑",
+        "replace_model": "视频模特替换",
+        "replace_product": "视频商品替换",
+        "replace_productANDmodel": "视频模特和商品联合替换",
+    }
+    system_prompt = "\n".join(
+        [
+            "你是图像和视频生成工作流的提示词工程师。",
+            "请根据用户原始中文需求，改写成适合 ComfyUI 工作流直接使用的生成提示词。",
+            "必须输出严格 JSON，不要代码块，不要解释。",
+            "字段：prompt_text。",
+            "prompt_text 只允许普通提示词文本，不要 Markdown、emoji、标题、列表、引用符号或解释语。",
+            "prompt_text 必须完整保留用户的具体主体、物品、动作、场景、材质、颜色和限制；不能把具体要求改成泛泛的质量词。",
+            "如果用户要求苹果，prompt_text 必须明确包含苹果；如果用户要求某个服装、颜色、环境或动作，也必须保留。",
+            "不要擅自替换用户指定的场景、材质或道具，例如木桌不能改成厨房台面，海边不能改成室内。",
+            "在保留原始要求的基础上，补充画面主体、场景、镜头、构图、光线、质感、风格和细节。",
+            "不要添加用户没有要求的敏感、违法、侵权或身份信息。",
+            f"当前任务类型：{task_labels.get(typ, typ)}。",
+        ]
+    )
+    llm_result, selected, attempts = _request_llm_json_with_fallback(
+        source=enhanced,
+        user_input=user_request,
+        system_prompt=system_prompt,
+        parameters="",
+        allow_builtin=False,
+        request_label="Telegram Grok 提示词改写",
+    )
+    parsed = llm_result.get("parsed") if isinstance(llm_result, dict) else None
+    rewritten = str((parsed or {}).get("prompt_text") or "").strip() if isinstance(parsed, dict) else ""
+    if not rewritten:
+        raise RuntimeError("Grok 提示词改写未返回 prompt_text")
+    rewritten_lines = []
+    for line in rewritten.splitlines():
+        cleaned_line = re.sub(r"^[>\\-•\\s]+", "", str(line or "").strip())
+        cleaned_line = cleaned_line.replace("**", "").replace("__", "").strip()
+        if not cleaned_line:
+            continue
+        if re.search(r"refining the prompt|prompt for comfyui|优化提示词|提示词改写", cleaned_line, re.IGNORECASE):
+            continue
+        rewritten_lines.append(cleaned_line)
+    if rewritten_lines:
+        rewritten = "，".join(rewritten_lines)
+    final_prompt = rewritten
+    if user_request not in rewritten:
+        final_prompt = f"{user_request}。{rewritten}"
+
+    enhanced["tg_original_prompt"] = user_request
+    enhanced["tg_llm_prompt_enhanced"] = True
+    enhanced["tg_llm_selected_model"] = str(selected.get("model") or "").strip() if isinstance(selected, dict) else ""
+    enhanced["tg_llm_attempts"] = attempts
+    enhanced["tg_llm_rewritten_prompt"] = rewritten
+    enhanced["prompt_text"] = final_prompt
+    enhanced["prompt"] = final_prompt
+    if typ in {"replace_model", "replace_product", "replace_productANDmodel"}:
+        enhanced["style_hint"] = final_prompt
+    return enhanced
 
 
 def _build_agent_task_payload(
