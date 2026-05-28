@@ -719,12 +719,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             IMAGE_REPLACE_BUTTON,
             VIDEO_EDIT_BUTTON,
             VIDEO_GENERAL_EDIT_BUTTON,
+            MAIN_MENU_BUTTON,
         }:
             return False
         if not await ensure_authorized(message):
             return True
         await state.clear()
-        if text == IMAGE_WORKFLOW_BUTTON:
+        if text == MAIN_MENU_BUTTON:
+            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+        elif text == IMAGE_WORKFLOW_BUTTON:
             await start_image_generate_flow(message, state)
         elif text == TEXT_TO_IMAGE_BUTTON:
             await start_text_to_image_flow(message, state)
