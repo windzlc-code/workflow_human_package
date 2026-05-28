@@ -240,10 +240,10 @@
             <div class="admin-runtime-panel-head">
               <div>
                 <div class="admin-config-card-title">闭源模型配置</div>
-                <div class="small">把文字模型和图片模型集中管理，避免和远程 ComfyUI 工作流混在一起。</div>
+                <div class="small">把文字、图片和视频模型集中管理，避免和远程 ComfyUI 工作流混在一起。</div>
               </div>
             </div>
-            <div class="admin-runtime-grid">
+            <div class="admin-runtime-grid admin-runtime-grid-models">
               <div class="admin-runtime-column">
                 <div class="admin-runtime-block">
                   <div class="admin-config-card-title">文字模型</div>
@@ -318,19 +318,12 @@
                   <div id="rtImageModelSummary" class="admin-model-summary small"></div>
                 </div>
               </div>
-            </div>
-          </div>
-
-          <div class="admin-config-card admin-runtime-panel">
-            <div class="admin-runtime-panel-head">
-              <div>
-                <div class="admin-config-card-title">MuleRouter 视频 API</div>
-                <div class="small">用于 Telegram「视频编辑」里的图生视频任务，请求记录会进入任务详情日志。</div>
-              </div>
-            </div>
-            <div class="admin-runtime-grid">
               <div class="admin-runtime-column">
                 <div class="admin-runtime-block">
+                  <div class="admin-config-card-title">视频模型</div>
+                  <div class="small">MuleRouter / Wan 2.7 图生视频，用于 Telegram「视频编辑」。请求记录会进入任务详情日志。</div>
+                  <label>模型名称</label>
+                  <input id="rtMuleRouterWanI2vModelName" type="text" value="wan2.7-i2v-spicy" readonly>
                   <label>API Name</label>
                   <input id="rtMuleRouterApiName" type="text" placeholder="api-key0526">
                   <label>API Key</label>
@@ -339,10 +332,6 @@
                   <input id="rtMuleRouterBaseUrl" type="text" placeholder="https://api.mulerouter.ai">
                   <label>Wan 2.7 I2V Endpoint</label>
                   <input id="rtMuleRouterWanI2vEndpoint" type="text" placeholder="/vendors/carrothub/v1/wan2.7-i2v-spicy/generation">
-                </div>
-              </div>
-              <div class="admin-runtime-column">
-                <div class="admin-runtime-block">
                   <label>默认分辨率</label>
                   <select id="rtMuleRouterWanI2vResolution">
                     <option value="720p">720p（最小资源）</option>

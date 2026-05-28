@@ -3930,6 +3930,10 @@ body.page-admin {
   gap: 16px;
 }
 
+.page-admin .admin-runtime-grid-models {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .page-admin .admin-runtime-column {
   min-width: 0;
   display: grid;
@@ -4578,6 +4582,7 @@ body.page-admin {
   .page-admin .admin-overview-strip,
   .page-admin .admin-config-grid,
   .page-admin .admin-runtime-grid,
+  .page-admin .admin-runtime-grid-models,
   .page-admin .tg-config-grid {
     grid-template-columns: 1fr;
   }
