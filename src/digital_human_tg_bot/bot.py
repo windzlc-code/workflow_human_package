@@ -20,7 +20,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from .config import AppConfig
 from .media import extract_video_first_frame
@@ -698,12 +698,20 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         )
 
     async def handle_entry_keyword(message: Message, state: FSMContext) -> bool:
-        if _canonical_button_text(_message_text(message)) != "多智能体数字人":
+        text = _canonical_button_text(_message_text(message))
+        if text not in {"多智能体数字人", IMAGE_WORKFLOW_BUTTON, VIDEO_EDIT_BUTTON, VIDEO_GENERAL_EDIT_BUTTON}:
             return False
         if not await ensure_authorized(message):
             return True
         await state.clear()
-        await message.answer(_quick_start_text(service), reply_markup=_menu_keyboard())
+        if text == IMAGE_WORKFLOW_BUTTON:
+            await start_image_generate_flow(message, state)
+        elif text == VIDEO_EDIT_BUTTON:
+            await message.answer("视频编辑：请选择要建立的任务。", reply_markup=_video_edit_keyboard())
+        elif text == VIDEO_GENERAL_EDIT_BUTTON:
+            await start_video_i2v_flow(message, state)
+        else:
+            await message.answer(_quick_start_text(service), reply_markup=_menu_keyboard())
         return True
 
     async def handle_workflow_reference_request(message: Message, state: FSMContext | None = None) -> bool:
@@ -823,6 +831,27 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params["prompt_extend"] = bool(params.get("prompt_extend"))
         return params
 
+    async def _video_i2v_step_text(state: FSMContext, *, fallback: str = "1/2 调整参数，然后上传参考图") -> str:
+        current_state = await state.get_state()
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt.state:
+            return "2/2 已收到参考图，请输入视频需求"
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_image.state:
+            return "1/2 调整参数，然后上传参考图"
+        return fallback
+
+    async def _try_delete_message(message: Message) -> None:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    async def _remove_reply_keyboard(message: Message) -> None:
+        try:
+            sent = await message.answer("请使用上方按钮调整图生视频参数。", reply_markup=ReplyKeyboardRemove())
+            await sent.delete()
+        except Exception:
+            pass
+
     async def _edit_video_i2v_control_message(message: Message, state: FSMContext, *, step: str) -> None:
         data = await state.get_data()
         params = _video_i2v_state_params(data)
@@ -857,17 +886,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 pass
 
     async def _answer_video_i2v_prompt(message: Message, state: FSMContext, *, text: str) -> None:
-        data = await state.get_data()
-        params = _video_i2v_state_params(data)
-        await message.answer(
-            text,
-            reply_markup=_video_i2v_keyboard(
-                resolution=str(params["resolution"]),
-                duration=int(params["duration"]),
-                use_grok=bool(params["use_grok"]),
-                prompt_extend=bool(params["prompt_extend"]),
-            ),
-        )
+        await _edit_video_i2v_control_message(message, state, step=text)
 
     async def _handle_video_i2v_param_button(message: Message, state: FSMContext) -> bool:
         text = _message_text(message)
@@ -893,13 +912,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not changed:
             return False
         await state.update_data(**params)
-        await _edit_video_i2v_control_message(message, state, step="参数已更新，请继续上传参考图或输入提示词")
+        await _edit_video_i2v_control_message(message, state, step=await _video_i2v_step_text(state))
+        await _try_delete_message(message)
         return True
 
     async def start_video_i2v_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
         await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_image)
         await state.update_data(**_video_i2v_defaults())
+        await _remove_reply_keyboard(message)
         await _edit_video_i2v_control_message(message, state, step="1/2 调整参数，然后上传参考图")
 
     async def _submit_video_i2v_from_state(message: Message, state: FSMContext, prompt: str) -> None:
