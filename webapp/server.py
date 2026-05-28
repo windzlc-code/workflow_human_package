@@ -5759,6 +5759,13 @@ TASK_RUNNERS = {
     "batch_replace_model": _run_batch_replace_model,
     "batch_replace_product": _run_batch_replace_product,
 }
+TG_AGENT_PRODUCTION_TASK_TYPES = set(TASK_RUNNERS.keys())
+
+
+def _agent_chat_payload(*, reply: str, summary: str = "") -> tuple[str, dict[str, Any], str]:
+    reply_text = str(reply or "").strip()
+    summary_text = str(summary or reply_text or "未创建生产任务").strip()
+    return "chat", {"reply": reply_text}, summary_text
 
 
 def _task_worker(task_id: str, user_id: int, task_type: str, payload: dict[str, Any]) -> None:

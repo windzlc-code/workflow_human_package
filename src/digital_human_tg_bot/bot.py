@@ -1213,6 +1213,19 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not text:
             text = "根据我上传的素材判断最合适的生产工作流，并生成需要的提示词。"
         await state.clear()
+        if text and not files:
+            params = {
+                "prompt": text,
+                "prompt_text": text,
+                "message": text,
+                "tg_use_llm_prompt": True,
+                "tg_user_instruction": f"用户文生图需求：{text}",
+            }
+            try:
+                await submit_webapp_task_and_reply(message, "text_to_image", params)
+            except Exception as exc:
+                await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
+            return
         try:
             result = await _submit_internal_webapp_agent_task(
                 chat_id=int(message.chat.id),
