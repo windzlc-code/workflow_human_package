@@ -243,6 +243,51 @@ def _text_to_image_params(data: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
+def _text_to_image_remote_node_inputs(params: dict[str, Any]) -> dict[str, Any]:
+    safe_save_prefixes = {
+        "715": {"filename_prefix": "telegram/ZIT_upscale"},
+        "732": {"filename_prefix": "telegram/ZIT_blend"},
+    }
+    if bool(params.get("final_resolution_enabled")):
+        return {
+            "647": {"scale_by": 1.7},
+            "637": {"value": 2.0},
+            "663": {
+                "cfg": 4.0,
+                "sampler_name": "dpmpp_2m_sde",
+                "scheduler": "sgm_uniform",
+                "denoise": 0.25,
+                "mode_type": "Linear",
+                "mask_blur": 8,
+                "seam_fix_mode": "None",
+                "seam_fix_denoise": 0.5,
+            },
+            "734": {
+                "cfg": 4.0,
+                "sampler_name": "dpmpp_2m_sde",
+                "scheduler": "sgm_uniform",
+                "denoise": 0.25,
+                "feather": 20,
+            },
+            "713": {
+                "resolution": 1080,
+                "color_correction": "lab",
+                "offload_device": "cpu",
+                "temporal_overlap": 0,
+            },
+            "789": {"image": ["663", 0]},
+            "790": {"image": ["663", 0]},
+            **safe_save_prefixes,
+        }
+    return {
+        "647": {"scale_by": 1.0},
+        "637": {"value": 1.0},
+        "789": {"image": ["610", 0]},
+        "790": {"image": ["610", 0]},
+        **safe_save_prefixes,
+    }
+
+
 def _text_to_image_status_text(*, step: str, params: dict[str, Any]) -> str:
     return "\n".join(
         [
@@ -1297,11 +1342,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "tg_llm_selected_model": str(data.get("selected_model") or "").strip(),
             "custom_prompt_used": bool(data.get("custom_prompt_used")),
         }
-        if not bool(params["final_resolution_enabled"]):
-            payload["remote_comfy_node_inputs"] = {
-                "647": {"scale_by": 1.0},
-                "637": {"value": 1},
-            }
+        payload["remote_comfy_node_inputs"] = _text_to_image_remote_node_inputs(params)
         await state.clear()
         await submit_webapp_task_and_reply(message, "text_to_image", payload)
 
