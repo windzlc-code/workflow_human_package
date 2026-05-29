@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import uuid
 import hashlib
@@ -27,6 +28,7 @@ WORKFLOW_ROOTS = [
 CONVERTER_VERSION = "2026-05-28.1"
 CONVERTED_ROOT = WORKFLOW_ROOTS[1][1] / "__converted__"
 CONVERT_MANIFEST_PATH = CONVERTED_ROOT / "manifest.json"
+CUSTOM_NODES_ROOT = (COMFY_ROOT / "custom_nodes").resolve()
 
 
 def _json_bytes(data: Any) -> bytes:
@@ -147,6 +149,24 @@ def _safe_model_path(category: Any, value: Any) -> Path:
     return candidate
 
 
+def _safe_custom_node_path(package: Any, value: Any = "") -> Path:
+    package_text = str(package or "").replace("\\", "/").strip().strip("/")
+    path_text = str(value or "").replace("\\", "/").strip().lstrip("/")
+    if not package_text:
+        raise ValueError("package is required")
+    package_parts = Path(package_text).parts
+    path_parts = Path(path_text).parts if path_text else ()
+    if any(part in {"", ".", ".."} for part in [*package_parts, *path_parts]):
+        raise ValueError("invalid custom node path")
+    root = (CUSTOM_NODES_ROOT / package_text).resolve()
+    candidate = (root / path_text).resolve() if path_text else root
+    if root != candidate and root not in candidate.parents:
+        raise ValueError("custom node path escapes package root")
+    if CUSTOM_NODES_ROOT != root and CUSTOM_NODES_ROOT not in root.parents:
+        raise ValueError("package path escapes custom_nodes root")
+    return candidate
+
+
 def _check_models(body: dict[str, Any]) -> dict[str, Any]:
     items = body.get("items")
     if not isinstance(items, list):
@@ -216,6 +236,93 @@ def _upload_model_chunk(body: dict[str, Any]) -> dict[str, Any]:
             path.unlink(missing_ok=True)
             raise ValueError("sha256 mismatch after upload")
     return response
+
+
+def _check_custom_nodes(body: dict[str, Any]) -> dict[str, Any]:
+    items = body.get("items")
+    if not isinstance(items, list):
+        raise ValueError("items must be a list")
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        package = str(item.get("package") or "")
+        rel = str(item.get("path") or "")
+        try:
+            path = _safe_custom_node_path(package, rel)
+            exists = path.exists() and path.is_file()
+            row = {
+                "package": package,
+                "path": rel,
+                "exists": exists,
+                "bytes": path.stat().st_size if exists else 0,
+            }
+            if exists and item.get("sha256"):
+                row["sha256"] = _sha256_file(path)
+            rows.append(row)
+        except Exception as exc:
+            rows.append({"package": package, "path": rel, "exists": False, "error": str(exc)})
+    return {"ok": True, "items": rows}
+
+
+def _upload_custom_node_chunk(body: dict[str, Any]) -> dict[str, Any]:
+    path = _safe_custom_node_path(body.get("package"), body.get("path"))
+    raw = _decode_upload_content(body)
+    if len(raw) > 16 * 1024 * 1024:
+        raise ValueError("chunk is too large")
+    offset = int(body.get("offset") or 0)
+    total = int(body.get("total") or 0)
+    if offset < 0 or total <= 0 or offset > total:
+        raise ValueError("invalid offset or total")
+    if offset + len(raw) > total:
+        raise ValueError("chunk exceeds total size")
+    expected_sha = str(body.get("sha256") or "").strip().lower()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if offset == 0:
+        mode = "wb"
+    else:
+        if not path.exists():
+            raise ValueError("target file does not exist for non-zero offset")
+        current_size = path.stat().st_size
+        if current_size != offset:
+            raise ValueError(f"offset mismatch: expected {current_size}, received {offset}")
+        mode = "ab"
+    with path.open(mode) as handle:
+        handle.write(raw)
+
+    current = path.stat().st_size
+    complete = current == total
+    response: dict[str, Any] = {
+        "ok": True,
+        "package": str(body.get("package") or ""),
+        "path": str(body.get("path") or ""),
+        "bytes": current,
+        "total": total,
+        "complete": complete,
+    }
+    if complete and expected_sha:
+        actual_sha = _sha256_file(path)
+        response["sha256"] = actual_sha
+        if actual_sha != expected_sha:
+            path.unlink(missing_ok=True)
+            raise ValueError("sha256 mismatch after upload")
+    return response
+
+
+def _delete_custom_node(body: dict[str, Any]) -> dict[str, Any]:
+    target = _safe_custom_node_path(body.get("package"), body.get("path") or "")
+    existed = target.exists()
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+    return {
+        "ok": True,
+        "package": str(body.get("package") or ""),
+        "path": str(body.get("path") or ""),
+        "deleted": existed,
+    }
 
 
 def _list_workflows() -> list[dict[str, Any]]:
@@ -709,6 +816,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, _check_models(body))
             elif path == "/api/models/upload_chunk":
                 self._send(200, _upload_model_chunk(body))
+            elif path == "/api/custom_nodes/check":
+                self._send(200, _check_custom_nodes(body))
+            elif path == "/api/custom_nodes/upload_chunk":
+                self._send(200, _upload_custom_node_chunk(body))
+            elif path == "/api/custom_nodes/delete":
+                self._send(200, _delete_custom_node(body))
             else:
                 self._send(404, {"ok": False, "error": "not_found"})
         except urllib.error.HTTPError as exc:

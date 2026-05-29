@@ -20,6 +20,16 @@ except Exception:
 REQUEST_TIMEOUT_SECONDS = 120
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return float(default)
+
+
+OPENAI_COMPATIBLE_TEMPERATURE = _env_float("OPENAI_COMPATIBLE_TEMPERATURE", 0.7)
+
+
 def _resolve_gemini_request_url(host: str, port: int | str | None = None, model: str = "") -> str:
     cleaned_host = clean_endpoint_input(host)
     model_name = str(model or "").strip() or "gemini-3-pro-preview"
@@ -253,7 +263,6 @@ def _file_to_data_url(file_path: str) -> str:
 def _build_openai_user_content(
     *,
     user_input: str,
-    system_prompt: str,
     parameters: dict | None | str,
     image_paths: list[str] | str | None,
     video_paths: list[str] | str | None,
@@ -292,10 +301,9 @@ def _build_openai_user_content(
             raise FileNotFoundError(f"鏂囦欢涓嶅瓨鍦? {file_path}")
         file_parts.append({"type": "image_url", "image_url": {"url": _file_to_data_url(file_path)}})
 
-    text = "\n".join(part for part in [str(system_prompt or "").strip(), composed_input] if part)
     if not file_parts:
-        return text
-    return [*file_parts, {"type": "text", "text": text}]
+        return composed_input
+    return [*file_parts, {"type": "text", "text": composed_input}]
 
 
 def _extract_openai_text(response_data: Any) -> str:
@@ -343,21 +351,24 @@ def _request_openai_compatible_raw_text(
     model: str = "",
 ) -> dict[str, Any]:
     url = _resolve_openai_chat_completions_url(host=host, port=port)
+    messages: list[dict[str, Any]] = []
+    if str(system_prompt or "").strip():
+        messages.append({"role": "system", "content": str(system_prompt or "").strip()})
+    messages.append(
+        {
+            "role": "user",
+            "content": _build_openai_user_content(
+                user_input=user_input,
+                parameters=parameters,
+                image_paths=image_paths,
+                video_paths=video_paths,
+            ),
+        }
+    )
     payload = {
         "model": str(model or "").strip() or "grok-4",
-        "messages": [
-            {
-                "role": "user",
-                "content": _build_openai_user_content(
-                    user_input=user_input,
-                    system_prompt=system_prompt,
-                    parameters=parameters,
-                    image_paths=image_paths,
-                    video_paths=video_paths,
-                ),
-            }
-        ],
-        "temperature": 0.2,
+        "messages": messages,
+        "temperature": OPENAI_COMPATIBLE_TEMPERATURE,
         "stream": False,
     }
     headers = {

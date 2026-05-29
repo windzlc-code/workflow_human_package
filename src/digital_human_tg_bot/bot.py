@@ -147,6 +147,8 @@ class UploadFlowForm(StatesGroup):
 
 class ProductionWorkflowForm(StatesGroup):
     text_to_image_waiting_for_prompt = State()
+    text_to_image_waiting_for_revision = State()
+    text_to_image_waiting_for_custom_prompt = State()
     image_waiting_for_product_image = State()
     image_waiting_for_model_image = State()
     image_waiting_for_prompt = State()
@@ -209,6 +211,91 @@ def _image_edit_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
+    )
+
+
+TEXT_TO_IMAGE_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
+    "2:3": {"label": "2:3 竖图", "note": "基础竖图", "width": 640, "height": 960, "final": "2176 x 3264"},
+    "3:4": {"label": "3:4 稳定竖图", "note": "稳定竖图", "width": 672, "height": 896, "final": "2285 x 3046"},
+    "9:16": {"label": "9:16 手机竖屏", "note": "手机竖屏长图", "width": 576, "height": 1024, "final": "1958 x 3482"},
+    "3:2": {"label": "3:2 横图", "note": "横图基准", "width": 960, "height": 640, "final": "3264 x 2176"},
+    "4:3": {"label": "4:3 平衡横图", "note": "平衡横图", "width": 896, "height": 672, "final": "3046 x 2285"},
+    "16:9": {"label": "16:9 宽屏", "note": "宽屏视频", "width": 1024, "height": 576, "final": "3482 x 1958"},
+    "1:1": {"label": "1:1 正方形", "note": "正方形", "width": 768, "height": 768, "final": "2611 x 2611"},
+}
+
+
+def _text_to_image_params(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = data or {}
+    ratio = str(source.get("aspect_ratio") or "2:3").strip()
+    if ratio not in TEXT_TO_IMAGE_RATIO_OPTIONS:
+        ratio = "2:3"
+    option = dict(TEXT_TO_IMAGE_RATIO_OPTIONS[ratio])
+    final_resolution_enabled = bool(source.get("final_resolution_enabled", False))
+    return {
+        "aspect_ratio": ratio,
+        "width": int(option["width"]),
+        "height": int(option["height"]),
+        "final": str(option["final"]),
+        "label": str(option["label"]),
+        "note": str(option["note"]),
+        "final_resolution_enabled": final_resolution_enabled,
+    }
+
+
+def _text_to_image_status_text(*, step: str, params: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "文生图设置",
+            f"当前步骤：{step}",
+            f"画面比例：{params['aspect_ratio']}（{params['note']}）",
+            f"基础分辨率：{params['width']} x {params['height']}",
+            f"最终分辨率：{'开启，预计 ' + params['final'] if params.get('final_resolution_enabled') else '关闭，使用基础分辨率'}",
+            "Grok 提示词：开启，生成后会完整显示，可确认使用或继续调整。",
+        ]
+    )
+
+
+def _text_to_image_settings_keyboard(
+    *,
+    selected_ratio: str = "2:3",
+    final_resolution_enabled: bool = False,
+    prompt_choices: bool = False,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    items = list(TEXT_TO_IMAGE_RATIO_OPTIONS.items())
+    for idx in range(0, len(items), 2):
+        row: list[InlineKeyboardButton] = []
+        for ratio, option in items[idx : idx + 2]:
+            prefix = "✓ " if ratio == selected_ratio else ""
+            row.append(InlineKeyboardButton(text=f"{prefix}{option['label']}", callback_data=f"t2i:ratio:{ratio}"))
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"最终分辨率：{'开' if final_resolution_enabled else '关'}",
+                callback_data="t2i:toggle_final",
+            )
+        ]
+    )
+    if prompt_choices:
+        rows.append([InlineKeyboardButton(text="输入需求让 Grok 生成", callback_data="t2i:ready_prompt")])
+        rows.append([InlineKeyboardButton(text="输入自定义提示词提交", callback_data="t2i:custom_prompt")])
+    else:
+        rows.append([InlineKeyboardButton(text="下一步", callback_data="t2i:choose_prompt_mode")])
+    rows.append([InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _text_to_image_prompt_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="使用这个提示词生成", callback_data="t2i:submit")],
+            [InlineKeyboardButton(text="输入自定义提示词提交", callback_data="t2i:custom_prompt")],
+            [InlineKeyboardButton(text="继续让 Grok 调整", callback_data="t2i:adjust")],
+            [InlineKeyboardButton(text="重新生成提示词", callback_data="t2i:regen")],
+            [InlineKeyboardButton(text="返回参数设置", callback_data="t2i:settings"), InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")],
+        ]
     )
 
 
@@ -579,6 +666,39 @@ async def _submit_internal_webapp_task(
                 raise RuntimeError(f"后台任务提交返回非 JSON: {body[:300]}") from exc
     if not isinstance(data, dict) or not data.get("id"):
         raise RuntimeError(f"后台任务提交返回缺少任务 ID: {data}")
+    return data
+
+
+async def _preview_internal_webapp_prompt(
+    *,
+    chat_id: int,
+    task_type: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    headers: dict[str, str] = {}
+    token = str(os.getenv("TG_INTERNAL_API_TOKEN") or "").strip()
+    if token:
+        headers["x-tg-internal-token"] = token
+    url = f"{_internal_webapp_base_url()}/api/internal/tg/prompt_preview"
+    async with ClientSession() as session:
+        async with session.post(
+            url,
+            json={"task_type": str(task_type), "tg_chat_id": int(chat_id), "params": dict(params or {})},
+            headers=headers,
+            timeout=60,
+        ) as response:
+            body = await response.text()
+            if response.status >= 400:
+                raise RuntimeError(f"后台 Grok 提示词生成失败 HTTP {response.status}: {body[:500]}")
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"后台 Grok 提示词生成返回非 JSON: {body[:300]}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"后台 Grok 提示词生成返回格式异常: {data}")
+    prompt_text = str(data.get("prompt_text") or "").strip()
+    if not prompt_text:
+        raise RuntimeError("Grok 未返回可用提示词")
     return data
 
 
@@ -1076,6 +1196,350 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.set_state(ProductionWorkflowForm.union_waiting_for_video)
         await state.update_data(work_dir=str(work_dir))
         await message.answer("🌟 联合替换工作流\n步骤 1/5：请上传原视频。", reply_markup=_menu_keyboard())
+
+    async def start_text_to_image_flow(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
+        params = _text_to_image_params()
+        await state.update_data(
+            aspect_ratio=params["aspect_ratio"],
+            width=params["width"],
+            height=params["height"],
+            final_resolution_enabled=bool(params["final_resolution_enabled"]),
+        )
+        await _remove_reply_keyboard(message)
+        sent = await message.answer(
+            _text_to_image_status_text(step="1/3 选择比例和分辨率，然后输入图片需求", params=params),
+            reply_markup=_text_to_image_settings_keyboard(
+                selected_ratio=params["aspect_ratio"],
+                final_resolution_enabled=bool(params["final_resolution_enabled"]),
+            ),
+        )
+        await state.update_data(t2i_control_message_id=int(sent.message_id))
+
+    async def _show_text_to_image_prompt_review(message: Message, state: FSMContext, *, prompt_text: str, selected_model: str = "") -> None:
+        data = await state.get_data()
+        params = _text_to_image_params(data)
+        text = "\n\n".join(
+            [
+                "文生图 3/3：Grok 已生成最终提示词。",
+                f"画面比例：{params['aspect_ratio']}，基础分辨率：{params['width']} x {params['height']}，最终分辨率：{'开启，预计 ' + params['final'] if params.get('final_resolution_enabled') else '关闭'}",
+                f"模型：{selected_model or 'Grok'}",
+                "最终提示词：",
+                prompt_text,
+                "你可以直接使用，也可以继续告诉 Grok 如何调整。",
+            ]
+        )
+        await message.answer(text, reply_markup=_text_to_image_prompt_keyboard())
+
+    async def _preview_text_to_image_prompt(
+        message: Message,
+        state: FSMContext,
+        *,
+        user_request: str,
+        original_user_request: str | None = None,
+        latest_only: bool = True,
+    ) -> None:
+        data = await state.get_data()
+        params = _text_to_image_params(data)
+        original_for_state = str(original_user_request or data.get("original_user_request") or user_request).strip()
+        generation_context = (
+            f"画面比例：{params['aspect_ratio']}，基础分辨率：{params['width']} x {params['height']}，"
+            f"最终分辨率：{'开启，预计 ' + params['final'] if params.get('final_resolution_enabled') else '关闭，使用基础分辨率'}。"
+        )
+        payload = {
+            "prompt": user_request,
+            "prompt_text": user_request,
+            "message": user_request,
+            "width": params["width"],
+            "height": params["height"],
+            "aspect_ratio": params["aspect_ratio"],
+            "final_resolution_enabled": bool(params["final_resolution_enabled"]),
+            "tg_use_llm_prompt": True,
+            "tg_latest_prompt_only": bool(latest_only),
+            "tg_preserve_original_prompt": False,
+            "tg_original_user_request": original_for_state,
+            "tg_generation_context": generation_context,
+            "tg_user_instruction": user_request,
+        }
+        await message.answer("正在让 Grok 生成最终提示词...")
+        result = await _preview_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="text_to_image", params=payload)
+        prompt_text = str(result.get("prompt_text") or "").strip()
+        selected_model = str(result.get("selected_model") or "").strip()
+        await state.update_data(
+            original_user_request=original_for_state,
+            final_prompt_text=prompt_text,
+            selected_model=selected_model,
+        )
+        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
+        await _show_text_to_image_prompt_review(message, state, prompt_text=prompt_text, selected_model=selected_model)
+
+    async def _submit_text_to_image_from_state(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        params = _text_to_image_params(data)
+        final_prompt = str(data.get("final_prompt_text") or "").strip()
+        if not final_prompt:
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
+            await message.answer("还没有可用的 Grok 提示词，请先输入图片需求。")
+            return
+        payload = {
+            "prompt": final_prompt,
+            "prompt_text": final_prompt,
+            "message": final_prompt,
+            "width": params["width"],
+            "height": params["height"],
+            "aspect_ratio": params["aspect_ratio"],
+            "final_resolution_enabled": bool(params["final_resolution_enabled"]),
+            "tg_use_llm_prompt": False,
+            "tg_llm_prompt_enhanced": True,
+            "tg_original_prompt": str(data.get("original_user_request") or "").strip(),
+            "tg_llm_rewritten_prompt": final_prompt,
+            "tg_llm_selected_model": str(data.get("selected_model") or "").strip(),
+            "custom_prompt_used": bool(data.get("custom_prompt_used")),
+        }
+        if not bool(params["final_resolution_enabled"]):
+            payload["remote_comfy_node_inputs"] = {
+                "647": {"scale_by": 1.0},
+                "637": {"value": 1},
+            }
+        await state.clear()
+        await submit_webapp_task_and_reply(message, "text_to_image", payload)
+
+    @router.callback_query(F.data.startswith("t2i:"))
+    async def on_text_to_image_callback(callback: CallbackQuery, state: FSMContext) -> None:
+        if callback.message is None:
+            await callback.answer()
+            return
+        if not service.is_chat_authorized(int(callback.message.chat.id)):
+            await callback.answer("当前账号未授权", show_alert=True)
+            return
+        action = str(callback.data or "")
+        data = await state.get_data()
+        if action == "t2i:main_menu":
+            await state.clear()
+            try:
+                await callback.message.edit_text("已返回主菜单。")
+            except Exception:
+                pass
+            await callback.message.answer("请选择任务类型。", reply_markup=_menu_keyboard())
+            await callback.answer()
+            return
+        if action.startswith("t2i:ratio:"):
+            ratio = action.split(":", 2)[-1]
+            if ratio in TEXT_TO_IMAGE_RATIO_OPTIONS:
+                option = _text_to_image_params({"aspect_ratio": ratio})
+                current_params = _text_to_image_params(data)
+                final_enabled = bool(current_params["final_resolution_enabled"])
+                option["final_resolution_enabled"] = final_enabled
+                await state.update_data(
+                    aspect_ratio=ratio,
+                    width=option["width"],
+                    height=option["height"],
+                    final_resolution_enabled=final_enabled,
+                )
+                try:
+                    await callback.message.edit_text(
+                        _text_to_image_status_text(step="1/3 选择比例和分辨率，然后输入图片需求", params=option),
+                        reply_markup=_text_to_image_settings_keyboard(
+                            selected_ratio=ratio,
+                            final_resolution_enabled=final_enabled,
+                        ),
+                    )
+                except Exception:
+                    pass
+            await callback.answer("已更新参数")
+            return
+        if action == "t2i:choose_prompt_mode":
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
+            params = _text_to_image_params(await state.get_data())
+            try:
+                await callback.message.edit_text(
+                    _text_to_image_status_text(step="2/3 选择提示词输入方式", params=params),
+                    reply_markup=_text_to_image_settings_keyboard(
+                        selected_ratio=params["aspect_ratio"],
+                        final_resolution_enabled=bool(params["final_resolution_enabled"]),
+                        prompt_choices=True,
+                    ),
+                )
+            except Exception:
+                await callback.message.answer(
+                    _text_to_image_status_text(step="2/3 选择提示词输入方式", params=params),
+                    reply_markup=_text_to_image_settings_keyboard(
+                        selected_ratio=params["aspect_ratio"],
+                        final_resolution_enabled=bool(params["final_resolution_enabled"]),
+                        prompt_choices=True,
+                    ),
+                )
+            await callback.answer("请选择提示词输入方式")
+            return
+        if action == "t2i:ready_prompt":
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
+            await callback.message.answer("请输入图片需求，Grok 会生成最终提示词供你确认。")
+            await callback.answer("请输入图片需求")
+            return
+        if action == "t2i:toggle_final":
+            params = _text_to_image_params(data)
+            final_enabled = not bool(params["final_resolution_enabled"])
+            await state.update_data(final_resolution_enabled=final_enabled)
+            params = _text_to_image_params({**data, "final_resolution_enabled": final_enabled})
+            current_state = await state.get_state()
+            step_text = (
+                "2/3 选择提示词输入方式"
+                if current_state == ProductionWorkflowForm.text_to_image_waiting_for_prompt.state
+                else "1/3 选择比例和分辨率，然后输入图片需求"
+            )
+            show_prompt_choices = current_state == ProductionWorkflowForm.text_to_image_waiting_for_prompt.state
+            try:
+                await callback.message.edit_text(
+                    _text_to_image_status_text(step=step_text, params=params),
+                    reply_markup=_text_to_image_settings_keyboard(
+                        selected_ratio=params["aspect_ratio"],
+                        final_resolution_enabled=bool(params["final_resolution_enabled"]),
+                        prompt_choices=show_prompt_choices,
+                    ),
+                )
+            except Exception:
+                pass
+            await callback.answer("已更新最终分辨率开关")
+            return
+        if action == "t2i:settings":
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
+            params = _text_to_image_params(data)
+            await callback.message.answer(
+                _text_to_image_status_text(step="2/3 选择提示词输入方式", params=params),
+                reply_markup=_text_to_image_settings_keyboard(
+                    selected_ratio=params["aspect_ratio"],
+                    final_resolution_enabled=bool(params["final_resolution_enabled"]),
+                    prompt_choices=True,
+                ),
+            )
+            await callback.answer()
+            return
+        if action == "t2i:adjust":
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
+            await callback.message.answer("请直接输入你希望 Grok 如何调整提示词，例如：更写实、换成夜景、保留人物姿势但改变服装。")
+            await callback.answer()
+            return
+        if action == "t2i:custom_prompt":
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
+            await callback.message.answer("请输入自定义最终提示词。下一条消息会跳过 Grok，直接提交到 ComfyUI 工作流生成。")
+            await callback.answer()
+            return
+        if action == "t2i:regen":
+            original = str(data.get("original_user_request") or data.get("final_prompt_text") or "").strip()
+            if not original:
+                await callback.answer("没有原始需求，请重新输入", show_alert=True)
+                return
+            try:
+                await _preview_text_to_image_prompt(callback.message, state, user_request=original)
+            except Exception as exc:
+                await callback.message.answer(f"Grok 提示词生成失败：{exc}")
+            await callback.answer()
+            return
+        if action == "t2i:submit":
+            try:
+                await _submit_text_to_image_from_state(callback.message, state)
+                await callback.answer("已提交生成")
+            except Exception as exc:
+                await callback.message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
+                await callback.answer()
+            return
+
+    @router.message(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
+    async def on_text_to_image_prompt_v2(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        prompt = _message_text(message)
+        if not prompt:
+            data = await state.get_data()
+            params = _text_to_image_params(data)
+            await message.answer(
+                _text_to_image_status_text(step="2/3 请输入图片需求", params=params),
+                reply_markup=_text_to_image_settings_keyboard(
+                    selected_ratio=params["aspect_ratio"],
+                    final_resolution_enabled=bool(params["final_resolution_enabled"]),
+                    prompt_choices=True,
+                ),
+            )
+            return
+        try:
+            await _preview_text_to_image_prompt(message, state, user_request=prompt)
+        except Exception as exc:
+            params = _text_to_image_params(await state.get_data())
+            await message.answer(
+                f"Grok 提示词生成失败：{exc}",
+                reply_markup=_text_to_image_settings_keyboard(
+                    selected_ratio=params["aspect_ratio"],
+                    final_resolution_enabled=bool(params["final_resolution_enabled"]),
+                    prompt_choices=True,
+                ),
+            )
+
+    @router.message(ProductionWorkflowForm.text_to_image_waiting_for_revision)
+    async def on_text_to_image_revision(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        revision = _message_text(message)
+        if not revision:
+            await message.answer("请直接输入调整要求，或点击“使用这个提示词生成”。", reply_markup=_text_to_image_prompt_keyboard())
+            return
+        data = await state.get_data()
+        original = str(data.get("original_user_request") or "").strip()
+        current = str(data.get("final_prompt_text") or "").strip()
+        combined = "\n".join(
+            part
+            for part in [
+                f"原始需求：{original}" if original else "",
+                f"当前提示词：{current}" if current else "",
+                f"调整要求：{revision}",
+                "请基于当前提示词按调整要求重写，保留用户明确要求，只输出最新版最终提示词。",
+                "不要输出“原始需求/当前提示词/调整要求”等标签，不要重复旧提示词，不要把上面的上下文原文拼进结果。",
+            ]
+            if part
+        )
+        try:
+            await _preview_text_to_image_prompt(
+                message,
+                state,
+                user_request=combined,
+                original_user_request=original or revision,
+                latest_only=True,
+            )
+        except Exception as exc:
+            await message.answer(f"Grok 提示词调整失败：{exc}", reply_markup=_text_to_image_prompt_keyboard())
+
+    @router.message(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
+    async def on_text_to_image_custom_prompt(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        custom_prompt = _message_text(message)
+        if not custom_prompt:
+            await message.answer("请输入自定义最终提示词。", reply_markup=_text_to_image_prompt_keyboard())
+            return
+        data = await state.get_data()
+        await state.update_data(
+            final_prompt_text=custom_prompt,
+            selected_model="自定义提示词",
+            original_user_request=str(data.get("original_user_request") or custom_prompt).strip(),
+            custom_prompt_used=True,
+        )
+        try:
+            await message.answer("已收到自定义提示词，正在提交生成。")
+            await _submit_text_to_image_from_state(message, state)
+        except Exception as exc:
+            await message.answer(f"自定义提示词提交失败：{exc}", reply_markup=_text_to_image_prompt_keyboard())
 
     @router.message(Command("whoami"))
     @router.message(Command("id"))
@@ -1681,17 +2145,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             text = "根据我上传的素材判断最合适的生产工作流，并生成需要的提示词。"
         await state.clear()
         if text and not files:
-            params = {
-                "prompt": text,
-                "prompt_text": text,
-                "message": text,
-                "tg_use_llm_prompt": True,
-                "tg_user_instruction": f"用户文生图需求：{text}",
-            }
             try:
-                await submit_webapp_task_and_reply(message, "text_to_image", params)
+                params = _text_to_image_params()
+                await state.update_data(aspect_ratio=params["aspect_ratio"], width=params["width"], height=params["height"])
+                await _preview_text_to_image_prompt(message, state, user_request=text)
             except Exception as exc:
-                await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
+                await message.answer(f"Grok ????????{exc}", reply_markup=_menu_keyboard())
             return
         try:
             result = await _submit_internal_webapp_agent_task(
