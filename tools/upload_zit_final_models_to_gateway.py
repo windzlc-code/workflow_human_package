@@ -21,6 +21,7 @@ FILES = [
     ("upscale_models", "4xNomosWebPhoto_RealPLKSR.pth"),
     ("upscale_models", "1xSkinContrast-High-SuperUltraCompact.pth"),
     ("loras", r"fix\zit_fdpo_v1.safetensors"),
+    ("loras", r"fix\zit_sda_v1.safetensors"),
     ("loras", r"Z-Image\b3tternud3s_v3.safetensors"),
     ("loras", r"Z-Image\Z-ImageTubro big-nipples.safetensors"),
     ("loras", r"Z-Image\Z-ImageTubro pussy-zimage-v1.safetensors"),
@@ -47,6 +48,13 @@ def _request(base_url: str, token: str, endpoint: str, body: Any) -> Any:
     return json.loads(raw) if raw else None
 
 
+def _check_remote_models(base_url: str, token: str) -> dict[tuple[str, str], dict[str, Any]]:
+    items = [{"category": category, "path": rel} for category, rel in FILES]
+    response = _request(base_url, token, "/api/models/check", {"items": items})
+    rows = response.get("items", []) if isinstance(response, dict) else []
+    return {(str(row.get("category")), str(row.get("path"))): row for row in rows if isinstance(row, dict)}
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -55,15 +63,25 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _upload_one(base_url: str, token: str, category: str, rel: str) -> None:
+def _upload_one(base_url: str, token: str, category: str, rel: str, remote: dict[str, Any] | None) -> None:
     local_path = LOCAL_MODEL_ROOT / category / rel
     if not local_path.exists():
         raise FileNotFoundError(str(local_path))
     total = local_path.stat().st_size
+    remote_size = int((remote or {}).get("bytes") or 0)
+    if remote_size == total:
+        print(f"跳过已存在: {category}/{rel} ({total / 1024 / 1024:.1f} MB)")
+        return
+    if remote_size > total:
+        print(f"远端文件比本地大，重新上传: {category}/{rel}")
+        remote_size = 0
+    elif remote_size > 0:
+        print(f"续传: {category}/{rel} from {remote_size / 1024 / 1024:.1f} MB")
     sha = _sha256_file(local_path)
-    offset = 0
+    offset = remote_size
     started = time.time()
     with local_path.open("rb") as handle:
+        handle.seek(offset)
         while True:
             chunk = handle.read(CHUNK_SIZE)
             if not chunk:
@@ -95,8 +113,9 @@ def main() -> int:
     if not token:
         print("remote gateway token is missing in runtime_config.json")
         return 2
+    remote_models = _check_remote_models(base_url, token)
     for category, rel in FILES:
-        _upload_one(base_url, token, category, rel)
+        _upload_one(base_url, token, category, rel, remote_models.get((category, rel)))
     print("所有 ZIT_final 缺失模型上传完成。")
     return 0
 
