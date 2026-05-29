@@ -173,6 +173,51 @@ def _check_models(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "items": rows}
 
 
+def _upload_model_chunk(body: dict[str, Any]) -> dict[str, Any]:
+    path = _safe_model_path(body.get("category"), body.get("path"))
+    raw = _decode_upload_content(body)
+    if len(raw) > 64 * 1024 * 1024:
+        raise ValueError("chunk is too large")
+    offset = int(body.get("offset") or 0)
+    total = int(body.get("total") or 0)
+    if offset < 0 or total <= 0 or offset > total:
+        raise ValueError("invalid offset or total")
+    if offset + len(raw) > total:
+        raise ValueError("chunk exceeds total size")
+    expected_sha = str(body.get("sha256") or "").strip().lower()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if offset == 0:
+        mode = "wb"
+    else:
+        if not path.exists():
+            raise ValueError("target file does not exist for non-zero offset")
+        current_size = path.stat().st_size
+        if current_size != offset:
+            raise ValueError(f"offset mismatch: expected {current_size}, received {offset}")
+        mode = "ab"
+    with path.open(mode) as handle:
+        handle.write(raw)
+
+    current = path.stat().st_size
+    complete = current == total
+    response: dict[str, Any] = {
+        "ok": True,
+        "category": str(body.get("category") or ""),
+        "path": str(body.get("path") or ""),
+        "bytes": current,
+        "total": total,
+        "complete": complete,
+    }
+    if complete and expected_sha:
+        actual_sha = _sha256_file(path)
+        response["sha256"] = actual_sha
+        if actual_sha != expected_sha:
+            path.unlink(missing_ok=True)
+            raise ValueError("sha256 mismatch after upload")
+    return response
+
+
 def _list_workflows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for root_name, root in WORKFLOW_ROOTS:
@@ -662,6 +707,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, _upload_workflow(body))
             elif path == "/api/models/check":
                 self._send(200, _check_models(body))
+            elif path == "/api/models/upload_chunk":
+                self._send(200, _upload_model_chunk(body))
             else:
                 self._send(404, {"ok": False, "error": "not_found"})
         except urllib.error.HTTPError as exc:
