@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 import hashlib
+import base64
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -74,6 +75,102 @@ def _safe_workflow_path(value: Any) -> Path:
             if candidate.exists() and candidate.is_file() and candidate.suffix.lower() == ".json":
                 return candidate
     raise FileNotFoundError(text)
+
+
+def _safe_workflow_write_path(root_name: Any, value: Any) -> Path:
+    root_key = str(root_name or "user").strip().lower()
+    roots = {name: root for name, root in WORKFLOW_ROOTS}
+    if root_key not in roots:
+        raise ValueError("workflow root must be user or api")
+    text = str(value or "").replace("\\", "/").strip().lstrip("/")
+    if not text:
+        raise ValueError("workflow path is required")
+    if not text.lower().endswith(".json"):
+        raise ValueError("workflow path must end with .json")
+    parts = Path(text).parts
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("invalid workflow path")
+    root = roots[root_key]
+    candidate = (root / text).resolve()
+    if root != candidate and root not in candidate.parents:
+        raise ValueError("workflow path escapes root")
+    return candidate
+
+
+def _decode_upload_content(body: dict[str, Any]) -> bytes:
+    if isinstance(body.get("content_b64"), str):
+        return base64.b64decode(body["content_b64"], validate=True)
+    if isinstance(body.get("content"), str):
+        return body["content"].encode("utf-8")
+    raise ValueError("content or content_b64 is required")
+
+
+def _upload_workflow(body: dict[str, Any]) -> dict[str, Any]:
+    target = _safe_workflow_write_path(body.get("root"), body.get("path"))
+    raw = _decode_upload_content(body)
+    if len(raw) > 50 * 1024 * 1024:
+        raise ValueError("workflow upload is too large")
+    data = json.loads(raw.decode("utf-8-sig"))
+    kind = _classify_workflow(data)
+    if kind == "unknown":
+        raise ValueError("uploaded JSON is not a recognized workflow")
+    expected_sha = str(body.get("sha256") or "").strip().lower()
+    actual_sha = _sha256_bytes(raw)
+    if expected_sha and expected_sha != actual_sha:
+        raise ValueError("sha256 mismatch")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw)
+    root = {name: path for name, path in WORKFLOW_ROOTS}[str(body.get("root") or "user").strip().lower()]
+    return {
+        "ok": True,
+        "root": str(body.get("root") or "user"),
+        "path": target.relative_to(root).as_posix(),
+        "kind": kind,
+        "bytes": len(raw),
+        "sha256": actual_sha,
+    }
+
+
+def _safe_model_path(category: Any, value: Any) -> Path:
+    category_text = str(category or "").replace("\\", "/").strip().strip("/")
+    path_text = str(value or "").replace("\\", "/").strip().lstrip("/")
+    if not category_text or not path_text:
+        raise ValueError("category and path are required")
+    category_parts = Path(category_text).parts
+    path_parts = Path(path_text).parts
+    if any(part in {"", ".", ".."} for part in [*category_parts, *path_parts]):
+        raise ValueError("invalid model path")
+    root = (COMFY_ROOT / "models" / category_text).resolve()
+    candidate = (root / path_text).resolve()
+    if root != candidate and root not in candidate.parents:
+        raise ValueError("model path escapes category root")
+    return candidate
+
+
+def _check_models(body: dict[str, Any]) -> dict[str, Any]:
+    items = body.get("items")
+    if not isinstance(items, list):
+        raise ValueError("items must be a list")
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        category = str(item.get("category") or "")
+        rel = str(item.get("path") or "")
+        try:
+            path = _safe_model_path(category, rel)
+            exists = path.exists() and path.is_file()
+            rows.append(
+                {
+                    "category": category,
+                    "path": rel,
+                    "exists": exists,
+                    "bytes": path.stat().st_size if exists else 0,
+                }
+            )
+        except Exception as exc:
+            rows.append({"category": category, "path": rel, "exists": False, "error": str(exc)})
+    return {"ok": True, "items": rows}
 
 
 def _list_workflows() -> list[dict[str, Any]]:
@@ -561,6 +658,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/workflows/convert":
                 self._send(200, _convert_workflows(body))
+            elif path == "/api/workflows/upload":
+                self._send(200, _upload_workflow(body))
+            elif path == "/api/models/check":
+                self._send(200, _check_models(body))
             else:
                 self._send(404, {"ok": False, "error": "not_found"})
         except urllib.error.HTTPError as exc:
