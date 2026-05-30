@@ -904,6 +904,24 @@ def _telegram_prompt_chinese_preview(prompt_text: str) -> str:
     return "，".join(rendered).strip("，。；、,.;\n\t ")
 
 
+def _looks_like_english_image_prompt(prompt_text: str) -> bool:
+    text = str(prompt_text or "")
+    english_words = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", text)
+    cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
+    return len(english_words) >= 12 and len(english_words) > len(cjk_chars)
+
+
+def _looks_like_clean_chinese_preview(prompt_text: str) -> bool:
+    text = str(prompt_text or "")
+    cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
+    english_words = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", text)
+    return len(cjk_chars) >= 6 and not english_words
+
+
+def _tg_prompt_preview_unavailable_text() -> str:
+    return "中文预览暂时生成失败，实际提交到后台的英文提示词已保存。"
+
+
 def _chat_identity_text(message: Message) -> str:
     user = message.from_user
     username = f"@{user.username}" if user and user.username else ""
@@ -1298,7 +1316,10 @@ async def _display_internal_webapp_prompt(
                 raise RuntimeError(f"后台提示词中文预览返回非 JSON: {body[:300]}") from exc
     if not isinstance(data, dict):
         return ""
-    return str(data.get("display_text") or "").strip()
+    display_text = str(data.get("display_text") or "").strip()
+    if display_text and not _looks_like_clean_chinese_preview(display_text):
+        raise RuntimeError("后台提示词中文预览包含英文残留")
+    return display_text
 
 
 async def _submit_internal_webapp_agent_task(
@@ -1538,6 +1559,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             task_type=task_type,
             params=params,
         )
+        prompt_preview = str(result.get("prompt_preview") or "").strip()
+        prompt_preview_display = ""
+        if prompt_preview:
+            prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
+            if not _looks_like_clean_chinese_preview(prompt_preview_display):
+                prompt_preview_display = prompt_preview
         await message.answer(
             "\n".join(
                 part
@@ -1545,7 +1572,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     "任务已提交到后台队列。",
                     f"工作流: {task_type}",
                     f"任务编号: {result.get('id')}",
-                    f"Grok 生成提示词: {str(result.get('prompt_preview') or '').strip()}" if str(result.get("prompt_preview") or "").strip() else "",
+                    f"Grok 生成提示词: {prompt_preview_display}" if prompt_preview_display else "",
                     "可按「查看工作台状态」跟进进度。",
                 ]
                 if part
@@ -1725,7 +1752,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "mulerouter_wan_i2v_duration": int(params["duration"]),
             "mulerouter_wan_i2v_prompt_extend": bool(params["prompt_extend"]),
             "tg_use_llm_prompt": bool(params["use_grok"]),
-            "tg_user_instruction": f"用户图生视频需求：{prompt}",
+            "tg_user_instruction": f"User image-to-video request: {prompt}",
         }
         await state.clear()
         try:
@@ -1734,12 +1761,25 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 task_type="video_i2v",
                 params=payload,
             )
+            prompt_preview = str(result.get("prompt_preview") or "").strip()
+            prompt_preview_display = ""
+            if prompt_preview:
+                try:
+                    prompt_preview_display = await _display_internal_webapp_prompt(
+                        chat_id=int(message.chat.id),
+                        task_type="video_i2v",
+                        prompt_text=prompt_preview,
+                    )
+                except Exception:
+                    prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
+                    if not _looks_like_clean_chinese_preview(prompt_preview_display):
+                        prompt_preview_display = _tg_prompt_preview_unavailable_text()
             reply = "\n".join(
                 part
                 for part in [
                     "图生视频任务已提交。",
                     f"任务编号：{result.get('id')}",
-                    f"Grok最终提示词：{str(result.get('prompt_preview') or '').strip()}" if str(result.get("prompt_preview") or "").strip() else "",
+                    f"Grok最终提示词：{prompt_preview_display}" if prompt_preview_display else "",
                     "生成完成后会自动把视频发回这里。",
                 ]
                 if part
@@ -1856,6 +1896,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 ) or clean_prompt_text
             except Exception:
                 display_prompt_text = _telegram_prompt_chinese_preview(clean_prompt_text) or clean_prompt_text
+                if not _looks_like_clean_chinese_preview(display_prompt_text):
+                    display_prompt_text = _tg_prompt_preview_unavailable_text()
         text = "\n\n".join(
             [
                 "文生图 3/3：Grok 已生成最终提示词。",
@@ -1875,23 +1917,28 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         *,
         user_request: str,
         original_user_request: str | None = None,
+        reference_image_path: str | None = None,
         latest_only: bool = True,
     ) -> None:
         data = await state.get_data()
         params = _text_to_image_params(data)
         original_for_state = str(original_user_request or data.get("original_user_request") or user_request).strip()
+        reference_image = str(reference_image_path or data.get("prompt_reference_image_local_path") or "").strip()
         await state.update_data(
             original_user_request=original_for_state,
             last_grok_user_request=str(user_request or "").strip(),
+            last_grok_reference_image_path=reference_image,
             final_prompt_text="",
             selected_model="",
             custom_prompt_used=False,
         )
         generation_context = (
-            f"画面比例：{params['aspect_ratio']}，基础分辨率：{params['width']} x {params['height']}，"
-            f"最终分辨率：{'开启，预计 ' + params['final'] if params.get('final_resolution_enabled') else '关闭，使用基础分辨率'}，"
-            f"人设 LoRA：{params.get('persona_label') or '使用人设' if params.get('persona_enabled') else '不使用'}。"
+            f"Aspect ratio: {params['aspect_ratio']}; base resolution: {params['width']} x {params['height']}; "
+            f"final resolution: {'enabled, estimated ' + params['final'] if params.get('final_resolution_enabled') else 'disabled, use base resolution'}; "
+            f"persona LoRA: {'enabled' if params.get('persona_enabled') else 'disabled'}."
         )
+        if reference_image:
+            generation_context += " The user uploaded a reference image. First identify the subject, composition, scene, clothing, pose, style, and visible details, then combine them with the text request to write the final prompt."
         payload = {
             "prompt": user_request,
             "prompt_text": user_request,
@@ -1910,10 +1957,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "tg_generation_context": generation_context,
             "tg_user_instruction": user_request,
         }
+        if reference_image:
+            payload["input_image_local_path"] = reference_image
+            payload["image_local_path"] = reference_image
         await message.answer("正在让 Grok 生成最终提示词...")
         result = await _preview_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="text_to_image", params=payload)
         prompt_text = _strip_prompt_char_count_note(str(result.get("prompt_text") or "").strip(), preserve_english=True)
         selected_model = str(result.get("selected_model") or "").strip()
+        if not _looks_like_english_image_prompt(prompt_text):
+            raise RuntimeError("Grok 返回的最终提示词不是英文，已阻止保存。请重新生成提示词。")
         await state.update_data(
             original_user_request=original_for_state,
             final_prompt_text=prompt_text,
@@ -1955,10 +2007,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _show_text_to_image_prompt_entry(message: Message, state: FSMContext) -> None:
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
         params = _text_to_image_params(await state.get_data())
-        step = "4/4 请输入图片需求" if params.get("persona_available") else "3/3 请输入图片需求"
+        step = "4/4 输入图片需求或上传参考图" if params.get("persona_available") else "3/3 输入图片需求或上传参考图"
         await message.answer(
             _text_to_image_status_text(step=step, params=params)
-            + "\n\n请直接发送图片需求，Grok 会生成最终提示词供你确认。",
+            + "\n\n可以直接输入图片需求，也可以上传参考图片；上传图片时可在图片说明里补充要求。Grok 会识别图片内容，并结合你的文字生成最终提示词供你确认。",
             reply_markup=_text_to_image_prompt_entry_keyboard(),
         )
 
@@ -2115,10 +2167,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             except Exception:
                 pass
             await callback.message.answer(
-                "请输入图片需求，Grok 会根据你的要求生成最终提示词供你确认。",
+                "可以直接输入图片需求，也可以上传参考图片；上传图片时可在图片说明里补充要求。Grok 会识别图片内容，并结合你的文字生成最终提示词供你确认。",
                 reply_markup=_text_to_image_prompt_entry_keyboard(),
             )
-            await callback.answer("请输入图片需求")
+            await callback.answer("请输入需求或上传参考图")
             return
         if action.startswith("t2i:final:") or action == "t2i:toggle_final":
             params = _text_to_image_params(data)
@@ -2349,7 +2401,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await callback.answer("没有原始需求，请重新输入", show_alert=True)
                 return
             try:
-                await _preview_text_to_image_prompt(callback.message, state, user_request=original)
+                await _preview_text_to_image_prompt(
+                    callback.message,
+                    state,
+                    user_request=original,
+                    reference_image_path=str(data.get("last_grok_reference_image_path") or data.get("prompt_reference_image_local_path") or ""),
+                )
             except Exception as exc:
                 await callback.message.answer(
                     f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
@@ -2420,16 +2477,35 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         prompt = _message_text(message)
+        data = await state.get_data()
+        reference_image_path = ""
+        image_suffix = _image_ext_from_message(message)
+        if image_suffix:
+            work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_text_to_image_ref")))
+            target = work_dir / f"prompt_reference_{int(message.message_id)}{image_suffix}"
+            await _download_message_media(message, target)
+            reference_image_path = str(target.resolve())
+            await state.update_data(
+                work_dir=str(work_dir),
+                prompt_reference_image_local_path=reference_image_path,
+            )
+            if not prompt:
+                prompt = "请根据我上传的参考图片生成图片提示词，保留图片中的主体、构图、场景、服装、姿态、风格和可见细节。"
         if not prompt:
-            data = await state.get_data()
             params = _text_to_image_params(data)
             await message.answer(
-                _text_to_image_status_text(step="4/4 请输入图片需求" if params.get("persona_available") else "3/3 请输入图片需求", params=params),
+                _text_to_image_status_text(step="4/4 请输入图片需求或上传参考图" if params.get("persona_available") else "3/3 请输入图片需求或上传参考图", params=params)
+                + "\n\n可以发送文字需求，也可以上传一张参考图片；上传图片时可在图片说明里补充要求。",
                 reply_markup=_text_to_image_prompt_entry_keyboard(),
             )
             return
         try:
-            await _preview_text_to_image_prompt(message, state, user_request=prompt)
+            await _preview_text_to_image_prompt(
+                message,
+                state,
+                user_request=prompt,
+                reference_image_path=reference_image_path or str(data.get("prompt_reference_image_local_path") or ""),
+            )
         except Exception as exc:
             params = _text_to_image_params(await state.get_data())
             await message.answer(
@@ -2455,11 +2531,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         combined = "\n".join(
             part
             for part in [
-                f"原始需求：{original}" if original else "",
-                f"当前提示词：{current}" if current else "",
-                f"调整要求：{revision}",
-                "请基于当前提示词按调整要求重写，保留用户明确要求，只输出最新版最终提示词。",
-                "不要输出“原始需求/当前提示词/调整要求”等标签，不要重复旧提示词，不要把上面的上下文原文拼进结果。",
+                f"Original request: {original}" if original else "",
+                f"Current prompt: {current}" if current else "",
+                f"Revision request: {revision}",
+                "Rewrite the current prompt according to the revision request, preserve explicit user requirements, and output only the latest final prompt.",
+                "Do not output labels such as Original request, Current prompt, or Revision request. Do not repeat the old prompt as a separate block, and do not paste the context text into the result.",
             ]
             if part
         )
@@ -2643,7 +2719,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "duration_seconds": int(duration or 15),
             "use_ai_copy": False,
             "tg_use_llm_prompt": True,
-            "tg_user_instruction": f"用户文生图需求：{prompt}",
+            "tg_user_instruction": f"User text-to-image request: {prompt}",
         }
         await state.clear()
         try:
@@ -2661,14 +2737,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         prompt = _message_text(message)
         if not prompt:
-            await message.answer("文生图\n步骤 1/1：请直接输入图片需求。", reply_markup=_image_edit_keyboard())
+            await message.answer("文生图\n步骤 1/1：可以直接输入图片需求，也可以上传参考图片并在图片说明里补充要求。", reply_markup=_image_edit_keyboard())
             return
         params = {
             "prompt": prompt,
             "prompt_text": prompt,
             "message": prompt,
             "tg_use_llm_prompt": True,
-            "tg_user_instruction": f"用户文生图需求：{prompt}",
+            "tg_user_instruction": f"User text-to-image request: {prompt}",
         }
         await state.clear()
         try:
@@ -2745,7 +2821,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "prompt_text": prompt,
             "message": prompt,
             "tg_use_llm_prompt": True,
-            "tg_user_instruction": f"用户{title}需求：{prompt}",
+            "tg_user_instruction": f"User {mode} request: {prompt}",
         }
         await state.clear()
         try:
@@ -2814,7 +2890,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "duration_seconds": duration,
             "mode": "original",
             "tg_use_llm_prompt": True,
-            "tg_user_instruction": str(data.get("prompt") or "保持原视频动作、镜头和环境，自然替换成上传模特图。"),
+            "tg_user_instruction": str(data.get("prompt") or "Preserve the original video action, camera, and environment, and naturally replace the subject with the uploaded model image."),
         }
         await state.clear()
         try:
@@ -2843,8 +2919,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "tg_use_llm_prompt": True,
             "tg_user_instruction": "\n".join(
                 [
-                    f"商品名称：{str(data.get('product_name') or '商品')}",
-                    str(data.get("prompt_text") or "保持原视频镜头和人物动作，自然替换成上传商品图。"),
+                    f"Product name: {str(data.get('product_name') or 'product')}",
+                    str(data.get("prompt_text") or "Preserve the original video camera and character action, and naturally replace the product with the uploaded product image."),
                 ]
             ),
         }
@@ -2874,7 +2950,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "model_params": {"duration_seconds": duration},
             "product_params": {"product_name": str(data.get("product_name") or "商品"), "duration_seconds": duration},
             "tg_use_llm_prompt": True,
-            "tg_user_instruction": f"联合替换：自然替换视频模特和商品。商品名称：{str(data.get('product_name') or '商品')}",
+            "tg_user_instruction": f"Combined replacement: naturally replace the video model and product. Product name: {str(data.get('product_name') or 'product')}",
         }
         await state.clear()
         try:
@@ -3132,13 +3208,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 reply = "请补充具体生产任务和必要素材，或按面板入口依序提交。"
             await message.answer(reply, reply_markup=_menu_keyboard())
             return
+        prompt_preview = str(result.get("prompt_preview") or "").strip()
+        prompt_preview_display = ""
+        if prompt_preview:
+            try:
+                prompt_preview_display = await _display_internal_webapp_prompt(
+                    chat_id=int(message.chat.id),
+                    task_type=str(result.get("task_type") or "text_to_image"),
+                    prompt_text=prompt_preview,
+                )
+            except Exception:
+                prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
+                if not _looks_like_clean_chinese_preview(prompt_preview_display):
+                    prompt_preview_display = _tg_prompt_preview_unavailable_text()
         await message.answer(
             "\n".join(
                 part
                 for part in [
                     "已通过文字模型理解你的会话，并生成工作流提示词。",
                     summary,
-                    f"Grok 生成提示词: {str(result.get('prompt_preview') or '').strip()}" if str(result.get("prompt_preview") or "").strip() else "",
+                    f"Grok 生成提示词: {prompt_preview_display}" if prompt_preview_display else "",
                     f"工作流: {result.get('task_type')}",
                     f"任务编号: {result.get('id')}",
                     "可按「查看工作台状态」跟进进度。",
