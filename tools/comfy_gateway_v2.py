@@ -653,13 +653,15 @@ def _convert_workflows(body: dict[str, Any]) -> dict[str, Any]:
 def _apply_prompt_overrides(prompt: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     positive = str(body.get("prompt_text") or body.get("prompt") or "").strip()
     negative = str(body.get("negative_prompt") or "").strip()
+    positive_node_ids = {str(value).strip() for value in body.get("prompt_text_node_ids") or [] if str(value).strip()}
+    negative_node_ids = {str(value).strip() for value in body.get("negative_text_node_ids") or [] if str(value).strip()}
     width = _int_or_none(body.get("width"))
     height = _int_or_none(body.get("height"))
     steps = _int_or_none(body.get("steps"))
     seed = _int_or_none(body.get("seed"))
     batch_size = _int_or_none(body.get("batch_size"))
 
-    for node in prompt.values():
+    for node_id, node in prompt.items():
         if not isinstance(node, dict):
             continue
         class_type = str(node.get("class_type") or "")
@@ -669,7 +671,13 @@ def _apply_prompt_overrides(prompt: dict[str, Any], body: dict[str, Any]) -> dic
         title = str((node.get("_meta") or {}).get("title") or "").lower()
 
         if positive and class_type == "CLIPTextEncode" and isinstance(inputs.get("text"), str):
-            if ("negative" in title or "neg" in title) and negative:
+            if positive_node_ids:
+                if str(node_id) in positive_node_ids:
+                    inputs["text"] = positive
+            elif negative_node_ids:
+                if negative and str(node_id) in negative_node_ids:
+                    inputs["text"] = negative
+            elif ("negative" in title or "neg" in title) and negative:
                 inputs["text"] = negative
             elif "negative" not in title and "neg" not in title:
                 inputs["text"] = positive
