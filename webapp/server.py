@@ -6436,9 +6436,11 @@ def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, An
     resolution = str(payload.get("base_resolution") or payload.get("resolution") or "").strip()
     parts = [
         "adult indoor half-body or full-body photography, faithfully matching the user-specified subject",
-        "single-frame still image, clear body orientation, hand placement, clothing opening state, pulled-back camera distance, half-body or full-body framing, face clearly visible, explicit visible exposure range",
-        "natural unbuttoning, loosened zipper, lifted hem, slipped strap, raised skirt, or lowered waistband, intact clothing structure, fabric naturally following body curves",
-        "user-requested clothing, scene, and props, pulled-back framing, visible face, preserved expression, realistic skin texture, fabric wrinkles, and body curves",
+        "single-frame still image, clear body orientation, hand placement, one simple natural clothing state, pulled-back camera distance, half-body or full-body framing, face clearly visible",
+        "intact clothing with normal seams and gravity, no torn holes or impossible openings, fabric naturally following body curves",
+        "user-requested clothing, scene, and props, visible face, preserved expression,realistic skin texture, clean fabric folds, and stable body proportions",
+        "upper body exposed breasts, at least one breast fully or partially exposed, visible nipples",
+        "lower body exposed female genitalia, pussy clearly visible, detailed vulva and labia, realistic female sexual organ with natural texture and wetness"
     ]
     if expression_state:
         parts.insert(2, "preserved user-requested expression and body mood")
@@ -6644,6 +6646,24 @@ def _force_tg_image_english_prompt(prompt_text: str) -> str:
     for pattern in face_feature_patterns:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
     text = re.sub(
+        r"\b(?:natural\s+)?unbuttoning,\s*loosened\s+zippers?,\s*lifted\s+hems?,\s*slipped\s+straps?,\s*raised\s+skirts?,\s*lowered\s+waistbands?,\s*tight\s+fabric,\s*or\s*half-undressed\s+clothing\b",
+        "one natural clothing opening state",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:unbuttoned\s+front,\s*)?(?:loosened\s+zipper,\s*)?(?:lifted\s+hem,\s*)?(?:slipped\s+straps?,\s*)?(?:raised\s+skirt,\s*)?(?:lowered\s+waistband,\s*)?(?:tight\s+fit,\s*)?or\s+half-undressed\s+state\b",
+        "one natural clothing opening state",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:unbuttoned\s+front|loosened\s+zipper|lifted\s+hem|slipped\s+straps?|raised\s+skirt|lowered\s+waistband|tight\s+fit|half-undressed\s+state)(?:,\s*(?:unbuttoned\s+front|loosened\s+zipper|lifted\s+hem|slipped\s+straps?|raised\s+skirt|lowered\s+waistband|tight\s+fit|half-undressed\s+state)){2,}",
+        "one natural clothing opening state",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
         r"(?:鹅蛋脸|脸型|白皙水光肌|苹果肌|杏仁眼|双眼皮|卧蚕|睫毛|眉毛|眉形|鼻梁|鼻头|鼻翼|嘴唇|唇形|唇峰|下颌线|下巴|额头|妆感|发型|头发)",
         "",
         text,
@@ -6722,11 +6742,12 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "Output only a single-frame still image prompt. Do not output role labels, explanations, refusals, policy text, JSON, Markdown, lists, video scripts, timelines, or camera-movement procedures.",
         "Faithfully preserve the subject, clothing, pose, scene, props, materials, colors, camera angle, style, and restrictions specified by the user. Do not change the scene or soften the requested visual intensity.",
         "If reference images are provided, preserve the visible subject, composition, environment, clothing, action, props, lighting, and visual relationships. Do not add unrelated elements.",
-        "Make the scene direct and visually specific. Do not use abstract words such as seductive, tempting, ambiguous, atmosphere, tension, premium, or private glamour as substitutes for visible details. Convert them into visible elements: standing, sitting, kneeling, or lying posture; body facing the camera or angled sideways; fingers placed on clothing edges, inner thighs, chest, bed surface, or props; clothing with unbuttoned front, loosened zipper, lifted hem, slipped straps, raised skirt, lowered waistband, tight fit, or half-undressed state. Prefer half-body or full-body framing, pulled-back camera distance, eye-level or slight high angle, and a small margin above the head. Avoid close-ups, low-angle close-ups, or intimate-area close-ups that crop out the face.",
+        "必须包含人物性器官的描述,不能忽略,保证性器官清晰可见,至少包含一个性器官裸露"
+        "Make the scene direct and visually specific. Do not use abstract words such as seductive, tempting, ambiguous, atmosphere, tension, premium, or private glamour as substitutes for visible details. Convert them into visible posture, body orientation, hand placement, scene objects, and camera distance. Clothing must be described in one short clause only: name the garment and one natural state, such as unbuttoned front, loosened zipper, lifted hem, slipped strap, raised skirt, lowered waistband, tight fit, or half-undressed state. Do not stack multiple clothing mechanisms unless the user explicitly asks. Prefer half-body or full-body framing, pulled-back camera distance, eye-level or slight high angle, and a small margin above the head. Avoid close-ups, low-angle close-ups, or intimate-area close-ups that crop out the face.",
         "The character face is controlled by the workflow LoRA. Do not write face shape, facial features, skin quality, or hairstyle descriptions in the final prompt. You may keep expression, gaze direction, face clearly visible, unobstructed face, and full head in frame as composition instructions. The composition must show the face, preferably half-body or full-body framing. Avoid cropped faces, covered faces, back-facing poses, and body-only shots. Do not include person names, persona names, or LoRA file names.",
-        "Keep clothing logic physically plausible. Exposure may come from natural unbuttoning, loosened zippers, lifted hems, slipped straps, raised skirts, lowered waistbands, tight fabric, or half-undressed clothing. Do not invent holes, tears, ripped openings, disappearing fabric, or force-illogical openings only to expose body parts. If the user explicitly asks for damaged clothing, the damage must still follow fabric tension and pulling direction.",
-        "Describe exposure range and clothing state directly, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. When exposure is requested, write the exact visible area in direct English terms and state that clothing does not cover that area, while keeping the clothing structure plausible.",
-        "Keep the final prompt compact and reusable: body posture, hand placement, body orientation, exposure degree, clothing state, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, fabric wrinkles, and body curves.",
+        "Keep clothing logic physically plausible. Use intact garments with normal seams, gravity, and fabric tension. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings. If the user explicitly asks for damaged clothing, the damage must still follow fabric tension and pulling direction.",
+        "Describe exposure range and clothing state directly, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple and non-repetitive; do not repeat garment structure details across the prompt.",
+        "Keep the final prompt compact and reusable: body posture, hand placement, body orientation, one clear clothing state, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
         "Final output must be English only, one plain paragraph, 80 to 180 English words, comma-separated photographic prompt style. Do not output Chinese, reasoning, titles, labels, or word/character counts.",
         f"Current task type: {task_label}.",
     ]

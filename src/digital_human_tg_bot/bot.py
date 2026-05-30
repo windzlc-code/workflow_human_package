@@ -1584,9 +1584,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params=params,
         )
         prompt_preview = str(result.get("prompt_preview") or "").strip()
-        prompt_preview_display = ""
-        if prompt_preview:
-            prompt_preview_display = prompt_preview
+        prompt_preview_display = str(params.get("tg_prompt_display_text") or "").strip()
+        if not prompt_preview_display and prompt_preview:
+            prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
+            if not _looks_like_clean_chinese_preview(prompt_preview_display):
+                prompt_preview_display = _tg_prompt_preview_unavailable_text()
         await message.answer(
             "\n".join(
                 part
@@ -1594,7 +1596,6 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     "任务已提交到后台队列。",
                     f"工作流: {task_type}",
                     f"任务编号: {result.get('id')}",
-                    f"Grok 生成提示词: {prompt_preview_display}" if prompt_preview_display else "",
                     "可按「查看工作台状态」跟进进度。",
                 ]
                 if part
@@ -2048,6 +2049,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "tg_original_prompt": str(data.get("original_user_request") or "").strip(),
             "tg_llm_rewritten_prompt": final_prompt,
             "tg_llm_selected_model": str(data.get("selected_model") or "").strip(),
+            "tg_prompt_display_text": str(data.get("prompt_display_text") or "").strip(),
             "custom_prompt_used": bool(data.get("custom_prompt_used")),
         }
         payload["remote_comfy_node_inputs"] = _text_to_image_remote_node_inputs(params)
