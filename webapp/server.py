@@ -91,10 +91,10 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "llm_api_key": "",
     "llm_api_key_gemini": "",
     "llm_api_key_gpt": "",
-    "llm_default_model": "gemini-3.1-pro-preview",
-    "llm_default_model_gemini": "gemini-3.1-pro-preview",
-    "llm_default_model_gpt": "gpt-4.1",
-    "llm_model_priority_order": "gemini-3.1-pro-preview, gpt-4.1",
+    "llm_default_model": "grok-4.2",
+    "llm_default_model_gemini": "",
+    "llm_default_model_gpt": "grok-4.2",
+    "llm_model_priority_order": "grok-4.2",
     "mulerouter_api_name": "",
     "mulerouter_api_key": "",
     "mulerouter_base_url": "https://api.mulerouter.ai",
@@ -128,9 +128,9 @@ BUILTIN_IMAGE_MODEL_PROVIDER_API_KEY_GPT = os.getenv("IMAGE_MODEL_PROVIDER_API_K
 BUILTIN_IMAGE_MODEL_DEFAULT = "gemini-3-pro-image-preview"
 BUILTIN_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 BUILTIN_LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-BUILTIN_LLM_API_KEY_GEMINI = BUILTIN_LLM_API_KEY
-BUILTIN_LLM_API_KEY_GPT = ""
-BUILTIN_LLM_DEFAULT_MODEL = "gemini-3.1-pro-preview"
+BUILTIN_LLM_API_KEY_GEMINI = ""
+BUILTIN_LLM_API_KEY_GPT = BUILTIN_LLM_API_KEY
+BUILTIN_LLM_DEFAULT_MODEL = "grok-4.2"
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
@@ -673,6 +673,29 @@ def _detect_llm_provider(model: str) -> str:
     return "gemini"
 
 
+def _is_grok_llm_model(model: str) -> bool:
+    return "grok" in str(model or "").strip().lower()
+
+
+def _grok_llm_models(*groups: list[str], fallback: list[str] | None = None) -> list[str]:
+    models: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for raw in group:
+            model = str(raw or "").strip()
+            if not model or not _is_grok_llm_model(model) or model in seen:
+                continue
+            seen.add(model)
+            models.append(model)
+    if not models:
+        for raw in fallback or ["grok-4.2"]:
+            model = str(raw or "").strip()
+            if model and _is_grok_llm_model(model) and model not in seen:
+                seen.add(model)
+                models.append(model)
+    return models
+
+
 def _detect_image_model_provider(model: str) -> str:
     text = str(model or "").strip().lower()
     if text.startswith("gpt-") or "gpt-image" in text or text.startswith("chatgpt"):
@@ -746,6 +769,12 @@ def _resolve_llm_fallback_candidates(source: dict[str, Any] | None, *, allow_bui
         gpt_models=gpt_models,
         legacy_models=legacy_models,
         builtin_model=str(BUILTIN_LLM_DEFAULT_MODEL).strip(),
+    )
+    model_priority = _grok_llm_models(
+        model_priority,
+        gpt_models,
+        priority_models,
+        fallback=["grok-4.2"],
     )
 
     candidates: list[dict[str, str]] = []
@@ -1045,14 +1074,28 @@ def _tg_bot_token() -> str:
     return str(os.getenv("TG_BOT_TOKEN") or _read_dotenv_values().get("TG_BOT_TOKEN") or "").strip()
 
 
-def _send_telegram_message(chat_id: int, text: str) -> bool:
+def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) -> dict[str, Any] | None:
+    if str(task_type or "").strip() != "text_to_image":
+        return None
+    return {
+        "inline_keyboard": [
+            [{"text": "继续生成图片", "callback_data": f"t2i:continue:{str(task_id or '').strip()}"}],
+            [{"text": "返回菜单", "callback_data": "t2i:main_menu"}],
+        ]
+    }
+
+
+def _send_telegram_message(chat_id: int, text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
     token = _tg_bot_token()
     if not token or int(chat_id or 0) <= 0:
         return False
     try:
+        data: dict[str, Any] = {"chat_id": int(chat_id), "text": str(text or "")[:3900]}
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": int(chat_id), "text": str(text or "")[:3900]},
+            data=data,
             timeout=30,
         )
         return resp.status_code < 400
@@ -1060,7 +1103,7 @@ def _send_telegram_message(chat_id: int, text: str) -> bool:
         return False
 
 
-def _send_telegram_file(chat_id: int, file_path: str, *, caption: str) -> bool:
+def _send_telegram_file(chat_id: int, file_path: str, *, caption: str, reply_markup: dict[str, Any] | None = None) -> bool:
     token = _tg_bot_token()
     path = Path(str(file_path or "")).expanduser()
     if not token or int(chat_id or 0) <= 0 or not path.exists() or not path.is_file():
@@ -1068,10 +1111,13 @@ def _send_telegram_file(chat_id: int, file_path: str, *, caption: str) -> bool:
     method = _telegram_file_method(path)
     field = {"sendPhoto": "photo", "sendVideo": "video"}.get(method, "document")
     try:
+        data: dict[str, Any] = {"chat_id": int(chat_id), "caption": str(caption or "")[:1000]}
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
         with path.open("rb") as fh:
             resp = requests.post(
                 f"https://api.telegram.org/bot{token}/{method}",
-                data={"chat_id": int(chat_id), "caption": str(caption or "")[:1000]},
+                data=data,
                 files={field: (path.name, fh)},
                 timeout=120,
             )
@@ -1081,10 +1127,13 @@ def _send_telegram_file(chat_id: int, file_path: str, *, caption: str) -> bool:
         pass
     if method != "sendDocument":
         try:
+            data = {"chat_id": int(chat_id), "caption": str(caption or "")[:1000]}
+            if reply_markup:
+                data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
             with path.open("rb") as fh:
                 resp = requests.post(
                     f"https://api.telegram.org/bot{token}/sendDocument",
-                    data={"chat_id": int(chat_id), "caption": str(caption or "")[:1000]},
+                    data=data,
                     files={"document": (path.name, fh)},
                     timeout=120,
                 )
@@ -1110,6 +1159,7 @@ def _notify_tg_task_finished(
     public_base = str(os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
     task_url = f"{public_base}/index.html#app-tasks" if public_base else ""
     if str(status or "").strip().lower() == "success":
+        reply_markup = _send_telegram_reply_markup_for_finished_task(task_id, task_type)
         caption = "\n".join(
             part
             for part in [
@@ -1119,14 +1169,14 @@ def _notify_tg_task_finished(
             ]
             if part
         )
-        if download_path and _send_telegram_file(chat_id, download_path, caption=caption):
+        if download_path and _send_telegram_file(chat_id, download_path, caption=caption, reply_markup=reply_markup):
             return
         parts = [caption]
         if task_url:
             parts.append(f"工作台: {task_url}")
         if download_path:
             parts.append(f"结果文件: {download_path}")
-        _send_telegram_message(chat_id, "\n".join(parts))
+        _send_telegram_message(chat_id, "\n".join(parts), reply_markup=reply_markup)
         return
 
     message = "\n".join(
@@ -1797,33 +1847,27 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     if llm_api_key_gemini is None and llm_api_key_gpt is None:
         llm_api_key_gemini = llm_api_key_legacy or BUILTIN_LLM_API_KEY_GEMINI
         llm_api_key_gpt = BUILTIN_LLM_API_KEY_GPT
-    merged["llm_api_key_gemini"] = str(llm_api_key_gemini or "").strip()
-    merged["llm_api_key_gpt"] = str(llm_api_key_gpt or "").strip()
-    merged["llm_api_key"] = str(merged["llm_api_key_gemini"] or merged["llm_api_key_gpt"] or llm_api_key_legacy or BUILTIN_LLM_API_KEY).strip()
-    merged["llm_default_model"] = str(merged.get("llm_default_model") or "gemini-3.1-pro-preview").strip() or "gemini-3.1-pro-preview"
-    llm_default_model_gemini = current.get("llm_default_model_gemini") if "llm_default_model_gemini" in current else None
+    merged["llm_api_key_gemini"] = ""
+    merged["llm_api_key_gpt"] = str(llm_api_key_gpt or llm_api_key_legacy or "").strip()
+    merged["llm_api_key"] = str(merged["llm_api_key_gpt"] or llm_api_key_legacy or BUILTIN_LLM_API_KEY).strip()
+    merged["llm_default_model"] = str(merged.get("llm_default_model") or "grok-4.2").strip() or "grok-4.2"
+    llm_default_model_gemini = ""
     llm_default_model_gpt = current.get("llm_default_model_gpt") if "llm_default_model_gpt" in current else None
-    if llm_default_model_gemini is None and llm_default_model_gpt is None:
-        llm_default_model_gemini = merged.get("llm_default_model")
-        llm_default_model_gpt = ""
-    merged["llm_default_model_gemini"] = str(llm_default_model_gemini or "").strip()
-    merged["llm_default_model_gpt"] = str(llm_default_model_gpt or "").strip()
     llm_model_priority_order = current.get("llm_model_priority_order") if "llm_model_priority_order" in current else None
-    llm_gemini_models = parse_model_list(merged.get("llm_default_model_gemini"))
-    llm_gpt_models = parse_model_list(merged.get("llm_default_model_gpt"))
-    if not llm_gemini_models and not llm_gpt_models:
-        llm_gemini_models = ["gemini-3.1-pro-preview"]
-    merged["llm_default_model_gemini"] = ", ".join(llm_gemini_models)
+    llm_gemini_models: list[str] = []
+    llm_gpt_models = _grok_llm_models(
+        parse_model_list(llm_model_priority_order),
+        parse_model_list(llm_default_model_gpt),
+        parse_model_list(merged.get("llm_default_model")),
+        fallback=["grok-4.2"],
+    )
+    merged["llm_default_model_gemini"] = str(llm_default_model_gemini or "").strip()
     merged["llm_default_model_gpt"] = ", ".join(llm_gpt_models)
-    merged["llm_default_model"] = ", ".join(llm_gemini_models or llm_gpt_models or ["gemini-3.1-pro-preview"])
-    llm_priority_candidates = parse_model_list(llm_model_priority_order)
-    llm_priority_models = _build_model_priority(
-        explicit_models=[],
-        priority_models=llm_priority_candidates,
-        gemini_models=llm_gemini_models,
-        gpt_models=llm_gpt_models,
-        legacy_models=parse_model_list(merged.get("llm_default_model")),
-        builtin_model="gemini-3.1-pro-preview",
+    merged["llm_default_model"] = ", ".join(llm_gpt_models)
+    llm_priority_models = _grok_llm_models(
+        parse_model_list(llm_model_priority_order),
+        llm_gpt_models,
+        fallback=llm_gpt_models or ["grok-4.2"],
     )
     merged["llm_model_priority_order"] = ", ".join(llm_priority_models)
 
@@ -6251,7 +6295,7 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
     typ = str(task_type or "").strip()
     prompt_chain = "image" if typ in _TG_IMAGE_PROMPT_TYPES else "video"
     image_rules = [
-        "你是 Grok，一位经验丰富的文生图提示词工程大师，擅长把用户的简短需求改写成可直接交给 ComfyUI 或图片生成 API 使用的高质量静态图片提示词。",
+        "你是一位经验丰富的文生图提示词工程大师，擅长把用户的简短需求改写成可直接交给 ComfyUI 或图片生成 API 使用的高质量静态图片提示词。",
         "当前链路只生成文生图/图片生成提示词。只写单帧静态画面，不写视频脚本、时间线、运镜、转场、逐帧变化、随后发生的动作或任何动态过程。",
         "必须忠实保留用户指定的题材、角色、外观、服装、姿态、情绪、艺术风格、场景、材质、颜色、镜头和限制；不要替用户改变主题、改换场景、弱化核心要求或输出无关安全说明。",
         "如果请求附带参考图，先识别图中主体、构图、环境、服装、动作、道具、光线和可见物体，再结合用户要求改写；不要凭空添加图中不存在且用户没要求的关键元素。",
@@ -7100,10 +7144,10 @@ class RuntimeConfigPayload(BaseModel):
     llm_api_key: str = ""
     llm_api_key_gemini: str = ""
     llm_api_key_gpt: str = ""
-    llm_default_model: str = "gemini-3.1-pro-preview"
-    llm_default_model_gemini: str = "gemini-3.1-pro-preview"
-    llm_default_model_gpt: str = "gpt-4.1"
-    llm_model_priority_order: str = "gemini-3.1-pro-preview, gpt-4.1"
+    llm_default_model: str = "grok-4.2"
+    llm_default_model_gemini: str = ""
+    llm_default_model_gpt: str = "grok-4.2"
+    llm_model_priority_order: str = "grok-4.2"
     mulerouter_api_name: str = ""
     mulerouter_api_key: str = ""
     mulerouter_base_url: str = "https://api.mulerouter.ai"
@@ -7563,6 +7607,48 @@ def create_app() -> FastAPI:
             if len(tasks) >= limit:
                 break
         return {"ok": True, "tasks": tasks}
+
+    @app.get("/api/internal/tg/tasks/{task_id}")
+    def api_internal_tg_task_detail(task_id: str, request: Request):
+        _require_internal_tg_request(request)
+        try:
+            chat_id = int(request.query_params.get("chat_id") or 0)
+        except Exception:
+            chat_id = 0
+        if chat_id <= 0:
+            raise HTTPException(status_code=400, detail="chat_id 必须为正整数")
+        with db() as conn:
+            row = conn.execute(
+                """
+                SELECT id, type, status, input_json, output_json, error, runninghub_task_id, cost_cents, created_at, updated_at
+                FROM tasks
+                WHERE id = ?
+                """,
+                (str(task_id or "").strip(),),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        input_payload = _json_loads(row["input_json"], {})
+        if _get_tg_chat_id_from_payload(input_payload) != chat_id:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        output_payload = _json_loads(row["output_json"], {})
+        return {
+            "ok": True,
+            "task": {
+                "id": row["id"],
+                "type": row["type"],
+                "status": row["status"],
+                "error": row["error"],
+                "runninghub_task_id": row["runninghub_task_id"],
+                "cost_cents": int(row["cost_cents"] or 0),
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+                "input": _sanitize_payload(input_payload),
+                "has_download": _task_has_download_file(output_payload),
+                "download_path": _extract_download_path(output_payload),
+                "batch_summary": _extract_batch_summary(output_payload),
+            },
+        }
 
     @app.get("/api/tasks")
     def api_tasks(limit: int = 50, user: dict[str, Any] = Depends(get_current_user)):

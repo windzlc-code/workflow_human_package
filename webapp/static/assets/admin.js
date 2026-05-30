@@ -128,6 +128,14 @@ function uniqueItems(items) {
     .filter(Boolean)));
 }
 
+function isGrokModel(model) {
+  return /grok/i.test(String(model || "").trim());
+}
+
+function grokModelItems(items) {
+  return uniqueItems(items).filter(isGrokModel);
+}
+
 function readModelDraft() {
   try {
     const raw = localStorage.getItem(RUNTIME_MODEL_DRAFT_KEY);
@@ -141,11 +149,11 @@ function readModelDraft() {
 function writeModelDraft() {
   try {
     localStorage.setItem(RUNTIME_MODEL_DRAFT_KEY, JSON.stringify({
-      llmGeminiModels: uniqueItems(adminState.llmGeminiModels),
-      llmGptModels: uniqueItems(adminState.llmGptModels),
+      llmGeminiModels: [],
+      llmGptModels: grokModelItems(adminState.llmGptModels),
       imageGeminiModels: uniqueItems(adminState.imageGeminiModels),
       imageGptModels: uniqueItems(adminState.imageGptModels),
-      llmPriorityModels: uniqueItems(adminState.llmPriorityModels),
+      llmPriorityModels: grokModelItems(adminState.llmPriorityModels),
       imagePriorityModels: uniqueItems(adminState.imagePriorityModels),
     }));
   } catch {
@@ -165,9 +173,11 @@ function mergeModelDraft() {
   const draft = readModelDraft();
   if (!draft) return false;
   let changed = false;
-  ["llmGeminiModels", "llmGptModels", "imageGeminiModels", "imageGptModels", "llmPriorityModels", "imagePriorityModels"].forEach((key) => {
+  ["llmGptModels", "imageGeminiModels", "imageGptModels", "llmPriorityModels", "imagePriorityModels"].forEach((key) => {
     const before = uniqueItems(adminState[key]);
-    const after = uniqueItems([...before, ...(Array.isArray(draft[key]) ? draft[key] : [])]);
+    const after = key.startsWith("llm")
+      ? grokModelItems([...before, ...(Array.isArray(draft[key]) ? draft[key] : [])])
+      : uniqueItems([...before, ...(Array.isArray(draft[key]) ? draft[key] : [])]);
     adminState[key] = after;
     if (after.length !== before.length) changed = true;
   });
@@ -244,13 +254,7 @@ function imageModelOptions() {
 }
 
 function llmModelOptions() {
-  const items = [
-    ...(Array.isArray(adminState.llmGeminiModels) ? adminState.llmGeminiModels : []),
-    ...(Array.isArray(adminState.llmGptModels) ? adminState.llmGptModels : []),
-  ]
-    .map((item) => String(item || "").trim())
-    .filter(Boolean);
-  return Array.from(new Set(items));
+  return grokModelItems(adminState.llmGptModels);
 }
 
 function modelCatalogForPriority(type) {
@@ -284,11 +288,12 @@ function syncPriorityModelsFromCatalog(type) {
     );
     return;
   }
+  const explicitPriority = grokModelItems(adminState.llmPriorityModels);
   adminState.llmPriorityModels = normalizePriorityList(
-    adminState.llmPriorityModels,
-    llmModelOptions(),
+    explicitPriority.length ? explicitPriority : llmModelOptions(),
+    [],
     ["grok-4.2"],
-  );
+  ).filter(isGrokModel);
 }
 
 function defaultClosedImageModel() {
@@ -297,7 +302,7 @@ function defaultClosedImageModel() {
 }
 
 function defaultClosedLlmModel() {
-  const priority = Array.isArray(adminState.llmPriorityModels) ? adminState.llmPriorityModels : [];
+  const priority = grokModelItems(adminState.llmPriorityModels);
   return priority[0] || llmModelOptions()[0] || "grok-4.2";
 }
 
@@ -354,7 +359,6 @@ function renderPriorityModelList(listKey, wrapId) {
 function renderAllModelLists() {
   syncPriorityModelsFromCatalog("llm");
   syncPriorityModelsFromCatalog("image");
-  renderModelList("llmGeminiModels", "rtLlmGeminiModelList");
   renderModelList("llmGptModels", "rtLlmGptModelList");
   renderModelList("imageGeminiModels", "rtImageGeminiModelList");
   renderModelList("imageGptModels", "rtImageGptModelList");
@@ -381,9 +385,9 @@ function buildModelSummary(geminiListKey, gptListKey, label) {
 }
 
 function buildLlmModelSummary() {
-  const priority = Array.isArray(adminState.llmPriorityModels) ? adminState.llmPriorityModels : [];
+  const priority = grokModelItems(adminState.llmPriorityModels);
   if (priority.length > 0) return `当前 Grok 执行模型：${priority[0]}`;
-  const grokModel = firstModel("llmGptModels") || firstModel("llmGeminiModels");
+  const grokModel = llmModelOptions()[0] || "";
   if (grokModel) return `当前 Grok 执行模型：${grokModel}`;
   return "当前未配置 Grok 文字模型";
 }
@@ -404,12 +408,16 @@ function addModelFromInput(listKey, inputId) {
   if (!input) return;
   const value = String(input.value || "").trim();
   if (!value) return;
+  if (listKey === "llmGptModels" && !isGrokModel(value)) {
+    setMsg("runtimeMsg", "文字模型只支持 Grok，请输入 grok-* 模型名。", false);
+    return;
+  }
   if (!Array.isArray(adminState[listKey])) {
     adminState[listKey] = [];
   }
   if (!adminState[listKey].includes(value)) {
     adminState[listKey].push(value);
-    if (listKey === "llmGeminiModels" || listKey === "llmGptModels") {
+    if (listKey === "llmGptModels") {
       syncPriorityModelsFromCatalog("llm");
     }
     if (listKey === "imageGeminiModels" || listKey === "imageGptModels") {
@@ -436,6 +444,7 @@ function hideLlmModelPicker() {
 function addLlmModelFromPicker(model) {
   const value = String(model || "").trim();
   if (!value) return;
+  if (!isGrokModel(value)) return;
   if (!Array.isArray(adminState.llmGptModels)) adminState.llmGptModels = [];
   if (!Array.isArray(adminState.llmPriorityModels)) adminState.llmPriorityModels = [];
   if (!adminState.llmGptModels.includes(value)) adminState.llmGptModels.push(value);
@@ -494,6 +503,10 @@ function addPriorityModelFromInput(listKey, inputId, type) {
   if (!input) return;
   const value = String(input.value || "").trim();
   if (!value) return;
+  if (type === "llm" && !isGrokModel(value)) {
+    setMsg("runtimeMsg", "文字模型调用顺序只支持 Grok，请输入 grok-* 模型名。", false);
+    return;
+  }
   if (!Array.isArray(adminState[listKey])) {
     adminState[listKey] = [];
   }
@@ -1619,8 +1632,10 @@ function runtimeFormToPayload() {
     .filter((stage) => parseWorkflowStage(stage).value);
   const imageGeminiModels = stringifyModelList(adminState.imageGeminiModels);
   const imageGptModels = stringifyModelList(adminState.imageGptModels);
-  const llmGeminiModels = stringifyModelList(adminState.llmGeminiModels);
-  const llmGptModels = stringifyModelList(adminState.llmGptModels);
+  adminState.llmGeminiModels = [];
+  adminState.llmGptModels = grokModelItems(adminState.llmGptModels);
+  adminState.llmPriorityModels = grokModelItems(adminState.llmPriorityModels);
+  const llmGrokModels = stringifyModelList(adminState.llmGptModels);
   const llmPriorityModels = stringifyModelList(adminState.llmPriorityModels);
   const imagePriorityModels = stringifyModelList(adminState.imagePriorityModels);
   return {
@@ -1647,13 +1662,13 @@ function runtimeFormToPayload() {
     image_model_default_model: imageGeminiModels || imageGptModels,
     image_model_priority_order: imagePriorityModels || imageGeminiModels || imageGptModels,
     llm_base_url: el("rtLlmBaseUrl").value.trim(),
-    llm_api_key_gemini: el("rtLlmApiKeyGemini").value.trim(),
+    llm_api_key_gemini: "",
     llm_api_key_gpt: el("rtLlmApiKeyGpt").value.trim(),
-    llm_api_key: el("rtLlmApiKeyGemini").value.trim() || el("rtLlmApiKeyGpt").value.trim(),
-    llm_default_model_gemini: llmGeminiModels,
-    llm_default_model_gpt: llmGptModels,
-    llm_default_model: llmGeminiModels || llmGptModels,
-    llm_model_priority_order: llmPriorityModels || llmGeminiModels || llmGptModels,
+    llm_api_key: el("rtLlmApiKeyGpt").value.trim(),
+    llm_default_model_gemini: "",
+    llm_default_model_gpt: llmGrokModels,
+    llm_default_model: llmGrokModels,
+    llm_model_priority_order: llmPriorityModels || llmGrokModels,
     mulerouter_api_name: el("rtMuleRouterApiName").value.trim(),
     mulerouter_api_key: el("rtMuleRouterApiKey").value.trim(),
     mulerouter_base_url: el("rtMuleRouterBaseUrl").value.trim(),
@@ -1696,11 +1711,15 @@ function fillRuntimeForm(data) {
   adminState.imageGptModels = parseModelList(v.image_model_default_model_gpt || "");
   adminState.imagePriorityModels = parseModelList(v.image_model_priority_order || "");
   el("rtLlmBaseUrl").value = v.llm_base_url || "http://202.90.21.53:3008";
-  el("rtLlmApiKeyGemini").value = Object.prototype.hasOwnProperty.call(v, "llm_api_key_gemini") ? (v.llm_api_key_gemini || "") : (v.llm_api_key || "");
+  el("rtLlmApiKeyGemini").value = "";
   el("rtLlmApiKeyGpt").value = v.llm_api_key_gpt || "";
-  adminState.llmGeminiModels = parseModelList(Object.prototype.hasOwnProperty.call(v, "llm_default_model_gemini") ? v.llm_default_model_gemini : (v.llm_default_model || "gemini-3.1-pro-preview"));
-  adminState.llmGptModels = parseModelList(v.llm_default_model_gpt || "");
-  adminState.llmPriorityModels = parseModelList(v.llm_model_priority_order || "");
+  adminState.llmGeminiModels = [];
+  adminState.llmGptModels = grokModelItems([
+    ...parseModelList(v.llm_default_model_gpt || ""),
+    ...parseModelList(v.llm_model_priority_order || ""),
+    ...parseModelList(v.llm_default_model || ""),
+  ]);
+  adminState.llmPriorityModels = grokModelItems(v.llm_model_priority_order ? parseModelList(v.llm_model_priority_order) : adminState.llmGptModels);
   el("rtMuleRouterApiName").value = v.mulerouter_api_name || "";
   el("rtMuleRouterApiKey").value = v.mulerouter_api_key || "";
   el("rtMuleRouterBaseUrl").value = v.mulerouter_base_url || "https://api.mulerouter.ai";
@@ -2188,7 +2207,6 @@ function bindActions() {
   }
 
   [
-    ["btnAddLlmGeminiModel", "rtLlmGeminiModelInput", "llmGeminiModels"],
     ["btnAddLlmGptModel", "rtLlmGptModelInput", "llmGptModels"],
     ["btnAddImageGeminiModel", "rtImageGeminiModelInput", "imageGeminiModels"],
     ["btnAddImageGptModel", "rtImageGptModelInput", "imageGptModels"],
@@ -2448,7 +2466,7 @@ function bindActions() {
       const list = adminState[listName];
       if (idx >= 0 && Array.isArray(list)) {
         list.splice(idx, 1);
-        if (listName === "llmGeminiModels" || listName === "llmGptModels" || listName === "llmPriorityModels") {
+        if (listName === "llmGptModels" || listName === "llmPriorityModels") {
           syncPriorityModelsFromCatalog("llm");
         }
         if (listName === "imageGeminiModels" || listName === "imageGptModels" || listName === "imagePriorityModels") {

@@ -1001,6 +1001,33 @@ async def _fetch_internal_webapp_tg_tasks(*, chat_id: int, limit: int = 5) -> li
     return [item for item in tasks if isinstance(item, dict)] if isinstance(tasks, list) else []
 
 
+async def _fetch_internal_webapp_tg_task_detail(*, chat_id: int, task_id: str) -> dict[str, Any]:
+    headers: dict[str, str] = {}
+    token = str(os.getenv("TG_INTERNAL_API_TOKEN") or "").strip()
+    if token:
+        headers["x-tg-internal-token"] = token
+    tid = str(task_id or "").strip()
+    url = f"{_internal_webapp_base_url()}/api/internal/tg/tasks/{tid}"
+    async with ClientSession() as session:
+        async with session.get(
+            url,
+            params={"chat_id": int(chat_id)},
+            headers=headers,
+            timeout=20,
+        ) as response:
+            body = await response.text()
+            if response.status >= 400:
+                raise RuntimeError(f"后台 TG 任务详情查询失败 HTTP {response.status}: {body[:500]}")
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"后台 TG 任务详情返回非 JSON: {body[:300]}") from exc
+    task = data.get("task") if isinstance(data, dict) else None
+    if not isinstance(task, dict):
+        raise RuntimeError(f"后台 TG 任务详情格式异常: {data}")
+    return task
+
+
 def _format_internal_webapp_tg_tasks(tasks: list[dict[str, Any]]) -> str:
     if not tasks:
         return "后台生成任务：暂无记录。"
@@ -1576,6 +1603,47 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 pass
             await callback.message.answer("请选择任务类型。", reply_markup=_menu_keyboard())
             await callback.answer()
+            return
+        if action.startswith("t2i:continue:"):
+            task_id = action.rsplit(":", 1)[-1].strip()
+            try:
+                task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(callback.message.chat.id), task_id=task_id)
+            except Exception as exc:
+                await callback.answer(f"读取上次任务失败：{exc}", show_alert=True)
+                return
+            if str(task.get("type") or "").strip() != "text_to_image":
+                await callback.answer("这个任务不是文生图任务", show_alert=True)
+                return
+            input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
+            params = _text_to_image_params(input_payload)
+            await state.clear()
+            await state.update_data(
+                aspect_ratio=params["aspect_ratio"],
+                width=params["width"],
+                height=params["height"],
+                final_resolution_enabled=bool(input_payload.get("final_resolution_enabled", params["final_resolution_enabled"])),
+                persona_available=bool(params["persona_available"]),
+                persona_enabled=bool(input_payload.get("persona_enabled", params["persona_enabled"])),
+                persona_lora=str(input_payload.get("persona_lora") or params.get("persona_lora") or ""),
+                ratio_selected=True,
+                resolution_selected=True,
+                persona_selected=bool(params["persona_available"]),
+                prompt_mode_selected=False,
+                prompt_mode_label="",
+                original_user_request="",
+                final_prompt_text="",
+                selected_model="",
+                custom_prompt_used=False,
+            )
+            try:
+                await callback.message.edit_caption(caption="继续生成图片：保留上次参数，重新进入提示词步骤。")
+            except Exception:
+                try:
+                    await callback.message.edit_text("继续生成图片：保留上次参数，重新进入提示词步骤。")
+                except Exception:
+                    pass
+            await _show_text_to_image_prompt_mode(callback.message, state)
+            await callback.answer("请继续输入提示词")
             return
         if action.startswith("t2i:ratio:"):
             ratio = action.split(":", 2)[-1]

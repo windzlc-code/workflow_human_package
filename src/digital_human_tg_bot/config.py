@@ -26,7 +26,7 @@ def _read_runtime_config(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"找不到 workflow runtime config: {path}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"runtime config 解析失敗: {exc}") from exc
     if not isinstance(data, dict):
