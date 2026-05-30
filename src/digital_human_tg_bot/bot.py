@@ -594,6 +594,169 @@ def _message_text(message: Message) -> str:
     return (message.text or message.caption or "").strip()
 
 
+def _strip_prompt_char_count_note(text: str, *, preserve_english: bool = False) -> str:
+    cleaned = re.sub(
+        r"[（(]\s*(?:共\s*)?(?:字符数|字数|汉字数)?\s*[：:]?\s*约?\s*\d+\s*(?:个\s*)?(?:中文)?(?:字符|汉字|字)?[^）)]*[）)]",
+        "",
+        str(text or ""),
+    )
+    cleaned = re.sub(
+        r"(?i)\b(?:drafting|crafting|creating|generating|rewriting|optimizing|translating|converting)\b\s+(?:the\s+)?(?:image\s+|final\s+|text\s+)?(?:prompt|description|request)\s*[:：,，。；;.\-]?\s*",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"^分析[^，。；、\n]{0,40}提示词(?:要求|并生成[^，。；、\n]{0,40}(?:描述|正文|内容))?\s*", "", cleaned)
+    if not preserve_english:
+        cleaned = re.sub(r"[A-Za-z][A-Za-z0-9'/_-]*", "", cleaned)
+    precise_replacements = {
+        "身体张力明显": "身体重心前移，手部位置明确，衣物开合状态清晰",
+        "挑逗氛围": "身体前倾，手指靠近衣物边缘，暖色床头灯照在皮肤和床面",
+        "挑逗姿势": "身体前倾，手指靠近衣物开口或大腿内侧",
+        "挑逗": "身体前倾，手指靠近衣物边缘",
+        "诱惑姿势": "衣物半开，身体侧向镜头，手部停在大腿内侧",
+        "诱惑": "衣物半开，身体侧向镜头",
+        "暧昧氛围": "暖色床头灯照在皮肤和床面",
+        "暧昧": "暖色侧光照在皮肤和布料上",
+        "氛围": "光线、场景物件和身体姿势",
+        "张力": "身体重心、手部位置和衣物开合状态",
+        "高级真实摄影质感": "真实皮肤纹理、布料褶皱、浅景深和柔和侧光",
+        "高级摄影质感": "真实皮肤纹理、布料褶皱、浅景深和柔和侧光",
+        "高级质感": "真实纹理、浅景深和柔和侧光",
+        "福利感": "明确的裸露范围和半身构图",
+        "私密福利": "室内半身构图",
+        "视线避开镜头": "脸部清晰可见",
+        "人物不露脸": "人物脸部清晰可见",
+        "头部自然入镜": "脸部清晰可见",
+        "不合常理的破洞": "纽扣自然解开，布料沿身体曲线滑落",
+        "破洞": "纽扣自然解开，布料沿身体曲线滑落",
+        "破口": "衣物边缘自然打开",
+        "洞口": "衣物开口",
+        "撕裂": "衣物自然松开",
+        "撕破": "衣物自然松开",
+        "撕开": "衣物自然解开",
+        "布料缺失": "衣物开合状态清晰",
+        "避开镜头": "脸部清晰可见",
+        "不露脸": "脸部清晰可见",
+        "遮住脸": "脸部清晰可见",
+        "遮脸": "脸部清晰可见",
+        "裁掉头部": "脸部清晰可见",
+        "头部裁切": "脸部清晰可见",
+        "面部避开": "脸部清晰可见",
+        "面部遮挡": "脸部清晰可见",
+        "脸部遮挡": "脸部清晰可见",
+        "脸部无遮挡": "脸部清晰可见",
+        "脸部清晰进入画面没有遮挡": "脸部清晰可见",
+        "脸部清晰进入画面且无遮挡": "脸部清晰可见",
+        "脸部清晰进入画面": "脸部清晰可见",
+        "脸部没有遮挡": "脸部清晰可见",
+        "露出脸部不遮挡": "脸部清晰可见",
+        "脸部不遮挡": "脸部清晰可见",
+        "清晰露出脸部无任何遮挡": "脸部清晰可见",
+        "露出脸部无任何遮挡": "脸部清晰可见",
+        "脸部无任何遮挡": "脸部清晰可见",
+        "近景构图": "半身构图，镜头距离拉开，头顶保留少量留白",
+        "室内近景": "室内半身构图，镜头距离拉开，头顶保留少量留白",
+        "低角度特写": "平视半身构图，镜头距离拉开，头顶保留少量留白",
+        "私密部位特写": "半身构图，镜头距离拉开，头顶保留少量留白",
+        "静态特写": "半身构图，镜头距离拉开，头顶保留少量留白",
+        "特写": "半身构图，镜头距离拉开，头顶保留少量留白",
+    }
+    for source, replacement in precise_replacements.items():
+        cleaned = cleaned.replace(source, replacement)
+    cleanup_replacements = {
+        "性器官区域可见或在场景允许时完全裸露": "性器官区域完整裸露，边界清晰可见，衣物没有遮挡该区域",
+        "阴部可见或在场景允许时完全裸露": "阴部完整裸露，边界清晰可见，衣物没有遮挡该区域",
+        "阴茎可见或在场景允许时完全裸露": "阴茎完整裸露，边界清晰可见，衣物没有遮挡该区域",
+        "性器官区域可见或完全裸露": "性器官区域完整裸露，边界清晰可见，衣物没有遮挡该区域",
+        "阴部可见或完全裸露": "阴部完整裸露，边界清晰可见，衣物没有遮挡该区域",
+        "阴茎可见或完全裸露": "阴茎完整裸露，边界清晰可见，衣物没有遮挡该区域",
+        "裸露必须来自合理服装状态和身体姿势": "纽扣解开、拉链松开、衣摆掀起，服装结构完整",
+        "精简写入脸型、眉眼、唇形和表情状态": "鹅蛋脸、明亮杏仁眼、粉嫩饱满唇、嘴部微张",
+        "最终提示词只保留其中最关键的三到五个脸部特征和一个表情状态": "",
+        "不要整段堆叠": "",
+        "保留用户要求的服装、场景和道具": "用户指定服装、场景和道具",
+        "用户指定服装、场景和道具": "原设服装、场景和道具",
+        "裸露只能来自自然开扣、拉链松开、衣摆掀起、肩带滑落、裙摆上移、腰头下拉、布料贴身或半脱状态": "纽扣解开、拉链松开、衣摆掀起、肩带滑落、裙摆上移、腰头下拉、布料贴身或半脱",
+        "禁止为了裸露强行制造破洞、撕裂、破口、布料凭空消失、不合受力逻辑的开口": "服装结构完整",
+        "构图必须能看到人物脸部": "脸部清晰可见",
+        "人物脸部需要精简描述": "脸部清晰可见",
+        "允许写脸型、肤质、眉眼、鼻梁、嘴唇和表情": "鹅蛋脸、白皙水光肌、明亮杏仁眼、粉嫩饱满唇、嘴部微张",
+        "金君雅": "",
+        "人设1": "",
+        "捞女1": "",
+        "当前人设": "人物",
+        "人设脸部": "脸部",
+        "人设名称": "",
+        "人物名称": "",
+        "名字": "",
+        "忠实匹配用户指定主体": "人物主体",
+        "用户指定主体": "人物主体",
+        "单帧静态画面": "静态摄影画面",
+        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、半身或全身构图、脸部清晰可见、脸部特征和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，半身或全身构图，脸部清晰可见",
+        "脸部特征和裸露范围": "鹅蛋脸、明亮杏仁眼、粉嫩饱满唇",
+        "明确的情色裸露": "",
+        "根据场景动态判断": "",
+        "或在场景允许时": "",
+        "在场景允许时": "",
+        "场景允许": "",
+        "若隐若现": "清晰可见",
+        "边缘可见": "边界清晰可见",
+        "部分遮挡": "无遮挡",
+        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、头部自然入镜和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，镜头距离为半身或全身构图，脸部清晰可见",
+        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、脸部完整露出且无遮挡、头部自然入镜和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，镜头距离为半身或全身构图，脸部清晰可见",
+        "禁止凭空纽扣自然解开，布料沿身体曲线滑落、衣物自然松开、衣物边缘自然打开和不合受力逻辑的衣物开合状态清晰": "服装结构完整，纽扣或拉链自然解开，布料沿身体曲线滑落",
+        "禁止凭空破坏服装结构": "服装结构完整",
+        "禁止凭空": "",
+        "不合受力逻辑的": "",
+        "保留用户要求的服装、场景和道具": "用户指定服装、场景和道具",
+        "头部自然进入画面但不描述表情状态": "脸部清晰可见，表情自然",
+        "头部自然进入画面但不描述五官": "脸部清晰可见",
+    }
+    for source, replacement in cleanup_replacements.items():
+        cleaned = cleaned.replace(source, replacement)
+    cleaned = cleaned.replace("视线头部自然入镜", "脸部清晰可见")
+    cleaned = cleaned.replace("出现纽扣自然解开", "纽扣自然解开")
+    cleaned = cleaned.replace("卧，室", "卧室")
+    cleaned = cleaned.replace("解，开", "解开")
+    cleaned = cleaned.replace("皮肤，和布料", "皮肤和布料")
+    cleaned = cleaned.replace("可见或", "完整裸露，")
+    cleaned = re.sub(r"(?:Character Setting|人设\d*|捞女\d*|金君雅|人设名称|人物名称|名称)[\\/\w\u4e00-\u9fff.-]*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"裸露程度[，、\s]*", "", cleaned)
+    cleaned = re.sub(r"(?:例如|比如)[，、\s]*", "", cleaned)
+    cleaned = cleaned.replace("明确写出", "")
+    cleaned = re.sub(r"(?:例如|比如)[^，。；、\n]{0,80}?(?:禁止|不要|必须|允许)[^，。；、\n]{0,80}", "", cleaned)
+    cleaned = re.sub(r"(?:必须|禁止|不要|允许|需要|只保留|保留)[^，。；、\n]{0,80}?(?:提示词|规则|字段|描述|写入|来自)[^，。；、\n]{0,80}", "", cleaned)
+    cleaned = cleaned.replace("低角度，", "")
+    cleaned = cleaned.replace("低角度", "平视角度")
+    cleaned = cleaned.replace("头部自然进入画面", "脸部清晰可见")
+    cleaned = cleaned.replace("头部自然入镜", "脸部清晰可见")
+    cleaned = re.sub(r"(头部完整入镜[，、\s]*){2,}", "头部完整入镜，", cleaned)
+    cleaned = re.sub(r"(脸部完整露出且无遮挡[，、\s]*){2,}", "脸部完整露出且无遮挡，", cleaned)
+    cleaned = re.sub(r"(头顶额头下巴都在画面内[，、\s]*){2,}", "头顶额头下巴都在画面内，", cleaned)
+    cleaned = re.sub(r"(镜头距离拉开[，、\s]*){2,}", "镜头距离拉开，", cleaned)
+    cleaned = re.sub(r"(头顶保留少量留白[，、\s]*){2,}", "头顶保留少量留白，", cleaned)
+    cleaned = re.sub(r"(半身构图[，、\s]*){2,}", "半身构图，", cleaned)
+    if preserve_english:
+        cleaned = re.sub(r"[\w\u4e00-\u9fff .\\/-]*\.safetensors", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"(?:Character Setting|人设\d*|捞女\d*|金君雅|人设名称|人物名称|名称)[^,，。;\n]*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"[#@$%^&_=+<>\[\]{}|~`]+", "", cleaned)
+        cleaned = re.sub(r"\s*,\s*", ", ", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned.strip(" ,.;:\n\t")
+    cleaned = cleaned.replace(",", "，").replace(";", "；").replace(":", "：")
+    cleaned = re.sub(r"[\\/*#@$%^&_=+<>\[\]{}|~`]+", "", cleaned)
+    cleaned = re.sub(r"[\"'“”‘’]+", "", cleaned)
+    cleaned = re.sub(r"[()\uFF08\uFF09]+", "", cleaned)
+    cleaned = re.sub(r"(?<!\d)[.\-]+(?!\d)", "", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([，。；、])", r"\1", cleaned)
+    cleaned = re.sub(r"[，、]{2,}", "，", cleaned)
+    cleaned = re.sub(r"([，。；、])\s*([，。；、])+", r"\1", cleaned)
+    if cleaned and ("近景" in cleaned or "特写" in cleaned) and "半身构图" not in cleaned and "全身构图" not in cleaned:
+        cleaned = f"{cleaned}，半身构图，镜头距离拉开"
+    return cleaned.strip(" ，。；、,.;\n\t ")
+
+
 def _chat_identity_text(message: Message) -> str:
     user = message.from_user
     username = f"@{user.username}" if user and user.username else ""
@@ -1478,6 +1641,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _show_text_to_image_prompt_review(message: Message, state: FSMContext, *, prompt_text: str, selected_model: str = "") -> None:
         data = await state.get_data()
         params = _text_to_image_params(data)
+        clean_prompt_text = _strip_prompt_char_count_note(prompt_text, preserve_english=True)
         text = "\n\n".join(
             [
                 "文生图 3/3：Grok 已生成最终提示词。",
@@ -1485,7 +1649,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 f"人设 LoRA：{params.get('persona_label') or '使用人设'}" if params.get("persona_enabled") else ("人设 LoRA：不使用" if params.get("persona_available") else ""),
                 f"模型：{selected_model or 'Grok'}",
                 "最终提示词：",
-                prompt_text,
+                clean_prompt_text,
                 "你可以直接使用，也可以继续告诉 Grok 如何调整。",
             ]
         )
@@ -1517,6 +1681,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
+            "persona_label": str(params.get("persona_label") or ""),
             "tg_use_llm_prompt": True,
             "tg_latest_prompt_only": bool(latest_only),
             "tg_preserve_original_prompt": False,
@@ -1526,7 +1691,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         }
         await message.answer("正在让 Grok 生成最终提示词...")
         result = await _preview_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="text_to_image", params=payload)
-        prompt_text = str(result.get("prompt_text") or "").strip()
+        prompt_text = _strip_prompt_char_count_note(str(result.get("prompt_text") or "").strip(), preserve_english=True)
         selected_model = str(result.get("selected_model") or "").strip()
         await state.update_data(
             original_user_request=original_for_state,
@@ -1539,7 +1704,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _submit_text_to_image_from_state(message: Message, state: FSMContext) -> None:
         data = await state.get_data()
         params = _text_to_image_params(data)
-        final_prompt = str(data.get("final_prompt_text") or "").strip()
+        final_prompt = _strip_prompt_char_count_note(str(data.get("final_prompt_text") or "").strip(), preserve_english=True)
         if not final_prompt:
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
             await message.answer("还没有可用的 Grok 提示词，请先输入图片需求。")
@@ -1554,6 +1719,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
+            "persona_label": str(params.get("persona_label") or ""),
             "tg_use_llm_prompt": False,
             "tg_llm_prompt_enhanced": True,
             "tg_original_prompt": str(data.get("original_user_request") or "").strip(),
@@ -2092,7 +2258,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
-        custom_prompt = _message_text(message)
+        custom_prompt = _strip_prompt_char_count_note(_message_text(message), preserve_english=True)
         if not custom_prompt:
             await message.answer("请输入自定义最终提示词。", reply_markup=_text_to_image_prompt_entry_keyboard())
             return
