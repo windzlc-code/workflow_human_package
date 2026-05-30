@@ -34,6 +34,7 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 ZIP_EXTS = {".zip"}
 AUTO_DURATION_TEXTS = {"跳过", "自动", "auto", "AUTO"}
 TG_PROMPT_PREVIEW_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_PREVIEW_TIMEOUT_SECONDS") or "240")
+TG_PROMPT_DISPLAY_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_DISPLAY_TIMEOUT_SECONDS") or "45")
 
 DIGITAL_HUMAN_VIDEO_BUTTON = "数字人视频生成"
 DIGITAL_HUMAN_REALISTIC_BUTTON = "写实带货视频"
@@ -545,10 +546,26 @@ def _text_to_image_prompt_failure_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _text_to_image_prompt_display_retry_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="重新生成中文预览", callback_data="t2i:retry_display")],
+            [InlineKeyboardButton(text="重新生成提示词", callback_data="t2i:regen")],
+            [InlineKeyboardButton(text="输入自定义提示词", callback_data="t2i:custom_prompt")],
+            [InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")],
+        ]
+    )
+
+
 def _format_grok_preview_error(exc: Exception) -> str:
     if isinstance(exc, asyncio.TimeoutError):
         return f"Grok 响应超时（超过 {TG_PROMPT_PREVIEW_TIMEOUT_SECONDS} 秒）。可以点击“重新生成提示词”再试一次，或先输入自定义提示词。"
     text = str(exc or "").strip()
+    lower_text = text.lower()
+    if "read timed out" in lower_text or "read timeout" in lower_text or "timed out" in lower_text:
+        return "Grok 模型响应超时，上游接口长时间没有返回。可以点击“重新生成提示词”再试一次，或先输入自定义提示词。"
+    if "http 502" in lower_text and ("全部候选模型调用失败" in text or "connectionpool" in lower_text):
+        return "Grok 模型服务暂时不可用或响应超时。可以点击“重新生成提示词”再试一次，或先输入自定义提示词。"
     if not text:
         return f"Grok 提示词生成失败（{type(exc).__name__}）。可以点击“重新生成提示词”再试一次。"
     return text
@@ -920,6 +937,13 @@ def _looks_like_clean_chinese_preview(prompt_text: str) -> bool:
 
 def _tg_prompt_preview_unavailable_text() -> str:
     return "中文预览暂时生成失败，实际提交到后台的英文提示词已保存。"
+
+
+def _format_prompt_display_fallback(exc: Exception | None = None) -> str:
+    text = str(exc or "").strip().lower()
+    if isinstance(exc, asyncio.TimeoutError) or "timed out" in text or "timeout" in text or "超时" in text or "504" in text:
+        return "中文预览生成超时，实际提交到后台的英文提示词已保存，可直接使用。"
+    return _tg_prompt_preview_unavailable_text()
 
 
 def _chat_identity_text(message: Message) -> str:
@@ -1305,7 +1329,7 @@ async def _display_internal_webapp_prompt(
             url,
             json={"task_type": str(task_type), "tg_chat_id": int(chat_id), "prompt_text": prompt_text},
             headers=headers,
-            timeout=120,
+            timeout=TG_PROMPT_DISPLAY_TIMEOUT_SECONDS,
         ) as response:
             body = await response.text()
             if response.status >= 400:
@@ -1562,9 +1586,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         prompt_preview = str(result.get("prompt_preview") or "").strip()
         prompt_preview_display = ""
         if prompt_preview:
-            prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
-            if not _looks_like_clean_chinese_preview(prompt_preview_display):
-                prompt_preview_display = prompt_preview
+            prompt_preview_display = prompt_preview
         await message.answer(
             "\n".join(
                 part
@@ -1770,10 +1792,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         task_type="video_i2v",
                         prompt_text=prompt_preview,
                     )
-                except Exception:
+                except Exception as exc:
                     prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
                     if not _looks_like_clean_chinese_preview(prompt_preview_display):
-                        prompt_preview_display = _tg_prompt_preview_unavailable_text()
+                        prompt_preview_display = _format_prompt_display_fallback(exc)
             reply = "\n".join(
                 part
                 for part in [
@@ -1884,20 +1906,20 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         data = await state.get_data()
         params = _text_to_image_params(data)
         clean_prompt_text = _strip_prompt_char_count_note(prompt_text, preserve_english=True)
-        display_prompt_text = clean_prompt_text
-        if clean_prompt_text:
-            try:
-                display_prompt_text = (
-                    await _display_internal_webapp_prompt(
-                        chat_id=int(message.chat.id),
-                        task_type="text_to_image",
-                        prompt_text=clean_prompt_text,
-                    )
-                ) or clean_prompt_text
-            except Exception:
-                display_prompt_text = _telegram_prompt_chinese_preview(clean_prompt_text) or clean_prompt_text
-                if not _looks_like_clean_chinese_preview(display_prompt_text):
-                    display_prompt_text = _tg_prompt_preview_unavailable_text()
+        if not clean_prompt_text:
+            raise RuntimeError("英文提示词为空，无法生成中文预览。")
+        display_prompt_text = await _display_internal_webapp_prompt(
+            chat_id=int(message.chat.id),
+            task_type="text_to_image",
+            prompt_text=clean_prompt_text,
+        )
+        if not _looks_like_clean_chinese_preview(display_prompt_text):
+            raise RuntimeError("中文预览校验未通过，已阻止显示提交按钮。")
+        await state.update_data(
+            prompt_display_text=display_prompt_text,
+            prompt_display_ready=True,
+            prompt_display_pending=False,
+        )
         text = "\n\n".join(
             [
                 "文生图 3/3：Grok 已生成最终提示词。",
@@ -1910,6 +1932,19 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             ]
         )
         await message.answer(text, reply_markup=_text_to_image_prompt_keyboard())
+
+    async def _show_text_to_image_display_pending(message: Message, state: FSMContext, *, exc: Exception | None = None) -> None:
+        await state.update_data(prompt_display_ready=False, prompt_display_pending=True)
+        await message.answer(
+            "\n".join(
+                [
+                    "Grok 英文提示词已生成并保存。",
+                    "中文预览还没有通过完整校验，所以暂不显示提交按钮，也不会提交到队列。",
+                    _format_prompt_display_fallback(exc),
+                ]
+            ),
+            reply_markup=_text_to_image_prompt_display_retry_keyboard(),
+        )
 
     async def _preview_text_to_image_prompt(
         message: Message,
@@ -1931,6 +1966,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             final_prompt_text="",
             selected_model="",
             custom_prompt_used=False,
+            prompt_display_text="",
+            prompt_display_ready=False,
+            prompt_display_pending=False,
         )
         generation_context = (
             f"Aspect ratio: {params['aspect_ratio']}; base resolution: {params['width']} x {params['height']}; "
@@ -1970,9 +2008,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             original_user_request=original_for_state,
             final_prompt_text=prompt_text,
             selected_model=selected_model,
+            prompt_display_ready=False,
+            prompt_display_pending=True,
         )
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
-        await _show_text_to_image_prompt_review(message, state, prompt_text=prompt_text, selected_model=selected_model)
+        try:
+            await _show_text_to_image_prompt_review(message, state, prompt_text=prompt_text, selected_model=selected_model)
+        except Exception as exc:
+            await _show_text_to_image_display_pending(message, state, exc=exc)
 
     async def _submit_text_to_image_from_state(message: Message, state: FSMContext) -> None:
         data = await state.get_data()
@@ -1981,6 +2024,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not final_prompt:
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
             await message.answer("还没有可用的 Grok 提示词，请先输入图片需求。")
+            return
+        if (not bool(data.get("custom_prompt_used"))) and not bool(data.get("prompt_display_ready")):
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
+            await message.answer(
+                "中文预览还没有通过完整校验，暂不提交到队列。请先点击“重新生成中文预览”。",
+                reply_markup=_text_to_image_prompt_display_retry_keyboard(),
+            )
             return
         payload = {
             "prompt": final_prompt,
@@ -2414,6 +2464,23 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 )
             await callback.answer()
             return
+        if action == "t2i:retry_display":
+            final_prompt = _strip_prompt_char_count_note(str(data.get("final_prompt_text") or "").strip(), preserve_english=True)
+            if not final_prompt:
+                await callback.answer("没有已保存的英文提示词，请重新生成", show_alert=True)
+                return
+            try:
+                await _show_text_to_image_prompt_review(
+                    callback.message,
+                    state,
+                    prompt_text=final_prompt,
+                    selected_model=str(data.get("selected_model") or "").strip(),
+                )
+                await callback.answer("中文预览已通过")
+            except Exception as exc:
+                await _show_text_to_image_display_pending(callback.message, state, exc=exc)
+                await callback.answer("中文预览未通过", show_alert=True)
+            return
         if action == "t2i:submit":
             try:
                 await _submit_text_to_image_from_state(callback.message, state)
@@ -2571,6 +2638,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             selected_model="自定义提示词",
             original_user_request=str(data.get("original_user_request") or custom_prompt).strip(),
             custom_prompt_used=True,
+            prompt_display_ready=True,
+            prompt_display_pending=False,
         )
         try:
             await message.answer("已收到自定义提示词，正在提交生成。")
@@ -3217,10 +3286,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     task_type=str(result.get("task_type") or "text_to_image"),
                     prompt_text=prompt_preview,
                 )
-            except Exception:
+            except Exception as exc:
                 prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
                 if not _looks_like_clean_chinese_preview(prompt_preview_display):
-                    prompt_preview_display = _tg_prompt_preview_unavailable_text()
+                    prompt_preview_display = _format_prompt_display_fallback(exc)
         await message.answer(
             "\n".join(
                 part

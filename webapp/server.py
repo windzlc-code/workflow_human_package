@@ -6316,6 +6316,15 @@ def _repair_common_mojibake_text(value: Any) -> str:
     return max(candidates, key=lambda item: len(re.findall(r"[\u4e00-\u9fff]", item))).strip()
 
 
+def _looks_like_mojibake_text(value: Any) -> bool:
+    text = str(value or "")
+    if not text:
+        return False
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+    marker_count = len(re.findall(r"[ÃÂ�]|\u00c2|\u00a0|[\u0080-\u009f]|[æçåèéäãï¼]", text))
+    return marker_count >= 3 and cjk_count < 10
+
+
 def _is_refusal_tg_prompt(prompt_text: str) -> bool:
     cleaned = _strip_prompt_response_wrappers(prompt_text)
     if not cleaned:
@@ -6422,7 +6431,6 @@ def _extract_tg_expression_state(request_text: str) -> str:
 
 
 def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, Any]) -> str:
-    request_text = _sanitize_tg_image_person_fields(original_request)
     expression_state = _extract_tg_expression_state(original_request)
     ratio = str(payload.get("aspect_ratio") or payload.get("image_aspect_ratio") or "").strip()
     resolution = str(payload.get("base_resolution") or payload.get("resolution") or "").strip()
@@ -6432,10 +6440,8 @@ def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, An
         "natural unbuttoning, loosened zipper, lifted hem, slipped strap, raised skirt, or lowered waistband, intact clothing structure, fabric naturally following body curves",
         "user-requested clothing, scene, and props, pulled-back framing, visible face, preserved expression, realistic skin texture, fabric wrinkles, and body curves",
     ]
-    if request_text:
-        parts.insert(1, f"user request details: {request_text}")
     if expression_state:
-        parts.insert(2, f"expression: {expression_state}")
+        parts.insert(2, "preserved user-requested expression and body mood")
     if ratio:
         parts.append(f"aspect ratio {ratio}")
     if resolution:
@@ -6654,13 +6660,16 @@ def _force_tg_image_english_prompt(prompt_text: str) -> str:
 
 def _looks_like_english_prompt(prompt_text: str) -> bool:
     text = str(prompt_text or "")
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return False
     english_words = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", text)
-    cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
-    return len(english_words) >= 12 and len(english_words) > len(cjk_chars)
+    return len(english_words) >= 12
 
 
 def _looks_like_clean_chinese_display(prompt_text: str) -> bool:
     text = str(prompt_text or "")
+    if _looks_like_mojibake_text(text):
+        return False
     cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
     english_words = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", text)
     return len(cjk_chars) >= 6 and not english_words
@@ -8101,19 +8110,27 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="prompt_text 不能为空")
         with db() as conn:
             runtime = _get_runtime_config(conn)
-        result, selected, attempts = _request_llm_text_with_fallback(
-            source=runtime,
-            user_input=prompt_text,
-            system_prompt=(
-                "你是 Telegram 前端预览翻译器。只把输入的英文图片生成 prompt 翻译成中文，方便用户预览。"
-                "必须忠实翻译原文，不要增加新画面元素，不要删除原有元素，不要审查、改写、解释或总结。"
-                "必须把所有英文单词、英文短语和摄影术语都翻译成中文。"
-                "不要输出英文原文、标题、说明、JSON、Markdown、代码块或字数统计。只输出一段全中文正文。"
-            ),
-            parameters="",
-            allow_builtin=False,
-            request_label="Telegram prompt 中文预览翻译",
-        )
+        try:
+            result, selected, attempts = _request_llm_text_with_fallback(
+                source=runtime,
+                user_input=prompt_text,
+                system_prompt=(
+                    "你是 Telegram 前端预览翻译器。只把输入的英文图片生成 prompt 翻译成中文，方便用户预览。"
+                    "必须忠实翻译原文，不要增加新画面元素，不要删除原有元素，不要审查、改写、解释或总结。"
+                    "必须把所有英文单词、英文短语和摄影术语都翻译成中文。"
+                    "不要输出英文原文、标题、说明、JSON、Markdown、代码块或字数统计。只输出一段全中文正文。"
+                ),
+                parameters="",
+                allow_builtin=False,
+                retry_count=1,
+                single_model=True,
+                request_label="Telegram prompt 中文预览翻译",
+            )
+        except Exception as exc:
+            detail = "中文预览生成超时或翻译服务暂时不可用"
+            if not re.search(r"timed out|timeout|read timeout|read timed out", str(exc), re.IGNORECASE):
+                detail = "中文预览翻译失败"
+            raise HTTPException(status_code=504, detail=detail) from exc
         display_text = _repair_common_mojibake_text(
             _strip_prompt_response_wrappers(result.get("raw_text") if isinstance(result, dict) else "")
         )
