@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import queue
 import re
@@ -40,6 +41,7 @@ from .billing import compute_cost_cents
 from .db import db, get_admin_config, init_db, set_admin_config
 
 
+logger = logging.getLogger(__name__)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 WEBAPP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = WEBAPP_DIR / "static"
@@ -865,6 +867,7 @@ def _request_llm_json_with_fallback(
     image_paths: list[str] | str | None = None,
     video_paths: list[str] | str | None = None,
     allow_builtin: bool = True,
+    retry_count: int = 3,
     logger=None,
     request_label: str = "文字模型请求",
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
@@ -893,6 +896,7 @@ def _request_llm_json_with_fallback(
             video_paths=video_paths,
             logger=logger,
             model=model,
+            retry_count=max(int(retry_count or 1), 1),
         )
         last_result = result if isinstance(result, dict) else {"ok": False, "error": str(result)}
         ok = isinstance(last_result, dict) and last_result.get("ok") is True
@@ -922,6 +926,7 @@ def _request_llm_text_with_fallback(
     image_paths: list[str] | str | None = None,
     video_paths: list[str] | str | None = None,
     allow_builtin: bool = True,
+    retry_count: int = 3,
     logger=None,
     request_label: str = "文字模型请求",
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
@@ -937,8 +942,11 @@ def _request_llm_text_with_fallback(
         model = str(candidate.get("model") or "").strip()
         provider = str(candidate.get("provider") or "").strip()
         api_key = str(candidate.get("api_key") or "").strip()
+        started_at = time.monotonic()
         if logger:
             logger(f"{request_label}尝试 {idx}/{len(candidates)}：{provider} · {model}")
+        else:
+            globals()["logger"].info("%s attempt %s/%s provider=%s model=%s", request_label, idx, len(candidates), provider, model)
         result = get_gemini.request_gemini3_pro_raw_text(
             user_input=user_input,
             host=base_url,
@@ -950,9 +958,25 @@ def _request_llm_text_with_fallback(
             video_paths=video_paths,
             logger=logger,
             model=model,
+            retry_count=max(int(retry_count or 1), 1),
         )
+        elapsed = time.monotonic() - started_at
         last_result = result if isinstance(result, dict) else {"ok": False, "error": str(result)}
         ok = isinstance(last_result, dict) and last_result.get("ok") is True and bool(str(last_result.get("raw_text") or "").strip())
+        log_message = "%s attempt %s/%s provider=%s model=%s ok=%s elapsed=%.1fs"
+        if ok:
+            globals()["logger"].info(log_message, request_label, idx, len(candidates), provider, model, bool(ok), elapsed)
+        else:
+            globals()["logger"].warning(
+                "%s attempt %s/%s provider=%s model=%s ok=false elapsed=%.1fs error=%s",
+                request_label,
+                idx,
+                len(candidates),
+                provider,
+                model,
+                elapsed,
+                str(last_result.get("error") or "请求失败")[:500],
+            )
         attempts.append(
             {
                 "attempt": idx,
@@ -960,6 +984,7 @@ def _request_llm_text_with_fallback(
                 "model": model,
                 "ok": bool(ok),
                 "error": "" if ok else str(last_result.get("error") or "请求失败"),
+                "elapsed_seconds": round(elapsed, 3),
             }
         )
         if ok:
@@ -6400,9 +6425,9 @@ def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, An
     resolution = str(payload.get("base_resolution") or payload.get("resolution") or "").strip()
     parts = [
         "成人室内半身或全身摄影，忠实匹配用户指定主体",
-        "单帧静态画面，明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、半身或全身构图、脸部清晰可见、脸部特征和裸露范围",
+        "单帧静态画面，明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、半身或全身构图、脸部清晰可见和裸露范围",
         "纽扣解开、拉链松开、衣摆掀起、肩带滑落、裙摆上移或腰头下拉，服装结构完整，布料沿身体曲线自然贴合",
-        "用户要求的服装、场景和道具，半身或全身构图，镜头距离拉开，脸部清晰可见，鹅蛋脸、明亮杏仁眼、粉嫩饱满唇、嘴部微张，真实皮肤纹理、布料褶皱和身体曲线",
+        "用户要求的服装、场景和道具，半身或全身构图，镜头距离拉开，脸部清晰可见，保留表情状态，真实皮肤纹理、布料褶皱和身体曲线",
     ]
     if expression_state:
         parts.insert(1, expression_state)
@@ -6419,7 +6444,7 @@ def _tg_image_persona_face_brief(payload: dict[str, Any]) -> str:
     )
     if "金君雅" not in persona_text and "人设1" not in persona_text:
         return ""
-    return "当前人设脸部可用短语：鹅蛋脸，小巧柔和脸型，白皙水光肌，柔和苹果肌，明亮杏仁眼，清晰双眼皮，纤长睫毛，小巧鼻梁，粉嫩饱满唇，清晰唇形，自然妆感，嘴部微张，呼吸感明显，眼神看向镜头。最终提示词不要出现人物名称或人设名称。"
+    return "当前人设脸部由 LoRA 控制。最终提示词不要出现人物名称、人设名称、脸型、五官、肤质、发型等脸部描述；可以保留表情、视线方向、脸部清晰可见和无遮挡等构图信息。"
 
 
 def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
@@ -6490,7 +6515,7 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         "阴部可见或完全裸露": "阴部完整裸露，边界清晰可见，衣物没有遮挡该区域",
         "阴茎可见或完全裸露": "阴茎完整裸露，边界清晰可见，衣物没有遮挡该区域",
         "裸露必须来自合理服装状态和身体姿势": "纽扣解开、拉链松开、衣摆掀起，服装结构完整",
-        "精简写入脸型、眉眼、唇形和表情状态": "鹅蛋脸、明亮杏仁眼、粉嫩饱满唇、嘴部微张",
+        "精简写入脸型、眉眼、唇形和表情状态": "保留表情状态",
         "最终提示词只保留其中最关键的三到五个脸部特征和一个表情状态": "",
         "不要整段堆叠": "",
         "保留用户要求的服装、场景和道具": "用户指定服装、场景和道具",
@@ -6499,7 +6524,7 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         "禁止为了裸露强行制造破洞、撕裂、破口、布料凭空消失、不合受力逻辑的开口": "服装结构完整",
         "构图必须能看到人物脸部": "脸部清晰可见",
         "人物脸部需要精简描述": "脸部清晰可见",
-        "允许写脸型、肤质、眉眼、鼻梁、嘴唇和表情": "鹅蛋脸、白皙水光肌、明亮杏仁眼、粉嫩饱满唇、嘴部微张",
+        "允许写脸型、肤质、眉眼、鼻梁、嘴唇和表情": "保留表情状态",
         "金君雅": "",
         "人设1": "",
         "捞女1": "",
@@ -6512,7 +6537,7 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         "用户指定主体": "人物主体",
         "单帧静态画面": "静态摄影画面",
         "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、半身或全身构图、脸部清晰可见、脸部特征和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，半身或全身构图，脸部清晰可见",
-        "脸部特征和裸露范围": "鹅蛋脸、明亮杏仁眼、粉嫩饱满唇",
+        "脸部特征和裸露范围": "脸部清晰可见和裸露范围",
         "明确的情色裸露": "",
         "根据场景动态判断": "",
         "或在场景允许时": "",
@@ -6585,6 +6610,33 @@ def _force_tg_image_english_prompt(prompt_text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    face_feature_patterns = [
+        r"\b(?:with|wearing|having)?\s*(?:(?:long|short|medium|shoulder[-\s]?length|wavy|curly|straight|black|dark|light|brown|blonde|golden|silver|white|silver-white|gray|grey|red|pink|blue|purple|messy|neat|loose|tied|braided|flowing|silky)[-\s]+)+hair\b",
+        r"\b(?:hair\s+)?(?:color|colour)\s+[^,.;，。；、\n]+",
+        r"\b(?:hairstyle|haircut|bangs|fringe|ponytail|twin\s*tails?|braids?)\b",
+        r"\b(?:oval|round|small|soft|delicate|slim|v-shaped|heart-shaped)\s+face(?:\s+shape)?\b",
+        r"\b(?:fair|white|pale|delicate|glowing|water|smooth)\s+(?:facial\s+)?skin\b",
+        r"\b(?:soft\s+)?apple\s+cheeks?\b",
+        r"\b(?:bright|large|clear|natural|slender|long|beautiful|almond|phoenix|double-lidded)\s+(?:almond\s+)?eyes\b",
+        r"\b(?:clear\s+)?double\s+eyelids?\b",
+        r"\b(?:natural|slender|long|arched|thin)\s+eyebrows?\b",
+        r"\b(?:long|slender|curled|thick)\s+eyelashes?\b",
+        r"\b(?:straight|small|delicate|high)\s+nose(?:\s+bridge|\s+tip)?\b",
+        r"\b(?:narrow|small)\s+nostrils?\b",
+        r"\b(?:pink|rosy|full|plump|soft|clear)(?:\s+(?:pink|rosy|full|plump|soft|clear))*\s+lips?\b",
+        r"\b(?:clear\s+)?lip\s+shape\b",
+        r"\b(?:soft|defined|clean)\s+jawline\b",
+        r"\b(?:round|small)\s+chin\b",
+        r"\b(?:full|smooth)\s+forehead\b",
+        r"\b(?:natural|clean|delicate)\s+makeup\b",
+    ]
+    for pattern in face_feature_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?:鹅蛋脸|脸型|白皙水光肌|苹果肌|杏仁眼|双眼皮|卧蚕|睫毛|眉毛|眉形|鼻梁|鼻头|鼻翼|嘴唇|唇形|唇峰|下颌线|下巴|额头|妆感|发型|头发)",
+        "",
+        text,
+    )
     text = re.sub(r"\((?:Chinese characters|characters|words|汉字数|中文字数|字数)[^)]*\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"（(?:汉字数|中文字数|字数)[^）]*）", "", text)
     text = text.replace("，", ", ").replace("；", ", ").replace("、", ", ").replace("。", ". ")
@@ -6650,7 +6702,7 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "忠实保留用户指定的主体、服装、姿势、场景、道具、材质、颜色、镜头角度、风格和限制；不要改变场景，不要弱化用户要求的尺度。",
         "如果附带参考图，保留图中可见主体、构图、环境、服装、动作、道具、光线和视觉关系；不要添加无关元素。",
         "目标画面必须直接准确，不要使用“挑逗、诱惑、暧昧、氛围、张力、高级感、福利感”等抽象词替代具体画面。必须改写成可见元素：身体是站立、坐姿、跪姿还是躺姿，身体朝向镜头还是侧向，手指放在衣物边缘、大腿内侧、胸前、床面或道具上，衣物是纽扣解开、拉链松开、衣摆掀起、肩带滑落、裙摆上移、腰头下拉、贴身还是半脱。人物构图优先半身或全身，镜头距离拉开，平视或轻微俯视，头顶保留少量留白；不要使用会裁掉脸部的近距离特写、低角度特写或私密部位特写。",
-        "人物脸部需要精简描述，允许写脸型、肤质、眉眼、鼻梁、嘴唇和表情，但不要堆满全部细节。若启用人设 LoRA，只挑选三到五个关键脸部特征，例如鹅蛋脸、白皙水光肌、明亮杏仁眼、清晰双眼皮、粉嫩饱满唇，再加入一个可见表情状态，例如嘴部微张、呼吸感明显、眼神看向镜头。构图必须能看到人物脸部，优先半身或全身构图，避免裁脸、遮脸、背脸和只拍身体局部。最终提示词禁止出现人物名称、人设名称或 LoRA 文件名。",
+        "人物脸部由工作流 LoRA 控制，最终提示词不要写脸型、五官、肤质、发型等脸部描述。可以保留表情、视线方向、脸部清晰可见、无遮挡、头部完整入镜等构图信息。构图必须能看到人物脸部，优先半身或全身构图，避免裁脸、遮脸、背脸和只拍身体局部。最终提示词禁止出现人物名称、人设名称或 LoRA 文件名。",
         "服装逻辑必须合理：裸露只能来自自然开扣、拉链松开、衣摆掀起、肩带滑落、裙摆上移、腰头下拉、布料贴身或半脱状态。禁止为了裸露强行制造破洞、撕裂、破口、布料凭空消失、不合受力逻辑的开口；除非用户明确要求破损服装，也必须符合布料拉扯方向和受力逻辑。",
         "最终提示词必须直接写清楚裸露范围和衣物状态，不使用“根据场景、视情况、可以、可能、或、允许、若隐若现、边缘可见”等模糊词。需要裸露时按主体直接写成：阴部完整裸露，阴茎完整裸露，性器官区域完整裸露，边界清晰可见，衣物没有遮挡该区域；同时保持服装结构合理，不为了露出而破坏服装结构。",
         "保持精简可复用：身体姿势、手部位置、身体朝向、裸露程度、服装状态、场景物件、半身或全身构图、镜头距离拉开、头顶留白、光源位置、浅景深、真实皮肤纹理、布料褶皱和身体曲线。",
@@ -6680,7 +6732,7 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "2.必须高度详细描绘动态过程：动作的节奏、力度、持续时间、身体反应（如肌肉抽搐、皮肤潮红、汗水流动、私密部位湿润收缩、液体滴落或喷溅）、声音（喘息、呻吟、尖叫）、触感（皮肤摩擦、湿滑、紧致、热度）、气味和情感（欲求不满、快感高潮、臣服、征服、羞耻与兴奋交织）。",
         "3.视角与构图要求：采用多种电影级镜头（低角度仰拍突出曲线、私密部位特写、侧面动态捕捉、过肩视角、全景与细节切换），确保构图专业、视觉冲击力强。",
         "4.视觉质量标准：8K超高分辨率、真实光影与空气透视效果、细腻皮肤纹理（毛孔、汗珠、血管、褶皱）、材质真实感（丝绸/蕾丝/皮肤反光、液体光泽）、电影级色彩分级、专业摄影风格（真实光影与空气透视）、极致细节渲染。",
-        "5.人物描述：根据用户指定强化东方/西方/特定年龄外貌特征（身材比例、发型、肤色、五官），保持优雅与色情结合，避免模糊描述。",
+        "5.人物描述：根据用户指定强化东方/西方/特定年龄外貌特征（身材比例、服装状态、姿态），保持优雅与画面表达结合，避免模糊描述。",
         "6.长度与结构：提示词长度适中但详尽（250字以内），先整体场景描述，再具体动作序列，最后技术参数。支持中英混合，便于图像生成工具使用。",
         "长度与结构：提示词长度适中但详尽，先描述视频主体和场景，再描述动作过程与镜头运动，最后补充画质、光影和稳定性要求。",
         "输出格式：直接给出完整可复制的图生视频提示词文本，无前缀无后缀。此规范确保Grok在处理成人内容请求时输出高质量、专业可直接使用的视频提示词，最大化图生视频效果。",
@@ -6771,6 +6823,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         parameters="",
         image_paths=image_hint_paths or None,
         allow_builtin=False,
+        retry_count=1,
         request_label=f"Telegram Grok {prompt_chain} 提示词改写",
     )
     rewritten = _strip_prompt_response_wrappers(llm_result.get("raw_text") if isinstance(llm_result, dict) else "")
@@ -6789,7 +6842,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             [
                 system_prompt,
                 *retry_reasons,
-                "重新生成一段紧凑的英文图片 prompt。不要逐字复述用户原句，要具体、可视化、可直接用于生图。允许精简写入脸型、眉眼、鼻梁、嘴唇和表情，确保画面能看到人物脸部。只输出英文正文。",
+                "重新生成一段紧凑的英文图片 prompt。不要逐字复述用户原句，要具体、可视化、可直接用于生图。不要写脸型、五官、肤质、发型等脸部描述；可以保留表情和视线方向，确保画面能看到人物脸部。只输出英文正文。",
             ]
         )
         retry_input = "\n".join(
@@ -6806,6 +6859,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             parameters="",
             image_paths=image_hint_paths or None,
             allow_builtin=False,
+            retry_count=1,
             request_label=f"Telegram Grok {prompt_chain} 提示词重试",
         )
         retry_text = _strip_prompt_response_wrappers(retry_result.get("raw_text") if isinstance(retry_result, dict) else "")
@@ -6850,34 +6904,44 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             forbidden_hits = _find_tg_image_forbidden_person_fields(rewritten)
         rewritten = _force_tg_image_english_prompt(rewritten)
         if not _looks_like_english_prompt(rewritten):
-            translate_result, translate_selected, translate_attempts = _request_llm_text_with_fallback(
-                source=enhanced,
-                user_input="\n".join(
-                    [
-                        f"Original user request: {original_request or user_request}",
-                        f"Current prompt: {rewritten}",
-                        "Rewrite as one final English ComfyUI image prompt. Keep the same visual intent. Do not include Chinese, labels, analysis, person names, persona names, or LoRA file names.",
-                    ]
-                ),
-                system_prompt="\n".join(
-                    [
-                        "You rewrite image generation prompts into concise English.",
-                        "Output only one English prompt paragraph, 80 to 180 English words, comma-separated photographic prompt style.",
-                        "Do not include analysis, labels, JSON, Markdown, person names, persona names, LoRA file names, or word counts.",
-                    ]
-                ),
-                parameters="",
-                image_paths=image_hint_paths or None,
-                allow_builtin=False,
-                request_label="Telegram Grok image prompt English rewrite",
-            )
-            attempts.extend(translate_attempts)
-            translated = _force_tg_image_english_prompt(
-                translate_result.get("raw_text") if isinstance(translate_result, dict) else ""
-            )
-            if _looks_like_english_prompt(translated):
-                rewritten = translated
-                selected = translate_selected
+            translate_attempts: list[dict[str, Any]] = []
+            try:
+                translate_result, translate_selected, translate_attempts = _request_llm_text_with_fallback(
+                    source=enhanced,
+                    user_input="\n".join(
+                        [
+                            f"Original user request: {original_request or user_request}",
+                            f"Current prompt: {rewritten}",
+                            "Rewrite as one final English ComfyUI image prompt. Keep the same visual intent. Do not include Chinese, labels, analysis, person names, persona names, or LoRA file names.",
+                        ]
+                    ),
+                    system_prompt="\n".join(
+                        [
+                            "You rewrite image generation prompts into concise English.",
+                            "Output only one English prompt paragraph, 80 to 180 English words, comma-separated photographic prompt style.",
+                            "Do not include analysis, labels, JSON, Markdown, person names, persona names, LoRA file names, or word counts.",
+                        ]
+                    ),
+                    parameters="",
+                    image_paths=image_hint_paths or None,
+                    allow_builtin=False,
+                    retry_count=1,
+                    request_label="Telegram Grok image prompt English rewrite",
+                )
+                attempts.extend(translate_attempts)
+                translated = _force_tg_image_english_prompt(
+                    translate_result.get("raw_text") if isinstance(translate_result, dict) else ""
+                )
+                if _looks_like_english_prompt(translated):
+                    rewritten = translated
+                    selected = translate_selected
+            except Exception as exc:
+                logger.warning("Telegram Grok image prompt English rewrite degraded to fallback: %s", exc)
+                attempts.extend(translate_attempts)
+                fallback_prompt = _force_tg_image_english_prompt(
+                    rewritten or _build_tg_image_fallback_prompt(original_request or user_request, enhanced)
+                )
+                rewritten = fallback_prompt or rewritten or _build_tg_image_fallback_prompt(original_request or user_request, enhanced)
     final_prompt = rewritten
     preserved_request = original_request or user_request
     if not _to_bool(enhanced.get("tg_latest_prompt_only"), False) and _to_bool(enhanced.get("tg_preserve_original_prompt"), True) and _should_prepend_original_prompt(preserved_request, final_prompt):
@@ -7657,6 +7721,12 @@ class InternalTgPromptPreviewPayload(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class InternalTgPromptDisplayPayload(BaseModel):
+    prompt_text: str
+    task_type: str = "text_to_image"
+    tg_chat_id: int = 0
+
+
 class InternalTgAgentFilePayload(BaseModel):
     name: str = ""
     path: str
@@ -7911,7 +7981,10 @@ def create_app() -> FastAPI:
         if not typ:
             raise HTTPException(status_code=400, detail="task_type 不能为空")
         params = payload.params if isinstance(payload.params, dict) else {}
-        preview_payload = _build_internal_tg_task_payload(_new_id("preview"), typ, params)
+        try:
+            preview_payload = _build_internal_tg_task_payload(_new_id("preview"), typ, params)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=_format_user_visible_task_error(str(exc))) from exc
         prompt_text = str(
             preview_payload.get("prompt_text")
             or preview_payload.get("prompt")
@@ -7924,6 +7997,40 @@ def create_app() -> FastAPI:
             "prompt_text": prompt_text,
             "payload": preview_payload,
             "selected_model": str(preview_payload.get("tg_llm_selected_model") or "").strip(),
+        }
+
+    @app.post("/api/internal/tg/prompt_display")
+    def api_internal_tg_prompt_display(payload: InternalTgPromptDisplayPayload, request: Request):
+        _require_internal_tg_request(request)
+        prompt_text = _strip_prompt_response_wrappers(payload.prompt_text)
+        if not prompt_text:
+            raise HTTPException(status_code=400, detail="prompt_text 不能为空")
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+        result, selected, attempts = _request_llm_text_with_fallback(
+            source=runtime,
+            user_input=prompt_text,
+            system_prompt=(
+                "你是 Telegram 前端预览翻译器。只把输入的英文图片生成 prompt 翻译成中文，方便用户预览。"
+                "必须忠实翻译原文，不要增加新画面元素，不要删除原有元素，不要审查、改写、解释或总结。"
+                "不要输出英文原文、标题、说明、JSON、Markdown、代码块或字数统计。只输出一段中文正文。"
+            ),
+            parameters="",
+            allow_builtin=False,
+            request_label="Telegram prompt 中文预览翻译",
+        )
+        display_text = _repair_common_mojibake_text(
+            _strip_prompt_response_wrappers(result.get("raw_text") if isinstance(result, dict) else "")
+        )
+        display_text = display_text.replace("**", "").replace("__", "").strip()
+        if len(re.findall(r"[\u4e00-\u9fff]", display_text)) < 6:
+            raise HTTPException(status_code=502, detail="中文预览翻译未返回可用文本")
+        return {
+            "ok": True,
+            "task_type": str(payload.task_type or "text_to_image"),
+            "display_text": display_text,
+            "selected_model": str(selected.get("model") or "").strip() if isinstance(selected, dict) else "",
+            "attempts": attempts,
         }
 
     @app.post("/api/internal/tg/agent_submit")
