@@ -516,6 +516,8 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIn("，她的左手", normalized)
         self.assertIn("，她的身体", normalized)
         self.assertIn("，她的头", normalized)
+        self.assertIn("浅景深，真实皮肤纹理", normalized)
+        self.assertNotIn("真实，皮肤，纹理", normalized)
         self.assertIn("高细节，8K，写实摄影风格", normalized)
 
 

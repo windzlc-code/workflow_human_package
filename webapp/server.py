@@ -6756,8 +6756,13 @@ def _normalize_tg_chinese_image_prompt_format(prompt_text: str) -> str:
     text = re.sub(r"(?<=[\u4e00-\u9fff0-9K])(?=穿着)", "，", text)
     for marker in ("她的左手", "她的身体", "她的头"):
         text = re.sub(rf"(?<![，。；、])(?={re.escape(marker)})", "，", text)
-    for marker in ("背景", "豪华", "简洁", "室内", "卧室", "客舱", "柔和", "自然光", "浅景深", "真实", "皮肤", "布料", "纹理", "高细节", "8K", "写实摄影"):
+    for marker in ("背景", "豪华", "简洁", "室内", "卧室", "客舱", "柔和", "自然光", "浅景深", "高细节", "8K", "写实摄影"):
         text = re.sub(rf"(?<=[\u4e00-\u9fff0-9K])(?={re.escape(marker)})", "，", text)
+    text = re.sub(r"真实[，、]皮肤[，、]纹理", "真实皮肤纹理", text)
+    text = re.sub(r"真实[，、]皮肤", "真实皮肤", text)
+    text = re.sub(r"皮肤[，、]纹理", "皮肤纹理", text)
+    text = re.sub(r"布料[，、]褶皱", "布料褶皱", text)
+    text = re.sub(r"浅景深[，、]?真实皮肤纹理", "浅景深，真实皮肤纹理", text)
     text = re.sub(r"高细节，?8K，?写实", "高细节，8K，写实", text)
     text = re.sub(r"高细节，?写实", "高细节，8K，写实", text)
     text = re.sub(r"高细节，?8K(?!，)", "高细节，8K，", text)
