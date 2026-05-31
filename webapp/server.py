@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import logging
 import os
@@ -96,6 +97,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "llm_default_model_gemini": "",
     "llm_default_model_gpt": "grok-4.2",
     "llm_model_priority_order": "grok-4.2",
+    "text_to_image_auto_qa_enabled": True,
+    "text_to_image_auto_qa_max_attempts": 3,
     "mulerouter_api_name": "",
     "mulerouter_api_key": "",
     "mulerouter_base_url": "https://api.mulerouter.ai",
@@ -1115,6 +1118,19 @@ def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) 
     }
 
 
+def _text_to_image_qa_notice(output_data: dict[str, Any]) -> str:
+    if not isinstance(output_data, dict):
+        return ""
+    qa = output_data.get("image_qa") if isinstance(output_data.get("image_qa"), dict) else {}
+    if not qa or not _to_bool(qa.get("enabled"), False):
+        return ""
+    attempts = max(_to_int(qa.get("attempts"), 1), 1)
+    rejected = max(_to_int(qa.get("rejected_rounds"), 0), 0)
+    if rejected <= 0:
+        return "自动 QA：第 1 轮通过筛选。"
+    return f"自动 QA：已筛选 {rejected} 轮候选图，第 {attempts} 轮通过。"
+
+
 def _send_telegram_message(chat_id: int, text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
     token = _tg_bot_token()
     if not token or int(chat_id or 0) <= 0:
@@ -1196,6 +1212,7 @@ def _notify_tg_task_finished(
                 "后台生成任务已完成。",
                 f"工作流: {task_type}",
                 f"任务编号: {task_id}",
+                _text_to_image_qa_notice(output_data if isinstance(output_data, dict) else {}),
             ]
             if part
         )
@@ -1921,6 +1938,11 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         fallback=llm_gpt_models or ["grok-4.2"],
     )
     merged["llm_model_priority_order"] = ", ".join(llm_priority_models)
+    merged["text_to_image_auto_qa_enabled"] = _to_bool(merged.get("text_to_image_auto_qa_enabled"), True)
+    merged["text_to_image_auto_qa_max_attempts"] = min(
+        max(_to_int(merged.get("text_to_image_auto_qa_max_attempts"), 3), 1),
+        6,
+    )
 
     merged["mulerouter_api_name"] = str(merged.get("mulerouter_api_name") or "").strip()
     merged["mulerouter_api_key"] = str(merged.get("mulerouter_api_key") or "").strip()
@@ -3532,6 +3554,176 @@ def _first_remote_comfy_output_path(result: dict[str, Any]) -> str:
     return ""
 
 
+def _new_image_qa_seed(excluded: set[int] | None = None) -> int:
+    excluded = excluded or set()
+    for _ in range(20):
+        seed = int(uuid.uuid4().int % 2147483647)
+        if seed > 0 and seed not in excluded:
+            return seed
+    return int(time.time() * 1000) % 2147483647 or 1
+
+
+def _collect_seed_values(value: Any) -> set[int]:
+    seeds: set[int] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if "seed" in str(key or "").strip().lower():
+                try:
+                    seed = int(item)
+                    if seed >= 0:
+                        seeds.add(seed)
+                except Exception:
+                    pass
+            seeds.update(_collect_seed_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            seeds.update(_collect_seed_values(item))
+    return seeds
+
+
+def _replace_seed_values(value: Any, seed: int) -> None:
+    if isinstance(value, dict):
+        for key, item in list(value.items()):
+            if "seed" in str(key or "").strip().lower():
+                value[key] = int(seed)
+                continue
+            _replace_seed_values(item, seed)
+    elif isinstance(value, list):
+        for item in value:
+            _replace_seed_values(item, seed)
+
+
+def _parse_qa_string_list(value: Any, limit: int = 6) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            out.append(text)
+        if len(out) >= int(limit):
+            break
+    return out
+
+
+def _qa_score(value: Any, default: int = 75) -> int:
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except Exception:
+        return int(default)
+
+
+def _analyze_generated_person_image_quality(
+    *,
+    image_path: str,
+    prompt_text: str,
+    payload: dict[str, Any],
+    attempt: int,
+) -> dict[str, Any]:
+    path = Path(str(image_path or "")).expanduser()
+    if not path.exists() or not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+        return {"inspected": False, "passed": True, "summary": "未找到可检查的图片文件。"}
+    system_prompt = "\n".join(
+        [
+            "你是严格的文生图自动 QA 检查员，只判断图片是否应该交付给用户。",
+            "请检查：主体是否清晰、人物肢体/手/脸/身体结构是否错乱、画面是否有意义、是否符合提示词要求、是否有明显水印文字或生成崩坏。",
+            "不要因为题材、服装风格或审美偏好而扣分；只根据可见画面质量、提示词符合度、人物结构完整性和交付可用性判断。",
+            "必须只返回 JSON，不要输出解释性正文。",
+            "JSON schema:",
+            "{",
+            '  "summary": "中文一句话总结",',
+            '  "overallScore": 0,',
+            '  "promptMatchScore": 0,',
+            '  "anatomyScore": 0,',
+            '  "visualScore": 0,',
+            '  "limbOrBodyBroken": false,',
+            '  "promptMismatchVisible": false,',
+            '  "meaninglessOrCollapsed": false,',
+            '  "textOrWatermarkVisible": false,',
+            '  "deliverableReady": false,',
+            '  "issues": ["中文问题1"],',
+            '  "fixPriorities": ["中文重试重点1"]',
+            "}",
+        ]
+    )
+    user_input = "\n".join(
+        [
+            f"生成提示词：{str(prompt_text or '').strip()}",
+            f"画面比例/分辨率：{payload.get('aspect_ratio') or ''} {payload.get('width') or ''}x{payload.get('height') or ''}".strip(),
+            f"当前为第 {max(int(attempt), 1)} 轮候选图，请判断是否可以直接显示给用户。",
+        ]
+    )
+    try:
+        result, selected, attempts = _request_llm_json_with_fallback(
+            source=payload,
+            user_input=user_input,
+            system_prompt=system_prompt,
+            image_paths=[str(path)],
+            retry_count=1,
+            request_label="图像自动QA",
+        )
+        parsed = result.get("parsed") if isinstance(result, dict) else None
+        if not isinstance(parsed, dict):
+            raise RuntimeError("图像自动 QA 未返回 JSON 对象")
+        report = {
+            "inspected": True,
+            "selected_model": str(selected.get("model") or "").strip() if isinstance(selected, dict) else "",
+            "attempts": attempts,
+            "summary": str(parsed.get("summary") or "图像 QA 检查完成。").strip(),
+            "overall_score": _qa_score(parsed.get("overallScore"), 75),
+            "prompt_match_score": _qa_score(parsed.get("promptMatchScore"), 75),
+            "anatomy_score": _qa_score(parsed.get("anatomyScore"), 75),
+            "visual_score": _qa_score(parsed.get("visualScore"), 75),
+            "limb_or_body_broken": parsed.get("limbOrBodyBroken") is True,
+            "prompt_mismatch_visible": parsed.get("promptMismatchVisible") is True,
+            "meaningless_or_collapsed": parsed.get("meaninglessOrCollapsed") is True,
+            "text_or_watermark_visible": parsed.get("textOrWatermarkVisible") is True,
+            "deliverable_ready": parsed.get("deliverableReady") is True,
+            "issues": _parse_qa_string_list(parsed.get("issues"), 6),
+            "fix_priorities": _parse_qa_string_list(parsed.get("fixPriorities"), 4),
+        }
+        reject = _should_reject_generated_person_image(report)
+        report["passed"] = not reject
+        return report
+    except Exception as exc:
+        return {
+            "inspected": False,
+            "passed": True,
+            "summary": "图像自动 QA 暂不可用，已放行当前结果。",
+            "error": str(exc),
+        }
+
+
+def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool:
+    if not isinstance(report, dict) or not _to_bool(report.get("inspected"), False):
+        return False
+    if _to_bool(report.get("limb_or_body_broken"), False):
+        return True
+    if _to_bool(report.get("prompt_mismatch_visible"), False):
+        return True
+    if _to_bool(report.get("meaningless_or_collapsed"), False):
+        return True
+    if _to_bool(report.get("deliverable_ready"), False):
+        return False
+    if _to_int(report.get("overall_score"), 75) < 78:
+        return True
+    if _to_int(report.get("prompt_match_score"), 75) < 72:
+        return True
+    if _to_int(report.get("anatomy_score"), 75) < 74:
+        return True
+    if _to_int(report.get("visual_score"), 75) < 70:
+        return True
+    return bool(report.get("issues"))
+
+
+def _qa_failure_reason(report: dict[str, Any]) -> str:
+    issues = _parse_qa_string_list(report.get("issues"), 3)
+    if issues:
+        return "；".join(issues)
+    summary = str(report.get("summary") or "").strip()
+    return summary or "候选图未通过自动 QA。"
+
+
 def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_type: str) -> dict[str, Any]:
     source, gateway_url, token = _comfy_gateway_from_payload(payload)
     source_label = "本地 ComfyUI" if source == "local" else "远程 ComfyUI"
@@ -3549,24 +3741,82 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     width = _to_int(payload.get("width"), 512)
     height = _to_int(payload.get("height"), 512)
     batch_size = _to_int(payload.get("batch_size"), 1)
-    _emit_stage(payload, stage="remote_comfy", status="running", message=f"提交{source_label}工作流: {workflow_path}")
-    result = _run_remote_comfy_gateway_test(
-        gateway_url=gateway_url,
-        token=token,
-        workflow_path=workflow_path,
-        prompt_text=prompt_text,
-        negative_prompt=negative_prompt,
-        width=width if width > 0 else None,
-        height=height if height > 0 else None,
-        steps=steps if steps > 0 else None,
-        seed=seed,
-        batch_size=batch_size if batch_size > 0 else None,
-        node_inputs=_remote_comfy_node_inputs_from_payload(payload, task_type=task_type, workflow_path=workflow_path),
-        timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
+    base_node_inputs = _remote_comfy_node_inputs_from_payload(payload, task_type=task_type, workflow_path=workflow_path)
+    auto_qa_enabled = (
+        str(task_type or "").strip() == "text_to_image"
+        and _to_bool(payload.get("text_to_image_auto_qa_enabled"), True)
     )
-    if not _to_bool(result.get("ok"), False):
-        raise RuntimeError(str(result.get("message") or f"{source_label} 工作流执行失败"))
-    output_path = _first_remote_comfy_output_path(result)
+    max_attempts = min(max(_to_int(payload.get("text_to_image_auto_qa_max_attempts"), 3), 1), 6) if auto_qa_enabled else 1
+    qa_reports: list[dict[str, Any]] = []
+    used_seeds = _collect_seed_values(base_node_inputs)
+    if seed is not None:
+        used_seeds.add(int(seed))
+    result: dict[str, Any] = {}
+    output_path = ""
+    selected_seed = seed
+    last_qa_reason = ""
+    for attempt in range(1, max_attempts + 1):
+        attempt_seed = selected_seed
+        node_inputs = copy.deepcopy(base_node_inputs)
+        if attempt > 1:
+            attempt_seed = _new_image_qa_seed(used_seeds)
+            used_seeds.add(int(attempt_seed))
+            if node_inputs:
+                _replace_seed_values(node_inputs, int(attempt_seed))
+        message = f"提交{source_label}工作流: {workflow_path}"
+        if auto_qa_enabled and max_attempts > 1:
+            message = f"{message}（自动 QA 第 {attempt}/{max_attempts} 轮）"
+        _emit_stage(payload, stage="remote_comfy", status="running", message=message, data={"qa_attempt": attempt, "seed": attempt_seed})
+        result = _run_remote_comfy_gateway_test(
+            gateway_url=gateway_url,
+            token=token,
+            workflow_path=workflow_path,
+            prompt_text=prompt_text,
+            negative_prompt=negative_prompt,
+            width=width if width > 0 else None,
+            height=height if height > 0 else None,
+            steps=steps if steps > 0 else None,
+            seed=attempt_seed,
+            batch_size=batch_size if batch_size > 0 else None,
+            node_inputs=node_inputs,
+            timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
+        )
+        if not _to_bool(result.get("ok"), False):
+            raise RuntimeError(str(result.get("message") or f"{source_label} 工作流执行失败"))
+        output_path = _first_remote_comfy_output_path(result)
+        selected_seed = attempt_seed
+        if not auto_qa_enabled or not output_path or Path(output_path).suffix.lower() not in IMAGE_EXTS:
+            break
+        qa_report = _analyze_generated_person_image_quality(
+            image_path=output_path,
+            prompt_text=prompt_text,
+            payload=payload,
+            attempt=attempt,
+        )
+        qa_report["attempt"] = attempt
+        qa_report["seed"] = attempt_seed
+        qa_reports.append(qa_report)
+        if not _should_reject_generated_person_image(qa_report):
+            _emit_stage(
+                payload,
+                stage="image_auto_qa",
+                status="success",
+                message=f"自动 QA 第 {attempt} 轮通过",
+                data={"qa_attempt": attempt, "qa_report": _sanitize_payload(qa_report)},
+            )
+            break
+        last_qa_reason = _qa_failure_reason(qa_report)
+        _emit_stage(
+            payload,
+            stage="image_auto_qa",
+            status="warn",
+            message=f"自动 QA 第 {attempt} 轮拦截候选图，准备重新生成",
+            data={"qa_attempt": attempt, "qa_report": _sanitize_payload(qa_report), "reason": last_qa_reason},
+        )
+    else:
+        if auto_qa_enabled and qa_reports and _should_reject_generated_person_image(qa_reports[-1]):
+            raise RuntimeError(f"自动 QA 已筛选 {len(qa_reports)} 轮仍未获得可交付图片：{last_qa_reason or '候选图未通过质量检查'}")
+
     output_key = "download_path"
     suffix = Path(output_path).suffix.lower() if output_path else ""
     if suffix in IMAGE_EXTS:
@@ -3586,6 +3836,17 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         "download_path": output_path,
         "raw_result": result,
     }
+    if selected_seed is not None:
+        output["seed"] = selected_seed
+    if auto_qa_enabled:
+        output["image_qa"] = {
+            "enabled": True,
+            "max_attempts": max_attempts,
+            "attempts": len(qa_reports) if qa_reports else 1,
+            "rejected_rounds": sum(1 for report in qa_reports if _should_reject_generated_person_image(report)),
+            "passed": not qa_reports or not _should_reject_generated_person_image(qa_reports[-1]),
+            "reports": qa_reports,
+        }
     if output_path:
         output[output_key] = output_path
     return output

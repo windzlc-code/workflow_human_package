@@ -529,6 +529,63 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(markup["keyboard"][1][0]["text"], "继续生成图片")
         self.assertEqual(markup["keyboard"][2][0]["text"], "返回主菜单")
 
+    def test_text_to_image_auto_qa_retries_rejected_candidate(self):
+        first_image = Path(self._tmpdir.name) / "first.png"
+        second_image = Path(self._tmpdir.name) / "second.png"
+        first_image.write_bytes(b"first")
+        second_image.write_bytes(b"second")
+        comfy_results = [
+            {"ok": True, "prompt_id": "prompt_1", "local_outputs": [{"local_path": str(first_image), "filename": "first.png"}]},
+            {"ok": True, "prompt_id": "prompt_2", "local_outputs": [{"local_path": str(second_image), "filename": "second.png"}]},
+        ]
+        qa_results = [
+            {
+                "inspected": True,
+                "passed": False,
+                "overall_score": 40,
+                "prompt_match_score": 80,
+                "anatomy_score": 20,
+                "visual_score": 60,
+                "limb_or_body_broken": True,
+                "issues": ["人物肢体错乱"],
+            },
+            {
+                "inspected": True,
+                "passed": True,
+                "overall_score": 88,
+                "prompt_match_score": 86,
+                "anatomy_score": 85,
+                "visual_score": 84,
+                "deliverable_ready": True,
+                "issues": [],
+            },
+        ]
+
+        with patch.object(server, "_run_remote_comfy_gateway_test", side_effect=comfy_results) as run_mock, patch.object(
+            server,
+            "_analyze_generated_person_image_quality",
+            side_effect=qa_results,
+        ):
+            output = server._run_remote_comfy_mapped_task(
+                "task_qa",
+                {
+                    "remote_comfy_gateway_url": "http://comfy.local",
+                    "remote_comfy_workflow_mappings": {"text_to_image": "ZIT_final_output.api.json"},
+                    "prompt": "一位人物肖像，清晰自然",
+                    "width": 640,
+                    "height": 960,
+                    "text_to_image_auto_qa_enabled": True,
+                    "text_to_image_auto_qa_max_attempts": 3,
+                },
+                "text_to_image",
+            )
+
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(output["image_path"], str(second_image))
+        self.assertEqual(output["image_qa"]["rejected_rounds"], 1)
+        self.assertEqual(output["image_qa"]["attempts"], 2)
+        self.assertIn("已筛选 1 轮候选图", server._text_to_image_qa_notice(output))
+
 
 if __name__ == "__main__":
     unittest.main()
