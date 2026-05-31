@@ -3653,6 +3653,11 @@ def _analyze_generated_person_image_quality(
             '  "anatomyScore": 0,',
             '  "visualScore": 0,',
             '  "limbOrBodyBroken": false,',
+            '  "extraOrMissingLimbs": false,',
+            '  "limbOverlapOrFusion": false,',
+            '  "handAnomalyVisible": false,',
+            '  "poseGeometryBroken": false,',
+            '  "bodyPartScaleAnomaly": false,',
             '  "promptMismatchVisible": false,',
             '  "meaninglessOrCollapsed": false,',
             '  "textOrWatermarkVisible": false,',
@@ -3669,7 +3674,8 @@ def _analyze_generated_person_image_quality(
             f"生成提示词：{str(prompt_text or '').strip()}",
             f"画面比例/分辨率：{payload.get('aspect_ratio') or ''} {payload.get('width') or ''}x{payload.get('height') or ''}".strip(),
             f"当前为第 {max(int(attempt), 1)} 轮候选图，请判断是否可以直接显示给用户。",
-            "若存在严重人体结构错误、肢体重叠错乱、身体融合、手部明显崩坏或画面无意义，请将 deliverableReady 设为 false，并把 limbOrBodyBroken 或 meaninglessOrCollapsed 设为 true。",
+            "请先逐项核对可见人体几何：是否只有合理数量的手臂和手掌；每只手是否连接到正确手臂；手臂是否异常变粗、变长、断裂、穿过身体或与腿/枕头/床单融合；身体轮廓是否存在不可能的重叠、交叉或重复肢体。",
+            "若存在严重人体结构错误、肢体重叠错乱、身体融合、手部明显崩坏、手臂比例异常、额外肢体或画面无意义，请将 deliverableReady 设为 false，并把 limbOrBodyBroken 以及对应的细分字段设为 true。",
             "本次提示词要求头部/脸部/眼神/表情可见：是。若候选图没有完整头部，或头部/脸部/眼神/表情被裁切、缺失、遮挡到无法判断，请将 headVisible 设为 false，headCroppedOrMissing 设为 true，deliverableReady 设为 false。"
             if requires_visible_head
             else "本次提示词没有明确要求头部/脸部/眼神/表情可见：否。无需仅因普通构图裁切头部而拦截，但仍需按主体和画面语义判断。",
@@ -3697,6 +3703,11 @@ def _analyze_generated_person_image_quality(
             "anatomy_score": _qa_score(parsed.get("anatomyScore"), 75),
             "visual_score": _qa_score(parsed.get("visualScore"), 75),
             "limb_or_body_broken": parsed.get("limbOrBodyBroken") is True,
+            "extra_or_missing_limbs": parsed.get("extraOrMissingLimbs") is True,
+            "limb_overlap_or_fusion": parsed.get("limbOverlapOrFusion") is True,
+            "hand_anomaly_visible": parsed.get("handAnomalyVisible") is True,
+            "pose_geometry_broken": parsed.get("poseGeometryBroken") is True,
+            "body_part_scale_anomaly": parsed.get("bodyPartScaleAnomaly") is True,
             "prompt_mismatch_visible": parsed.get("promptMismatchVisible") is True,
             "meaningless_or_collapsed": parsed.get("meaninglessOrCollapsed") is True,
             "text_or_watermark_visible": parsed.get("textOrWatermarkVisible") is True,
@@ -3730,6 +3741,15 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         return _to_bool(report.get("qa_unavailable"), False)
     if _to_bool(report.get("limb_or_body_broken"), False):
         return True
+    for key in (
+        "extra_or_missing_limbs",
+        "limb_overlap_or_fusion",
+        "hand_anomaly_visible",
+        "pose_geometry_broken",
+        "body_part_scale_anomaly",
+    ):
+        if _to_bool(report.get(key), False):
+            return True
     if _to_bool(report.get("prompt_mismatch_visible"), False):
         return True
     if _to_bool(report.get("meaningless_or_collapsed"), False):
@@ -3739,16 +3759,16 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         or _to_bool(report.get("head_cropped_or_missing"), False)
     ):
         return True
+    if _to_int(report.get("overall_score"), 75) < 82:
+        return True
+    if _to_int(report.get("prompt_match_score"), 75) < 76:
+        return True
+    if _to_int(report.get("anatomy_score"), 75) < 88:
+        return True
+    if _to_int(report.get("visual_score"), 75) < 76:
+        return True
     if _to_bool(report.get("deliverable_ready"), False):
         return False
-    if _to_int(report.get("overall_score"), 75) < 78:
-        return True
-    if _to_int(report.get("prompt_match_score"), 75) < 72:
-        return True
-    if _to_int(report.get("anatomy_score"), 75) < 74:
-        return True
-    if _to_int(report.get("visual_score"), 75) < 70:
-        return True
     return bool(report.get("issues"))
 
 

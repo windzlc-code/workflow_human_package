@@ -554,7 +554,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 "passed": True,
                 "overall_score": 88,
                 "prompt_match_score": 86,
-                "anatomy_score": 85,
+                "anatomy_score": 92,
                 "visual_score": 84,
                 "deliverable_ready": True,
                 "issues": [],
@@ -608,6 +608,36 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             "prompt_match_score": 90,
             "anatomy_score": 90,
             "visual_score": 90,
+            "deliverable_ready": True,
+            "issues": [],
+        }
+
+        self.assertTrue(server._should_reject_generated_person_image(report))
+
+    def test_text_to_image_auto_qa_rejects_borderline_anatomy_even_if_deliverable(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 88,
+            "prompt_match_score": 90,
+            "anatomy_score": 85,
+            "visual_score": 87,
+            "limb_or_body_broken": False,
+            "deliverable_ready": True,
+            "issues": [],
+        }
+
+        self.assertTrue(server._should_reject_generated_person_image(report))
+
+    def test_text_to_image_auto_qa_rejects_limb_geometry_flags(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 95,
+            "prompt_match_score": 95,
+            "anatomy_score": 95,
+            "visual_score": 95,
+            "limb_overlap_or_fusion": True,
             "deliverable_ready": True,
             "issues": [],
         }
