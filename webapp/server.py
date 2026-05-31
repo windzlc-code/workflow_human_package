@@ -3696,6 +3696,7 @@ def _analyze_generated_person_image_quality(
             "qa_unavailable": True,
             "summary": "图像自动 QA 暂不可用，未放行当前结果。",
             "error": str(exc),
+            "issues": ["图像自动 QA 未完成，不能确认候选图可交付。"],
         }
 
 
