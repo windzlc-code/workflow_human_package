@@ -8175,10 +8175,10 @@ def _ensure_internal_tg_payload_chinese_image_prompt(task_type: str, payload: di
     prompt_text = _primary_tg_generation_prompt(ensured)
     if not prompt_text:
         return ensured
+    if _to_bool(ensured.get("custom_prompt_used"), False):
+        return ensured
     if _looks_like_chinese_image_prompt(prompt_text):
         return _set_tg_generation_prompt(ensured, _force_tg_image_chinese_prompt(prompt_text))
-    if _to_bool(ensured.get("custom_prompt_used"), False):
-        raise HTTPException(status_code=400, detail="图像提示词必须是中文，不能包含英文。")
 
     rewrite_payload = dict(ensured)
     rewrite_payload["tg_use_llm_prompt"] = True

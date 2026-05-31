@@ -1938,7 +1938,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "\n".join(
                 [
                     "Grok 生成的提示词还没有通过中文校验。",
-                    "暂不提交到队列。请重新生成提示词，或输入自定义中文提示词。",
+                    "暂不提交到队列。请重新生成提示词，或输入自定义提示词。",
                     _format_prompt_display_fallback(exc),
                 ]
             ),
@@ -2027,7 +2027,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if (not bool(data.get("custom_prompt_used"))) and not bool(data.get("prompt_display_ready")):
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
             await message.answer(
-                "当前提示词还没有通过中文校验，暂不提交到队列。请重新生成提示词，或输入自定义中文提示词。",
+                "当前提示词还没有通过中文校验，暂不提交到队列。请重新生成提示词，或输入自定义提示词。",
                 reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
             )
             return
@@ -2996,7 +2996,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         except Exception as exc:
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
             await message.answer(
-                f"自定义提示词提交失败：{exc}\n\n请重新输入一条纯中文提示词，或返回上一步。",
+                f"自定义提示词提交失败：{exc}\n\n请重新输入提示词，或返回上一步。",
                 reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
             )
 
