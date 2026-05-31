@@ -6759,14 +6759,55 @@ def _extract_tg_expression_state(request_text: str) -> str:
     return ""
 
 
+def _tg_image_aspect_ratio_pose_guidance(payload: dict[str, Any] | None) -> str:
+    source = payload if isinstance(payload, dict) else {}
+    ratio = str(source.get("aspect_ratio") or source.get("image_aspect_ratio") or "").strip()
+    width = _to_int(source.get("width"), 0)
+    height = _to_int(source.get("height"), 0)
+    orientation = ""
+    if width > 0 and height > 0:
+        if height / max(width, 1) >= 1.35:
+            orientation = "portrait"
+        elif width / max(height, 1) >= 1.35:
+            orientation = "landscape"
+        else:
+            orientation = "square"
+    if ratio in {"2:3", "3:4", "9:16"}:
+        orientation = "portrait"
+    elif ratio in {"3:2", "4:3", "16:9"}:
+        orientation = "landscape"
+    elif ratio == "1:1":
+        orientation = "square"
+
+    if ratio == "9:16":
+        detail = "手机长竖图优先选择站立、跪坐、倚靠门框或床边的纵向动作，身体重心沿画面竖向展开，头部完整入镜并保留头顶留白，手部靠近衣物边缘或道具，避免横向平躺和过宽场景。"
+    elif ratio in {"2:3", "3:4"} or orientation == "portrait":
+        detail = "竖图优先选择全身或半身站姿、坐姿、跪姿、侧身倚靠等纵向姿势，身体从头部到腰腿形成清晰竖向线条，动作集中在上半身和手部，镜头距离拉开，避免把人物横向铺满。"
+    elif ratio == "16:9":
+        detail = "宽屏横图优先选择床、沙发、车厢、桌边等横向场景动作，人物可侧躺、斜靠、坐在画面一侧或沿对角线展开，利用左右背景空间，双手动作分开且不重叠，避免直挺全身站姿挤在中央。"
+    elif ratio in {"3:2", "4:3"} or orientation == "landscape":
+        detail = "横图优先选择坐姿、斜靠、侧卧、趴伏在床边或桌边等横向动作，让身体与场景形成稳定对角线，背景物件分布在左右两侧，头部和手部都清楚可见，避免过窄的竖直站姿。"
+    elif ratio == "1:1" or orientation == "square":
+        detail = "正方形构图优先选择居中半身、跪坐、坐在床边或椅边的稳定姿态，头部、肩部、手部和主要服装状态集中在画面中心，左右留白均衡，避免过长全身动作和过宽横躺动作。"
+    else:
+        detail = "根据画面比例选择合理姿势：竖图用纵向站姿或坐姿，横图用横向场景动作或对角线姿态，正方形用居中稳定半身姿态。"
+
+    return (
+        f"画面比例构图规则：当前比例 {ratio or '未指定'}，分辨率 {width or '-'} x {height or '-'}。"
+        f"{detail}提示词必须让人物姿势、手部动作、身体朝向、镜头距离和场景空间与该比例匹配，保证头部完整入镜、身体结构自然、肢体不交叠。"
+    )
+
+
 def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, Any]) -> str:
     request_text = _sanitize_tg_image_person_fields(original_request)
     expression_state = _extract_tg_expression_state(original_request)
+    aspect_pose_guidance = _tg_image_aspect_ratio_pose_guidance(payload)
     ratio = str(payload.get("aspect_ratio") or payload.get("image_aspect_ratio") or "").strip()
     resolution = str(payload.get("base_resolution") or payload.get("resolution") or "").strip()
     parts = [
         "\u771f\u5b9e\u624b\u673a\u968f\u624b\u62cd\u7167\u7247\uff0c\u5fe0\u5b9e\u5339\u914d\u7528\u6237\u6307\u5b9a\u4e3b\u4f53\uff0c\u5355\u5e27\u9759\u6001\u753b\u9762",
         "\u8eab\u4f53\u671d\u5411\u6e05\u695a\uff0c\u624b\u90e8\u4f4d\u7f6e\u660e\u786e\uff0c\u8863\u7269\u72b6\u6001\u5177\u4f53\uff0c\u955c\u5934\u8ddd\u79bb\u62c9\u5f00\uff0c\u534a\u8eab\u6216\u5168\u8eab\u6784\u56fe\uff0c\u8138\u90e8\u6e05\u6670\u53ef\u89c1",
+        aspect_pose_guidance,
         "\u670d\u88c5\u7ed3\u6784\u81ea\u7136\u5b8c\u6574\uff0c\u5e03\u6599\u987a\u7740\u8eab\u4f53\u66f2\u7ebf\u548c\u52a8\u4f5c\u5f62\u6210\u771f\u5b9e\u8936\u76b1\uff0c\u573a\u666f\u5149\u7ebf\u8d34\u8fd1\u771f\u5b9e\u751f\u6d3b\u7167",
         "\u4fdd\u7559\u7528\u6237\u8981\u6c42\u7684\u670d\u88c5\u3001\u573a\u666f\u548c\u9053\u5177\uff0c\u5199\u6e05\u80cc\u666f\u7269\u4ef6\u3001\u81ea\u7136\u5149\u65b9\u5411\u3001\u6d45\u666f\u6df1\u3001\u76ae\u80a4\u4e0e\u5e03\u6599\u8d28\u611f\uff0c\u4e0d\u8981\u6587\u5b57\uff0c\u4e0d\u8981\u6c34\u5370",
     ]
@@ -7235,11 +7276,31 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     }
     system_prompt, prompt_chain = _build_tg_prompt_system_prompt(typ, task_labels.get(typ, typ))
     persona_face_brief = _tg_image_persona_face_brief(enhanced) if prompt_chain == "image" else ""
+    aspect_pose_guidance = _tg_image_aspect_ratio_pose_guidance(enhanced) if prompt_chain == "image" else ""
+    if aspect_pose_guidance:
+        system_prompt = "\n".join(
+            [
+                system_prompt,
+                "MANDATORY ASPECT-RATIO COMPOSITION MATCHING:",
+                aspect_pose_guidance,
+                "Before writing the final prompt, choose a pose and action that naturally fits the selected aspect ratio. Do not reuse a generic pose when the ratio would make it cramped, cropped, or visually unstable.",
+            ]
+        )
     llm_user_input = user_request
+    if aspect_pose_guidance:
+        llm_user_input = "\n".join(
+            [
+                f"User original request: {user_request}",
+                f"Aspect-ratio composition requirement: {aspect_pose_guidance}",
+                "Use the aspect ratio to choose a reasonable pose, action, body orientation, hand placement, and camera distance for a high-quality person image.",
+                "Output only the final Chinese image prompt body.",
+            ]
+        )
     if persona_face_brief:
         llm_user_input = (
             f"User original request: {user_request}\n"
-            f"Persona/LoRA constraint: {persona_face_brief}\n"
+            + (f"Aspect-ratio composition requirement: {aspect_pose_guidance}\n" if aspect_pose_guidance else "")
+            + f"Persona/LoRA constraint: {persona_face_brief}\n"
             "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names."
         )
     image_hint_paths: list[str] = []

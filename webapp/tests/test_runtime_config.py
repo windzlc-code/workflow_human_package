@@ -614,6 +614,28 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertTrue(server._should_reject_generated_person_image(report))
 
+    def test_text_to_image_aspect_ratio_pose_guidance_matches_orientation(self):
+        portrait = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "9:16", "width": 576, "height": 1024})
+        landscape = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "16:9", "width": 1024, "height": 576})
+        square = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "1:1", "width": 768, "height": 768})
+
+        self.assertIn("手机长竖图", portrait)
+        self.assertIn("站立", portrait)
+        self.assertIn("宽屏横图", landscape)
+        self.assertIn("横向场景动作", landscape)
+        self.assertIn("正方形构图", square)
+        self.assertIn("居中半身", square)
+
+    def test_tg_image_fallback_prompt_includes_aspect_ratio_pose_guidance(self):
+        prompt = server._build_tg_image_fallback_prompt(
+            "人物在室内拍照",
+            {"aspect_ratio": "16:9", "width": 1024, "height": 576},
+        )
+
+        self.assertIn("宽屏横图", prompt)
+        self.assertIn("横向场景动作", prompt)
+        self.assertIn("头部完整入镜", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
