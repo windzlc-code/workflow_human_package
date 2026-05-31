@@ -436,8 +436,33 @@ def _text_to_image_remote_node_inputs(params: dict[str, Any]) -> dict[str, Any]:
     return node_inputs
 
 
-def _new_text_to_image_seed() -> int:
-    return secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
+def _new_text_to_image_seed(excluded: set[int] | None = None) -> int:
+    excluded = excluded or set()
+    for _ in range(32):
+        seed = secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
+        if seed not in excluded:
+            return seed
+    seed = secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
+    while seed in excluded:
+        seed = 1 if seed >= TEXT_TO_IMAGE_MAX_SEED else seed + 1
+    return seed
+
+
+def _collect_text_to_image_seed_fields(value: Any) -> set[int]:
+    seeds: set[int] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in {"seed", "noise_seed"}:
+                try:
+                    seeds.add(int(item))
+                except Exception:
+                    pass
+            else:
+                seeds.update(_collect_text_to_image_seed_fields(item))
+    elif isinstance(value, list):
+        for item in value:
+            seeds.update(_collect_text_to_image_seed_fields(item))
+    return seeds
 
 
 def _replace_text_to_image_seed_fields(value: Any, seed: int) -> None:
@@ -473,7 +498,12 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
     else:
         node_inputs = copy.deepcopy(node_inputs)
 
-    seed = _new_text_to_image_seed()
+    excluded_seeds = _collect_text_to_image_seed_fields(node_inputs)
+    try:
+        excluded_seeds.add(int(payload.get("seed")))
+    except Exception:
+        pass
+    seed = _new_text_to_image_seed(excluded_seeds)
     _replace_text_to_image_seed_fields(node_inputs, seed)
     payload.update(
         {
