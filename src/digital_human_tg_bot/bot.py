@@ -1657,6 +1657,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "safety_filter": False,
             "seed": "1024",
             "negative_prompt": "",
+            "resolution_selected": False,
+            "duration_selected": False,
+            "prompt_mode_selected": False,
+            "prompt_extend_selected": False,
+            "prompt_mode_label": "",
         }
 
     async def _video_i2v_runtime_defaults() -> dict[str, Any]:
@@ -1681,22 +1686,28 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params["use_grok"] = bool(params.get("use_grok"))
         params["prompt_extend"] = bool(params.get("prompt_extend"))
         params["safety_filter"] = False
+        params["resolution_selected"] = bool(params.get("resolution_selected"))
+        params["duration_selected"] = bool(params.get("duration_selected"))
+        params["prompt_mode_selected"] = bool(params.get("prompt_mode_selected"))
+        params["prompt_extend_selected"] = bool(params.get("prompt_extend_selected"))
+        params["prompt_mode_label"] = str(params.get("prompt_mode_label") or "").strip()
         seed_text = str(params.get("seed") or "1024").strip()
         params["seed"] = seed_text if seed_text.isdigit() else "1024"
         params["negative_prompt"] = str(params.get("negative_prompt") or "").strip()
         return params
 
     def _video_i2v_status_text(*, step: str, params: dict[str, Any]) -> str:
-        return "\n".join(
-            [
-                "\u89c6\u9891\u751f\u6210\u8bbe\u7f6e",
-                f"\u5f53\u524d\u6b65\u9aa4\uff1a{step}",
-                f"\u5206\u8fa8\u7387\uff1a{params['resolution']}",
-                f"\u65f6\u957f\uff1a{params['duration']}\u79d2",
-                f"\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{'Grok \u751f\u6210' if params['use_grok'] else '\u81ea\u5b9a\u4e49\u63d0\u4ea4'}",
-                f"\u63a5\u53e3\u6269\u5199\uff1a{'\u5f00\u542f' if params['prompt_extend'] else '\u5173\u95ed'}",
-            ]
-        )
+        lines = ["\u89c6\u9891\u751f\u6210\u8bbe\u7f6e", f"\u5f53\u524d\u6b65\u9aa4\uff1a{step}"]
+        if params.get("resolution_selected"):
+            lines.append(f"\u5206\u8fa8\u7387\uff1a{params['resolution']}")
+        if params.get("duration_selected"):
+            lines.append(f"\u65f6\u957f\uff1a{params['duration']}\u79d2")
+        if params.get("prompt_mode_selected"):
+            label = str(params.get("prompt_mode_label") or "").strip()
+            lines.append(f"\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{label or ('Grok \u751f\u6210' if params['use_grok'] else '\u81ea\u5b9a\u4e49\u63d0\u4ea4')}")
+        if params.get("prompt_extend_selected"):
+            lines.append(f"\u63a5\u53e3\u6269\u5199\uff1a{'\u5f00\u542f' if params['prompt_extend'] else '\u5173\u95ed'}")
+        return "\n".join(lines)
 
     def _video_i2v_step_keyboard(step: str, params: dict[str, Any]) -> InlineKeyboardMarkup:
         if step == "resolution":
@@ -1706,12 +1717,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         InlineKeyboardButton(text=f"{'\u2713 ' if params['resolution'] == '720p' else ''}720p\uff08\u6700\u5c0f\u8d44\u6e90\uff09", callback_data="video_i2v:resolution:720p"),
                         InlineKeyboardButton(text=f"{'\u2713 ' if params['resolution'] == '1080p' else ''}1080p", callback_data="video_i2v:resolution:1080p"),
                     ],
+                    [InlineKeyboardButton(text="\u4e0b\u4e00\u6b65\uff1a\u8f93\u5165\u89c6\u9891\u65f6\u957f", callback_data="video_i2v:next:duration")],
                     [InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
                 ]
             )
         if step == "duration":
             return InlineKeyboardMarkup(
                 inline_keyboard=[
+                    [InlineKeyboardButton(text="\u4e0b\u4e00\u6b65\uff1a\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f", callback_data="video_i2v:next:prompt_mode")],
                     [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:resolution")],
                     [InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
                 ]
@@ -1719,8 +1732,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if step == "prompt_mode":
             return InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd", callback_data="video_i2v:prompt_mode:grok")],
-                    [InlineKeyboardButton(text="\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4", callback_data="video_i2v:prompt_mode:custom")],
+                    [InlineKeyboardButton(text=f"{'\u2713 ' if params['use_grok'] else ''}\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd", callback_data="video_i2v:prompt_mode:grok")],
+                    [InlineKeyboardButton(text=f"{'\u2713 ' if not params['use_grok'] else ''}\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4", callback_data="video_i2v:prompt_mode:custom")],
+                    [InlineKeyboardButton(text="\u4e0b\u4e00\u6b65\uff1a\u9009\u62e9\u63a5\u53e3\u6269\u5199", callback_data="video_i2v:next:prompt_extend")],
                     [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:duration"), InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
                 ]
             )
@@ -1731,6 +1745,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         InlineKeyboardButton(text=f"{'\u2713 ' if params['prompt_extend'] else ''}\u5f00\u542f\u63a5\u53e3\u6269\u5199", callback_data="video_i2v:extend:on"),
                         InlineKeyboardButton(text=f"{'\u2713 ' if not params['prompt_extend'] else ''}\u5173\u95ed", callback_data="video_i2v:extend:off"),
                     ],
+                    [InlineKeyboardButton(text="\u4e0b\u4e00\u6b65\uff1a\u4e0a\u4f20\u53c2\u8003\u56fe", callback_data="video_i2v:next:image")],
                     [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:prompt_mode"), InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
                 ]
             )
@@ -1905,37 +1920,86 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await callback.answer()
             return
         if action == "video_i2v:back:resolution":
+            params.update(
+                {
+                    "resolution_selected": False,
+                    "duration_selected": False,
+                    "prompt_mode_selected": False,
+                    "prompt_extend_selected": False,
+                }
+            )
+            await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="resolution")
             await callback.answer()
             return
         if action == "video_i2v:back:duration":
+            params.update({"duration_selected": False, "prompt_mode_selected": False, "prompt_extend_selected": False})
+            await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="duration")
             await callback.answer()
             return
         if action == "video_i2v:back:prompt_mode":
+            params.update({"prompt_mode_selected": False, "prompt_extend_selected": False})
+            await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
             await callback.answer()
             return
         if action == "video_i2v:back:extend":
+            params.update({"prompt_extend_selected": False})
+            await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await callback.answer()
+            return
+        if action == "video_i2v:next:duration":
+            params["resolution_selected"] = True
+            await state.update_data(**params)
+            await _show_video_i2v_step_from_callback(callback, state, step="duration")
+            await callback.answer()
+            return
+        if action == "video_i2v:next:prompt_mode":
+            if not params.get("duration_selected"):
+                await callback.answer("\u8bf7\u5148\u8f93\u5165\u89c6\u9891\u65f6\u957f", show_alert=True)
+                return
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
+            await callback.answer()
+            return
+        if action == "video_i2v:next:prompt_extend":
+            if not params.get("prompt_mode_selected"):
+                params["prompt_mode_selected"] = True
+                params["prompt_mode_label"] = "Grok \u751f\u6210" if params.get("use_grok") else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
+                await state.update_data(**params)
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await callback.answer()
+            return
+        if action == "video_i2v:next:image":
+            if not params.get("prompt_extend_selected"):
+                params["prompt_extend_selected"] = True
+                await state.update_data(**params)
+            await _show_video_i2v_step_from_callback(callback, state, step="image")
             await callback.answer()
             return
         if action.startswith("video_i2v:resolution:"):
             params["resolution"] = action.rsplit(":", 1)[-1]
+            params["resolution_selected"] = True
+            params.update({"duration_selected": False, "prompt_mode_selected": False, "prompt_extend_selected": False})
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="duration")
+            await _show_video_i2v_step_from_callback(callback, state, step="resolution")
             await callback.answer("\u5df2\u9009\u62e9\u5206\u8fa8\u7387")
             return
         if action.startswith("video_i2v:prompt_mode:"):
             params["use_grok"] = action.endswith(":grok")
+            params["prompt_mode_selected"] = True
+            params["prompt_mode_label"] = "Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
+            params["prompt_extend_selected"] = False
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
             await callback.answer("\u5df2\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f")
             return
         if action.startswith("video_i2v:extend:"):
             params["prompt_extend"] = action.endswith(":on")
+            params["prompt_extend_selected"] = True
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="image")
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
             await callback.answer("\u5df2\u9009\u62e9\u63a5\u53e3\u6269\u5199")
             return
         await callback.answer()
@@ -3350,7 +3414,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await message.answer("时长范围是 2 到 15 秒，请重新输入。")
                 await _show_video_i2v_step(message, state, step="duration")
                 return
-            await state.update_data(duration=duration)
+            await state.update_data(duration=duration, duration_selected=True, prompt_mode_selected=False, prompt_extend_selected=False)
             await _show_video_i2v_step(message, state, step="prompt_mode")
             return
         step = "resolution"
