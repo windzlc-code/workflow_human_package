@@ -3802,6 +3802,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         str(task_type or "").strip() == "text_to_image"
         and _to_bool(payload.get("text_to_image_auto_qa_enabled"), True)
     )
+    image_task_requires_output = str(task_type or "").strip() in {"text_to_image", "image_generate"}
     max_attempts = min(max(_to_int(payload.get("text_to_image_auto_qa_max_attempts"), 3), 1), 6) if auto_qa_enabled else 1
     qa_reports: list[dict[str, Any]] = []
     used_seeds = _collect_seed_values(base_node_inputs)
@@ -3843,7 +3844,26 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
             raise RuntimeError(str(result.get("message") or f"{source_label} 工作流执行失败"))
         output_path = _first_remote_comfy_output_path(result)
         selected_seed = attempt_seed
-        if not auto_qa_enabled or not output_path or Path(output_path).suffix.lower() not in IMAGE_EXTS:
+        if image_task_requires_output and not output_path:
+            last_qa_reason = f"{source_label} 工作流完成但未返回可下载图片"
+            _emit_stage(
+                payload,
+                stage="remote_comfy",
+                status="warn",
+                message=last_qa_reason,
+                data={
+                    "qa_attempt": attempt,
+                    "prompt_id": str(result.get("prompt_id") or "").strip(),
+                    "outputs_count": len(result.get("outputs") if isinstance(result.get("outputs"), list) else []),
+                    "local_outputs_count": len(result.get("local_outputs") if isinstance(result.get("local_outputs"), list) else []),
+                },
+            )
+            if auto_qa_enabled and attempt < max_attempts:
+                continue
+            raise RuntimeError(last_qa_reason)
+        if image_task_requires_output and Path(output_path).suffix.lower() not in IMAGE_EXTS:
+            raise RuntimeError(f"{source_label} 工作流返回的结果不是图片文件：{output_path}")
+        if not auto_qa_enabled or Path(output_path).suffix.lower() not in IMAGE_EXTS:
             break
         qa_report = _analyze_generated_person_image_quality(
             image_path=output_path,
