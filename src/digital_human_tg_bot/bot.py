@@ -172,6 +172,10 @@ class ProductionWorkflowForm(StatesGroup):
     image_waiting_for_product_image = State()
     image_waiting_for_model_image = State()
     image_waiting_for_prompt = State()
+    video_i2v_waiting_for_resolution = State()
+    video_i2v_waiting_for_duration = State()
+    video_i2v_waiting_for_prompt_mode = State()
+    video_i2v_waiting_for_prompt_extend = State()
     video_i2v_waiting_for_image = State()
     video_i2v_waiting_for_prompt = State()
     replace_model_waiting_for_video = State()
@@ -1645,132 +1649,188 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         )
 
     def _video_i2v_defaults() -> dict[str, Any]:
-        return {"resolution": "720p", "duration": 2, "use_grok": True, "prompt_extend": False}
+        return {
+            "resolution": "720p",
+            "duration": 2,
+            "use_grok": True,
+            "prompt_extend": False,
+            "safety_filter": False,
+            "seed": "1024",
+            "negative_prompt": "",
+        }
 
-    def _video_i2v_status_text(*, step: str, resolution: str, duration: int, use_grok: bool, prompt_extend: bool) -> str:
-        return "\n".join(
-            [
-                "图生视频设置",
-                f"当前步骤：{step}",
-                f"分辨率：{resolution}",
-                f"时长：{duration}秒",
-                f"Grok提示词：{'开启，会识别参考图并用中文改写最终提示词' if use_grok else '关闭'}",
-                f"接口扩写：{'开启' if prompt_extend else '关闭'}",
-            ]
-        )
+    async def _video_i2v_runtime_defaults() -> dict[str, Any]:
+        defaults = _video_i2v_defaults()
+        try:
+            runtime = await asyncio.to_thread(_fetch_webapp_runtime_config)
+        except Exception:
+            runtime = {}
+        defaults["negative_prompt"] = str(
+            runtime.get("mulerouter_wan_i2v_negative_prompt")
+            or "low quality, blurry, distorted, watermark, text, logo"
+        ).strip()
+        seed_value = str(runtime.get("mulerouter_wan_i2v_seed") or defaults["seed"]).strip()
+        defaults["seed"] = seed_value if seed_value.isdigit() else "1024"
+        return defaults
 
     def _video_i2v_state_params(data: dict[str, Any]) -> dict[str, Any]:
         params = _video_i2v_defaults()
         params.update({k: data.get(k) for k in params.keys() if k in data})
         params["resolution"] = "1080p" if str(params.get("resolution") or "").strip() == "1080p" else "720p"
-        params["duration"] = int(params.get("duration") or 2)
-        if params["duration"] not in {2, 5, 8, 15}:
-            params["duration"] = 2
+        params["duration"] = min(max(int(params.get("duration") or 2), 2), 15)
         params["use_grok"] = bool(params.get("use_grok"))
         params["prompt_extend"] = bool(params.get("prompt_extend"))
+        params["safety_filter"] = False
+        seed_text = str(params.get("seed") or "1024").strip()
+        params["seed"] = seed_text if seed_text.isdigit() else "1024"
+        params["negative_prompt"] = str(params.get("negative_prompt") or "").strip()
         return params
 
-    async def _video_i2v_step_text(state: FSMContext, *, fallback: str = "1/2 调整参数，然后上传参考图") -> str:
-        current_state = await state.get_state()
-        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt.state:
-            return "2/2 已收到参考图，请输入视频需求"
-        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_image.state:
-            return "1/2 调整参数，然后上传参考图"
-        return fallback
+    def _video_i2v_status_text(*, step: str, params: dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                "\u89c6\u9891\u751f\u6210\u8bbe\u7f6e",
+                f"\u5f53\u524d\u6b65\u9aa4\uff1a{step}",
+                f"\u5206\u8fa8\u7387\uff1a{params['resolution']}",
+                f"\u65f6\u957f\uff1a{params['duration']}\u79d2",
+                f"\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{'Grok \u751f\u6210' if params['use_grok'] else '\u81ea\u5b9a\u4e49\u63d0\u4ea4'}",
+                f"\u63a5\u53e3\u6269\u5199\uff1a{'\u5f00\u542f' if params['prompt_extend'] else '\u5173\u95ed'}",
+            ]
+        )
 
-    async def _try_delete_message(message: Message) -> None:
-        try:
-            await message.delete()
-        except Exception:
-            pass
+    def _video_i2v_step_keyboard(step: str, params: dict[str, Any]) -> InlineKeyboardMarkup:
+        if step == "resolution":
+            return InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text=f"{'\u2713 ' if params['resolution'] == '720p' else ''}720p\uff08\u6700\u5c0f\u8d44\u6e90\uff09", callback_data="video_i2v:resolution:720p"),
+                        InlineKeyboardButton(text=f"{'\u2713 ' if params['resolution'] == '1080p' else ''}1080p", callback_data="video_i2v:resolution:1080p"),
+                    ],
+                    [InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
+                ]
+            )
+        if step == "duration":
+            return InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:resolution")],
+                    [InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
+                ]
+            )
+        if step == "prompt_mode":
+            return InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd", callback_data="video_i2v:prompt_mode:grok")],
+                    [InlineKeyboardButton(text="\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4", callback_data="video_i2v:prompt_mode:custom")],
+                    [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:duration"), InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
+                ]
+            )
+        if step == "prompt_extend":
+            return InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text=f"{'\u2713 ' if params['prompt_extend'] else ''}\u5f00\u542f\u63a5\u53e3\u6269\u5199", callback_data="video_i2v:extend:on"),
+                        InlineKeyboardButton(text=f"{'\u2713 ' if not params['prompt_extend'] else ''}\u5173\u95ed", callback_data="video_i2v:extend:off"),
+                    ],
+                    [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:prompt_mode"), InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
+                ]
+            )
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:extend")],
+                [InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
+            ]
+        )
 
-    async def _remove_reply_keyboard(message: Message, *, text: str = "请使用上方按钮调整参数。") -> None:
-        try:
-            sent = await message.answer(text, reply_markup=ReplyKeyboardRemove())
-            await sent.delete()
-        except Exception:
-            pass
-
-    async def _edit_video_i2v_control_message(message: Message, state: FSMContext, *, step: str) -> None:
+    async def _show_video_i2v_step(message: Message, state: FSMContext, *, step: str) -> None:
         data = await state.get_data()
         params = _video_i2v_state_params(data)
-        text = _video_i2v_status_text(step=step, **params)
-        markup = _video_i2v_inline_keyboard(**params)
+        state_map = {
+            "resolution": ProductionWorkflowForm.video_i2v_waiting_for_resolution,
+            "duration": ProductionWorkflowForm.video_i2v_waiting_for_duration,
+            "prompt_mode": ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode,
+            "prompt_extend": ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend,
+            "image": ProductionWorkflowForm.video_i2v_waiting_for_image,
+            "prompt": ProductionWorkflowForm.video_i2v_waiting_for_prompt,
+        }
+        await state.set_state(state_map.get(step, ProductionWorkflowForm.video_i2v_waiting_for_resolution))
+        labels = {
+            "resolution": "1/5 \u9009\u62e9\u5206\u8fa8\u7387",
+            "duration": "2/5 \u8f93\u5165\u89c6\u9891\u65f6\u957f",
+            "prompt_mode": "3/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
+            "prompt_extend": "4/5 \u9009\u62e9 MuleRouter \u63a5\u53e3\u6269\u5199",
+            "image": "5/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
+            "prompt": "\u5df2\u6536\u5230\u53c2\u8003\u56fe\uff0c\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42",
+        }
+        text = _video_i2v_status_text(step=labels.get(step, step), params=params)
+        if step == "duration":
+            text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
+        elif step == "image":
+            text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u53ef\u4ee5\u5728\u56fe\u7247\u8bf4\u660e\u91cc\u586b\u5199\u89c6\u9891\u9700\u6c42\uff0c\u7cfb\u7edf\u4f1a\u7acb\u5373\u63d0\u4ea4\u3002"
+        elif step == "prompt":
+            text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u8fd9\u6b21\u56fe\u751f\u89c6\u9891\u7684\u753b\u9762\u548c\u52a8\u4f5c\u9700\u6c42\u3002"
+        markup = _video_i2v_step_keyboard(step, params)
         control_message_id = int(data.get("control_message_id") or 0)
         if control_message_id:
             try:
-                await message.bot.edit_message_text(
-                    chat_id=int(message.chat.id),
-                    message_id=control_message_id,
-                    text=text,
-                    reply_markup=markup,
-                )
+                await message.bot.edit_message_text(chat_id=int(message.chat.id), message_id=control_message_id, text=text, reply_markup=markup)
                 return
             except Exception:
                 pass
         sent = await message.answer(text, reply_markup=markup)
         await state.update_data(control_message_id=int(sent.message_id))
 
-    async def _edit_video_i2v_control_from_callback(callback: CallbackQuery, state: FSMContext, *, step: str) -> None:
+    async def _show_video_i2v_step_from_callback(callback: CallbackQuery, state: FSMContext, *, step: str) -> None:
+        if callback.message is None:
+            return
         data = await state.get_data()
         params = _video_i2v_state_params(data)
-        text = _video_i2v_status_text(step=step, **params)
-        markup = _video_i2v_inline_keyboard(**params)
-        if callback.message:
-            try:
-                await callback.message.edit_text(text, reply_markup=markup)
-                await state.update_data(control_message_id=int(callback.message.message_id))
-                return
-            except Exception:
-                pass
+        state_map = {
+            "resolution": ProductionWorkflowForm.video_i2v_waiting_for_resolution,
+            "duration": ProductionWorkflowForm.video_i2v_waiting_for_duration,
+            "prompt_mode": ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode,
+            "prompt_extend": ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend,
+            "image": ProductionWorkflowForm.video_i2v_waiting_for_image,
+        }
+        await state.set_state(state_map.get(step, ProductionWorkflowForm.video_i2v_waiting_for_resolution))
+        labels = {
+            "resolution": "1/5 \u9009\u62e9\u5206\u8fa8\u7387",
+            "duration": "2/5 \u8f93\u5165\u89c6\u9891\u65f6\u957f",
+            "prompt_mode": "3/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
+            "prompt_extend": "4/5 \u9009\u62e9 MuleRouter \u63a5\u53e3\u6269\u5199",
+            "image": "5/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
+        }
+        text = _video_i2v_status_text(step=labels.get(step, step), params=params)
+        if step == "duration":
+            text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
+        elif step == "image":
+            text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u53ef\u4ee5\u5728\u56fe\u7247\u8bf4\u660e\u91cc\u586b\u5199\u89c6\u9891\u9700\u6c42\uff0c\u7cfb\u7edf\u4f1a\u7acb\u5373\u63d0\u4ea4\u3002"
+        try:
+            await callback.message.edit_text(text, reply_markup=_video_i2v_step_keyboard(step, params))
+            await state.update_data(control_message_id=int(callback.message.message_id))
+        except Exception:
+            await _show_video_i2v_step(callback.message, state, step=step)
 
-    async def _answer_video_i2v_prompt(message: Message, state: FSMContext, *, text: str) -> None:
-        await _edit_video_i2v_control_message(message, state, step=text)
-
-    async def _handle_video_i2v_param_button(message: Message, state: FSMContext) -> bool:
-        text = _message_text(message)
-        if not text:
-            return False
-        data = await state.get_data()
-        params = _video_i2v_state_params(data)
-        changed = False
-        if text.startswith(VIDEO_I2V_RES_PREFIX):
-            params["resolution"] = "1080p" if str(params["resolution"]) == "720p" else "720p"
-            changed = True
-        elif text.startswith(VIDEO_I2V_DURATION_PREFIX):
-            order = [2, 5, 8, 15]
-            current = int(params.get("duration") or 2)
-            params["duration"] = order[(order.index(current) + 1) % len(order)] if current in order else 2
-            changed = True
-        elif text in {VIDEO_I2V_GROK_ON, VIDEO_I2V_GROK_OFF}:
-            params["use_grok"] = not bool(params["use_grok"])
-            changed = True
-        elif text in {VIDEO_I2V_EXTEND_ON, VIDEO_I2V_EXTEND_OFF}:
-            params["prompt_extend"] = not bool(params["prompt_extend"])
-            changed = True
-        if not changed:
-            return False
-        await state.update_data(**params)
-        await _edit_video_i2v_control_message(message, state, step=await _video_i2v_step_text(state))
-        await _try_delete_message(message)
-        return True
+    async def _remove_reply_keyboard(message: Message, *, text: str = "\u8bf7\u4f7f\u7528\u4e0a\u65b9\u6309\u94ae\u7ee7\u7eed\u3002") -> None:
+        try:
+            sent = await message.answer(text, reply_markup=ReplyKeyboardRemove())
+            await sent.delete()
+        except Exception:
+            pass
 
     async def start_video_i2v_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
-        await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_image)
-        await state.update_data(**_video_i2v_defaults())
-        await _remove_reply_keyboard(message, text="请使用上方按钮调整图生视频参数。")
-        await _edit_video_i2v_control_message(message, state, step="1/2 调整参数，然后上传参考图")
+        defaults = await _video_i2v_runtime_defaults()
+        await state.update_data(**defaults)
+        await _remove_reply_keyboard(message, text="\u8bf7\u6309\u6b65\u9aa4\u9009\u62e9\u89c6\u9891\u751f\u6210\u53c2\u6570\u3002")
+        await _show_video_i2v_step(message, state, step="resolution")
 
     async def _submit_video_i2v_from_state(message: Message, state: FSMContext, prompt: str) -> None:
         data = await state.get_data()
         image_path = str(data.get("image_local_path") or "").strip()
         if not image_path:
-            await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_image)
-            await _answer_video_i2v_prompt(message, state, text="缺少参考图，请先上传一张图片。")
+            await _show_video_i2v_step(message, state, step="image")
             return
-        params = _video_i2v_defaults()
-        params.update({k: data.get(k) for k in params.keys() if k in data})
+        params = _video_i2v_state_params(data)
         payload = {
             "image_local_path": image_path,
             "prompt": prompt,
@@ -1781,38 +1841,37 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "mulerouter_wan_i2v_resolution": str(params["resolution"]),
             "mulerouter_wan_i2v_duration": int(params["duration"]),
             "mulerouter_wan_i2v_prompt_extend": bool(params["prompt_extend"]),
+            "mulerouter_wan_i2v_safety_filter": False,
+            "mulerouter_wan_i2v_negative_prompt": str(params["negative_prompt"]),
+            "negative_prompt": str(params["negative_prompt"]),
+            "prompt_extend": bool(params["prompt_extend"]),
+            "safety_filter": False,
             "tg_use_llm_prompt": bool(params["use_grok"]),
             "tg_user_instruction": f"User image-to-video request: {prompt}",
         }
+        if str(params.get("seed") or "").isdigit():
+            payload["seed"] = int(str(params["seed"]))
+            payload["mulerouter_wan_i2v_seed"] = int(str(params["seed"]))
         await state.clear()
         try:
-            result = await _submit_internal_webapp_task(
-                chat_id=int(message.chat.id),
-                task_type="video_i2v",
-                params=payload,
-            )
+            result = await _submit_internal_webapp_task(chat_id=int(message.chat.id), task_type="video_i2v", params=payload)
             prompt_preview = str(result.get("prompt_preview") or "").strip()
             prompt_preview_display = ""
             if prompt_preview:
                 try:
-                    prompt_preview_display = await _display_internal_webapp_prompt(
-                        chat_id=int(message.chat.id),
-                        task_type="video_i2v",
-                        prompt_text=prompt_preview,
-                    )
+                    prompt_preview_display = await _display_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="video_i2v", prompt_text=prompt_preview)
                 except Exception as exc:
                     prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
                     if not _looks_like_clean_chinese_preview(prompt_preview_display):
                         prompt_preview_display = _format_prompt_display_fallback(exc)
             reply = "\n".join(
-                part
-                for part in [
-                    "图生视频任务已提交。",
-                    f"任务编号：{result.get('id')}",
-                    f"Grok最终提示词：{prompt_preview_display}" if prompt_preview_display else "",
-                    "生成完成后会自动把视频发回这里。",
-                ]
-                if part
+                part for part in [
+                    "\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u5df2\u63d0\u4ea4\u3002",
+                    f"\u4efb\u52a1\u7f16\u53f7\uff1a{result.get('id')}",
+                    f"\u5206\u8fa8\u7387\uff1a{params['resolution']}\uff0c\u65f6\u957f\uff1a{params['duration']}\u79d2\uff0c\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{'Grok \u751f\u6210' if params['use_grok'] else '\u81ea\u5b9a\u4e49\u63d0\u4ea4'}\uff0c\u63a5\u53e3\u6269\u5199\uff1a{'\u5f00' if params['prompt_extend'] else '\u5173'}",
+                    f"Grok\u6700\u7ec8\u63d0\u793a\u8bcd\uff1a{prompt_preview_display}" if prompt_preview_display else "",
+                    "\u751f\u6210\u5b8c\u6210\u540e\u4f1a\u81ea\u52a8\u628a\u89c6\u9891\u53d1\u56de\u8fd9\u91cc\u3002",
+                ] if part
             )
             control_message_id = int(data.get("control_message_id") or 0)
             if control_message_id:
@@ -1823,7 +1882,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     pass
             await message.answer(reply, reply_markup=_menu_keyboard())
         except Exception as exc:
-            await message.answer(f"图生视频任务提交失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u63d0\u4ea4\u5931\u8d25\uff1a{exc}", reply_markup=_menu_keyboard())
 
     @router.callback_query(F.data.startswith("video_i2v:"))
     async def on_video_i2v_callback(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1831,38 +1890,55 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await callback.answer()
             return
         if not _is_message_authorized(service, callback.message):
-            await callback.answer("当前账号未授权", show_alert=True)
+            await callback.answer("\u5f53\u524d\u8d26\u53f7\u672a\u6388\u6743", show_alert=True)
             return
-        data_value = str(callback.data or "")
-        current = await state.get_data()
-        params = _video_i2v_state_params(current)
-        if data_value.endswith(":main_menu"):
+        action = str(callback.data or "")
+        data = await state.get_data()
+        params = _video_i2v_state_params(data)
+        if action.endswith(":main_menu"):
             await state.clear()
             try:
-                await callback.message.edit_text("已返回主菜单。")
+                await callback.message.edit_text("\u5df2\u8fd4\u56de\u4e3b\u83dc\u5355\u3002")
             except Exception:
                 pass
-            await callback.message.answer("请选择任务类型。", reply_markup=_menu_keyboard())
+            await callback.message.answer("\u8bf7\u9009\u62e9\u4efb\u52a1\u7c7b\u578b\u3002", reply_markup=_menu_keyboard())
             await callback.answer()
             return
-        if data_value.endswith(":toggle_resolution"):
-            params["resolution"] = "1080p" if params["resolution"] == "720p" else "720p"
-        elif data_value.endswith(":cycle_duration"):
-            order = [2, 5, 8, 15]
-            params["duration"] = order[(order.index(int(params["duration"])) + 1) % len(order)]
-        elif data_value.endswith(":toggle_grok"):
-            params["use_grok"] = not bool(params["use_grok"])
-        elif data_value.endswith(":toggle_extend"):
-            params["prompt_extend"] = not bool(params["prompt_extend"])
-        elif data_value.endswith(":ready_image"):
-            await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_image)
-            await state.update_data(**params, control_message_id=int(callback.message.message_id))
-            await _edit_video_i2v_control_from_callback(callback, state, step="1/2 请上传参考图")
-            await callback.answer("请上传参考图")
+        if action == "video_i2v:back:resolution":
+            await _show_video_i2v_step_from_callback(callback, state, step="resolution")
+            await callback.answer()
             return
-        await state.update_data(**params, control_message_id=int(callback.message.message_id))
-        await _edit_video_i2v_control_from_callback(callback, state, step="1/2 调整参数，然后上传参考图")
-        await callback.answer("已更新")
+        if action == "video_i2v:back:duration":
+            await _show_video_i2v_step_from_callback(callback, state, step="duration")
+            await callback.answer()
+            return
+        if action == "video_i2v:back:prompt_mode":
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
+            await callback.answer()
+            return
+        if action == "video_i2v:back:extend":
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await callback.answer()
+            return
+        if action.startswith("video_i2v:resolution:"):
+            params["resolution"] = action.rsplit(":", 1)[-1]
+            await state.update_data(**params)
+            await _show_video_i2v_step_from_callback(callback, state, step="duration")
+            await callback.answer("\u5df2\u9009\u62e9\u5206\u8fa8\u7387")
+            return
+        if action.startswith("video_i2v:prompt_mode:"):
+            params["use_grok"] = action.endswith(":grok")
+            await state.update_data(**params)
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await callback.answer("\u5df2\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f")
+            return
+        if action.startswith("video_i2v:extend:"):
+            params["prompt_extend"] = action.endswith(":on")
+            await state.update_data(**params)
+            await _show_video_i2v_step_from_callback(callback, state, step="image")
+            await callback.answer("\u5df2\u9009\u62e9\u63a5\u53e3\u6269\u5199")
+            return
+        await callback.answer()
 
     async def start_replace_model_flow(message: Message, state: FSMContext) -> None:
         work_dir = service.create_job_dir(prefix="tg_replace_model")
@@ -3251,6 +3327,40 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         except Exception as exc:
             await message.answer(f"{title}任务提交失败：{exc}", reply_markup=_menu_keyboard())
 
+    @router.message(ProductionWorkflowForm.video_i2v_waiting_for_resolution)
+    @router.message(ProductionWorkflowForm.video_i2v_waiting_for_duration)
+    @router.message(ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode)
+    @router.message(ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend)
+    async def on_video_i2v_param_text(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        current_state = await state.get_state()
+        text = _message_text(message).strip()
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
+            if not text.isdigit():
+                await message.answer("请输入 2 到 15 秒之间的整数，例如：5。")
+                await _show_video_i2v_step(message, state, step="duration")
+                return
+            duration = int(text)
+            if duration < 2 or duration > 15:
+                await message.answer("时长范围是 2 到 15 秒，请重新输入。")
+                await _show_video_i2v_step(message, state, step="duration")
+                return
+            await state.update_data(duration=duration)
+            await _show_video_i2v_step(message, state, step="prompt_mode")
+            return
+        step = "resolution"
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode.state:
+            step = "prompt_mode"
+        elif current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend.state:
+            step = "prompt_extend"
+        await message.answer("请点击上方按钮选择当前参数。")
+        await _show_video_i2v_step(message, state, step=step)
+
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_image)
     async def on_video_i2v_image(message: Message, state: FSMContext) -> None:
         if await handle_entry_keyword(message, state):
@@ -3259,11 +3369,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
-        if await _handle_video_i2v_param_button(message, state):
-            return
         suffix = _image_ext_from_message(message)
         if suffix is None:
-            await _answer_video_i2v_prompt(message, state, text="请上传一张参考图片，或点击按钮调整参数。")
+            await message.answer("请上传一张参考图片。")
+            await _show_video_i2v_step(message, state, step="image")
             return
         data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
@@ -3275,7 +3384,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await _submit_video_i2v_from_state(message, state, caption)
             return
         await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
-        await _edit_video_i2v_control_message(message, state, step="2/2 已收到参考图，请输入视频需求")
+        await _show_video_i2v_step(message, state, step="prompt")
 
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
     async def on_video_i2v_prompt(message: Message, state: FSMContext) -> None:
@@ -3285,11 +3394,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
-        if await _handle_video_i2v_param_button(message, state):
-            return
         prompt = _message_text(message)
         if not prompt:
-            await _edit_video_i2v_control_message(message, state, step="2/2 请输入这次图生视频的画面和动作需求")
+            await _show_video_i2v_step(message, state, step="prompt")
             return
         await _submit_video_i2v_from_state(message, state, prompt)
 

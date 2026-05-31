@@ -1605,9 +1605,6 @@ function runtimeFormToPayload() {
     mulerouter_api_key: el("rtMuleRouterApiKey").value.trim(),
     mulerouter_base_url: el("rtMuleRouterBaseUrl").value.trim(),
     mulerouter_wan_i2v_endpoint: el("rtMuleRouterWanI2vEndpoint").value.trim(),
-    mulerouter_wan_i2v_resolution: el("rtMuleRouterWanI2vResolution").value,
-    mulerouter_wan_i2v_duration: Math.min(Math.max(Number(el("rtMuleRouterWanI2vDuration").value || 2), 2), 15),
-    mulerouter_wan_i2v_prompt_extend: el("rtMuleRouterWanI2vPromptExtend").value === "1",
     mulerouter_wan_i2v_negative_prompt: el("rtMuleRouterWanI2vNegativePrompt").value.trim(),
     create_video_app_id: "",
     create_audio_app_id: "",
@@ -1650,9 +1647,6 @@ function fillRuntimeForm(data) {
   el("rtMuleRouterApiKey").value = v.mulerouter_api_key || "";
   el("rtMuleRouterBaseUrl").value = v.mulerouter_base_url || "https://api.mulerouter.ai";
   el("rtMuleRouterWanI2vEndpoint").value = v.mulerouter_wan_i2v_endpoint || "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation";
-  el("rtMuleRouterWanI2vResolution").value = v.mulerouter_wan_i2v_resolution || "720p";
-  el("rtMuleRouterWanI2vDuration").value = v.mulerouter_wan_i2v_duration || 2;
-  el("rtMuleRouterWanI2vPromptExtend").value = v.mulerouter_wan_i2v_prompt_extend ? "1" : "0";
   el("rtMuleRouterWanI2vNegativePrompt").value = v.mulerouter_wan_i2v_negative_prompt || "low quality, blurry, distorted, watermark, text, logo";
   syncPriorityModelsFromCatalog("llm");
   const restoredModelDraft = mergeModelDraft();

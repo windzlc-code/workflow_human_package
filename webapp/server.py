@@ -2975,8 +2975,9 @@ def _run_mulerouter_wan_i2v(task_id: str, payload: dict[str, Any]) -> dict[str, 
         resolution = "720p"
     duration = min(max(_to_int(payload.get("mulerouter_wan_i2v_duration") or payload.get("duration_seconds"), 2), 2), 15)
     prompt_extend = _to_bool(payload.get("mulerouter_wan_i2v_prompt_extend", payload.get("prompt_extend")), False)
+    safety_filter = _to_bool(payload.get("mulerouter_wan_i2v_safety_filter", payload.get("safety_filter")), True)
     negative_prompt = str(payload.get("mulerouter_wan_i2v_negative_prompt") or payload.get("negative_prompt") or "").strip()
-    seed_raw = payload.get("seed")
+    seed_raw = payload.get("mulerouter_wan_i2v_seed", payload.get("seed"))
     seed = None if str(seed_raw or "").strip() in {"", "auto", "None", "null"} else min(max(_to_int(seed_raw, 0), 0), 2147483647)
     request_body: dict[str, Any] = {
         "prompt": prompt,
@@ -2985,6 +2986,7 @@ def _run_mulerouter_wan_i2v(task_id: str, payload: dict[str, Any]) -> dict[str, 
         "resolution": resolution,
         "duration": duration,
         "prompt_extend": prompt_extend,
+        "safety_filter": safety_filter,
         "seed": seed,
     }
     audio_url = str(payload.get("audio_url") or "").strip()
@@ -7991,6 +7993,11 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         resolution = str(payload.get("resolution") or payload.get("mulerouter_wan_i2v_resolution") or "720p").strip()
         payload["mulerouter_wan_i2v_resolution"] = resolution if resolution in {"720p", "1080p"} else "720p"
         payload["mulerouter_wan_i2v_prompt_extend"] = _to_bool(payload.get("mulerouter_wan_i2v_prompt_extend", payload.get("prompt_extend")), False)
+        payload["mulerouter_wan_i2v_safety_filter"] = _to_bool(payload.get("mulerouter_wan_i2v_safety_filter", payload.get("safety_filter")), True)
+        payload["mulerouter_wan_i2v_negative_prompt"] = str(payload.get("mulerouter_wan_i2v_negative_prompt") or payload.get("negative_prompt") or "").strip()
+        seed_raw = payload.get("mulerouter_wan_i2v_seed", payload.get("seed"))
+        if str(seed_raw or "").strip().isdigit():
+            payload["mulerouter_wan_i2v_seed"] = min(max(_to_int(seed_raw, 0), 0), 2147483647)
         payload = _enhance_tg_payload_with_llm_prompt(typ, payload)
         return payload
 
