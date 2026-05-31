@@ -589,6 +589,11 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(output["image_qa"]["attempts"], 2)
         self.assertIn("已筛选 1 轮候选图", server._text_to_image_qa_notice(output))
 
+    def test_text_to_image_auto_qa_unavailable_is_blocking(self):
+        report = {"inspected": False, "passed": False, "qa_unavailable": True}
+
+        self.assertTrue(server._should_reject_generated_person_image(report))
+
 
 if __name__ == "__main__":
     unittest.main()

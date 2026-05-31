@@ -3692,15 +3692,20 @@ def _analyze_generated_person_image_quality(
     except Exception as exc:
         return {
             "inspected": False,
-            "passed": True,
-            "summary": "图像自动 QA 暂不可用，已放行当前结果。",
+            "passed": False,
+            "qa_unavailable": True,
+            "summary": "图像自动 QA 暂不可用，未放行当前结果。",
             "error": str(exc),
         }
 
 
 def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool:
-    if not isinstance(report, dict) or not _to_bool(report.get("inspected"), False):
+    if not isinstance(report, dict):
         return False
+    if report.get("passed") is False:
+        return True
+    if not _to_bool(report.get("inspected"), False):
+        return _to_bool(report.get("qa_unavailable"), False)
     if _to_bool(report.get("limb_or_body_broken"), False):
         return True
     if _to_bool(report.get("prompt_mismatch_visible"), False):
