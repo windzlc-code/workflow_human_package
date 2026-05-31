@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,7 @@ ZIP_EXTS = {".zip"}
 AUTO_DURATION_TEXTS = {"跳过", "自动", "auto", "AUTO"}
 TG_PROMPT_PREVIEW_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_PREVIEW_TIMEOUT_SECONDS") or "240")
 TG_PROMPT_DISPLAY_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_DISPLAY_TIMEOUT_SECONDS") or "45")
+TEXT_TO_IMAGE_MAX_SEED = 2147483647
 
 DIGITAL_HUMAN_VIDEO_BUTTON = "数字人视频生成"
 DIGITAL_HUMAN_REALISTIC_BUTTON = "写实带货视频"
@@ -422,6 +425,65 @@ def _text_to_image_remote_node_inputs(params: dict[str, Any]) -> dict[str, Any]:
             )
         )
     return node_inputs
+
+
+def _new_text_to_image_seed() -> int:
+    return secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
+
+
+def _replace_text_to_image_seed_fields(value: Any, seed: int) -> None:
+    if isinstance(value, dict):
+        for key, item in list(value.items()):
+            if str(key) in {"seed", "noise_seed"}:
+                value[key] = int(seed)
+            else:
+                _replace_text_to_image_seed_fields(item, seed)
+    elif isinstance(value, list):
+        for item in value:
+            _replace_text_to_image_seed_fields(item, seed)
+
+
+def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    payload = copy.deepcopy(input_payload if isinstance(input_payload, dict) else {})
+    params = _text_to_image_params(payload)
+    final_prompt = str(
+        payload.get("prompt_text")
+        or payload.get("prompt")
+        or payload.get("message")
+        or payload.get("tg_llm_rewritten_prompt")
+        or ""
+    ).strip()
+    if not final_prompt:
+        raise ValueError("上次任务没有可复用的最终提示词")
+
+    node_inputs = payload.get("remote_comfy_node_inputs")
+    if not isinstance(node_inputs, dict) or not node_inputs:
+        node_inputs = _text_to_image_remote_node_inputs(params)
+    else:
+        node_inputs = copy.deepcopy(node_inputs)
+
+    seed = _new_text_to_image_seed()
+    _replace_text_to_image_seed_fields(node_inputs, seed)
+    payload.update(
+        {
+            "prompt": final_prompt,
+            "prompt_text": final_prompt,
+            "message": final_prompt,
+            "width": params["width"],
+            "height": params["height"],
+            "aspect_ratio": params["aspect_ratio"],
+            "final_resolution_enabled": bool(params["final_resolution_enabled"]),
+            "persona_enabled": bool(params["persona_enabled"]),
+            "persona_lora": str(params.get("persona_lora") or ""),
+            "persona_label": str(params.get("persona_label") or ""),
+            "tg_use_llm_prompt": False,
+            "tg_llm_prompt_enhanced": True,
+            "tg_llm_rewritten_prompt": final_prompt,
+            "remote_comfy_node_inputs": node_inputs,
+            "seed": seed,
+        }
+    )
+    return payload, seed
 
 
 def _text_to_image_status_text(*, step: str, params: dict[str, Any]) -> str:
@@ -1922,6 +1984,28 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await callback.message.answer("请选择任务类型。", reply_markup=_menu_keyboard())
             await callback.answer()
             return
+        if action.startswith("t2i:reroll:"):
+            task_id = action.rsplit(":", 1)[-1].strip()
+            try:
+                task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(callback.message.chat.id), task_id=task_id)
+            except Exception as exc:
+                await callback.answer(f"读取上次任务失败：{exc}", show_alert=True)
+                return
+            if str(task.get("type") or "").strip() != "text_to_image":
+                await callback.answer("这个任务不是文生图任务", show_alert=True)
+                return
+            input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
+            try:
+                payload, seed = _text_to_image_reroll_payload(input_payload)
+            except Exception as exc:
+                await callback.answer(f"重新生成图片失败：{exc}", show_alert=True)
+                return
+            payload["tg_reroll_from_task_id"] = task_id
+            await state.clear()
+            await callback.answer("已切换 seed，重新提交生成")
+            await submit_webapp_task_and_reply(callback.message, "text_to_image", payload)
+            logger.info("Submitted text_to_image reroll from task %s with seed %s", task_id, seed)
+            return
         if action.startswith("t2i:continue:"):
             task_id = action.rsplit(":", 1)[-1].strip()
             try:
@@ -2386,7 +2470,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 prompt_reference_image_local_path=reference_image_path,
             )
             if not prompt:
-                prompt = "请根据我上传的参考图片生成图片提示词，保留图片中的主体、构图、场景、服装、姿态、风格和可见细节。风格必须挑逗诱惑、充满情欲张力，像私房福利图一样撩人。详细描述女性生殖器官：饱满挺立的乳房、粉嫩敏感的乳头、清晰可见的阴唇轮廓、湿润的私密部位。姿态要挑逗：手指轻抚乳房、微微拱起的腰肢、湿润的嘴唇微张、勾人的眼神。"
+                prompt = "请根据我上传的参考图片生成图片提示词，保留图片中的主体、构图、场景、服装、姿态、风格和可见细节。风格必须挑逗诱惑、充满情欲张力，像私房福利图一样撩人。详细描述女性生殖器官：饱满挺立的乳房、粉嫩敏感的乳头、清晰可见的阴唇轮廓、湿润的私密部位。姿态要挑逗：手指轻抚乳房、微微拱起的腰肢、湿润的嘴唇微张、勾人的眼神。确保人体结构正确流畅：头部比例1:7到1:8、自然关节角度、避免扭曲畸形、手指自然放置。姿态描述简洁直白：站立、坐姿、跪姿、躺姿等简单描述即可。头部和脸部必须完整入镜，不能被裁剪。"
         if not prompt:
             params = _text_to_image_params(data)
             await message.answer(
