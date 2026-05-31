@@ -565,7 +565,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             server,
             "_analyze_generated_person_image_quality",
             side_effect=qa_results,
-        ):
+        ), patch.object(server, "_new_image_qa_seed", return_value=123456):
             output = server._run_remote_comfy_mapped_task(
                 "task_qa",
                 {
@@ -581,7 +581,10 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             )
 
         self.assertEqual(run_mock.call_count, 2)
+        self.assertIsNone(run_mock.call_args_list[0].kwargs["seed"])
+        self.assertEqual(run_mock.call_args_list[1].kwargs["seed"], 123456)
         self.assertEqual(output["image_path"], str(second_image))
+        self.assertEqual(output["seed"], 123456)
         self.assertEqual(output["image_qa"]["rejected_rounds"], 1)
         self.assertEqual(output["image_qa"]["attempts"], 2)
         self.assertIn("已筛选 1 轮候选图", server._text_to_image_qa_notice(output))

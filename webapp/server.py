@@ -3626,8 +3626,11 @@ def _analyze_generated_person_image_quality(
     system_prompt = "\n".join(
         [
             "你是严格的文生图自动 QA 检查员，只判断图片是否应该交付给用户。",
-            "请检查：主体是否清晰、人物肢体/手/脸/身体结构是否错乱、画面是否有意义、是否符合提示词要求、是否有明显水印文字或生成崩坏。",
-            "不要因为题材、服装风格或审美偏好而扣分；只根据可见画面质量、提示词符合度、人物结构完整性和交付可用性判断。",
+            "核心目标：筛掉人物图像里明显不可交付的候选图，尤其是人体结构、肢体关系和画面语义异常。",
+            "必须拦截这些情况：肢体严重错乱、额外手脚或缺失手脚、手指融合或数量明显异常、关节反折、身体比例严重畸形、人物和背景/道具融合、多人或身体部位异常重叠、主体塌陷、画面意义不明、明显不符合提示词主体。",
+            "允许轻微姿势遮挡、自然透视、正常衣物遮挡和不影响交付的小瑕疵；不要因为题材、服装风格或审美偏好而扣分。",
+            "只根据可见画面质量、提示词符合度、人物结构完整性和交付可用性判断。",
+            "如果图像没有清晰人物，或者主体不是人物，也应按提示词符合度和画面语义判断是否拦截。",
             "必须只返回 JSON，不要输出解释性正文。",
             "JSON schema:",
             "{",
@@ -3651,6 +3654,7 @@ def _analyze_generated_person_image_quality(
             f"生成提示词：{str(prompt_text or '').strip()}",
             f"画面比例/分辨率：{payload.get('aspect_ratio') or ''} {payload.get('width') or ''}x{payload.get('height') or ''}".strip(),
             f"当前为第 {max(int(attempt), 1)} 轮候选图，请判断是否可以直接显示给用户。",
+            "若存在严重人体结构错误、肢体重叠错乱、身体融合、手部明显崩坏或画面无意义，请将 deliverableReady 设为 false，并把 limbOrBodyBroken 或 meaninglessOrCollapsed 设为 true。",
         ]
     )
     try:
@@ -3761,8 +3765,10 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         if attempt > 1:
             attempt_seed = _new_image_qa_seed(used_seeds)
             used_seeds.add(int(attempt_seed))
+        if attempt_seed is not None:
             if node_inputs:
                 _replace_seed_values(node_inputs, int(attempt_seed))
+            payload["seed"] = int(attempt_seed)
         message = f"提交{source_label}工作流: {workflow_path}"
         if auto_qa_enabled and max_attempts > 1:
             message = f"{message}（自动 QA 第 {attempt}/{max_attempts} 轮）"
