@@ -503,6 +503,21 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(payload.llm_api_key, "sk-gemini-llm")
         self.assertEqual(payload.llm_default_model, "gemini-3.1-pro-preview")
 
+    def test_chinese_image_prompt_format_keeps_punctuation_and_8k(self):
+        prompt = (
+            "一位女子全身躺在床上穿着丝质睡袍她的左手轻轻抚摸胸前而右手放在大腿内侧"
+            "她的身体平躺微微拱起朝向镜头她的头转向直视镜头带着诱惑眼神"
+            "豪华卧室背景柔和大床和枕头柔和的暖光从侧面照射浅景深真实皮肤纹理细节布料褶皱自然身体比例高细节8写实摄影风格"
+        )
+
+        normalized = server._normalize_tg_chinese_image_prompt_format(prompt)
+
+        self.assertIn("床上，穿着", normalized)
+        self.assertIn("，她的左手", normalized)
+        self.assertIn("，她的身体", normalized)
+        self.assertIn("，她的头", normalized)
+        self.assertIn("高细节，8K，写实摄影风格", normalized)
+
 
 if __name__ == "__main__":
     unittest.main()

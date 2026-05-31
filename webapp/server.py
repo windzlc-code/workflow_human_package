@@ -6734,11 +6734,33 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         flags=re.IGNORECASE,
     )
     text = text.replace(",", "，").replace(";", "；").replace(":", "：")
-    text = re.sub(r"[A-Za-z][A-Za-z0-9'/_-]*", "", text)
+    text = re.sub(r"(?i)(?<!\d)8\s*k\b", "8K", text)
+    text = re.sub(r"(?i)(?<!\d)8\s*[kｋＫ]\b", "8K", text)
+    text = re.sub(r"(?<!\d)[A-Za-z][A-Za-z0-9'/_-]*", "", text)
     text = re.sub(r"[#@$%^&_=+<>\[\]{}|~`]+", "", text)
     text = re.sub(r"[\"'“”‘’]+", "", text)
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"\s+([，。；、])", r"\1", text)
+    text = re.sub(r"[，、]{2,}", "，", text)
+    text = re.sub(r"([，。；、])\s*([，。；、])+", r"\1", text)
+    return text.strip(" ，。；、,.;\n\t ")
+
+
+def _normalize_tg_chinese_image_prompt_format(prompt_text: str) -> str:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    if not text:
+        return ""
+    text = text.replace(",", "，").replace(";", "；").replace(":", "：")
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"(?i)8\s*[kｋＫ]?", "8K", text)
+    text = re.sub(r"(?<=[\u4e00-\u9fff0-9K])(?=穿着)", "，", text)
+    for marker in ("她的左手", "她的身体", "她的头"):
+        text = re.sub(rf"(?<![，。；、])(?={re.escape(marker)})", "，", text)
+    for marker in ("背景", "豪华", "简洁", "室内", "卧室", "客舱", "柔和", "自然光", "浅景深", "真实", "皮肤", "布料", "纹理", "高细节", "8K", "写实摄影"):
+        text = re.sub(rf"(?<=[\u4e00-\u9fff0-9K])(?={re.escape(marker)})", "，", text)
+    text = re.sub(r"高细节，?8K，?写实", "高细节，8K，写实", text)
+    text = re.sub(r"高细节，?写实", "高细节，8K，写实", text)
+    text = re.sub(r"高细节，?8K(?!，)", "高细节，8K，", text)
     text = re.sub(r"[，、]{2,}", "，", text)
     text = re.sub(r"([，。；、])\s*([，。；、])+", r"\1", text)
     return text.strip(" ，。；、,.;\n\t ")
@@ -7015,6 +7037,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             rewritten = _build_tg_image_fallback_prompt(original_request or user_request, enhanced)
             forbidden_hits = _find_tg_image_forbidden_person_fields(rewritten)
         rewritten = _force_tg_image_chinese_prompt(rewritten)
+        rewritten = _normalize_tg_chinese_image_prompt_format(rewritten)
         if not _looks_like_chinese_image_prompt(rewritten):
             translate_attempts: list[dict[str, Any]] = []
             try:
@@ -7045,6 +7068,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 translated = _force_tg_image_chinese_prompt(
                     translate_result.get("raw_text") if isinstance(translate_result, dict) else ""
                 )
+                translated = _normalize_tg_chinese_image_prompt_format(translated)
                 if _looks_like_chinese_image_prompt(translated):
                     rewritten = translated
                     selected = translate_selected
@@ -7067,14 +7091,16 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         final_prompt = f"{preserved_request}. {rewritten}"
     if prompt_chain == "image" and not _looks_like_chinese_image_prompt(final_prompt):
         raise RuntimeError("Grok final image prompt is not Chinese; blocked before submission.")
-    if prompt_chain == "video" and not _looks_like_english_prompt(final_prompt):
-        raise RuntimeError("Grok final prompt is not English; blocked before submission.")
     if prompt_chain == "video":
-        required_segments = ["her left hand", "while her right hand", "her body", "her head"]
-        for seg in required_segments:
-            if seg not in final_prompt.lower():
-                raise RuntimeError(f"Grok final video prompt missing required format segment: {seg}; blocked before submission.")
-        if not any(x in final_prompt.lower() for x in ["cleavage", "breasts", "nipples", "labia", "intimate", "thigh"]):
+        required_segments_cn = ["她的左手", "而右手", "她的身体", "她的头"]
+        required_segments_en = ["her left hand", "while her right hand", "her body", "her head"]
+        has_cn_format = all(seg in final_prompt for seg in required_segments_cn)
+        has_en_format = all(seg in final_prompt.lower() for seg in required_segments_en)
+        if not has_cn_format and not has_en_format:
+            raise RuntimeError("Grok final video prompt missing required format segments (left/right hand, body, head); blocked before submission.")
+
+        has_erotic = any(x in final_prompt.lower() for x in ["cleavage", "breasts", "nipples", "labia", "intimate", "thigh", "乳沟", "乳房", "乳头", "阴唇", "私密", "大腿内侧"])
+        if not has_erotic:
             raise RuntimeError("Grok final video prompt missing required erotic content (breasts or labia); blocked before submission.")
 
     if prompt_chain == "image":
