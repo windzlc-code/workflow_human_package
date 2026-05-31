@@ -154,6 +154,27 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(current["nano_host"], "runtime.example.internal")
         self.assertEqual(current["cleanup_enabled"], False)
 
+    def test_runtime_config_api_preserves_comfy_when_saving_partial_config(self):
+        put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
+        server._write_runtime_config_file(
+            {
+                "image_generate_mode_default": "remote_comfy",
+                "comfy_workflow_source": "remote",
+                "remote_comfy_gateway_url": "http://comfy.local",
+                "remote_comfy_gateway_token": "secret-token",
+                "remote_comfy_workflow_mappings": {"text_to_image": "wf-text", "image_generate": "wf-image"},
+            }
+        )
+
+        resp = put_runtime_config(server.RuntimeConfigPayload(llm_base_url="http://llm.local"), self.admin_user)
+
+        self.assertEqual(resp["runtime_config"]["llm_base_url"], "http://llm.local")
+        self.assertEqual(resp["runtime_config"]["image_generate_mode_default"], "remote_comfy")
+        self.assertEqual(resp["runtime_config"]["comfy_workflow_source"], "remote")
+        self.assertEqual(resp["runtime_config"]["remote_comfy_gateway_url"], "http://comfy.local")
+        self.assertEqual(resp["runtime_config"]["remote_comfy_gateway_token"], "secret-token")
+        self.assertEqual(resp["runtime_config"]["remote_comfy_workflow_mappings"]["text_to_image"], "wf-text")
+
     def test_runtime_defaults_prefer_local_file_and_keep_explicit_app_id(self):
         with db_module.db() as conn:
             db_module.set_admin_config(
@@ -188,6 +209,20 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(combo_payload["workflow_ids"], ["file_model_app", "file_product_app"])
         self.assertEqual(explicit_payload["app_id"], "1234567890123456789")
         self.assertEqual(explicit_payload["workflow_id"], "1234567890123456789")
+
+    def test_runtime_defaults_fill_empty_comfy_mappings_from_runtime(self):
+        server._write_runtime_config_file(
+            {
+                "comfy_workflow_source": "remote",
+                "remote_comfy_gateway_url": "http://comfy.local",
+                "remote_comfy_workflow_mappings": {"text_to_image": "wf-text"},
+            }
+        )
+
+        payload = server._apply_runtime_defaults("text_to_image", {"remote_comfy_workflow_mappings": {}})
+
+        self.assertEqual(payload["remote_comfy_gateway_url"], "http://comfy.local")
+        self.assertEqual(payload["remote_comfy_workflow_mappings"], {"text_to_image": "wf-text"})
 
     def test_runtime_defaults_replace_invalid_replace_workflow_ids(self):
         server._write_runtime_config_file(

@@ -1877,7 +1877,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
                 local_mappings[task_key] = workflow_path
     merged["local_comfy_workflow_mappings"] = local_mappings
     merged["image_generate_mode_default"] = str(merged.get("image_generate_mode_default") or "closed_model_api").strip() or "closed_model_api"
-    if merged["image_generate_mode_default"] not in {"closed_model_api"}:
+    if merged["image_generate_mode_default"] not in {"closed_model_api", "remote_comfy"}:
         merged["image_generate_mode_default"] = "closed_model_api"
     merged["image_model_provider_base_url"] = str(merged.get("image_model_provider_base_url") or BUILTIN_IMAGE_MODEL_PROVIDER_BASE_URL).strip() or BUILTIN_IMAGE_MODEL_PROVIDER_BASE_URL
     merged["image_model_provider_api_key_gemini"] = str(merged.get("image_model_provider_api_key_gemini") or BUILTIN_IMAGE_MODEL_PROVIDER_API_KEY_GEMINI).strip()
@@ -2680,9 +2680,9 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
             continue
         if not current_value:
             merged[key] = runtime.get(key)
-    if not isinstance(merged.get("remote_comfy_workflow_mappings"), dict):
+    if not isinstance(merged.get("remote_comfy_workflow_mappings"), dict) or not merged.get("remote_comfy_workflow_mappings"):
         merged["remote_comfy_workflow_mappings"] = runtime.get("remote_comfy_workflow_mappings") if isinstance(runtime.get("remote_comfy_workflow_mappings"), dict) else {}
-    if not isinstance(merged.get("local_comfy_workflow_mappings"), dict):
+    if not isinstance(merged.get("local_comfy_workflow_mappings"), dict) or not merged.get("local_comfy_workflow_mappings"):
         merged["local_comfy_workflow_mappings"] = runtime.get("local_comfy_workflow_mappings") if isinstance(runtime.get("local_comfy_workflow_mappings"), dict) else {}
     source = str(merged.get("comfy_workflow_source") or runtime.get("comfy_workflow_source") or "remote").strip().lower()
     merged["comfy_workflow_source"] = source if source in {"remote", "local"} else "remote"
@@ -9423,14 +9423,16 @@ def create_app() -> FastAPI:
 
     @app.put("/api/admin/runtime_config")
     def api_admin_set_runtime_config(payload: RuntimeConfigPayload, user: dict[str, Any] = Depends(require_admin)):
-        data = payload.model_dump()
-        merged = dict(DEFAULT_RUNTIME_CONFIG)
-        merged.update({k: str(v).strip() if isinstance(v, str) else v for k, v in data.items()})
         try:
             with db() as conn:
                 current_runtime = _get_runtime_config(conn)
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        explicit_data = payload.model_dump(exclude_unset=True)
+        merged = dict(DEFAULT_RUNTIME_CONFIG)
+        if isinstance(current_runtime, dict):
+            merged.update(current_runtime)
+        merged.update({k: str(v).strip() if isinstance(v, str) else v for k, v in explicit_data.items()})
         comfy_preserve_keys = (
             "comfy_workflow_source",
             "remote_comfy_gateway_url",
@@ -9441,9 +9443,9 @@ def create_app() -> FastAPI:
             "local_comfy_workflow_mappings",
         )
         for key in comfy_preserve_keys:
-            current_value = merged.get(key)
+            current_value = explicit_data.get(key)
             saved_value = current_runtime.get(key) if isinstance(current_runtime, dict) else None
-            if current_value in (None, "", {}) and saved_value not in (None, "", {}):
+            if (key not in explicit_data or current_value in (None, "", {})) and saved_value not in (None, "", {}):
                 merged[key] = saved_value
         try:
             merged = _normalize_runtime_config(merged)
