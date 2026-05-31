@@ -38,6 +38,15 @@ AUTO_DURATION_TEXTS = {"跳过", "自动", "auto", "AUTO"}
 TG_PROMPT_PREVIEW_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_PREVIEW_TIMEOUT_SECONDS") or "240")
 TG_PROMPT_DISPLAY_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_DISPLAY_TIMEOUT_SECONDS") or "45")
 TEXT_TO_IMAGE_MAX_SEED = 2147483647
+TEXT_TO_IMAGE_REROLL_RUNTIME_KEYS = (
+    "comfy_workflow_source",
+    "remote_comfy_gateway_url",
+    "remote_comfy_gateway_token",
+    "remote_comfy_workflow_mappings",
+    "local_comfy_gateway_url",
+    "local_comfy_gateway_token",
+    "local_comfy_workflow_mappings",
+)
 
 DIGITAL_HUMAN_VIDEO_BUTTON = "数字人视频生成"
 DIGITAL_HUMAN_REALISTIC_BUTTON = "写实带货视频"
@@ -445,6 +454,8 @@ def _replace_text_to_image_seed_fields(value: Any, seed: int) -> None:
 
 def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     payload = copy.deepcopy(input_payload if isinstance(input_payload, dict) else {})
+    for key in TEXT_TO_IMAGE_REROLL_RUNTIME_KEYS:
+        payload.pop(key, None)
     params = _text_to_image_params(payload)
     final_prompt = str(
         payload.get("prompt_text")
