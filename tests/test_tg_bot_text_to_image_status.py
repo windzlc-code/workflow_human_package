@@ -1,5 +1,7 @@
 import unittest
 
+from aiogram.types import ReplyKeyboardMarkup
+
 from src.digital_human_tg_bot import bot
 
 
@@ -44,6 +46,15 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertNotIn("最终分辨率：", text)
         self.assertNotIn("人设 LoRA：", text)
         self.assertNotIn("提示词方式：", text)
+
+    def test_prompt_failure_keyboard_uses_reply_keyboard(self) -> None:
+        markup = bot._text_to_image_prompt_failure_reply_keyboard()
+
+        self.assertIsInstance(markup, ReplyKeyboardMarkup)
+        labels = [button.text for row in markup.keyboard for button in row]
+        self.assertIn("重新生成提示词", labels)
+        self.assertIn("输入自定义提示词", labels)
+        self.assertNotIn("使用这个提示词生成", labels)
 
 
 if __name__ == "__main__":

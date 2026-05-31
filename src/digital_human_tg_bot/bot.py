@@ -719,6 +719,17 @@ def _text_to_image_prompt_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def _text_to_image_prompt_failure_reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="重新生成提示词")],
+            [KeyboardButton(text="输入自定义提示词")],
+            [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def _format_grok_preview_error(exc: Exception) -> str:
     if isinstance(exc, asyncio.TimeoutError):
         return f"Grok 响应超时（超过 {TG_PROMPT_PREVIEW_TIMEOUT_SECONDS} 秒）。可以点击“重新生成提示词”再试一次，或先输入自定义提示词。"
@@ -1926,12 +1937,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await message.answer(
             "\n".join(
                 [
-                    "Grok 英文提示词已生成并保存。",
-                    "中文预览还没有通过完整校验，所以暂不显示提交按钮，也不会提交到队列。",
+                    "Grok 生成的提示词还没有通过中文校验。",
+                    "暂不提交到队列。请重新生成提示词，或输入自定义中文提示词。",
                     _format_prompt_display_fallback(exc),
                 ]
             ),
-            reply_markup=_text_to_image_prompt_display_retry_keyboard(),
+            reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
         )
 
     async def _preview_text_to_image_prompt(
@@ -2016,8 +2027,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if (not bool(data.get("custom_prompt_used"))) and not bool(data.get("prompt_display_ready")):
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
             await message.answer(
-                "中文预览还没有通过完整校验，暂不提交到队列。请先点击“重新生成中文预览”。",
-                reply_markup=_text_to_image_prompt_display_retry_keyboard(),
+                "当前提示词还没有通过中文校验，暂不提交到队列。请重新生成提示词，或输入自定义中文提示词。",
+                reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
             )
             return
         payload = {
@@ -2040,8 +2051,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "custom_prompt_used": bool(data.get("custom_prompt_used")),
         }
         payload["remote_comfy_node_inputs"] = _text_to_image_remote_node_inputs(params)
-        await state.clear()
         await submit_webapp_task_and_reply(message, "text_to_image", payload)
+        await state.clear()
 
     async def _show_text_to_image_prompt_entry(message: Message, state: FSMContext) -> None:
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
@@ -2565,7 +2576,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             except Exception as exc:
                 await callback.message.answer(
                     f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
-                    reply_markup=_text_to_image_prompt_failure_keyboard(),
+                    reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
                 )
             await callback.answer()
             return
@@ -2788,6 +2799,37 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             await _show_text_to_image_prompt_mode(message, state)
             return
+        if prompt == "输入自定义提示词" and not _image_ext_from_message(message):
+            await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定义输入")
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
+            params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "自定义输入"})
+            await message.answer(
+                _text_to_image_status_text(
+                    step="4/4 请输入自定义最终提示词" if params.get("persona_available") else "3/3 请输入自定义最终提示词",
+                    params=params,
+                )
+                + "\n\n请输入自定义最终提示词。下一条消息会跳过 Grok，直接提交到 ComfyUI 工作流生成。",
+                reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
+            )
+            return
+        if prompt == "重新生成提示词" and not _image_ext_from_message(message):
+            original = str(data.get("last_grok_user_request") or data.get("original_user_request") or "").strip()
+            if not original:
+                await message.answer("没有原始需求，请先输入图片需求。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
+                return
+            try:
+                await _preview_text_to_image_prompt(
+                    message,
+                    state,
+                    user_request=original,
+                    reference_image_path=str(data.get("last_grok_reference_image_path") or data.get("prompt_reference_image_local_path") or ""),
+                )
+            except Exception as exc:
+                await message.answer(
+                    f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
+                    reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
+                )
+            return
         reference_image_path = ""
         image_suffix = _image_ext_from_message(message)
         if image_suffix:
@@ -2820,7 +2862,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params(await state.get_data())
             await message.answer(
                 f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
-                reply_markup=_text_to_image_prompt_failure_keyboard(),
+                reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
             )
 
     @router.message(ProductionWorkflowForm.text_to_image_waiting_for_revision)
@@ -2842,10 +2884,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             except Exception as exc:
                 await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_text_to_image_prompt_reply_keyboard())
             return
-        if revision == "输入自定义提示词提交":
+        if revision in {"输入自定义提示词提交", "输入自定义提示词"}:
             await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定义输入")
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
             await message.answer("请输入自定义最终提示词。下一条消息会跳过 Grok，直接提交到 ComfyUI 工作流生成。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
+            return
+        if revision == "上一步":
+            await _show_text_to_image_prompt_mode(message, state)
             return
         if revision == "继续让 Grok 调整":
             await message.answer("请直接输入你希望 Grok 如何调整提示词，例如：更写实、换成夜景、保留人物姿势但改变服装。", reply_markup=_text_to_image_prompt_reply_keyboard())
@@ -2866,7 +2911,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             except Exception as exc:
                 await message.answer(
                     f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
-                    reply_markup=_text_to_image_prompt_reply_keyboard(),
+                    reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
                 )
             return
         if revision == "返回参数设置":
@@ -2917,7 +2962,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         except Exception as exc:
             await message.answer(
                 f"Grok 提示词调整失败：{_format_grok_preview_error(exc)}",
-                reply_markup=_text_to_image_prompt_failure_keyboard(),
+                reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
             )
 
     @router.message(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
@@ -2949,7 +2994,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await message.answer("已收到自定义提示词，正在提交生成。")
             await _submit_text_to_image_from_state(message, state)
         except Exception as exc:
-            await message.answer(f"自定义提示词提交失败：{exc}", reply_markup=_text_to_image_prompt_keyboard())
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
+            await message.answer(
+                f"自定义提示词提交失败：{exc}\n\n请重新输入一条纯中文提示词，或返回上一步。",
+                reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
+            )
 
     @router.message(Command("whoami"))
     @router.message(Command("id"))
