@@ -3613,6 +3613,17 @@ def _qa_score(value: Any, default: int = 75) -> int:
         return int(default)
 
 
+_HEAD_REQUIRED_PROMPT_PATTERN = re.compile(
+    r"(?:头部|头脸|脸部|面部|脸|眼神|眼睛|目光|视线|凝视|看向镜头|直视镜头|望向镜头|注视镜头|表情|神情|微笑|嘴唇|"
+    r"head|face|facial|eyes?|gaze|expression|look(?:ing)?\s+(?:at|towards?)\s+(?:the\s+)?camera)",
+    re.IGNORECASE,
+)
+
+
+def _text_to_image_prompt_requires_visible_head(prompt_text: str) -> bool:
+    return bool(_HEAD_REQUIRED_PROMPT_PATTERN.search(str(prompt_text or "")))
+
+
 def _analyze_generated_person_image_quality(
     *,
     image_path: str,
@@ -3623,11 +3634,13 @@ def _analyze_generated_person_image_quality(
     path = Path(str(image_path or "")).expanduser()
     if not path.exists() or not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
         return {"inspected": False, "passed": True, "summary": "未找到可检查的图片文件。"}
+    requires_visible_head = _text_to_image_prompt_requires_visible_head(prompt_text)
     system_prompt = "\n".join(
         [
             "你是严格的文生图自动 QA 检查员，只判断图片是否应该交付给用户。",
             "核心目标：筛掉人物图像里明显不可交付的候选图，尤其是人体结构、肢体关系和画面语义异常。",
             "必须拦截这些情况：肢体严重错乱、额外手脚或缺失手脚、手指融合或数量明显异常、关节反折、身体比例严重畸形、人物和背景/道具融合、多人或身体部位异常重叠、主体塌陷、画面意义不明、明显不符合提示词主体。",
+            "当生成提示词明确要求头部、脸部、眼神、目光、表情或看向镜头时，候选图必须完整包含人物头部，且脸部/眼神/表情区域不能被裁掉、遮挡到无法判断或缺失。",
             "允许轻微姿势遮挡、自然透视、正常衣物遮挡和不影响交付的小瑕疵；不要因为题材、服装风格或审美偏好而扣分。",
             "只根据可见画面质量、提示词符合度、人物结构完整性和交付可用性判断。",
             "如果图像没有清晰人物，或者主体不是人物，也应按提示词符合度和画面语义判断是否拦截。",
@@ -3643,6 +3656,8 @@ def _analyze_generated_person_image_quality(
             '  "promptMismatchVisible": false,',
             '  "meaninglessOrCollapsed": false,',
             '  "textOrWatermarkVisible": false,',
+            '  "headVisible": true,',
+            '  "headCroppedOrMissing": false,',
             '  "deliverableReady": false,',
             '  "issues": ["中文问题1"],',
             '  "fixPriorities": ["中文重试重点1"]',
@@ -3655,6 +3670,9 @@ def _analyze_generated_person_image_quality(
             f"画面比例/分辨率：{payload.get('aspect_ratio') or ''} {payload.get('width') or ''}x{payload.get('height') or ''}".strip(),
             f"当前为第 {max(int(attempt), 1)} 轮候选图，请判断是否可以直接显示给用户。",
             "若存在严重人体结构错误、肢体重叠错乱、身体融合、手部明显崩坏或画面无意义，请将 deliverableReady 设为 false，并把 limbOrBodyBroken 或 meaninglessOrCollapsed 设为 true。",
+            "本次提示词要求头部/脸部/眼神/表情可见：是。若候选图没有完整头部，或头部/脸部/眼神/表情被裁切、缺失、遮挡到无法判断，请将 headVisible 设为 false，headCroppedOrMissing 设为 true，deliverableReady 设为 false。"
+            if requires_visible_head
+            else "本次提示词没有明确要求头部/脸部/眼神/表情可见：否。无需仅因普通构图裁切头部而拦截，但仍需按主体和画面语义判断。",
         ]
     )
     try:
@@ -3682,6 +3700,9 @@ def _analyze_generated_person_image_quality(
             "prompt_mismatch_visible": parsed.get("promptMismatchVisible") is True,
             "meaningless_or_collapsed": parsed.get("meaninglessOrCollapsed") is True,
             "text_or_watermark_visible": parsed.get("textOrWatermarkVisible") is True,
+            "requires_visible_head": requires_visible_head,
+            "head_visible": (parsed.get("headVisible") is True) if requires_visible_head else parsed.get("headVisible") is not False,
+            "head_cropped_or_missing": parsed.get("headCroppedOrMissing") is True,
             "deliverable_ready": parsed.get("deliverableReady") is True,
             "issues": _parse_qa_string_list(parsed.get("issues"), 6),
             "fix_priorities": _parse_qa_string_list(parsed.get("fixPriorities"), 4),
@@ -3712,6 +3733,11 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
     if _to_bool(report.get("prompt_mismatch_visible"), False):
         return True
     if _to_bool(report.get("meaningless_or_collapsed"), False):
+        return True
+    if _to_bool(report.get("requires_visible_head"), False) and (
+        not _to_bool(report.get("head_visible"), False)
+        or _to_bool(report.get("head_cropped_or_missing"), False)
+    ):
         return True
     if _to_bool(report.get("deliverable_ready"), False):
         return False
