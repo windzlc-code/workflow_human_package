@@ -15,7 +15,6 @@ from PIL import Image
 
 import create_audio
 import create_video
-import image_model_api
 import runninghub_common
 
 
@@ -34,10 +33,6 @@ class AudioSettings:
 
 @dataclass
 class NanoSettings:
-    base_url: str = "http://202.90.21.53:3008"
-    model: str = "gemini-3-pro-image-preview"
-    gemini_api_key: str = ""
-    gpt_api_key: str = ""
     prompt_template: str = "电商口播视频场景截图风格：真实人物在室内/直播间展示商品，手持商品或放在手掌上讲解；写实摄影、柔和补光、干净背景；9:16；画面不要文字/水印/海报排版。"
 
 
@@ -538,6 +533,7 @@ def generate_commerce_videos(
 
     jobs = max(len(product_paths2), len(model_paths2))
     upload_cache: dict[str, str] = {}
+    runninghub_task_ids: list[str] = []
     success_files: list[Path] = []
     logs_path = out_dir / "logs.jsonl"
 
@@ -689,32 +685,9 @@ def generate_commerce_videos(
                     extra={"step": "image_ready", "image_path": str(generated_img_path), "resumed": True},
                 )
             else:
-                nano_result = image_model_api.generate_image(
-                    base_url=str(nano_settings.base_url or "").strip(),
-                    model=str(nano_settings.model or "").strip(),
-                    prompt=nano_prompt,
-                    output_image_path=str(generated_img_path),
-                    gemini_api_key=str(nano_settings.gemini_api_key or "").strip(),
-                    gpt_api_key=str(nano_settings.gpt_api_key or "").strip(),
-                    input_image_path=str(ref_path),
-                    logger=logger,
-                )
-                image_path_value = ""
-                if isinstance(nano_result, dict):
-                    image_path_value = str(nano_result.get("image_path") or nano_result.get("imagePath") or "").strip()
-                elif isinstance(nano_result, str):
-                    image_path_value = nano_result.strip()
-                image_path = Path(image_path_value or str(generated_img_path)).resolve()
-                _emit_job_progress(
-                    progress_callback,
-                    job_no=job_no,
-                    total_jobs=jobs,
-                    job_progress=50,
-                    message=f"第 {job_no}/{jobs} 条场景图生成完成",
-                    extra={"step": "image_ready", "image_path": str(image_path)},
-                )
+                raise RuntimeError("商业视频生成需要通过 image_path_provider 或配置 scene_images 提供已生成的场景图")
             if not image_path.exists():
-                raise RuntimeError("闭源图片模型生成成功但未找到输出文件")
+                raise RuntimeError(f"场景图不存在: {image_path}")
 
             image_url = upload_binary(api_key=media_upload_api_key, file_path=image_path, cache=upload_cache, media_kind="image")
             duration_mode = str(getattr(video_workflow, "duration_mode", "manual") or "manual").strip() or "manual"
@@ -893,12 +866,7 @@ def run_from_config(config: dict[str, Any]) -> dict[str, Any]:
     if not prompt_provider(1, Path("."), Path(".")).strip():
         raise ValueError("缺少 prompts（可为 str/list/dict）")
 
-    image_base_url = str(nano_cfg.get("base_url") or "http://202.90.21.53:3008").strip() or "http://202.90.21.53:3008"
-    image_model = str(nano_cfg.get("model") or "gemini-3-pro-image-preview").strip() or "gemini-3-pro-image-preview"
-    image_gemini_api_key = str(nano_cfg.get("gemini_api_key") or "").strip()
-    image_gpt_api_key = str(nano_cfg.get("gpt_api_key") or "").strip()
-    if not image_gemini_api_key and not image_gpt_api_key:
-        raise ValueError("缺少 nano.gemini_api_key 或 nano.gpt_api_key")
+    image_provider = build_provider(config.get("scene_images") or config.get("image_paths"))
 
     return generate_commerce_videos(
         runninghub_api_key=runninghub_api_key,
@@ -921,10 +889,6 @@ def run_from_config(config: dict[str, Any]) -> dict[str, Any]:
             speaker=str(audio_cfg.get("speaker") or "Ryan").strip() or "Ryan",
         ),
         nano_settings=NanoSettings(
-            base_url=image_base_url,
-            model=image_model,
-            gemini_api_key=image_gemini_api_key,
-            gpt_api_key=image_gpt_api_key,
             prompt_template=str(nano_cfg.get("prompt_template") or "生成一张电商带货宣传图：模特正在介绍商品，画面真实自然，光照与风格协调。").strip()
             or "生成一张电商带货宣传图：模特正在介绍商品，画面真实自然，光照与风格协调。",
         ),
@@ -939,6 +903,7 @@ def run_from_config(config: dict[str, Any]) -> dict[str, Any]:
         ),
         speech_text_provider=speech_provider,
         prompt_provider=prompt_provider,
+        image_path_provider=image_provider,
     )
 
 
@@ -951,13 +916,8 @@ def run_example() -> dict[str, Any]:
         "speech_texts": "大家好，今天给大家介绍这款产品，它是真皮材质的，由法国著名工匠，卡特玲娜花费了1个月雕作的，它的设计师也不简单，是英国的设计师世家，詹姆斯英德伯爵的后代，詹姆斯扎克伯格设计",
         "prompts": "运镜缓慢推进，突出商品细节，口播与画面同步。",
         "audio": {"emotion": "happy", "language": "Chinese", "model_choice": "1.7B", "speaker": "Ryan"},
-        "nano": {
-            "base_url": "http://202.90.21.53:3008",
-            "model": "gemini-3-pro-image-preview",
-            "gemini_api_key": "",
-            "gpt_api_key": "",
-            "prompt_template": "生成一张电商带货宣传图：模特正在介绍商品，画面真实自然，光照与风格协调。画面干净",
-        },
+        "scene_images": "",
+        "nano": {"prompt_template": "生成一张电商带货宣传图：模特正在介绍商品，画面真实自然，光照与风格协调。画面干净"},
         "video_workflow": {
             "app_id": "1968024407312596994",
             "duration_mode": "manual",

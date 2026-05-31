@@ -632,197 +632,6 @@ def _message_text(message: Message) -> str:
     return (message.text or message.caption or "").strip()
 
 
-def _strip_prompt_char_count_note(text: str, *, preserve_english: bool = False) -> str:
-    cleaned = re.sub(
-        r"[（(]\s*(?:共\s*)?(?:字符数|字数|汉字数)?\s*[：:]?\s*约?\s*\d+\s*(?:个\s*)?(?:中文)?(?:字符|汉字|字)?[^）)]*[）)]",
-        "",
-        str(text or ""),
-    )
-    cleaned = re.sub(
-        r"(?i)\b(?:drafting|crafting|creating|generating|rewriting|optimizing|translating|converting)\b\s+(?:the\s+)?(?:image\s+|final\s+|text\s+)?(?:prompt|description|request)\s*[:：,，。；;.\-]?\s*",
-        "",
-        cleaned,
-    )
-    cleaned = re.sub(r"^分析[^，。；、\n]{0,40}提示词(?:要求|并生成[^，。；、\n]{0,40}(?:描述|正文|内容))?\s*", "", cleaned)
-    if not preserve_english:
-        cleaned = re.sub(r"[A-Za-z][A-Za-z0-9'/_-]*", "", cleaned)
-    precise_replacements = {
-        "身体张力明显": "身体重心前移，手部位置明确，衣物开合状态清晰",
-        "挑逗氛围": "身体前倾，手指靠近衣物边缘，暖色床头灯照在皮肤和床面",
-        "挑逗姿势": "身体前倾，手指靠近衣物开口或大腿内侧",
-        "挑逗": "身体前倾，手指靠近衣物边缘",
-        "诱惑姿势": "衣物半开，身体侧向镜头，手部停在大腿内侧",
-        "诱惑": "衣物半开，身体侧向镜头",
-        "暧昧氛围": "暖色床头灯照在皮肤和床面",
-        "暧昧": "暖色侧光照在皮肤和布料上",
-        "氛围": "光线、场景物件和身体姿势",
-        "张力": "身体重心、手部位置和衣物开合状态",
-        "高级真实摄影质感": "真实皮肤纹理、布料褶皱、浅景深和柔和侧光",
-        "高级摄影质感": "真实皮肤纹理、布料褶皱、浅景深和柔和侧光",
-        "高级质感": "真实纹理、浅景深和柔和侧光",
-        "福利感": "明确的裸露范围和半身构图",
-        "私密福利": "室内半身构图",
-        "视线避开镜头": "脸部清晰可见",
-        "人物不露脸": "人物脸部清晰可见",
-        "头部自然入镜": "脸部清晰可见",
-        "不合常理的破洞": "纽扣自然解开，布料沿身体曲线滑落",
-        "破洞": "纽扣自然解开，布料沿身体曲线滑落",
-        "破口": "衣物边缘自然打开",
-        "洞口": "衣物开口",
-        "撕裂": "衣物自然松开",
-        "撕破": "衣物自然松开",
-        "撕开": "衣物自然解开",
-        "布料缺失": "衣物开合状态清晰",
-        "避开镜头": "脸部清晰可见",
-        "不露脸": "脸部清晰可见",
-        "遮住脸": "脸部清晰可见",
-        "遮脸": "脸部清晰可见",
-        "裁掉头部": "脸部清晰可见",
-        "头部裁切": "脸部清晰可见",
-        "面部避开": "脸部清晰可见",
-        "面部遮挡": "脸部清晰可见",
-        "脸部遮挡": "脸部清晰可见",
-        "脸部无遮挡": "脸部清晰可见",
-        "脸部清晰进入画面没有遮挡": "脸部清晰可见",
-        "脸部清晰进入画面且无遮挡": "脸部清晰可见",
-        "脸部清晰进入画面": "脸部清晰可见",
-        "脸部没有遮挡": "脸部清晰可见",
-        "露出脸部不遮挡": "脸部清晰可见",
-        "脸部不遮挡": "脸部清晰可见",
-        "清晰露出脸部无任何遮挡": "脸部清晰可见",
-        "露出脸部无任何遮挡": "脸部清晰可见",
-        "脸部无任何遮挡": "脸部清晰可见",
-        "近景构图": "半身构图，镜头距离拉开，头顶保留少量留白",
-        "室内近景": "室内半身构图，镜头距离拉开，头顶保留少量留白",
-        "低角度特写": "平视半身构图，镜头距离拉开，头顶保留少量留白",
-        "私密部位特写": "半身构图，镜头距离拉开，头顶保留少量留白",
-        "静态特写": "半身构图，镜头距离拉开，头顶保留少量留白",
-        "特写": "半身构图，镜头距离拉开，头顶保留少量留白",
-    }
-    for source, replacement in precise_replacements.items():
-        cleaned = cleaned.replace(source, replacement)
-    cleanup_replacements = {
-        "性器官区域可见或在场景允许时完全裸露": "性器官区域完整裸露，边界清晰可见，衣物没有遮挡该区域",
-        "阴部可见或在场景允许时完全裸露": "阴部完整裸露，边界清晰可见，衣物没有遮挡该区域",
-        "阴茎可见或在场景允许时完全裸露": "阴茎完整裸露，边界清晰可见，衣物没有遮挡该区域",
-        "性器官区域可见或完全裸露": "性器官区域完整裸露，边界清晰可见，衣物没有遮挡该区域",
-        "阴部可见或完全裸露": "阴部完整裸露，边界清晰可见，衣物没有遮挡该区域",
-        "阴茎可见或完全裸露": "阴茎完整裸露，边界清晰可见，衣物没有遮挡该区域",
-        "裸露必须来自合理服装状态和身体姿势": "纽扣解开、拉链松开、衣摆掀起，服装结构完整",
-        "精简写入脸型、眉眼、唇形和表情状态": "保留表情状态",
-        "最终提示词只保留其中最关键的三到五个脸部特征和一个表情状态": "",
-        "不要整段堆叠": "",
-        "保留用户要求的服装、场景和道具": "用户指定服装、场景和道具",
-        "用户指定服装、场景和道具": "原设服装、场景和道具",
-        "裸露只能来自自然开扣、拉链松开、衣摆掀起、肩带滑落、裙摆上移、腰头下拉、布料贴身或半脱状态": "纽扣解开、拉链松开、衣摆掀起、肩带滑落、裙摆上移、腰头下拉、布料贴身或半脱",
-        "禁止为了裸露强行制造破洞、撕裂、破口、布料凭空消失、不合受力逻辑的开口": "服装结构完整",
-        "构图必须能看到人物脸部": "脸部清晰可见",
-        "人物脸部需要精简描述": "脸部清晰可见",
-        "允许写脸型、肤质、眉眼、鼻梁、嘴唇和表情": "保留表情状态",
-        "金君雅": "",
-        "人设1": "",
-        "捞女1": "",
-        "当前人设": "人物",
-        "人设脸部": "脸部",
-        "人设名称": "",
-        "人物名称": "",
-        "名字": "",
-        "忠实匹配用户指定主体": "人物主体",
-        "用户指定主体": "人物主体",
-        "单帧静态画面": "静态摄影画面",
-        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、半身或全身构图、脸部清晰可见、脸部特征和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，半身或全身构图，脸部清晰可见",
-        "脸部特征和裸露范围": "脸部清晰可见和裸露范围",
-        "明确的情色裸露": "",
-        "根据场景动态判断": "",
-        "或在场景允许时": "",
-        "在场景允许时": "",
-        "场景允许": "",
-        "若隐若现": "清晰可见",
-        "边缘可见": "边界清晰可见",
-        "部分遮挡": "无遮挡",
-        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、头部自然入镜和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，镜头距离为半身或全身构图，脸部清晰可见",
-        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、脸部完整露出且无遮挡、头部自然入镜和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，镜头距离为半身或全身构图，脸部清晰可见",
-        "禁止凭空纽扣自然解开，布料沿身体曲线滑落、衣物自然松开、衣物边缘自然打开和不合受力逻辑的衣物开合状态清晰": "服装结构完整，纽扣或拉链自然解开，布料沿身体曲线滑落",
-        "禁止凭空破坏服装结构": "服装结构完整",
-        "禁止凭空": "",
-        "不合受力逻辑的": "",
-        "保留用户要求的服装、场景和道具": "用户指定服装、场景和道具",
-        "头部自然进入画面但不描述表情状态": "脸部清晰可见，表情自然",
-        "头部自然进入画面但不描述五官": "脸部清晰可见",
-    }
-    for source, replacement in cleanup_replacements.items():
-        cleaned = cleaned.replace(source, replacement)
-    cleaned = cleaned.replace("视线头部自然入镜", "脸部清晰可见")
-    cleaned = cleaned.replace("出现纽扣自然解开", "纽扣自然解开")
-    cleaned = cleaned.replace("卧，室", "卧室")
-    cleaned = cleaned.replace("解，开", "解开")
-    cleaned = cleaned.replace("皮肤，和布料", "皮肤和布料")
-    cleaned = cleaned.replace("可见或", "完整裸露，")
-    cleaned = re.sub(r"(?:Character Setting|人设\d*|捞女\d*|金君雅|人设名称|人物名称|名称)[\\/\w\u4e00-\u9fff.-]*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"裸露程度[，、\s]*", "", cleaned)
-    cleaned = re.sub(r"(?:例如|比如)[，、\s]*", "", cleaned)
-    cleaned = cleaned.replace("明确写出", "")
-    cleaned = re.sub(r"(?:例如|比如)[^，。；、\n]{0,80}?(?:禁止|不要|必须|允许)[^，。；、\n]{0,80}", "", cleaned)
-    cleaned = re.sub(r"(?:必须|禁止|不要|允许|需要|只保留|保留)[^，。；、\n]{0,80}?(?:提示词|规则|字段|描述|写入|来自)[^，。；、\n]{0,80}", "", cleaned)
-    cleaned = cleaned.replace("低角度，", "")
-    cleaned = cleaned.replace("低角度", "平视角度")
-    cleaned = cleaned.replace("头部自然进入画面", "脸部清晰可见")
-    cleaned = cleaned.replace("头部自然入镜", "脸部清晰可见")
-    cleaned = re.sub(r"(头部完整入镜[，、\s]*){2,}", "头部完整入镜，", cleaned)
-    cleaned = re.sub(r"(脸部完整露出且无遮挡[，、\s]*){2,}", "脸部完整露出且无遮挡，", cleaned)
-    cleaned = re.sub(r"(头顶额头下巴都在画面内[，、\s]*){2,}", "头顶额头下巴都在画面内，", cleaned)
-    cleaned = re.sub(r"(镜头距离拉开[，、\s]*){2,}", "镜头距离拉开，", cleaned)
-    cleaned = re.sub(r"(头顶保留少量留白[，、\s]*){2,}", "头顶保留少量留白，", cleaned)
-    cleaned = re.sub(r"(半身构图[，、\s]*){2,}", "半身构图，", cleaned)
-    if preserve_english:
-        cleaned = re.sub(r"[\w\u4e00-\u9fff .\\/-]*\.safetensors", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"(?:Character Setting|人设\d*|捞女\d*|金君雅|人设名称|人物名称|名称)[^,，。;\n]*", "", cleaned, flags=re.IGNORECASE)
-        face_feature_patterns = [
-            r"\b(?:with|wearing|having)?\s*(?:(?:long|short|medium|shoulder[-\s]?length|wavy|curly|straight|black|dark|light|brown|blonde|golden|silver|white|silver-white|gray|grey|red|pink|blue|purple|messy|neat|loose|tied|braided|flowing|silky)[-\s]+)+hair\b",
-            r"\b(?:hair\s+)?(?:color|colour)\s+[^,.;，。；、\n]+",
-            r"\b(?:hairstyle|haircut|bangs|fringe|ponytail|twin\s*tails?|braids?)\b",
-            r"\b(?:oval|round|small|soft|delicate|slim|v-shaped|heart-shaped)\s+face(?:\s+shape)?\b",
-            r"\b(?:fair|white|pale|delicate|glowing|water|smooth)\s+(?:facial\s+)?skin\b",
-            r"\b(?:soft\s+)?apple\s+cheeks?\b",
-            r"\b(?:bright|large|clear|natural|slender|long|beautiful|almond|phoenix|double-lidded)\s+(?:almond\s+)?eyes\b",
-            r"\b(?:clear\s+)?double\s+eyelids?\b",
-            r"\b(?:natural|slender|long|arched|thin)\s+eyebrows?\b",
-            r"\b(?:long|slender|curled|thick)\s+eyelashes?\b",
-            r"\b(?:straight|small|delicate|high)\s+nose(?:\s+bridge|\s+tip)?\b",
-            r"\b(?:narrow|small)\s+nostrils?\b",
-            r"\b(?:pink|rosy|full|plump|soft|clear)(?:\s+(?:pink|rosy|full|plump|soft|clear))*\s+lips?\b",
-            r"\b(?:clear\s+)?lip\s+shape\b",
-            r"\b(?:soft|defined|clean)\s+jawline\b",
-            r"\b(?:round|small)\s+chin\b",
-            r"\b(?:full|smooth)\s+forehead\b",
-            r"\b(?:natural|clean|delicate)\s+makeup\b",
-        ]
-        for pattern in face_feature_patterns:
-            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(
-            r"(?:鹅蛋脸|脸型|白皙水光肌|苹果肌|杏仁眼|双眼皮|卧蚕|睫毛|眉毛|眉形|鼻梁|鼻头|鼻翼|嘴唇|唇形|唇峰|下颌线|下巴|额头|妆感|发型|头发)",
-            "",
-            cleaned,
-        )
-        cleaned = re.sub(r"[#@$%^&_=+<>\[\]{}|~`]+", "", cleaned)
-        cleaned = re.sub(r"\s*,\s*", ", ", cleaned)
-        cleaned = re.sub(r"(?:,\s*){2,}", ", ", cleaned)
-        cleaned = re.sub(r"\s{2,}", " ", cleaned)
-        return cleaned.strip(" ,.;:\n\t")
-    cleaned = cleaned.replace(",", "，").replace(";", "；").replace(":", "：")
-    cleaned = re.sub(r"[\\/*#@$%^&_=+<>\[\]{}|~`]+", "", cleaned)
-    cleaned = re.sub(r"[\"'“”‘’]+", "", cleaned)
-    cleaned = re.sub(r"[()\uFF08\uFF09]+", "", cleaned)
-    cleaned = re.sub(r"(?<!\d)[.\-]+(?!\d)", "", cleaned)
-    cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    cleaned = re.sub(r"\s+([，。；、])", r"\1", cleaned)
-    cleaned = re.sub(r"[，、]{2,}", "，", cleaned)
-    cleaned = re.sub(r"([，。；、])\s*([，。；、])+", r"\1", cleaned)
-    if cleaned and ("近景" in cleaned or "特写" in cleaned) and "半身构图" not in cleaned and "全身构图" not in cleaned:
-        cleaned = f"{cleaned}，半身构图，镜头距离拉开"
-    return cleaned.strip(" ，。；、,.;\n\t ")
-
-
 def _telegram_prompt_chinese_preview(prompt_text: str) -> str:
     text = str(prompt_text or "").strip()
     if not text:
@@ -921,13 +730,6 @@ def _telegram_prompt_chinese_preview(prompt_text: str) -> str:
     return "，".join(rendered).strip("，。；、,.;\n\t ")
 
 
-def _looks_like_english_image_prompt(prompt_text: str) -> bool:
-    text = str(prompt_text or "")
-    english_words = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", text)
-    cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
-    return len(english_words) >= 12 and len(english_words) > len(cjk_chars)
-
-
 def _looks_like_clean_chinese_preview(prompt_text: str) -> bool:
     text = str(prompt_text or "")
     cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
@@ -936,7 +738,7 @@ def _looks_like_clean_chinese_preview(prompt_text: str) -> bool:
 
 
 def _tg_prompt_preview_unavailable_text() -> str:
-    return "中文预览暂时生成失败，实际提交到后台的英文提示词已保存。"
+    return "提示词预览暂时不可用，实际提交到后台的原提示词已保存。"
 
 
 def _format_prompt_display_fallback(exc: Exception | None = None) -> str:
@@ -949,6 +751,7 @@ def _format_prompt_display_fallback(exc: Exception | None = None) -> str:
 def _chat_identity_text(message: Message) -> str:
     user = message.from_user
     username = f"@{user.username}" if user and user.username else ""
+    user_id = int(user.id) if user and getattr(user, "id", None) is not None else None
     full_name = " ".join(
         part for part in [getattr(user, "first_name", "") if user else "", getattr(user, "last_name", "") if user else ""] if part
     ).strip()
@@ -956,6 +759,8 @@ def _chat_identity_text(message: Message) -> str:
         "你的 Telegram 身份信息：",
         f"chat_id: {int(message.chat.id)}",
     ]
+    if user_id is not None and user_id != int(message.chat.id):
+        lines.append(f"user_id: {user_id}")
     if username:
         lines.append(f"username: {username}")
     if full_name:
@@ -963,10 +768,30 @@ def _chat_identity_text(message: Message) -> str:
     lines.extend(
         [
             "",
-            "请把上面的 chat_id 添加到后台「可信 TG 用户」，不要填写机器人 ID。",
+            "私聊机器人时请添加 chat_id；在群里使用时可以添加 user_id 或群 chat_id。不要填写机器人 ID。",
         ]
     )
     return "\n".join(lines)
+
+
+def _message_authorization_ids(message: Message) -> list[int]:
+    ids: list[int] = []
+    try:
+        ids.append(int(message.chat.id))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    user = getattr(message, "from_user", None)
+    try:
+        user_id = int(user.id) if user and getattr(user, "id", None) is not None else None
+    except (TypeError, ValueError):
+        user_id = None
+    if user_id is not None and user_id not in ids:
+        ids.append(user_id)
+    return ids
+
+
+def _is_message_authorized(service: WorkspaceService, message: Message) -> bool:
+    return any(service.is_chat_authorized(candidate) for candidate in _message_authorization_ids(message))
 
 
 def _is_text(message: Message, *values: str) -> bool:
@@ -1266,42 +1091,51 @@ async def _preview_internal_webapp_prompt(
     if token:
         headers["x-tg-internal-token"] = token
     url = f"{_internal_webapp_base_url()}/api/internal/tg/prompt_preview"
-    try:
-        async with ClientSession() as session:
-            async with session.post(
-                url,
-                json={"task_type": str(task_type), "tg_chat_id": int(chat_id), "params": dict(params or {})},
-                headers=headers,
-                timeout=TG_PROMPT_PREVIEW_TIMEOUT_SECONDS,
-            ) as response:
-                body = await response.text()
-                if response.status >= 400:
-                    detail = ""
-                    try:
-                        error_data = json.loads(body)
-                        if isinstance(error_data, dict):
-                            detail = str(
-                                error_data.get("detail")
-                                or error_data.get("message")
-                                or error_data.get("error")
-                                or ""
-                            ).strip()
-                    except json.JSONDecodeError:
+    data: dict[str, Any] | None = None
+    last_client_error: ClientError | None = None
+    for attempt in range(1, 4):
+        try:
+            async with ClientSession() as session:
+                async with session.post(
+                    url,
+                    json={"task_type": str(task_type), "tg_chat_id": int(chat_id), "params": dict(params or {})},
+                    headers=headers,
+                    timeout=TG_PROMPT_PREVIEW_TIMEOUT_SECONDS,
+                ) as response:
+                    body = await response.text()
+                    if response.status >= 400:
                         detail = ""
-                    raise RuntimeError(
-                        f"后台 Grok 提示词生成失败 HTTP {response.status}: {(detail or body)[:500]}"
-                    )
-                try:
-                    data = json.loads(body)
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError(f"后台 Grok 提示词生成返回非 JSON: {body[:300]}") from exc
-    except asyncio.TimeoutError as exc:
-        raise RuntimeError(
-            f"后台 Grok 提示词生成超时（超过 {TG_PROMPT_PREVIEW_TIMEOUT_SECONDS} 秒）。"
-            "通常是 Grok 响应慢、供应商排队，或提示词被二次校验重试拖长。"
-        ) from exc
-    except ClientError as exc:
-        raise RuntimeError(f"连接后台 Grok 提示词服务失败：{exc}") from exc
+                        try:
+                            error_data = json.loads(body)
+                            if isinstance(error_data, dict):
+                                detail = str(
+                                    error_data.get("detail")
+                                    or error_data.get("message")
+                                    or error_data.get("error")
+                                    or ""
+                                ).strip()
+                        except json.JSONDecodeError:
+                            detail = ""
+                        raise RuntimeError(
+                            f"后台 Grok 提示词生成失败 HTTP {response.status}: {(detail or body)[:500]}"
+                        )
+                    try:
+                        data = json.loads(body)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(f"后台 Grok 提示词生成返回非 JSON: {body[:300]}") from exc
+                    break
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"后台 Grok 提示词生成超时（超过 {TG_PROMPT_PREVIEW_TIMEOUT_SECONDS} 秒）。"
+                "通常是 Grok 响应慢、供应商排队，或提示词被二次校验重试拖长。"
+            ) from exc
+        except ClientError as exc:
+            last_client_error = exc
+            if attempt >= 3:
+                raise RuntimeError(f"连接后台 Grok 提示词服务失败：{exc}") from exc
+            await asyncio.sleep(0.8 * attempt)
+    if data is None:
+        raise RuntimeError(f"连接后台 Grok 提示词服务失败：{last_client_error}")
     if not isinstance(data, dict):
         raise RuntimeError(f"后台 Grok 提示词生成返回格式异常: {data}")
     prompt_text = str(data.get("prompt_text") or "").strip()
@@ -1468,7 +1302,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     chat_script_drafts: dict[int, str] = {}
 
     async def ensure_authorized(message: Message) -> bool:
-        if service.is_chat_authorized(int(message.chat.id)):
+        if _is_message_authorized(service, message):
             return True
         await message.answer(
             "\n".join(
@@ -1823,7 +1657,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if callback.message is None:
             await callback.answer()
             return
-        if not service.is_chat_authorized(int(callback.message.chat.id)):
+        if not _is_message_authorized(service, callback.message):
             await callback.answer("当前账号未授权", show_alert=True)
             return
         data_value = str(callback.data or "")
@@ -1906,16 +1740,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _show_text_to_image_prompt_review(message: Message, state: FSMContext, *, prompt_text: str, selected_model: str = "") -> None:
         data = await state.get_data()
         params = _text_to_image_params(data)
-        clean_prompt_text = _strip_prompt_char_count_note(prompt_text, preserve_english=True)
-        if not clean_prompt_text:
-            raise RuntimeError("英文提示词为空，无法生成中文预览。")
-        display_prompt_text = await _display_internal_webapp_prompt(
-            chat_id=int(message.chat.id),
-            task_type="text_to_image",
-            prompt_text=clean_prompt_text,
-        )
-        if not _looks_like_clean_chinese_preview(display_prompt_text):
-            raise RuntimeError("中文预览校验未通过，已阻止显示提交按钮。")
+        display_prompt_text = str(prompt_text or "").strip()
+        if not display_prompt_text:
+            raise RuntimeError("Grok \u672a\u8fd4\u56de\u53ef\u7528\u63d0\u793a\u8bcd\uff0c\u8bf7\u91cd\u65b0\u751f\u6210\u63d0\u793a\u8bcd\u3002")
         await state.update_data(
             prompt_display_text=display_prompt_text,
             prompt_display_ready=True,
@@ -2001,10 +1828,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             payload["image_local_path"] = reference_image
         await message.answer("正在让 Grok 生成最终提示词...")
         result = await _preview_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="text_to_image", params=payload)
-        prompt_text = _strip_prompt_char_count_note(str(result.get("prompt_text") or "").strip(), preserve_english=True)
+        prompt_text = str(result.get("prompt_text") or "").strip()
         selected_model = str(result.get("selected_model") or "").strip()
-        if not _looks_like_english_image_prompt(prompt_text):
-            raise RuntimeError("Grok 返回的最终提示词不是英文，已阻止保存。请重新生成提示词。")
+        if not prompt_text:
+            raise RuntimeError("Grok 未返回可用提示词，请重新生成提示词。")
         await state.update_data(
             original_user_request=original_for_state,
             final_prompt_text=prompt_text,
@@ -2021,7 +1848,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _submit_text_to_image_from_state(message: Message, state: FSMContext) -> None:
         data = await state.get_data()
         params = _text_to_image_params(data)
-        final_prompt = _strip_prompt_char_count_note(str(data.get("final_prompt_text") or "").strip(), preserve_english=True)
+        final_prompt = str(data.get("final_prompt_text") or "").strip()
         if not final_prompt:
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
             await message.answer("还没有可用的 Grok 提示词，请先输入图片需求。")
@@ -2081,7 +1908,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if callback.message is None:
             await callback.answer()
             return
-        if not service.is_chat_authorized(int(callback.message.chat.id)):
+        if not _is_message_authorized(service, callback.message):
             await callback.answer("当前账号未授权", show_alert=True)
             return
         action = str(callback.data or "")
@@ -2559,7 +2386,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 prompt_reference_image_local_path=reference_image_path,
             )
             if not prompt:
-                prompt = "请根据我上传的参考图片生成图片提示词，保留图片中的主体、构图、场景、服装、姿态、风格和可见细节。"
+                prompt = "请根据我上传的参考图片生成图片提示词，保留图片中的主体、构图、场景、服装、姿态、风格和可见细节。风格必须挑逗诱惑、充满情欲张力，像私房福利图一样撩人。详细描述女性生殖器官：饱满挺立的乳房、粉嫩敏感的乳头、清晰可见的阴唇轮廓、湿润的私密部位。姿态要挑逗：手指轻抚乳房、微微拱起的腰肢、湿润的嘴唇微张、勾人的眼神。"
         if not prompt:
             params = _text_to_image_params(data)
             await message.answer(
@@ -2630,7 +2457,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
-        custom_prompt = _strip_prompt_char_count_note(_message_text(message), preserve_english=True)
+        custom_prompt = _message_text(message)
         if not custom_prompt:
             await message.answer("请输入自定义最终提示词。", reply_markup=_text_to_image_prompt_entry_keyboard())
             return
@@ -3258,7 +3085,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.update_data(aspect_ratio=params["aspect_ratio"], width=params["width"], height=params["height"])
                 await _preview_text_to_image_prompt(message, state, user_request=text)
             except Exception as exc:
-                await message.answer(f"Grok ????????{exc}", reply_markup=_menu_keyboard())
+                await message.answer(f"Grok 提示词生成失败：{exc}", reply_markup=_menu_keyboard())
             return
         try:
             result = await _submit_internal_webapp_agent_task(

@@ -416,16 +416,14 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertEqual(detail["error_analysis_available"], True)
 
-    def test_image_generate_task_detail_keeps_runtime_service_fields(self):
+    def test_image_generate_task_detail_keeps_comfy_runtime_fields(self):
         get_task_detail = self._route_endpoint("/api/tasks/{task_id}", "GET")
         server._write_runtime_config_file(
             {
-                "image_generate_mode_default": "runninghub_workflow",
-                "image_runninghub_workflow_id": "1900814586436534274",
-                "image_model_provider_base_url": "http://202.90.21.53:3008",
-                "image_model_provider_api_key_gemini": "sk-gemini-image",
-                "image_model_provider_api_key_gpt": "sk-gpt-image",
-                "image_model_default_model": "gpt-image-2",
+                "image_generate_mode_default": "remote_comfy",
+                "comfy_workflow_source": "remote",
+                "remote_comfy_gateway_url": "http://comfy.local",
+                "remote_comfy_workflow_mappings": {"image_generate": "wf-image"},
                 "llm_base_url": "http://202.90.21.53:3008",
                 "llm_api_key": "sk-gemini-llm",
                 "llm_default_model": "gemini-3.1-pro-preview",
@@ -434,8 +432,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         payload = server._apply_runtime_defaults(
             "image_generate",
             {
-                "image_generate_provider": "runninghub_workflow",
-                "image_generate_model": "gpt-image-2",
+                "image_generate_provider": "remote_comfy",
                 "prompt": "生成图片",
             },
         )
@@ -443,37 +440,30 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         detail = get_task_detail("task_image_detail_clean", self.admin_user)
 
-        self.assertEqual(detail["workflow_id"], "1900814586436534274")
-        self.assertEqual(detail["workflow_ids"], ["1900814586436534274"])
-        self.assertEqual(detail["input"]["image_generate_mode_default"], "runninghub_workflow")
-        self.assertEqual(detail["input"]["image_runninghub_workflow_id"], "1900814586436534274")
-        self.assertEqual(detail["input"]["image_model_provider_base_url"], "http://202.90.21.53:3008")
-        self.assertEqual(detail["input"]["image_model_provider_api_key_gemini"], "sk-g***mage")
-        self.assertEqual(detail["input"]["image_model_provider_api_key_gpt"], "sk-g***mage")
-        self.assertEqual(detail["input"]["image_model_default_model"], "gpt-image-2")
+        self.assertEqual(detail["workflow_id"], "wf-image")
+        self.assertEqual(detail["workflow_ids"], ["wf-image"])
+        self.assertEqual(detail["input"]["image_generate_mode_default"], "remote_comfy")
+        self.assertEqual(detail["input"]["remote_comfy_gateway_url"], "http://comfy.local")
+        self.assertEqual(detail["input"]["remote_comfy_workflow_mappings"], {"image_generate": "wf-image"})
         self.assertEqual(detail["input"]["llm_base_url"], "http://202.90.21.53:3008")
         self.assertEqual(detail["input"]["llm_api_key"], "sk-g***-llm")
         self.assertEqual(detail["input"]["llm_default_model"], "gemini-3.1-pro-preview")
-        self.assertEqual(detail["input"]["image_generate_provider"], "runninghub_workflow")
-        self.assertEqual(detail["input"]["image_generate_model"], "gpt-image-2")
-    def test_runtime_config_supports_dual_image_generation_and_llm_fields(self):
+        self.assertEqual(detail["input"]["image_generate_provider"], "remote_comfy")
+        self.assertNotIn("image_model_provider_base_url", detail["input"])
+    def test_runtime_config_supports_comfy_image_generation_and_llm_fields(self):
         payload = server.RuntimeConfigPayload(
-            image_generate_mode_default="runninghub_workflow",
-            image_runninghub_workflow_id="1900814586436534274",
-            image_model_provider_base_url="http://202.90.21.53:3008",
-            image_model_provider_api_key_gemini="sk-gemini-image",
-            image_model_provider_api_key_gpt="sk-gpt-image",
-            image_model_default_model="gpt-image-2",
+            image_generate_mode_default="remote_comfy",
+            comfy_workflow_source="remote",
+            remote_comfy_gateway_url="http://comfy.local",
+            remote_comfy_workflow_mappings={"image_generate": "wf-image"},
             llm_base_url="http://202.90.21.53:3008",
             llm_api_key="sk-gemini-llm",
             llm_default_model="gemini-3.1-pro-preview",
         )
-        self.assertEqual(payload.image_generate_mode_default, "runninghub_workflow")
-        self.assertEqual(payload.image_runninghub_workflow_id, "1900814586436534274")
-        self.assertEqual(payload.image_model_provider_base_url, "http://202.90.21.53:3008")
-        self.assertEqual(payload.image_model_provider_api_key_gemini, "sk-gemini-image")
-        self.assertEqual(payload.image_model_provider_api_key_gpt, "sk-gpt-image")
-        self.assertEqual(payload.image_model_default_model, "gpt-image-2")
+        self.assertEqual(payload.image_generate_mode_default, "remote_comfy")
+        self.assertEqual(payload.comfy_workflow_source, "remote")
+        self.assertEqual(payload.remote_comfy_gateway_url, "http://comfy.local")
+        self.assertEqual(payload.remote_comfy_workflow_mappings, {"image_generate": "wf-image"})
         self.assertEqual(payload.llm_base_url, "http://202.90.21.53:3008")
         self.assertEqual(payload.llm_api_key, "sk-gemini-llm")
         self.assertEqual(payload.llm_default_model, "gemini-3.1-pro-preview")

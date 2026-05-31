@@ -12,7 +12,6 @@ from typing import Any, Callable
 
 import Video_Clip_Extraction
 import get_gemini
-import get_nano_banana
 import replace_model
 from asset_uploader import upload_file
 
@@ -489,7 +488,7 @@ def run_tiktok_face_replace_project(
         fixed_image_index=fixed_image_index,
     )
     log_step("[配置] Gemini", host=settings.gemini_host, port=settings.gemini_port, api_key=_mask_secret(settings.gemini_api_key))
-    log_step("[配置] Nano Banana", host=settings.nano_host, port=settings.nano_port, api_key=_mask_secret(settings.nano_api_key))
+    log_step("[配置] 图片生成", mode="ComfyUI/外部场景图")
     log_step("[配置] RunningHub", api_key=_mask_secret(settings.runninghub_api_key), app_id=str(getattr(settings, "runninghub_replace_app_id", "") or ""))
     log_step(
         "[配置] 输出参数",
@@ -500,10 +499,8 @@ def run_tiktok_face_replace_project(
     )
 
     prompt_gemini_path = os.path.join(os.path.dirname(__file__), "system_prompt", "gemini_system_prompt.md")
-    prompt_nano_path = os.path.join(os.path.dirname(__file__), "system_prompt", "nano_banana_prompt.md")
     prompt_review_path = os.path.join(os.path.dirname(__file__), "system_prompt", "gemini_frame_review_prompt.md")
     gemini_system_prompt = _read_text_file(prompt_gemini_path)
-    nano_system_prompt = _read_text_file(prompt_nano_path)
     frame_review_prompt = _read_text_file(prompt_review_path)
 
     download_started = _now_ts()
@@ -852,51 +849,7 @@ def run_tiktok_face_replace_project(
                 )
                 continue
 
-            step_started = _now_ts()
-            generated_path = os.path.join(images_dir, f"{_sanitize_filename(video_id)}.png")
-            nano_user_prompt = str(getattr(settings, "nano_prompt", "") or "").strip() or "生成相似但非同一人的新人物，保持原图的姿势、服装、场景与光照。"
-            nano_prompt = f"{nano_system_prompt}\n\n{nano_user_prompt}"
-            log_step(
-                "[任务] Nano Banana 生图",
-                video_id=video_id,
-                model="gemini-3-pro-image-preview",
-                host=settings.nano_host,
-                port=settings.nano_port,
-                system_prompt_file="system_prompt/nano_banana_prompt.md",
-                input_image_path=item.frame_image_path,
-                output_image_path=generated_path,
-                prompt=nano_prompt,
-            )
-            nano_result = get_nano_banana.get_nano_banana_pro(
-                prompt=nano_prompt,
-                output_image_path=generated_path,
-                api_key=settings.nano_api_key,
-                input_image_path=item.frame_image_path,
-                host=settings.nano_host,
-                port=settings.nano_port,
-            )
-            item.generated_image_path = os.path.abspath(str(nano_result.get("image_path") or generated_path))
-            step_finished = _now_ts()
-            item.steps.append(
-                StepResult(
-                    name="nano_banana_generate",
-                    status="success",
-                    started_at=datetime.fromtimestamp(step_started).isoformat(timespec="seconds"),
-                    finished_at=datetime.fromtimestamp(step_finished).isoformat(timespec="seconds"),
-                    duration=_format_duration(step_finished - step_started),
-                    inputs={"image_path": item.frame_image_path},
-                    outputs={"generated_image_path": item.generated_image_path, "raw": nano_result},
-                    prompt="system_prompt=system_prompt/nano_banana_prompt.md",
-                )
-            )
-            log_step(f"[阶段4] 生图完成: {item.generated_image_path}", video_id=video_id)
-            _emit("image", {"video_id": video_id, "path": item.generated_image_path})
-            completed_units += 1
-            emit_progress(
-                percent=5.0 + (completed_units / total_units) * 95.0,
-                phase="nano_done",
-                video_id=video_id,
-            )
+            raise RuntimeError("WorkFlow.py 需要先由 ComfyUI 生成场景图，再进入视频工作流")
 
         use_custom_duration = bool(getattr(settings, "use_custom_duration", False))
         requested_duration = int(getattr(settings, "output_duration_seconds", 0) or 0)
@@ -1089,7 +1042,7 @@ def run_tiktok_face_replace_project(
             "gemini_api_key": _mask_secret(settings.gemini_api_key),
             "nano_api_key": _mask_secret(settings.nano_api_key),
             "runninghub_api_key": _mask_secret(settings.runninghub_api_key),
-            "prompt_files": {"gemini": "system_prompt/gemini_system_prompt.md", "nano": "system_prompt/nano_banana_prompt.md"},
+            "prompt_files": {"gemini": "system_prompt/gemini_system_prompt.md"},
         },
         items=items,
         logs=project_logs,

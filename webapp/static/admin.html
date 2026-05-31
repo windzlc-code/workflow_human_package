@@ -276,43 +276,6 @@
               </div>
               <div class="admin-runtime-column">
                 <div class="admin-runtime-block">
-                  <div class="admin-config-card-title">图片模型</div>
-                  <div class="small">闭源图片模型与默认候选模型统一在这里维护。</div>
-                  <label>闭源图像 API Base URL</label>
-                  <input id="rtImageModelProviderBaseUrl" placeholder="http://202.90.21.53:3008">
-                  <label>Gemini 生图服务密钥</label>
-                  <input id="rtImageModelProviderApiKeyGemini" type="password" placeholder="Gemini Image API Key">
-                  <label>GPT 生图服务密钥</label>
-                  <input id="rtImageModelProviderApiKeyGpt" type="password" placeholder="GPT Image API Key">
-                  <label>Gemini 候选模型</label>
-                  <div class="admin-model-list-editor">
-                    <div id="rtImageGeminiModelList" class="admin-model-list"></div>
-                    <div class="admin-model-list-input-row">
-                      <input id="rtImageGeminiModelInput" type="text" placeholder="输入 Gemini 图片模型后回车或点击添加">
-                      <button id="btnAddImageGeminiModel" type="button" class="ghost admin-model-add-btn">+</button>
-                    </div>
-                  </div>
-                  <label>GPT 候选模型</label>
-                  <div class="admin-model-list-editor">
-                    <div id="rtImageGptModelList" class="admin-model-list"></div>
-                    <div class="admin-model-list-input-row">
-                      <input id="rtImageGptModelInput" type="text" placeholder="输入 GPT 图片模型后回车或点击添加">
-                      <button id="btnAddImageGptModel" type="button" class="ghost admin-model-add-btn">+</button>
-                    </div>
-                  </div>
-                  <label>优先级调用顺序（失败自动降级）</label>
-                  <div class="admin-model-list-editor">
-                    <div id="rtImagePriorityModelList" class="admin-model-priority-list"></div>
-                    <div class="admin-model-list-input-row">
-                      <input id="rtImagePriorityModelInput" type="text" placeholder="输入模型名后回车或点击添加到优先级列表">
-                      <button id="btnAddImagePriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
-                    </div>
-                  </div>
-                  <div id="rtImageModelSummary" class="admin-model-summary small"></div>
-                </div>
-              </div>
-              <div class="admin-runtime-column">
-                <div class="admin-runtime-block">
                   <div class="admin-config-card-title">视频模型</div>
                   <div class="small">MuleRouter / Wan 2.7 图生视频，用于 Telegram「视频编辑」。请求记录会进入任务详情日志。</div>
                   <label>模型名称</label>
@@ -430,7 +393,7 @@
             <div class="admin-runtime-panel-head">
               <div>
                 <div class="admin-config-card-title">TG Bot 设置</div>
-                <div class="small">维护 Telegram Bot 授权用户。只有信任名单里的 TG 用户 ID 可以操作机器人。</div>
+                <div class="small">维护 Telegram Bot 授权用户。私聊填 chat_id；群里使用可填用户 user_id 或群 chat_id。</div>
               </div>
               <button id="btnRefreshTgTrustedUsers" class="ghost" type="button">刷新</button>
             </div>
@@ -454,7 +417,7 @@
                 </div>
               </div>
               <div class="tg-config-compose">
-                <label>TG 用户 ID</label>
+                  <label>TG chat_id / user_id</label>
                 <input id="tgTrustedChatId" type="number" min="1" placeholder="例如：601992552">
                 <label>备注名称</label>
                 <input id="tgTrustedLabel" type="text" placeholder="例如：Ricky / Frank">
@@ -471,7 +434,7 @@
               <table class="table tg-member-table">
                 <thead>
                   <tr>
-                    <th>TG 用户 ID</th>
+                    <th>TG chat_id / user_id</th>
                     <th>备注</th>
                     <th>状态</th>
                     <th>任务占用通知</th>

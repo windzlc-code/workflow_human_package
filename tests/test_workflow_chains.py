@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from pathlib import Path
+import re
 import tempfile
+
+import pytest
 
 import replace_productANDmodel as replace_union
 import webapp.server as server
@@ -50,25 +53,7 @@ def test_normalize_runtime_config_removes_deprecated_replace_model_variants():
     assert "replace_model_motion_transfer_app_id" not in runtime
 
 
-def test_normalize_runtime_config_accepts_closed_image_model_stage():
-    runtime = server._normalize_runtime_config(
-        {
-            "image_generate_mode_default": "runninghub_workflow",
-            "image_runninghub_workflow_id": "2001",
-            "image_generate_workflow_ids": [
-                "2001",
-                {"type": "closed_image_model", "value": "gpt-image-1"},
-                "2002",
-            ],
-        }
-    )
-
-    assert runtime["image_generate_workflow_ids"] == ["2001", "closed_image_model:gpt-image-1", "2002"]
-    assert runtime["image_runninghub_workflow_id"] == "2002"
-    assert runtime["image_generate_mode_default"] == "runninghub_workflow"
-
-
-def test_normalize_runtime_config_accepts_closed_models_in_oral_chain():
+def test_normalize_runtime_config_accepts_closed_llm_in_oral_chain():
     runtime = server._normalize_runtime_config(
         {
             "create_audio_app_id": "1000",
@@ -76,7 +61,6 @@ def test_normalize_runtime_config_accepts_closed_models_in_oral_chain():
             "oral_digital_human_workflow_ids": [
                 {"type": "closed_llm_model", "value": "gpt-5.5"},
                 "1001",
-                {"type": "closed_image_model", "value": "gpt-image-2"},
                 "1002",
             ],
         }
@@ -85,7 +69,6 @@ def test_normalize_runtime_config_accepts_closed_models_in_oral_chain():
     assert runtime["oral_digital_human_workflow_ids"] == [
         "closed_llm_model:gpt-5.5",
         "1001",
-        "closed_image_model:gpt-image-2",
         "1002",
     ]
     assert runtime["create_audio_app_id"] == "1001"
@@ -93,60 +76,21 @@ def test_normalize_runtime_config_accepts_closed_models_in_oral_chain():
     assert runtime["video_app_id"] == "1002"
 
 
-def test_normalize_runtime_config_keeps_replace_legacy_id_on_runninghub_stage():
-    runtime = server._normalize_runtime_config(
-        {
-            "replace_model_original_app_id": "3000",
-            "replace_model_original_workflow_ids": [
-                {"type": "closed_image_model", "value": "gpt-image-1"},
-                "3001",
-            ],
-            "replace_product_app_id": "4000",
-            "replace_product_workflow_ids": [
-                "closed_image_model:gpt-image-1",
-                "4001",
-            ],
-        }
-    )
-
-    assert runtime["replace_model_original_workflow_ids"] == ["closed_image_model:gpt-image-1", "3001"]
-    assert runtime["replace_model_original_app_id"] == "3001"
-    assert runtime["replace_product_workflow_ids"] == ["closed_image_model:gpt-image-1", "4001"]
-    assert runtime["replace_product_app_id"] == "4001"
-
-
-def test_build_workflow_meta_describes_mixed_image_chain():
+def test_build_workflow_meta_describes_comfy_image_chain():
     meta = server._build_workflow_meta(
         task_id="task-image",
         task_type="image_generate",
         input_payload={
-            "image_generate_provider": "runninghub_workflow",
-            "image_generate_workflow_ids": ["2001", "closed_image_model:gpt-image-1"],
+            "image_generate_provider": "remote_comfy",
+            "remote_comfy_workflow_mappings": {"image_generate": "wf-image"},
         },
         output_payload={},
         runninghub_task_id="",
     )
 
-    assert meta["workflow_ids"] == ["2001", "闭源图片模型:gpt-image-1"]
-    assert meta["workflow_chain_summary"] == "图像编辑链 2 步（闭源模型 1 + RunningHub 1）"
-    assert meta["workflow_step_count"] == 2
-
-
-def test_build_workflow_meta_describes_mixed_replace_chain():
-    meta = server._build_workflow_meta(
-        task_id="task-replace",
-        task_type="replace_model",
-        input_payload={
-            "replace_model_original_workflow_ids": ["closed_image_model:gpt-image-1", "3001"],
-            "mode": "original",
-        },
-        output_payload={},
-        runninghub_task_id="",
-    )
-
-    assert meta["workflow_ids"] == ["闭源图片模型:gpt-image-1", "3001"]
-    assert meta["workflow_chain_summary"] == "视频模特替换链 2 步（闭源图片 1 + RunningHub 1）"
-    assert meta["workflow_step_count"] == 2
+    assert meta["workflow_ids"] == ["wf-image"]
+    assert meta["workflow_chain_summary"] == "ComfyUI 图像生成链 1 步"
+    assert meta["workflow_step_count"] == 1
 
 
 def test_normalize_runtime_config_splits_gemini_and_gpt_candidates():
@@ -154,31 +98,23 @@ def test_normalize_runtime_config_splits_gemini_and_gpt_candidates():
         {
             "llm_default_model_gemini": "gemini-3.1-pro-preview, gemini-2.5-pro",
             "llm_default_model_gpt": "gpt-4.1, gpt-4o-mini",
-            "image_model_default_model_gemini": "gemini-3-pro-image-preview",
-            "image_model_default_model_gpt": "gpt-image-1, gpt-image-1-mini",
         }
     )
 
     assert runtime["llm_default_model_gemini"] == "gemini-3.1-pro-preview, gemini-2.5-pro"
     assert runtime["llm_default_model_gpt"] == "gpt-4.1, gpt-4o-mini"
     assert runtime["llm_default_model"] == "gemini-3.1-pro-preview, gemini-2.5-pro"
-    assert runtime["image_model_default_model_gemini"] == "gemini-3-pro-image-preview"
-    assert runtime["image_model_default_model_gpt"] == "gpt-image-1, gpt-image-1-mini"
-    assert runtime["image_model_default_model"] == "gemini-3-pro-image-preview"
 
 
 def test_normalize_runtime_config_backfills_split_candidates_from_legacy_fields():
     runtime = server._normalize_runtime_config(
         {
             "llm_default_model": "gemini-3.1-pro-preview, gemini-2.5-flash",
-            "image_model_default_model": "gemini-3-pro-image-preview, imagen-3",
         }
     )
 
     assert runtime["llm_default_model_gemini"] == "gemini-3.1-pro-preview, gemini-2.5-flash"
     assert runtime["llm_default_model_gpt"] == ""
-    assert runtime["image_model_default_model_gemini"] == "gemini-3-pro-image-preview, imagen-3"
-    assert runtime["image_model_default_model_gpt"] == ""
 
 
 def test_normalize_runtime_config_backfills_split_llm_keys_from_legacy_field():
@@ -198,17 +134,12 @@ def test_normalize_runtime_config_keeps_gpt_only_candidates_separate():
         {
             "llm_default_model_gemini": "",
             "llm_default_model_gpt": "gpt-4.1, gpt-4o-mini",
-            "image_model_default_model_gemini": "",
-            "image_model_default_model_gpt": "gpt-image-1",
         }
     )
 
     assert runtime["llm_default_model_gemini"] == ""
     assert runtime["llm_default_model_gpt"] == "gpt-4.1, gpt-4o-mini"
     assert runtime["llm_default_model"] == "gpt-4.1, gpt-4o-mini"
-    assert runtime["image_model_default_model_gemini"] == ""
-    assert runtime["image_model_default_model_gpt"] == "gpt-image-1"
-    assert runtime["image_model_default_model"] == "gpt-image-1"
 
 
 def test_resolve_llm_settings_uses_gpt_key_for_gpt_models():
@@ -249,14 +180,10 @@ def test_normalize_runtime_config_respects_model_priority_order():
             "llm_default_model_gemini": "gemini-3.1-pro-preview, gemini-3-flash-preview",
             "llm_default_model_gpt": "gpt-5.5",
             "llm_model_priority_order": "gpt-5.5, gemini-3-flash-preview",
-            "image_model_default_model_gemini": "gemini-3-pro-image-preview",
-            "image_model_default_model_gpt": "gpt-image-2",
-            "image_model_priority_order": "gpt-image-2, gemini-3-pro-image-preview",
         }
     )
 
     assert runtime["llm_model_priority_order"] == "gpt-5.5, gemini-3-flash-preview, gemini-3.1-pro-preview"
-    assert runtime["image_model_priority_order"] == "gpt-image-2, gemini-3-pro-image-preview"
 
 
 def test_request_llm_json_with_fallback_uses_next_model_on_failure(monkeypatch):
@@ -328,6 +255,77 @@ def test_tg_prompt_enhancement_generates_image_prompt_without_production_request
     assert calls == ["gemini-3-flash-preview"]
     assert payload["prompt"] == "精修商品图，真实电商摄影，无文字水印"
     assert payload["tg_llm_prompt_selected_model"] == "gemini-3-flash-preview"
+
+
+def test_tg_text_to_image_prompt_uses_automatic_script_person_contract_and_dedupes(monkeypatch):
+    class DummyDb:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(server, "db", lambda: DummyDb())
+    monkeypatch.setattr(
+        server,
+        "_get_runtime_config",
+        lambda _conn: {
+            "llm_base_url": "http://llm.local",
+            "llm_api_key_gemini": "gemini-key",
+            "llm_default_model_gemini": "gemini-3-flash-preview",
+        },
+    )
+
+    captured: dict[str, str] = {}
+
+    def _fake_request(*, model: str, **kwargs):
+        captured["system_prompt"] = str(kwargs.get("system_prompt") or "")
+        return {
+            "ok": True,
+            "parsed": {
+                "prompt": (
+                    "真实手机随手拍社交照片，事件优先叙事，像真实动态照片一样自然不完美的构图，"
+                    "外观一致，同一个人，同一个人，不要文字，不要水印，不要水印，真实肢体语言，自然现场光"
+                )
+            },
+        }
+
+    monkeypatch.setattr(server.get_gemini, "request_gemini3_pro_json", _fake_request)
+    payload = server._enhance_tg_payload_with_llm_prompt(
+        "text_to_image",
+        {
+            "prompt": "生成室内人像",
+            "tg_use_llm_prompt": True,
+            "tg_user_instruction": "生成室内人像",
+            "aspect_ratio": "2:3",
+            "persona_label": "人设1捞女1金君雅",
+        },
+    )
+
+    assert "Automatic-script" in captured["system_prompt"]
+    assert "真实手机随手拍社交照片" in captured["system_prompt"]
+    assert "最终必须写成中文" in captured["system_prompt"]
+    assert "不要重复同一要求" in captured["system_prompt"]
+    assert "同一个人" not in payload["prompt"]
+    assert "外观一致" not in payload["prompt"]
+    assert "外观保持一致" not in payload["prompt"]
+    assert payload["prompt"].count("不要水印") == 1
+    assert re.search(r"[A-Za-z][A-Za-z'-]{1,}", payload["prompt"]) is None
+    assert payload["prompt_text"] == payload["prompt"]
+
+
+def test_legacy_tg_image_prompt_builder_uses_automatic_script_contract():
+    system_prompt, prompt_chain = server._build_tg_prompt_system_prompt("text_to_image", "text-to-image")
+
+    assert prompt_chain == "image"
+    assert "Automatic-script workflow girl/persona image" in system_prompt
+    assert "真实手机随手拍社交照片" in system_prompt
+    assert "LoRA controls appearance" in system_prompt
+    assert "Final output must be Chinese only" in system_prompt
+
+
+def test_automatic_person_prompt_rejects_english_fallback_text():
+    assert server._normalize_tg_automatic_person_prompt("photorealistic candid smartphone social photo, same person, no watermark") == ""
 
 
 def test_agent_task_payload_uses_llm_fallback_to_plan_replace_product(monkeypatch):
@@ -633,7 +631,7 @@ def test_tg_agent_production_only_plans_image_generate(monkeypatch):
     assert typ == "image_generate"
     assert summary == "识别为图片编辑"
     assert payload["product_image_local_path"] == "C:/tmp/product.png"
-    assert payload["image_generate_provider"] == "closed_model_api"
+    assert payload["image_generate_provider"] == "remote_comfy"
 
 
 def test_tg_agent_union_skill_plans_menu_compatible_payload(monkeypatch):
@@ -783,38 +781,6 @@ def test_internal_tg_union_accepts_agent_mixed_payload(monkeypatch):
     assert payload["auto_rename"] is True
 
 
-def test_generate_closed_image_with_fallback_uses_next_model_on_failure(monkeypatch):
-    calls: list[str] = []
-
-    def _fake_generate(*, model: str, **kwargs):
-        calls.append(model)
-        if model == "gemini-3-pro-image-preview":
-            raise RuntimeError("gemini image failed")
-        return {"image_path": kwargs["output_image_path"], "raw_result": {"ok": True}}
-
-    monkeypatch.setattr(server.image_model_api, "generate_image", _fake_generate)
-    result, selected, attempts = server._generate_closed_image_with_fallback(
-        source={
-            "image_model_provider_base_url": "http://image.local",
-            "image_model_provider_api_key_gemini": "gem-key",
-            "image_model_provider_api_key_gpt": "gpt-key",
-            "image_model_default_model_gemini": "gemini-3-pro-image-preview",
-            "image_model_default_model_gpt": "gpt-image-2",
-            "image_model_priority_order": "gemini-3-pro-image-preview, gpt-image-2",
-        },
-        prompt="test",
-        output_image_path=str(Path("tmp_out.png").resolve()),
-        input_image_path=None,
-        allow_builtin=False,
-    )
-
-    assert selected["model"] == "gpt-image-2"
-    assert calls == ["gemini-3-pro-image-preview", "gpt-image-2"]
-    assert attempts[0]["ok"] is False
-    assert attempts[1]["ok"] is True
-    assert "image_path" in result
-
-
 def test_apply_runtime_defaults_uses_runtime_chains_for_union(monkeypatch):
     runtime = {
         "runninghub_api_key": "rh-key",
@@ -903,7 +869,6 @@ def test_build_workflow_meta_describes_mixed_oral_chain():
             "oral_digital_human_workflow_ids": [
                 "closed_llm_model:gpt-5.5",
                 "1001",
-                "closed_image_model:gpt-image-2",
                 "1002",
             ],
         },
@@ -911,19 +876,21 @@ def test_build_workflow_meta_describes_mixed_oral_chain():
         runninghub_task_id="",
     )
 
-    assert meta["workflow_ids"] == ["闭源文字模型:gpt-5.5", "1001", "闭源图片模型:gpt-image-2", "1002"]
-    assert meta["workflow_chain_summary"] == "口播链 4 步（闭源文字 1 + 闭源图片 1 + RunningHub 2）"
-    assert meta["workflow_step_count"] == 4
+    assert meta["workflow_ids"] == ["闭源文字模型:gpt-5.5", "1001", "1002"]
+    assert meta["workflow_chain_summary"] == "口播链 3 步（闭源文字 1 + RunningHub 2）"
+    assert meta["workflow_step_count"] == 3
 
 
-def test_create_video_uses_closed_models_from_oral_chain_without_network(monkeypatch):
+def test_create_video_uses_closed_llm_from_oral_chain_without_network(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         model_image = root / "model.png"
         product_image = root / "product.png"
         workdir = root / "work"
+        scene_image = root / "scene.png"
         model_image.write_bytes(b"model")
         product_image.write_bytes(b"product")
+        scene_image.write_bytes(b"scene")
 
         captured: dict[str, object] = {}
 
@@ -936,8 +903,8 @@ def test_create_video_uses_closed_models_from_oral_chain_without_network(monkeyp
 
         def fake_generate_commerce_videos(**kwargs):
             captured["audio_app_id"] = kwargs["audio_settings"].app_id
-            captured["image_model"] = kwargs["nano_settings"].model
             captured["video_app_ids"] = kwargs["video_workflow"].app_ids
+            captured["scene_provider"] = kwargs["image_path_provider"](1, model_image, product_image)
             output_dir = Path(kwargs["output_dir"]).resolve()
             video_dir = output_dir / "videos"
             video_dir.mkdir(parents=True, exist_ok=True)
@@ -957,24 +924,22 @@ def test_create_video_uses_closed_models_from_oral_chain_without_network(monkeyp
                 "oral_digital_human_workflow_ids": [
                     "closed_llm_model:gpt-5.5",
                     "1001",
-                    "closed_image_model:gpt-image-2",
                     "1002",
                 ],
                 "llm_base_url": "http://llm.local",
                 "llm_api_key_gpt": "gpt-key",
-                "image_model_provider_base_url": "http://image.local",
-                "image_model_provider_api_key_gpt": "image-key",
+                "generated_scene_local_path": str(scene_image),
             },
         )
 
         assert result["ok"] is True
         assert captured["llm_model"] == "gpt-5.5"
-        assert captured["image_model"] == "gpt-image-2"
         assert captured["audio_app_id"] == "1001"
         assert captured["video_app_ids"] == ["1002"]
+        assert captured["scene_provider"] == str(scene_image)
 
 
-def test_image_generate_closed_stage_in_chain_runs_without_runninghub(monkeypatch):
+def test_image_generate_without_comfy_mapping_refuses_closed_model_fallback(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         product = root / "product.png"
@@ -982,85 +947,15 @@ def test_image_generate_closed_stage_in_chain_runs_without_runninghub(monkeypatc
         out_root = root / "out"
         out_root.mkdir()
 
-        monkeypatch.setattr(server, "_build_task_workdir", lambda task_id, fallback_username=None: out_root)
-        monkeypatch.setattr(
-            server.image_model_api,
-            "generate_image",
-            lambda **kwargs: Path(kwargs["output_image_path"]).write_bytes(b"closed-image") or {"image_path": kwargs["output_image_path"]},
-        )
-        monkeypatch.setattr(
-            server,
-            "_upload_binary_to_runninghub",
-            lambda **kwargs: (_ for _ in ()).throw(AssertionError("RunningHub upload should not be called")),
-        )
-
-        result = server._run_image_generate(
-            "task-image-closed",
-            {
-                "image_generate_provider": "runninghub_workflow",
-                "image_generate_workflow_ids": ["closed_image_model:gpt-image-1"],
-                "product_image_local_path": str(product),
-                "prompt": "生成商品图",
-                "image_model_provider_base_url": "http://closed.local",
-                "image_model_provider_api_key_gpt": "gpt-key",
-            },
-        )
-
-        assert result["ok"] is True
-        assert result["runninghub_task_ids"] == []
-        assert Path(result["image_path"]).read_bytes() == b"closed-image"
-        assert result["raw_result"]["steps"][0]["provider"] == "closed_image_model"
-        assert result["raw_result"]["steps"][0]["model"] == "gpt-image-1"
-
-
-def test_replace_model_closed_stage_preprocesses_image_before_runninghub(monkeypatch):
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        video = root / "input.mp4"
-        image = root / "model.png"
-        workdir = root / "work"
-        video.write_bytes(b"video")
-        image.write_bytes(b"image")
-
-        monkeypatch.setattr(server, "_build_task_workdir", lambda task_id, fallback_username=None: workdir)
-        monkeypatch.setattr(
-            server.image_model_api,
-            "generate_image",
-            lambda **kwargs: Path(kwargs["output_image_path"]).write_bytes(b"processed") or {"image_path": kwargs["output_image_path"]},
-        )
-
-        resolved: list[tuple[str, str]] = []
-
-        def fake_resolve_media_url(**kwargs):
-            resolved.append((str(kwargs["media_kind"]), str(kwargs.get("local_path") or kwargs.get("remote_url") or "")))
-            return f"url://{Path(str(kwargs.get('local_path') or kwargs.get('remote_url') or 'media')).name}"
-
-        def fake_requests_api(**kwargs):
-            Path(kwargs["video_output_path"]).write_bytes(b"out")
-            return {"status": "success", "task_id": "rh-1", "message": "ok", "image_path": kwargs["image_path"]}
-
-        monkeypatch.setattr(server, "_resolve_media_url", fake_resolve_media_url)
-        monkeypatch.setattr(server.replace_model, "requests_api", fake_requests_api)
-
-        result = server._run_replace_model(
-            "task-replace-model",
-            {
-                "runninghub_api_key": "rh-key",
-                "video_local_path": str(video),
-                "image_local_path": str(image),
-                "replace_model_original_workflow_ids": ["closed_image_model:gpt-image-1", "3001"],
-                "mode": "original",
-                "image_model_provider_base_url": "http://closed.local",
-                "image_model_provider_api_key_gpt": "gpt-key",
-            },
-        )
-
-        image_uploads = [item for item in resolved if item[0] == "image"]
-        assert result["ok"] is True
-        assert image_uploads
-        assert "replace_model_image_closed_stage_01" in image_uploads[0][1]
-        assert result["raw_result"]["steps"][0]["provider"] == "closed_image_model"
-        assert result["raw_result"]["steps"][1]["provider"] == "runninghub_workflow"
+        with pytest.raises(RuntimeError, match="ComfyUI 网关未配置 image_generate 工作流映射"):
+            server._run_image_generate(
+                "task-image-closed",
+                {
+                    "image_generate_provider": "remote_comfy",
+                    "product_image_local_path": str(product),
+                    "prompt": "生成商品图",
+                },
+            )
 
 
 def test_replace_union_executes_model_and_product_chains_without_network(monkeypatch):

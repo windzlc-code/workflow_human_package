@@ -201,18 +201,16 @@ class ProductizationAccessTests(unittest.TestCase):
         self.assertIn('taskTypeModeVideo', js_text)
         self.assertIn('taskTypeModeImage', js_text)
 
-    def test_index_page_contains_image_generation_provider_controls(self):
+    def test_index_page_contains_comfy_image_generation_controls(self):
         self._create_customer(balance_cents=1000)
         self._login_customer()
         resp = self.client.get("/index.html")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertIn('id="imageGenerateProvider"', resp.text)
-        self.assertIn('RunningHub 工作流', resp.text)
-        self.assertIn('闭源模型 API', resp.text)
-        self.assertIn('id="imageGenerateModelWrap"', resp.text)
-        self.assertIn('id="imageGenerateModel"', resp.text)
-        self.assertIn('gpt-image-2', resp.text)
-        self.assertIn('gemini-3-pro-image-preview', resp.text)
+        self.assertIn('data-task-type="image_generate"', resp.text)
+        self.assertNotIn('id="imageGenerateProvider"', resp.text)
+        self.assertNotIn('闭源模型 API', resp.text)
+        self.assertNotIn('id="imageGenerateModelWrap"', resp.text)
+        self.assertNotIn('id="imageGenerateModel"', resp.text)
 
     def test_admin_runtime_page_contains_editable_image_and_llm_service_fields(self):
         self._login_admin()

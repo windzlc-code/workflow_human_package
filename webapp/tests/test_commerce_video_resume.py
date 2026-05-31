@@ -84,14 +84,12 @@ class CommerceVideoResumeTests(unittest.TestCase):
         self.assertEqual(stored["retry_mode"], "resume")
 
     @patch("commerce_video_generator.upload_binary")
-    @patch("commerce_video_generator.get_nano_banana.get_nano_banana_pro")
     @patch("commerce_video_generator._generate_audio")
     @patch("commerce_video_generator.create_video.requests_api")
     def test_generate_commerce_videos_skips_finished_job_in_resume_mode(
         self,
         mock_video_api,
         mock_generate_audio,
-        mock_nano,
         mock_upload,
     ):
         root = Path(self._tmpdir.name)
@@ -114,7 +112,7 @@ class CommerceVideoResumeTests(unittest.TestCase):
             output_dir=str(out_dir),
             batch=commerce_video_generator.BatchSettings(output_dir=str(out_dir), resume=True),
             audio_settings=commerce_video_generator.AudioSettings(),
-        nano_settings=commerce_video_generator.NanoSettings(api_key="nano-secret", host="202.90.21.53"),
+            nano_settings=commerce_video_generator.NanoSettings(),
             video_workflow=commerce_video_generator.VideoWorkflowSettings(app_id="2018758760096862209"),
             speech_text_provider=lambda *_: "speech",
             prompt_provider=lambda *_: "prompt",
@@ -125,11 +123,9 @@ class CommerceVideoResumeTests(unittest.TestCase):
         self.assertTrue((out_dir / "result.zip").exists())
         mock_video_api.assert_not_called()
         mock_generate_audio.assert_not_called()
-        mock_nano.assert_not_called()
         mock_upload.assert_not_called()
 
     @patch("commerce_video_generator.upload_binary", side_effect=["https://example.com/scene.png", "https://example.com/1.mp3"])
-    @patch("commerce_video_generator.get_nano_banana.get_nano_banana_pro")
     @patch("commerce_video_generator._generate_audio")
     @patch("commerce_video_generator._probe_media_duration_seconds", return_value=10.0)
     @patch("commerce_video_generator._compose_reference_image")
@@ -140,7 +136,6 @@ class CommerceVideoResumeTests(unittest.TestCase):
         mock_compose_reference,
         _mock_probe_duration,
         mock_generate_audio,
-        mock_nano,
         mock_upload,
     ):
         root = Path(self._tmpdir.name)
@@ -173,7 +168,7 @@ class CommerceVideoResumeTests(unittest.TestCase):
             output_dir=str(out_dir),
             batch=commerce_video_generator.BatchSettings(output_dir=str(out_dir), resume=False),
             audio_settings=commerce_video_generator.AudioSettings(),
-        nano_settings=commerce_video_generator.NanoSettings(api_key="nano-secret", host="202.90.21.53"),
+            nano_settings=commerce_video_generator.NanoSettings(),
             video_workflow=commerce_video_generator.VideoWorkflowSettings(app_id="2018758760096862209"),
             speech_text_provider=lambda *_: "speech",
             prompt_provider=lambda *_: "prompt",
@@ -183,7 +178,6 @@ class CommerceVideoResumeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["success"], 1)
-        mock_nano.assert_not_called()
         mock_upload.assert_any_call(api_key="rh-secret", file_path=existing_scene, cache=unittest.mock.ANY, media_kind="image")
 
     def test_fast_path_with_generated_scene_does_not_require_nano_config(self):
@@ -213,7 +207,6 @@ class CommerceVideoResumeTests(unittest.TestCase):
                  patch.object(server.commerce_video_generator, "generate_commerce_videos", return_value={"success": 1, "output_dir": str(output_dir)}):
                 result = server._run_create_video_with_doubao("task_fast_path", payload)
     @patch("commerce_video_generator.upload_binary", side_effect=["https://example.com/1.png", "https://example.com/1.mp3"])
-    @patch("commerce_video_generator.get_nano_banana.get_nano_banana_pro")
     @patch("commerce_video_generator._generate_audio")
     @patch("commerce_video_generator._probe_media_duration_seconds", return_value=10.0)
     @patch("commerce_video_generator._compose_reference_image")
@@ -224,7 +217,6 @@ class CommerceVideoResumeTests(unittest.TestCase):
         mock_compose_reference,
         _mock_probe_duration,
         mock_generate_audio,
-        mock_nano,
         mock_upload,
     ):
         root = Path(self._tmpdir.name)
@@ -249,7 +241,6 @@ class CommerceVideoResumeTests(unittest.TestCase):
 
         mock_generate_audio.return_value = generated_audio
         mock_compose_reference.return_value = ref_image
-        mock_nano.return_value = {"image_path": str(generated_image)}
         mock_video_api.return_value = {"status": "success", "message": ""}
         progress_events = []
 
@@ -261,10 +252,11 @@ class CommerceVideoResumeTests(unittest.TestCase):
             output_dir=str(out_dir),
             batch=commerce_video_generator.BatchSettings(output_dir=str(out_dir), resume=False),
             audio_settings=commerce_video_generator.AudioSettings(),
-        nano_settings=commerce_video_generator.NanoSettings(api_key="nano-secret", host="202.90.21.53"),
+            nano_settings=commerce_video_generator.NanoSettings(),
             video_workflow=commerce_video_generator.VideoWorkflowSettings(app_id="2018758760096862209"),
             speech_text_provider=lambda *_: "speech",
             prompt_provider=lambda *_: "prompt",
+            image_path_provider=lambda *_: str(generated_image),
             logger=lambda *_args, **_kwargs: None,
             progress_callback=lambda payload: progress_events.append(payload),
         )

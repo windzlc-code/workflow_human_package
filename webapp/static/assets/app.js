@@ -239,8 +239,7 @@ let paramsByTaskType = {
   },
   image_generate: {
     mode: "product_only",
-    image_generate_provider: "closed_model_api",
-    image_generate_model: "gemini-3-pro-image-preview",
+    image_generate_provider: "remote_comfy",
     prompt: "生成电商商品展示图，画面干净自然，无文字。",
   },
   replace_model: { mode: "original", prompt: "", duration_seconds: 10, width: 576, height: 1024, frame: 30, start_seconds: 0 },
@@ -630,13 +629,7 @@ function updateUploadHint() {
       need = "单条模式：请分别上传模特图和商品图，可选运镜视频或口播音频。";
     }
   } else if (taskType === "image_generate") {
-    const provider = String((el("imageGenerateProvider") && el("imageGenerateProvider").value) || "closed_model_api").trim() || "closed_model_api";
-    if (provider === "closed_model_api") {
-      const model = String((el("imageGenerateModel") && el("imageGenerateModel").value) || "gemini-3-pro-image-preview").trim() || "gemini-3-pro-image-preview";
-      need = `图片生成：当前使用闭源模型 API（${model}），可上传 1 张商品图，或先模特图后商品图。`;
-    } else {
-      need = "图片生成：当前使用闭源模型 API，可上传 1 张商品图，或先模特图后商品图。";
-    }
+    need = "图片生成：当前使用 ComfyUI 工作流，可上传 1 张商品图，或先模特图后商品图。";
   } else if (taskType === "replace_model") {
     if (batchEnabled) {
       need = "批量：只上传 ZIP（可多个）。每条需 1 个被替换视频 + 1 张模特图片；可单ZIP多文件夹或 被替换视频ZIP+模特图片ZIP自动配对。";
@@ -785,14 +778,12 @@ function updateGeneratePageCopy() {
   const settingsDisclosure = el("settingsDisclosure");
   const settingsDisclosureSummary = el("settingsDisclosureSummary");
   const imageModeWrap = el("imageGenerateModeWrap");
-  const imageModelWrap = el("imageGenerateModelWrap");
-  const provider = String((el("imageGenerateProvider") && el("imageGenerateProvider").value) || "closed_model_api").trim() || "closed_model_api";
   const title = el("generatePageTitle");
   const hint = el("generatorActionHint");
   const button = el("btnSendChat");
   if (hint) {
     hint.textContent = isImage
-      ? (provider === "closed_model_api" ? "准备好图片素材后，点击主按钮开始生成图片。" : "准备好图片素材后，点击主按钮开始生成图片。")
+      ? "准备好图片素材后，点击主按钮开始生成图片。"
       : (isQuickVideo ? "已选中场景图，上传 1 张模特图后即可开始生成视频。" : "模特图和商品图准备完成后，点击主按钮开始生成视频。");
   }
   if (button) {
@@ -817,9 +808,7 @@ function updateGeneratePageCopy() {
       meta.className = "mode-brief-meta";
       briefImageMeta.appendChild(meta);
     }
-    meta.textContent = provider === "closed_model_api"
-      ? "支持仅商品图，或模特图 + 商品图双图生成，当前走闭源模型 API。"
-      : "支持仅商品图，或模特图 + 商品图双图生成，当前走闭源模型 API。";
+    meta.textContent = "支持仅商品图，或模特图 + 商品图双图生成，当前走 ComfyUI 工作流。";
   }
   if (uploadStageTitle) uploadStageTitle.textContent = isImage ? "上传生成素材" : "上传视频素材";
   if (uploadStageMeta) {
@@ -837,7 +826,6 @@ function updateGeneratePageCopy() {
     settingsDisclosureSummary.textContent = settingsDisclosure.open ? "收起设置" : "展开设置";
   }
   if (imageModeWrap) imageModeWrap.style.display = isImage ? "grid" : "none";
-  if (imageModelWrap) imageModelWrap.style.display = isImage && provider === "closed_model_api" ? "grid" : "none";
   const recentSection = el("recentImageSection");
   const recentSideRail = el("recentSideRail");
   if (recentSection) recentSection.style.display = isImage ? "" : "none";
@@ -1828,11 +1816,8 @@ function exportParamsForSubmit(taskType, msgText) {
   }
   if (taskType === "image_generate") {
     const modeNode = el("imageGenerateMode");
-    const providerNode = el("imageGenerateProvider");
-    const modelNode = el("imageGenerateModel");
     params.mode = String((modeNode && modeNode.value) || params.mode || "product_only").trim() || "product_only";
-    params.image_generate_provider = String((providerNode && providerNode.value) || params.image_generate_provider || "closed_model_api").trim() || "closed_model_api";
-    params.image_generate_model = String((modelNode && modelNode.value) || params.image_generate_model || "gemini-3-pro-image-preview").trim() || "gemini-3-pro-image-preview";
+    params.image_generate_provider = "remote_comfy";
     if (!String(params.prompt || "").trim()) params.prompt = params.message;
   }
   if (taskType === "replace_productANDmodel") {
@@ -2119,19 +2104,6 @@ function bindActions() {
     imageGenerateMode.addEventListener("change", () => {
       updateImageModeUI();
       updateGenerateSteps();
-      updateUploadHint();
-    });
-  }
-  const imageGenerateProvider = el("imageGenerateProvider");
-  if (imageGenerateProvider) {
-    imageGenerateProvider.addEventListener("change", () => {
-      updateGeneratePageCopy();
-      updateUploadHint();
-    });
-  }
-  const imageGenerateModel = el("imageGenerateModel");
-  if (imageGenerateModel) {
-    imageGenerateModel.addEventListener("change", () => {
       updateUploadHint();
     });
   }

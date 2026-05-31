@@ -19,8 +19,6 @@ const ADMIN_PAGE_LABELS = {
 
 const SENSITIVE_RUNTIME_INPUT_IDS = [
   "rtLlmApiKeyGpt",
-  "rtImageModelProviderApiKeyGemini",
-  "rtImageModelProviderApiKeyGpt",
   "rtRemoteComfyGatewayToken",
   "rtLocalComfyGatewayToken",
   "rtMuleRouterApiKey",
@@ -151,10 +149,7 @@ function writeModelDraft() {
     localStorage.setItem(RUNTIME_MODEL_DRAFT_KEY, JSON.stringify({
       llmGeminiModels: [],
       llmGptModels: grokModelItems(adminState.llmGptModels),
-      imageGeminiModels: uniqueItems(adminState.imageGeminiModels),
-      imageGptModels: uniqueItems(adminState.imageGptModels),
       llmPriorityModels: grokModelItems(adminState.llmPriorityModels),
-      imagePriorityModels: uniqueItems(adminState.imagePriorityModels),
     }));
   } catch {
     // localStorage can be unavailable in private browsing; config save still works.
@@ -173,7 +168,7 @@ function mergeModelDraft() {
   const draft = readModelDraft();
   if (!draft) return false;
   let changed = false;
-  ["llmGptModels", "imageGeminiModels", "imageGptModels", "llmPriorityModels", "imagePriorityModels"].forEach((key) => {
+  ["llmGptModels", "llmPriorityModels"].forEach((key) => {
     const before = uniqueItems(adminState[key]);
     const after = key.startsWith("llm")
       ? grokModelItems([...before, ...(Array.isArray(draft[key]) ? draft[key] : [])])
@@ -206,35 +201,27 @@ function normalizeWorkflowChain(value, fallback = []) {
     .filter(Boolean);
 }
 
-const CLOSED_IMAGE_STAGE_PREFIX = "closed_image_model:";
 const CLOSED_LLM_STAGE_PREFIX = "closed_llm_model:";
 
 function parseWorkflowStage(item) {
   if (item && typeof item === "object") {
     const type = String(item.type || item.provider || "").trim();
     const value = String(item.value || item.model || item.workflow_id || item.id || "").trim();
-    if (["closed_image_model", "closed_model_api", "closed_model", "image_model"].includes(type)) {
-      return { type: "closed_image_model", value };
-    }
     if (["closed_llm_model", "closed_text_model", "llm_model", "text_model"].includes(type)) {
       return { type: "closed_llm_model", value };
     }
-    return { type: "closed_image_model", value };
+    return { type: "runninghub_workflow", value };
   }
   const text = String(item || "").trim();
-  if (text.startsWith(CLOSED_IMAGE_STAGE_PREFIX)) {
-    return { type: "closed_image_model", value: text.slice(CLOSED_IMAGE_STAGE_PREFIX.length).trim() };
-  }
   if (text.startsWith(CLOSED_LLM_STAGE_PREFIX)) {
     return { type: "closed_llm_model", value: text.slice(CLOSED_LLM_STAGE_PREFIX.length).trim() };
   }
-  return { type: "closed_image_model", value: text };
+  return { type: "runninghub_workflow", value: text };
 }
 
 function buildWorkflowStageValue(type, value) {
   const stageValue = String(value || "").trim();
   if (!stageValue) return "";
-  if (type === "closed_image_model") return `${CLOSED_IMAGE_STAGE_PREFIX}${stageValue}`;
   if (type === "closed_llm_model") return `${CLOSED_LLM_STAGE_PREFIX}${stageValue}`;
   return stageValue;
 }
@@ -243,22 +230,11 @@ function looksLikeLegacyWorkflowId(value) {
   return /^\d{10,}$/.test(String(value || "").trim());
 }
 
-function imageModelOptions() {
-  const items = [
-    ...(Array.isArray(adminState.imageGeminiModels) ? adminState.imageGeminiModels : []),
-    ...(Array.isArray(adminState.imageGptModels) ? adminState.imageGptModels : []),
-  ]
-    .map((item) => String(item || "").trim())
-    .filter(Boolean);
-  return Array.from(new Set(items));
-}
-
 function llmModelOptions() {
   return grokModelItems(adminState.llmGptModels);
 }
 
 function modelCatalogForPriority(type) {
-  if (type === "image") return imageModelOptions();
   return llmModelOptions();
 }
 
@@ -280,14 +256,6 @@ function normalizePriorityList(priorityItems, catalogItems, fallbackItems) {
 }
 
 function syncPriorityModelsFromCatalog(type) {
-  if (type === "image") {
-    adminState.imagePriorityModels = normalizePriorityList(
-      adminState.imagePriorityModels,
-      imageModelOptions(),
-      ["gemini-3-pro-image-preview"],
-    );
-    return;
-  }
   const explicitPriority = grokModelItems(adminState.llmPriorityModels);
   adminState.llmPriorityModels = normalizePriorityList(
     explicitPriority.length ? explicitPriority : llmModelOptions(),
@@ -296,28 +264,19 @@ function syncPriorityModelsFromCatalog(type) {
   ).filter(isGrokModel);
 }
 
-function defaultClosedImageModel() {
-  const priority = Array.isArray(adminState.imagePriorityModels) ? adminState.imagePriorityModels : [];
-  return priority[0] || imageModelOptions()[0] || "gemini-3-pro-image-preview";
-}
-
 function defaultClosedLlmModel() {
   const priority = grokModelItems(adminState.llmPriorityModels);
   return priority[0] || llmModelOptions()[0] || "grok-4.2";
 }
 
 function normalizeWorkflowStageForType(type, value) {
-  const stageType = String(type || "closed_image_model").trim();
+  const stageType = String(type || "runninghub_workflow").trim();
   const text = String(value || "").trim();
-  if (stageType === "closed_image_model") {
-    return looksLikeLegacyWorkflowId(text) || !text ? defaultClosedImageModel() : text;
-  }
   if (stageType === "closed_llm_model") {
     return looksLikeLegacyWorkflowId(text) || !text ? defaultClosedLlmModel() : text;
   }
   return (
-    text.startsWith(CLOSED_IMAGE_STAGE_PREFIX)
-    || text.startsWith(CLOSED_LLM_STAGE_PREFIX)
+    text.startsWith(CLOSED_LLM_STAGE_PREFIX)
   ) ? "" : text;
 }
 
@@ -358,12 +317,8 @@ function renderPriorityModelList(listKey, wrapId) {
 
 function renderAllModelLists() {
   syncPriorityModelsFromCatalog("llm");
-  syncPriorityModelsFromCatalog("image");
   renderModelList("llmGptModels", "rtLlmGptModelList");
-  renderModelList("imageGeminiModels", "rtImageGeminiModelList");
-  renderModelList("imageGptModels", "rtImageGptModelList");
   renderPriorityModelList("llmPriorityModels", "rtLlmPriorityModelList");
-  renderPriorityModelList("imagePriorityModels", "rtImagePriorityModelList");
   renderModelSummaries();
 }
 
@@ -374,7 +329,7 @@ function firstModel(listKey) {
 }
 
 function buildModelSummary(geminiListKey, gptListKey, label) {
-  const priorityKey = label === "文字模型" ? "llmPriorityModels" : "imagePriorityModels";
+  const priorityKey = "llmPriorityModels";
   const priority = Array.isArray(adminState[priorityKey]) ? adminState[priorityKey] : [];
   if (priority.length > 0) return `当前默认执行：按优先级顺序依次尝试，当前首选 ${priority[0]}`;
   const geminiModel = firstModel(geminiListKey);
@@ -397,10 +352,6 @@ function renderModelSummaries() {
   if (llmSummary) {
     llmSummary.textContent = buildLlmModelSummary();
   }
-  const imageSummary = el("rtImageModelSummary");
-  if (imageSummary) {
-    imageSummary.textContent = buildModelSummary("imageGeminiModels", "imageGptModels", "图片模型");
-  }
 }
 
 function addModelFromInput(listKey, inputId) {
@@ -419,9 +370,6 @@ function addModelFromInput(listKey, inputId) {
     adminState[listKey].push(value);
     if (listKey === "llmGptModels") {
       syncPriorityModelsFromCatalog("llm");
-    }
-    if (listKey === "imageGeminiModels" || listKey === "imageGptModels") {
-      syncPriorityModelsFromCatalog("image");
     }
     writeModelDraft();
     renderAllModelLists();
@@ -529,10 +477,7 @@ const adminState = {
   activePage: "overview",
   llmGeminiModels: [],
   llmGptModels: [],
-  imageGeminiModels: [],
-  imageGptModels: [],
   llmPriorityModels: [],
-  imagePriorityModels: [],
   workflowChains: {},
   remoteComfyWorkflowMappings: {},
   remoteComfyWorkflows: [],
@@ -550,7 +495,7 @@ const REMOTE_COMFY_TASKS = [
   ["create_video", "生成视频"],
   ["video_i2v", "图生视频"],
   ["commerce_video", "带货视频"],
-  ["get_nano_banana", "图片编辑"],
+  ["get_nano_banana", "Comfy 图片编辑"],
 ];
 const ADMIN_PAGES = new Set(["overview", "users", "tasks", "pricing", "runtime", "account"]);
 const ADMIN_PAGE_ALIASES = {
@@ -579,7 +524,7 @@ function syncWorkflowChainFromDom(key) {
       const modelNode = row.querySelector(`[data-chain-model="${key}"]`);
       const value = input ? String(input.value || "").trim() : "";
       const modelValue = modelNode ? String(modelNode.value || "").trim() : "";
-      const type = typeNode ? String(typeNode.value || "closed_image_model") : "closed_image_model";
+      const type = typeNode ? String(typeNode.value || "runninghub_workflow") : "runninghub_workflow";
       return buildWorkflowStageValue(type, normalizeWorkflowStageForType(type, modelNode ? modelValue : value));
     });
   adminState.workflowChains[key] = values.length ? values : [""];
@@ -599,9 +544,6 @@ function renderWorkflowChain(key) {
     if (meta.supportsClosedLlmModel) {
       typeOptions.push(`<option value="closed_llm_model"${stage.type === "closed_llm_model" ? " selected" : ""}>闭源文字模型</option>`);
     }
-    if (meta.supportsClosedImageModel) {
-      typeOptions.push(`<option value="closed_image_model"${stage.type === "closed_image_model" ? " selected" : ""}>闭源图片模型</option>`);
-    }
     const stageTypeOptions = typeOptions.length > 1
       ? `
         <select class="workflow-step-type" data-chain-type="${key}" data-idx="${index}" aria-label="步骤类型">
@@ -609,16 +551,16 @@ function renderWorkflowChain(key) {
         </select>
       `
       : "";
-    const modelOptions = stage.type === "closed_llm_model" ? llmModelOptions() : imageModelOptions();
+    const modelOptions = stage.type === "closed_llm_model" ? llmModelOptions() : [];
     let stageValue = stage.value;
-    if (stage.type === "closed_image_model" || stage.type === "closed_llm_model") {
+    if (stage.type === "closed_llm_model") {
       stageValue = normalizeWorkflowStageForType(stage.type, stage.value);
       if (stageValue && !modelOptions.includes(stageValue)) modelOptions.push(stageValue);
     }
     let valueControl = "";
-    if (stage.type === "closed_image_model" || stage.type === "closed_llm_model") {
+    if (stage.type === "closed_llm_model") {
       valueControl = `
-        <select class="workflow-step-value" data-chain-model="${key}" data-idx="${index}" aria-label="${stage.type === "closed_llm_model" ? "选择闭源文字模型" : "选择闭源图片模型"}">
+        <select class="workflow-step-value" data-chain-model="${key}" data-idx="${index}" aria-label="选择文字模型">
           ${modelOptions.map((model) => `<option value="${escapeHtml(model)}"${model === stageValue ? " selected" : ""}>${escapeHtml(model)}</option>`).join("")}
         </select>
       `;
@@ -1630,14 +1572,11 @@ function runtimeFormToPayload() {
   const workflowChains = collectWorkflowChains();
   const digitalHumanChain = (workflowChains.digital_human_workflow_ids || [])
     .filter((stage) => parseWorkflowStage(stage).value);
-  const imageGeminiModels = stringifyModelList(adminState.imageGeminiModels);
-  const imageGptModels = stringifyModelList(adminState.imageGptModels);
   adminState.llmGeminiModels = [];
   adminState.llmGptModels = grokModelItems(adminState.llmGptModels);
   adminState.llmPriorityModels = grokModelItems(adminState.llmPriorityModels);
   const llmGrokModels = stringifyModelList(adminState.llmGptModels);
   const llmPriorityModels = stringifyModelList(adminState.llmPriorityModels);
-  const imagePriorityModels = stringifyModelList(adminState.imagePriorityModels);
   return {
     comfy_workflow_source: el("rtComfyWorkflowSource").value || "remote",
     remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
@@ -1646,7 +1585,7 @@ function runtimeFormToPayload() {
     local_comfy_gateway_url: el("rtLocalComfyGatewayUrl").value.trim(),
     local_comfy_gateway_token: el("rtLocalComfyGatewayToken").value.trim(),
     local_comfy_workflow_mappings: collectLocalComfyWorkflowMappings(),
-    image_generate_mode_default: "closed_model_api",
+    image_generate_mode_default: "remote_comfy",
     digital_human_workflow_ids: digitalHumanChain,
     oral_digital_human_workflow_ids: [],
     image_generate_workflow_ids: [],
@@ -1654,13 +1593,6 @@ function runtimeFormToPayload() {
     replace_product_workflow_ids: [],
     replace_union_model_workflow_ids: [],
     replace_union_product_workflow_ids: [],
-    image_model_provider_base_url: el("rtImageModelProviderBaseUrl").value.trim(),
-    image_model_provider_api_key_gemini: el("rtImageModelProviderApiKeyGemini").value.trim(),
-    image_model_provider_api_key_gpt: el("rtImageModelProviderApiKeyGpt").value.trim(),
-    image_model_default_model_gemini: imageGeminiModels,
-    image_model_default_model_gpt: imageGptModels,
-    image_model_default_model: imageGeminiModels || imageGptModels,
-    image_model_priority_order: imagePriorityModels || imageGeminiModels || imageGptModels,
     llm_base_url: el("rtLlmBaseUrl").value.trim(),
     llm_api_key_gemini: "",
     llm_api_key_gpt: el("rtLlmApiKeyGpt").value.trim(),
@@ -1704,12 +1636,6 @@ function fillRuntimeForm(data) {
     : {};
   renderRemoteComfyWorkflowMappings();
   renderLocalComfyWorkflowMappings();
-  el("rtImageModelProviderBaseUrl").value = v.image_model_provider_base_url || "http://202.90.21.53:3008";
-  el("rtImageModelProviderApiKeyGemini").value = v.image_model_provider_api_key_gemini || "";
-  el("rtImageModelProviderApiKeyGpt").value = v.image_model_provider_api_key_gpt || "";
-  adminState.imageGeminiModels = parseModelList(v.image_model_default_model_gemini || v.image_model_default_model || "gemini-3-pro-image-preview");
-  adminState.imageGptModels = parseModelList(v.image_model_default_model_gpt || "");
-  adminState.imagePriorityModels = parseModelList(v.image_model_priority_order || "");
   el("rtLlmBaseUrl").value = v.llm_base_url || "http://202.90.21.53:3008";
   el("rtLlmApiKeyGemini").value = "";
   el("rtLlmApiKeyGpt").value = v.llm_api_key_gpt || "";
@@ -1729,7 +1655,6 @@ function fillRuntimeForm(data) {
   el("rtMuleRouterWanI2vPromptExtend").value = v.mulerouter_wan_i2v_prompt_extend ? "1" : "0";
   el("rtMuleRouterWanI2vNegativePrompt").value = v.mulerouter_wan_i2v_negative_prompt || "low quality, blurry, distorted, watermark, text, logo";
   syncPriorityModelsFromCatalog("llm");
-  syncPriorityModelsFromCatalog("image");
   const restoredModelDraft = mergeModelDraft();
   renderAllModelLists();
   if (restoredModelDraft) {
@@ -2208,8 +2133,6 @@ function bindActions() {
 
   [
     ["btnAddLlmGptModel", "rtLlmGptModelInput", "llmGptModels"],
-    ["btnAddImageGeminiModel", "rtImageGeminiModelInput", "imageGeminiModels"],
-    ["btnAddImageGptModel", "rtImageGptModelInput", "imageGptModels"],
   ].forEach(([buttonId, inputId, listKey]) => {
     if (el(buttonId)) {
       el(buttonId).addEventListener("click", () => addModelFromInput(listKey, inputId));
@@ -2238,7 +2161,6 @@ function bindActions() {
 
   [
     ["btnAddLlmPriorityModel", "rtLlmPriorityModelInput", "llmPriorityModels", "llm"],
-    ["btnAddImagePriorityModel", "rtImagePriorityModelInput", "imagePriorityModels", "image"],
   ].forEach(([buttonId, inputId, listKey, type]) => {
     if (el(buttonId)) {
       el(buttonId).addEventListener("click", () => addPriorityModelFromInput(listKey, inputId, type));
@@ -2469,9 +2391,6 @@ function bindActions() {
         if (listName === "llmGptModels" || listName === "llmPriorityModels") {
           syncPriorityModelsFromCatalog("llm");
         }
-        if (listName === "imageGeminiModels" || listName === "imageGptModels" || listName === "imagePriorityModels") {
-          syncPriorityModelsFromCatalog("image");
-        }
         writeModelDraft();
         renderAllModelLists();
       }
@@ -2493,7 +2412,6 @@ function bindActions() {
         list[idx + 1] = item;
       }
       if (listName === "llmPriorityModels") syncPriorityModelsFromCatalog("llm");
-      if (listName === "imagePriorityModels") syncPriorityModelsFromCatalog("image");
       writeModelDraft();
       renderAllModelLists();
       return;
