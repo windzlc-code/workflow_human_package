@@ -1106,11 +1106,12 @@ def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) 
     if str(task_type or "").strip() != "text_to_image":
         return None
     return {
-        "inline_keyboard": [
-            [{"text": "重新生成图片", "callback_data": f"t2i:reroll:{str(task_id or '').strip()}"}],
-            [{"text": "继续生成图片", "callback_data": f"t2i:continue:{str(task_id or '').strip()}"}],
-            [{"text": "返回菜单", "callback_data": "t2i:main_menu"}],
-        ]
+        "keyboard": [
+            [{"text": "重新生成图片"}],
+            [{"text": "继续生成图片"}],
+            [{"text": "返回主菜单"}],
+        ],
+        "resize_keyboard": True,
     }
 
 

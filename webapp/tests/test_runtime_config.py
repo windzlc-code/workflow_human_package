@@ -520,6 +520,15 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertNotIn("真实，皮肤，纹理", normalized)
         self.assertIn("高细节，8K，写实摄影风格", normalized)
 
+    def test_finished_text_to_image_uses_reply_keyboard(self):
+        markup = server._send_telegram_reply_markup_for_finished_task("task_1", "text_to_image")
+
+        self.assertIn("keyboard", markup)
+        self.assertNotIn("inline_keyboard", markup)
+        self.assertEqual(markup["keyboard"][0][0]["text"], "重新生成图片")
+        self.assertEqual(markup["keyboard"][1][0]["text"], "继续生成图片")
+        self.assertEqual(markup["keyboard"][2][0]["text"], "返回主菜单")
+
 
 if __name__ == "__main__":
     unittest.main()

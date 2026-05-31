@@ -58,6 +58,8 @@ LEGACY_ORAL_UPLOAD_BUTTON = "口播数字人：上传素材"
 WORKFLOW_CONFIG_BUTTON = "查看后台工作流配置"
 IMAGE_WORKFLOW_BUTTON = "图像生成"
 TEXT_TO_IMAGE_BUTTON = "文生图"
+TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON = "重新生成图片"
+TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON = "继续生成图片"
 MULTI_IMAGE_BUTTON = "多图生成"
 IMAGE_REPLACE_BUTTON = "图片替换"
 VIDEO_GENERAL_EDIT_BUTTON = "图生视频"
@@ -2066,6 +2068,66 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             reply_markup=_text_to_image_prompt_mode_reply_keyboard(),
         )
 
+    async def _latest_text_to_image_task(chat_id: int) -> dict[str, Any]:
+        tasks = await _fetch_internal_webapp_tg_tasks(chat_id=int(chat_id), limit=20)
+        selected = next(
+            (
+                item
+                for item in tasks
+                if str(item.get("type") or "").strip() == "text_to_image"
+                and str(item.get("status") or "").strip() == "success"
+            ),
+            None,
+        )
+        if selected is None:
+            selected = next((item for item in tasks if str(item.get("type") or "").strip() == "text_to_image"), None)
+        if not isinstance(selected, dict):
+            raise RuntimeError("没有找到最近的文生图任务")
+        task_id = str(selected.get("id") or "").strip()
+        if not task_id:
+            raise RuntimeError("最近的文生图任务缺少任务编号")
+        return await _fetch_internal_webapp_tg_task_detail(chat_id=int(chat_id), task_id=task_id)
+
+    async def _reroll_latest_text_to_image(message: Message, state: FSMContext) -> None:
+        task = await _latest_text_to_image_task(int(message.chat.id))
+        if str(task.get("type") or "").strip() != "text_to_image":
+            raise RuntimeError("最近任务不是文生图任务")
+        input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
+        payload, seed = _text_to_image_reroll_payload(input_payload)
+        payload["tg_reroll_from_task_id"] = str(task.get("id") or "").strip()
+        await state.clear()
+        await message.answer(f"已切换 seed，重新提交生成。Seed: {seed}", reply_markup=_menu_keyboard())
+        await submit_webapp_task_and_reply(message, "text_to_image", payload)
+        logger.info("Submitted text_to_image reroll from latest task %s with seed %s", task.get("id"), seed)
+
+    async def _continue_latest_text_to_image(message: Message, state: FSMContext) -> None:
+        task = await _latest_text_to_image_task(int(message.chat.id))
+        if str(task.get("type") or "").strip() != "text_to_image":
+            raise RuntimeError("最近任务不是文生图任务")
+        input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
+        params = _text_to_image_params(input_payload)
+        await state.clear()
+        await state.update_data(
+            aspect_ratio=params["aspect_ratio"],
+            width=params["width"],
+            height=params["height"],
+            final_resolution_enabled=bool(input_payload.get("final_resolution_enabled", params["final_resolution_enabled"])),
+            persona_available=bool(params["persona_available"]),
+            persona_enabled=bool(input_payload.get("persona_enabled", params["persona_enabled"])),
+            persona_lora=str(input_payload.get("persona_lora") or params.get("persona_lora") or ""),
+            ratio_selected=True,
+            resolution_selected=True,
+            persona_selected=bool(params["persona_available"]),
+            prompt_mode_selected=False,
+            prompt_mode_label="",
+            original_user_request="",
+            final_prompt_text="",
+            selected_model="",
+            custom_prompt_used=False,
+        )
+        await message.answer("继续生成图片：保留上次参数，重新进入提示词步骤。", reply_markup=_menu_keyboard())
+        await _show_text_to_image_prompt_mode(message, state)
+
     @router.callback_query(F.data.startswith("t2i:"))
     async def on_text_to_image_callback(callback: CallbackQuery, state: FSMContext) -> None:
         if callback.message is None:
@@ -3297,6 +3359,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         await start_text_to_image_flow(message, state)
+
+    @router.message(F.text == TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON)
+    async def on_text_to_image_reroll_image_button(message: Message, state: FSMContext) -> None:
+        if not await ensure_authorized(message):
+            return
+        try:
+            await _reroll_latest_text_to_image(message, state)
+        except Exception as exc:
+            await message.answer(f"重新生成图片失败：{exc}", reply_markup=_menu_keyboard())
+
+    @router.message(F.text == TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON)
+    async def on_text_to_image_continue_image_button(message: Message, state: FSMContext) -> None:
+        if not await ensure_authorized(message):
+            return
+        try:
+            await _continue_latest_text_to_image(message, state)
+        except Exception as exc:
+            await message.answer(f"继续生成图片失败：{exc}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == MULTI_IMAGE_BUTTON)
     @router.message(F.text == "多圖生成")
