@@ -2710,7 +2710,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 prompt_reference_image_local_path=reference_image_path,
             )
             if not prompt:
-                prompt = "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by commas (，): 1.[人物+全身姿态+场景] 2.穿着[服装] 3.[暴露器官] 4.她的[左手动作]而[右手动作] 5.她的身体[朝向] 6.她的头[转向+眼神] 7.[背景] 8.[光线] 9.[技术参数]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Example: 一位美丽女郎全身站立在豪华卧室中，穿着优雅的黑色丝绸睡裙，薄薄的意大利面条肩带，低领部部分解开露出深深的乳沟和侧乳，她的左手放在臀部上而右手触摸着裸露的大腿，她的身体微微侧向一边朝向镜头，她的头转向直视镜头带着诱惑的眼神，卧室背景有大大的特大号床铺，白色床单凌乱不堪，柔和的卧室灯投射出温柔的阴影，浅景深让主体清晰而背景微微模糊，真实皮肤纹理，细节的织物褶皱，自然的身体曲线，高细节，8k，写实摄影风格，电影摄影。 This is the ONLY acceptable format."
+                prompt = "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by commas (，): 1.[人物+全身姿态+场景] 2.穿着[服装] 3.[暴露器官] 4.她的[左手动作]而[右手动作] 5.她的身体[朝向] 6.她的头[转向+眼神] 7.[背景] 8.[光线] 9.[技术参数]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Example: 一位美丽女郎全身站立在豪华卧室中，穿着优雅的黑色丝绸睡裙，薄薄的意大利面条肩带，低领部部分解开露出深深的乳沟和侧乳，她的左手放在臀部上而右手触摸着裸露的大腿，她的身体微微侧向一边朝向镜头，她的头转向直视镜头带着诱惑的眼神，卧室背景有大大的特大号床铺，白色床单凌乱不堪，柔和的卧室灯投射出温柔的阴影，浅景深让主体清晰而背景微微模糊，真实皮肤纹理，细节的织物褶皱，自然的身体曲线，高细节，写实摄影风格，电影摄影。 This is the ONLY acceptable format."
         if not prompt:
             params = _text_to_image_params(data)
             await message.answer(
