@@ -42,19 +42,6 @@ class TgCustomPromptValidationTests(unittest.TestCase):
         self.assertEqual(result["prompt"], "standing portrait, cinematic light")
         self.assertEqual(result["prompt_text"], "standing portrait, cinematic light")
 
-    def test_grok_text_to_image_prompt_preserves_mixed_language(self) -> None:
-        mixed_prompt = "室内人像，cinematic lighting, shallow depth of field, 8K"
-        payload = {
-            "prompt": mixed_prompt,
-            "prompt_text": mixed_prompt,
-            "tg_llm_prompt_enhanced": True,
-        }
-
-        result = server._ensure_internal_tg_payload_chinese_image_prompt("text_to_image", payload)
-
-        self.assertEqual(result["prompt"], mixed_prompt)
-        self.assertEqual(result["prompt_text"], mixed_prompt)
-
 
 class RemoteComfyImageOutputTests(unittest.TestCase):
     def test_text_to_image_cannot_succeed_without_output_file(self) -> None:

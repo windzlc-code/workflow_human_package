@@ -285,8 +285,7 @@ def test_tg_text_to_image_prompt_uses_automatic_script_person_contract_and_dedup
             "parsed": {
                 "prompt": (
                     "真实手机随手拍社交照片，事件优先叙事，像真实动态照片一样自然不完美的构图，"
-                    "外观一致，同一个人，同一个人，不要文字，不要水印，不要水印，真实肢体语言，自然现场光，"
-                    "cinematic lighting, shallow depth of field, 8K"
+                    "外观一致，同一个人，同一个人，不要文字，不要水印，不要水印，真实肢体语言，自然现场光"
                 )
             },
         }
@@ -305,14 +304,13 @@ def test_tg_text_to_image_prompt_uses_automatic_script_person_contract_and_dedup
 
     assert "Automatic-script" in captured["system_prompt"]
     assert "真实手机随手拍社交照片" in captured["system_prompt"]
-    assert "mixed Chinese-English" in captured["system_prompt"]
+    assert "最终必须写成中文" in captured["system_prompt"]
     assert "不要重复同一要求" in captured["system_prompt"]
     assert "同一个人" not in payload["prompt"]
     assert "外观一致" not in payload["prompt"]
     assert "外观保持一致" not in payload["prompt"]
     assert payload["prompt"].count("不要水印") == 1
-    assert "cinematic lighting" in payload["prompt"]
-    assert "shallow depth of field" in payload["prompt"]
+    assert re.search(r"[A-Za-z][A-Za-z'-]{1,}", payload["prompt"]) is None
     assert payload["prompt_text"] == payload["prompt"]
 
 
@@ -323,7 +321,7 @@ def test_legacy_tg_image_prompt_builder_uses_automatic_script_contract():
     assert "Automatic-script workflow girl/persona image" in system_prompt
     assert "真实手机随手拍社交照片" in system_prompt
     assert "LoRA controls appearance" in system_prompt
-    assert "mixed Chinese-English" in system_prompt
+    assert "Final output must be Chinese only" in system_prompt
 
 
 def test_automatic_person_prompt_rejects_english_fallback_text():

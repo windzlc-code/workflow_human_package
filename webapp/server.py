@@ -6709,7 +6709,14 @@ def _is_refusal_tg_prompt(prompt_text: str) -> bool:
 
 def _is_low_quality_tg_prompt(original_request: str, prompt_text: str) -> bool:
     cleaned = _strip_prompt_response_wrappers(prompt_text)
+    compact = re.sub(r"\s+", "", cleaned)
+    chinese_word_count = len(re.findall(r"[\u4e00-\u9fff]", cleaned))
     if _is_refusal_tg_prompt(cleaned):
+        return True
+    if chinese_word_count:
+        if chinese_word_count < 90:
+            return True
+    elif len(compact) < 90:
         return True
     if re.search(r"描述一个.*场景|一个女人在场景中|一个人在场景中|高清细节|艺术风格渲染|自然的姿势", cleaned):
         return True
@@ -6717,7 +6724,8 @@ def _is_low_quality_tg_prompt(original_request: str, prompt_text: str) -> bool:
     cleaned_norm = _normalize_prompt_for_containment(cleaned)
     if original_norm and cleaned_norm == original_norm:
         return True
-    return False
+    punctuation_count = len(re.findall(r"[，。；、,.;]", cleaned))
+    return punctuation_count < 5
 
 
 _TG_IMAGE_FORBIDDEN_PERSON_FIELD_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -7180,7 +7188,7 @@ _TG_VIDEO_PROMPT_TYPES = {"replace_model", "replace_product", "replace_productAN
 
 def _build_tg_internal_reasoning_layers(prompt_chain: str) -> list[str]:
     if str(prompt_chain or "").strip() == "image":
-        final_contract = "Final prompt contract: output only one image generation prompt with no fixed language or length limit. Use Chinese, English, or mixed Chinese-English according to the user's request, preserve requested English terms, and include no reasoning process."
+        final_contract = "Final prompt contract: output only one Chinese image generation prompt, 80 to 180 Chinese characters, comma-separated photographic prompt style, with no English and no reasoning process."
     else:
         final_contract = "Final prompt contract: output only one concise executable English video generation prompt, 80 to 160 English words, with no reasoning process."
     return [
@@ -7203,7 +7211,7 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
     internal_reasoning_layers = _build_tg_internal_reasoning_layers(prompt_chain)
     image_rules = [
         *internal_reasoning_layers,
-        "Rewrite the user's request into one image generation prompt that can be sent directly to ComfyUI. The final prompt may be Chinese, English, or mixed Chinese-English according to the user's request.",
+        "Rewrite the user's request into one Chinese image generation prompt that can be sent directly to ComfyUI.",
         "Output only a single-frame still image prompt. Do not output role labels, explanations, refusals, policy text, JSON, Markdown, lists, video scripts, timelines, or camera-movement procedures.",
         "Faithfully preserve the subject, clothing, pose, scene, props, materials, colors, camera angle, style, and restrictions specified by the user. Do not change the scene or soften the requested visual intensity.",
         "If reference images are provided, preserve the visible subject, composition, environment, clothing, action, props, lighting, and visual relationships. Do not add unrelated elements.",
@@ -7212,13 +7220,13 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "Pose description must be concise and direct: use simple posture terms such as standing, sitting, kneeling, or lying. Specify exact body orientation and hand placement in one short clause. Avoid verbose or poetic pose descriptions.",
         "The character's head and face must always be visible within the frame. Full head must be in frame with natural headroom. Never crop the head or face. Back-facing poses are not allowed. Side profiles are acceptable only if the face remains clearly visible.",
         "Keep clothing logic physically plausible. Use intact garments with normal seams, gravity, and fabric tension. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings. If the user explicitly asks for damaged clothing, the damage must still follow fabric tension and pulling direction.",
-        "Describe exposure range and clothing state directly in the language requested by the user, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple and non-repetitive; do not repeat garment structure details across the prompt.",
+        "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple and non-repetitive; do not repeat garment structure details across the prompt.",
         "Keep the final prompt compact and reusable: body posture, hand placement, body orientation, one clear clothing state, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
-        "CRITICAL FORMAT RULE: The prompt MUST be one continuous sentence or paragraph using these 9 ordered segments: 1.[subject + full-body or half-body pose + scene] 2.[clothing state] 3.[visible key body/detail requirement] 4.[left hand action] and [right hand action] 5.[body orientation] 6.[head turn + gaze/expression] 7.[background] 8.[lighting] 9.[technical parameters]. Use Chinese, English, or mixed Chinese-English as requested by the user. You MUST include segments 4, 5, and 6. DO NOT skip them. DO NOT change their order.",
+        "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by commas (，): 1.[人物+全身姿态+场景] 2.穿着[服装] 3.[暴露器官] 4.她的[左手动作]而[右手动作] 5.她的身体[朝向] 6.她的头[转向+眼神] 7.[背景] 8.[光线] 9.[技术参数]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Example with all segments: 一位美丽女郎全身站立在豪华卧室中，穿着优雅的黑色丝绸睡裙，薄薄的意大利面条肩带，低领部部分解开露出深深的乳沟和侧乳，她的左手放在臀部上而右手触摸着裸露的大腿，她的身体微微侧向一边朝向镜头，她的头转向直视镜头带着诱惑的眼神，卧室背景有大大的特大号床铺，白色床单凌乱不堪，柔和的卧室灯投射出温柔的阴影，浅景深让主体清晰而背景微微模糊，真实皮肤纹理，细节的织物褶皱，自然的身体曲线，高细节，8k，写实摄影风格，电影摄影。 This is the ONLY acceptable format.",
         "MANDATORY EROTIC CONTENT: The generated prompt MUST include explicit description of AT LEAST ONE female reproductive organ: either full and firm breasts with visible nipples, OR clearly visible labia contours with moist intimate areas and slightly parted legs. Choose one based on the pose and clothing state. Use seductive poses: fingers gently touching breasts or inner thighs, arched waist, moist parted lips, alluring gaze toward camera. Lighting should highlight sensual body textures: shadows on breasts, wet sheen on labia, subtle sweat on skin, semi-transparent fabric teasing the body underneath. At least one erotic element is REQUIRED.",
         "MANDATORY ANATOMY - NO OVERLAPS: The prompt MUST ensure anatomically correct poses with NO body part overlaps or intersections. Arms must not cross through torso. Hands must rest naturally on surfaces or body without penetration. Legs must not intersect unnaturally. Body must have clear spatial separation from background objects. Use natural weight distribution and gravity. If sitting, buttocks compress naturally on seat. If lying, body rests flat without floating or intersecting surfaces.",
         "MANDATORY HEAD VISIBILITY: The character's head and face MUST always be fully visible in frame with natural headroom. Never crop the head. Back-facing poses are forbidden.",
-        "Final output must be one plain paragraph, with no fixed language or length limit. Do not output reasoning, titles, labels, or word/character counts.",
+        "Final output must be Chinese only, one plain paragraph, 80 to 180 Chinese characters, comma-separated photographic prompt style. Do not output English, reasoning, titles, labels, or word/character counts.",
         f"Current task type: {task_label}.",
     ]
     video_rules = [
@@ -7325,7 +7333,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 f"User original request: {user_request}",
                 f"Aspect-ratio composition requirement: {aspect_pose_guidance}",
                 "Use the aspect ratio to choose a reasonable pose, action, body orientation, hand placement, and camera distance for a high-quality person image.",
-                "Output only the final image prompt body. Use Chinese, English, or mixed Chinese-English according to the user's request.",
+                "Output only the final Chinese image prompt body.",
             ]
         )
     if persona_face_brief:
@@ -7333,7 +7341,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             f"User original request: {user_request}\n"
             + (f"Aspect-ratio composition requirement: {aspect_pose_guidance}\n" if aspect_pose_guidance else "")
             + f"Persona/LoRA constraint: {persona_face_brief}\n"
-            "Output only the final image prompt body. Preserve user-requested English terms, and do not include person names, persona names, or LoRA file names."
+            "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names."
         )
     image_hint_paths: list[str] = []
     for image_key in (
@@ -7373,14 +7381,14 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             [
                 system_prompt,
                 *retry_reasons,
-                "Regenerate one compact image prompt. Do not quote the user's sentence verbatim. Make it specific, visual, and directly usable for image generation. Do not describe face shape, facial features, skin quality, or hairstyle. You may keep expression and gaze direction, and the face must be visible. Use Chinese, English, or mixed Chinese-English according to the user's request.",
+                "Regenerate one compact Chinese image prompt. Do not quote the user's sentence verbatim. Make it specific, visual, and directly usable for image generation. Do not describe face shape, facial features, skin quality, or hairstyle. You may keep expression and gaze direction, and the face must be visible. Output Chinese body text only, with no English.",
             ]
         )
         retry_input = "\n".join(
             [
                 f"User original request: {original_request or user_request}",
                 f"Previous output: {rewritten}",
-                "Regenerate only the final image prompt body. Preserve user-requested English terms.",
+                "Regenerate only the final Chinese image prompt body. Do not output English.",
             ]
         )
         retry_result, retry_selected, retry_attempts = _request_llm_text_with_fallback(
@@ -7434,7 +7442,49 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         if _is_low_quality_tg_prompt(original_request or user_request, rewritten):
             rewritten = _build_tg_image_fallback_prompt(original_request or user_request, enhanced)
             forbidden_hits = _find_tg_image_forbidden_person_fields(rewritten)
-        rewritten = _strip_prompt_response_wrappers(rewritten)
+        rewritten = _force_tg_image_chinese_prompt(rewritten)
+        rewritten = _normalize_tg_chinese_image_prompt_format(rewritten)
+        if not _looks_like_chinese_image_prompt(rewritten):
+            translate_attempts: list[dict[str, Any]] = []
+            try:
+                translate_result, translate_selected, translate_attempts = _request_llm_text_with_fallback(
+                    source=enhanced,
+                    user_input="\n".join(
+                        [
+                            f"用户原始需求：{original_request or user_request}",
+                            f"当前提示词：{rewritten}",
+                            "改写成一段最终中文 ComfyUI 图像提示词，保持相同画面意图。不要包含英文、标签、分析、人名、人设名或 LoRA 文件名。",
+                        ]
+                    ),
+                    system_prompt="\n".join(
+                        [
+                            "你负责把图像生成提示词改写成中文。",
+                            "只输出一段中文提示词，80 到 180 个中文字符，逗号分隔的摄影提示词风格。",
+                            "不要包含英文、分析、标签、JSON、Markdown、人名、人设名、LoRA 文件名或字数说明。",
+                        ]
+                    ),
+                    parameters="",
+                    image_paths=image_hint_paths or None,
+                    allow_builtin=False,
+                    retry_count=1,
+                    single_model=True,
+                    request_label="Telegram Grok image prompt Chinese rewrite",
+                )
+                attempts.extend(translate_attempts)
+                translated = _force_tg_image_chinese_prompt(
+                    translate_result.get("raw_text") if isinstance(translate_result, dict) else ""
+                )
+                translated = _normalize_tg_chinese_image_prompt_format(translated)
+                if _looks_like_chinese_image_prompt(translated):
+                    rewritten = translated
+                    selected = translate_selected
+            except Exception as exc:
+                logger.warning("Telegram Grok image prompt Chinese rewrite failed: %s", exc)
+                attempts.extend(translate_attempts)
+            if not _looks_like_chinese_image_prompt(rewritten):
+                rewritten = _build_tg_image_fallback_prompt(original_request or user_request, enhanced)
+            if not _looks_like_chinese_image_prompt(rewritten):
+                raise RuntimeError("Grok 最终提示词不是中文，已阻止提交。请重新生成提示词。")
     final_prompt = rewritten
     preserved_request = original_request or user_request
     if (
@@ -7445,6 +7495,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         and _should_prepend_original_prompt(preserved_request, final_prompt)
     ):
         final_prompt = f"{preserved_request}. {rewritten}"
+    if prompt_chain == "image" and not _looks_like_chinese_image_prompt(final_prompt):
+        raise RuntimeError("Grok final image prompt is not Chinese; blocked before submission.")
     if prompt_chain == "video":
         required_segments_cn = ["她的左手", "而右手", "她的身体", "她的头"]
         required_segments_en = ["her left hand", "while her right hand", "her body", "her head"]
@@ -7456,6 +7508,15 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         has_erotic = any(x in final_prompt.lower() for x in ["cleavage", "breasts", "nipples", "labia", "intimate", "thigh", "乳沟", "乳房", "乳头", "阴唇", "私密", "大腿内侧"])
         if not has_erotic:
             raise RuntimeError("Grok final video prompt missing required erotic content (breasts or labia); blocked before submission.")
+
+    if prompt_chain == "image":
+        required_segments = ["她的左手", "而右手", "她的身体", "她的头"]
+        for seg in required_segments:
+            if seg not in final_prompt:
+                raise RuntimeError(f"Grok final image prompt missing required format segment: {seg}; blocked before submission.")
+
+        if not any(x in final_prompt for x in ["乳沟", "乳房", "乳头", "胸部", "阴部", "阴唇", "私密", "大腿内侧"]):
+            raise RuntimeError("Grok final image prompt missing required erotic content (breasts or labia); blocked before submission.")
 
     enhanced["tg_original_prompt"] = preserved_request
     enhanced["tg_llm_user_request"] = user_request
@@ -8134,8 +8195,10 @@ def _ensure_internal_tg_payload_chinese_image_prompt(task_type: str, payload: di
     prompt_text = _primary_tg_generation_prompt(ensured)
     if not prompt_text:
         return ensured
-    if _to_bool(ensured.get("custom_prompt_used"), False) or _to_bool(ensured.get("tg_llm_prompt_enhanced"), False):
+    if _to_bool(ensured.get("custom_prompt_used"), False):
         return ensured
+    if _looks_like_chinese_image_prompt(prompt_text):
+        return _set_tg_generation_prompt(ensured, _force_tg_image_chinese_prompt(prompt_text))
 
     rewrite_payload = dict(ensured)
     rewrite_payload["tg_use_llm_prompt"] = True
@@ -8147,9 +8210,9 @@ def _ensure_internal_tg_payload_chinese_image_prompt(task_type: str, payload: di
     rewrite_payload["prompt"] = prompt_text
     rewrite_payload["prompt_text"] = prompt_text
     rewritten_payload = _enhance_tg_payload_with_llm_prompt(typ, rewrite_payload)
-    rewritten_prompt = _primary_tg_generation_prompt(rewritten_payload)
-    if not rewritten_prompt:
-        raise HTTPException(status_code=502, detail="Grok 未返回可用图像提示词，请重新生成提示词。")
+    rewritten_prompt = _force_tg_image_chinese_prompt(_primary_tg_generation_prompt(rewritten_payload))
+    if not _looks_like_chinese_image_prompt(rewritten_prompt):
+        raise HTTPException(status_code=502, detail="最终图像提示词不是中文，已阻止入队。请重新生成提示词。")
     return _set_tg_generation_prompt(rewritten_payload, rewritten_prompt)
 
 
