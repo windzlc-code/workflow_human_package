@@ -520,6 +520,14 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertNotIn("真实，皮肤，纹理", normalized)
         self.assertIn("高细节，8K，写实摄影风格", normalized)
 
+    def test_chinese_image_prompt_format_does_not_split_location_phrase(self):
+        prompt = "一位美少女全身站立在现代卧室中穿着白色衬衫她的左手扶着椅背而右手自然下垂"
+
+        normalized = server._normalize_tg_chinese_image_prompt_format(prompt)
+
+        self.assertIn("现代卧室中", normalized)
+        self.assertNotIn("现代，卧室中", normalized)
+
     def test_finished_text_to_image_uses_reply_keyboard(self):
         markup = server._send_telegram_reply_markup_for_finished_task("task_1", "text_to_image")
 

@@ -34,6 +34,7 @@ data/
 webapp_data/
 webapp_data_*/
 runninghub_batch_test/
+tmp_tg_test_images/
 
 *.db
 *.sqlite
@@ -48,4 +49,3 @@ runninghub_batch_test/
 *.mp3
 *.wav
 *.flac
-
