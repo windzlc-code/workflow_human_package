@@ -1233,7 +1233,6 @@ def _notify_tg_task_finished(
             f"工作流: {task_type}",
             f"任务编号: {task_id}",
             f"原因: {_format_user_visible_task_error(str(error or output_data.get('error') or output_data.get('message') or '未知错误').strip())}",
-            f"工作台: {task_url}" if task_url else "",
         ]
         if part
     )
@@ -1242,6 +1241,13 @@ def _notify_tg_task_finished(
 
 def _format_user_visible_task_error(error: str) -> str:
     text = str(error or "").strip()
+    text = re.sub(r"工作台[:：]\s*https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bfor url:\s*https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\burl:\s*https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/[^\s，。；;]*)?", "", text)
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip(" ：:，,。；;")
     if "MuleRouter" in text and ("External service request failed" in text or '"code": 3002' in text):
         return "MuleRouter 下游生成失败（3002）。常见原因是提示词或参考图触发供应商限制、图文不匹配，或供应商服务临时异常；请换成更清晰、合规的动作描述后重试。"
     return text or "未知错误"
@@ -1964,7 +1970,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     resolution = str(merged.get("mulerouter_wan_i2v_resolution") or "720p").strip()
     merged["mulerouter_wan_i2v_resolution"] = resolution if resolution in {"720p", "1080p"} else "720p"
     merged["mulerouter_wan_i2v_duration"] = min(max(_to_int(merged.get("mulerouter_wan_i2v_duration"), 2), 2), 15)
-    merged["mulerouter_wan_i2v_prompt_extend"] = _to_bool(merged.get("mulerouter_wan_i2v_prompt_extend"), False)
+    merged["mulerouter_wan_i2v_prompt_extend"] = False
     merged["mulerouter_wan_i2v_negative_prompt"] = str(merged.get("mulerouter_wan_i2v_negative_prompt") or "").strip()
 
     image_model_priority_order = current.get("image_model_priority_order") if "image_model_priority_order" in current else None
@@ -2968,6 +2974,25 @@ def _image_file_to_mulerouter_base64(image_path: str, workdir: Path) -> tuple[st
     return base64.b64encode(target.read_bytes()).decode("ascii"), target
 
 
+def _audio_file_to_mulerouter_data_url(audio_path: str) -> tuple[str, Path]:
+    src = Path(str(audio_path or "")).expanduser()
+    if not src.exists() or not src.is_file():
+        raise RuntimeError(f"图生视频音频文件不存在: {src}")
+    if src.stat().st_size > 20 * 1024 * 1024:
+        raise RuntimeError("图生视频音频文件超过 MuleRouter 20MB 限制")
+    suffix = src.suffix.lower()
+    mime = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/ogg",
+        ".flac": "audio/flac",
+    }.get(suffix, "application/octet-stream")
+    return f"data:{mime};base64,{base64.b64encode(src.read_bytes()).decode('ascii')}", src
+
+
 def _run_mulerouter_wan_i2v(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     api_key = str(payload.get("mulerouter_api_key") or "").strip()
     if not api_key:
@@ -3000,10 +3025,19 @@ def _run_mulerouter_wan_i2v(task_id: str, payload: dict[str, Any]) -> dict[str, 
         "seed": seed,
     }
     audio_url = str(payload.get("audio_url") or "").strip()
+    audio_local_path = str(payload.get("audio_local_path") or "").strip()
+    audio_source: Path | None = None
+    if not audio_url and audio_local_path:
+        audio_url, audio_source = _audio_file_to_mulerouter_data_url(audio_local_path)
     if audio_url:
         request_body["audio_url"] = audio_url
     request_log = dict(request_body)
     request_log["image"] = f"base64:{normalized_image.name}:{normalized_image.stat().st_size} bytes"
+    if audio_url:
+        if audio_source is not None:
+            request_log["audio_url"] = f"data_url:{audio_source.name}:{audio_source.stat().st_size} bytes"
+        elif audio_url.startswith("data:"):
+            request_log["audio_url"] = "data_url:<omitted>"
     provider_meta = {
         "provider": "mulerouter",
         "api_name": str(payload.get("mulerouter_api_name") or "").strip(),
@@ -8257,6 +8291,9 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
     if typ == "video_i2v":
         image_path = payload.get("image_local_path") or payload.get("input_image_local_path")
         payload["image_local_path"] = _validated_local_file(image_path, label="图生视频参考图")
+        audio_path = str(payload.get("audio_local_path") or "").strip()
+        if audio_path:
+            payload["audio_local_path"] = _validated_local_file(audio_path, label="音频")
         payload["prompt"] = str(payload.get("prompt") or payload.get("prompt_text") or payload.get("message") or payload.get("tg_user_instruction") or "").strip()
         if not payload["prompt"]:
             raise HTTPException(status_code=400, detail="video_i2v 需要 prompt")
@@ -8264,7 +8301,8 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         payload["mulerouter_wan_i2v_duration"] = payload["duration_seconds"]
         resolution = str(payload.get("resolution") or payload.get("mulerouter_wan_i2v_resolution") or "720p").strip()
         payload["mulerouter_wan_i2v_resolution"] = resolution if resolution in {"720p", "1080p"} else "720p"
-        payload["mulerouter_wan_i2v_prompt_extend"] = _to_bool(payload.get("mulerouter_wan_i2v_prompt_extend", payload.get("prompt_extend")), False)
+        payload["mulerouter_wan_i2v_prompt_extend"] = False
+        payload["prompt_extend"] = False
         payload["mulerouter_wan_i2v_safety_filter"] = _to_bool(payload.get("mulerouter_wan_i2v_safety_filter", payload.get("safety_filter")), True)
         payload["mulerouter_wan_i2v_negative_prompt"] = str(payload.get("mulerouter_wan_i2v_negative_prompt") or payload.get("negative_prompt") or "").strip()
         seed_raw = payload.get("mulerouter_wan_i2v_seed", payload.get("seed"))
@@ -9044,7 +9082,7 @@ def create_app() -> FastAPI:
             )
         except Exception as exc:
             typ, planned_payload, summary = _agent_chat_payload(
-                reply=f"我还不能创建生产任务：{exc}。请补充具体任务类型和必要素材，或点击面板里的工作流入口按步骤提交。",
+                reply=f"我还不能创建生产任务：{_format_user_visible_task_error(str(exc))}。请补充具体任务类型和必要素材，或点击面板里的工作流入口按步骤提交。",
                 summary="未创建生产任务",
             )
 
@@ -9100,7 +9138,7 @@ def create_app() -> FastAPI:
                     "id": row["id"],
                     "type": row["type"],
                     "status": row["status"],
-                    "error": row["error"],
+                    "error": _format_user_visible_task_error(row["error"] or ""),
                     "runninghub_task_id": row["runninghub_task_id"],
                     "cost_cents": int(row["cost_cents"] or 0),
                     "created_at": int(row["created_at"] or 0),
@@ -9144,7 +9182,7 @@ def create_app() -> FastAPI:
                 "id": row["id"],
                 "type": row["type"],
                 "status": row["status"],
-                "error": row["error"],
+                "error": _format_user_visible_task_error(row["error"] or ""),
                 "runninghub_task_id": row["runninghub_task_id"],
                 "cost_cents": int(row["cost_cents"] or 0),
                 "created_at": int(row["created_at"] or 0),

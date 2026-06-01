@@ -33,6 +33,7 @@ from .workflow import WorkflowRequest
 logger = logging.getLogger(__name__)
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".flac"}
 ZIP_EXTS = {".zip"}
 AUTO_DURATION_TEXTS = {"跳过", "自动", "auto", "AUTO"}
 TG_PROMPT_PREVIEW_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_PREVIEW_TIMEOUT_SECONDS") or "240")
@@ -168,8 +169,8 @@ class ProductionWorkflowForm(StatesGroup):
     image_waiting_for_prompt = State()
     video_i2v_waiting_for_resolution = State()
     video_i2v_waiting_for_duration = State()
+    video_i2v_waiting_for_audio = State()
     video_i2v_waiting_for_prompt_mode = State()
-    video_i2v_waiting_for_prompt_extend = State()
     video_i2v_waiting_for_image = State()
     video_i2v_waiting_for_prompt = State()
     replace_model_waiting_for_video = State()
@@ -838,7 +839,18 @@ def _format_grok_preview_error(exc: Exception) -> str:
         return "Grok 模型服务暂时不可用或响应超时。可以点击“重新生成提示词”再试一次，或先输入自定义提示词。"
     if not text:
         return f"Grok 提示词生成失败（{type(exc).__name__}）。可以点击“重新生成提示词”再试一次。"
-    return text
+    return _format_tg_user_error(text)
+
+
+def _format_tg_user_error(error: Any) -> str:
+    text = str(error or "").strip()
+    text = re.sub(r"工作台[:：]\s*https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bfor url:\s*https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\burl:\s*https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/[^\s，。；;]*)?", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ：:，,。；;") or "未知错误"
 
 
 def _video_edit_keyboard() -> ReplyKeyboardMarkup:
@@ -855,6 +867,16 @@ def _video_i2v_prompt_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _video_i2v_audio_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="\u8df3\u8fc7\u97f3\u9891")],
+            [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
     )
@@ -1215,7 +1237,7 @@ def _quick_start_text(service: WorkspaceService) -> str:
             f"1. {IMAGE_WORKFLOW_BUTTON}",
             "   点击后进入文生图。",
             f"2. {VIDEO_EDIT_BUTTON}",
-            "   点击后选择图生视频，可用按钮切换分辨率、时长、Grok 提示词和接口扩写。",
+            "   点击后选择图生视频，可用按钮设置分辨率、时长、音频和提示词。",
             "",
             "🌟 直接对话",
             "也可以发送 /status 查看后台任务进度，发送 /stop 停止当前任务。",
@@ -1252,6 +1274,19 @@ def _image_ext_from_message(message: Message) -> str | None:
     return None
 
 
+def _audio_ext_from_message(message: Message) -> str | None:
+    if message.audio:
+        suffix = Path(message.audio.file_name or "").suffix.lower()
+        return suffix if suffix in AUDIO_EXTS else ".mp3"
+    if message.voice:
+        return ".ogg"
+    if message.document:
+        suffix = Path(message.document.file_name or "").suffix.lower()
+        if suffix in AUDIO_EXTS:
+            return suffix
+    return None
+
+
 def _agent_file_ext_from_message(message: Message) -> tuple[str, str] | None:
     video_suffix = _video_ext_from_message(message)
     if video_suffix:
@@ -1283,6 +1318,10 @@ async def _download_message_media(message: Message, target_path: Path) -> Path:
     downloadable = None
     if message.video:
         downloadable = message.video
+    elif message.audio:
+        downloadable = message.audio
+    elif message.voice:
+        downloadable = message.voice
     elif message.photo:
         downloadable = message.photo[-1]
     elif message.document:
@@ -1462,6 +1501,16 @@ async def _display_internal_webapp_prompt(
     return display_text
 
 
+async def _send_long_text(message: Message, text: str, *, reply_markup: Any | None = None) -> None:
+    body = str(text or "")
+    if len(body) <= 3900:
+        await message.answer(body, reply_markup=reply_markup)
+        return
+    chunks = [body[idx : idx + 3900] for idx in range(0, len(body), 3900)]
+    for idx, chunk in enumerate(chunks):
+        await message.answer(chunk, reply_markup=reply_markup if idx == len(chunks) - 1 else None)
+
+
 async def _submit_internal_webapp_agent_task(
     *,
     chat_id: int,
@@ -1569,7 +1618,7 @@ def _format_internal_webapp_tg_tasks(tasks: list[dict[str, Any]]) -> str:
         status = str(item.get("status") or "").strip()
         label = status_labels.get(status, status or "unknown")
         download = "，有结果文件" if item.get("has_download") else ""
-        error = str(item.get("error") or "").strip()
+        error = _format_tg_user_error(item.get("error") or "")
         if len(error) > 80:
             error = f"{error[:80]}..."
         suffix = f"，{error}" if status == "failed" and error else download
@@ -1725,7 +1774,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             tasks = await _fetch_internal_webapp_tg_tasks(chat_id=int(message.chat.id), limit=5)
             parts.append(_format_internal_webapp_tg_tasks(tasks))
         except Exception as exc:
-            parts.append(f"后台生成任务：查询失败（{exc}）")
+            parts.append(f"后台生成任务：查询失败（{_format_tg_user_error(exc)}）")
         legacy_status = service.get_status_text(chat_id=int(message.chat.id))
         if legacy_status:
             parts.append(legacy_status)
@@ -1764,6 +1813,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "negative_prompt": "",
             "resolution_selected": False,
             "duration_selected": False,
+            "audio_selected": False,
+            "audio_local_path": "",
             "prompt_mode_selected": False,
             "prompt_extend_selected": False,
             "prompt_mode_label": "",
@@ -1793,8 +1844,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params["safety_filter"] = False
         params["resolution_selected"] = bool(params.get("resolution_selected"))
         params["duration_selected"] = bool(params.get("duration_selected"))
+        params["audio_selected"] = bool(params.get("audio_selected"))
+        params["audio_local_path"] = str(params.get("audio_local_path") or "").strip()
         params["prompt_mode_selected"] = bool(params.get("prompt_mode_selected"))
-        params["prompt_extend_selected"] = bool(params.get("prompt_extend_selected"))
+        params["prompt_extend"] = False
+        params["prompt_extend_selected"] = False
         params["prompt_mode_label"] = str(params.get("prompt_mode_label") or "").strip()
         seed_text = str(params.get("seed") or "1024").strip()
         params["seed"] = seed_text if seed_text.isdigit() else "1024"
@@ -1807,24 +1861,21 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             lines.append(f"\u5206\u8fa8\u7387\uff1a{params['resolution']}")
         if params.get("duration_selected"):
             lines.append(f"\u65f6\u957f\uff1a{params['duration']}\u79d2")
+        if params.get("audio_selected"):
+            lines.append("\u97f3\u9891\uff1a\u5df2\u4e0a\u4f20" if params.get("audio_local_path") else "\u97f3\u9891\uff1a\u8df3\u8fc7")
         if params.get("prompt_mode_selected"):
             label = str(params.get("prompt_mode_label") or "").strip()
             prompt_mode_text = label or ("Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4")
             lines.append(f"\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{prompt_mode_text}")
-        if params.get("prompt_extend_selected"):
-            extend_text = "\u5f00\u542f" if params["prompt_extend"] else "\u5173\u95ed"
-            lines.append(f"\u63a5\u53e3\u6269\u5199\uff1a{extend_text}")
         return "\n".join(lines)
 
     def _video_i2v_step_keyboard(step: str, params: dict[str, Any]) -> ReplyKeyboardMarkup:
         if step == "resolution":
-            selected_720 = "\u2713 " if params["resolution"] == "720p" else ""
-            selected_1080 = "\u2713 " if params["resolution"] == "1080p" else ""
             return ReplyKeyboardMarkup(
                 keyboard=[
                     [
-                        KeyboardButton(text=f"{selected_720}720p\uff08\u6700\u5c0f\u8d44\u6e90\uff09"),
-                        KeyboardButton(text=f"{selected_1080}1080p"),
+                        KeyboardButton(text="720p\uff08\u6700\u5c0f\u8d44\u6e90\uff09"),
+                        KeyboardButton(text="1080p"),
                     ],
                     [KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
                 ],
@@ -1838,29 +1889,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 resize_keyboard=True,
             )
         if step == "prompt_mode":
-            grok_selected = "\u2713 " if params["use_grok"] else ""
-            custom_selected = "\u2713 " if not params["use_grok"] else ""
             return ReplyKeyboardMarkup(
                 keyboard=[
-                    [KeyboardButton(text=f"{grok_selected}\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd")],
-                    [KeyboardButton(text=f"{custom_selected}\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4")],
+                    [KeyboardButton(text="\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd")],
+                    [KeyboardButton(text="\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4")],
                     [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
                 ],
                 resize_keyboard=True,
             )
-        if step == "prompt_extend":
-            extend_on_selected = "\u2713 " if params["prompt_extend"] else ""
-            extend_off_selected = "\u2713 " if not params["prompt_extend"] else ""
-            return ReplyKeyboardMarkup(
-                keyboard=[
-                    [
-                        KeyboardButton(text=f"{extend_on_selected}\u5f00\u542f\u63a5\u53e3\u6269\u5199"),
-                        KeyboardButton(text=f"{extend_off_selected}\u5173\u95ed"),
-                    ],
-                    [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
-                ],
-                resize_keyboard=True,
-            )
+        if step == "audio":
+            return _video_i2v_audio_keyboard()
         return ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
@@ -1874,31 +1912,34 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         state_map = {
             "resolution": ProductionWorkflowForm.video_i2v_waiting_for_resolution,
             "duration": ProductionWorkflowForm.video_i2v_waiting_for_duration,
+            "audio": ProductionWorkflowForm.video_i2v_waiting_for_audio,
             "prompt_mode": ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode,
-            "prompt_extend": ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend,
             "image": ProductionWorkflowForm.video_i2v_waiting_for_image,
             "prompt": ProductionWorkflowForm.video_i2v_waiting_for_prompt,
         }
         await state.set_state(state_map.get(step, ProductionWorkflowForm.video_i2v_waiting_for_resolution))
         labels = {
             "resolution": "1/5 \u9009\u62e9\u5206\u8fa8\u7387",
-            "duration": "2/5 \u9009\u62e9\u89c6\u9891\u65f6\u957f",
-            "prompt_mode": "3/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
-            "prompt_extend": "4/5 \u9009\u62e9 MuleRouter \u63a5\u53e3\u6269\u5199",
-            "image": "5/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
+            "duration": "2/5 \u8f93\u5165\u89c6\u9891\u65f6\u957f",
+            "image": "3/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
+            "audio": "4/5 \u4e0a\u4f20\u97f3\u9891\uff08\u53ef\u9009\uff09",
+            "prompt_mode": "5/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
             "prompt": "\u5df2\u6536\u5230\u53c2\u8003\u56fe\uff0c\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42",
         }
         text = _video_i2v_status_text(step=labels.get(step, step), params=params)
         if step == "duration":
             text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
-        elif step == "prompt_mode":
-            text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u4e2d\u6587\u89c6\u9891\u63d0\u793a\u8bcd\uff0c\u6216\u76f4\u63a5\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
-        elif step == "prompt_extend":
-            text += "\n\n\u8bf7\u9009\u62e9\u662f\u5426\u8ba9\u89c6\u9891\u751f\u6210\u63a5\u53e3\u518d\u6269\u5199\u63d0\u793a\u8bcd\u3002"
+        elif step == "audio":
+            text += "\n\n\u53ef\u4ee5\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff08mp3/wav/m4a/ogg \u7b49\uff09\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002"
         elif step == "image":
-            text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u53ef\u4ee5\u5728\u56fe\u7247\u8bf4\u660e\u91cc\u586b\u5199\u89c6\u9891\u9700\u6c42\uff0c\u7cfb\u7edf\u4f1a\u7acb\u5373\u63d0\u4ea4\u3002"
+            text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u4e0b\u4e00\u6b65\u518d\u9009\u62e9\u662f\u5426\u4e0a\u4f20\u97f3\u9891\u3002"
+        elif step == "prompt_mode":
+            text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd\uff0c\u6216\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
         elif step == "prompt":
-            text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u8fd9\u6b21\u56fe\u751f\u89c6\u9891\u7684\u753b\u9762\u548c\u52a8\u4f5c\u9700\u6c42\u3002"
+            if params.get("use_grok"):
+                text += "\n\n\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42\u3002Grok \u4f1a\u5728\u6700\u540e\u751f\u6210\u5b8c\u6574\u63d0\u793a\u8bcd\uff0c\u5e76\u5728\u804a\u5929\u4e2d\u5b8c\u6574\u663e\u793a\u540e\u518d\u63d0\u4ea4\u3002"
+            else:
+                text += "\n\n\u8bf7\u8f93\u5165\u81ea\u5b9a\u4e49\u6700\u7ec8\u63d0\u793a\u8bcd\u3002\u4e0b\u4e00\u6761\u6d88\u606f\u4f1a\u8df3\u8fc7 Grok \u76f4\u63a5\u63d0\u4ea4\u3002"
         markup = _video_i2v_step_keyboard(step, params)
         await message.answer(text, reply_markup=markup)
 
@@ -1910,27 +1951,34 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         state_map = {
             "resolution": ProductionWorkflowForm.video_i2v_waiting_for_resolution,
             "duration": ProductionWorkflowForm.video_i2v_waiting_for_duration,
+            "audio": ProductionWorkflowForm.video_i2v_waiting_for_audio,
             "prompt_mode": ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode,
-            "prompt_extend": ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend,
             "image": ProductionWorkflowForm.video_i2v_waiting_for_image,
+            "prompt": ProductionWorkflowForm.video_i2v_waiting_for_prompt,
         }
         await state.set_state(state_map.get(step, ProductionWorkflowForm.video_i2v_waiting_for_resolution))
         labels = {
             "resolution": "1/5 \u9009\u62e9\u5206\u8fa8\u7387",
-            "duration": "2/5 \u9009\u62e9\u89c6\u9891\u65f6\u957f",
-            "prompt_mode": "3/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
-            "prompt_extend": "4/5 \u9009\u62e9 MuleRouter \u63a5\u53e3\u6269\u5199",
-            "image": "5/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
+            "duration": "2/5 \u8f93\u5165\u89c6\u9891\u65f6\u957f",
+            "image": "3/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
+            "audio": "4/5 \u4e0a\u4f20\u97f3\u9891\uff08\u53ef\u9009\uff09",
+            "prompt_mode": "5/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
+            "prompt": "\u5df2\u6536\u5230\u53c2\u8003\u56fe\uff0c\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42",
         }
         text = _video_i2v_status_text(step=labels.get(step, step), params=params)
         if step == "duration":
             text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
-        elif step == "prompt_mode":
-            text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u4e2d\u6587\u89c6\u9891\u63d0\u793a\u8bcd\uff0c\u6216\u76f4\u63a5\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
-        elif step == "prompt_extend":
-            text += "\n\n\u8bf7\u9009\u62e9\u662f\u5426\u8ba9\u89c6\u9891\u751f\u6210\u63a5\u53e3\u518d\u6269\u5199\u63d0\u793a\u8bcd\u3002"
+        elif step == "audio":
+            text += "\n\n\u53ef\u4ee5\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff08mp3/wav/m4a/ogg \u7b49\uff09\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002"
         elif step == "image":
-            text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u53ef\u4ee5\u5728\u56fe\u7247\u8bf4\u660e\u91cc\u586b\u5199\u89c6\u9891\u9700\u6c42\uff0c\u7cfb\u7edf\u4f1a\u7acb\u5373\u63d0\u4ea4\u3002"
+            text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u4e0b\u4e00\u6b65\u518d\u9009\u62e9\u662f\u5426\u4e0a\u4f20\u97f3\u9891\u3002"
+        elif step == "prompt_mode":
+            text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd\uff0c\u6216\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
+        elif step == "prompt":
+            if params.get("use_grok"):
+                text += "\n\n\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42\u3002Grok \u4f1a\u5728\u6700\u540e\u751f\u6210\u5b8c\u6574\u63d0\u793a\u8bcd\uff0c\u5e76\u5728\u804a\u5929\u4e2d\u5b8c\u6574\u663e\u793a\u540e\u518d\u63d0\u4ea4\u3002"
+            else:
+                text += "\n\n\u8bf7\u8f93\u5165\u81ea\u5b9a\u4e49\u6700\u7ec8\u63d0\u793a\u8bcd\u3002\u4e0b\u4e00\u6761\u6d88\u606f\u4f1a\u8df3\u8fc7 Grok \u76f4\u63a5\u63d0\u4ea4\u3002"
         await callback.message.answer(text, reply_markup=_video_i2v_step_keyboard(step, params))
 
     async def _remove_reply_keyboard(message: Message, *, text: str = "\u8bf7\u4f7f\u7528\u4e0a\u65b9\u6309\u94ae\u7ee7\u7eed\u3002") -> None:
@@ -1949,6 +1997,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 "prompt_extend": False,
                 "resolution_selected": False,
                 "duration_selected": False,
+                "audio_selected": False,
+                "audio_local_path": "",
                 "prompt_mode_selected": False,
                 "prompt_extend_selected": False,
                 "prompt_mode_label": "Grok \u751f\u6210",
@@ -1975,36 +2025,55 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "duration_seconds": int(params["duration"]),
             "mulerouter_wan_i2v_resolution": str(params["resolution"]),
             "mulerouter_wan_i2v_duration": int(params["duration"]),
-            "mulerouter_wan_i2v_prompt_extend": bool(params["prompt_extend"]),
+            "mulerouter_wan_i2v_prompt_extend": False,
             "mulerouter_wan_i2v_safety_filter": False,
             "mulerouter_wan_i2v_negative_prompt": str(params["negative_prompt"]),
             "negative_prompt": str(params["negative_prompt"]),
-            "prompt_extend": bool(params["prompt_extend"]),
+            "prompt_extend": False,
             "safety_filter": False,
             "tg_use_llm_prompt": bool(params["use_grok"]),
             "tg_user_instruction": f"User image-to-video request: {prompt}",
         }
+        if str(params.get("audio_local_path") or "").strip():
+            payload["audio_local_path"] = str(params["audio_local_path"]).strip()
         if str(params.get("seed") or "").isdigit():
             payload["seed"] = int(str(params["seed"]))
             payload["mulerouter_wan_i2v_seed"] = int(str(params["seed"]))
         await state.clear()
         try:
             if params["use_grok"]:
-                await message.answer("正在让 Grok 生成中文视频提示词，并提交后台队列。")
+                await message.answer("\u6b63\u5728\u8ba9 Grok \u751f\u6210\u89c6\u9891\u63d0\u793a\u8bcd...")
+                preview = await _preview_internal_webapp_prompt(
+                    chat_id=int(message.chat.id),
+                    task_type="video_i2v",
+                    params=payload,
+                )
+                generated_prompt = str(preview.get("prompt_text") or "").strip()
+                if not generated_prompt:
+                    raise RuntimeError("Grok \u672a\u8fd4\u56de\u53ef\u7528\u7684\u89c6\u9891\u63d0\u793a\u8bcd")
+                await _send_long_text(message, "\u89c6\u9891 Grok \u751f\u6210\u63d0\u793a\u8bcd\uff1a\n\n" + generated_prompt)
+                payload.update(
+                    {
+                        "prompt": generated_prompt,
+                        "prompt_text": generated_prompt,
+                        "message": generated_prompt,
+                        "tg_use_llm_prompt": False,
+                        "tg_llm_rewritten_prompt": generated_prompt,
+                    }
+                )
             result = await _submit_internal_webapp_task(chat_id=int(message.chat.id), task_type="video_i2v", params=payload)
             prompt_mode_text = "Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
-            prompt_extend_text = "\u5f00" if params["prompt_extend"] else "\u5173"
             reply = "\n".join(
                 part for part in [
                     "\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u5df2\u63d0\u4ea4\u3002",
                     f"\u4efb\u52a1\u7f16\u53f7\uff1a{result.get('id')}",
-                    f"\u5206\u8fa8\u7387\uff1a{params['resolution']}\uff0c\u65f6\u957f\uff1a{params['duration']}\u79d2\uff0c\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{prompt_mode_text}\uff0c\u63a5\u53e3\u6269\u5199\uff1a{prompt_extend_text}",
+                    f"\u5206\u8fa8\u7387\uff1a{params['resolution']}\uff0c\u65f6\u957f\uff1a{params['duration']}\u79d2\uff0c\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{prompt_mode_text}",
                     "\u751f\u6210\u5b8c\u6210\u540e\u4f1a\u81ea\u52a8\u628a\u89c6\u9891\u53d1\u56de\u8fd9\u91cc\u3002",
                 ] if part
             )
             await message.answer(reply, reply_markup=_menu_keyboard())
         except Exception as exc:
-            await message.answer(f"\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u63d0\u4ea4\u5931\u8d25\uff1a{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u63d0\u4ea4\u5931\u8d25\uff1a{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.callback_query(F.data.startswith("video_i2v:"))
     async def on_video_i2v_callback(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2048,13 +2117,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if action == "video_i2v:back:prompt_mode":
             params.update({"prompt_mode_selected": False, "prompt_extend_selected": False})
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
+            await _show_video_i2v_step_from_callback(callback, state, step="audio")
             await callback.answer()
             return
         if action == "video_i2v:back:extend":
-            params.update({"prompt_extend_selected": False})
+            params.update({"prompt_extend": False, "prompt_extend_selected": False})
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await _show_video_i2v_step_from_callback(callback, state, step="audio")
             await callback.answer()
             return
         if action == "video_i2v:next:duration":
@@ -2064,8 +2133,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await callback.answer()
             return
         if action == "video_i2v:next:prompt_mode":
-            if not params.get("duration_selected"):
-                await callback.answer("\u8bf7\u5148\u8f93\u5165\u89c6\u9891\u65f6\u957f", show_alert=True)
+            if not params.get("audio_selected"):
+                await callback.answer("\u8bf7\u5148\u9009\u62e9\u97f3\u9891\u6b65\u9aa4", show_alert=True)
                 return
             await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
             await callback.answer()
@@ -2075,13 +2144,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 params["prompt_mode_selected"] = True
                 params["prompt_mode_label"] = "Grok \u751f\u6210" if params.get("use_grok") else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
                 await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt")
             await callback.answer()
             return
         if action == "video_i2v:next:image":
-            if not params.get("prompt_extend_selected"):
-                params["prompt_extend_selected"] = True
-                await state.update_data(**params)
+            params["prompt_extend"] = False
+            params["prompt_extend_selected"] = True
+            await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="image")
             await callback.answer()
             return
@@ -2106,24 +2175,25 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params["duration_selected"] = True
             params.update({"prompt_mode_selected": False, "prompt_extend_selected": False})
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
+            await _show_video_i2v_step_from_callback(callback, state, step="image")
             await callback.answer("\u5df2\u9009\u62e9\u89c6\u9891\u65f6\u957f")
             return
         if action.startswith("video_i2v:prompt_mode:"):
             params["use_grok"] = action.endswith(":grok")
             params["prompt_mode_selected"] = True
             params["prompt_mode_label"] = "Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
-            params["prompt_extend_selected"] = False
+            params["prompt_extend"] = False
+            params["prompt_extend_selected"] = True
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt")
             await callback.answer("\u5df2\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f")
             return
         if action.startswith("video_i2v:extend:"):
-            params["prompt_extend"] = action.endswith(":on")
+            params["prompt_extend"] = False
             params["prompt_extend_selected"] = True
             await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="image")
-            await callback.answer("\u5df2\u9009\u62e9\u63a5\u53e3\u6269\u5199")
+            await callback.answer()
             return
         await callback.answer()
 
@@ -2488,7 +2558,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             try:
                 task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(callback.message.chat.id), task_id=task_id)
             except Exception as exc:
-                await callback.answer(f"读取上次任务失败：{exc}", show_alert=True)
+                await callback.answer(f"读取上次任务失败：{_format_tg_user_error(exc)}", show_alert=True)
                 return
             if str(task.get("type") or "").strip() != "text_to_image":
                 await callback.answer("这个任务不是文生图任务", show_alert=True)
@@ -2497,7 +2567,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             try:
                 payload, seed = _text_to_image_reroll_payload(input_payload)
             except Exception as exc:
-                await callback.answer(f"重新生成图片失败：{exc}", show_alert=True)
+                await callback.answer(f"重新生成图片失败：{_format_tg_user_error(exc)}", show_alert=True)
                 return
             payload["tg_reroll_from_task_id"] = task_id
             await state.clear()
@@ -2510,7 +2580,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             try:
                 task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(callback.message.chat.id), task_id=task_id)
             except Exception as exc:
-                await callback.answer(f"读取上次任务失败：{exc}", show_alert=True)
+                await callback.answer(f"读取上次任务失败：{_format_tg_user_error(exc)}", show_alert=True)
                 return
             if str(task.get("type") or "").strip() != "text_to_image":
                 await callback.answer("这个任务不是文生图任务", show_alert=True)
@@ -2968,7 +3038,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await _submit_text_to_image_from_state(callback.message, state)
                 await callback.answer("已提交生成")
             except Exception as exc:
-                await callback.message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
+                await callback.message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
                 await callback.answer()
             return
 
@@ -3202,7 +3272,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 try:
                     await _submit_text_to_image_from_state(message, state)
                 except Exception as exc:
-                    await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_text_to_image_prompt_reply_keyboard())
+                    await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_text_to_image_prompt_reply_keyboard())
                 return
             await message.answer("还没有可用的最终提示词，请先输入图片需求。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
             return
@@ -3293,7 +3363,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             try:
                 await _submit_text_to_image_from_state(message, state)
             except Exception as exc:
-                await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_text_to_image_prompt_reply_keyboard())
+                await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_text_to_image_prompt_reply_keyboard())
             return
         if revision in {"输入自定义提示词提交", "输入自定义提示词"}:
             await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定义输入")
@@ -3407,7 +3477,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         except Exception as exc:
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
             await message.answer(
-                f"自定义提示词提交失败：{exc}\n\n请重新输入提示词，或返回上一步。",
+                f"自定义提示词提交失败：{_format_tg_user_error(exc)}\n\n请重新输入提示词，或返回上一步。",
                 reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
             )
 
@@ -3558,7 +3628,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "text_to_image", params)
         except Exception as exc:
-            await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
     async def on_text_to_image_prompt(message: Message, state: FSMContext) -> None:
@@ -3583,7 +3653,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "text_to_image", params)
         except Exception as exc:
-            await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.image_waiting_for_product_image)
     async def on_image_first_reference(message: Message, state: FSMContext) -> None:
@@ -3660,12 +3730,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "image_generate", params)
         except Exception as exc:
-            await message.answer(f"{title}任务提交失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"{title}任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_resolution)
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_duration)
+    @router.message(ProductionWorkflowForm.video_i2v_waiting_for_audio)
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode)
-    @router.message(ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend)
     async def on_video_i2v_param_text(message: Message, state: FSMContext) -> None:
         if await handle_entry_keyword(message, state):
             return
@@ -3692,14 +3762,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await _show_video_i2v_step(message, state, step="resolution")
                 return
             if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode.state:
-                params.update({"duration_selected": False, "prompt_mode_selected": False, "prompt_extend_selected": False})
+                params.update({"prompt_mode_selected": False})
                 await state.update_data(**params)
-                await _show_video_i2v_step(message, state, step="duration")
+                await _show_video_i2v_step(message, state, step="audio")
                 return
-            if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend.state:
-                params.update({"prompt_mode_selected": False, "prompt_extend_selected": False})
+            if current_state == ProductionWorkflowForm.video_i2v_waiting_for_audio.state:
+                params.update({"audio_selected": False, "audio_local_path": "", "prompt_mode_selected": False})
                 await state.update_data(**params)
-                await _show_video_i2v_step(message, state, step="prompt_mode")
+                await _show_video_i2v_step(message, state, step="image")
                 return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_resolution.state:
             if button_text.startswith("720p"):
@@ -3714,6 +3784,25 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params.update({"duration_selected": False, "prompt_mode_selected": False, "prompt_extend_selected": False})
             await state.update_data(**params)
             await _show_video_i2v_step(message, state, step="duration")
+            return
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_audio.state:
+            if button_text == "\u8df3\u8fc7\u97f3\u9891":
+                params["audio_selected"] = True
+                params["audio_local_path"] = ""
+                await state.update_data(**params)
+                await _show_video_i2v_step(message, state, step="prompt_mode")
+                return
+            audio_suffix = _audio_ext_from_message(message)
+            if audio_suffix is None:
+                await message.answer("\u8bf7\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002", reply_markup=_video_i2v_audio_keyboard())
+                return
+            work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
+            target = work_dir / f"audio{audio_suffix}"
+            await _download_message_media(message, target)
+            params["audio_selected"] = True
+            params["audio_local_path"] = str(target.resolve())
+            await state.update_data(**params, work_dir=str(work_dir))
+            await _show_video_i2v_step(message, state, step="prompt_mode")
             return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
             if button_text != text:
@@ -3732,20 +3821,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params["prompt_mode_selected"] = True
             params["prompt_extend_selected"] = False
             await state.update_data(**params)
-            await _show_video_i2v_step(message, state, step="prompt_extend")
-            return
-        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend.state:
-            if button_text == "\u5f00\u542f\u63a5\u53e3\u6269\u5199":
-                params["prompt_extend"] = True
-            elif button_text == "\u5173\u95ed":
-                params["prompt_extend"] = False
-            else:
-                await message.answer("\u8bf7\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u9009\u62e9\u63a5\u53e3\u6269\u5199\u3002")
-                await _show_video_i2v_step(message, state, step="prompt_extend")
-                return
-            params["prompt_extend_selected"] = True
-            await state.update_data(**params)
-            await _show_video_i2v_step(message, state, step="image")
+            await _show_video_i2v_step(message, state, step="prompt")
             return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
             if not text.isdigit():
@@ -3758,13 +3834,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await _show_video_i2v_step(message, state, step="duration")
                 return
             await state.update_data(duration=duration, duration_selected=True, prompt_mode_selected=False, prompt_extend_selected=False)
-            await _show_video_i2v_step(message, state, step="prompt_mode")
+            await _show_video_i2v_step(message, state, step="image")
             return
         step = "resolution"
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode.state:
             step = "prompt_mode"
-        elif current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend.state:
-            step = "prompt_extend"
         await message.answer("请点击上方按钮选择当前参数。")
         await _show_video_i2v_step(message, state, step=step)
 
@@ -3779,9 +3853,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if _canonical_button_text(_message_text(message)).strip() == "\u4e0a\u4e00\u6b65":
             data = await state.get_data()
             params = _video_i2v_state_params(data)
-            params["prompt_extend_selected"] = False
+            params["duration_selected"] = False
             await state.update_data(**params)
-            await _show_video_i2v_step(message, state, step="prompt_extend")
+            await _show_video_i2v_step(message, state, step="duration")
             return
         suffix = _image_ext_from_message(message)
         if suffix is None:
@@ -3792,16 +3866,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
         target = work_dir / f"reference{suffix}"
         await _download_message_media(message, target)
-        await state.update_data(work_dir=str(work_dir), image_local_path=str(target.resolve()))
         caption = _message_text(message)
-        if caption:
-            await _submit_video_i2v_from_state(message, state, caption)
-            return
-        await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
-        await message.answer(
-            "已收到参考图。\n\n请直接输入这次图生视频的画面和动作需求。",
-            reply_markup=_video_i2v_prompt_keyboard(),
-        )
+        await state.update_data(work_dir=str(work_dir), image_local_path=str(target.resolve()), video_i2v_initial_prompt=caption)
+        await _show_video_i2v_step(message, state, step="audio")
+        return
 
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
     async def on_video_i2v_prompt(message: Message, state: FSMContext) -> None:
@@ -3813,7 +3881,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         prompt = _message_text(message)
         if _canonical_button_text(prompt).strip() == "\u4e0a\u4e00\u6b65":
-            await _show_video_i2v_step(message, state, step="image")
+            await _show_video_i2v_step(message, state, step="prompt_mode")
             return
         if not prompt:
             await message.answer("请直接输入这次图生视频的画面和动作需求。", reply_markup=_video_i2v_prompt_keyboard())
@@ -3845,7 +3913,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "replace_model", params)
         except Exception as exc:
-            await message.answer(f"视频模特替换任务提交失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"视频模特替换任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.replace_product_waiting_for_video)
     async def on_replace_product_video(message: Message, state: FSMContext) -> None:
@@ -3877,7 +3945,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "replace_product", params)
         except Exception as exc:
-            await message.answer(f"视频商品替换任务提交失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"视频商品替换任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.union_waiting_for_video)
     async def on_union_video(message: Message, state: FSMContext) -> None:
@@ -3905,7 +3973,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "replace_productANDmodel", params)
         except Exception as exc:
-            await message.answer(f"联合替换任务提交失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"联合替换任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == DIGITAL_HUMAN_VIDEO_BUTTON)
     @router.message(F.text == "数字人视频生成")
@@ -3970,7 +4038,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await _reroll_latest_text_to_image(message, state)
         except Exception as exc:
-            await message.answer(f"重新生成图片失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"重新生成图片失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON)
     async def on_text_to_image_continue_image_button(message: Message, state: FSMContext) -> None:
@@ -3979,7 +4047,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await _continue_latest_text_to_image(message, state)
         except Exception as exc:
-            await message.answer(f"继续生成图片失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"继续生成图片失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == MULTI_IMAGE_BUTTON)
     @router.message(F.text == "多圖生成")
@@ -4140,7 +4208,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             if downloaded:
                 files.append(downloaded)
         except Exception as exc:
-            await message.answer(f"素材下载失败：{exc}", reply_markup=_menu_keyboard())
+            await message.answer(f"素材下载失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
             return
         if not text and not files:
             await message.answer("请用文字描述你要建立的生产任务，或按面板入口依序提交素材。", reply_markup=_menu_keyboard())
@@ -4154,7 +4222,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.update_data(aspect_ratio=params["aspect_ratio"], width=params["width"], height=params["height"])
                 await _preview_text_to_image_prompt(message, state, user_request=text)
             except Exception as exc:
-                await message.answer(f"Grok 提示词生成失败：{exc}", reply_markup=_menu_keyboard())
+                await message.answer(f"Grok 提示词生成失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
             return
         try:
             result = await _submit_internal_webapp_agent_task(
@@ -4164,7 +4232,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
         except Exception as exc:
             await message.answer(
-                f"智能任务提交失败：{exc}\n\n你也可以按面板中的具体工作流入口，依序上传素材。",
+                f"智能任务提交失败：{_format_tg_user_error(exc)}\n\n你也可以按面板中的具体工作流入口，依序上传素材。",
                 reply_markup=_menu_keyboard(),
             )
             return
