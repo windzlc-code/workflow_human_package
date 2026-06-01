@@ -30,6 +30,7 @@ CONVERTED_ROOT = WORKFLOW_ROOTS[1][1] / "__converted__"
 CONVERT_MANIFEST_PATH = CONVERTED_ROOT / "manifest.json"
 CUSTOM_NODES_ROOT = (COMFY_ROOT / "custom_nodes").resolve()
 INPUT_ROOT = (COMFY_ROOT / "input").resolve()
+FRONTEND_ONLY_CLASS_TYPES = {"Note", "MarkdownNote", "Fast Bypasser (rgthree)"}
 
 
 def _json_bytes(data: Any) -> bytes:
@@ -696,6 +697,10 @@ def _convert_workflows(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_prompt_overrides(prompt: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    for node_id, node in list(prompt.items()):
+        if isinstance(node, dict) and str(node.get("class_type") or "") in FRONTEND_ONLY_CLASS_TYPES:
+            prompt.pop(node_id, None)
+
     positive = str(body.get("prompt_text") or body.get("prompt") or "").strip()
     negative = str(body.get("negative_prompt") or "").strip()
     positive_node_ids = {str(value).strip() for value in body.get("prompt_text_node_ids") or [] if str(value).strip()}
