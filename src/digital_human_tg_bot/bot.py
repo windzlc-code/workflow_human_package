@@ -64,6 +64,7 @@ TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON = "继续生成图片"
 MULTI_IMAGE_BUTTON = "多图生成"
 IMAGE_REPLACE_BUTTON = "图片替换"
 VIDEO_GENERAL_EDIT_BUTTON = "图生视频"
+PERSON_T2I_DEFAULT_BATCH_SIZE = 6
 LEGACY_IMAGE_WORKFLOW_BUTTON = "图像编辑工作流"
 LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "图片生成工作流"
 VIDEO_EDIT_BUTTON = "视频生成"
@@ -419,7 +420,7 @@ def _text_to_image_remote_node_inputs(params: dict[str, Any]) -> dict[str, Any]:
     profile = _text_to_image_profile(params)
     if profile == "person_t2i":
         node_inputs: dict[str, Any] = {
-            "160": {"width": int(params["width"]), "height": int(params["height"]), "batch_size": 1},
+            "160": {"width": int(params["width"]), "height": int(params["height"]), "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE},
             "167": {
                 "steps": 10,
                 "cfg": 1.0,
@@ -610,6 +611,7 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
             "width": params["width"],
             "height": params["height"],
             "aspect_ratio": params["aspect_ratio"],
+            "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
@@ -1009,7 +1011,7 @@ def _tg_prompt_preview_unavailable_text() -> str:
 def _format_prompt_display_fallback(exc: Exception | None = None) -> str:
     text = str(exc or "").strip().lower()
     if isinstance(exc, asyncio.TimeoutError) or "timed out" in text or "timeout" in text or "超时" in text or "504" in text:
-        return "中文预览生成超时，实际提交到后台的英文提示词已保存，可直接使用。"
+        return "提示词预览生成超时，实际提交到后台的提示词已保存，可直接使用。"
     return _tg_prompt_preview_unavailable_text()
 
 
@@ -2375,6 +2377,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "width": params["width"],
             "height": params["height"],
             "aspect_ratio": params["aspect_ratio"],
+            "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
@@ -2438,6 +2441,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "width": params["width"],
             "height": params["height"],
             "aspect_ratio": params["aspect_ratio"],
+            "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
@@ -3019,7 +3023,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if action == "t2i:retry_display":
             final_prompt = _strip_prompt_char_count_note(str(data.get("final_prompt_text") or "").strip(), preserve_english=True)
             if not final_prompt:
-                await callback.answer("没有已保存的英文提示词，请重新生成", show_alert=True)
+                await callback.answer("没有已保存的提示词，请重新生成", show_alert=True)
                 return
             try:
                 await _show_text_to_image_prompt_review(

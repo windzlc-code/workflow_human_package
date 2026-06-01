@@ -1080,6 +1080,50 @@ def _extract_download_path(output_data: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_download_paths(output_data: dict[str, Any]) -> list[str]:
+    if not isinstance(output_data, dict):
+        return []
+    candidates: list[Any] = [
+        output_data.get("download_paths"),
+        output_data.get("image_paths"),
+        output_data.get("video_paths"),
+        output_data.get("audio_paths"),
+        output_data.get("result_paths"),
+    ]
+    raw_result = output_data.get("raw_result") if isinstance(output_data.get("raw_result"), dict) else {}
+    local_outputs = raw_result.get("local_outputs") if isinstance(raw_result.get("local_outputs"), list) else []
+    candidates.append([item.get("local_path") for item in local_outputs if isinstance(item, dict)])
+    candidates.extend(
+        [
+            output_data.get("download_path"),
+            output_data.get("video_path"),
+            output_data.get("audio_path"),
+            output_data.get("image_path"),
+            output_data.get("result_zip"),
+            output_data.get("result_path"),
+            output_data.get("output_path"),
+        ]
+    )
+    paths: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        values = candidate if isinstance(candidate, list) else [candidate]
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            path = Path(text).expanduser()
+            try:
+                resolved = str(path.resolve())
+            except Exception:
+                resolved = str(path)
+            if resolved in seen or not path.exists() or not path.is_file():
+                continue
+            seen.add(resolved)
+            paths.append(resolved)
+    return paths
+
+
 def _task_has_download_file(output_data: dict[str, Any]) -> bool:
     return bool(_extract_download_path(output_data))
 
@@ -1206,16 +1250,38 @@ def _notify_tg_task_finished(
     task_url = f"{public_base}/index.html#app-tasks" if public_base else ""
     if str(status or "").strip().lower() == "success":
         reply_markup = _send_telegram_reply_markup_for_finished_task(task_id, task_type)
+        download_paths = _extract_download_paths(output_data if isinstance(output_data, dict) else {})
+        if str(task_type or "").strip() == "text_to_image":
+            image_paths = [path for path in download_paths if Path(path).suffix.lower() in IMAGE_EXTS]
+            if image_paths:
+                download_paths = image_paths
         caption = "\n".join(
             part
             for part in [
                 "后台生成任务已完成。",
                 f"工作流: {task_type}",
                 f"任务编号: {task_id}",
+                f"返回图片: {len(download_paths)} 张" if str(task_type or "").strip() == "text_to_image" and len(download_paths) > 1 else "",
                 _text_to_image_qa_notice(output_data if isinstance(output_data, dict) else {}),
             ]
             if part
         )
+        if len(download_paths) > 1:
+            sent_count = 0
+            for index, path in enumerate(download_paths, start=1):
+                item_caption = caption if index == 1 else "\n".join(
+                    [
+                        "后台生成任务已完成。",
+                        f"工作流: {task_type}",
+                        f"任务编号: {task_id}",
+                        f"第 {index}/{len(download_paths)} 张",
+                    ]
+                )
+                item_markup = reply_markup if index == len(download_paths) else None
+                if _send_telegram_file(chat_id, path, caption=item_caption, reply_markup=item_markup):
+                    sent_count += 1
+            if sent_count == len(download_paths):
+                return
         if download_path and _send_telegram_file(chat_id, download_path, caption=caption, reply_markup=reply_markup):
             return
         parts = [caption]
@@ -3539,6 +3605,18 @@ def _remote_comfy_node_inputs_from_payload(
         return parsed if isinstance(parsed, dict) else {}
     if (
         str(task_type or "").strip() in {"text_to_image", "image_generate"}
+        and ("person_t2i" in str(workflow_path or "").lower() or "人设_t2i" in str(workflow_path or "") or "人設_t2i" in str(workflow_path or ""))
+    ):
+        return {
+            "160": {
+                "width": max(_to_int(payload.get("width"), 640), 1),
+                "height": max(_to_int(payload.get("height"), 960), 1),
+                "batch_size": max(_to_int(payload.get("batch_size"), _remote_comfy_default_batch_size(task_type, workflow_path)), 1),
+            },
+            "171": {"filename_prefix": "telegram/person_t2i"},
+        }
+    if (
+        str(task_type or "").strip() in {"text_to_image", "image_generate"}
         and "ZIT_final" in str(workflow_path or "")
         and "final_resolution_enabled" in payload
     ):
@@ -3652,6 +3730,37 @@ def _first_remote_comfy_output_path(result: dict[str, Any]) -> str:
         if local_path and Path(local_path).exists():
             return local_path
     return ""
+
+
+def _remote_comfy_output_image_paths(result: dict[str, Any]) -> list[str]:
+    outputs = result.get("local_outputs") if isinstance(result.get("local_outputs"), list) else []
+    image_items = [
+        item
+        for item in outputs
+        if isinstance(item, dict)
+        and str(item.get("local_path") or "").strip()
+        and Path(str(item.get("local_path") or "")).exists()
+        and Path(str(item.get("local_path") or "")).suffix.lower() in IMAGE_EXTS
+    ]
+    preferred_items = [
+        item
+        for item in image_items
+        if str(item.get("node") or "").strip() in {"650", "651"}
+        or "ZIT_detailer" in str(item.get("filename") or item.get("local_path") or "")
+    ]
+    selected = preferred_items or image_items
+    paths: list[str] = []
+    seen: set[str] = set()
+    for item in selected:
+        local_path = str(item.get("local_path") or "").strip()
+        try:
+            resolved = str(Path(local_path).resolve())
+        except Exception:
+            resolved = local_path
+        if resolved and resolved not in seen:
+            seen.add(resolved)
+            paths.append(resolved)
+    return paths
 
 
 def _remote_comfy_image_generate_chain_config(payload: dict[str, Any]) -> dict[str, Any]:
@@ -4101,7 +4210,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     seed = None if str(seed_raw or "").strip() in {"", "auto", "None", "null"} else min(max(_to_int(seed_raw, 0), 0), 2147483647)
     width = _to_int(payload.get("width"), 512)
     height = _to_int(payload.get("height"), 512)
-    batch_size = _to_int(payload.get("batch_size"), 1)
+    batch_size = _to_int(payload.get("batch_size"), _remote_comfy_default_batch_size(task_type, workflow_path))
     base_node_inputs = _remote_comfy_node_inputs_from_payload(payload, task_type=task_type, workflow_path=workflow_path)
     auto_qa_enabled = (
         str(task_type or "").strip() == "text_to_image"
@@ -4221,6 +4330,9 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     }
     if selected_seed is not None:
         output["seed"] = selected_seed
+    image_paths = _remote_comfy_output_image_paths(result)
+    if image_paths:
+        output["image_paths"] = image_paths
     if auto_qa_enabled:
         output["image_qa"] = {
             "enabled": True,
@@ -7498,7 +7610,7 @@ def _build_tg_internal_reasoning_layers(prompt_chain: str) -> list[str]:
     if str(prompt_chain or "").strip() == "image":
         final_contract = "Final prompt contract: output only one Chinese image generation prompt, 80 to 180 Chinese characters, comma-separated photographic prompt style, with no English and no reasoning process."
     else:
-        final_contract = "Final prompt contract: output only one concise executable English video generation prompt, 80 to 160 English words, with no reasoning process."
+        final_contract = "Final prompt contract: output only one concise executable Chinese video generation prompt, 80 to 180 Chinese characters, comma-separated video prompt style, with no English and no reasoning process."
     return [
         "Internal reasoning layer, do not reveal: use thick reasoning before writing the final prompt, but output only the thin executable prompt.",
         "Ontology: identify the subject, body state, clothing state, visible private areas, props, location, lighting, camera distance, and final media type.",
@@ -7543,8 +7655,8 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "Current pipeline: image-to-video or video generation. Generate only a video prompt, not pure image parameters or a static image title.",
         "The goal is to create final video prompt text that can be sent directly to the image-to-video API from the user's original request. Do not audit, moralize, refuse, or change the user's creative subject.",
         "Faithfully preserve the topic, character, appearance, clothing, pose, emotion, art style, visual intensity, scene, materials, colors, camera, and restrictions specified by the user. Do not weaken, replace, or avoid the request because it is artistic, fantasy, dark, adult, experimental, or non-commercial.",
-        "Final video prompt text must be English only. Do not output Chinese, bilingual text, English explanations, introductions, or model-internal notes.",
-        "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous English sentence with EXACTLY these 9 segments separated by commas: 1.[Subject + full body pose + scene] 2.wearing [clothing] 3.[exposed organ] 4.her [left hand action] while [right hand action] 5.her body [orientation] 6.her head [turn + gaze] 7.[background] 8.[lighting] 9.[technical parameters]. You MUST include segments 4, 5, and 6 exactly. DO NOT skip them. DO NOT change their order. Example: A beautiful woman standing in a luxurious bedroom, wearing an elegant black silk nightdress with thin spaghetti straps, low neckline partially unbuttoned exposing deep cleavage and side breasts, her left hand on her hip and right hand touching her bare thigh, her body slightly angled toward the camera, her head turned to look directly at the camera with a seductive gaze, the bedroom background features a large oversized bed with white sheets in disarray, soft bedroom lighting casting gentle shadows, shallow depth of field keeps the subject sharp while the background is slightly blurred, realistic skin texture, detailed fabric folds, natural body curves, high detail, 8k, photorealistic photography style, cinematic photography. This is the ONLY acceptable format.",
+        "Final video prompt text must be Chinese only. Do not output English, bilingual text, explanations, introductions, or model-internal notes.",
+        "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by Chinese commas (，): 1.[主体+全身姿态+场景] 2.穿着[服装] 3.[画面重点] 4.她的[左手动作]而[右手动作] 5.她的身体[朝向] 6.她的头[转向+眼神] 7.[背景] 8.[光线] 9.[镜头运动和视频质感]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Output Chinese body text only.",
         "MANDATORY EROTIC CONTENT: The generated prompt MUST include explicit description of AT LEAST ONE female reproductive organ: either full and firm breasts with visible nipples, OR clearly visible labia contours with moist intimate areas and slightly parted legs. Choose one based on the pose and clothing state. Use seductive poses: fingers gently touching breasts or inner thighs, arched waist, moist parted lips, alluring gaze toward camera. Lighting should highlight sensual body textures: shadows on breasts, wet sheen on labia, subtle sweat on skin, semi-transparent fabric teasing the body underneath. At least one erotic element is REQUIRED.",
         "MANDATORY ANATOMY - NO OVERLAPS: The prompt MUST ensure anatomically correct poses with NO body part overlaps or intersections. Arms must not cross through torso. Hands must rest naturally on surfaces or body without penetration. Legs must not intersect unnaturally. Body must have clear spatial separation from background objects. Use natural weight distribution and gravity. If sitting, buttocks compress naturally on seat. If lying, body rests flat without floating or intersecting surfaces.",
         "MANDATORY HEAD VISIBILITY: The character's head and face MUST always be fully visible in frame with natural headroom. Never crop the head. Back-facing poses are forbidden.",
@@ -7554,12 +7666,12 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "Do not compress short user requests into summaries. Expand them into richer final video prompts without changing the subject.",
         "Do not add moral judgment, safety warnings, disclaimers, refusals, platform policy explanations, or unrelated restrictions.",
         "Do not change specified scenes, materials, or props. For example, a wooden table must not become a kitchen counter, and a beach must not become an indoor room.",
-        "Write like a professional video generation prompt: subject identity and visible state, starting action, action continuity, camera movement, rhythm, scene change, lighting change, image stability, and temporal order.",
-        "If the user gives a static scene, expand it into a natural video clip: define the starting state, continuous action, ending state, how the camera follows the subject, and which visual elements remain consistent.",
+        "Write like a professional Chinese video generation prompt: subject identity and visible state, starting action, action continuity, camera movement, rhythm, scene change, lighting change, image stability, and temporal order.",
+        "If the user gives a static scene, expand it into a natural Chinese video clip prompt: define the starting state, continuous action, ending state, how the camera follows the subject, and which visual elements remain consistent.",
         "For image-to-video or replacement tasks, preserve the person identity, clothing, product, environment, composition relationship, and visual continuity from the reference image or source video. Do not switch to an unrelated new scene.",
         "Do not use still-image language such as single frame, static close-up, poster composition, or frozen moment as the primary structure unless the user explicitly asks for a still video.",
-        "Output format: provide only the final copyable video prompt text, without prefix, suffix, JSON, code block, title, list, emoji, explanation, or process notes.",
-        "Final prompt must be one continuous English paragraph, usually 80 to 160 English words unless the user explicitly asks for an extremely short prompt.",
+        "Output format: provide only the final copyable Chinese video prompt text, without prefix, suffix, JSON, code block, title, list, emoji, explanation, or process notes.",
+        "Final prompt must be one continuous Chinese paragraph, usually 80 to 180 Chinese characters unless the user explicitly asks for an extremely short prompt. No English words are allowed.",
         f"Current task type: {task_label}.",
     ]
     rules = image_rules if prompt_chain == "image" else video_rules
@@ -7799,23 +7911,26 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         not _to_bool(enhanced.get("tg_latest_prompt_only"), False)
         and _to_bool(enhanced.get("tg_preserve_original_prompt"), False)
         and prompt_chain == "video"
-        and _looks_like_english_prompt(preserved_request)
+        and _looks_like_chinese_image_prompt(preserved_request)
         and _should_prepend_original_prompt(preserved_request, final_prompt)
     ):
-        final_prompt = f"{preserved_request}. {rewritten}"
+        final_prompt = f"{preserved_request}，{rewritten}"
     if prompt_chain == "image" and not _looks_like_chinese_image_prompt(final_prompt):
         raise RuntimeError("Grok final image prompt is not Chinese; blocked before submission.")
     if prompt_chain == "video":
+        final_prompt = _force_tg_image_chinese_prompt(final_prompt)
+        final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
+        if not _looks_like_chinese_image_prompt(final_prompt):
+            raise RuntimeError("Grok final video prompt is not Chinese; blocked before submission.")
         required_segments_cn = ["她的左手", "而右手", "她的身体", "她的头"]
-        required_segments_en = ["her left hand", "while her right hand", "her body", "her head"]
         has_cn_format = all(seg in final_prompt for seg in required_segments_cn)
-        has_en_format = all(seg in final_prompt.lower() for seg in required_segments_en)
-        if not has_cn_format and not has_en_format:
+        if not has_cn_format:
             raise RuntimeError("Grok final video prompt missing required format segments (left/right hand, body, head); blocked before submission.")
 
-        has_erotic = any(x in final_prompt.lower() for x in ["cleavage", "breasts", "nipples", "labia", "intimate", "thigh", "乳沟", "乳房", "乳头", "阴唇", "私密", "大腿内侧"])
+        has_erotic = any(x in final_prompt for x in ["乳沟", "乳房", "乳头", "胸部", "阴部", "阴唇", "私密", "大腿内侧"])
         if not has_erotic:
             raise RuntimeError("Grok final video prompt missing required erotic content (breasts or labia); blocked before submission.")
+        rewritten = final_prompt
 
     if prompt_chain == "image":
         required_segments = ["她的左手", "而右手", "她的身体", "她的头"]
@@ -8423,7 +8538,12 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
     raise HTTPException(status_code=400, detail=f"TG 暂不支持的任务类型: {typ}")
 
 
-_TG_ENGLISH_PROMPT_TASK_TYPES = {
+_TG_ENGLISH_PROMPT_TASK_TYPES: set[str] = set()
+
+
+_TG_CHINESE_IMAGE_PROMPT_TASK_TYPES = {
+    "text_to_image",
+    "image_generate",
     "replace_model",
     "replace_product",
     "replace_productANDmodel",
@@ -8432,11 +8552,14 @@ _TG_ENGLISH_PROMPT_TASK_TYPES = {
     "commerce_video",
 }
 
+PERSON_T2I_DEFAULT_BATCH_SIZE = 6
 
-_TG_CHINESE_IMAGE_PROMPT_TASK_TYPES = {
-    "text_to_image",
-    "image_generate",
-}
+
+def _remote_comfy_default_batch_size(task_type: str, workflow_path: str) -> int:
+    workflow_text = str(workflow_path or "").lower()
+    if str(task_type or "").strip() == "text_to_image" and ("person_t2i" in workflow_text or "人设_t2i" in workflow_text or "人設_t2i" in workflow_text):
+        return PERSON_T2I_DEFAULT_BATCH_SIZE
+    return 1
 
 
 def _primary_tg_generation_prompt(payload: dict[str, Any]) -> str:
@@ -8476,35 +8599,10 @@ def _set_tg_generation_prompt(payload: dict[str, Any], prompt_text: str) -> dict
 
 
 def _ensure_internal_tg_payload_english_prompt(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    typ = str(task_type or "").strip()
-    if typ not in _TG_ENGLISH_PROMPT_TASK_TYPES:
-        return payload
-    ensured = dict(payload or {})
-    prompt_text = _primary_tg_generation_prompt(ensured)
-    if not prompt_text:
-        return ensured
-    if _to_bool(ensured.get("custom_prompt_used"), False):
-        return ensured
-    if _looks_like_english_prompt(prompt_text):
-        return _set_tg_generation_prompt(ensured, _force_tg_image_english_prompt(prompt_text))
-
-    rewrite_payload = dict(ensured)
-    rewrite_payload["tg_use_llm_prompt"] = True
-    rewrite_payload["tg_latest_prompt_only"] = True
-    rewrite_payload["tg_preserve_original_prompt"] = False
-    rewrite_payload.pop("tg_llm_prompt_enhanced", None)
-    rewrite_payload["tg_user_instruction"] = prompt_text
-    rewrite_payload["tg_original_user_request"] = prompt_text
-    rewrite_payload["prompt"] = prompt_text
-    rewrite_payload["prompt_text"] = prompt_text
-    rewritten_payload = _enhance_tg_payload_with_llm_prompt(typ, rewrite_payload)
-    rewritten_prompt = _primary_tg_generation_prompt(rewritten_payload)
-    if not _looks_like_english_prompt(rewritten_prompt):
-        raise HTTPException(status_code=502, detail="最终提交提示词不是英文，已阻止入队。请重新生成提示词。")
-    return _set_tg_generation_prompt(rewritten_payload, _force_tg_image_english_prompt(rewritten_prompt))
+    return payload
 
 
-def _ensure_internal_tg_payload_chinese_image_prompt(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _ensure_internal_tg_payload_chinese_prompt(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     typ = str(task_type or "").strip()
     if typ not in _TG_CHINESE_IMAGE_PROMPT_TASK_TYPES:
         return payload
@@ -8529,8 +8627,12 @@ def _ensure_internal_tg_payload_chinese_image_prompt(task_type: str, payload: di
     rewritten_payload = _enhance_tg_payload_with_llm_prompt(typ, rewrite_payload)
     rewritten_prompt = _force_tg_image_chinese_prompt(_primary_tg_generation_prompt(rewritten_payload))
     if not _looks_like_chinese_image_prompt(rewritten_prompt):
-        raise HTTPException(status_code=502, detail="最终图像提示词不是中文，已阻止入队。请重新生成提示词。")
+        raise HTTPException(status_code=502, detail="最终提示词不是中文，已阻止入队。请重新生成提示词。")
     return _set_tg_generation_prompt(rewritten_payload, rewritten_prompt)
+
+
+def _ensure_internal_tg_payload_chinese_image_prompt(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _ensure_internal_tg_payload_chinese_prompt(task_type, payload)
 
 
 def _tg_prompt_preview(payload: dict[str, Any]) -> str:
