@@ -75,7 +75,12 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "remote_comfy_gateway_url": "",
     "remote_comfy_gateway_token": "",
     "remote_comfy_workflow_mappings": {"face_swap": "__converted__/flux_人物换脸工作流.api.json"},
-    "remote_comfy_image_input_bindings": {},
+    "remote_comfy_image_input_bindings": {
+        "get_nano_banana": {
+            "image1": {"node_id": "2", "input_name": "image"},
+            "image2": {"node_id": "19", "input_name": "image"},
+        }
+    },
     "local_comfy_image_input_bindings": {},
     "local_comfy_gateway_url": "http://127.0.0.1:9001",
     "local_comfy_gateway_token": "",
@@ -1158,7 +1163,18 @@ def _tg_bot_token() -> str:
 
 
 def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) -> dict[str, Any] | None:
-    if str(task_type or "").strip() != "text_to_image":
+    typ = str(task_type or "").strip()
+    if typ == "face_swap":
+        return {
+            "inline_keyboard": [
+                [{"text": "SeedVR 单独放大", "callback_data": f"face_swap:seedvr:{task_id}"}],
+                [
+                    {"text": "重新生成", "callback_data": f"face_swap:rerun:{task_id}"},
+                    {"text": "返回菜单", "callback_data": "face_swap:main_menu"},
+                ],
+            ]
+        }
+    if typ != "text_to_image":
         return None
     return {
         "keyboard": [
@@ -1271,7 +1287,11 @@ def _notify_tg_task_finished(
         if is_text_to_image and "image_paths" in output_dict:
             download_paths = _extract_existing_file_paths(output_dict.get("image_paths"))
         else:
-            download_paths = _extract_download_paths(output_dict)
+            if download_path:
+                download_paths = [download_path]
+            else:
+                all_download_paths = _extract_download_paths(output_dict)
+                download_paths = all_download_paths[:1]
         qa = output_dict.get("image_qa") if isinstance(output_dict.get("image_qa"), dict) else {}
         target_count = max(_to_int(qa.get("target_count"), 0), 0)
         if is_text_to_image:
@@ -1337,6 +1357,10 @@ def _notify_tg_task_finished(
 
 def _format_user_visible_task_error(error: str) -> str:
     text = str(error or "").strip()
+    if "WinError 10061" in text or "Connection refused" in text or "目标电脑拒绝连接" in text or "目標電腦拒絕連線" in text:
+        return "4090 ComfyUI 主服务当前不可用或已崩溃，网关能连接但 ComfyUI 端口拒绝连接；请先重启 4090 上的 ComfyUI 后再提交。"
+    if "RemoteDisconnected" in text or "SSH session not active" in text or "Connection aborted" in text:
+        return "4090 连接通道中断，已不是提示词问题；请重新连接 4090 网关后再提交。"
     text = re.sub(r"工作台[:：]\s*https?://\S+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\bfor url:\s*https?://\S+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\burl:\s*https?://\S+", "", text, flags=re.IGNORECASE)
@@ -2829,8 +2853,12 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
             merged[key] = runtime.get(key)
     if not isinstance(merged.get("remote_comfy_workflow_mappings"), dict) or not merged.get("remote_comfy_workflow_mappings"):
         merged["remote_comfy_workflow_mappings"] = runtime.get("remote_comfy_workflow_mappings") if isinstance(runtime.get("remote_comfy_workflow_mappings"), dict) else {}
+    if not isinstance(merged.get("remote_comfy_image_input_bindings"), dict) or not merged.get("remote_comfy_image_input_bindings"):
+        merged["remote_comfy_image_input_bindings"] = runtime.get("remote_comfy_image_input_bindings") if isinstance(runtime.get("remote_comfy_image_input_bindings"), dict) else {}
     if not isinstance(merged.get("local_comfy_workflow_mappings"), dict) or not merged.get("local_comfy_workflow_mappings"):
         merged["local_comfy_workflow_mappings"] = runtime.get("local_comfy_workflow_mappings") if isinstance(runtime.get("local_comfy_workflow_mappings"), dict) else {}
+    if not isinstance(merged.get("local_comfy_image_input_bindings"), dict) or not merged.get("local_comfy_image_input_bindings"):
+        merged["local_comfy_image_input_bindings"] = runtime.get("local_comfy_image_input_bindings") if isinstance(runtime.get("local_comfy_image_input_bindings"), dict) else {}
     source = str(merged.get("comfy_workflow_source") or runtime.get("comfy_workflow_source") or "remote").strip().lower()
     merged["comfy_workflow_source"] = source if source in {"remote", "local"} else "remote"
 
@@ -3524,6 +3552,43 @@ def _run_remote_comfy_gateway_test(
         )
         if _to_bool(last_job.get("done"), False):
             outputs = last_job.get("outputs") if isinstance(last_job.get("outputs"), list) else []
+            if not outputs:
+                try:
+                    history = _remote_comfy_gateway_json(
+                        gateway_url=gateway_url,
+                        token=token,
+                        method="GET",
+                        path=f"/api/history/{prompt_id}",
+                        timeout=60,
+                    )
+                    item = history.get(prompt_id) if isinstance(history, dict) else None
+                    status = item.get("status") if isinstance(item, dict) else None
+                    if isinstance(status, dict):
+                        last_job["history_status"] = {
+                            "status_str": status.get("status_str"),
+                            "completed": status.get("completed"),
+                        }
+                        for message in status.get("messages") or []:
+                            if not isinstance(message, list) or len(message) < 2:
+                                continue
+                            if message[0] != "execution_error" or not isinstance(message[1], dict):
+                                continue
+                            error_payload = message[1]
+                            node_id = str(error_payload.get("node_id") or "").strip()
+                            node_type = str(error_payload.get("node_type") or "").strip()
+                            exception_message = str(error_payload.get("exception_message") or "").strip()
+                            last_job["execution_error_message"] = " ".join(
+                                part
+                                for part in [
+                                    f"节点 {node_id}" if node_id else "",
+                                    f"({node_type})" if node_type else "",
+                                    exception_message,
+                                ]
+                                if part
+                            )
+                            break
+                except Exception as exc:
+                    last_job["history_error"] = str(exc)
             local_outputs: list[dict[str, Any]] = []
             output_dir = OUTPUT_ROOT / "remote_comfy_tests" / prompt_id
             for item in outputs:
@@ -3558,6 +3623,7 @@ REMOTE_COMFY_TASK_LABELS = {
     "create_audio": "生成音频",
     "create_video": "生成视频",
     "video_i2v": "图生视频",
+    "single_image_edit": "单图编辑",
     "get_nano_banana": "图片编辑",
     "face_swap": "人物换脸",
 }
@@ -3572,6 +3638,7 @@ def _remote_comfy_workflow_mapping_value(payload: dict[str, Any], task_type: str
         payload.get("remote_comfy_workflow_path"),
         payload.get("local_comfy_workflow_path"),
         mappings.get(task_type),
+        mappings.get("get_nano_banana") if str(task_type or "").strip() == "single_image_edit" else None,
         mappings.get("default"),
     ]
     for value in candidates:
@@ -3616,6 +3683,12 @@ def _remote_comfy_image_input_bindings(payload: dict[str, Any], task_type: str) 
             value = mapping_value.get(key)
             if isinstance(value, (dict, list)):
                 return value
+    workflow_path = _remote_comfy_workflow_mapping(payload, task_type)
+    if str(task_type or "").strip() in {"get_nano_banana", "single_image_edit"} and "firered" in str(workflow_path or "").lower():
+        return {
+            "image1": {"node_id": "2", "input_name": "image"},
+            "image2": {"node_id": "19", "input_name": "image"},
+        }
     return None
 
 
@@ -3690,6 +3763,30 @@ def _remote_comfy_node_inputs_from_payload(
     if raw_json:
         parsed = _json_loads(raw_json, {})
         return parsed if isinstance(parsed, dict) else {}
+    mapping_value = _remote_comfy_workflow_mapping_value(payload, task_type)
+    if isinstance(mapping_value, dict):
+        mapped_inputs: dict[str, Any] = {}
+        for key in ("node_inputs", "remote_comfy_node_inputs", "inputs"):
+            value = mapping_value.get(key)
+            if isinstance(value, dict):
+                mapped_inputs = value
+                break
+        if str(task_type or "").strip() == "face_swap":
+            seed = _to_int(payload.get("face_swap_random_seed") or payload.get("seed"), 0)
+            if seed > 0:
+                mapped_inputs = _merge_node_inputs(mapped_inputs, {"256": {"noise_seed": seed}})
+            if _to_bool(payload.get("face_swap_seedvr_upscale"), False):
+                return _merge_node_inputs(
+                    mapped_inputs,
+                    {
+                        "467": {
+                            "images": ["326", 0],
+                            "filename_prefix": "telegram/face_swap_seedvr",
+                        }
+                    },
+                )
+        if mapped_inputs:
+            return mapped_inputs
     if (
         str(task_type or "").strip() in {"text_to_image", "image_generate"}
         and ("person_t2i" in str(workflow_path or "").lower() or "人设_t2i" in str(workflow_path or "") or "人設_t2i" in str(workflow_path or ""))
@@ -3798,12 +3895,28 @@ def _remote_comfy_node_inputs_from_payload(
 def _remote_comfy_input_image_paths_from_payload(payload: dict[str, Any], task_type: str) -> list[dict[str, str]]:
     typ = str(task_type or "").strip()
     candidates: list[tuple[str, Any, str]] = []
-    if typ == "get_nano_banana":
+    if typ == "single_image_edit":
+        single_image = (
+            payload.get("input_image_local_path")
+            or payload.get("image_local_path")
+            or payload.get("product_image_local_path")
+        )
         candidates.extend(
             [
-                ("input", payload.get("input_image_local_path"), "待编辑图片"),
-                ("input", payload.get("image_local_path"), "待编辑图片"),
-                ("input", payload.get("product_image_local_path"), "待编辑图片"),
+                ("image1", single_image, "原图"),
+                ("image2", single_image, "原图"),
+            ]
+        )
+    elif typ == "get_nano_banana":
+        candidates.extend(
+            [
+                ("image1", payload.get("input_image_local_path"), "原图"),
+                ("image1", payload.get("image_local_path"), "原图"),
+                ("image1", payload.get("product_image_local_path"), "原图"),
+                ("image2", payload.get("reference_image_local_path"), "参考图"),
+                ("image2", payload.get("second_image_local_path"), "参考图"),
+                ("image2", payload.get("image2_local_path"), "参考图"),
+                ("image2", payload.get("model_image_local_path"), "参考图"),
             ]
         )
     elif typ == "face_swap":
@@ -3867,8 +3980,58 @@ def _remote_comfy_upload_input_images(
     return uploaded
 
 
+def _remote_comfy_node_inputs_from_uploaded_image_bindings(
+    input_images: list[dict[str, str]],
+    input_image_bindings: Any,
+) -> dict[str, Any]:
+    if not input_images or not isinstance(input_image_bindings, (dict, list)):
+        return {}
+    bindings_by_role: dict[str, dict[str, str]] = {}
+    if isinstance(input_image_bindings, dict):
+        for role, binding in input_image_bindings.items():
+            if isinstance(binding, dict):
+                node_id = str(binding.get("node_id") or binding.get("node") or binding.get("id") or "").strip()
+                input_name = str(binding.get("input_name") or binding.get("input") or "image").strip() or "image"
+                if node_id:
+                    bindings_by_role[str(role or "").strip().lower()] = {"node_id": node_id, "input_name": input_name}
+    elif isinstance(input_image_bindings, list):
+        for binding in input_image_bindings:
+            if not isinstance(binding, dict):
+                continue
+            role = str(binding.get("role") or binding.get("source") or "").strip().lower()
+            node_id = str(binding.get("node_id") or binding.get("node") or binding.get("id") or "").strip()
+            input_name = str(binding.get("input_name") or binding.get("input") or "image").strip() or "image"
+            if role and node_id:
+                bindings_by_role[role] = {"node_id": node_id, "input_name": input_name}
+    if not bindings_by_role:
+        return {}
+    node_inputs: dict[str, Any] = {}
+    for item in input_images:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        image_value = str(item.get("image") or "").strip()
+        binding = bindings_by_role.get(role)
+        if not binding or not image_value:
+            continue
+        node_inputs.setdefault(binding["node_id"], {})[binding["input_name"]] = image_value
+    return node_inputs
+
+
 def _first_remote_comfy_output_path(result: dict[str, Any]) -> str:
     outputs = result.get("local_outputs") if isinstance(result.get("local_outputs"), list) else []
+    saved_outputs = [
+        item
+        for item in outputs
+        if isinstance(item, dict)
+        and str(item.get("type") or "").strip().lower() == "output"
+        and str(item.get("local_path") or "").strip()
+        and Path(str(item.get("local_path") or "")).exists()
+    ]
+    for item in saved_outputs:
+        local_path = str(item.get("local_path") or "").strip()
+        if local_path and Path(local_path).exists():
+            return local_path
     preferred_outputs = [
         item
         for item in outputs
@@ -3907,7 +4070,12 @@ def _remote_comfy_output_image_paths(result: dict[str, Any]) -> list[str]:
         if str(item.get("node") or "").strip() in {"650", "651"}
         or "ZIT_detailer" in str(item.get("filename") or item.get("local_path") or "")
     ]
-    selected = preferred_items or image_items
+    saved_items = [
+        item
+        for item in image_items
+        if str(item.get("type") or "").strip().lower() == "output"
+    ]
+    selected = preferred_items or saved_items or image_items
     paths: list[str] = []
     seen: set[str] = set()
     for item in selected:
@@ -4379,11 +4547,13 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         task_type=task_type,
     )
     input_image_bindings = _remote_comfy_image_input_bindings(payload, task_type)
+    binding_node_inputs = _remote_comfy_node_inputs_from_uploaded_image_bindings(input_images, input_image_bindings)
+    base_node_inputs = _merge_node_inputs(binding_node_inputs, base_node_inputs)
     auto_qa_enabled = (
         str(task_type or "").strip() == "text_to_image"
         and _to_bool(payload.get("text_to_image_auto_qa_enabled"), True)
     )
-    image_task_requires_output = str(task_type or "").strip() in {"text_to_image", "image_generate", "get_nano_banana", "face_swap"}
+    image_task_requires_output = str(task_type or "").strip() in {"text_to_image", "image_generate", "single_image_edit", "get_nano_banana", "face_swap"}
     qa_target_count = max(batch_size, 1) if str(task_type or "").strip() == "text_to_image" else 1
     batch_qa_enabled = auto_qa_enabled and qa_target_count > 1
     max_attempts = 1 if batch_qa_enabled else (min(max(_to_int(payload.get("text_to_image_auto_qa_max_attempts"), 3), 1), 6) if auto_qa_enabled else 1)
@@ -4433,6 +4603,10 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         selected_seed = attempt_seed
         if image_task_requires_output and not output_path:
             last_qa_reason = f"{source_label} 工作流完成但未返回可下载图片"
+            raw_job = result.get("raw_job") if isinstance(result.get("raw_job"), dict) else {}
+            execution_error = str(raw_job.get("execution_error_message") or "").strip()
+            if execution_error:
+                last_qa_reason = f"{source_label} 工作流执行失败：{execution_error}"
             _emit_stage(
                 payload,
                 stage="remote_comfy",
@@ -4526,11 +4700,15 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         if auto_qa_enabled and qa_reports and _should_reject_generated_person_image(qa_reports[-1]):
             raise RuntimeError(f"自动 QA 已筛选 {len(qa_reports)} 轮仍未获得可交付图片：{last_qa_reason or '候选图未通过质量检查'}")
 
-    if batch_qa_enabled:
-        image_paths = qa_passed_image_paths[:qa_target_count]
-        output_path = image_paths[0] if image_paths else ""
-    else:
-        image_paths = _remote_comfy_output_image_paths(result)
+        current_task_type = str(task_type or "").strip()
+        if batch_qa_enabled:
+            image_paths = qa_passed_image_paths[:qa_target_count]
+            output_path = image_paths[0] if image_paths else ""
+        elif current_task_type == "text_to_image":
+            image_paths = _remote_comfy_output_image_paths(result)
+            output_path = image_paths[0] if image_paths else output_path
+        else:
+            image_paths = [output_path] if output_path and Path(output_path).suffix.lower() in IMAGE_EXTS else []
 
     output_key = "download_path"
     suffix = Path(output_path).suffix.lower() if output_path else ""
@@ -4553,7 +4731,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     }
     if selected_seed is not None:
         output["seed"] = selected_seed
-    if batch_qa_enabled or image_paths:
+    if batch_qa_enabled or (str(task_type or "").strip() == "text_to_image" and image_paths):
         output["image_paths"] = image_paths
     if auto_qa_enabled:
         if batch_qa_enabled:
@@ -7523,6 +7701,7 @@ def _build_tg_image_edit_fallback_prompt(original_request: str, task_type: str) 
     request_text = _clean_tg_prompt_request(original_request)
     if not request_text:
         request_text = "自然处理图片，保持原图构图、光线、服装、背景和主体关系"
+    request_text = re.sub(r"^\s*把\s*", "", request_text).strip()
     if str(task_type or "").strip() == "face_swap":
         return (
             f"{request_text}，保持目标图姿态、服装、背景、光线和镜头角度，只替换脸部身份，"
@@ -7854,7 +8033,7 @@ def _ensure_tg_image_explicit_private_part(prompt_text: str, original_request: s
     return f"{text}，{addition}".strip("， ")
 
 
-_TG_IMAGE_PROMPT_TYPES = {"text_to_image", "image_generate", "get_nano_banana", "face_swap"}
+_TG_IMAGE_PROMPT_TYPES = {"text_to_image", "image_generate", "single_image_edit", "get_nano_banana", "face_swap"}
 _TG_VIDEO_PROMPT_TYPES = {"replace_model", "replace_product", "replace_productANDmodel", "video_i2v"}
 
 
@@ -7880,7 +8059,7 @@ def _build_tg_internal_reasoning_layers(prompt_chain: str) -> list[str]:
 def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str, str]:
     typ = str(task_type or "").strip()
     prompt_chain = "image" if typ in _TG_IMAGE_PROMPT_TYPES else "video"
-    if typ in {"get_nano_banana", "face_swap"}:
+    if typ in {"single_image_edit", "get_nano_banana", "face_swap"}:
         edit_rules = [
             "You rewrite Telegram user requests into one Chinese prompt for an existing image-conditioned ComfyUI workflow.",
             "Output only the final Chinese prompt text. Do not output English, labels, JSON, Markdown, explanations, policy text, or reasoning.",
@@ -7970,7 +8149,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             pass
 
     typ = str(task_type or "").strip()
-    if typ not in {"text_to_image", "image_generate", "get_nano_banana", "face_swap", "replace_model", "replace_product", "replace_productANDmodel", "video_i2v"}:
+    if typ not in {"text_to_image", "image_generate", "single_image_edit", "get_nano_banana", "face_swap", "replace_model", "replace_product", "replace_productANDmodel", "video_i2v"}:
         return enhanced
 
     user_request = _clean_tg_prompt_request(
@@ -7995,6 +8174,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     task_labels = {
         "text_to_image": "text-to-image",
         "image_generate": "image generation",
+        "single_image_edit": "single image editing",
         "get_nano_banana": "image editing",
         "face_swap": "face swap",
         "replace_model": "video model replacement",
@@ -8003,7 +8183,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         "video_i2v": "image-to-video",
     }
     system_prompt, prompt_chain = _build_tg_prompt_system_prompt(typ, task_labels.get(typ, typ))
-    edit_image_task = typ in {"get_nano_banana", "face_swap"}
+    edit_image_task = typ in {"single_image_edit", "get_nano_banana", "face_swap"}
     persona_face_brief = _tg_image_persona_face_brief(enhanced) if prompt_chain == "image" and not edit_image_task else ""
     aspect_pose_guidance = _tg_image_aspect_ratio_pose_guidance(enhanced) if prompt_chain == "image" and not edit_image_task else ""
     if aspect_pose_guidance:
@@ -8036,6 +8216,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     for image_key in (
         "image_local_path",
         "input_image_local_path",
+        "reference_image_local_path",
         "product_image_local_path",
         "model_image_local_path",
         "generated_scene_image_local_path",
@@ -8043,18 +8224,27 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         image_path = str(enhanced.get(image_key) or "").strip()
         if image_path and Path(image_path).exists() and image_path not in image_hint_paths:
             image_hint_paths.append(image_path)
-    llm_result, selected, attempts = _request_llm_text_with_fallback(
-        source=enhanced,
-        user_input=llm_user_input,
-        system_prompt=system_prompt,
-        parameters="",
-        image_paths=image_hint_paths or None,
-        allow_builtin=False,
-        retry_count=1,
-        single_model=True,
-        request_label=f"Telegram Grok {prompt_chain} 提示词改写",
-    )
-    rewritten = _strip_prompt_response_wrappers(llm_result.get("raw_text") if isinstance(llm_result, dict) else "")
+    attempts: list[dict[str, Any]] = []
+    selected: dict[str, Any] = {}
+    try:
+        llm_result, selected, attempts = _request_llm_text_with_fallback(
+            source=enhanced,
+            user_input=llm_user_input,
+            system_prompt=system_prompt,
+            parameters="",
+            image_paths=image_hint_paths or None,
+            allow_builtin=False,
+            retry_count=1,
+            single_model=True,
+            request_label=f"Telegram Grok {prompt_chain} 提示词改写",
+        )
+        rewritten = _strip_prompt_response_wrappers(llm_result.get("raw_text") if isinstance(llm_result, dict) else "")
+    except Exception as exc:
+        if not edit_image_task:
+            raise
+        rewritten = _build_tg_image_edit_fallback_prompt(original_request or user_request, typ)
+        attempts = [{"attempt": 1, "provider": "fallback", "model": "", "ok": False, "error": str(exc)}]
+        selected = {}
     if not rewritten:
         raise RuntimeError("Grok 提示词改写未返回可用文本")
     forbidden_hits = _find_tg_image_forbidden_person_fields(rewritten) if prompt_chain == "image" and not edit_image_task else []
@@ -8126,6 +8316,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     if prompt_chain == "image" and edit_image_task:
         rewritten = _force_tg_image_chinese_prompt(rewritten)
         rewritten = _normalize_tg_chinese_image_prompt_format(rewritten)
+        rewritten = re.sub(r"([和与及跟同])，", r"\1", rewritten)
+        rewritten = re.sub(r"^把，", "", rewritten).strip()
         if not rewritten or not _looks_like_chinese_image_prompt(rewritten):
             rewritten = _build_tg_image_edit_fallback_prompt(original_request or user_request, typ)
         final_prompt = rewritten
@@ -8262,6 +8454,10 @@ def _run_get_nano_banana(task_id: str, payload: dict[str, Any]) -> dict[str, Any
     return _run_remote_comfy_mapped_task(task_id, payload, "get_nano_banana")
 
 
+def _run_single_image_edit(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_remote_comfy_mapped_task(task_id, payload, "single_image_edit")
+
+
 def _run_face_swap(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return _run_remote_comfy_mapped_task(task_id, payload, "face_swap")
 
@@ -8271,6 +8467,7 @@ TASK_RUNNERS = {
     "replace_model": _run_replace_model,
     "replace_product": _run_replace_product,
     "create_audio": _run_create_audio,
+    "single_image_edit": _run_single_image_edit,
     "get_nano_banana": _run_get_nano_banana,
     "face_swap": _run_face_swap,
     "video_i2v": _run_video_i2v,
@@ -8795,9 +8992,18 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         payload["speech_text"] = speech_text
         return payload
 
+    if typ == "single_image_edit":
+        input_image = payload.get("input_image_local_path") or payload.get("image_local_path")
+        payload["input_image_local_path"] = _validated_local_file(input_image, label="原图")
+        payload["reference_image_local_path"] = payload["input_image_local_path"]
+        payload = _enhance_tg_payload_with_llm_prompt(typ, payload)
+        return payload
+
     if typ == "get_nano_banana":
         input_image = payload.get("input_image_local_path") or payload.get("image_local_path")
-        payload["input_image_local_path"] = _validated_local_file(input_image, label="参考图")
+        reference_image = payload.get("reference_image_local_path") or payload.get("second_image_local_path") or payload.get("image2_local_path") or payload.get("model_image_local_path")
+        payload["input_image_local_path"] = _validated_local_file(input_image, label="原图")
+        payload["reference_image_local_path"] = _validated_local_file(reference_image, label="参考图")
         payload = _enhance_tg_payload_with_llm_prompt(typ, payload)
         return payload
 
@@ -8832,6 +9038,7 @@ _TG_ENGLISH_PROMPT_TASK_TYPES: set[str] = set()
 _TG_CHINESE_IMAGE_PROMPT_TASK_TYPES = {
     "text_to_image",
     "image_generate",
+    "single_image_edit",
     "get_nano_banana",
     "face_swap",
     "replace_model",
@@ -10234,6 +10441,7 @@ def create_app() -> FastAPI:
         gemini_output_tokens: int = Form(0),
         nano_images: int = Form(1),
         input_image_file: UploadFile | None = File(None),
+        reference_image_file: UploadFile | None = File(None),
         user: dict[str, Any] = Depends(get_current_user),
     ):
         _require_positive_balance(user)
@@ -10250,6 +10458,7 @@ def create_app() -> FastAPI:
             "nano_images": nano_images,
         }
         payload["input_image_local_path"] = await _save_upload_file(str(user.get("username") or ""), task_id, "input_image", input_image_file)
+        payload["reference_image_local_path"] = await _save_upload_file(str(user.get("username") or ""), task_id, "reference_image", reference_image_file)
         _enqueue_task(task_id, int(user["id"]), "get_nano_banana", payload)
         return {"id": task_id}
 
@@ -10460,10 +10669,15 @@ def create_app() -> FastAPI:
                         raise HTTPException(status_code=400, detail=f"图片生成需要至少上传 1 张商品图（已识别：{_format_uploaded_files(saved)}）")
                     payload["mode"] = "product_only"
                     payload["product_image_local_path"] = str(images[0]["path"])
-            elif typ == "get_nano_banana":
+            elif typ == "single_image_edit":
                 if not images:
-                    raise HTTPException(status_code=400, detail=f"get_nano_banana 需要上传 1 张图片（已识别：{_format_uploaded_files(saved)}）")
+                    raise HTTPException(status_code=400, detail=f"单图编辑需要上传 1 张图片（已识别：{_format_uploaded_files(saved)}）")
                 payload["input_image_local_path"] = str(images[0]["path"])
+            elif typ == "get_nano_banana":
+                if len(images) < 2:
+                    raise HTTPException(status_code=400, detail=f"图片编辑需要上传 2 张图片（先原图，后参考图）（已识别：{_format_uploaded_files(saved)}）")
+                payload["input_image_local_path"] = str(images[0]["path"])
+                payload["reference_image_local_path"] = str(images[1]["path"])
             elif typ == "face_swap":
                 if len(images) < 2:
                     raise HTTPException(status_code=400, detail=f"人物换脸需要上传 2 张图片（先原图，后人脸参考图）（已识别：{_format_uploaded_files(saved)}）")

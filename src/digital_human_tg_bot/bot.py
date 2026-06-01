@@ -62,6 +62,7 @@ TEXT_TO_IMAGE_BUTTON = "文生图"
 TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON = "重新生成图片"
 TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON = "继续生成图片"
 MULTI_IMAGE_BUTTON = "多图生成"
+SINGLE_IMAGE_EDIT_BUTTON = "单图编辑"
 IMAGE_EDIT_BUTTON = "图片编辑"
 FACE_SWAP_BUTTON = "人物换脸"
 IMAGE_REPLACE_BUTTON = "图片替换"
@@ -100,6 +101,7 @@ TRADITIONAL_BUTTON_ALIASES = {
     "圖像編輯": IMAGE_WORKFLOW_BUTTON,
     "文生圖片": TEXT_TO_IMAGE_BUTTON,
     "多圖生成": MULTI_IMAGE_BUTTON,
+    "單圖編輯": SINGLE_IMAGE_EDIT_BUTTON,
     "圖片編輯": IMAGE_EDIT_BUTTON,
     "圖像編輯": IMAGE_EDIT_BUTTON,
     "人物換臉": FACE_SWAP_BUTTON,
@@ -174,10 +176,13 @@ class ProductionWorkflowForm(StatesGroup):
     image_waiting_for_model_image = State()
     image_waiting_for_prompt = State()
     image_edit_waiting_for_image = State()
+    image_edit_waiting_for_reference_image = State()
     image_edit_waiting_for_prompt = State()
+    image_edit_waiting_for_confirm = State()
     face_swap_waiting_for_target_image = State()
     face_swap_waiting_for_source_image = State()
     face_swap_waiting_for_prompt = State()
+    face_swap_waiting_for_confirm = State()
     video_i2v_waiting_for_resolution = State()
     video_i2v_waiting_for_duration = State()
     video_i2v_waiting_for_audio = State()
@@ -236,12 +241,31 @@ def _menu_keyboard() -> ReplyKeyboardMarkup:
 def _image_edit_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=TEXT_TO_IMAGE_BUTTON), KeyboardButton(text=IMAGE_EDIT_BUTTON)],
-            [KeyboardButton(text=FACE_SWAP_BUTTON)],
+            [KeyboardButton(text=TEXT_TO_IMAGE_BUTTON), KeyboardButton(text=SINGLE_IMAGE_EDIT_BUTTON)],
+            [KeyboardButton(text=IMAGE_EDIT_BUTTON), KeyboardButton(text=FACE_SWAP_BUTTON)],
             [KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
     )
+
+
+def _image_task_confirm_keyboard(submit_text: str) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=submit_text)],
+            [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _image_task_step_keyboard(*, back: bool = True) -> ReplyKeyboardMarkup:
+    rows: list[list[KeyboardButton]] = []
+    if back:
+        rows.append([KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)])
+    else:
+        rows.append([KeyboardButton(text=MAIN_MENU_BUTTON)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 TEXT_TO_IMAGE_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
@@ -1159,6 +1183,8 @@ def _runtime_mapped_workflow(runtime: dict[str, Any], task_type: str) -> str:
     if not isinstance(mappings, dict):
         return ""
     value = mappings.get(task_type)
+    if value is None and str(task_type or "").strip() == "single_image_edit":
+        value = mappings.get("get_nano_banana")
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
@@ -1222,6 +1248,7 @@ def _workflow_config_text(service: WorkspaceService, selected_button: str = "") 
         selected_map = {
             IMAGE_WORKFLOW_BUTTON: _format_chain("图像生成", image_chain),
             REPLACE_MODEL_WORKFLOW_BUTTON: _format_chain("视频模特替换", replace_model_original_chain),
+            SINGLE_IMAGE_EDIT_BUTTON: _format_mapping("单图编辑", image_edit_workflow),
             IMAGE_EDIT_BUTTON: _format_mapping("图片编辑", image_edit_workflow),
             FACE_SWAP_BUTTON: _format_mapping("人物换脸", face_swap_workflow),
         }
@@ -1241,6 +1268,7 @@ def _workflow_config_text(service: WorkspaceService, selected_button: str = "") 
             "后台工作流配置：",
             _format_chain("口播数字人工作流", oral_chain),
             _format_chain("图像生成", image_chain),
+            _format_mapping("单图编辑", image_edit_workflow),
             _format_mapping("图片编辑", image_edit_workflow),
             _format_mapping("人物换脸", face_swap_workflow),
             _format_chain("视频模特替换", replace_model_original_chain),
@@ -1695,6 +1723,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "多智能体数字人",
             IMAGE_WORKFLOW_BUTTON,
             TEXT_TO_IMAGE_BUTTON,
+            SINGLE_IMAGE_EDIT_BUTTON,
             IMAGE_EDIT_BUTTON,
             FACE_SWAP_BUTTON,
             MULTI_IMAGE_BUTTON,
@@ -1713,8 +1742,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await start_image_generate_flow(message, state)
         elif text == TEXT_TO_IMAGE_BUTTON:
             await start_text_to_image_flow(message, state)
+        elif text == SINGLE_IMAGE_EDIT_BUTTON:
+            await start_single_image_edit_flow(message, state, single_input=True)
         elif text == IMAGE_EDIT_BUTTON:
-            await start_single_image_edit_flow(message, state)
+            await start_single_image_edit_flow(message, state, single_input=False)
         elif text == FACE_SWAP_BUTTON:
             await start_face_swap_flow(message, state)
         elif text == MULTI_IMAGE_BUTTON:
@@ -1782,6 +1813,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "text_to_image": "文生图",
             "image_generate": "图像生成",
             "get_nano_banana": "图片编辑",
+            "single_image_edit": "单图编辑",
             "face_swap": "人物换脸",
             "video_i2v": "图生视频",
         }.get(str(task_type), str(task_type))
@@ -1828,6 +1860,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     def _image_mode_title(mode: str) -> str:
         return "图片替换" if mode == "image_replace" else "多图生成"
 
+    def _tg_workflow_display_name(workflow_path: str) -> str:
+        text = str(workflow_path or "").strip().replace("\\", "/")
+        if not text:
+            return ""
+        text = text.removeprefix("__converted__/")
+        name = Path(text).stem or text
+        if name.endswith(".api"):
+            name = name[:-4]
+        parent = str(Path(text).parent).replace("\\", "/")
+        if parent and parent not in {".", "__converted__"}:
+            return f"{parent}/{name}"
+        return name
+
+    def _tg_mapped_workflow_line(task_type: str) -> str:
+        runtime = _load_runtime_config(service.resolve_config())
+        workflow_path = _runtime_mapped_workflow(runtime, task_type)
+        if not workflow_path:
+            return "可用工作流：未配置，请先在后台映射工作流。"
+        return f"可用工作流：{_tg_workflow_display_name(workflow_path)}"
+
     async def start_image_reference_flow(message: Message, state: FSMContext, *, mode: str) -> None:
         mode = "image_replace" if mode == "image_replace" else "multi_image"
         title = _image_mode_title(mode)
@@ -1840,13 +1892,23 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             reply_markup=_image_edit_keyboard(),
         )
 
-    async def start_single_image_edit_flow(message: Message, state: FSMContext) -> None:
+    async def start_single_image_edit_flow(message: Message, state: FSMContext, *, single_input: bool = False) -> None:
         await state.clear()
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
-        await state.update_data(work_dir=str(service.create_job_dir(prefix="tg_image_edit")))
+        mode = "single" if single_input else "two"
+        title = "单图编辑" if single_input else "图片编辑"
+        total_steps = "3" if single_input else "4"
+        workflow_type = "single_image_edit" if single_input else "get_nano_banana"
+        await state.update_data(work_dir=str(service.create_job_dir(prefix="tg_image_edit")), image_edit_mode=mode)
         await message.answer(
-            "图片编辑\n步骤 1/2：请上传需要编辑的图片。",
-            reply_markup=_image_edit_keyboard(),
+            "\n".join(
+                [
+                    title,
+                    _tg_mapped_workflow_line(workflow_type),
+                    f"步骤 1/{total_steps}：请上传需要编辑的原图。",
+                ]
+            ),
+            reply_markup=_image_task_step_keyboard(back=False),
         )
 
     async def start_face_swap_flow(message: Message, state: FSMContext) -> None:
@@ -1854,8 +1916,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_target_image)
         await state.update_data(work_dir=str(service.create_job_dir(prefix="tg_face_swap")))
         await message.answer(
-            "人物换脸\n步骤 1/3：请上传原图，也就是需要被换脸的图片。",
-            reply_markup=_image_edit_keyboard(),
+            "\n".join(
+                [
+                    "人物换脸",
+                    _tg_mapped_workflow_line("face_swap"),
+                    "步骤 1/4：请上传原图，也就是需要被换脸的图片。",
+                ]
+            ),
+            reply_markup=_image_task_step_keyboard(back=False),
         )
 
     def _video_i2v_defaults() -> dict[str, Any]:
@@ -2602,6 +2670,113 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         )
         await message.answer("继续生成图片：保留上次参数，重新进入提示词步骤。", reply_markup=_menu_keyboard())
         await _show_text_to_image_prompt_mode(message, state)
+
+    def _face_swap_resubmit_payload(input_payload: dict[str, Any], *, seedvr_upscale: bool = False) -> dict[str, Any]:
+        target_image = str(input_payload.get("target_image_local_path") or input_payload.get("image_local_path") or "").strip()
+        source_image = str(
+            input_payload.get("source_image_local_path")
+            or input_payload.get("reference_image_local_path")
+            or input_payload.get("face_image_local_path")
+            or ""
+        ).strip()
+        prompt = str(
+            input_payload.get("prompt_text")
+            or input_payload.get("prompt")
+            or input_payload.get("message")
+            or "自然换脸，保持目标图姿态、服装、光线和背景，只替换脸部身份"
+        ).strip()
+        if not target_image or not source_image:
+            raise RuntimeError("上次人物换脸任务缺少原图或人脸参考图，无法重新提交。")
+        payload = {
+            "target_image_local_path": target_image,
+            "source_image_local_path": source_image,
+            "prompt": prompt,
+            "prompt_text": prompt,
+            "message": prompt,
+            "tg_use_llm_prompt": False,
+            "tg_llm_prompt_enhanced": True,
+            "tg_original_prompt": str(input_payload.get("tg_original_prompt") or input_payload.get("tg_user_instruction") or prompt).strip(),
+            "tg_llm_rewritten_prompt": prompt,
+        }
+        if seedvr_upscale:
+            seed_value = 0
+            try:
+                seed_value = int(input_payload.get("face_swap_random_seed") or input_payload.get("seed") or 0)
+            except Exception:
+                seed_value = 0
+            if seed_value > 0:
+                payload["seed"] = seed_value
+                payload["face_swap_random_seed"] = seed_value
+            payload["face_swap_seedvr_upscale"] = True
+            payload["remote_comfy_timeout_seconds"] = max(int(input_payload.get("remote_comfy_timeout_seconds") or 900), 900)
+        else:
+            seed_value = secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
+            payload["seed"] = seed_value
+            payload["face_swap_random_seed"] = seed_value
+        return payload
+
+    async def _resubmit_face_swap_from_task(
+        message: Message,
+        state: FSMContext,
+        *,
+        task_id: str,
+        seedvr_upscale: bool = False,
+    ) -> None:
+        task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(message.chat.id), task_id=str(task_id))
+        if str(task.get("type") or "").strip() != "face_swap":
+            raise RuntimeError("这条记录不是人物换脸任务，无法继续操作。")
+        input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
+        payload = _face_swap_resubmit_payload(input_payload, seedvr_upscale=seedvr_upscale)
+        if seedvr_upscale:
+            payload["tg_seedvr_from_task_id"] = str(task_id)
+        else:
+            payload["tg_rerun_from_task_id"] = str(task_id)
+        await state.clear()
+        await submit_webapp_task_and_reply(message, "face_swap", payload)
+
+    @router.callback_query(F.data.startswith("face_swap:"))
+    async def on_face_swap_callback(callback: CallbackQuery, state: FSMContext) -> None:
+        if callback.message is None:
+            await callback.answer()
+            return
+        if not _is_message_authorized(service, callback.message):
+            await callback.answer("当前账号未授权", show_alert=True)
+            return
+        action = str(callback.data or "")
+        if action == "face_swap:main_menu":
+            await state.clear()
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await callback.message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+            await callback.answer()
+            return
+        if action.startswith("face_swap:seedvr:") or action.startswith("face_swap:rerun:"):
+            parts = action.split(":", 2)
+            task_id = parts[2].strip() if len(parts) >= 3 else ""
+            seedvr_upscale = parts[1] == "seedvr"
+            if not task_id:
+                await callback.answer("缺少任务编号", show_alert=True)
+                return
+            try:
+                await _resubmit_face_swap_from_task(
+                    callback.message,
+                    state,
+                    task_id=task_id,
+                    seedvr_upscale=seedvr_upscale,
+                )
+            except Exception as exc:
+                label = "SeedVR 放大" if seedvr_upscale else "重新生成"
+                await callback.answer(f"{label}提交失败：{_format_tg_user_error(exc)}", show_alert=True)
+                return
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await callback.answer("已提交 SeedVR 放大任务" if seedvr_upscale else "已提交重新生成任务")
+            return
+        await callback.answer("未知操作", show_alert=True)
 
     @router.callback_query(F.data.startswith("t2i:"))
     async def on_text_to_image_callback(callback: CallbackQuery, state: FSMContext) -> None:
@@ -3809,17 +3984,54 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
-        suffix = _image_ext_from_message(message)
-        if suffix is None:
-            await message.answer("图片编辑\n步骤 1/2：请上传需要编辑的图片。", reply_markup=_image_edit_keyboard())
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            await start_image_generate_flow(message, state)
             return
+        suffix = _image_ext_from_message(message)
         data = await state.get_data()
+        single_input = str(data.get("image_edit_mode") or "").strip() == "single"
+        title = "单图编辑" if single_input else "图片编辑"
+        total_steps = "3" if single_input else "4"
+        if suffix is None:
+            await message.answer(f"{title}\n步骤 1/{total_steps}：请上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
+            return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_image_edit")))
         target = work_dir / f"input{suffix}"
         await _download_message_media(message, target)
         await state.update_data(work_dir=str(work_dir), input_image_local_path=str(target.resolve()))
+        if single_input:
+            await state.update_data(reference_image_local_path=str(target.resolve()))
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
+            await message.answer("单图编辑\n步骤 2/3：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            return
+        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
+        await message.answer("图片编辑\n步骤 2/4：请上传参考图或素材图。", reply_markup=_image_task_step_keyboard())
+
+    @router.message(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
+    async def on_image_edit_reference_image(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
+            await message.answer("图片编辑\n步骤 1/4：请重新上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
+            return
+        suffix = _image_ext_from_message(message)
+        if suffix is None:
+            await message.answer("图片编辑\n步骤 2/4：请上传参考图或素材图。", reply_markup=_image_task_step_keyboard())
+            return
+        data = await state.get_data()
+        work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_image_edit")))
+        target = work_dir / f"reference{suffix}"
+        await _download_message_media(message, target)
+        await state.update_data(work_dir=str(work_dir), reference_image_local_path=str(target.resolve()))
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-        await message.answer("图片编辑\n步骤 2/2：请输入这次图片编辑要求。", reply_markup=_image_edit_keyboard())
+        await message.answer("图片编辑\n步骤 3/4：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
 
     @router.message(ProductionWorkflowForm.image_edit_waiting_for_prompt)
     async def on_image_edit_prompt(message: Message, state: FSMContext) -> None:
@@ -3829,13 +4041,69 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
+        data = await state.get_data()
+        single_input = str(data.get("image_edit_mode") or "").strip() == "single"
+        title = "单图编辑" if single_input else "图片编辑"
+        total_steps = "3" if single_input else "4"
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            if single_input:
+                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
+                await message.answer("单图编辑\n步骤 1/3：请重新上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
+            else:
+                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
+                await message.answer("图片编辑\n步骤 2/4：请重新上传参考图或素材图。", reply_markup=_image_task_step_keyboard())
+            return
         prompt = _message_text(message)
         if not prompt:
-            await message.answer("图片编辑\n步骤 2/2：请直接输入这次图片编辑要求。", reply_markup=_image_edit_keyboard())
+            await message.answer(f"{title}\n步骤 {int(total_steps) - 1}/{total_steps}：请直接输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            return
+        await state.update_data(image_edit_prompt=prompt)
+        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
+        submit_text = "提交单图编辑任务" if single_input else "提交图片编辑任务"
+        workflow_type = "single_image_edit" if single_input else "get_nano_banana"
+        await message.answer(
+            "\n".join(
+                [
+                    title,
+                    f"步骤 {total_steps}/{total_steps}：请确认任务信息，点击提交后才会进入后台队列。",
+                    _tg_mapped_workflow_line(workflow_type),
+                    f"编辑要求：{prompt}",
+                ]
+            ),
+            reply_markup=_image_task_confirm_keyboard(submit_text),
+        )
+
+    @router.message(ProductionWorkflowForm.image_edit_waiting_for_confirm)
+    async def on_image_edit_confirm(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
             return
         data = await state.get_data()
+        single_input = str(data.get("image_edit_mode") or "").strip() == "single"
+        title = "单图编辑" if single_input else "图片编辑"
+        total_steps = "3" if single_input else "4"
+        submit_text = "提交单图编辑任务" if single_input else "提交图片编辑任务"
+        task_type = "single_image_edit" if single_input else "get_nano_banana"
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
+            await message.answer(f"{title}\n步骤 {int(total_steps) - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            return
+        if text != submit_text:
+            await message.answer(f"{title}\n步骤 {total_steps}/{total_steps}：请点击「{submit_text}」后再提交。", reply_markup=_image_task_confirm_keyboard(submit_text))
+            return
+        prompt = str(data.get("image_edit_prompt") or "").strip()
+        if not prompt:
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
+            await message.answer(f"{title}\n步骤 {int(total_steps) - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            return
         params = {
             "input_image_local_path": str(data.get("input_image_local_path") or ""),
+            "reference_image_local_path": str(data.get("reference_image_local_path") or ""),
             "prompt": prompt,
             "prompt_text": prompt,
             "message": prompt,
@@ -3844,9 +4112,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         }
         await state.clear()
         try:
-            await submit_webapp_task_and_reply(message, "get_nano_banana", params)
+            await submit_webapp_task_and_reply(message, task_type, params)
         except Exception as exc:
-            await message.answer(f"图片编辑任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await message.answer(f"{title}任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_target_image)
     async def on_face_swap_target_image(message: Message, state: FSMContext) -> None:
@@ -3856,9 +4124,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            await start_image_generate_flow(message, state)
+            return
         suffix = _image_ext_from_message(message)
         if suffix is None:
-            await message.answer("人物换脸\n步骤 1/3：请上传原图。", reply_markup=_image_edit_keyboard())
+            await message.answer("人物换脸\n步骤 1/4：请上传原图。", reply_markup=_image_task_step_keyboard(back=False))
             return
         data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_face_swap")))
@@ -3866,7 +4138,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await _download_message_media(message, target)
         await state.update_data(work_dir=str(work_dir), target_image_local_path=str(target.resolve()))
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
-        await message.answer("人物换脸\n步骤 2/3：请上传人脸参考图。", reply_markup=_image_edit_keyboard())
+        await message.answer("人物换脸\n步骤 2/4：请上传人脸参考图。", reply_markup=_image_task_step_keyboard())
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_source_image)
     async def on_face_swap_source_image(message: Message, state: FSMContext) -> None:
@@ -3876,9 +4148,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_target_image)
+            await message.answer("人物换脸\n步骤 1/4：请重新上传原图。", reply_markup=_image_task_step_keyboard(back=False))
+            return
         suffix = _image_ext_from_message(message)
         if suffix is None:
-            await message.answer("人物换脸\n步骤 2/3：请上传人脸参考图。", reply_markup=_image_edit_keyboard())
+            await message.answer("人物换脸\n步骤 2/4：请上传人脸参考图。", reply_markup=_image_task_step_keyboard())
             return
         data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_face_swap")))
@@ -3886,7 +4163,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await _download_message_media(message, target)
         await state.update_data(work_dir=str(work_dir), source_image_local_path=str(target.resolve()))
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
-        await message.answer("人物换脸\n步骤 3/3：请输入换脸要求；如果没有额外要求，可输入“自然换脸”。", reply_markup=_image_edit_keyboard())
+        await message.answer("人物换脸\n步骤 3/4：请输入换脸要求；如果没有额外要求，可输入“自然换脸”。", reply_markup=_image_task_step_keyboard())
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_prompt)
     async def on_face_swap_prompt(message: Message, state: FSMContext) -> None:
@@ -3896,14 +4173,53 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
+            await message.answer("人物换脸\n步骤 2/4：请重新上传人脸参考图。", reply_markup=_image_task_step_keyboard())
+            return
         prompt = _message_text(message) or "自然换脸，保持原图姿态、服装、光线和背景，只替换人物脸部身份。"
+        await state.update_data(face_swap_prompt=prompt)
+        await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
+        await message.answer(
+            "\n".join(
+                [
+                    "人物换脸",
+                    "步骤 4/4：请确认任务信息，点击提交后才会进入后台队列。",
+                    _tg_mapped_workflow_line("face_swap"),
+                    f"换脸要求：{prompt}",
+                ]
+            ),
+            reply_markup=_image_task_confirm_keyboard("提交人物换脸任务"),
+        )
+
+    @router.message(ProductionWorkflowForm.face_swap_waiting_for_confirm)
+    async def on_face_swap_confirm(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
+            await message.answer("人物换脸\n步骤 3/4：请重新输入换脸要求；如果没有额外要求，可输入“自然换脸”。", reply_markup=_image_task_step_keyboard())
+            return
+        if text != "提交人物换脸任务":
+            await message.answer("人物换脸\n步骤 4/4：请点击「提交人物换脸任务」后再提交。", reply_markup=_image_task_confirm_keyboard("提交人物换脸任务"))
+            return
         data = await state.get_data()
+        prompt = str(data.get("face_swap_prompt") or "").strip() or "自然换脸，保持原图姿态、服装、光线和背景，只替换人物脸部身份。"
+        seed_value = secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
         params = {
             "target_image_local_path": str(data.get("target_image_local_path") or ""),
             "source_image_local_path": str(data.get("source_image_local_path") or ""),
             "prompt": prompt,
             "prompt_text": prompt,
             "message": prompt,
+            "seed": seed_value,
+            "face_swap_random_seed": seed_value,
             "tg_use_llm_prompt": True,
             "tg_user_instruction": f"User face swap request: {prompt}",
         }
@@ -4306,13 +4622,20 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await start_image_reference_flow(message, state, mode="multi_image")
 
+    @router.message(F.text == SINGLE_IMAGE_EDIT_BUTTON)
+    @router.message(F.text == "单图编辑")
+    async def on_single_image_edit_button(message: Message, state: FSMContext) -> None:
+        if not await ensure_authorized(message):
+            return
+        await start_single_image_edit_flow(message, state, single_input=True)
+
     @router.message(F.text == IMAGE_EDIT_BUTTON)
     @router.message(F.text == "图片编辑")
     @router.message(F.text == "圖片編輯")
     async def on_image_edit_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
-        await start_single_image_edit_flow(message, state)
+        await start_single_image_edit_flow(message, state, single_input=False)
 
     @router.message(F.text == FACE_SWAP_BUTTON)
     @router.message(F.text == "人物換臉")
