@@ -489,13 +489,11 @@ const REMOTE_COMFY_TASKS = [
   ["text_to_image", "文字生成图片"],
   ["image_generate", "图片生成"],
   ["replace_model", "替换模特"],
-  ["replace_product", "替换商品"],
-  ["replace_productANDmodel", "联合替换"],
   ["create_audio", "生成音频"],
   ["create_video", "生成视频"],
   ["video_i2v", "图生视频"],
-  ["commerce_video", "带货视频"],
-  ["get_nano_banana", "Comfy 图片编辑"],
+  ["get_nano_banana", "图片编辑"],
+  ["face_swap", "人物换脸"],
 ];
 const ADMIN_PAGES = new Set(["overview", "users", "tasks", "pricing", "runtime", "account"]);
 const ADMIN_PAGE_ALIASES = {
@@ -1242,6 +1240,14 @@ function renderComfyWorkflowMappings(source = "remote") {
   const runnable = workflows.filter((item) => item && item.can_run);
   const convertible = workflows.filter((item) => item && item.kind === "ui_workflow");
   const apiWorkflows = workflows.filter((item) => item && item.root === "api");
+  const mappings = adminState[cfg.mappingsKey] || {};
+  const runnablePaths = new Set(runnable.map((item) => String(item.path || "")).filter(Boolean));
+  const savedMappingOptions = Object.values(mappings)
+    .map((value) => {
+      if (value && typeof value === "object") return String(value.path || value.workflow || value.value || "").trim();
+      return String(value || "").trim();
+    })
+    .filter((value) => value && !runnablePaths.has(value));
   const options = [
     `<option value="">${escapeHtml("\u672a\u6620\u5c04")}</option>`,
     ...runnable.map((item) => {
@@ -1249,8 +1255,8 @@ function renderComfyWorkflowMappings(source = "remote") {
       const label = remoteComfyDisplayName(path);
       return `<option value="${escapeHtml(path)}">${escapeHtml(label)}</option>`;
     }),
+    ...savedMappingOptions.map((path) => `<option value="${escapeHtml(path)}">${escapeHtml(`${remoteComfyDisplayName(path)}（已保存，未刷新到列表）`)}</option>`),
   ].join("");
-  const mappings = adminState[cfg.mappingsKey] || {};
   host.innerHTML = REMOTE_COMFY_TASKS.map(([key, label]) => {
     const value = String(mappings[key] || "");
     return `

@@ -710,6 +710,8 @@ def _apply_prompt_overrides(prompt: dict[str, Any], body: dict[str, Any]) -> dic
     steps = _int_or_none(body.get("steps"))
     seed = _int_or_none(body.get("seed"))
     batch_size = _int_or_none(body.get("batch_size"))
+    input_images = _normalize_input_images(body.get("input_images"))
+    input_image_bindings = _normalize_input_image_bindings(body.get("input_image_bindings"))
 
     for node_id, node in prompt.items():
         if not isinstance(node, dict):
@@ -743,6 +745,9 @@ def _apply_prompt_overrides(prompt: dict[str, Any], body: dict[str, Any]) -> dic
         if batch_size is not None and isinstance(inputs.get("batch_size"), int):
             inputs["batch_size"] = batch_size
 
+    if input_images:
+        _apply_input_images_to_prompt(prompt, input_images, input_image_bindings)
+
     explicit = body.get("node_inputs")
     if isinstance(explicit, dict):
         for node_id, values in explicit.items():
@@ -753,6 +758,186 @@ def _apply_prompt_overrides(prompt: dict[str, Any], body: dict[str, Any]) -> dic
             if isinstance(inputs, dict):
                 inputs.update(values)
     return prompt
+
+
+def _normalize_input_images(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    for item in value:
+        if isinstance(item, dict):
+            text = str(item.get("image") or item.get("name") or item.get("filename") or "").strip()
+            role = str(item.get("role") or item.get("kind") or "input").strip().lower() or "input"
+            node_id = str(item.get("node_id") or item.get("node") or "").strip()
+            input_name = str(item.get("input_name") or item.get("input") or "image").strip() or "image"
+        else:
+            text = str(item or "").strip()
+            role = "input"
+            node_id = ""
+            input_name = "image"
+        if text:
+            normalized = {"image": text, "role": role, "input_name": input_name}
+            if node_id:
+                normalized["node_id"] = node_id
+            result.append(normalized)
+    return result
+
+
+def _normalize_input_image_bindings(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, (dict, list)):
+        return {}
+    rows: list[dict[str, Any]]
+    if isinstance(value, dict):
+        rows = []
+        for role, binding in value.items():
+            if isinstance(binding, dict):
+                rows.append({"role": role, **binding})
+            else:
+                rows.append({"role": role, "node_id": binding})
+    else:
+        rows = [item for item in value if isinstance(item, dict)]
+    result: dict[str, dict[str, str]] = {}
+    for row in rows:
+        role = str(row.get("role") or row.get("kind") or "").strip().lower()
+        node_id = str(row.get("node_id") or row.get("node") or "").strip()
+        if not role or not node_id:
+            continue
+        result[role] = {
+            "node_id": node_id,
+            "input_name": str(row.get("input_name") or row.get("input") or "image").strip() or "image",
+        }
+    return result
+
+
+def _load_image_nodes(prompt: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if str(node.get("class_type") or "") != "LoadImage" or not isinstance(inputs, dict) or "image" not in inputs:
+            continue
+        try:
+            order_key = int(str(node_id))
+        except Exception:
+            order_key = 10**9
+        title = str((node.get("_meta") or {}).get("title") or "")
+        current_image = str(inputs.get("image") or "")
+        nodes.append(
+            {
+                "order": order_key,
+                "node_id": str(node_id),
+                "inputs": inputs,
+                "search_text": f"{title} {current_image}".lower(),
+            }
+        )
+    nodes.sort(key=lambda item: (item["order"], item["node_id"]))
+    return nodes
+
+
+def _role_keywords(role: str) -> list[str]:
+    role = str(role or "").strip().lower()
+    if role in {"source_face", "face", "source", "reference_face", "identity"}:
+        return [
+            "source face",
+            "source_face",
+            "face source",
+            "face",
+            "reference",
+            "ref",
+            "identity",
+            "src",
+            "人脸",
+            "人臉",
+            "参考",
+            "參考",
+            "脸",
+            "臉",
+            "身份",
+        ]
+    if role in {"target", "original", "base", "destination"}:
+        return [
+            "target",
+            "original",
+            "base",
+            "destination",
+            "dst",
+            "main",
+            "background",
+            "body",
+            "原图",
+            "原圖",
+            "目标",
+            "目標",
+            "底图",
+            "底圖",
+            "主图",
+            "主圖",
+            "被换脸",
+            "被換臉",
+        ]
+    return ["input", "image", "edit", "reference", "原图", "原圖", "参考", "參考"]
+
+
+def _find_load_image_node_for_role(
+    nodes: list[dict[str, Any]],
+    role: str,
+    used_node_ids: set[str],
+) -> dict[str, Any] | None:
+    keywords = _role_keywords(role)
+    best: tuple[int, dict[str, Any]] | None = None
+    for node in nodes:
+        node_id = str(node.get("node_id") or "")
+        if node_id in used_node_ids:
+            continue
+        text = str(node.get("search_text") or "")
+        score = 0
+        for keyword in keywords:
+            if keyword and keyword.lower() in text:
+                score += 2 if len(keyword) > 2 else 1
+        if score <= 0:
+            continue
+        if best is None or score > best[0]:
+            best = (score, node)
+    return best[1] if best else None
+
+
+def _apply_input_images_to_prompt(
+    prompt: dict[str, Any],
+    input_images: list[dict[str, str]],
+    input_image_bindings: dict[str, dict[str, str]],
+) -> None:
+    nodes = _load_image_nodes(prompt)
+    used_node_ids: set[str] = set()
+    remaining_images: list[dict[str, str]] = []
+    by_node_id = {str(node.get("node_id")): node for node in nodes}
+
+    for item in input_images:
+        role = str(item.get("role") or "input").strip().lower() or "input"
+        image_value = str(item.get("image") or "").strip()
+        if not image_value:
+            continue
+        binding = input_image_bindings.get(role) or {}
+        explicit_node_id = str(item.get("node_id") or binding.get("node_id") or "").strip()
+        if explicit_node_id:
+            node = by_node_id.get(explicit_node_id)
+            if node:
+                input_name = str(item.get("input_name") or binding.get("input_name") or "image").strip() or "image"
+                node["inputs"][input_name] = image_value
+                used_node_ids.add(explicit_node_id)
+                continue
+        node = _find_load_image_node_for_role(nodes, role, used_node_ids)
+        if node:
+            node["inputs"]["image"] = image_value
+            used_node_ids.add(str(node.get("node_id") or ""))
+        else:
+            remaining_images.append(item)
+
+    remaining_nodes = [node for node in nodes if str(node.get("node_id") or "") not in used_node_ids]
+    for item, node in zip(remaining_images, remaining_nodes):
+        image_value = str(item.get("image") or "").strip()
+        if image_value:
+            node["inputs"]["image"] = image_value
 
 
 def _int_or_none(value: Any) -> int | None:
