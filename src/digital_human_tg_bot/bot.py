@@ -2208,6 +2208,22 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 return
             await _submit_video_i2v_payload(message, state, payload, params)
         except Exception as exc:
+            if params.get("use_grok"):
+                await state.update_data(
+                    **params,
+                    video_i2v_user_request=prompt,
+                    video_i2v_prompt_ready=False,
+                    video_i2v_generated_prompt="",
+                )
+                await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
+                await message.answer(
+                    "Grok 视频提示词生成失败："
+                    f"{_format_grok_preview_error(exc)}\n\n"
+                    "任务还没有提交，当前图生视频参数已保留。可以点击“重新生成提示词”再试一次，"
+                    "或点击“输入自定义提示词提交”跳过 Grok。",
+                    reply_markup=_video_i2v_prompt_review_keyboard(),
+                )
+                return
             await message.answer(f"\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u63d0\u4ea4\u5931\u8d25\uff1a{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.callback_query(F.data.startswith("video_i2v:"))
