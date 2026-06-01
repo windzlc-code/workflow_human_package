@@ -1289,6 +1289,7 @@ function remoteComfyDisplayName(path) {
   const name = filename
     .replace(/\.api\.json$/i, "")
     .replace(/\.json$/i, "");
+  if (name === "person_t2i") return "人设_t2i";
   const folder = parts.length ? parts[parts.length - 1] : "";
   return folder ? `${folder} / ${name}` : name;
 }

@@ -1877,21 +1877,31 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     source = str(merged.get("comfy_workflow_source") or "remote").strip().lower()
     merged["comfy_workflow_source"] = source if source in {"remote", "local"} else "remote"
     raw_remote_mappings = current.get("remote_comfy_workflow_mappings")
-    remote_mappings: dict[str, str] = {}
+    remote_mappings: dict[str, Any] = {}
     if isinstance(raw_remote_mappings, dict):
         for key, value in raw_remote_mappings.items():
             task_key = str(key or "").strip()
+            if not task_key:
+                continue
+            if isinstance(value, (dict, list)):
+                remote_mappings[task_key] = value
+                continue
             workflow_path = str(value or "").strip()
-            if task_key and workflow_path:
+            if workflow_path:
                 remote_mappings[task_key] = workflow_path
     merged["remote_comfy_workflow_mappings"] = remote_mappings
     raw_local_mappings = current.get("local_comfy_workflow_mappings")
-    local_mappings: dict[str, str] = {}
+    local_mappings: dict[str, Any] = {}
     if isinstance(raw_local_mappings, dict):
         for key, value in raw_local_mappings.items():
             task_key = str(key or "").strip()
+            if not task_key:
+                continue
+            if isinstance(value, (dict, list)):
+                local_mappings[task_key] = value
+                continue
             workflow_path = str(value or "").strip()
-            if task_key and workflow_path:
+            if workflow_path:
                 local_mappings[task_key] = workflow_path
     merged["local_comfy_workflow_mappings"] = local_mappings
     merged["image_generate_mode_default"] = str(merged.get("image_generate_mode_default") or "closed_model_api").strip() or "closed_model_api"
@@ -3200,7 +3210,15 @@ def _remote_comfy_gateway_json(
         response.raise_for_status()
         data = response.json()
     except requests.RequestException as exc:
-        raise RuntimeError(f"远程 ComfyUI 网关请求失败: {exc}") from exc
+        detail = ""
+        response = getattr(exc, "response", None)
+        if response is not None:
+            try:
+                detail = str(response.text or "").strip()
+            except Exception:
+                detail = ""
+        suffix = f": {detail[:800]}" if detail else ""
+        raise RuntimeError(f"远程 ComfyUI 网关请求失败: {exc}{suffix}") from exc
     except Exception as exc:
         raise RuntimeError("远程 ComfyUI 网关返回的不是有效 JSON") from exc
     return data if isinstance(data, dict) else {"raw": data}
@@ -3233,6 +3251,42 @@ def _remote_comfy_gateway_download_output(
     return target
 
 
+def _remote_comfy_gateway_upload_image(
+    *,
+    gateway_url: str,
+    token: str,
+    image_path: str | Path,
+    subfolder: str = "telegram",
+) -> dict[str, Any]:
+    path = Path(str(image_path or "")).expanduser()
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"ComfyUI input image not found: {path}")
+    if path.suffix.lower() not in IMAGE_EXTS:
+        raise RuntimeError(f"ComfyUI input must be an image file: {path}")
+    body = {
+        "filename": path.name,
+        "subfolder": str(subfolder or "telegram").strip().strip("/"),
+        "overwrite": False,
+        "content_b64": base64.b64encode(path.read_bytes()).decode("ascii"),
+    }
+    data = _remote_comfy_gateway_json(
+        gateway_url=gateway_url,
+        token=token,
+        method="POST",
+        path="/api/upload/image",
+        json_body=body,
+        timeout=120,
+    )
+    image_value = str(data.get("image") or "").strip()
+    if not image_value:
+        name = str(data.get("name") or data.get("filename") or "").strip()
+        folder = str(data.get("subfolder") or "").strip().strip("/")
+        image_value = f"{folder}/{name}" if folder else name
+    if not image_value:
+        raise RuntimeError(f"ComfyUI gateway did not return uploaded image name: {data}")
+    return {**data, "image": image_value}
+
+
 def _run_remote_comfy_gateway_test(
     *,
     gateway_url: str,
@@ -3247,9 +3301,12 @@ def _run_remote_comfy_gateway_test(
     batch_size: int | None = None,
     node_inputs: dict[str, Any] | None = None,
     timeout_seconds: int = 900,
+    apply_prompt: bool = True,
 ) -> dict[str, Any]:
     workflow_text = str(workflow_path or "").strip()
-    prompt_text_value = str(prompt_text or "").strip() or "a simple red apple on a wooden table, studio lighting"
+    prompt_text_value = str(prompt_text or "").strip()
+    if apply_prompt and not prompt_text_value:
+        prompt_text_value = "a simple red apple on a wooden table, studio lighting"
     zit_final_workflow = "ZIT_final" in workflow_text
     body: dict[str, Any] = {"path": workflow_text}
     merged_node_inputs: dict[str, Any] = {}
@@ -3259,7 +3316,7 @@ def _run_remote_comfy_gateway_test(
             for node_id, values in node_inputs.items()
             if isinstance(values, dict)
         }
-    if zit_final_workflow:
+    if apply_prompt and zit_final_workflow:
         merged_node_inputs.setdefault("627", {})["text"] = prompt_text_value
         if width is not None:
             merged_node_inputs.setdefault("698", {})["width"] = int(width)
@@ -3268,7 +3325,7 @@ def _run_remote_comfy_gateway_test(
         if batch_size is not None:
             merged_node_inputs.setdefault("698", {})["batch_size"] = int(batch_size)
         body["prompt_text_node_ids"] = ["627"]
-    else:
+    elif apply_prompt:
         body["prompt_text"] = prompt_text_value
         body["negative_prompt"] = str(negative_prompt or "").strip()
         for key, value in {
@@ -3348,7 +3405,7 @@ REMOTE_COMFY_TASK_LABELS = {
 }
 
 
-def _remote_comfy_workflow_mapping(payload: dict[str, Any], task_type: str) -> str:
+def _remote_comfy_workflow_mapping_value(payload: dict[str, Any], task_type: str) -> Any:
     source = _comfy_workflow_source(payload)
     mappings = payload.get("local_comfy_workflow_mappings") if source == "local" else payload.get("remote_comfy_workflow_mappings")
     if not isinstance(mappings, dict):
@@ -3360,12 +3417,19 @@ def _remote_comfy_workflow_mapping(payload: dict[str, Any], task_type: str) -> s
         mappings.get("default"),
     ]
     for value in candidates:
+        if isinstance(value, (dict, list)):
+            return value
         text = str(value or "").strip()
         if text:
             if source == "remote" and task_type in {"text_to_image", "image_generate"} and text.endswith("__converted__/ZIT_final.api.json"):
                 return "ZIT_final_output.api.json"
             return text
     return ""
+
+
+def _remote_comfy_workflow_mapping(payload: dict[str, Any], task_type: str) -> str:
+    value = _remote_comfy_workflow_mapping_value(payload, task_type)
+    return value if isinstance(value, str) else ""
 
 
 def _comfy_workflow_source(payload: dict[str, Any]) -> str:
@@ -3554,6 +3618,211 @@ def _first_remote_comfy_output_path(result: dict[str, Any]) -> str:
         if local_path and Path(local_path).exists():
             return local_path
     return ""
+
+
+def _remote_comfy_image_generate_chain_config(payload: dict[str, Any]) -> dict[str, Any]:
+    value = _remote_comfy_workflow_mapping_value(payload, "image_generate")
+    if isinstance(value, dict):
+        mode = str(value.get("mode") or value.get("type") or "").strip().lower()
+        if mode in {"firered_chain", "person_firered_chain", "two_image_firered"} or value.get("firered_workflow"):
+            return value
+    return {}
+
+
+def _workflow_path_from_chain_config(config: dict[str, Any], keys: Iterable[str], default: str = "") -> str:
+    for key in keys:
+        text = str(config.get(key) or "").strip()
+        if text:
+            return text
+    return str(default or "").strip()
+
+
+def _merge_node_inputs(*values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        for node_id, inputs in value.items():
+            if not isinstance(inputs, dict):
+                continue
+            target = merged.setdefault(str(node_id), {})
+            if isinstance(target, dict):
+                target.update(inputs)
+    return merged
+
+
+def _firered_image_input_bindings(config: dict[str, Any]) -> list[dict[str, str]]:
+    raw = config.get("firered_image_inputs") or config.get("image_inputs")
+    bindings: list[dict[str, str]] = []
+    if isinstance(raw, list):
+        for idx, item in enumerate(raw):
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("node_id") or item.get("node") or item.get("id") or "").strip()
+            input_name = str(item.get("input_name") or item.get("input") or "image").strip() or "image"
+            source = str(item.get("source") or ("image1" if idx == 0 else "image2")).strip().lower()
+            if node_id:
+                bindings.append({"node_id": node_id, "input_name": input_name, "source": source})
+    if not bindings:
+        node_ids = config.get("firered_input_node_ids") or config.get("image_input_node_ids")
+        if isinstance(node_ids, list):
+            for idx, node_id in enumerate(node_ids[:2]):
+                text = str(node_id or "").strip()
+                if text:
+                    bindings.append({"node_id": text, "input_name": "image", "source": "image1" if idx == 0 else "image2"})
+    if not bindings:
+        first = str(config.get("firered_image1_node_id") or config.get("image1_node_id") or "").strip()
+        second = str(config.get("firered_image2_node_id") or config.get("image2_node_id") or "").strip()
+        if first:
+            bindings.append({"node_id": first, "input_name": str(config.get("image1_input_name") or "image").strip() or "image", "source": "image1"})
+        if second:
+            bindings.append({"node_id": second, "input_name": str(config.get("image2_input_name") or "image").strip() or "image", "source": "image2"})
+    if len(bindings) < 2:
+        raise RuntimeError("firered_api 需要配置两个输入图节点 ID。请在 image_generate 的链式配置里填写 firered_image_inputs，格式如 [{\"node_id\":\"节点1\",\"input_name\":\"image\",\"source\":\"image1\"},{\"node_id\":\"节点2\",\"input_name\":\"image\",\"source\":\"image2\"}]。")
+    return bindings[:2]
+
+
+def _build_firered_node_inputs(config: dict[str, Any], *, image1: str, image2: str) -> dict[str, Any]:
+    source_images = {
+        "image1": image1,
+        "persona": image1,
+        "person": image1,
+        "model": image1,
+        "source": image1,
+        "image2": image2,
+        "zit": image2,
+        "reference": image2,
+        "clothes": image2,
+        "target": image2,
+    }
+    node_inputs = _merge_node_inputs(config.get("firered_node_inputs"), config.get("node_inputs"))
+    for idx, binding in enumerate(_firered_image_input_bindings(config)):
+        source = str(binding.get("source") or "").strip().lower()
+        image_value = source_images.get(source, image1 if idx == 0 else image2)
+        node_inputs.setdefault(str(binding["node_id"]), {})[str(binding["input_name"] or "image")] = image_value
+    return node_inputs
+
+
+def _run_image_generate_via_remote_comfy_firered_chain(task_id: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    source, gateway_url, token = _comfy_gateway_from_payload(payload)
+    source_label = "本地 ComfyUI" if source == "local" else "远程 ComfyUI"
+    if not gateway_url:
+        raise RuntimeError(f"{source_label} 网关未配置，请先在后台保存网关地址")
+    prompt_text = _remote_comfy_prompt_from_payload("image_generate", payload)
+    negative_prompt = str(payload.get("negative_prompt") or payload.get("negative") or "low quality, blurry, distorted").strip()
+    width = _to_int(payload.get("width"), 640)
+    height = _to_int(payload.get("height"), 960)
+    steps = _to_int(payload.get("steps"), 6)
+    batch_size = _to_int(payload.get("batch_size"), 1)
+    seed_raw = payload.get("seed")
+    seed = None if str(seed_raw or "").strip() in {"", "auto", "None", "null"} else min(max(_to_int(seed_raw, 0), 0), 2147483647)
+
+    persona_workflow = _workflow_path_from_chain_config(
+        config,
+        ("persona_workflow", "person_workflow", "image1_workflow", "first_workflow"),
+        "人设1 金君雅.api.json",
+    )
+    zit_workflow = _workflow_path_from_chain_config(
+        config,
+        ("zit_workflow", "image2_workflow", "second_workflow"),
+        "ZIT_final_output.api.json",
+    )
+    firered_workflow = _workflow_path_from_chain_config(
+        config,
+        ("firered_workflow", "final_workflow", "workflow"),
+        "firered_api.json",
+    )
+    if not persona_workflow or not zit_workflow or not firered_workflow:
+        raise RuntimeError("image_generate 链式工作流缺少 persona_workflow、zit_workflow 或 firered_workflow")
+
+    stage_results: list[dict[str, Any]] = []
+    _emit_stage(payload, stage="remote_comfy_chain", status="running", message=f"生成图1：{persona_workflow}", data={"workflow": persona_workflow})
+    image1_result = _run_remote_comfy_gateway_test(
+        gateway_url=gateway_url,
+        token=token,
+        workflow_path=persona_workflow,
+        prompt_text=prompt_text,
+        negative_prompt=negative_prompt,
+        width=width if width > 0 else None,
+        height=height if height > 0 else None,
+        steps=steps if steps > 0 else None,
+        seed=seed,
+        batch_size=batch_size if batch_size > 0 else None,
+        node_inputs=_merge_node_inputs(config.get("persona_node_inputs"), config.get("image1_node_inputs")),
+        timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
+    )
+    image1_path = _first_remote_comfy_output_path(image1_result)
+    if not image1_path:
+        raise RuntimeError(f"图1工作流完成但没有返回可下载图片：{persona_workflow}")
+    stage_results.append({"stage": "image1", "workflow": persona_workflow, "output_path": image1_path, "result": image1_result})
+
+    _emit_stage(payload, stage="remote_comfy_chain", status="running", message=f"生成图2：{zit_workflow}", data={"workflow": zit_workflow})
+    image2_result = _run_remote_comfy_gateway_test(
+        gateway_url=gateway_url,
+        token=token,
+        workflow_path=zit_workflow,
+        prompt_text=prompt_text,
+        negative_prompt=negative_prompt,
+        width=width if width > 0 else None,
+        height=height if height > 0 else None,
+        steps=steps if steps > 0 else None,
+        seed=seed,
+        batch_size=batch_size if batch_size > 0 else None,
+        node_inputs=_merge_node_inputs(_remote_comfy_node_inputs_from_payload(payload, task_type="image_generate", workflow_path=zit_workflow), config.get("zit_node_inputs"), config.get("image2_node_inputs")),
+        timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
+    )
+    image2_path = _first_remote_comfy_output_path(image2_result)
+    if not image2_path:
+        raise RuntimeError(f"图2工作流完成但没有返回可下载图片：{zit_workflow}")
+    stage_results.append({"stage": "image2", "workflow": zit_workflow, "output_path": image2_path, "result": image2_result})
+
+    upload_subfolder = f"telegram/{re.sub(r'[^a-zA-Z0-9._-]+', '_', str(task_id or uuid.uuid4().hex)).strip('._-') or uuid.uuid4().hex}"
+    image1_upload = _remote_comfy_gateway_upload_image(gateway_url=gateway_url, token=token, image_path=image1_path, subfolder=upload_subfolder)
+    image2_upload = _remote_comfy_gateway_upload_image(gateway_url=gateway_url, token=token, image_path=image2_path, subfolder=upload_subfolder)
+    firered_node_inputs = _build_firered_node_inputs(config, image1=str(image1_upload["image"]), image2=str(image2_upload["image"]))
+
+    _emit_stage(
+        payload,
+        stage="remote_comfy_chain",
+        status="running",
+        message=f"执行服装替换：{firered_workflow}",
+        data={"workflow": firered_workflow, "image1": image1_upload.get("image"), "image2": image2_upload.get("image")},
+    )
+    final_result = _run_remote_comfy_gateway_test(
+        gateway_url=gateway_url,
+        token=token,
+        workflow_path=firered_workflow,
+        prompt_text="",
+        negative_prompt="",
+        node_inputs=firered_node_inputs,
+        timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
+        apply_prompt=False,
+    )
+    final_path = _first_remote_comfy_output_path(final_result)
+    if not final_path:
+        raise RuntimeError(f"firered_api 工作流完成但没有返回可下载图片：{firered_workflow}")
+    if Path(final_path).suffix.lower() not in IMAGE_EXTS:
+        raise RuntimeError(f"firered_api 返回的结果不是图片文件：{final_path}")
+    stage_results.append({"stage": "firered", "workflow": firered_workflow, "output_path": final_path, "result": final_result})
+
+    return {
+        "ok": True,
+        "message": f"{source_label} 图像生成链路完成",
+        "comfy_workflow_source": source,
+        "remote_comfy_workflow_path": firered_workflow,
+        "remote_comfy_prompt_id": str(final_result.get("prompt_id") or "").strip(),
+        "runninghub_task_id": str(final_result.get("prompt_id") or "").strip(),
+        "runninghub_usage": {},
+        "download_path": final_path,
+        "image_path": final_path,
+        "intermediate_image_paths": [image1_path, image2_path],
+        "raw_result": {
+            "mode": "firered_chain",
+            "image1_upload": _sanitize_payload(image1_upload),
+            "image2_upload": _sanitize_payload(image2_upload),
+            "stages": stage_results,
+        },
+    }
 
 
 def _new_image_qa_seed(excluded: set[int] | None = None) -> int:
@@ -4187,6 +4456,9 @@ def _run_image_generate_via_legacy_nano(task_id: str, payload: dict[str, Any], *
 
 
 def _run_image_generate(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    chain_config = _remote_comfy_image_generate_chain_config(payload)
+    if chain_config:
+        return _run_image_generate_via_remote_comfy_firered_chain(task_id, payload, chain_config)
     if _remote_comfy_workflow_mapping(payload, "image_generate"):
         return _run_remote_comfy_mapped_task(task_id, payload, "image_generate")
     mode = str(payload.get("mode") or "product_only").strip() or "product_only"
@@ -8664,6 +8936,16 @@ def create_app() -> FastAPI:
         user_id = _internal_tg_submit_user_id()
         _enqueue_task(task_id, user_id, typ, task_payload)
         return {"ok": True, "id": task_id, "task_type": typ, "prompt_preview": _tg_prompt_preview(task_payload)}
+
+    @app.get("/api/internal/tg/runtime_config")
+    def api_internal_tg_runtime_config(request: Request):
+        _require_internal_tg_request(request)
+        try:
+            with db() as conn:
+                runtime = _get_runtime_config(conn)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"ok": True, "runtime_config": runtime}
 
     @app.post("/api/internal/tg/prompt_preview")
     def api_internal_tg_prompt_preview(payload: InternalTgPromptPreviewPayload, request: Request):

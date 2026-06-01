@@ -63,12 +63,6 @@ TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON = "继续生成图片"
 MULTI_IMAGE_BUTTON = "多图生成"
 IMAGE_REPLACE_BUTTON = "图片替换"
 VIDEO_GENERAL_EDIT_BUTTON = "图生视频"
-VIDEO_I2V_RES_PREFIX = "分辨率："
-VIDEO_I2V_DURATION_PREFIX = "时长："
-VIDEO_I2V_GROK_ON = "Grok提示词：开"
-VIDEO_I2V_GROK_OFF = "Grok提示词：关"
-VIDEO_I2V_EXTEND_ON = "接口扩写：开"
-VIDEO_I2V_EXTEND_OFF = "接口扩写：关"
 LEGACY_IMAGE_WORKFLOW_BUTTON = "图像编辑工作流"
 LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "图片生成工作流"
 VIDEO_EDIT_BUTTON = "视频生成"
@@ -248,6 +242,22 @@ TEXT_TO_IMAGE_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
 }
 
 
+TEXT_TO_IMAGE_PERSON_T2I_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
+    "8:15": {"label": "8:15 人设竖图", "note": "人设_t2i 原生竖图", "width": 1024, "height": 1920, "final": "关闭"},
+    "2:3": {"label": "2:3 人设竖图", "note": "人设_t2i 竖图", "width": 1024, "height": 1536, "final": "关闭"},
+    "3:4": {"label": "3:4 人设竖图", "note": "人设_t2i 稳定竖图", "width": 1024, "height": 1365, "final": "关闭"},
+}
+
+
+TEXT_TO_IMAGE_PERSON_T2I_PERSONA_LORA_NODE_INPUTS: dict[str, dict[str, Any]] = {
+    "184": {
+        "lora_name": r"Character Setting\人设1捞女1金君雅.safetensors",
+        "strength_model": 0.8,
+        "strength_clip": 1.0,
+    }
+}
+
+
 TEXT_TO_IMAGE_PERSONA_LORA_NODE_INPUTS: dict[str, dict[str, Any]] = {
     "821": {
         "lora_1": {
@@ -268,44 +278,93 @@ TEXT_TO_IMAGE_PERSONA_LORA_NODE_INPUTS: dict[str, dict[str, Any]] = {
 }
 
 
-def _text_to_image_persona_available() -> bool:
-    return bool(_text_to_image_persona_options())
+def _text_to_image_workflow_profile_from_path(value: Any) -> str:
+    text = str(value or "").replace("\\", "/").lower()
+    if "person_t2i" in text or "\u4eba\u8bbe_t2i" in text or "\u4eba\u8a2d_t2i" in text:
+        return "person_t2i"
+    return "person_t2i" if "person_t2i" in text or "人设_t2i" in text or "人設_t2i" in text else "zit_final"
 
 
-def _text_to_image_persona_options() -> list[dict[str, str]]:
+def _text_to_image_profile(data: dict[str, Any] | None = None) -> str:
+    source = data or {}
+    explicit = str(source.get("text_to_image_workflow_profile") or "").strip().lower()
+    if explicit:
+        if explicit in {"person_t2i", "persona_t2i", "\u4eba\u8bbe_t2i", "\u4eba\u8a2d_t2i"}:
+            return "person_t2i"
+        return "person_t2i" if explicit in {"person_t2i", "persona_t2i", "人设_t2i", "人設_t2i"} else "zit_final"
+    for key in ("text_to_image_workflow_path", "remote_comfy_workflow_path", "local_comfy_workflow_path"):
+        profile = _text_to_image_workflow_profile_from_path(source.get(key))
+        if profile == "person_t2i":
+            return profile
+    return "zit_final"
+
+
+def _text_to_image_ratio_options(profile: str = "zit_final") -> dict[str, dict[str, Any]]:
+    return TEXT_TO_IMAGE_PERSON_T2I_RATIO_OPTIONS if profile == "person_t2i" else TEXT_TO_IMAGE_RATIO_OPTIONS
+
+
+def _text_to_image_final_resolution_available(profile: str = "zit_final") -> bool:
+    return profile != "person_t2i"
+
+
+def _text_to_image_persona_available(profile: str = "zit_final") -> bool:
+    return bool(_text_to_image_persona_options(profile=profile))
+
+
+def _text_to_image_persona_options(*, profile: str = "zit_final") -> list[dict[str, str]]:
     options: list[dict[str, str]] = []
     seen: set[str] = set()
-    for values in TEXT_TO_IMAGE_PERSONA_LORA_NODE_INPUTS.values():
-        if not isinstance(values, dict):
+    if profile == "person_t2i":
+        source_values = [{"lora": values.get("lora_name")} for values in TEXT_TO_IMAGE_PERSON_T2I_PERSONA_LORA_NODE_INPUTS.values()]
+    else:
+        source_values = []
+        for values in TEXT_TO_IMAGE_PERSONA_LORA_NODE_INPUTS.values():
+            if isinstance(values, dict):
+                source_values.extend(value for value in values.values() if isinstance(value, dict))
+    for lora_value in source_values:
+        if not isinstance(lora_value, dict):
             continue
-        for lora_value in values.values():
-            if not isinstance(lora_value, dict):
-                continue
-            path = str(lora_value.get("lora") or "").strip()
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            label = Path(path.replace("\\", "/")).stem or path
-            options.append({"id": str(len(options)), "label": label, "path": path})
+        path = str(lora_value.get("lora") or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        label = Path(path.replace("\\", "/")).stem or path
+        options.append({"id": str(len(options)), "label": label, "path": path})
     return options
 
 
-def _text_to_image_persona_label(path: str | None) -> str:
+def _text_to_image_persona_label(path: str | None, *, profile: str = "zit_final") -> str:
     target = str(path or "").strip()
-    for option in _text_to_image_persona_options():
+    for option in _text_to_image_persona_options(profile=profile):
         if option["path"] == target:
             return option["label"]
     return Path(target.replace("\\", "/")).stem if target else ""
 
 
-def _text_to_image_default_persona_path() -> str:
-    options = _text_to_image_persona_options()
+def _text_to_image_default_persona_path(*, profile: str = "zit_final") -> str:
+    options = _text_to_image_persona_options(profile=profile)
     return options[0]["path"] if options else ""
 
 
-def _text_to_image_persona_node_inputs(*, enabled: bool, persona_lora: str = "") -> dict[str, dict[str, Any]]:
+def _text_to_image_persona_node_inputs(*, enabled: bool, persona_lora: str = "", profile: str = "zit_final") -> dict[str, dict[str, Any]]:
     node_inputs: dict[str, dict[str, Any]] = {}
-    selected_lora = str(persona_lora or _text_to_image_default_persona_path()).strip()
+    selected_lora = str(persona_lora or _text_to_image_default_persona_path(profile=profile)).strip()
+    if profile == "person_t2i":
+        for node_id, values in TEXT_TO_IMAGE_PERSON_T2I_PERSONA_LORA_NODE_INPUTS.items():
+            lora_name = str(selected_lora or values.get("lora_name") or "").strip()
+            if enabled and lora_name:
+                node_inputs[node_id] = {
+                    "lora_name": lora_name,
+                    "strength_model": float(values.get("strength_model") or 0.8),
+                    "strength_clip": float(values.get("strength_clip") or 1.0),
+                }
+            else:
+                node_inputs[node_id] = {
+                    "lora_name": str(values.get("lora_name") or lora_name),
+                    "strength_model": 0.0,
+                    "strength_clip": 0.0,
+                }
+        return node_inputs
     for node_id, values in TEXT_TO_IMAGE_PERSONA_LORA_NODE_INPUTS.items():
         lora_value = dict(values.get("lora_1") or {})
         if enabled and selected_lora:
@@ -321,26 +380,32 @@ def _text_to_image_persona_node_inputs(*, enabled: bool, persona_lora: str = "")
 
 def _text_to_image_params(data: dict[str, Any] | None = None) -> dict[str, Any]:
     source = data or {}
-    ratio = str(source.get("aspect_ratio") or "2:3").strip()
-    if ratio not in TEXT_TO_IMAGE_RATIO_OPTIONS:
-        ratio = "2:3"
-    option = dict(TEXT_TO_IMAGE_RATIO_OPTIONS[ratio])
-    final_resolution_enabled = bool(source.get("final_resolution_enabled", False))
-    persona_available = _text_to_image_persona_available()
+    profile = _text_to_image_profile(source)
+    ratio_options = _text_to_image_ratio_options(profile)
+    default_ratio = next(iter(ratio_options.keys()))
+    ratio = str(source.get("aspect_ratio") or default_ratio).strip()
+    if ratio not in ratio_options:
+        ratio = default_ratio
+    option = dict(ratio_options[ratio])
+    final_resolution_available = _text_to_image_final_resolution_available(profile)
+    final_resolution_enabled = bool(source.get("final_resolution_enabled", False)) if final_resolution_available else False
+    persona_available = _text_to_image_persona_available(profile)
     persona_enabled = bool(source.get("persona_enabled", True if persona_available else False))
-    persona_lora = str(source.get("persona_lora") or _text_to_image_default_persona_path()).strip() if persona_available else ""
+    persona_lora = str(source.get("persona_lora") or _text_to_image_default_persona_path(profile=profile)).strip() if persona_available else ""
     return {
+        "text_to_image_workflow_profile": profile,
         "aspect_ratio": ratio,
         "width": int(option["width"]),
         "height": int(option["height"]),
         "final": str(option["final"]),
         "label": str(option["label"]),
         "note": str(option["note"]),
+        "final_resolution_available": final_resolution_available,
         "final_resolution_enabled": final_resolution_enabled,
         "persona_available": persona_available,
         "persona_enabled": bool(persona_enabled and persona_available),
         "persona_lora": persona_lora,
-        "persona_label": _text_to_image_persona_label(persona_lora),
+        "persona_label": _text_to_image_persona_label(persona_lora, profile=profile),
         "ratio_selected": bool(source.get("ratio_selected", False)),
         "resolution_selected": bool(source.get("resolution_selected", False)),
         "persona_selected": bool(source.get("persona_selected", False)),
@@ -350,6 +415,30 @@ def _text_to_image_params(data: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _text_to_image_remote_node_inputs(params: dict[str, Any]) -> dict[str, Any]:
+    profile = _text_to_image_profile(params)
+    if profile == "person_t2i":
+        node_inputs: dict[str, Any] = {
+            "160": {"width": int(params["width"]), "height": int(params["height"]), "batch_size": 1},
+            "167": {
+                "steps": 10,
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1.0,
+            },
+            "185": {"lora_name": r"ZIT\臀部Z-Hip-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
+            "186": {"lora_name": r"ZIT\胸部Z-Breast-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
+            "191": {"lora_name": r"Z-Image\Z-ImageTubro big-nipples.safetensors", "strength_model": 0.0, "strength_clip": 0.0},
+            "171": {"filename_prefix": "telegram/person_t2i"},
+        }
+        node_inputs.update(
+            _text_to_image_persona_node_inputs(
+                enabled=bool(params.get("persona_enabled")),
+                persona_lora=str(params.get("persona_lora") or ""),
+                profile=profile,
+            )
+        )
+        return node_inputs
     detailer_inputs = {
         "guide_size": 512.0,
         "guide_size_for": True,
@@ -432,11 +521,12 @@ def _text_to_image_remote_node_inputs(params: dict[str, Any]) -> dict[str, Any]:
             "790": {"image": ["663", 0]},
             **safe_save_prefixes,
         }
-    if _text_to_image_persona_available():
+    if _text_to_image_persona_available(profile):
         node_inputs.update(
             _text_to_image_persona_node_inputs(
                 enabled=bool(params.get("persona_enabled")),
                 persona_lora=str(params.get("persona_lora") or ""),
+                profile=profile,
             )
         )
     return node_inputs
@@ -556,9 +646,9 @@ def _text_to_image_status_text(*, step: str, params: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _text_to_image_ratio_keyboard(*, selected_ratio: str = "") -> InlineKeyboardMarkup:
+def _text_to_image_ratio_keyboard(*, selected_ratio: str = "", profile: str = "zit_final") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    items = list(TEXT_TO_IMAGE_RATIO_OPTIONS.items())
+    items = list(_text_to_image_ratio_options(profile).items())
     for idx in range(0, len(items), 2):
         row: list[InlineKeyboardButton] = []
         for ratio, option in items[idx : idx + 2]:
@@ -569,7 +659,12 @@ def _text_to_image_ratio_keyboard(*, selected_ratio: str = "") -> InlineKeyboard
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _text_to_image_resolution_keyboard(*, final_resolution_enabled: bool = False, selected: bool = False) -> InlineKeyboardMarkup:
+def _text_to_image_resolution_keyboard(
+    *,
+    final_resolution_enabled: bool = False,
+    selected: bool = False,
+    final_resolution_available: bool = True,
+) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -577,24 +672,25 @@ def _text_to_image_resolution_keyboard(*, final_resolution_enabled: bool = False
                 callback_data="t2i:final:off",
             )
         ],
-        [
-            InlineKeyboardButton(
-                text=f"{'✓ ' if selected and final_resolution_enabled else ''}开启最终分辨率",
-                callback_data="t2i:final:on",
-            )
-        ],
-        [
-            InlineKeyboardButton(text="上一步", callback_data="t2i:back:ratio"),
-        ],
-        [InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")],
     ]
+    if final_resolution_available:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{'✓ ' if selected and final_resolution_enabled else ''}开启最终分辨率",
+                    callback_data="t2i:final:on",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="上一步", callback_data="t2i:back:ratio")])
+    rows.append([InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _text_to_image_persona_keyboard(*, persona_enabled: bool = True, persona_lora: str = "", selected: bool = False) -> InlineKeyboardMarkup:
+def _text_to_image_persona_keyboard(*, persona_enabled: bool = True, persona_lora: str = "", selected: bool = False, profile: str = "zit_final") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     selected_lora = str(persona_lora or "").strip()
-    for option in _text_to_image_persona_options():
+    for option in _text_to_image_persona_options(profile=profile):
         prefix = "✓ " if selected and persona_enabled and option["path"] == selected_lora else ""
         rows.append([InlineKeyboardButton(text=f"{prefix}{option['label']}", callback_data=f"t2i:persona:{option['id']}")])
     rows.append([InlineKeyboardButton(text=f"{'✓ ' if selected and not persona_enabled else ''}不使用人设", callback_data="t2i:persona:off")])
@@ -661,31 +757,28 @@ def _text_to_image_prompt_display_retry_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _text_to_image_ratio_reply_keyboard() -> ReplyKeyboardMarkup:
-    items = [str(option["label"]) for option in TEXT_TO_IMAGE_RATIO_OPTIONS.values()]
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=items[idx]), KeyboardButton(text=items[idx + 1])]
-            for idx in range(0, len(items) - 1, 2)
-        ]
-        + [[KeyboardButton(text=items[-1])], [KeyboardButton(text=MAIN_MENU_BUTTON)]],
-        resize_keyboard=True,
-    )
+def _text_to_image_ratio_reply_keyboard(*, profile: str = "zit_final") -> ReplyKeyboardMarkup:
+    items = [str(option["label"]) for option in _text_to_image_ratio_options(profile).values()]
+    rows = [
+        [KeyboardButton(text=items[idx]), KeyboardButton(text=items[idx + 1])]
+        for idx in range(0, len(items) - 1, 2)
+    ]
+    if len(items) % 2:
+        rows.append([KeyboardButton(text=items[-1])])
+    rows.append([KeyboardButton(text=MAIN_MENU_BUTTON)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def _text_to_image_resolution_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="使用基础分辨率")],
-            [KeyboardButton(text="开启最终分辨率")],
-            [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
-        ],
-        resize_keyboard=True,
-    )
+def _text_to_image_resolution_reply_keyboard(*, final_resolution_available: bool = True) -> ReplyKeyboardMarkup:
+    rows = [[KeyboardButton(text="使用基础分辨率")]]
+    if final_resolution_available:
+        rows.append([KeyboardButton(text="开启最终分辨率")])
+    rows.append([KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def _text_to_image_persona_reply_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=str(option["label"]))] for option in _text_to_image_persona_options()]
+def _text_to_image_persona_reply_keyboard(*, profile: str = "zit_final") -> ReplyKeyboardMarkup:
+    rows = [[KeyboardButton(text=str(option["label"]))] for option in _text_to_image_persona_options(profile=profile)]
     rows.append([KeyboardButton(text="不使用人设")])
     rows.append([KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
@@ -758,39 +851,12 @@ def _video_edit_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def _video_i2v_keyboard(*, resolution: str = "720p", duration: int = 2, use_grok: bool = True, prompt_extend: bool = False) -> ReplyKeyboardMarkup:
-    resolution = "1080p" if str(resolution or "").strip() == "1080p" else "720p"
-    duration = int(duration or 2)
-    if duration not in {2, 5, 8, 15}:
-        duration = 2
+def _video_i2v_prompt_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=f"{VIDEO_I2V_RES_PREFIX}{resolution}"), KeyboardButton(text=f"{VIDEO_I2V_DURATION_PREFIX}{duration}秒")],
-            [KeyboardButton(text=VIDEO_I2V_GROK_ON if use_grok else VIDEO_I2V_GROK_OFF), KeyboardButton(text=VIDEO_I2V_EXTEND_ON if prompt_extend else VIDEO_I2V_EXTEND_OFF)],
-            [KeyboardButton(text=MAIN_MENU_BUTTON)],
+            [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
-    )
-
-
-def _video_i2v_inline_keyboard(*, resolution: str = "720p", duration: int = 2, use_grok: bool = True, prompt_extend: bool = False) -> InlineKeyboardMarkup:
-    resolution = "1080p" if str(resolution or "").strip() == "1080p" else "720p"
-    duration = int(duration or 2)
-    if duration not in {2, 5, 8, 15}:
-        duration = 2
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=f"分辨率：{resolution}", callback_data="video_i2v:toggle_resolution"),
-                InlineKeyboardButton(text=f"时长：{duration}秒", callback_data="video_i2v:cycle_duration"),
-            ],
-            [
-                InlineKeyboardButton(text=f"Grok提示词：{'开' if use_grok else '关'}", callback_data="video_i2v:toggle_grok"),
-                InlineKeyboardButton(text=f"接口扩写：{'开' if prompt_extend else '关'}", callback_data="video_i2v:toggle_extend"),
-            ],
-            [InlineKeyboardButton(text="下一步：上传参考图", callback_data="video_i2v:ready_image")],
-            [InlineKeyboardButton(text="返回主菜单", callback_data="video_i2v:main_menu")],
-        ]
     )
 
 
@@ -985,6 +1051,29 @@ def _load_runtime_config(config: AppConfig) -> dict[str, Any]:
         logger.exception("Failed to read runtime workflow config: %s", path)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _runtime_text_to_image_workflow_path(runtime: dict[str, Any] | None) -> str:
+    source = str((runtime or {}).get("comfy_workflow_source") or "remote").strip().lower()
+    mappings_key = "local_comfy_workflow_mappings" if source == "local" else "remote_comfy_workflow_mappings"
+    mappings = (runtime or {}).get(mappings_key)
+    if not isinstance(mappings, dict):
+        mappings = {}
+    value = mappings.get("text_to_image") or mappings.get("default") or ""
+    return str(value or "").strip()
+
+
+def _text_to_image_runtime_params(runtime: dict[str, Any] | None) -> dict[str, Any]:
+    workflow_path = _runtime_text_to_image_workflow_path(runtime)
+    workflow_profile = _text_to_image_workflow_profile_from_path(workflow_path)
+    params = _text_to_image_params(
+        {
+            "text_to_image_workflow_profile": workflow_profile,
+            "text_to_image_workflow_path": workflow_path,
+        }
+    )
+    params["text_to_image_workflow_path"] = workflow_path
+    return params
 
 
 def _normalize_workflow_chain(value: Any) -> list[str]:
@@ -1225,6 +1314,22 @@ async def _download_agent_message_file(message: Message, work_dir: Path) -> dict
 
 def _internal_webapp_base_url() -> str:
     return str(os.getenv("TG_INTERNAL_WEBAPP_BASE_URL") or "http://127.0.0.1:8091").strip().rstrip("/")
+
+
+def _fetch_webapp_runtime_config() -> dict[str, Any]:
+    headers: dict[str, str] = {}
+    token = str(os.getenv("TG_INTERNAL_API_TOKEN") or "").strip()
+    if token:
+        headers["x-tg-internal-token"] = token
+    url = f"{_internal_webapp_base_url()}/api/internal/tg/runtime_config"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = response.read().decode("utf-8", errors="replace")
+    data = json.loads(body)
+    if not isinstance(data, dict):
+        return {}
+    runtime = data.get("runtime_config")
+    return runtime if isinstance(runtime, dict) else {}
 
 
 async def _submit_internal_webapp_task(
@@ -1704,56 +1809,63 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             lines.append(f"\u65f6\u957f\uff1a{params['duration']}\u79d2")
         if params.get("prompt_mode_selected"):
             label = str(params.get("prompt_mode_label") or "").strip()
-            lines.append(f"\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{label or ('Grok \u751f\u6210' if params['use_grok'] else '\u81ea\u5b9a\u4e49\u63d0\u4ea4')}")
+            prompt_mode_text = label or ("Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4")
+            lines.append(f"\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{prompt_mode_text}")
         if params.get("prompt_extend_selected"):
-            lines.append(f"\u63a5\u53e3\u6269\u5199\uff1a{'\u5f00\u542f' if params['prompt_extend'] else '\u5173\u95ed'}")
+            extend_text = "\u5f00\u542f" if params["prompt_extend"] else "\u5173\u95ed"
+            lines.append(f"\u63a5\u53e3\u6269\u5199\uff1a{extend_text}")
         return "\n".join(lines)
 
-    def _video_i2v_step_keyboard(step: str, params: dict[str, Any]) -> InlineKeyboardMarkup:
+    def _video_i2v_step_keyboard(step: str, params: dict[str, Any]) -> ReplyKeyboardMarkup:
         if step == "resolution":
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
+            selected_720 = "\u2713 " if params["resolution"] == "720p" else ""
+            selected_1080 = "\u2713 " if params["resolution"] == "1080p" else ""
+            return ReplyKeyboardMarkup(
+                keyboard=[
                     [
-                        InlineKeyboardButton(text=f"{'\u2713 ' if params['resolution'] == '720p' else ''}720p\uff08\u6700\u5c0f\u8d44\u6e90\uff09", callback_data="video_i2v:resolution:720p"),
-                        InlineKeyboardButton(text=f"{'\u2713 ' if params['resolution'] == '1080p' else ''}1080p", callback_data="video_i2v:resolution:1080p"),
+                        KeyboardButton(text=f"{selected_720}720p\uff08\u6700\u5c0f\u8d44\u6e90\uff09"),
+                        KeyboardButton(text=f"{selected_1080}1080p"),
                     ],
-                    [InlineKeyboardButton(text="\u4e0b\u4e00\u6b65\uff1a\u8f93\u5165\u89c6\u9891\u65f6\u957f", callback_data="video_i2v:next:duration")],
-                    [InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
-                ]
+                    [KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+                ],
+                resize_keyboard=True,
             )
         if step == "duration":
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="\u4e0b\u4e00\u6b65\uff1a\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f", callback_data="video_i2v:next:prompt_mode")],
-                    [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:resolution")],
-                    [InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
-                ]
+            return ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+                ],
+                resize_keyboard=True,
             )
         if step == "prompt_mode":
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text=f"{'\u2713 ' if params['use_grok'] else ''}\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd", callback_data="video_i2v:prompt_mode:grok")],
-                    [InlineKeyboardButton(text=f"{'\u2713 ' if not params['use_grok'] else ''}\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4", callback_data="video_i2v:prompt_mode:custom")],
-                    [InlineKeyboardButton(text="\u4e0b\u4e00\u6b65\uff1a\u9009\u62e9\u63a5\u53e3\u6269\u5199", callback_data="video_i2v:next:prompt_extend")],
-                    [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:duration"), InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
-                ]
+            grok_selected = "\u2713 " if params["use_grok"] else ""
+            custom_selected = "\u2713 " if not params["use_grok"] else ""
+            return ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text=f"{grok_selected}\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd")],
+                    [KeyboardButton(text=f"{custom_selected}\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4")],
+                    [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+                ],
+                resize_keyboard=True,
             )
         if step == "prompt_extend":
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
+            extend_on_selected = "\u2713 " if params["prompt_extend"] else ""
+            extend_off_selected = "\u2713 " if not params["prompt_extend"] else ""
+            return ReplyKeyboardMarkup(
+                keyboard=[
                     [
-                        InlineKeyboardButton(text=f"{'\u2713 ' if params['prompt_extend'] else ''}\u5f00\u542f\u63a5\u53e3\u6269\u5199", callback_data="video_i2v:extend:on"),
-                        InlineKeyboardButton(text=f"{'\u2713 ' if not params['prompt_extend'] else ''}\u5173\u95ed", callback_data="video_i2v:extend:off"),
+                        KeyboardButton(text=f"{extend_on_selected}\u5f00\u542f\u63a5\u53e3\u6269\u5199"),
+                        KeyboardButton(text=f"{extend_off_selected}\u5173\u95ed"),
                     ],
-                    [InlineKeyboardButton(text="\u4e0b\u4e00\u6b65\uff1a\u4e0a\u4f20\u53c2\u8003\u56fe", callback_data="video_i2v:next:image")],
-                    [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:prompt_mode"), InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
-                ]
+                    [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+                ],
+                resize_keyboard=True,
             )
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="\u4e0a\u4e00\u6b65", callback_data="video_i2v:back:extend")],
-                [InlineKeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355", callback_data="video_i2v:main_menu")],
-            ]
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+            ],
+            resize_keyboard=True,
         )
 
     async def _show_video_i2v_step(message: Message, state: FSMContext, *, step: str) -> None:
@@ -1770,7 +1882,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.set_state(state_map.get(step, ProductionWorkflowForm.video_i2v_waiting_for_resolution))
         labels = {
             "resolution": "1/5 \u9009\u62e9\u5206\u8fa8\u7387",
-            "duration": "2/5 \u8f93\u5165\u89c6\u9891\u65f6\u957f",
+            "duration": "2/5 \u9009\u62e9\u89c6\u9891\u65f6\u957f",
             "prompt_mode": "3/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
             "prompt_extend": "4/5 \u9009\u62e9 MuleRouter \u63a5\u53e3\u6269\u5199",
             "image": "5/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
@@ -1779,20 +1891,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         text = _video_i2v_status_text(step=labels.get(step, step), params=params)
         if step == "duration":
             text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
+        elif step == "prompt_mode":
+            text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u4e2d\u6587\u89c6\u9891\u63d0\u793a\u8bcd\uff0c\u6216\u76f4\u63a5\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
+        elif step == "prompt_extend":
+            text += "\n\n\u8bf7\u9009\u62e9\u662f\u5426\u8ba9\u89c6\u9891\u751f\u6210\u63a5\u53e3\u518d\u6269\u5199\u63d0\u793a\u8bcd\u3002"
         elif step == "image":
             text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u53ef\u4ee5\u5728\u56fe\u7247\u8bf4\u660e\u91cc\u586b\u5199\u89c6\u9891\u9700\u6c42\uff0c\u7cfb\u7edf\u4f1a\u7acb\u5373\u63d0\u4ea4\u3002"
         elif step == "prompt":
             text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u8fd9\u6b21\u56fe\u751f\u89c6\u9891\u7684\u753b\u9762\u548c\u52a8\u4f5c\u9700\u6c42\u3002"
         markup = _video_i2v_step_keyboard(step, params)
-        control_message_id = int(data.get("control_message_id") or 0)
-        if control_message_id:
-            try:
-                await message.bot.edit_message_text(chat_id=int(message.chat.id), message_id=control_message_id, text=text, reply_markup=markup)
-                return
-            except Exception:
-                pass
-        sent = await message.answer(text, reply_markup=markup)
-        await state.update_data(control_message_id=int(sent.message_id))
+        await message.answer(text, reply_markup=markup)
 
     async def _show_video_i2v_step_from_callback(callback: CallbackQuery, state: FSMContext, *, step: str) -> None:
         if callback.message is None:
@@ -1809,7 +1917,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.set_state(state_map.get(step, ProductionWorkflowForm.video_i2v_waiting_for_resolution))
         labels = {
             "resolution": "1/5 \u9009\u62e9\u5206\u8fa8\u7387",
-            "duration": "2/5 \u8f93\u5165\u89c6\u9891\u65f6\u957f",
+            "duration": "2/5 \u9009\u62e9\u89c6\u9891\u65f6\u957f",
             "prompt_mode": "3/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
             "prompt_extend": "4/5 \u9009\u62e9 MuleRouter \u63a5\u53e3\u6269\u5199",
             "image": "5/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
@@ -1817,13 +1925,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         text = _video_i2v_status_text(step=labels.get(step, step), params=params)
         if step == "duration":
             text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
+        elif step == "prompt_mode":
+            text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u4e2d\u6587\u89c6\u9891\u63d0\u793a\u8bcd\uff0c\u6216\u76f4\u63a5\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
+        elif step == "prompt_extend":
+            text += "\n\n\u8bf7\u9009\u62e9\u662f\u5426\u8ba9\u89c6\u9891\u751f\u6210\u63a5\u53e3\u518d\u6269\u5199\u63d0\u793a\u8bcd\u3002"
         elif step == "image":
             text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u53ef\u4ee5\u5728\u56fe\u7247\u8bf4\u660e\u91cc\u586b\u5199\u89c6\u9891\u9700\u6c42\uff0c\u7cfb\u7edf\u4f1a\u7acb\u5373\u63d0\u4ea4\u3002"
-        try:
-            await callback.message.edit_text(text, reply_markup=_video_i2v_step_keyboard(step, params))
-            await state.update_data(control_message_id=int(callback.message.message_id))
-        except Exception:
-            await _show_video_i2v_step(callback.message, state, step=step)
+        await callback.message.answer(text, reply_markup=_video_i2v_step_keyboard(step, params))
 
     async def _remove_reply_keyboard(message: Message, *, text: str = "\u8bf7\u4f7f\u7528\u4e0a\u65b9\u6309\u94ae\u7ee7\u7eed\u3002") -> None:
         try:
@@ -1835,14 +1943,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def start_video_i2v_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
         defaults = await _video_i2v_runtime_defaults()
+        defaults.update(
+            {
+                "use_grok": True,
+                "prompt_extend": False,
+                "resolution_selected": False,
+                "duration_selected": False,
+                "prompt_mode_selected": False,
+                "prompt_extend_selected": False,
+                "prompt_mode_label": "Grok \u751f\u6210",
+                "work_dir": str(service.create_job_dir(prefix="tg_video_i2v")),
+            }
+        )
         await state.update_data(**defaults)
-        await _remove_reply_keyboard(message, text="\u8bf7\u6309\u6b65\u9aa4\u9009\u62e9\u89c6\u9891\u751f\u6210\u53c2\u6570\u3002")
         await _show_video_i2v_step(message, state, step="resolution")
 
     async def _submit_video_i2v_from_state(message: Message, state: FSMContext, prompt: str) -> None:
         data = await state.get_data()
         image_path = str(data.get("image_local_path") or "").strip()
         if not image_path:
+            await message.answer("\u8bf7\u5148\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u3002")
             await _show_video_i2v_step(message, state, step="image")
             return
         params = _video_i2v_state_params(data)
@@ -1869,32 +1989,19 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             payload["mulerouter_wan_i2v_seed"] = int(str(params["seed"]))
         await state.clear()
         try:
+            if params["use_grok"]:
+                await message.answer("正在让 Grok 生成中文视频提示词，并提交后台队列。")
             result = await _submit_internal_webapp_task(chat_id=int(message.chat.id), task_type="video_i2v", params=payload)
-            prompt_preview = str(result.get("prompt_preview") or "").strip()
-            prompt_preview_display = ""
-            if prompt_preview:
-                try:
-                    prompt_preview_display = await _display_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="video_i2v", prompt_text=prompt_preview)
-                except Exception as exc:
-                    prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
-                    if not _looks_like_clean_chinese_preview(prompt_preview_display):
-                        prompt_preview_display = _format_prompt_display_fallback(exc)
+            prompt_mode_text = "Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
+            prompt_extend_text = "\u5f00" if params["prompt_extend"] else "\u5173"
             reply = "\n".join(
                 part for part in [
                     "\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u5df2\u63d0\u4ea4\u3002",
                     f"\u4efb\u52a1\u7f16\u53f7\uff1a{result.get('id')}",
-                    f"\u5206\u8fa8\u7387\uff1a{params['resolution']}\uff0c\u65f6\u957f\uff1a{params['duration']}\u79d2\uff0c\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{'Grok \u751f\u6210' if params['use_grok'] else '\u81ea\u5b9a\u4e49\u63d0\u4ea4'}\uff0c\u63a5\u53e3\u6269\u5199\uff1a{'\u5f00' if params['prompt_extend'] else '\u5173'}",
-                    f"Grok\u6700\u7ec8\u63d0\u793a\u8bcd\uff1a{prompt_preview_display}" if prompt_preview_display else "",
+                    f"\u5206\u8fa8\u7387\uff1a{params['resolution']}\uff0c\u65f6\u957f\uff1a{params['duration']}\u79d2\uff0c\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{prompt_mode_text}\uff0c\u63a5\u53e3\u6269\u5199\uff1a{prompt_extend_text}",
                     "\u751f\u6210\u5b8c\u6210\u540e\u4f1a\u81ea\u52a8\u628a\u89c6\u9891\u53d1\u56de\u8fd9\u91cc\u3002",
                 ] if part
             )
-            control_message_id = int(data.get("control_message_id") or 0)
-            if control_message_id:
-                try:
-                    await message.bot.edit_message_text(chat_id=int(message.chat.id), message_id=control_message_id, text=reply)
-                    return
-                except Exception:
-                    pass
             await message.answer(reply, reply_markup=_menu_keyboard())
         except Exception as exc:
             await message.answer(f"\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u63d0\u4ea4\u5931\u8d25\uff1a{exc}", reply_markup=_menu_keyboard())
@@ -1983,8 +2090,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params["resolution_selected"] = True
             params.update({"duration_selected": False, "prompt_mode_selected": False, "prompt_extend_selected": False})
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="resolution")
+            await _show_video_i2v_step_from_callback(callback, state, step="duration")
             await callback.answer("\u5df2\u9009\u62e9\u5206\u8fa8\u7387")
+            return
+        if action.startswith("video_i2v:duration:"):
+            value = action.rsplit(":", 1)[-1]
+            try:
+                duration = int(value)
+            except ValueError:
+                duration = 2
+            if duration not in {2, 5, 8, 15}:
+                await callback.answer("\u8bf7\u9009\u62e9\u53ef\u7528\u7684\u89c6\u9891\u65f6\u957f", show_alert=True)
+                return
+            params["duration"] = duration
+            params["duration_selected"] = True
+            params.update({"prompt_mode_selected": False, "prompt_extend_selected": False})
+            await state.update_data(**params)
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
+            await callback.answer("\u5df2\u9009\u62e9\u89c6\u9891\u65f6\u957f")
             return
         if action.startswith("video_i2v:prompt_mode:"):
             params["use_grok"] = action.endswith(":grok")
@@ -1992,14 +2115,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params["prompt_mode_label"] = "Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
             params["prompt_extend_selected"] = False
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
+            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
             await callback.answer("\u5df2\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f")
             return
         if action.startswith("video_i2v:extend:"):
             params["prompt_extend"] = action.endswith(":on")
             params["prompt_extend_selected"] = True
             await state.update_data(**params)
-            await _show_video_i2v_step_from_callback(callback, state, step="prompt_extend")
+            await _show_video_i2v_step_from_callback(callback, state, step="image")
             await callback.answer("\u5df2\u9009\u62e9\u63a5\u53e3\u6269\u5199")
             return
         await callback.answer()
@@ -2025,11 +2148,18 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.update_data(work_dir=str(work_dir))
         await message.answer("🌟 联合替换工作流\n步骤 1/5：请上传原视频。", reply_markup=_menu_keyboard())
 
-    async def start_text_to_image_flow(message: Message, state: FSMContext) -> None:
-        await state.clear()
-        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
-        params = _text_to_image_params()
+    async def _current_text_to_image_runtime_params() -> dict[str, Any]:
+        try:
+            runtime = await asyncio.to_thread(_fetch_webapp_runtime_config)
+        except Exception:
+            logger.exception("Failed to fetch runtime config from webapp API; falling back to runtime file")
+            runtime = _load_runtime_config(config)
+        return _text_to_image_runtime_params(runtime)
+
+    async def _set_text_to_image_runtime_state(state: FSMContext, params: dict[str, Any]) -> None:
         await state.update_data(
+            text_to_image_workflow_profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+            text_to_image_workflow_path=str(params.get("text_to_image_workflow_path") or ""),
             aspect_ratio=params["aspect_ratio"],
             width=params["width"],
             height=params["height"],
@@ -2043,9 +2173,60 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             prompt_mode_selected=False,
             prompt_mode_label="",
         )
+
+    async def _refresh_text_to_image_runtime_state(state: FSMContext) -> tuple[dict[str, Any], bool]:
+        data = await state.get_data()
+        current_path = str(data.get("text_to_image_workflow_path") or "").strip()
+        current_profile = str(data.get("text_to_image_workflow_profile") or "").strip()
+        params = await _current_text_to_image_runtime_params()
+        latest_path = str(params.get("text_to_image_workflow_path") or "").strip()
+        latest_profile = str(params.get("text_to_image_workflow_profile") or "").strip()
+        changed = latest_path != current_path or latest_profile != current_profile
+        if changed:
+            await _set_text_to_image_runtime_state(state, params)
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
+        else:
+            params = _text_to_image_params(data)
+            params["text_to_image_workflow_path"] = current_path
+        return params, changed
+
+    async def start_text_to_image_flow(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
+        runtime = _load_runtime_config(config)
+        source = str(runtime.get("comfy_workflow_source") or "remote").strip().lower()
+        mappings = runtime.get("local_comfy_workflow_mappings") if source == "local" else runtime.get("remote_comfy_workflow_mappings")
+        mappings = mappings if isinstance(mappings, dict) else {}
+        workflow_path = str(mappings.get("text_to_image") or "").strip()
+        workflow_profile = _text_to_image_workflow_profile_from_path(workflow_path)
+        params = _text_to_image_params(
+            {
+                "text_to_image_workflow_profile": workflow_profile,
+                "text_to_image_workflow_path": workflow_path,
+            }
+        )
+        await state.update_data(
+            text_to_image_workflow_profile=workflow_profile,
+            text_to_image_workflow_path=workflow_path,
+            aspect_ratio=params["aspect_ratio"],
+            width=params["width"],
+            height=params["height"],
+            final_resolution_enabled=bool(params["final_resolution_enabled"]),
+            persona_available=bool(params["persona_available"]),
+            persona_enabled=bool(params["persona_enabled"]),
+            persona_lora=str(params["persona_lora"] or ""),
+            ratio_selected=False,
+            resolution_selected=False,
+            persona_selected=False,
+            prompt_mode_selected=False,
+            prompt_mode_label="",
+        )
+        params = await _current_text_to_image_runtime_params()
+        workflow_profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
+        await _set_text_to_image_runtime_state(state, params)
         await message.answer(
             _text_to_image_status_text(step="1/4 请选择图像比例", params=params),
-            reply_markup=_text_to_image_ratio_reply_keyboard(),
+            reply_markup=_text_to_image_ratio_reply_keyboard(profile=workflow_profile),
         )
 
     async def _show_text_to_image_prompt_review(message: Message, state: FSMContext, *, prompt_text: str, selected_model: str = "") -> None:
@@ -2059,6 +2240,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             prompt_display_ready=True,
             prompt_display_pending=False,
         )
+        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
         text = "\n\n".join(
             [
                 "文生图 3/3：Grok 已生成最终提示词。",
@@ -2147,16 +2329,22 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             original_user_request=original_for_state,
             final_prompt_text=prompt_text,
             selected_model=selected_model,
-            prompt_display_ready=False,
-            prompt_display_pending=True,
+            prompt_display_text=prompt_text,
+            prompt_display_ready=True,
+            prompt_display_pending=False,
         )
-        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
-        try:
-            await _show_text_to_image_prompt_review(message, state, prompt_text=prompt_text, selected_model=selected_model)
-        except Exception as exc:
-            await _show_text_to_image_display_pending(message, state, exc=exc)
+        await _show_text_to_image_prompt_review(message, state, prompt_text=prompt_text, selected_model=selected_model)
 
     async def _submit_text_to_image_from_state(message: Message, state: FSMContext) -> None:
+        params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
+        if runtime_changed:
+            profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
+            await message.answer(
+                "\u540e\u53f0\u6587\u751f\u56fe\u5de5\u4f5c\u6d41\u5df2\u66f4\u65b0\uff0c"
+                "\u672c\u6b21\u672a\u63d0\u4ea4\u5230\u961f\u5217\u3002\u8bf7\u6309\u6700\u65b0\u53c2\u6570\u91cd\u65b0\u9009\u62e9\u3002",
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
+            )
+            return
         data = await state.get_data()
         params = _text_to_image_params(data)
         final_prompt = str(data.get("final_prompt_text") or "").strip()
@@ -2175,6 +2363,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "prompt": final_prompt,
             "prompt_text": final_prompt,
             "message": final_prompt,
+            "text_to_image_workflow_profile": str(params.get("text_to_image_workflow_profile") or ""),
+            "text_to_image_workflow_path": str(data.get("text_to_image_workflow_path") or ""),
             "width": params["width"],
             "height": params["height"],
             "aspect_ratio": params["aspect_ratio"],
@@ -2356,9 +2546,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await _show_text_to_image_prompt_mode(callback.message, state)
             await callback.answer("请继续输入提示词")
             return
+        params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
+        if runtime_changed:
+            profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
+            text = (
+                "\u540e\u53f0\u6587\u751f\u56fe\u5de5\u4f5c\u6d41\u5df2\u66f4\u65b0\uff0c"
+                "\u5df2\u540c\u6b65\u6700\u65b0\u53ef\u9009\u53c2\u6570\u3002\n\n"
+                + _text_to_image_status_text(step="1/4 \u8bf7\u9009\u62e9\u56fe\u50cf\u6bd4\u4f8b", params=params)
+            )
+            try:
+                await callback.message.edit_text(text, reply_markup=_text_to_image_ratio_keyboard(profile=profile))
+            except Exception:
+                await callback.message.answer(text, reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile))
+            await callback.answer("\u5df2\u540c\u6b65\u540e\u53f0\u5de5\u4f5c\u6d41")
+            return
+        data = await state.get_data()
         if action.startswith("t2i:ratio:"):
             ratio = action.split(":", 2)[-1]
-            if ratio in TEXT_TO_IMAGE_RATIO_OPTIONS:
+            if ratio in _text_to_image_ratio_options(str(_text_to_image_params(data).get("text_to_image_workflow_profile") or "zit_final")):
                 option = _text_to_image_params({**data, "aspect_ratio": ratio})
                 current_params = _text_to_image_params(data)
                 final_enabled = bool(current_params["final_resolution_enabled"])
@@ -2387,12 +2592,18 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 try:
                     await callback.message.edit_text(
                         _text_to_image_status_text(step="2/4 请选择最终分辨率", params=option),
-                        reply_markup=_text_to_image_resolution_keyboard(final_resolution_enabled=final_enabled),
+                        reply_markup=_text_to_image_resolution_keyboard(
+                            final_resolution_enabled=final_enabled,
+                            final_resolution_available=bool(option.get("final_resolution_available")),
+                        ),
                     )
                 except Exception:
                     await callback.message.answer(
                         _text_to_image_status_text(step="2/4 请选择最终分辨率", params=option),
-                        reply_markup=_text_to_image_resolution_keyboard(final_resolution_enabled=final_enabled),
+                        reply_markup=_text_to_image_resolution_keyboard(
+                            final_resolution_enabled=final_enabled,
+                            final_resolution_available=bool(option.get("final_resolution_available")),
+                        ),
                     )
                 await callback.answer("请选择分辨率")
                 return
@@ -2407,6 +2618,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reply_markup=_text_to_image_resolution_keyboard(
                         final_resolution_enabled=bool(params["final_resolution_enabled"]),
                         selected=bool(params.get("resolution_selected")),
+                        final_resolution_available=bool(params.get("final_resolution_available")),
                     ),
                 )
             except Exception:
@@ -2415,6 +2627,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reply_markup=_text_to_image_resolution_keyboard(
                         final_resolution_enabled=bool(params["final_resolution_enabled"]),
                         selected=bool(params.get("resolution_selected")),
+                        final_resolution_available=bool(params.get("final_resolution_available")),
                     ),
                 )
             await callback.answer("请选择分辨率")
@@ -2426,14 +2639,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await callback.message.edit_text(
                     _text_to_image_status_text(step="1/4 请选择图像比例", params=params),
                     reply_markup=_text_to_image_ratio_keyboard(
-                        selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else ""
+                        selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
+                        profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
                     ),
                 )
             except Exception:
                 await callback.message.answer(
                     _text_to_image_status_text(step="1/4 请选择图像比例", params=params),
                     reply_markup=_text_to_image_ratio_keyboard(
-                        selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else ""
+                        selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
+                        profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
                     ),
                 )
             await callback.answer("已返回比例")
@@ -2465,6 +2680,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 final_enabled = not bool(params["final_resolution_enabled"])
             else:
                 final_enabled = action.endswith(":on")
+            if final_enabled and not bool(params.get("final_resolution_available")):
+                await callback.answer("当前工作流不支持最终分辨率，请选择使用基础分辨率。", show_alert=True)
+                return
             await state.update_data(
                 final_resolution_enabled=final_enabled,
                 resolution_selected=True,
@@ -2489,6 +2707,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
                     selected=bool(params.get("persona_selected")),
+                    profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
                 )
                 try:
                     await callback.message.edit_text(text, reply_markup=markup)
@@ -2514,6 +2733,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
                     selected=bool(params.get("persona_selected")),
+                    profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
                 )
                 try:
                     await callback.message.edit_text(text, reply_markup=markup)
@@ -2547,6 +2767,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reply_markup=_text_to_image_resolution_keyboard(
                         final_resolution_enabled=bool(params["final_resolution_enabled"]),
                         selected=bool(params.get("resolution_selected")),
+                        final_resolution_available=bool(params.get("final_resolution_available")),
                     ),
                 )
             except Exception:
@@ -2555,13 +2776,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reply_markup=_text_to_image_resolution_keyboard(
                         final_resolution_enabled=bool(params["final_resolution_enabled"]),
                         selected=bool(params.get("resolution_selected")),
+                        final_resolution_available=bool(params.get("final_resolution_available")),
                     ),
                 )
             await callback.answer("已返回分辨率")
             return
         if action.startswith("t2i:persona:"):
             persona_key = action.rsplit(":", 1)[-1]
-            options = _text_to_image_persona_options()
+            params = _text_to_image_params(data)
+            profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
+            options = _text_to_image_persona_options(profile=profile)
             persona_enabled = persona_key != "off"
             selected_lora = ""
             if persona_enabled:
@@ -2574,7 +2798,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     return
             await state.update_data(
                 persona_enabled=persona_enabled,
-                persona_lora=selected_lora or _text_to_image_default_persona_path(),
+                persona_lora=selected_lora or _text_to_image_default_persona_path(profile=profile),
                 persona_selected=True,
                 prompt_mode_selected=False,
                 prompt_mode_label="",
@@ -2635,6 +2859,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
                     selected=bool(params.get("persona_selected")),
+                    profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
                 )
                 try:
                     await callback.message.edit_text(text, reply_markup=markup)
@@ -2646,6 +2871,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 markup = _text_to_image_resolution_keyboard(
                     final_resolution_enabled=bool(params["final_resolution_enabled"]),
                     selected=bool(params.get("resolution_selected")),
+                    final_resolution_available=bool(params.get("final_resolution_available")),
                 )
                 try:
                     await callback.message.edit_text(text, reply_markup=markup)
@@ -2675,7 +2901,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             await callback.message.answer(
                 _text_to_image_status_text(step="1/4 请重新选择图像比例", params=params),
-                reply_markup=_text_to_image_ratio_reply_keyboard(),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
             )
             await callback.answer()
             return
@@ -2757,6 +2983,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
+        params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
+        if runtime_changed:
+            profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
+            await message.answer(
+                "\u540e\u53f0\u6587\u751f\u56fe\u5de5\u4f5c\u6d41\u5df2\u66f4\u65b0\uff0c"
+                "\u5df2\u540c\u6b65\u6700\u65b0\u53ef\u9009\u53c2\u6570\u3002\n\n"
+                + _text_to_image_status_text(step="1/4 \u8bf7\u9009\u62e9\u56fe\u50cf\u6bd4\u4f8b", params=params),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
+            )
+            return
         data = await state.get_data()
         params = _text_to_image_params(data)
         current_state = await state.get_state()
@@ -2764,35 +3000,39 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
 
         if current_state == ProductionWorkflowForm.text_to_image_waiting_for_ratio.state:
             selected_ratio = ""
-            for ratio, option in TEXT_TO_IMAGE_RATIO_OPTIONS.items():
+            profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
+            for ratio, option in _text_to_image_ratio_options(profile).items():
                 if text == str(option.get("label") or ""):
                     selected_ratio = ratio
                     break
             if selected_ratio:
                 option = _text_to_image_params({**data, "aspect_ratio": selected_ratio})
+                option["ratio_selected"] = True
+                option["resolution_selected"] = False
+                option["persona_selected"] = False
+                option["prompt_mode_selected"] = False
                 await state.update_data(
                     aspect_ratio=selected_ratio,
                     width=option["width"],
                     height=option["height"],
+                    final_resolution_enabled=bool(option["final_resolution_enabled"]),
                     ratio_selected=True,
                     resolution_selected=False,
                     persona_selected=False,
                     prompt_mode_selected=False,
                     prompt_mode_label="",
                 )
-                option["ratio_selected"] = True
-                option["resolution_selected"] = False
-                option["persona_selected"] = False
-                option["prompt_mode_selected"] = False
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                 await message.answer(
                     _text_to_image_status_text(step="2/4 请选择最终分辨率", params=option),
-                    reply_markup=_text_to_image_resolution_reply_keyboard(),
+                    reply_markup=_text_to_image_resolution_reply_keyboard(
+                        final_resolution_available=bool(option.get("final_resolution_available"))
+                    ),
                 )
                 return
             await message.answer(
                 _text_to_image_status_text(step="1/4 请先选择图像比例", params=params),
-                reply_markup=_text_to_image_ratio_reply_keyboard(),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
             )
             return
 
@@ -2801,10 +3041,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
                 await message.answer(
                     _text_to_image_status_text(step="1/4 请选择图像比例", params=params),
-                    reply_markup=_text_to_image_ratio_reply_keyboard(),
+                    reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                 )
                 return
             if text in {"使用基础分辨率", "开启最终分辨率"}:
+                if text == "开启最终分辨率" and not bool(params.get("final_resolution_available")):
+                    await message.answer(
+                        "当前工作流不支持最终分辨率，请选择“使用基础分辨率”。",
+                        reply_markup=_text_to_image_resolution_reply_keyboard(final_resolution_available=False),
+                    )
+                    return
                 final_enabled = text == "开启最终分辨率"
                 await state.update_data(
                     final_resolution_enabled=final_enabled,
@@ -2827,14 +3073,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
                     await message.answer(
                         _text_to_image_status_text(step="3/4 请选择人设 LoRA", params=params),
-                        reply_markup=_text_to_image_persona_reply_keyboard(),
+                        reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                 else:
                     await _show_text_to_image_prompt_mode(message, state)
                 return
-            await message.answer(
-                _text_to_image_status_text(step="2/4 请先选择最终分辨率", params=params),
-                reply_markup=_text_to_image_resolution_reply_keyboard(),
+                await message.answer(
+                    _text_to_image_status_text(step="2/4 请先选择最终分辨率", params=params),
+                    reply_markup=_text_to_image_resolution_reply_keyboard(
+                        final_resolution_available=bool(params.get("final_resolution_available"))
+                    ),
             )
             return
 
@@ -2844,25 +3092,27 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                 await message.answer(
                     _text_to_image_status_text(step="2/4 请选择最终分辨率", params=params),
-                    reply_markup=_text_to_image_resolution_reply_keyboard(),
+                    reply_markup=_text_to_image_resolution_reply_keyboard(
+                        final_resolution_available=bool(params.get("final_resolution_available"))
+                    ),
                 )
                 return
             persona_enabled = text != "不使用人设"
             selected_lora = ""
             if persona_enabled:
-                for option in _text_to_image_persona_options():
+                for option in _text_to_image_persona_options(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")):
                     if text == str(option.get("label") or ""):
                         selected_lora = str(option.get("path") or "")
                         break
                 if not selected_lora:
                     await message.answer(
                         _text_to_image_status_text(step="3/4 请先选择人设 LoRA", params=params),
-                        reply_markup=_text_to_image_persona_reply_keyboard(),
+                        reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                     return
             await state.update_data(
                 persona_enabled=persona_enabled,
-                persona_lora=selected_lora or _text_to_image_default_persona_path(),
+                persona_lora=selected_lora or _text_to_image_default_persona_path(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                 persona_selected=True,
                 prompt_mode_selected=False,
                 prompt_mode_label="",
@@ -2886,13 +3136,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
                     await message.answer(
                         _text_to_image_status_text(step="3/4 请选择人设 LoRA", params=params),
-                        reply_markup=_text_to_image_persona_reply_keyboard(),
+                        reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                 else:
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                     await message.answer(
                         _text_to_image_status_text(step="2/3 请选择最终分辨率", params=params),
-                        reply_markup=_text_to_image_resolution_reply_keyboard(),
+                        reply_markup=_text_to_image_resolution_reply_keyboard(
+                            final_resolution_available=bool(params.get("final_resolution_available"))
+                        ),
                     )
                 return
             if text == "让 Grok 生成提示词":
@@ -2933,8 +3185,27 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
+        params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
+        if runtime_changed:
+            profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
+            await message.answer(
+                "\u540e\u53f0\u6587\u751f\u56fe\u5de5\u4f5c\u6d41\u5df2\u66f4\u65b0\uff0c"
+                "\u5df2\u540c\u6b65\u6700\u65b0\u53ef\u9009\u53c2\u6570\u3002\n\n"
+                + _text_to_image_status_text(step="1/4 \u8bf7\u9009\u62e9\u56fe\u50cf\u6bd4\u4f8b", params=params),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
+            )
+            return
         prompt = _message_text(message)
         data = await state.get_data()
+        if prompt == "使用这个提示词生成" and not _image_ext_from_message(message):
+            if str(data.get("final_prompt_text") or "").strip():
+                try:
+                    await _submit_text_to_image_from_state(message, state)
+                except Exception as exc:
+                    await message.answer(f"文生图任务提交失败：{exc}", reply_markup=_text_to_image_prompt_reply_keyboard())
+                return
+            await message.answer("还没有可用的最终提示词，请先输入图片需求。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
+            return
         if prompt == "上一步" and not _image_ext_from_message(message):
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             await _show_text_to_image_prompt_mode(message, state)
@@ -3075,7 +3346,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             await message.answer(
                 _text_to_image_status_text(step="1/4 请重新选择图像比例", params=params),
-                reply_markup=_text_to_image_ratio_reply_keyboard(),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
             )
             return
         original = str(data.get("original_user_request") or "").strip()
@@ -3404,6 +3675,78 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         current_state = await state.get_state()
         text = _message_text(message).strip()
+        button_text = _canonical_button_text(text).replace("\u2713", "").strip()
+        data = await state.get_data()
+        params = _video_i2v_state_params(data)
+        if button_text == "\u4e0a\u4e00\u6b65":
+            if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
+                params.update(
+                    {
+                        "resolution_selected": False,
+                        "duration_selected": False,
+                        "prompt_mode_selected": False,
+                        "prompt_extend_selected": False,
+                    }
+                )
+                await state.update_data(**params)
+                await _show_video_i2v_step(message, state, step="resolution")
+                return
+            if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode.state:
+                params.update({"duration_selected": False, "prompt_mode_selected": False, "prompt_extend_selected": False})
+                await state.update_data(**params)
+                await _show_video_i2v_step(message, state, step="duration")
+                return
+            if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend.state:
+                params.update({"prompt_mode_selected": False, "prompt_extend_selected": False})
+                await state.update_data(**params)
+                await _show_video_i2v_step(message, state, step="prompt_mode")
+                return
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_resolution.state:
+            if button_text.startswith("720p"):
+                params["resolution"] = "720p"
+            elif button_text.startswith("1080p"):
+                params["resolution"] = "1080p"
+            else:
+                await message.answer("\u8bf7\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u9009\u62e9\u5206\u8fa8\u7387\u3002")
+                await _show_video_i2v_step(message, state, step="resolution")
+                return
+            params["resolution_selected"] = True
+            params.update({"duration_selected": False, "prompt_mode_selected": False, "prompt_extend_selected": False})
+            await state.update_data(**params)
+            await _show_video_i2v_step(message, state, step="duration")
+            return
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
+            if button_text != text:
+                text = button_text
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode.state:
+            if button_text == "\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd":
+                params["use_grok"] = True
+                params["prompt_mode_label"] = "Grok \u751f\u6210"
+            elif button_text == "\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4":
+                params["use_grok"] = False
+                params["prompt_mode_label"] = "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
+            else:
+                await message.answer("\u8bf7\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f\u3002")
+                await _show_video_i2v_step(message, state, step="prompt_mode")
+                return
+            params["prompt_mode_selected"] = True
+            params["prompt_extend_selected"] = False
+            await state.update_data(**params)
+            await _show_video_i2v_step(message, state, step="prompt_extend")
+            return
+        if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_extend.state:
+            if button_text == "\u5f00\u542f\u63a5\u53e3\u6269\u5199":
+                params["prompt_extend"] = True
+            elif button_text == "\u5173\u95ed":
+                params["prompt_extend"] = False
+            else:
+                await message.answer("\u8bf7\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u9009\u62e9\u63a5\u53e3\u6269\u5199\u3002")
+                await _show_video_i2v_step(message, state, step="prompt_extend")
+                return
+            params["prompt_extend_selected"] = True
+            await state.update_data(**params)
+            await _show_video_i2v_step(message, state, step="image")
+            return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
             if not text.isdigit():
                 await message.answer("请输入 2 到 15 秒之间的整数，例如：5。")
@@ -3433,6 +3776,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
+        if _canonical_button_text(_message_text(message)).strip() == "\u4e0a\u4e00\u6b65":
+            data = await state.get_data()
+            params = _video_i2v_state_params(data)
+            params["prompt_extend_selected"] = False
+            await state.update_data(**params)
+            await _show_video_i2v_step(message, state, step="prompt_extend")
+            return
         suffix = _image_ext_from_message(message)
         if suffix is None:
             await message.answer("请上传一张参考图片。")
@@ -3448,7 +3798,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await _submit_video_i2v_from_state(message, state, caption)
             return
         await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
-        await _show_video_i2v_step(message, state, step="prompt")
+        await message.answer(
+            "已收到参考图。\n\n请直接输入这次图生视频的画面和动作需求。",
+            reply_markup=_video_i2v_prompt_keyboard(),
+        )
 
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
     async def on_video_i2v_prompt(message: Message, state: FSMContext) -> None:
@@ -3459,8 +3812,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         prompt = _message_text(message)
+        if _canonical_button_text(prompt).strip() == "\u4e0a\u4e00\u6b65":
+            await _show_video_i2v_step(message, state, step="image")
+            return
         if not prompt:
-            await _show_video_i2v_step(message, state, step="prompt")
+            await message.answer("请直接输入这次图生视频的画面和动作需求。", reply_markup=_video_i2v_prompt_keyboard())
             return
         await _submit_video_i2v_from_state(message, state, prompt)
 

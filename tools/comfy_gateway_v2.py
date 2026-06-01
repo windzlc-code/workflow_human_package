@@ -29,6 +29,7 @@ CONVERTER_VERSION = "2026-05-28.1"
 CONVERTED_ROOT = WORKFLOW_ROOTS[1][1] / "__converted__"
 CONVERT_MANIFEST_PATH = CONVERTED_ROOT / "manifest.json"
 CUSTOM_NODES_ROOT = (COMFY_ROOT / "custom_nodes").resolve()
+INPUT_ROOT = (COMFY_ROOT / "input").resolve()
 
 
 def _json_bytes(data: Any) -> bytes:
@@ -99,6 +100,25 @@ def _safe_workflow_write_path(root_name: Any, value: Any) -> Path:
     return candidate
 
 
+def _safe_input_image_path(subfolder_value: Any, filename_value: Any) -> tuple[Path, str, str]:
+    filename = Path(str(filename_value or "").replace("\\", "/")).name
+    if not filename:
+        raise ValueError("filename is required")
+    if Path(filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+        raise ValueError("unsupported image extension")
+    subfolder = str(subfolder_value or "telegram").replace("\\", "/").strip().strip("/")
+    parts = Path(subfolder).parts if subfolder else ()
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("invalid image subfolder")
+    target_dir = (INPUT_ROOT / subfolder).resolve() if subfolder else INPUT_ROOT
+    if INPUT_ROOT != target_dir and INPUT_ROOT not in target_dir.parents:
+        raise ValueError("image path escapes input root")
+    target = (target_dir / filename).resolve()
+    if target_dir != target.parent or (INPUT_ROOT != target and INPUT_ROOT not in target.parents):
+        raise ValueError("image path escapes input root")
+    return target, filename, subfolder
+
+
 def _decode_upload_content(body: dict[str, Any]) -> bytes:
     if isinstance(body.get("content_b64"), str):
         return base64.b64decode(body["content_b64"], validate=True)
@@ -130,6 +150,31 @@ def _upload_workflow(body: dict[str, Any]) -> dict[str, Any]:
         "kind": kind,
         "bytes": len(raw),
         "sha256": actual_sha,
+    }
+
+
+def _upload_input_image(body: dict[str, Any]) -> dict[str, Any]:
+    target, filename, subfolder = _safe_input_image_path(body.get("subfolder"), body.get("filename") or body.get("name"))
+    raw = _decode_upload_content(body)
+    if len(raw) > 30 * 1024 * 1024:
+        raise ValueError("image upload is too large")
+    overwrite = str(body.get("overwrite") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if target.exists() and not overwrite:
+        target = target.with_name(f"{target.stem}_{uuid.uuid4().hex[:8]}{target.suffix}")
+        filename = target.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw)
+    image_value = f"{subfolder}/{filename}" if subfolder else filename
+    return {
+        "ok": True,
+        "name": filename,
+        "filename": filename,
+        "subfolder": subfolder,
+        "type": "input",
+        "image": image_value,
+        "path": str(target),
+        "size": len(raw),
+        "sha256": _sha256_bytes(raw),
     }
 
 
@@ -820,6 +865,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, _convert_workflows(body))
             elif path == "/api/workflows/upload":
                 self._send(200, _upload_workflow(body))
+            elif path == "/api/upload/image":
+                self._send(200, _upload_input_image(body))
             elif path == "/api/models/check":
                 self._send(200, _check_models(body))
             elif path == "/api/models/upload_chunk":
