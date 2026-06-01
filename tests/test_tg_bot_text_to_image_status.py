@@ -56,6 +56,23 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertIn("输入自定义提示词", labels)
         self.assertNotIn("使用这个提示词生成", labels)
 
+    def test_video_prompt_failure_keyboard_prioritizes_available_actions(self) -> None:
+        markup = bot._video_i2v_prompt_failure_keyboard()
+
+        self.assertIsInstance(markup, ReplyKeyboardMarkup)
+        rows = [[button.text for button in row] for row in markup.keyboard]
+        self.assertEqual(
+            rows,
+            [
+                ["重新生成提示词"],
+                ["输入自定义提示词提交"],
+                ["返回参数设置", bot.MAIN_MENU_BUTTON],
+            ],
+        )
+        labels = [label for row in rows for label in row]
+        self.assertNotIn("使用这个提示词生成", labels)
+        self.assertNotIn("继续让 Grok 调整", labels)
+
 
 if __name__ == "__main__":
     unittest.main()

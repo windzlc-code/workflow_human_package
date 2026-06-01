@@ -921,6 +921,17 @@ def _video_i2v_prompt_review_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def _video_i2v_prompt_failure_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="重新生成提示词")],
+            [KeyboardButton(text="输入自定义提示词提交")],
+            [KeyboardButton(text="返回参数设置"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def _video_i2v_audio_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -2221,7 +2232,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     f"{_format_grok_preview_error(exc)}\n\n"
                     "任务还没有提交，当前图生视频参数已保留。可以点击“重新生成提示词”再试一次，"
                     "或点击“输入自定义提示词提交”跳过 Grok。",
-                    reply_markup=_video_i2v_prompt_review_keyboard(),
+                    reply_markup=_video_i2v_prompt_failure_keyboard(),
                 )
                 return
             await message.answer(f"\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u63d0\u4ea4\u5931\u8d25\uff1a{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
@@ -4402,7 +4413,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if button_text == "使用这个提示词生成":
             final_prompt = str(data.get("video_i2v_generated_prompt") or "").strip()
             if not final_prompt:
-                await message.answer("还没有可用的视频提示词，请先输入需求让 Grok 生成。", reply_markup=_video_i2v_prompt_review_keyboard())
+                await message.answer("还没有可用的视频提示词，请先输入需求让 Grok 生成。", reply_markup=_video_i2v_prompt_failure_keyboard())
                 return
             submit_params = dict(params)
             submit_params["use_grok"] = False
