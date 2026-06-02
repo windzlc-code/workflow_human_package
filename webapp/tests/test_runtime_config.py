@@ -566,6 +566,77 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertNotIn("米白色", anchored)
         self.assertNotIn("直筒下裝", anchored)
 
+    def test_persona_body_profile_is_injected_for_jinjunya_lora(self):
+        payload = server._apply_persona_body_profile_to_payload(
+            "text_to_image",
+            {
+                "prompt": "一位成人女性站在现代卧室中，她的左手扶着椅背而右手自然下垂，她的身体朝向镜头，她的头转向镜头",
+                "persona_enabled": True,
+                "persona_lora": r"Character Setting\人设1捞女1金君雅.safetensors",
+                "persona_label": "人设1捞女1金君雅",
+                "negative_prompt": "low quality",
+            },
+        )
+
+        self.assertIn("身材约束", payload["prompt"])
+        self.assertIn("腰部很细", payload["prompt"])
+        self.assertIn("胯部和臀部曲线明显", payload["prompt"])
+        self.assertEqual(payload["prompt_text"], payload["prompt"])
+        self.assertEqual(payload["tg_persona_body_profile_id"], "jinjunya_gy")
+        self.assertIn("粗腰", payload["negative_prompt"])
+        self.assertIn("low quality", payload["negative_prompt"])
+
+    def test_persona_body_profile_not_injected_when_persona_disabled(self):
+        payload = server._apply_persona_body_profile_to_payload(
+            "text_to_image",
+            {
+                "prompt": "一位成人女性站在现代卧室中",
+                "persona_enabled": False,
+                "persona_lora": r"Character Setting\人设1捞女1金君雅.safetensors",
+            },
+        )
+
+        self.assertNotIn("身材约束", payload["prompt"])
+        self.assertNotIn("tg_persona_body_profile_id", payload)
+
+    def test_persona_body_profile_does_not_duplicate_prompt_or_negative(self):
+        body_profile = server.PERSONA_BODY_PROFILES["jinjunya_gy"]["body_profile_prompt"]
+        negative = server.PERSONA_BODY_PROFILES["jinjunya_gy"]["negative_body_prompt"]
+        payload = server._apply_persona_body_profile_to_payload(
+            "text_to_image",
+            {
+                "prompt": f"{body_profile}，一位成人女性站在现代卧室中",
+                "negative_prompt": negative,
+                "persona_enabled": True,
+                "persona_label": "人设1金君雅",
+            },
+        )
+
+        self.assertEqual(payload["prompt"].count(body_profile), 1)
+        self.assertEqual(payload["negative_prompt"].count(negative), 1)
+
+    def test_persona_body_profile_runtime_config_can_override_profile(self):
+        payload = server._apply_persona_body_profile_to_payload(
+            "text_to_image",
+            {
+                "prompt": "一位成人女性站在现代卧室中",
+                "persona_enabled": True,
+                "persona_lora": r"Character Setting\人设1捞女1金君雅.safetensors",
+                "persona_body_profiles": {
+                    "custom_jinjunya": {
+                        "label": "自定义金君雅",
+                        "match_terms": ["金君雅", "人设1捞女1金君雅.safetensors"],
+                        "body_profile_prompt": "身材约束：自定义纤细沙漏体型",
+                        "negative_body_prompt": "自定义负面体型漂移",
+                    }
+                },
+            },
+        )
+
+        self.assertEqual(payload["tg_persona_body_profile_id"], "custom_jinjunya")
+        self.assertIn("自定义纤细沙漏体型", payload["prompt"])
+        self.assertIn("自定义负面体型漂移", payload["negative_prompt"])
+
     def test_finished_text_to_image_uses_reply_keyboard(self):
         markup = server._send_telegram_reply_markup_for_finished_task("task_1", "text_to_image")
 
@@ -1027,7 +1098,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(check["reason"], "insufficient_vram")
         self.assertGreater(check["required_free_gb"], 7)
 
-    def test_comfy_gpu_capacity_check_waits_when_comfy_queue_running(self):
+    def test_comfy_gpu_capacity_check_allows_queue_running_below_limit(self):
         def fake_gateway_json(**kwargs):
             if kwargs["path"] == "/api/health":
                 return {
@@ -1045,7 +1116,39 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             return {}
 
         with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json), \
-             patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True):
+             patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True), \
+             patch.object(server, "COMFY_GPU_MAX_CONCURRENCY", 2):
+            check = server._comfy_gpu_capacity_check(
+                gateway_url="http://gateway",
+                token="secret",
+                payload={"_task_id": "task_gpu_queue", "_task_type": "single_image_edit"},
+                workflow_path="edit.api.json",
+                body={"path": "edit.api.json"},
+            )
+
+        self.assertTrue(check["ok"])
+        self.assertEqual(check["reason"], "capacity_available")
+
+    def test_comfy_gpu_capacity_check_waits_when_comfy_queue_reaches_limit(self):
+        def fake_gateway_json(**kwargs):
+            if kwargs["path"] == "/api/health":
+                return {
+                    "devices": [
+                        {
+                            "name": "4090",
+                            "type": "cuda",
+                            "vram_total": 24 * 1024**3,
+                            "vram_free": 22 * 1024**3,
+                        }
+                    ]
+                }
+            if kwargs["path"] == "/api/queue":
+                return {"queue_running": [["prompt-running"], ["prompt-running-2"]], "queue_pending": []}
+            return {}
+
+        with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json), \
+             patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True), \
+             patch.object(server, "COMFY_GPU_MAX_CONCURRENCY", 2):
             check = server._comfy_gpu_capacity_check(
                 gateway_url="http://gateway",
                 token="secret",
@@ -1056,6 +1159,15 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertFalse(check["ok"])
         self.assertEqual(check["reason"], "comfy_running")
+
+    def test_person_t2i_keeps_batch_three_but_returns_nine_to_telegram(self):
+        workflow = "__converted__/person_t2i.api.json"
+
+        self.assertEqual(server._remote_comfy_default_batch_size("text_to_image", workflow), 3)
+        self.assertEqual(
+            server._text_to_image_qa_target_count({}, batch_size=3, workflow_path=workflow),
+            9,
+        )
 
     def test_text_to_image_auto_qa_rejects_hand_limb_audit_extra_hands(self):
         report = {
@@ -1221,6 +1333,8 @@ class RuntimeConfigStoreTests(unittest.TestCase):
     def test_text_to_image_aspect_ratio_pose_guidance_matches_orientation(self):
         portrait = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "9:16", "width": 576, "height": 1024})
         landscape = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "16:9", "width": 1024, "height": 576})
+        base_landscape = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "3:2", "width": 960, "height": 640})
+        balanced_landscape = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "4:3", "width": 896, "height": 672})
         square = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "1:1", "width": 768, "height": 768})
 
         self.assertIn("手机长竖图", portrait)
@@ -1229,6 +1343,9 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIn("横向场景动作", landscape)
         self.assertIn("正方形构图", square)
         self.assertIn("居中半身", square)
+
+        self.assertIn("3:2", base_landscape)
+        self.assertIn("4:3", balanced_landscape)
 
     def test_tg_image_fallback_prompt_includes_aspect_ratio_pose_guidance(self):
         prompt = server._build_tg_image_fallback_prompt(

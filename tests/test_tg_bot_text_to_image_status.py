@@ -152,6 +152,31 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertNotIn("196", node_inputs)
         self.assertNotIn("197", node_inputs)
 
+    def test_text_to_image_ratio_options_include_common_view_ratios(self) -> None:
+        expected = ["2:3", "3:4", "9:16", "3:2", "4:3", "16:9", "1:1"]
+
+        standard_ratios = list(bot._text_to_image_ratio_options("zit_final").keys())
+        person_ratios = list(bot._text_to_image_ratio_options("person_t2i").keys())
+
+        for ratio in expected:
+            self.assertIn(ratio, standard_ratios)
+            self.assertIn(ratio, person_ratios)
+
+    def test_person_t2i_widescreen_ratio_updates_comfy_dimensions(self) -> None:
+        params = bot._text_to_image_params(
+            {
+                "text_to_image_workflow_profile": "person_t2i",
+                "aspect_ratio": "16:9",
+            }
+        )
+        node_inputs = bot._text_to_image_remote_node_inputs(params)
+
+        self.assertEqual(params["width"], 1820)
+        self.assertEqual(params["height"], 1024)
+        self.assertEqual(node_inputs["160"]["width"], 1820)
+        self.assertEqual(node_inputs["160"]["height"], 1024)
+        self.assertEqual(node_inputs["160"]["batch_size"], 3)
+
     def test_person_t2i_reroll_does_not_reuse_stale_lora_controls(self) -> None:
         payload, _seed = bot._text_to_image_reroll_payload(
             {

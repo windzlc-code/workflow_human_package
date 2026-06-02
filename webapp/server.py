@@ -107,6 +107,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "llm_model_priority_order": "grok-4.2",
     "text_to_image_auto_qa_enabled": True,
     "text_to_image_auto_qa_max_attempts": 3,
+    "persona_body_profiles": {},
     "mulerouter_api_name": "",
     "mulerouter_api_key": "",
     "mulerouter_base_url": "https://api.mulerouter.ai",
@@ -175,13 +176,13 @@ def _env_bool(name: str, default: bool) -> bool:
 
 RH_MAX_CONCURRENCY = max(_env_int("RH_MAX_CONCURRENCY", 20), 1)
 TASK_QUEUE_MAXSIZE = max(_env_int("TASK_QUEUE_MAXSIZE", 0), 0)
-COMFY_GPU_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_MAX_CONCURRENCY", 1), 1)
+COMFY_GPU_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_MAX_CONCURRENCY", 2), 1)
 COMFY_GPU_QUEUE_TIMEOUT_SECONDS = max(_env_int("COMFY_GPU_QUEUE_TIMEOUT_SECONDS", 3600), 30)
 COMFY_GPU_QUEUE_POLL_SECONDS = max(_env_int("COMFY_GPU_QUEUE_POLL_SECONDS", 2), 1)
 COMFY_GPU_DYNAMIC_ENABLED = _env_bool("COMFY_GPU_DYNAMIC_ENABLED", True)
-COMFY_GPU_MIN_FREE_GB = max(_env_float("COMFY_GPU_MIN_FREE_GB", 8.0), 0.0)
-COMFY_GPU_RESERVE_GB = max(_env_float("COMFY_GPU_RESERVE_GB", 4.0), 0.0)
-COMFY_GPU_MAX_COMFY_PENDING = max(_env_int("COMFY_GPU_MAX_COMFY_PENDING", 0), 0)
+COMFY_GPU_MIN_FREE_GB = max(_env_float("COMFY_GPU_MIN_FREE_GB", 6.0), 0.0)
+COMFY_GPU_RESERVE_GB = max(_env_float("COMFY_GPU_RESERVE_GB", 3.0), 0.0)
+COMFY_GPU_MAX_COMFY_PENDING = max(_env_int("COMFY_GPU_MAX_COMFY_PENDING", 1), 0)
 _TASK_QUEUE: queue.Queue[tuple[str, int, str, dict[str, Any]]] = queue.Queue(maxsize=int(TASK_QUEUE_MAXSIZE or 0))
 _WORKERS: list[threading.Thread] = []
 _WORKERS_LOCK = threading.Lock()
@@ -2208,6 +2209,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         max(_to_int(merged.get("text_to_image_auto_qa_max_attempts"), 3), 1),
         6,
     )
+    merged["persona_body_profiles"] = current.get("persona_body_profiles") if isinstance(current.get("persona_body_profiles"), dict) else {}
 
     merged["mulerouter_api_name"] = str(merged.get("mulerouter_api_name") or "").strip()
     merged["mulerouter_api_key"] = str(merged.get("mulerouter_api_key") or "").strip()
@@ -2957,6 +2959,7 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
         "llm_default_model_gemini",
         "llm_default_model_gpt",
         "llm_model_priority_order",
+        "persona_body_profiles",
         "mulerouter_api_name",
         "mulerouter_api_key",
         "mulerouter_base_url",
@@ -3738,7 +3741,7 @@ def _comfy_gpu_capacity_check(
     memory = _extract_comfy_gpu_memory_stats(health)
     queue_counts = _comfy_queue_counts(queue_data)
     result.update({"memory": memory, "comfy_queue": queue_counts})
-    if queue_counts.get("running", 0) > 0:
+    if queue_counts.get("running", 0) >= int(COMFY_GPU_MAX_CONCURRENCY):
         return {**result, "ok": False, "reason": "comfy_running"}
     if queue_counts.get("pending", 0) > int(COMFY_GPU_MAX_COMFY_PENDING):
         return {**result, "ok": False, "reason": "comfy_pending"}
@@ -4185,6 +4188,114 @@ def _remote_comfy_prompt_from_payload(task_type: str, payload: dict[str, Any]) -
         if text:
             return text
     return f"{REMOTE_COMFY_TASK_LABELS.get(task_type, task_type)} test generation, high quality"
+
+
+PERSONA_BODY_PROFILES: dict[str, dict[str, Any]] = {
+    "jinjunya_gy": {
+        "label": "人设1金君雅",
+        "match_terms": [
+            "金君雅",
+            "人设1捞女1金君雅",
+            "人設1撈女1金君雅",
+            "Character Setting\\人设1捞女1金君雅.safetensors",
+            "Character Setting/人设1捞女1金君雅.safetensors",
+        ],
+        "body_profile_prompt": (
+            "身材约束：年轻女性，头身比例修长，上半身纤细，肩线窄而柔和，颈部修长，"
+            "腰部很细，腰腹线条平滑，胯部和臀部曲线明显，形成纤细腰身与饱满髋部的沙漏轮廓，"
+            "腿部修长纤细，手臂纤细自然，整体比例轻盈、柔和、真实，不要变成厚重宽肩、粗腰、短腿或男性化体型"
+        ),
+        "negative_body_prompt": (
+            "宽肩，粗腰，短腿，厚重体型，男性化躯干，腰胯比例消失，身体比例漂移，"
+            "过度肌肉，粗壮手臂，畸形躯干，额外肢体，重复手臂，手脚错乱"
+        ),
+    }
+}
+
+
+def _persona_body_profile_for_payload(payload: dict[str, Any] | None) -> dict[str, str]:
+    source = payload if isinstance(payload, dict) else {}
+    explicit_prompt = str(source.get("persona_body_profile_prompt") or source.get("tg_persona_body_profile_prompt") or "").strip()
+    explicit_negative = str(source.get("persona_negative_body_prompt") or source.get("tg_persona_negative_body_prompt") or "").strip()
+    explicit_label = str(source.get("persona_body_profile_label") or source.get("tg_persona_body_profile_label") or "").strip()
+    if explicit_prompt:
+        return {
+            "id": str(source.get("persona_body_profile_id") or source.get("tg_persona_body_profile_id") or "custom").strip() or "custom",
+            "label": explicit_label or str(source.get("persona_label") or "当前人设").strip() or "当前人设",
+            "body_profile_prompt": explicit_prompt,
+            "negative_body_prompt": explicit_negative,
+        }
+
+    persona_text = " ".join(
+        str(source.get(key) or "")
+        for key in (
+            "persona_lora",
+            "persona_label",
+            "tg_generation_context",
+            "text_to_image_workflow_path",
+            "remote_comfy_workflow_path",
+        )
+    )
+    normalized = persona_text.replace("\\", "/").lower()
+
+    runtime_profiles = source.get("persona_body_profiles") if isinstance(source.get("persona_body_profiles"), dict) else {}
+    profile_sources: list[tuple[str, dict[str, Any]]] = []
+    for profile_id, profile in runtime_profiles.items():
+        if isinstance(profile, dict):
+            profile_sources.append((str(profile_id), profile))
+    for profile_id, profile in PERSONA_BODY_PROFILES.items():
+        profile_sources.append((profile_id, profile))
+
+    for profile_id, profile in profile_sources:
+        raw_terms = profile.get("match_terms")
+        if isinstance(raw_terms, list):
+            terms = [str(item or "").strip() for item in raw_terms if str(item or "").strip()]
+        else:
+            terms = [
+                item.strip()
+                for item in re.split(r"[\n,，;；]+", str(raw_terms or ""))
+                if item.strip()
+            ]
+        terms = [term.replace("\\", "/").lower() for term in terms]
+        if any(term.lower() in normalized for term in terms):
+            return {
+                "id": profile_id,
+                "label": str(profile.get("label") or "").strip(),
+                "body_profile_prompt": str(profile.get("body_profile_prompt") or "").strip(),
+                "negative_body_prompt": str(profile.get("negative_body_prompt") or "").strip(),
+            }
+    return {}
+
+
+def _apply_persona_body_profile_to_payload(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    typ = str(task_type or "").strip()
+    if typ not in {"text_to_image", "image_generate"}:
+        return payload
+    source = dict(payload or {})
+    if not _to_bool(source.get("persona_enabled"), False):
+        return source
+    profile = _persona_body_profile_for_payload(source)
+    body_prompt = str(profile.get("body_profile_prompt") or "").strip()
+    if not body_prompt:
+        return source
+    current_prompt = _remote_comfy_prompt_from_payload(typ, source).strip()
+    if not current_prompt:
+        return source
+    if body_prompt not in current_prompt:
+        current_prompt = f"{body_prompt}，{current_prompt}"
+        source = _set_tg_generation_prompt(source, current_prompt)
+    source["tg_persona_body_profile_id"] = str(profile.get("id") or "").strip()
+    source["tg_persona_body_profile_label"] = str(profile.get("label") or "").strip()
+    source["tg_persona_body_profile_prompt"] = body_prompt
+    negative_body = str(profile.get("negative_body_prompt") or "").strip()
+    if negative_body:
+        source["tg_persona_negative_body_prompt"] = negative_body
+        existing_negative = str(source.get("negative_prompt") or source.get("negative") or "").strip()
+        if negative_body not in existing_negative:
+            merged_negative = f"{existing_negative}, {negative_body}" if existing_negative else negative_body
+            source["negative_prompt"] = merged_negative
+            source["negative"] = merged_negative
+    return source
 
 
 def _remote_comfy_prompt_node_inputs_from_payload(
@@ -5370,6 +5481,7 @@ def _qa_failure_reason(report: dict[str, Any]) -> str:
 
 
 def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_type: str) -> dict[str, Any]:
+    payload = _apply_persona_body_profile_to_payload(task_type, payload if isinstance(payload, dict) else {})
     source, gateway_url, token = _comfy_gateway_from_payload(payload)
     source_label = "本地 ComfyUI" if source == "local" else "远程 ComfyUI"
     workflow_path = _remote_comfy_workflow_mapping(payload, task_type)
@@ -9092,6 +9204,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 "llm_default_model_gemini",
                 "llm_default_model_gpt",
                 "llm_model_priority_order",
+                "persona_body_profiles",
             ):
                 if not str(enhanced.get(key) or "").strip():
                     enhanced[key] = runtime.get(key)
@@ -9135,6 +9248,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     system_prompt, prompt_chain = _build_tg_prompt_system_prompt(typ, task_labels.get(typ, typ))
     edit_image_task = typ in {"single_image_edit", "get_nano_banana", "face_swap"}
     persona_face_brief = _tg_image_persona_face_brief(enhanced) if prompt_chain == "image" and not edit_image_task else ""
+    persona_body_profile = _persona_body_profile_for_payload(enhanced) if prompt_chain == "image" and typ in {"text_to_image", "image_generate"} and _to_bool(enhanced.get("persona_enabled"), False) else {}
+    persona_body_prompt = str(persona_body_profile.get("body_profile_prompt") or "").strip()
     aspect_pose_guidance = _tg_image_aspect_ratio_pose_guidance(enhanced) if prompt_chain == "image" and not edit_image_task else ""
     if aspect_pose_guidance:
         system_prompt = "\n".join(
@@ -9143,6 +9258,15 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 "MANDATORY ASPECT-RATIO COMPOSITION MATCHING:",
                 aspect_pose_guidance,
                 "Before writing the final prompt, choose a pose and action that naturally fits the selected aspect ratio. Do not reuse a generic pose when the ratio would make it cramped, cropped, or visually unstable.",
+            ]
+        )
+    if persona_body_prompt:
+        system_prompt = "\n".join(
+            [
+                system_prompt,
+                "MANDATORY PERSONA BODY PROFILE:",
+                persona_body_prompt,
+                "This body profile comes from the selected persona LoRA reference set. Preserve it in every final image prompt as an overall body-shape constraint. Do not replace it with unrelated body type, broad shoulders, thick waist, short legs, masculine torso, or generic model body.",
             ]
         )
     llm_user_input = user_request
@@ -9160,7 +9284,16 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             f"User original request: {user_request}\n"
             + (f"Aspect-ratio composition requirement: {aspect_pose_guidance}\n" if aspect_pose_guidance else "")
             + f"Persona/LoRA constraint: {persona_face_brief}\n"
-            "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names."
+            + (f"Persona body profile that must be included as body-shape wording: {persona_body_prompt}\n" if persona_body_prompt else "")
+            + "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names."
+        )
+    elif persona_body_prompt:
+        llm_user_input = "\n".join(
+            [
+                f"User original request: {user_request}",
+                f"Persona body profile that must be included as body-shape wording: {persona_body_prompt}",
+                "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names.",
+            ]
         )
     image_hint_paths: list[str] = []
     for image_key in (
@@ -9359,6 +9492,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
 
     if prompt_chain == "image" and typ in {"text_to_image", "image_generate"}:
         final_prompt = _ensure_tg_image_clothing_anchor(final_prompt, preserved_request, enhanced)
+        enhanced = _apply_persona_body_profile_to_payload(typ, {**enhanced, "prompt": final_prompt, "prompt_text": final_prompt, "message": final_prompt})
+        final_prompt = _remote_comfy_prompt_from_payload(typ, enhanced)
         rewritten = final_prompt
         required_segments = ["她的左手", "而右手", "她的身体", "她的头"]
         for seg in required_segments:
@@ -10151,7 +10286,7 @@ _TG_CHINESE_IMAGE_PROMPT_TASK_TYPES = {
 }
 
 PERSON_T2I_DEFAULT_BATCH_SIZE = 3
-PERSON_T2I_TELEGRAM_RETURN_COUNT = 6
+PERSON_T2I_TELEGRAM_RETURN_COUNT = 9
 
 
 def _remote_comfy_default_batch_size(task_type: str, workflow_path: str) -> int:

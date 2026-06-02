@@ -378,8 +378,13 @@ TEXT_TO_IMAGE_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
 
 TEXT_TO_IMAGE_PERSON_T2I_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
     "8:15": {"label": "8:15 人設豎圖", "note": "人設_t2i 原生豎圖", "width": 1024, "height": 1920, "final": "關閉"},
-    "2:3": {"label": "2:3 人設豎圖", "note": "人設_t2i 豎圖", "width": 1024, "height": 1536, "final": "關閉"},
-    "3:4": {"label": "3:4 人設豎圖", "note": "人設_t2i 穩定豎圖", "width": 1024, "height": 1365, "final": "關閉"},
+    "2:3": {"label": "2:3 基礎豎圖", "note": "人設_t2i 基礎豎圖", "width": 1024, "height": 1536, "final": "關閉"},
+    "3:4": {"label": "3:4 穩定豎圖", "note": "人設_t2i 穩定豎圖", "width": 1024, "height": 1365, "final": "關閉"},
+    "9:16": {"label": "9:16 手機豎屏長圖", "note": "人設_t2i 手機豎屏長圖", "width": 1024, "height": 1820, "final": "關閉"},
+    "3:2": {"label": "3:2 橫圖基準", "note": "人設_t2i 橫圖基準", "width": 1536, "height": 1024, "final": "關閉"},
+    "4:3": {"label": "4:3 平衡橫圖", "note": "人設_t2i 平衡橫圖", "width": 1365, "height": 1024, "final": "關閉"},
+    "16:9": {"label": "16:9 寬屏視頻", "note": "人設_t2i 寬屏視頻", "width": 1820, "height": 1024, "final": "關閉"},
+    "1:1": {"label": "1:1 正方形", "note": "人設_t2i 正方形", "width": 1024, "height": 1024, "final": "關閉"},
 }
 
 
