@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -528,6 +530,42 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIn("现代卧室中", normalized)
         self.assertNotIn("现代，卧室中", normalized)
 
+    def test_tg_image_clothing_anchor_adds_missing_color_and_structure(self):
+        prompt = (
+            "一位成人女性全身站立在现代卧室中，穿着时尚服装，"
+            "她的左手扶着椅背而右手自然下垂，她的身体朝向镜头，她的头转向镜头"
+        )
+
+        anchored = server._ensure_tg_image_clothing_anchor(
+            prompt,
+            "生成室内人物图",
+            {"text_to_image_workflow_profile": "person_t2i"},
+        )
+
+        self.assertIn("米白色", anchored)
+        self.assertIn("深灰色", anchored)
+        self.assertIn("簡潔上衣", anchored)
+        self.assertIn("直筒下裝", anchored)
+        self.assertIn("領口", anchored)
+        self.assertIn("袖口", anchored)
+        self.assertIn("腰線", anchored)
+
+    def test_tg_image_clothing_anchor_keeps_existing_color_and_structure(self):
+        prompt = (
+            "一位成人女性全身站立在现代卧室中，穿着红色连衣裙，领口和裙摆边界清楚，"
+            "她的左手扶着椅背而右手自然下垂，她的身体朝向镜头，她的头转向镜头"
+        )
+
+        anchored = server._ensure_tg_image_clothing_anchor(
+            prompt,
+            "生成室内人物图",
+            {"text_to_image_workflow_profile": "person_t2i"},
+        )
+
+        self.assertIn("红色连衣裙", anchored)
+        self.assertNotIn("米白色", anchored)
+        self.assertNotIn("直筒下裝", anchored)
+
     def test_finished_text_to_image_uses_reply_keyboard(self):
         markup = server._send_telegram_reply_markup_for_finished_task("task_1", "text_to_image")
 
@@ -867,6 +905,157 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(task["runninghub_task_id"], "")
         self.assertEqual(task["cost_cents"], 0)
         self.assertIsNotNone(late_event)
+
+    def test_comfy_gpu_gate_serializes_remote_workflow_submits(self):
+        active_posts = 0
+        max_active_posts = 0
+        calls: list[str] = []
+        lock = threading.Lock()
+
+        def fake_gateway_json(**kwargs):
+            nonlocal active_posts, max_active_posts
+            if kwargs["method"] == "POST":
+                with lock:
+                    active_posts += 1
+                    max_active_posts = max(max_active_posts, active_posts)
+                    calls.append(str(kwargs["json_body"]["path"]))
+                time.sleep(0.05)
+                with lock:
+                    active_posts -= 1
+                return {"prompt_id": f"prompt_{len(calls)}"}
+            return {"ok": True, "done": True, "outputs": []}
+
+        def run_one(workflow: str):
+            return server._run_remote_comfy_gateway_test(
+                gateway_url="http://gateway",
+                token="secret",
+                workflow_path=workflow,
+                prompt_text="一位人物站在室内",
+                timeout_seconds=30,
+            )
+
+        with patch.object(server, "_COMFY_GPU_SEMAPHORE", threading.BoundedSemaphore(1)), \
+             patch.object(server, "_COMFY_GPU_WAITING", 0), \
+             patch.object(server, "_COMFY_GPU_RUNNING", 0), \
+             patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json):
+            threads = [
+                threading.Thread(target=run_one, args=("workflow_a.api.json",)),
+                threading.Thread(target=run_one, args=("workflow_b.api.json",)),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+        self.assertEqual(max_active_posts, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(server._comfy_gpu_snapshot()["running"], 0)
+
+    def test_comfy_gpu_gate_blocks_cancelled_task_before_submit(self):
+        server._create_task_record("task_wait_cancel", 1, "text_to_image", {"tg_chat_id": 8100401093})
+        server._cancel_task_record_for_user(
+            task_id="task_wait_cancel",
+            user_id=1,
+            requested_by="TG-8100401093",
+            expected_chat_id=8100401093,
+        )
+
+        semaphore = threading.BoundedSemaphore(1)
+        semaphore.acquire()
+        try:
+            with patch.object(server, "_COMFY_GPU_SEMAPHORE", semaphore), \
+                 patch.object(server, "_COMFY_GPU_WAITING", 0), \
+                 patch.object(server, "_COMFY_GPU_RUNNING", 0), \
+                 patch.object(server, "COMFY_GPU_QUEUE_TIMEOUT_SECONDS", 30), \
+                 patch.object(server, "COMFY_GPU_QUEUE_POLL_SECONDS", 1):
+                with self.assertRaisesRegex(RuntimeError, "任務已取消"):
+                    with server._comfy_gpu_execution_slot({"_task_id": "task_wait_cancel"}, workflow_path="wf.api.json"):
+                        pass
+                self.assertEqual(server._comfy_gpu_snapshot()["waiting"], 0)
+                self.assertEqual(server._comfy_gpu_snapshot()["running"], 0)
+        finally:
+            semaphore.release()
+
+    def test_comfy_gpu_memory_stats_parse_comfy_system_stats(self):
+        stats = {
+            "devices": [
+                {
+                    "name": "NVIDIA GeForce RTX 4090",
+                    "type": "cuda",
+                    "vram_total": 24 * 1024**3,
+                    "vram_free": 18 * 1024**3,
+                }
+            ]
+        }
+
+        parsed = server._extract_comfy_gpu_memory_stats(stats)
+
+        self.assertTrue(parsed["available"])
+        self.assertEqual(parsed["vram_total_gb"], 24.0)
+        self.assertEqual(parsed["vram_free_gb"], 18.0)
+
+    def test_comfy_gpu_capacity_check_rejects_low_vram_conservatively(self):
+        def fake_gateway_json(**kwargs):
+            if kwargs["path"] == "/api/health":
+                return {
+                    "devices": [
+                        {
+                            "name": "4090",
+                            "type": "cuda",
+                            "vram_total": 24 * 1024**3,
+                            "vram_free": 7 * 1024**3,
+                        }
+                    ]
+                }
+            if kwargs["path"] == "/api/queue":
+                return {"queue_running": [], "queue_pending": []}
+            return {}
+
+        with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json), \
+             patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True), \
+             patch.object(server, "COMFY_GPU_MIN_FREE_GB", 8.0), \
+             patch.object(server, "COMFY_GPU_RESERVE_GB", 4.0):
+            check = server._comfy_gpu_capacity_check(
+                gateway_url="http://gateway",
+                token="secret",
+                payload={"_task_id": "task_gpu_check", "_task_type": "text_to_image", "batch_size": 3},
+                workflow_path="person_t2i.api.json",
+                body={"path": "person_t2i.api.json", "batch_size": 3, "width": 1024, "height": 1536},
+            )
+
+        self.assertFalse(check["ok"])
+        self.assertEqual(check["reason"], "insufficient_vram")
+        self.assertGreater(check["required_free_gb"], 7)
+
+    def test_comfy_gpu_capacity_check_waits_when_comfy_queue_running(self):
+        def fake_gateway_json(**kwargs):
+            if kwargs["path"] == "/api/health":
+                return {
+                    "devices": [
+                        {
+                            "name": "4090",
+                            "type": "cuda",
+                            "vram_total": 24 * 1024**3,
+                            "vram_free": 22 * 1024**3,
+                        }
+                    ]
+                }
+            if kwargs["path"] == "/api/queue":
+                return {"queue_running": [["prompt-running"]], "queue_pending": []}
+            return {}
+
+        with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json), \
+             patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True):
+            check = server._comfy_gpu_capacity_check(
+                gateway_url="http://gateway",
+                token="secret",
+                payload={"_task_id": "task_gpu_queue", "_task_type": "single_image_edit"},
+                workflow_path="edit.api.json",
+                body={"path": "edit.api.json"},
+            )
+
+        self.assertFalse(check["ok"])
+        self.assertEqual(check["reason"], "comfy_running")
 
     def test_text_to_image_auto_qa_rejects_hand_limb_audit_extra_hands(self):
         report = {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import copy
 import json
 import logging
@@ -160,12 +161,35 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.getenv(name, str(default)) or "").strip() or str(default))
+    except Exception:
+        return float(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 RH_MAX_CONCURRENCY = max(_env_int("RH_MAX_CONCURRENCY", 20), 1)
 TASK_QUEUE_MAXSIZE = max(_env_int("TASK_QUEUE_MAXSIZE", 0), 0)
+COMFY_GPU_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_MAX_CONCURRENCY", 1), 1)
+COMFY_GPU_QUEUE_TIMEOUT_SECONDS = max(_env_int("COMFY_GPU_QUEUE_TIMEOUT_SECONDS", 3600), 30)
+COMFY_GPU_QUEUE_POLL_SECONDS = max(_env_int("COMFY_GPU_QUEUE_POLL_SECONDS", 2), 1)
+COMFY_GPU_DYNAMIC_ENABLED = _env_bool("COMFY_GPU_DYNAMIC_ENABLED", True)
+COMFY_GPU_MIN_FREE_GB = max(_env_float("COMFY_GPU_MIN_FREE_GB", 8.0), 0.0)
+COMFY_GPU_RESERVE_GB = max(_env_float("COMFY_GPU_RESERVE_GB", 4.0), 0.0)
+COMFY_GPU_MAX_COMFY_PENDING = max(_env_int("COMFY_GPU_MAX_COMFY_PENDING", 0), 0)
 _TASK_QUEUE: queue.Queue[tuple[str, int, str, dict[str, Any]]] = queue.Queue(maxsize=int(TASK_QUEUE_MAXSIZE or 0))
 _WORKERS: list[threading.Thread] = []
 _WORKERS_LOCK = threading.Lock()
 _RUNTIME_CONFIG_LOCK = threading.RLock()
+_COMFY_GPU_SEMAPHORE = threading.BoundedSemaphore(int(COMFY_GPU_MAX_CONCURRENCY))
+_COMFY_GPU_LOCK = threading.Lock()
+_COMFY_GPU_WAITING = 0
+_COMFY_GPU_RUNNING = 0
 
 
 class RuntimeConfigFileError(RuntimeError):
@@ -3568,6 +3592,283 @@ def _remote_comfy_gateway_upload_image(
     return {**data, "image": image_value}
 
 
+def _task_status_for_payload(payload: dict[str, Any] | None) -> str:
+    task_id = str((payload or {}).get("_task_id") or "").strip()
+    if not task_id:
+        return ""
+    try:
+        with db() as conn:
+            row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return str(row["status"] or "").strip().lower() if row is not None else ""
+    except Exception:
+        return ""
+
+
+def _task_cancelled_for_payload(payload: dict[str, Any] | None) -> bool:
+    return _task_status_for_payload(payload) == "cancelled"
+
+
+def _comfy_gpu_snapshot() -> dict[str, int]:
+    with _COMFY_GPU_LOCK:
+        return {
+            "max_concurrency": int(COMFY_GPU_MAX_CONCURRENCY),
+            "waiting": int(_COMFY_GPU_WAITING),
+            "running": int(_COMFY_GPU_RUNNING),
+        }
+
+
+def _bytes_to_gb(value: Any) -> float:
+    try:
+        number = float(value)
+    except Exception:
+        return 0.0
+    if number <= 0:
+        return 0.0
+    return number / (1024.0 ** 3)
+
+
+def _first_numeric_value(source: dict[str, Any], keys: Iterable[str]) -> float:
+    for key in keys:
+        if key not in source:
+            continue
+        try:
+            value = float(source.get(key) or 0)
+        except Exception:
+            continue
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _extract_comfy_gpu_memory_stats(health: Any) -> dict[str, Any]:
+    if not isinstance(health, dict):
+        return {"available": False}
+    devices = health.get("devices")
+    if not isinstance(devices, list):
+        devices = health.get("gpus") if isinstance(health.get("gpus"), list) else []
+    best: dict[str, Any] = {}
+    for raw_device in devices:
+        if not isinstance(raw_device, dict):
+            continue
+        device_type = str(raw_device.get("type") or raw_device.get("device_type") or raw_device.get("name") or "").lower()
+        total_bytes = _first_numeric_value(raw_device, ("vram_total", "total_vram", "memory_total", "total_memory", "torch_vram_total"))
+        free_bytes = _first_numeric_value(raw_device, ("vram_free", "free_vram", "memory_free", "free_memory", "torch_vram_free"))
+        used_bytes = _first_numeric_value(raw_device, ("vram_used", "used_vram", "memory_used", "used_memory", "torch_vram_used"))
+        if devices and ("cuda" not in device_type and "gpu" not in device_type and "nvidia" not in device_type) and not (total_bytes or free_bytes or used_bytes):
+            continue
+        if not free_bytes and total_bytes and used_bytes:
+            free_bytes = max(total_bytes - used_bytes, 0)
+        if not total_bytes and free_bytes:
+            total_bytes = free_bytes + used_bytes
+        if free_bytes <= 0 and total_bytes <= 0:
+            continue
+        candidate = {
+            "available": True,
+            "name": str(raw_device.get("name") or raw_device.get("device") or "gpu").strip(),
+            "type": str(raw_device.get("type") or "").strip(),
+            "vram_total_gb": round(_bytes_to_gb(total_bytes), 2),
+            "vram_free_gb": round(_bytes_to_gb(free_bytes), 2),
+            "vram_used_gb": round(_bytes_to_gb(used_bytes), 2) if used_bytes else round(max(_bytes_to_gb(total_bytes) - _bytes_to_gb(free_bytes), 0), 2),
+        }
+        if not best or float(candidate["vram_free_gb"]) > float(best.get("vram_free_gb") or 0):
+            best = candidate
+    return best or {"available": False}
+
+
+def _comfy_queue_counts(queue_data: Any) -> dict[str, int]:
+    if not isinstance(queue_data, dict):
+        return {"running": 0, "pending": 0}
+    running = queue_data.get("queue_running")
+    pending = queue_data.get("queue_pending")
+    if not isinstance(running, list):
+        running = queue_data.get("running") if isinstance(queue_data.get("running"), list) else []
+    if not isinstance(pending, list):
+        pending = queue_data.get("pending") if isinstance(queue_data.get("pending"), list) else []
+    return {"running": len(running), "pending": len(pending)}
+
+
+def _comfy_task_required_free_gb(payload: dict[str, Any] | None, workflow_path: str, body: dict[str, Any] | None) -> float:
+    source = payload if isinstance(payload, dict) else {}
+    request_body = body if isinstance(body, dict) else {}
+    task_type = str(source.get("_task_type") or "").strip()
+    workflow = str(workflow_path or request_body.get("path") or "").lower()
+    batch_size = max(_to_int(request_body.get("batch_size") or source.get("batch_size"), 1), 1)
+    width = max(_to_int(request_body.get("width") or source.get("width"), 0), 0)
+    height = max(_to_int(request_body.get("height") or source.get("height"), 0), 0)
+    megapixels = (width * height / 1_000_000.0) if width and height else 1.0
+
+    required = 8.0
+    if task_type in {"face_swap", "single_image_edit", "get_nano_banana"} or any(key in workflow for key in ("face", "swap", "nano", "edit")):
+        required = 10.0
+    if task_type in {"video_i2v", "create_video"} or any(key in workflow for key in ("video", "i2v", "seedvr", "upscale")):
+        required = 16.0
+    if task_type in {"text_to_image", "image_generate"}:
+        required = 9.0 + max(batch_size - 1, 0) * 1.5
+        if "person_t2i" in workflow or "人设_t2i" in workflow or "人設_t2i" in workflow:
+            required += 1.5
+    if megapixels > 1.2:
+        required += min((megapixels - 1.2) * 1.2, 4.0)
+    return round(max(required, float(COMFY_GPU_MIN_FREE_GB)) + float(COMFY_GPU_RESERVE_GB), 2)
+
+
+def _comfy_gpu_capacity_check(
+    *,
+    gateway_url: str,
+    token: str,
+    payload: dict[str, Any] | None,
+    workflow_path: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    required_free_gb = _comfy_task_required_free_gb(payload, workflow_path, body)
+    result: dict[str, Any] = {
+        "ok": True,
+        "dynamic_enabled": bool(COMFY_GPU_DYNAMIC_ENABLED),
+        "required_free_gb": required_free_gb,
+        "reason": "dynamic_disabled",
+    }
+    if not COMFY_GPU_DYNAMIC_ENABLED:
+        return result
+    if not str((payload or {}).get("_task_id") or "").strip():
+        return {**result, "ok": True, "reason": "no_task_context_fallback"}
+    try:
+        health = _remote_comfy_gateway_json(gateway_url=gateway_url, token=token, method="GET", path="/api/health", timeout=20)
+        queue_data = _remote_comfy_gateway_json(gateway_url=gateway_url, token=token, method="GET", path="/api/queue", timeout=20)
+    except Exception as exc:
+        return {**result, "ok": True, "reason": "stats_unavailable_fallback", "stats_error": str(exc)}
+    memory = _extract_comfy_gpu_memory_stats(health)
+    queue_counts = _comfy_queue_counts(queue_data)
+    result.update({"memory": memory, "comfy_queue": queue_counts})
+    if queue_counts.get("running", 0) > 0:
+        return {**result, "ok": False, "reason": "comfy_running"}
+    if queue_counts.get("pending", 0) > int(COMFY_GPU_MAX_COMFY_PENDING):
+        return {**result, "ok": False, "reason": "comfy_pending"}
+    if not memory.get("available"):
+        return {**result, "ok": True, "reason": "memory_unavailable_fallback"}
+    free_gb = float(memory.get("vram_free_gb") or 0.0)
+    if free_gb < required_free_gb:
+        return {**result, "ok": False, "reason": "insufficient_vram", "free_gb": free_gb}
+    return {**result, "ok": True, "reason": "capacity_available", "free_gb": free_gb}
+
+
+@contextlib.contextmanager
+def _comfy_gpu_execution_slot(
+    payload: dict[str, Any] | None,
+    *,
+    gateway_url: str = "",
+    token: str = "",
+    workflow_path: str,
+    body: dict[str, Any] | None = None,
+) -> Iterable[dict[str, Any]]:
+    global _COMFY_GPU_WAITING, _COMFY_GPU_RUNNING
+    source_payload = payload if isinstance(payload, dict) else {}
+    request_body = body if isinstance(body, dict) else {}
+    workflow_label = str(workflow_path or "").strip() or "ComfyUI workflow"
+    last_capacity: dict[str, Any] = {}
+    with _COMFY_GPU_LOCK:
+        _COMFY_GPU_WAITING += 1
+        queue_position = _COMFY_GPU_WAITING
+        queued_snapshot = {
+            "max_concurrency": int(COMFY_GPU_MAX_CONCURRENCY),
+            "waiting": int(_COMFY_GPU_WAITING),
+            "running": int(_COMFY_GPU_RUNNING),
+            "queue_position": int(queue_position),
+        }
+    _emit_stage(
+        source_payload,
+        stage="comfy_gpu_queue",
+        status="queued",
+        message=f"等待 4090 生成資源，前方約 {max(queue_position - 1, 0)} 個 ComfyUI 任務",
+        data={"workflow": workflow_label, **queued_snapshot},
+    )
+    acquired = False
+    started = time.time()
+    try:
+        while not acquired:
+            if _task_cancelled_for_payload(source_payload):
+                raise RuntimeError("任務已取消，未提交到 4090。")
+            elapsed = time.time() - started
+            remaining = float(COMFY_GPU_QUEUE_TIMEOUT_SECONDS) - elapsed
+            if remaining <= 0:
+                detail = ""
+                if last_capacity:
+                    detail = f"，最後檢測：{last_capacity.get('reason') or 'unknown'}"
+                raise RuntimeError(f"等待 4090 生成資源超時（超過 {COMFY_GPU_QUEUE_TIMEOUT_SECONDS} 秒{detail}），請稍後重試。")
+            acquired = _COMFY_GPU_SEMAPHORE.acquire(timeout=min(float(COMFY_GPU_QUEUE_POLL_SECONDS), remaining))
+            if not acquired:
+                continue
+            last_capacity = _comfy_gpu_capacity_check(
+                gateway_url=gateway_url,
+                token=token,
+                payload=source_payload,
+                workflow_path=workflow_label,
+                body=request_body,
+            )
+            if last_capacity.get("ok") is False:
+                _COMFY_GPU_SEMAPHORE.release()
+                acquired = False
+                reason = str(last_capacity.get("reason") or "capacity_wait").strip()
+                memory = last_capacity.get("memory") if isinstance(last_capacity.get("memory"), dict) else {}
+                queue_counts = last_capacity.get("comfy_queue") if isinstance(last_capacity.get("comfy_queue"), dict) else {}
+                free_gb = memory.get("vram_free_gb") if memory else last_capacity.get("free_gb")
+                required_gb = last_capacity.get("required_free_gb")
+                _emit_stage(
+                    source_payload,
+                    stage="comfy_gpu_queue",
+                    status="queued",
+                    message="4090 資源暫不足，繼續排隊等待",
+                    data={
+                        "workflow": workflow_label,
+                        "reason": reason,
+                        "free_gb": free_gb,
+                        "required_free_gb": required_gb,
+                        "comfy_queue": queue_counts,
+                        **_comfy_gpu_snapshot(),
+                    },
+                )
+                time.sleep(float(COMFY_GPU_QUEUE_POLL_SECONDS))
+        with _COMFY_GPU_LOCK:
+            _COMFY_GPU_WAITING = max(_COMFY_GPU_WAITING - 1, 0)
+            _COMFY_GPU_RUNNING += 1
+            running_snapshot = {
+                "max_concurrency": int(COMFY_GPU_MAX_CONCURRENCY),
+                "waiting": int(_COMFY_GPU_WAITING),
+                "running": int(_COMFY_GPU_RUNNING),
+                "queue_wait_seconds": int(time.time() - started),
+            }
+        if last_capacity:
+            running_snapshot["gpu_capacity"] = last_capacity
+        if _task_cancelled_for_payload(source_payload):
+            raise RuntimeError("任務已取消，未提交到 4090。")
+        _emit_stage(
+            source_payload,
+            stage="comfy_gpu_queue",
+            status="running",
+            message="已取得 4090 生成資源，開始提交 ComfyUI 工作流",
+            data={"workflow": workflow_label, **running_snapshot},
+        )
+        yield running_snapshot
+    finally:
+        if not acquired:
+            with _COMFY_GPU_LOCK:
+                _COMFY_GPU_WAITING = max(_COMFY_GPU_WAITING - 1, 0)
+        else:
+            with _COMFY_GPU_LOCK:
+                _COMFY_GPU_RUNNING = max(_COMFY_GPU_RUNNING - 1, 0)
+                released_snapshot = {
+                    "max_concurrency": int(COMFY_GPU_MAX_CONCURRENCY),
+                    "waiting": int(_COMFY_GPU_WAITING),
+                    "running": int(_COMFY_GPU_RUNNING),
+                }
+            _COMFY_GPU_SEMAPHORE.release()
+            _emit_stage(
+                source_payload,
+                stage="comfy_gpu_queue",
+                status="success",
+                message="4090 生成資源已釋放",
+                data={"workflow": workflow_label, **released_snapshot},
+            )
+
+
 def _run_remote_comfy_gateway_test(
     *,
     gateway_url: str,
@@ -3585,6 +3886,7 @@ def _run_remote_comfy_gateway_test(
     input_image_bindings: Any = None,
     timeout_seconds: int = 900,
     apply_prompt: bool = True,
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     workflow_text = str(workflow_path or "").strip()
     prompt_text_value = str(prompt_text or "").strip()
@@ -3639,6 +3941,22 @@ def _run_remote_comfy_gateway_test(
         body["input_images"] = [item for item in input_images if item]
     if isinstance(input_image_bindings, (dict, list)) and input_image_bindings:
         body["input_image_bindings"] = input_image_bindings
+    with _comfy_gpu_execution_slot(payload, gateway_url=gateway_url, token=token, workflow_path=workflow_text, body=body):
+        return _execute_remote_comfy_gateway_body(
+            gateway_url=gateway_url,
+            token=token,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+def _execute_remote_comfy_gateway_body(
+    *,
+    gateway_url: str,
+    token: str,
+    body: dict[str, Any],
+    timeout_seconds: int = 900,
+) -> dict[str, Any]:
     submitted = _remote_comfy_gateway_json(
         gateway_url=gateway_url,
         token=token,
@@ -4453,6 +4771,7 @@ def _run_image_generate_via_remote_comfy_firered_chain(task_id: str, payload: di
         batch_size=batch_size if batch_size > 0 else None,
         node_inputs=_merge_node_inputs(config.get("persona_node_inputs"), config.get("image1_node_inputs")),
         timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
+        payload=payload,
     )
     image1_path = _first_remote_comfy_output_path(image1_result)
     if not image1_path:
@@ -4473,6 +4792,7 @@ def _run_image_generate_via_remote_comfy_firered_chain(task_id: str, payload: di
         batch_size=batch_size if batch_size > 0 else None,
         node_inputs=_merge_node_inputs(_remote_comfy_node_inputs_from_payload(payload, task_type="image_generate", workflow_path=zit_workflow), config.get("zit_node_inputs"), config.get("image2_node_inputs")),
         timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
+        payload=payload,
     )
     image2_path = _first_remote_comfy_output_path(image2_result)
     if not image2_path:
@@ -4500,6 +4820,7 @@ def _run_image_generate_via_remote_comfy_firered_chain(task_id: str, payload: di
         node_inputs=firered_node_inputs,
         timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
         apply_prompt=False,
+        payload=payload,
     )
     final_path = _first_remote_comfy_output_path(final_result)
     if not final_path:
@@ -5127,6 +5448,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
             input_images=input_images,
             input_image_bindings=input_image_bindings,
             timeout_seconds=max(_to_int(payload.get("remote_comfy_timeout_seconds"), 900), 30),
+            payload=payload,
         )
         if not _to_bool(result.get("ok"), False):
             raise RuntimeError(str(result.get("message") or f"{source_label} 工作流执行失败"))
@@ -8226,6 +8548,7 @@ def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, An
         "\u771f\u5b9e\u624b\u673a\u968f\u624b\u62cd\u7167\u7247\uff0c\u5fe0\u5b9e\u5339\u914d\u7528\u6237\u6307\u5b9a\u4e3b\u4f53\uff0c\u5355\u5e27\u9759\u6001\u753b\u9762",
         "\u8eab\u4f53\u671d\u5411\u6e05\u695a\uff0c\u624b\u90e8\u4f4d\u7f6e\u660e\u786e\uff0c\u8863\u7269\u72b6\u6001\u5177\u4f53\uff0c\u955c\u5934\u8ddd\u79bb\u62c9\u5f00\uff0c\u534a\u8eab\u6216\u5168\u8eab\u6784\u56fe\uff0c\u8138\u90e8\u6e05\u6670\u53ef\u89c1",
         aspect_pose_guidance,
+        "服裝以米白色和深灰色為主，簡潔上衣與直筒下裝，領口、袖口、腰線清楚",
         "\u670d\u88c5\u7ed3\u6784\u81ea\u7136\u5b8c\u6574\uff0c\u5e03\u6599\u987a\u7740\u8eab\u4f53\u66f2\u7ebf\u548c\u52a8\u4f5c\u5f62\u6210\u771f\u5b9e\u8936\u76b1\uff0c\u573a\u666f\u5149\u7ebf\u8d34\u8fd1\u771f\u5b9e\u751f\u6d3b\u7167",
         "\u4fdd\u7559\u7528\u6237\u8981\u6c42\u7684\u670d\u88c5\u3001\u573a\u666f\u548c\u9053\u5177\uff0c\u5199\u6e05\u80cc\u666f\u7269\u4ef6\u3001\u81ea\u7136\u5149\u65b9\u5411\u3001\u6d45\u666f\u6df1\u3001\u76ae\u80a4\u4e0e\u5e03\u6599\u8d28\u611f\uff0c\u4e0d\u8981\u6587\u5b57\uff0c\u4e0d\u8981\u6c34\u5370",
     ]
@@ -8584,6 +8907,54 @@ def _looks_like_chinese_image_prompt(prompt_text: str) -> bool:
     return len(cjk_chars) >= 20 and not english_words
 
 
+_TG_PERSON_IMAGE_PATTERN = re.compile(
+    r"人物|人像|真人|模特|成人|女性|女人|女子|女郎|男性|男人|男士|她的|他的|站立|坐姿|半身|全身|portrait|person|human|model",
+    re.IGNORECASE,
+)
+_TG_CLOTHING_COLOR_PATTERN = re.compile(
+    r"黑色|白色|灰色|深灰|浅灰|淺灰|米白|米色|红色|紅色|蓝色|藍色|绿色|綠色|黄色|黃色|粉色|紫色|棕色|咖啡色|"
+    r"卡其|奶油色|藏青|深色|浅色|淺色|银色|銀色|金色|酒红|酒紅|墨绿|墨綠|天蓝|天藍|color|colour|black|white|gray|grey|red|blue|green|yellow|pink|purple|brown|beige",
+    re.IGNORECASE,
+)
+_TG_CLOTHING_STRUCTURE_PATTERN = re.compile(
+    r"上衣|下装|下裝|衬衫|襯衫|恤|短袖|长袖|長袖|背心|吊带|吊帶|外套|夹克|夾克|西装|西裝|制服|连衣裙|連衣裙|"
+    r"半裙|短裙|长裙|長裙|裤|褲|短裤|短褲|长裤|長褲|领口|領口|袖口|腰线|腰線|腰头|腰頭|裙摆|裙擺|裤腰|褲腰|"
+    r"纽扣|鈕扣|扣子|拉链|拉鏈|衣摆|衣擺|肩带|肩帶|衣领|衣領|shirt|skirt|dress|pants|trousers|jacket|sleeve|collar|waistline|hem",
+    re.IGNORECASE,
+)
+
+
+def _tg_prompt_needs_person_clothing_anchor(original_request: str, prompt_text: str, payload: dict[str, Any] | None) -> bool:
+    source = payload if isinstance(payload, dict) else {}
+    profile = str(source.get("text_to_image_workflow_profile") or source.get("workflow_profile") or "").strip()
+    if profile == "person_t2i":
+        return True
+    text = f"{original_request or ''} {prompt_text or ''}"
+    return bool(_TG_PERSON_IMAGE_PATTERN.search(text))
+
+
+def _tg_image_prompt_has_clothing_color(prompt_text: str) -> bool:
+    return bool(_TG_CLOTHING_COLOR_PATTERN.search(str(prompt_text or "")))
+
+
+def _tg_image_prompt_has_clothing_structure(prompt_text: str) -> bool:
+    return bool(_TG_CLOTHING_STRUCTURE_PATTERN.search(str(prompt_text or "")))
+
+
+def _ensure_tg_image_clothing_anchor(prompt_text: str, original_request: str, payload: dict[str, Any] | None) -> str:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    if not text or not _tg_prompt_needs_person_clothing_anchor(original_request, text, payload):
+        return text
+    additions: list[str] = []
+    if not _tg_image_prompt_has_clothing_color(text):
+        additions.append("服裝以米白色和深灰色為主")
+    if not _tg_image_prompt_has_clothing_structure(text):
+        additions.append("服裝為簡潔上衣與直筒下裝，領口、袖口、腰線清楚")
+    if not additions:
+        return text
+    return _normalize_tg_chinese_image_prompt_format(f"{text}，{'，'.join(additions)}")
+
+
 def _looks_like_clean_chinese_display(prompt_text: str) -> bool:
     text = str(prompt_text or "")
     if _looks_like_mojibake_text(text):
@@ -8660,9 +9031,10 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "The character face is controlled by the workflow LoRA. Do not write face shape, facial features, skin quality, or hairstyle descriptions in the final prompt. You may keep expression, gaze direction, face clearly visible, unobstructed face, and full head in frame as composition instructions. The composition must show the face, preferably half-body or full-body framing. Avoid cropped faces, covered faces, back-facing poses, and body-only shots. Do not include person names, persona names, or LoRA file names.",
         "Pose description must be concise and direct: use simple posture terms such as standing, sitting, kneeling, or lying. Specify exact body orientation and hand placement in one short clause. Avoid verbose or poetic pose descriptions.",
         "The character's head and face must always be visible within the frame. Full head must be in frame with natural headroom. Never crop the head or face. Back-facing poses are not allowed. Side profiles are acceptable only if the face remains clearly visible.",
+        "MANDATORY CLOTHING ANCHOR: for person images, the clothing phrase must include explicit clothing colors and a simple basic structure, such as color + top/bottom/dress + neckline/sleeves/waistline/hem. Do not leave clothing as vague words like beautiful outfit, sexy outfit, fashion style, or clothing state only.",
         "Keep clothing logic physically plausible. Use intact garments with normal seams, gravity, and fabric tension. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings. If the user explicitly asks for damaged clothing, the damage must still follow fabric tension and pulling direction.",
         "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple and non-repetitive; do not repeat garment structure details across the prompt.",
-        "Keep the final prompt compact and reusable: body posture, hand placement, body orientation, one clear clothing state, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
+        "Keep the final prompt compact and reusable: body posture, hand placement, body orientation, one clear clothing color, one simple clothing structure, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
         "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by commas (，): 1.[人物+全身姿态+场景] 2.穿着[服装] 3.[暴露器官] 4.她的[左手动作]而[右手动作] 5.她的身体[朝向] 6.她的头[转向+眼神] 7.[背景] 8.[光线] 9.[技术参数]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Example with all segments: 一位美丽女郎全身站立在豪华卧室中，穿着优雅的黑色丝绸睡裙，薄薄的意大利面条肩带，低领部部分解开露出深深的乳沟和侧乳，她的左手放在臀部上而右手触摸着裸露的大腿，她的身体微微侧向一边朝向镜头，她的头转向直视镜头带着诱惑的眼神，卧室背景有大大的特大号床铺，白色床单凌乱不堪，柔和的卧室灯投射出温柔的阴影，浅景深让主体清晰而背景微微模糊，真实皮肤纹理，细节的织物褶皱，自然的身体曲线，高细节，8k，写实摄影风格，电影摄影。 This is the ONLY acceptable format.",
         "MANDATORY EROTIC CONTENT: The generated prompt MUST include explicit description of AT LEAST ONE female reproductive organ: either full and firm breasts with visible nipples, OR clearly visible labia contours with moist intimate areas and slightly parted legs. Choose one based on the pose and clothing state. Use seductive poses: fingers gently touching breasts or inner thighs, arched waist, moist parted lips, alluring gaze toward camera. Lighting should highlight sensual body textures: shadows on breasts, wet sheen on labia, subtle sweat on skin, semi-transparent fabric teasing the body underneath. At least one erotic element is REQUIRED.",
         "MANDATORY ANATOMY - NO OVERLAPS: The prompt MUST ensure anatomically correct poses with NO body part overlaps or intersections. Arms must not cross through torso. Hands must rest naturally on surfaces or body without penetration. Legs must not intersect unnaturally. Body must have clear spatial separation from background objects. Use natural weight distribution and gravity. If sitting, buttocks compress naturally on seat. If lying, body rests flat without floating or intersecting surfaces.",
@@ -8911,6 +9283,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             forbidden_hits = _find_tg_image_forbidden_person_fields(rewritten)
         rewritten = _force_tg_image_chinese_prompt(rewritten)
         rewritten = _normalize_tg_chinese_image_prompt_format(rewritten)
+        if typ in {"text_to_image", "image_generate"}:
+            rewritten = _ensure_tg_image_clothing_anchor(rewritten, original_request or user_request, enhanced)
         if not _looks_like_chinese_image_prompt(rewritten):
             translate_attempts: list[dict[str, Any]] = []
             try:
@@ -8942,6 +9316,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                     translate_result.get("raw_text") if isinstance(translate_result, dict) else ""
                 )
                 translated = _normalize_tg_chinese_image_prompt_format(translated)
+                if typ in {"text_to_image", "image_generate"}:
+                    translated = _ensure_tg_image_clothing_anchor(translated, original_request or user_request, enhanced)
                 if _looks_like_chinese_image_prompt(translated):
                     rewritten = translated
                     selected = translate_selected
@@ -8950,6 +9326,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 attempts.extend(translate_attempts)
             if not _looks_like_chinese_image_prompt(rewritten):
                 rewritten = _build_tg_image_fallback_prompt(original_request or user_request, enhanced)
+            if typ in {"text_to_image", "image_generate"}:
+                rewritten = _ensure_tg_image_clothing_anchor(rewritten, original_request or user_request, enhanced)
             if not _looks_like_chinese_image_prompt(rewritten):
                 raise RuntimeError("Grok 最终提示词不是中文，已阻止提交。请重新生成提示词。")
     final_prompt = rewritten
@@ -8980,6 +9358,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         rewritten = final_prompt
 
     if prompt_chain == "image" and typ in {"text_to_image", "image_generate"}:
+        final_prompt = _ensure_tg_image_clothing_anchor(final_prompt, preserved_request, enhanced)
+        rewritten = final_prompt
         required_segments = ["她的左手", "而右手", "她的身体", "她的头"]
         for seg in required_segments:
             if seg not in final_prompt:
