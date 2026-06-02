@@ -236,3 +236,17 @@ def test_face_swap_finished_markup_has_followup_actions():
             ],
         ]
     }
+
+
+def test_image_edit_finished_markup_keeps_edit_actions():
+    for task_type in ("single_image_edit", "get_nano_banana"):
+        markup = server._send_telegram_reply_markup_for_finished_task("task_1", task_type)
+
+        assert markup == {
+            "keyboard": [
+                [{"text": "单图编辑"}, {"text": "图片编辑"}],
+                [{"text": "文生图"}, {"text": "人物换脸"}],
+                [{"text": "返回主菜单"}],
+            ],
+            "resize_keyboard": True,
+        }

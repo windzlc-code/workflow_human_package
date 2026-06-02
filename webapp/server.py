@@ -1174,6 +1174,15 @@ def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) 
                 ],
             ]
         }
+    if typ in {"single_image_edit", "get_nano_banana"}:
+        return {
+            "keyboard": [
+                [{"text": "单图编辑"}, {"text": "图片编辑"}],
+                [{"text": "文生图"}, {"text": "人物换脸"}],
+                [{"text": "返回主菜单"}],
+            ],
+            "resize_keyboard": True,
+        }
     if typ != "text_to_image":
         return None
     return {
