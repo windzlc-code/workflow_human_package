@@ -537,6 +537,94 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(markup["keyboard"][1][0]["text"], "继续生成图片")
         self.assertEqual(markup["keyboard"][2][0]["text"], "返回主菜单")
 
+    def test_user_visible_task_error_shortens_insufficient_balance_json(self):
+        raw_error = (
+            'MuleRouter 图生视频提交失败失败 HTTP 402: {"status": 402, "title": "Insufficient balance", '
+            '"detail": "Insufficient balance to complete this request. Required: 650000 amount '
+            '(65.0 credits), Available: 170000 amount (17.0 credits)"}'
+        )
+
+        formatted = server._format_user_visible_task_error(raw_error)
+
+        self.assertEqual(formatted, "余额不足：本次需要 65.0 credits，当前只有 17.0 credits，请充值或降低视频参数后重试。")
+        self.assertNotIn("{", formatted)
+        self.assertNotIn("HTTP", formatted)
+
+    def test_user_visible_task_error_shortens_comfy_cuda_oom(self):
+        raw_error = (
+            "远程 ComfyUI 工作流执行失败: 节点 17 (KSampler) CUDA error: "
+            "out of memory Search for `cudaErrorMemoryAllocation` in docs"
+        )
+
+        formatted = server._format_user_visible_task_error(raw_error)
+
+        self.assertTrue(formatted.startswith("4090 显存不足："))
+        self.assertNotIn("cudaErrorMemoryAllocation", formatted)
+
+    def test_user_visible_task_error_shortens_comfy_validation_json(self):
+        raw_error = (
+            '远程 ComfyUI 网关请求失败: 400 Client Error: Bad Request '
+            '{"error": {"type": "prompt_outputs_failed_validation", "message": "Prompt outputs failed validation", '
+            '"details": "", "node_errors": {"468": {"errors": [{"type": "value_not_in_list", '
+            '"message": "Value not in list", "details": "keep_proportion: 1080 not in list"}]}}}}'
+        )
+
+        formatted = server._format_user_visible_task_error(raw_error)
+
+        self.assertTrue(formatted.startswith("ComfyUI 工作流参数校验失败："))
+        self.assertNotIn("node_errors", formatted)
+
+    def test_user_visible_task_error_shortens_missing_custom_node(self):
+        raw_error = '{"error": {"type": "missing_node_type", "message": "Node FooBar not found"}}'
+
+        formatted = server._format_user_visible_task_error(raw_error)
+
+        self.assertEqual(formatted, "ComfyUI 缺少自定义节点：当前工作流需要的节点没有安装或未启用，请在 4090 安装对应 custom node 后重试。")
+
+    def test_user_visible_task_error_hides_unknown_raw_json(self):
+        raw_error = '{"error": {"code": "vendor_error", "message": "very long private upstream payload"}}'
+
+        formatted = server._format_user_visible_task_error(raw_error)
+
+        self.assertEqual(formatted, "后台生成失败：上游服务返回了结构化错误，已隐藏原始 JSON；请在工作台查看详情或按当前任务类型重新提交。")
+        self.assertNotIn("vendor_error", formatted)
+
+    def test_task_detail_formats_error_fields_for_display(self):
+        raw_error = (
+            'MuleRouter 图生视频提交失败失败 HTTP 402: {"status": 402, "title": "Insufficient balance", '
+            '"detail": "Insufficient balance to complete this request. Required: 650000 amount '
+            '(65.0 credits), Available: 170000 amount (17.0 credits)"}'
+        )
+        with db_module.db() as conn:
+            conn.execute(
+                """
+                INSERT INTO tasks(id, user_id, type, status, input_json, output_json, error, runninghub_task_id, usage_json, cost_cents, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "task_error_display",
+                    1,
+                    "video_i2v",
+                    "failed",
+                    "{}",
+                    json.dumps({"items": [{"ok": False, "error": raw_error}], "ok": False}, ensure_ascii=False),
+                    raw_error,
+                    "",
+                    "{}",
+                    0,
+                    server._now_ts(),
+                    server._now_ts(),
+                ),
+            )
+
+        with db_module.db() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", ("task_error_display",)).fetchone()
+        detail = server._build_task_detail_payload(task=dict(row), include_logs=False)
+
+        self.assertEqual(detail["error"], "余额不足：本次需要 65.0 credits，当前只有 17.0 credits，请充值或降低视频参数后重试。")
+        self.assertEqual(detail["first_error"], detail["error"])
+        self.assertEqual(detail["output"]["items"][0]["error"], detail["error"])
+
     def test_text_to_image_auto_qa_retries_rejected_candidate(self):
         first_image = Path(self._tmpdir.name) / "first.png"
         second_image = Path(self._tmpdir.name) / "second.png"

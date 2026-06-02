@@ -1357,6 +1357,66 @@ def _notify_tg_task_finished(
 
 def _format_user_visible_task_error(error: str) -> str:
     text = str(error or "").strip()
+    short_reason_prefixes = (
+        "余额不足：",
+        "4090 显存不足：",
+        "ComfyUI 工作流参数校验失败：",
+        "ComfyUI 缺少自定义节点：",
+        "工作流已执行但没有返回可下载结果",
+        "生成超时：",
+        "接口鉴权失败：",
+        "请求过于频繁：",
+        "上传素材过大：",
+        "请求参数不合法：",
+        "上游资源不存在：",
+        "上游服务异常：",
+        "4090 ComfyUI 主服务当前不可用",
+        "4090 连接通道中断",
+        "MuleRouter 下游生成失败：",
+        "后台生成失败：",
+    )
+    if text.startswith(short_reason_prefixes):
+        return text
+    lower = text.lower()
+    if "insufficient balance" in lower or "http 402" in lower or '"status": 402' in lower or "402 client error" in lower:
+        required_match = re.search(r"Required:\s*\d+\s*amount\s*\(([\d.]+)\s*credits?\)", text, flags=re.IGNORECASE)
+        available_match = re.search(r"Available:\s*\d+\s*amount\s*\(([\d.]+)\s*credits?\)", text, flags=re.IGNORECASE)
+        if required_match and available_match:
+            return f"余额不足：本次需要 {required_match.group(1)} credits，当前只有 {available_match.group(1)} credits，请充值或降低视频参数后重试。"
+        return "余额不足：上游生成服务拒绝了请求，请充值或降低任务参数后重试。"
+    if "cuda error" in lower and ("out of memory" in lower or "cudaerrormemoryallocation" in lower):
+        return "4090 显存不足：ComfyUI 在采样节点显存溢出，请释放显存、降低分辨率/批量数，或重启 ComfyUI 后重试。"
+    if "prompt_outputs_failed_validation" in text or "Prompt outputs failed validation" in text:
+        if "keep_proportion" in text or "crop_position" in text or "value_not_in_list" in text:
+            return "ComfyUI 工作流参数校验失败：当前工作流节点参数与 4090 节点版本不匹配，请更新工作流映射或使用已修正的节点覆盖配置。"
+        return "ComfyUI 工作流参数校验失败：提交前节点输入不合法，请检查工作流映射和后台节点参数。"
+    if "missing_node_type" in text or ("Node '" in text and "not found" in text):
+        return "ComfyUI 缺少自定义节点：当前工作流需要的节点没有安装或未启用，请在 4090 安装对应 custom node 后重试。"
+    if "did not return downloadable image" in lower or "未返回可下载图片" in text or "未返回可下载" in text:
+        return "工作流已执行但没有返回可下载结果，请检查工作流保存节点和输出节点配置。"
+    if "timeout" in lower or "超时" in text:
+        return "生成超时：上游服务长时间没有返回结果，请稍后重试或降低任务参数。"
+    if "unauthorized" in lower or "invalid api key" in lower or "api key" in lower and "invalid" in lower:
+        return "接口鉴权失败：API Key 或访问令牌无效，请检查后台密钥配置。"
+    if "rate limit" in lower or "too many requests" in lower or "http 429" in lower or "429 client error" in lower:
+        return "请求过于频繁：上游服务限流，请稍后重试。"
+    if "request entity too large" in lower or "payload too large" in lower or "http 413" in lower:
+        return "上传素材过大：请压缩图片/视频后重新提交。"
+    http_match = re.search(r"\bHTTP\s+(\d{3})\b|(\d{3})\s+Client Error|\"status\"\s*:\s*(\d{3})", text, flags=re.IGNORECASE)
+    http_code = next((int(group) for group in (http_match.groups() if http_match else ()) if group), 0)
+    if http_code:
+        if http_code == 400:
+            return "请求参数不合法：当前任务参数或工作流输入不符合上游接口要求，请检查后台映射后重试。"
+        if http_code in {401, 403}:
+            return "接口鉴权失败：当前 API Key、Token 或账号权限不足，请检查后台配置。"
+        if http_code == 404:
+            return "上游资源不存在：模型、工作流或接口地址配置错误，请检查后台映射。"
+        if http_code == 408:
+            return "生成请求超时：上游服务未及时响应，请稍后重试。"
+        if http_code == 429:
+            return "请求过于频繁：上游服务限流，请稍后重试。"
+        if 500 <= http_code <= 599:
+            return "上游服务异常：生成服务临时不可用，请稍后重试。"
     if "WinError 10061" in text or "Connection refused" in text or "目标电脑拒绝连接" in text or "目標電腦拒絕連線" in text:
         return "4090 ComfyUI 主服务当前不可用或已崩溃，网关能连接但 ComfyUI 端口拒绝连接；请先重启 4090 上的 ComfyUI 后再提交。"
     if "RemoteDisconnected" in text or "SSH session not active" in text or "Connection aborted" in text:
@@ -1369,8 +1429,31 @@ def _format_user_visible_task_error(error: str) -> str:
     text = re.sub(r"\s+", " ", text)
     text = text.strip(" ：:，,。；;")
     if "MuleRouter" in text and ("External service request failed" in text or '"code": 3002' in text):
-        return "MuleRouter 下游生成失败（3002）。常见原因是提示词或参考图触发供应商限制、图文不匹配，或供应商服务临时异常；请换成更清晰、合规的动作描述后重试。"
+        return "MuleRouter 下游生成失败：可能是提示词/参考图触发供应商限制、图文不匹配，或供应商临时异常；请简化描述后重试。"
+    if text.startswith("{") or text.startswith("[") or '\\"error\\"' in text or '"error"' in text:
+        return "后台生成失败：上游服务返回了结构化错误，已隐藏原始 JSON；请在工作台查看详情或按当前任务类型重新提交。"
+    if len(text) > 180:
+        text = text[:180].rstrip() + "..."
     return text or "未知错误"
+
+
+def _format_optional_user_visible_task_error(error: Any) -> str:
+    text = str(error or "").strip()
+    return _format_user_visible_task_error(text) if text else ""
+
+
+def _format_display_error_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key) in {"error", "first_error", "failure_reason"} and isinstance(item, str):
+                out[key] = _format_optional_user_visible_task_error(item)
+            else:
+                out[key] = _format_display_error_fields(item)
+        return out
+    if isinstance(value, list):
+        return [_format_display_error_fields(item) for item in value]
+    return value
 
 
 def _truncate_text(value: Any, max_len: int = 1200) -> str:
@@ -2661,6 +2744,9 @@ def _serialize_task_event_record(*, task: dict[str, Any], event_row: Any) -> dic
         runninghub_task_id=task.get("runninghub_task_id"),
     )
     merged_data = _merge_task_log_meta(_normalize_task_event_data(str(event.get("kind") or ""), str(event.get("message") or ""), data), meta)
+    for key in ("error", "first_error", "failure_reason"):
+        if isinstance(merged_data.get(key), str) and str(merged_data.get(key) or "").strip():
+            merged_data[key] = _format_user_visible_task_error(str(merged_data.get(key) or ""))
     return {
         "id": int(event.get("id") or 0),
         "kind": str(event.get("kind") or ""),
@@ -2735,7 +2821,7 @@ def _build_task_detail_payload(*, task: dict[str, Any], include_logs: bool = Tru
     raw_input = _json_loads(task.get("input_json"), {})
     raw_output = _json_loads(task.get("output_json"), {})
     safe_input = _sanitize_payload(raw_input)
-    safe_output = _sanitize_payload(raw_output)
+    safe_output = _format_display_error_fields(_sanitize_payload(raw_output))
     execution_trace = _build_task_execution_trace(task_type=str(task.get("type") or ""), output_data=raw_output)
     logs: list[dict[str, Any]] = []
     runtime: dict[str, Any] = {}
@@ -2744,13 +2830,15 @@ def _build_task_detail_payload(*, task: dict[str, Any], include_logs: bool = Tru
         if include_logs:
             logs = _load_task_events(conn, task=task, limit=log_limit)
     batch_summary = _extract_batch_summary(safe_output)
+    if str(batch_summary.get("first_error") or "").strip():
+        batch_summary["first_error"] = _format_user_visible_task_error(str(batch_summary.get("first_error") or ""))
     has_download = _task_has_download_file(_json_loads(task.get("output_json"), {}))
     return {
         "id": task["id"],
         "user_id": int(task["user_id"]),
         "type": task["type"],
         "status": task["status"],
-        "error": task["error"],
+        "error": _format_optional_user_visible_task_error(task["error"]),
         "runninghub_task_id": task["runninghub_task_id"],
         "cost_cents": int(task["cost_cents"] or 0),
         "input": safe_input,
@@ -9778,19 +9866,22 @@ def create_app() -> FastAPI:
             if _get_tg_chat_id_from_payload(input_payload) != chat_id:
                 continue
             output_payload = _json_loads(row["output_json"], {})
+            batch_summary = _extract_batch_summary(_format_display_error_fields(output_payload))
+            if str(batch_summary.get("first_error") or "").strip():
+                batch_summary["first_error"] = _format_user_visible_task_error(str(batch_summary.get("first_error") or ""))
             tasks.append(
                 {
                     "id": row["id"],
                     "type": row["type"],
                     "status": row["status"],
-                    "error": _format_user_visible_task_error(row["error"] or ""),
+                    "error": _format_optional_user_visible_task_error(row["error"]),
                     "runninghub_task_id": row["runninghub_task_id"],
                     "cost_cents": int(row["cost_cents"] or 0),
                     "created_at": int(row["created_at"] or 0),
                     "updated_at": int(row["updated_at"] or 0),
                     "has_download": _task_has_download_file(output_payload),
                     "download_path": _extract_download_path(output_payload),
-                    "batch_summary": _extract_batch_summary(output_payload),
+                    "batch_summary": batch_summary,
                 }
             )
             if len(tasks) >= limit:
@@ -9821,13 +9912,16 @@ def create_app() -> FastAPI:
         if _get_tg_chat_id_from_payload(input_payload) != chat_id:
             raise HTTPException(status_code=404, detail="任务不存在")
         output_payload = _json_loads(row["output_json"], {})
+        batch_summary = _extract_batch_summary(_format_display_error_fields(output_payload))
+        if str(batch_summary.get("first_error") or "").strip():
+            batch_summary["first_error"] = _format_user_visible_task_error(str(batch_summary.get("first_error") or ""))
         return {
             "ok": True,
             "task": {
                 "id": row["id"],
                 "type": row["type"],
                 "status": row["status"],
-                "error": _format_user_visible_task_error(row["error"] or ""),
+                "error": _format_optional_user_visible_task_error(row["error"]),
                 "runninghub_task_id": row["runninghub_task_id"],
                 "cost_cents": int(row["cost_cents"] or 0),
                 "created_at": int(row["created_at"] or 0),
@@ -9835,7 +9929,7 @@ def create_app() -> FastAPI:
                 "input": _sanitize_payload(input_payload),
                 "has_download": _task_has_download_file(output_payload),
                 "download_path": _extract_download_path(output_payload),
-                "batch_summary": _extract_batch_summary(output_payload),
+                "batch_summary": batch_summary,
             },
         }
 
@@ -9857,6 +9951,7 @@ def create_app() -> FastAPI:
         for row in rows:
             item = dict(row)
             item["has_download"] = _task_has_download_file(_json_loads(item.get("output_json"), {}))
+            item["error"] = _format_optional_user_visible_task_error(item.get("error"))
             item.pop("output_json", None)
             items.append(item)
         return {"items": items}
@@ -11219,6 +11314,7 @@ def create_app() -> FastAPI:
         for row in rows:
             item = dict(row)
             output_payload = _json_loads(item.get("output_json"), {})
+            item["error"] = _format_optional_user_visible_task_error(item.get("error"))
             workflow_meta = _build_workflow_meta(
                 task_id=str(item.get("id") or ""),
                 task_type=str(item.get("type") or ""),
