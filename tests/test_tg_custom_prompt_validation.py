@@ -1,6 +1,8 @@
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 bs4 = types.ModuleType("bs4")
@@ -59,6 +61,88 @@ class RemoteComfyImageOutputTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "未返回可下载图片"):
                 server._run_remote_comfy_mapped_task("task_test", payload, "text_to_image")
+
+    def test_text_to_image_batch_qa_accumulates_until_six_passed_images(self) -> None:
+        def pass_report():
+            return {
+                "inspected": True,
+                "passed": True,
+                "overall_score": 90,
+                "prompt_match_score": 88,
+                "anatomy_score": 92,
+                "visual_score": 88,
+                "deliverable_ready": True,
+                "issues": [],
+            }
+
+        def reject_report():
+            return {
+                "inspected": True,
+                "passed": False,
+                "overall_score": 55,
+                "prompt_match_score": 70,
+                "anatomy_score": 40,
+                "visual_score": 60,
+                "limb_or_body_broken": True,
+                "deliverable_ready": False,
+                "issues": ["肢體結構不穩定"],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_round = []
+            second_round = []
+            for index in range(1, 4):
+                first = root / f"round1_{index}.png"
+                second = root / f"round2_{index}.png"
+                first.write_bytes(b"first")
+                second.write_bytes(b"second")
+                first_round.append(str(first))
+                second_round.append(str(second))
+
+            comfy_results = [
+                {"ok": True, "prompt_id": "prompt_1", "local_outputs": [{"local_path": path} for path in first_round]},
+                {"ok": True, "prompt_id": "prompt_2", "local_outputs": [{"local_path": path} for path in second_round]},
+            ]
+            qa_results = [
+                pass_report(),
+                pass_report(),
+                pass_report(),
+                pass_report(),
+                pass_report(),
+                pass_report(),
+            ]
+
+            with (
+                patch.object(server, "_run_remote_comfy_gateway_test", side_effect=comfy_results) as run_mock,
+                patch.object(server, "_analyze_generated_person_image_quality", side_effect=qa_results),
+                patch.object(server, "_new_image_qa_seed", return_value=123456),
+                patch.object(server, "_emit_stage"),
+            ):
+                output = server._run_remote_comfy_mapped_task(
+                    "task_batch_qa",
+                    {
+                        "remote_comfy_gateway_url": "http://comfy.local",
+                        "remote_comfy_workflow_mappings": {"text_to_image": "person_t2i.api.json"},
+                        "prompt": "一位人物肖像，清晰自然",
+                        "width": 640,
+                        "height": 960,
+                        "batch_size": 3,
+                        "text_to_image_qa_target_count": 6,
+                        "text_to_image_auto_qa_enabled": True,
+                        "text_to_image_auto_qa_max_attempts": 3,
+                    },
+                    "text_to_image",
+                )
+
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(len(output["image_paths"]), 6)
+        self.assertEqual(output["image_paths"][:3], first_round)
+        self.assertEqual(output["image_paths"][3:], second_round)
+        self.assertEqual(output["image_qa"]["target_count"], 6)
+        self.assertEqual(output["image_qa"]["checked_count"], 6)
+        self.assertEqual(output["image_qa"]["passed_count"], 6)
+        self.assertFalse(output["image_qa"]["insufficient_count"])
 
 
 if __name__ == "__main__":

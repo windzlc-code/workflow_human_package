@@ -59,8 +59,8 @@ def test_remote_comfy_upload_input_images_preserves_face_swap_roles(tmp_path):
 
     assert upload.call_count == 2
     assert result == [
-        {"role": "target", "image": "telegram/task/target.jpg", "label": "原图"},
-        {"role": "source_face", "image": "telegram/task/source.jpg", "label": "人脸参考图"},
+        {"role": "target", "image": "telegram/task/target.jpg", "label": "原圖"},
+        {"role": "source_face", "image": "telegram/task/source.jpg", "label": "人臉參考圖"},
     ]
 
 
@@ -89,8 +89,31 @@ def test_remote_comfy_upload_input_images_preserves_image_edit_roles(tmp_path):
 
     assert upload.call_count == 2
     assert result == [
-        {"role": "image1", "image": "telegram/task/input.png", "label": "原图"},
-        {"role": "image2", "image": "telegram/task/reference.png", "label": "参考图"},
+        {"role": "image1", "image": "telegram/task/input.png", "label": "原圖"},
+        {"role": "image2", "image": "telegram/task/reference.png", "label": "參考圖"},
+    ]
+
+
+def test_remote_comfy_input_images_keep_first_path_per_role(tmp_path):
+    canonical = tmp_path / "canonical.png"
+    alias = tmp_path / "alias.png"
+    reference = tmp_path / "reference.png"
+    canonical.write_bytes(b"canonical")
+    alias.write_bytes(b"alias")
+    reference.write_bytes(b"reference")
+
+    result = server._remote_comfy_input_image_paths_from_payload(
+        {
+            "input_image_local_path": str(canonical),
+            "image_local_path": str(alias),
+            "reference_image_local_path": str(reference),
+        },
+        "get_nano_banana",
+    )
+
+    assert result == [
+        {"role": "image1", "path": str(canonical.resolve()), "label": "原圖"},
+        {"role": "image2", "path": str(reference.resolve()), "label": "參考圖"},
     ]
 
 
@@ -114,8 +137,8 @@ def test_remote_comfy_upload_input_images_duplicates_single_image_edit_role(tmp_
 
     assert upload.call_count == 2
     assert result == [
-        {"role": "image1", "image": "telegram/task/input.png", "label": "原图"},
-        {"role": "image2", "image": "telegram/task/input.png", "label": "原图"},
+        {"role": "image1", "image": "telegram/task/input.png", "label": "原圖"},
+        {"role": "image2", "image": "telegram/task/input.png", "label": "原圖"},
     ]
 
 
@@ -137,10 +160,51 @@ def test_remote_comfy_uploaded_bindings_become_node_inputs():
     }
 
 
+def test_single_image_edit_reuses_nano_banana_image_bindings():
+    payload = {
+        "remote_comfy_workflow_mappings": {
+            "single_image_edit": "__converted__/custom_edit.api.json",
+        },
+        "remote_comfy_image_input_bindings": {
+            "get_nano_banana": {
+                "image1": {"node_id": "2", "input_name": "image"},
+                "image2": {"node_id": "19", "input_name": "image"},
+            }
+        },
+    }
+
+    result = server._remote_comfy_image_input_bindings(payload, "single_image_edit")
+
+    assert result == {
+        "image1": {"node_id": "2", "input_name": "image"},
+        "image2": {"node_id": "19", "input_name": "image"},
+    }
+
+
+def test_image_edit_rejects_prompt_drift_into_face_or_clothing_replacement():
+    request = "將原圖的色彩調得更清爽，參考第二張圖的柔和光感，保持人物身份、姿勢和構圖不變，真實自然。"
+
+    assert server._tg_edit_prompt_violates_user_request(
+        "使用第二張圖片的臉部替換第一張圖片的臉部，換成學校水手服，保留精液細節",
+        request,
+        "get_nano_banana",
+    )
+    assert not server._tg_edit_prompt_violates_user_request(
+        "將原圖色彩調得更清爽，參考第二張圖的柔和光感，保持人物身份、姿勢和構圖不變，真實自然",
+        request,
+        "get_nano_banana",
+    )
+    assert server._tg_edit_prompt_violates_user_request(
+        "以第二張圖片為參考進行自然編輯，保持第一張圖片的姿勢、構圖、身體、服裝、光影和背景不變，細節自然融合無瑕疵",
+        request,
+        "get_nano_banana",
+    )
+
+
 def test_firered_image_edit_prompt_overrides_cr_prompt_node():
     result = server._remote_comfy_node_inputs_from_payload(
         {
-            "prompt_text": "将主图脸部和头发替换为参考图的脸部与双马尾发型",
+            "prompt_text": "將主圖臉部和頭髮替換為參考圖的臉部與雙馬尾髮型",
             "remote_comfy_workflow_mappings": {
                 "get_nano_banana": "__converted__/firered_api.json",
             },
@@ -149,7 +213,7 @@ def test_firered_image_edit_prompt_overrides_cr_prompt_node():
         workflow_path="__converted__/firered_api.json",
     )
 
-    assert result["66"]["prompt"] == "将主图脸部和头发替换为参考图的脸部与双马尾发型"
+    assert result["66"]["prompt"] == "將主圖臉部和頭髮替換為參考圖的臉部與雙馬尾髮型"
 
 
 def test_person_t2i_gateway_call_locks_prompt_nodes():
@@ -170,8 +234,8 @@ def test_person_t2i_gateway_call_locks_prompt_nodes():
             negative_prompt="low quality",
             width=1024,
             height=1536,
-            batch_size=6,
-            node_inputs={"160": {"width": 1024, "height": 1536, "batch_size": 6}},
+            batch_size=3,
+            node_inputs={"160": {"width": 1024, "height": 1536, "batch_size": 3}},
             timeout_seconds=30,
         )
 
@@ -179,8 +243,8 @@ def test_person_t2i_gateway_call_locks_prompt_nodes():
     body = captured[0]["json_body"]
     assert body["prompt_text_node_ids"] == ["164"]
     assert body["negative_text_node_ids"] == ["166"]
-    assert body["batch_size"] == 6
-    assert body["node_inputs"]["160"]["batch_size"] == 6
+    assert body["batch_size"] == 3
+    assert body["node_inputs"]["160"]["batch_size"] == 3
     assert body["node_inputs"]["164"]["text"] == "一位人物站在卧室中"
     assert body["node_inputs"]["166"]["text"] == "low quality"
 
@@ -190,7 +254,7 @@ def test_person_t2i_node_inputs_strip_stale_lora_controls():
         {
             "width": 1024,
             "height": 1536,
-            "batch_size": 6,
+            "batch_size": 3,
             "remote_comfy_node_inputs": {
                 "185": {"lora_name": r"ZIT\臀部Z-Hip-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
                 "186": {"lora_name": r"ZIT\胸部Z-Breast-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
@@ -202,7 +266,7 @@ def test_person_t2i_node_inputs_strip_stale_lora_controls():
         workflow_path="__converted__/person_t2i.api.json",
     )
 
-    assert result["160"] == {"width": 1024, "height": 1536, "batch_size": 6}
+    assert result["160"] == {"width": 1024, "height": 1536, "batch_size": 3}
     assert "184" not in result
     assert "185" not in result
     assert "186" not in result
@@ -350,9 +414,10 @@ def test_image_edit_finished_markup_keeps_edit_actions():
 
         assert markup == {
             "keyboard": [
-                [{"text": "单图编辑"}, {"text": "图片编辑"}],
-                [{"text": "文生图"}, {"text": "人物换脸"}],
-                [{"text": "返回主菜单"}],
+                [{"text": "繼續編輯結果圖"}],
+                [{"text": "重新生成圖片編輯"}],
+                [{"text": "單圖編輯"}, {"text": "圖片編輯"}],
+                [{"text": "返回主選單"}],
             ],
             "resize_keyboard": True,
         }

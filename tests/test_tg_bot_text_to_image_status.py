@@ -112,6 +112,8 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertEqual(bot._canonical_button_text("人物换脸"), bot.FACE_SWAP_BUTTON)
         self.assertEqual(bot._canonical_button_text("增加解析度 2 倍"), bot.FACE_SWAP_UPSCALE_BUTTON)
         self.assertEqual(bot._canonical_button_text("重新生成人物換臉"), bot.FACE_SWAP_RERUN_BUTTON)
+        self.assertEqual(bot._canonical_button_text("繼續編輯結果圖"), bot.IMAGE_EDIT_CONTINUE_RESULT_BUTTON)
+        self.assertEqual(bot._canonical_button_text("重新生成圖片編輯"), bot.IMAGE_EDIT_RERUN_BUTTON)
 
     def test_continue_text_to_image_restores_previous_prompt_context(self) -> None:
         restored = bot._text_to_image_continue_state_from_payload(
@@ -141,7 +143,7 @@ class TextToImageStatusTextTests(unittest.TestCase):
         params = bot._text_to_image_params({"text_to_image_workflow_profile": "person_t2i"})
         node_inputs = bot._text_to_image_remote_node_inputs(params)
 
-        self.assertEqual(node_inputs["160"]["batch_size"], 6)
+        self.assertEqual(node_inputs["160"]["batch_size"], 3)
         self.assertNotIn("184", node_inputs)
         self.assertNotIn("185", node_inputs)
         self.assertNotIn("186", node_inputs)

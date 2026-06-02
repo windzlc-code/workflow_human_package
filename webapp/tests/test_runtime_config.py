@@ -779,6 +779,33 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(old["status"], "queued")
         self.assertEqual(other["status"], "queued")
 
+    def test_internal_tg_cancel_latest_reports_recent_finished_task_when_no_active_task(self):
+        cancel_latest = self._route_endpoint("/api/internal/tg/tasks/cancel_latest", "POST")
+        server._create_task_record("task_done", 1, "face_swap", {"tg_chat_id": 8100401093})
+        server._create_task_record("task_other_chat", 1, "face_swap", {"tg_chat_id": 123})
+        with db_module.db() as conn:
+            conn.execute(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                ("success", server._now_ts() + 20, "task_done"),
+            )
+            conn.execute(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                ("running", server._now_ts() + 30, "task_other_chat"),
+            )
+
+        class Request:
+            query_params = {"chat_id": "8100401093"}
+            headers = {}
+            client = type("Client", (), {"host": "127.0.0.1"})()
+
+        result = cancel_latest(Request())
+
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(result["state"], "none")
+        self.assertEqual(result["latest"]["id"], "task_done")
+        self.assertEqual(result["latest"]["status"], "success")
+        self.assertIn("目前狀態為已完成", result["message"])
+
     def test_cancelled_queued_webapp_task_is_not_started_by_worker(self):
         server._create_task_record("task_cancelled_before_start", 1, "text_to_image", {"tg_chat_id": 8100401093})
         server._cancel_task_record_for_user(

@@ -64,12 +64,15 @@ TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON = "繼續生成圖片"
 MULTI_IMAGE_BUTTON = "多圖生成"
 SINGLE_IMAGE_EDIT_BUTTON = "單圖編輯"
 IMAGE_EDIT_BUTTON = "圖片編輯"
+IMAGE_EDIT_CONTINUE_RESULT_BUTTON = "繼續編輯結果圖"
+IMAGE_EDIT_RERUN_BUTTON = "重新生成圖片編輯"
 FACE_SWAP_BUTTON = "人物換臉"
 FACE_SWAP_UPSCALE_BUTTON = "增加解析度 2 倍"
 FACE_SWAP_RERUN_BUTTON = "重新生成人物換臉"
 IMAGE_REPLACE_BUTTON = "圖片替換"
 VIDEO_GENERAL_EDIT_BUTTON = "圖生視頻"
-PERSON_T2I_DEFAULT_BATCH_SIZE = 6
+PERSON_T2I_DEFAULT_BATCH_SIZE = 3
+PERSON_T2I_TELEGRAM_RETURN_COUNT = 6
 LEGACY_IMAGE_WORKFLOW_BUTTON = "圖像編輯工作流"
 LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "圖片生成工作流"
 VIDEO_EDIT_BUTTON = "視頻生成"
@@ -118,6 +121,8 @@ BUTTON_ALIASES = {
     "單圖編輯": SINGLE_IMAGE_EDIT_BUTTON,
     "图片编辑": IMAGE_EDIT_BUTTON,
     "圖片編輯": IMAGE_EDIT_BUTTON,
+    "繼續編輯結果圖": IMAGE_EDIT_CONTINUE_RESULT_BUTTON,
+    "重新生成圖片編輯": IMAGE_EDIT_RERUN_BUTTON,
     "人物换脸": FACE_SWAP_BUTTON,
     "人物換臉": FACE_SWAP_BUTTON,
     "增加分辨率 2 倍": FACE_SWAP_UPSCALE_BUTTON,
@@ -731,6 +736,7 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
             "height": params["height"],
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
@@ -1915,6 +1921,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             TEXT_TO_IMAGE_BUTTON,
             SINGLE_IMAGE_EDIT_BUTTON,
             IMAGE_EDIT_BUTTON,
+            IMAGE_EDIT_CONTINUE_RESULT_BUTTON,
+            IMAGE_EDIT_RERUN_BUTTON,
             FACE_SWAP_BUTTON,
             FACE_SWAP_UPSCALE_BUTTON,
             FACE_SWAP_RERUN_BUTTON,
@@ -1952,6 +1960,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await start_single_image_edit_flow(message, state, single_input=True)
         elif text == IMAGE_EDIT_BUTTON:
             await start_single_image_edit_flow(message, state, single_input=False)
+        elif text == IMAGE_EDIT_CONTINUE_RESULT_BUTTON:
+            try:
+                await _continue_latest_image_edit_result(message, state)
+            except Exception as exc:
+                await _answer(message, f"繼續編輯結果圖失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+        elif text == IMAGE_EDIT_RERUN_BUTTON:
+            try:
+                await _rerun_latest_image_edit(message, state)
+            except Exception as exc:
+                await _answer(message, f"重新生成圖片編輯失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
         elif text == FACE_SWAP_BUTTON:
             await start_face_swap_flow(message, state)
         elif text == FACE_SWAP_UPSCALE_BUTTON:
@@ -2040,11 +2058,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if str(webapp_cancel.get("state") or "") == "error":
             await _answer(message, str(webapp_cancel.get("message") or "後臺生成任務停止失敗。"), reply_markup=_menu_keyboard())
             return True
+        webapp_no_active_message = ""
+        if str(webapp_cancel.get("state") or "") == "none":
+            webapp_no_active_message = str(webapp_cancel.get("message") or "").strip()
 
         active_task = service.store.get_active_task()
         target_task = active_task or service.get_latest_open_task_for_submitter(int(message.chat.id))
         if target_task is None:
-            await _answer(message, "目前沒有可強制停止的任務。", reply_markup=_menu_keyboard())
+            await _answer(message, webapp_no_active_message or "目前沒有可強制停止的任務。", reply_markup=_menu_keyboard())
             return True
 
         result = await service.cancel_task(target_task.id, requested_by=f"TG-{int(message.chat.id)}")
@@ -3012,6 +3033,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "height": params["height"],
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
@@ -3079,6 +3101,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "height": params["height"],
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
@@ -3170,6 +3193,109 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await _answer(message, "繼續生成圖片：已載入上次參數，請重新輸入圖片需求。")
         await _show_text_to_image_prompt_entry(message, state)
+
+    async def _latest_image_edit_task(chat_id: int) -> dict[str, Any]:
+        tasks = await _fetch_internal_webapp_tg_tasks(chat_id=int(chat_id), limit=20)
+        edit_types = {"single_image_edit", "get_nano_banana"}
+        selected = next(
+            (
+                item
+                for item in tasks
+                if str(item.get("type") or "").strip() in edit_types
+                and str(item.get("status") or "").strip() == "success"
+                and item.get("has_download")
+            ),
+            None,
+        )
+        if selected is None:
+            selected = next(
+                (
+                    item
+                    for item in tasks
+                    if str(item.get("type") or "").strip() in edit_types
+                    and str(item.get("status") or "").strip() == "success"
+                ),
+                None,
+            )
+        if selected is None:
+            selected = next((item for item in tasks if str(item.get("type") or "").strip() in edit_types), None)
+        if not isinstance(selected, dict):
+            raise RuntimeError("沒有找到最近的圖片編輯任務")
+        task_id = str(selected.get("id") or "").strip()
+        if not task_id:
+            raise RuntimeError("最近的圖片編輯任務缺少任務編號")
+        return await _fetch_internal_webapp_tg_task_detail(chat_id=int(chat_id), task_id=task_id)
+
+    def _image_edit_resubmit_payload(input_payload: dict[str, Any], task_type: str) -> dict[str, Any]:
+        typ = str(task_type or "").strip()
+        input_image = str(input_payload.get("input_image_local_path") or input_payload.get("image_local_path") or "").strip()
+        reference_image = str(
+            input_payload.get("reference_image_local_path")
+            or input_payload.get("second_image_local_path")
+            or input_payload.get("image2_local_path")
+            or ""
+        ).strip()
+        prompt = str(
+            input_payload.get("tg_llm_rewritten_prompt")
+            or input_payload.get("prompt_text")
+            or input_payload.get("prompt")
+            or input_payload.get("message")
+            or ""
+        ).strip()
+        if typ == "single_image_edit":
+            reference_image = reference_image or input_image
+        if not input_image:
+            raise RuntimeError("上次圖片編輯任務缺少原圖，無法重新提交。")
+        if typ == "get_nano_banana" and not reference_image:
+            raise RuntimeError("上次圖片編輯任務缺少參考圖，無法重新提交。")
+        if not prompt:
+            raise RuntimeError("上次圖片編輯任務缺少提示詞，無法重新提交。")
+        return {
+            "input_image_local_path": input_image,
+            "reference_image_local_path": reference_image,
+            "prompt": prompt,
+            "prompt_text": prompt,
+            "message": prompt,
+            "tg_use_llm_prompt": False,
+            "tg_llm_prompt_enhanced": True,
+            "tg_original_prompt": str(input_payload.get("tg_original_prompt") or input_payload.get("tg_original_user_request") or prompt).strip(),
+            "tg_llm_rewritten_prompt": prompt,
+            "tg_rerun_from_task_id": str(input_payload.get("tg_rerun_from_task_id") or "").strip(),
+        }
+
+    async def _rerun_latest_image_edit(message: Message, state: FSMContext) -> None:
+        task = await _latest_image_edit_task(int(message.chat.id))
+        task_type = str(task.get("type") or "").strip()
+        if task_type not in {"single_image_edit", "get_nano_banana"}:
+            raise RuntimeError("最近任務不是圖片編輯任務")
+        input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
+        payload = _image_edit_resubmit_payload(input_payload, task_type)
+        payload["tg_rerun_from_task_id"] = str(task.get("id") or "").strip()
+        await state.clear()
+        await submit_webapp_task_and_reply(message, task_type, payload)
+
+    async def _continue_latest_image_edit_result(message: Message, state: FSMContext) -> None:
+        task = await _latest_image_edit_task(int(message.chat.id))
+        if str(task.get("status") or "").strip() != "success":
+            raise RuntimeError("最近的圖片編輯任務尚未成功完成，無法沿用結果圖。")
+        result_image = str(task.get("download_path") or "").strip()
+        if not result_image or not Path(result_image).exists():
+            raise RuntimeError("最近的圖片編輯任務缺少可用結果圖。")
+        await state.clear()
+        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
+        await state.update_data(
+            work_dir=str(service.create_job_dir(prefix="tg_image_edit_continue")),
+            image_edit_mode="single",
+            input_image_local_path=result_image,
+            reference_image_local_path=result_image,
+            continued_from_task_id=str(task.get("id") or "").strip(),
+            **_clear_image_edit_prompt_fields(),
+        )
+        await _answer(
+            message,
+            "繼續編輯結果圖\n已把最近生成的圖片設為新原圖。\n步驟 2/3：請輸入下一次圖片編輯要求。",
+            reply_markup=_image_task_step_keyboard(),
+        )
 
     def _face_swap_resubmit_payload(input_payload: dict[str, Any], *, seedvr_upscale: bool = False) -> dict[str, Any]:
         target_image = str(input_payload.get("target_image_local_path") or input_payload.get("image_local_path") or "").strip()
@@ -5368,6 +5494,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         await start_single_image_edit_flow(message, state, single_input=False)
+
+    @router.message(F.text == IMAGE_EDIT_CONTINUE_RESULT_BUTTON)
+    async def on_image_edit_continue_result_button(message: Message, state: FSMContext) -> None:
+        if not await ensure_authorized(message):
+            return
+        try:
+            await _continue_latest_image_edit_result(message, state)
+        except Exception as exc:
+            await _answer(message, f"繼續編輯結果圖失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+
+    @router.message(F.text == IMAGE_EDIT_RERUN_BUTTON)
+    async def on_image_edit_rerun_button(message: Message, state: FSMContext) -> None:
+        if not await ensure_authorized(message):
+            return
+        try:
+            await _rerun_latest_image_edit(message, state)
+        except Exception as exc:
+            await _answer(message, f"重新生成圖片編輯失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == FACE_SWAP_BUTTON)
     @router.message(F.text == "人物換臉")

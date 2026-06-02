@@ -1177,9 +1177,10 @@ def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) 
     if typ in {"single_image_edit", "get_nano_banana"}:
         return {
             "keyboard": [
-                [{"text": "单图编辑"}, {"text": "图片编辑"}],
-                [{"text": "文生图"}, {"text": "人物换脸"}],
-                [{"text": "返回主菜单"}],
+                [{"text": "繼續編輯結果圖"}],
+                [{"text": "重新生成圖片編輯"}],
+                [{"text": "單圖編輯"}, {"text": "圖片編輯"}],
+                [{"text": "返回主選單"}],
             ],
             "resize_keyboard": True,
         }
@@ -1207,8 +1208,8 @@ def _text_to_image_qa_notice(output_data: dict[str, Any]) -> str:
     rejected_count = max(_to_int(qa.get("rejected_count"), 0), 0)
     if target_count > 1:
         if passed_count >= target_count:
-            return f"自动 QA：已检查 {checked_count} 张候选图，通过 {passed_count} 张。"
-        return f"自动 QA：已检查 {checked_count} 张候选图，通过 {passed_count} 张，拦截 {rejected_count} 张，未满 {target_count} 张。可继续生成或重新生成。"
+            return f"自動 QA：已檢查 {checked_count} 張候選圖，通過 {passed_count} 張。"
+        return f"自動 QA：已檢查 {checked_count} 張候選圖，通過 {passed_count} 張，攔截 {rejected_count} 張，未滿 {target_count} 張。"
     attempts = max(_to_int(qa.get("attempts"), 1), 1)
     rejected = max(_to_int(qa.get("rejected_rounds"), 0), 0)
     if rejected <= 0:
@@ -1310,16 +1311,16 @@ def _notify_tg_task_finished(
         returned_line = ""
         if is_text_to_image and len(download_paths) > 0:
             returned_line = (
-                f"返回通过 QA 图片: {len(download_paths)}/{target_count} 张"
+                f"回傳通過 QA 圖片: {len(download_paths)}/{target_count} 張"
                 if target_count > 1
-                else f"返回图片: {len(download_paths)} 张"
+                else f"回傳圖片: {len(download_paths)} 張"
             )
         caption = "\n".join(
             part
             for part in [
-                "后台生成任务已完成。",
+                "後臺生成任務已完成。",
                 f"工作流: {task_type}",
-                f"任务编号: {task_id}",
+                f"任務編號: {task_id}",
                 returned_line,
                 _text_to_image_qa_notice(output_dict),
             ]
@@ -1330,10 +1331,10 @@ def _notify_tg_task_finished(
             for index, path in enumerate(download_paths, start=1):
                 item_caption = caption if index == 1 else "\n".join(
                     [
-                        "后台生成任务已完成。",
+                        "後臺生成任務已完成。",
                         f"工作流: {task_type}",
-                        f"任务编号: {task_id}",
-                        f"第 {index}/{len(download_paths)} 张",
+                        f"任務編號: {task_id}",
+                        f"第 {index}/{len(download_paths)} 張",
                     ]
                 )
                 item_markup = reply_markup if index == len(download_paths) else None
@@ -1345,19 +1346,19 @@ def _notify_tg_task_finished(
             return
         parts = [caption]
         if task_url and not (is_text_to_image and _to_bool(qa.get("insufficient_count"), False)):
-            parts.append(f"工作台: {task_url}")
+            parts.append(f"工作臺: {task_url}")
         if download_path:
-            parts.append(f"结果文件: {download_path}")
+            parts.append(f"結果文件: {download_path}")
         _send_telegram_message(chat_id, "\n".join(parts), reply_markup=reply_markup)
         return
 
     message = "\n".join(
         part
         for part in [
-            "后台生成任务失败。",
+            "後臺生成任務失敗。",
             f"工作流: {task_type}",
-            f"任务编号: {task_id}",
-            f"原因: {_format_user_visible_task_error(str(error or output_data.get('error') or output_data.get('message') or '未知错误').strip())}",
+            f"任務編號: {task_id}",
+            f"原因: {_format_user_visible_task_error(str(error or output_data.get('error') or output_data.get('message') or '未知錯誤').strip())}",
         ]
         if part
     )
@@ -3783,6 +3784,10 @@ def _remote_comfy_image_input_bindings(payload: dict[str, Any], task_type: str) 
         value = bindings.get(task_type)
         if isinstance(value, (dict, list)):
             return value
+        if str(task_type or "").strip() == "single_image_edit":
+            value = bindings.get("get_nano_banana")
+            if isinstance(value, (dict, list)):
+                return value
         default_value = bindings.get("default")
         if isinstance(default_value, (dict, list)):
             return default_value
@@ -4130,48 +4135,49 @@ def _remote_comfy_input_image_paths_from_payload(payload: dict[str, Any], task_t
         )
         candidates.extend(
             [
-                ("image1", single_image, "原图"),
-                ("image2", single_image, "原图"),
+                ("image1", single_image, "原圖"),
+                ("image2", single_image, "原圖"),
             ]
         )
     elif typ == "get_nano_banana":
         candidates.extend(
             [
-                ("image1", payload.get("input_image_local_path"), "原图"),
-                ("image1", payload.get("image_local_path"), "原图"),
-                ("image1", payload.get("product_image_local_path"), "原图"),
-                ("image2", payload.get("reference_image_local_path"), "参考图"),
-                ("image2", payload.get("second_image_local_path"), "参考图"),
-                ("image2", payload.get("image2_local_path"), "参考图"),
-                ("image2", payload.get("model_image_local_path"), "参考图"),
+                ("image1", payload.get("input_image_local_path"), "原圖"),
+                ("image1", payload.get("image_local_path"), "原圖"),
+                ("image1", payload.get("product_image_local_path"), "原圖"),
+                ("image2", payload.get("reference_image_local_path"), "參考圖"),
+                ("image2", payload.get("second_image_local_path"), "參考圖"),
+                ("image2", payload.get("image2_local_path"), "參考圖"),
+                ("image2", payload.get("model_image_local_path"), "參考圖"),
             ]
         )
     elif typ == "face_swap":
         candidates.extend(
             [
-                ("target", payload.get("target_image_local_path"), "原图"),
-                ("target", payload.get("image_local_path"), "原图"),
-                ("source_face", payload.get("source_image_local_path"), "人脸参考图"),
-                ("source_face", payload.get("reference_image_local_path"), "人脸参考图"),
-                ("source_face", payload.get("face_image_local_path"), "人脸参考图"),
+                ("target", payload.get("target_image_local_path"), "原圖"),
+                ("target", payload.get("image_local_path"), "原圖"),
+                ("source_face", payload.get("source_image_local_path"), "人臉參考圖"),
+                ("source_face", payload.get("reference_image_local_path"), "人臉參考圖"),
+                ("source_face", payload.get("face_image_local_path"), "人臉參考圖"),
             ]
         )
     else:
         return []
     paths: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen_roles: set[str] = set()
     for role, value, label in candidates:
         text = str(value or "").strip()
         if not text:
+            continue
+        role_text = str(role)
+        if role_text in seen_roles:
             continue
         try:
             resolved = str(Path(text).expanduser().resolve())
         except Exception:
             resolved = text
-        dedupe_key = (str(role), resolved)
-        if dedupe_key not in seen:
-            seen.add(dedupe_key)
-            paths.append({"role": str(role), "path": resolved, "label": str(label)})
+        seen_roles.add(role_text)
+        paths.append({"role": role_text, "path": resolved, "label": str(label)})
     return paths
 
 
@@ -4935,9 +4941,13 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         and _to_bool(payload.get("text_to_image_auto_qa_enabled"), True)
     )
     image_task_requires_output = str(task_type or "").strip() in {"text_to_image", "image_generate", "single_image_edit", "get_nano_banana", "face_swap"}
-    qa_target_count = max(batch_size, 1) if str(task_type or "").strip() == "text_to_image" else 1
+    qa_target_count = _text_to_image_qa_target_count(payload, batch_size=batch_size, workflow_path=workflow_path) if str(task_type or "").strip() == "text_to_image" else 1
     batch_qa_enabled = auto_qa_enabled and qa_target_count > 1
-    max_attempts = 1 if batch_qa_enabled else (min(max(_to_int(payload.get("text_to_image_auto_qa_max_attempts"), 3), 1), 6) if auto_qa_enabled else 1)
+    if batch_qa_enabled:
+        configured_attempts = _to_int(payload.get("text_to_image_auto_qa_max_attempts"), qa_target_count)
+        max_attempts = min(max(configured_attempts, qa_target_count, 1), 12)
+    else:
+        max_attempts = min(max(_to_int(payload.get("text_to_image_auto_qa_max_attempts"), 3), 1), 6) if auto_qa_enabled else 1
     qa_reports: list[dict[str, Any]] = []
     qa_passed_image_paths: list[str] = []
     used_seeds = _collect_seed_values(base_node_inputs)
@@ -5009,7 +5019,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         if not auto_qa_enabled or Path(output_path).suffix.lower() not in IMAGE_EXTS:
             break
         if batch_qa_enabled:
-            qa_passed_image_paths = []
+            attempt_passed_image_paths: list[str] = []
             for candidate_index, candidate_path in enumerate(candidate_image_paths, start=1):
                 qa_report = _analyze_generated_person_image_quality(
                     image_path=candidate_path,
@@ -5023,22 +5033,26 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
                 qa_report["image_path"] = candidate_path
                 qa_reports.append(qa_report)
                 if not _should_reject_generated_person_image(qa_report):
-                    qa_passed_image_paths.append(candidate_path)
+                    attempt_passed_image_paths.append(candidate_path)
+                    if candidate_path not in qa_passed_image_paths:
+                        qa_passed_image_paths.append(candidate_path)
             if len(qa_passed_image_paths) >= qa_target_count:
                 _emit_stage(
                     payload,
                     stage="image_auto_qa",
                     status="success",
-                    message=f"自动 QA 已检查 {len(qa_reports)} 张候选图，通过 {len(qa_passed_image_paths)} 张",
+                    message=f"自動 QA 已檢查 {len(qa_reports)} 張候選圖，累積通過 {len(qa_passed_image_paths)} 張",
                     data={
                         "qa_attempt": attempt,
                         "target_count": qa_target_count,
                         "passed_count": len(qa_passed_image_paths),
                         "rejected_count": len(qa_reports) - len(qa_passed_image_paths),
+                        "attempt_passed_count": len(attempt_passed_image_paths),
                     },
                 )
+                break
             else:
-                last_qa_reason = f"QA 通过图片 {len(qa_passed_image_paths)}/{qa_target_count} 张，未满 {qa_target_count} 张"
+                last_qa_reason = f"QA 累積通過圖片 {len(qa_passed_image_paths)}/{qa_target_count} 張，未滿 {qa_target_count} 張"
                 _emit_stage(
                     payload,
                     stage="image_auto_qa",
@@ -5049,9 +5063,10 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
                         "target_count": qa_target_count,
                         "passed_count": len(qa_passed_image_paths),
                         "rejected_count": len(qa_reports) - len(qa_passed_image_paths),
+                        "attempt_passed_count": len(attempt_passed_image_paths),
                     },
                 )
-            break
+                continue
         qa_report = _analyze_generated_person_image_quality(
             image_path=output_path,
             prompt_text=prompt_text,
@@ -5079,6 +5094,11 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
             data={"qa_attempt": attempt, "qa_report": _sanitize_payload(qa_report), "reason": last_qa_reason},
         )
     else:
+        if batch_qa_enabled and len(qa_passed_image_paths) < qa_target_count:
+            raise RuntimeError(
+                f"自動 QA 已檢查 {len(qa_reports)} 張候選圖，"
+                f"累積通過 {len(qa_passed_image_paths)}/{qa_target_count} 張，仍未滿 Telegram 回傳數量要求。"
+            )
         if auto_qa_enabled and qa_reports and _should_reject_generated_person_image(qa_reports[-1]):
             raise RuntimeError(f"自动 QA 已筛选 {len(qa_reports)} 轮仍未获得可交付图片：{last_qa_reason or '候选图未通过质量检查'}")
 
@@ -5117,8 +5137,8 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         output["image_paths"] = image_paths
     if auto_qa_enabled:
         if batch_qa_enabled:
-            rejected_count = sum(1 for report in qa_reports if _should_reject_generated_person_image(report))
-            passed_count = len(qa_reports) - rejected_count
+            passed_count = len(qa_passed_image_paths)
+            rejected_count = max(len(qa_reports) - passed_count, 0)
             output["image_qa"] = {
                 "enabled": True,
                 "mode": "batch_candidates",
@@ -5128,6 +5148,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
                 "rejected_count": rejected_count,
                 "insufficient_count": passed_count < qa_target_count,
                 "passed": passed_count >= qa_target_count,
+                "attempts": max((int(report.get("attempt") or 0) for report in qa_reports), default=0),
                 "reports": qa_reports,
             }
         else:
@@ -8082,17 +8103,48 @@ def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, An
 def _build_tg_image_edit_fallback_prompt(original_request: str, task_type: str) -> str:
     request_text = _clean_tg_prompt_request(original_request)
     if not request_text:
-        request_text = "自然处理图片，保持原图构图、光线、服装、背景和主体关系"
+        request_text = "自然處理圖片，保持原圖構圖、光線、服裝、背景和主體關係"
     request_text = re.sub(r"^\s*把\s*", "", request_text).strip()
     if str(task_type or "").strip() == "face_swap":
         return (
-            f"{request_text}，保持目标图姿态、服装、背景、光线和镜头角度，只替换脸部身份，"
-            "五官融合自然，肤色和阴影一致，边缘干净，无变形，无水印"
+            f"{request_text}，保持目標圖姿態、服裝、背景、光線和鏡頭角度，只替換臉部身份，"
+            "五官融合自然，膚色和陰影一致，邊緣乾淨，無變形，無水印"
         )
     return (
-        f"{request_text}，保留原图主体、构图、背景、光线和材质关系，编辑区域过渡自然，"
-        "细节清晰，边缘干净，无变形，无水印"
+        f"{request_text}，保留原圖主體、構圖、背景、光線和材質關係，編輯區域過渡自然，"
+        "細節清晰，邊緣乾淨，無變形，無水印"
     )
+
+
+def _tg_edit_prompt_violates_user_request(prompt_text: str, original_request: str, task_type: str) -> bool:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    request = _strip_prompt_response_wrappers(original_request)
+    typ = str(task_type or "").strip()
+    if not text or not request:
+        return False
+    face_terms = r"换脸|換臉|替换脸|替換臉|脸部(?:身份|五官)?替换|臉部(?:身份|五官)?替換|五官替换|五官替換|身份替换|身份替換"
+    if typ != "face_swap" and not re.search(face_terms, request) and re.search(face_terms, text):
+        return True
+    sensitive_terms = r"裸体|裸體|裸露|全裸|阴部|陰部|阴唇|陰唇|阴道|陰道|乳房|乳头|乳頭|精液|自慰|私处|私處|下体|下體|色情|情色|湿润|濕潤"
+    if not re.search(sensitive_terms, request) and re.search(sensitive_terms, text):
+        return True
+    clothing_terms = r"衣|服|裙|穿|换装|換裝|校服|水手服|短裙|外套|制服"
+    clothing_change_terms = r"换成|換成|替换.*(?:衣|服|裙|校服|水手服|短裙|制服)|替換.*(?:衣|服|裙|校服|水手服|短裙|制服)|穿着|穿著|半敞开|半敞開|短裙|校服|水手服"
+    if not re.search(clothing_terms, request) and re.search(clothing_change_terms, text):
+        return True
+    scene_terms = r"背景|场景|場景|环境|環境|户外|戶外|室内|室內|卧室|臥室|校园|校園"
+    scene_change_terms = r"户外场景|戶外場景|校园|校園|学校|學校|卧室|臥室|街道|海边|海邊|森林"
+    if not re.search(scene_terms, request) and re.search(scene_change_terms, text):
+        return True
+    required_groups = [
+        (r"色彩|颜色|顏色|色调|色調|清爽|明亮", r"色彩|颜色|顏色|色调|色調|清爽|明亮"),
+        (r"光感|柔和光|光线|光線|光影", r"光感|柔和光|光线|光線|光影"),
+        (r"人物身份|身份不变|身份不變|保持身份", r"人物身份|身份不变|身份不變|保持身份|身份"),
+    ]
+    for request_pattern, prompt_pattern in required_groups:
+        if re.search(request_pattern, request) and not re.search(prompt_pattern, text):
+            return True
+    return False
 
 
 def _tg_image_persona_face_brief(payload: dict[str, Any]) -> str:
@@ -8449,6 +8501,8 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
             "Use the uploaded reference image as the visual source. Keep the original composition, lighting, camera angle, clothing, background, and object relationships unless the user explicitly asks to change them.",
             "For image editing, describe only the requested edit and the visual constraints needed to keep the result natural.",
             "For face swap, preserve the target image pose, body, clothes, lighting, camera, and background; only replace the face identity using the face reference image unless the user asks for another change.",
+            "For single_image_edit and get_nano_banana, do not turn a style, color, lighting, cleanup, or detail request into face replacement. The second image is a reference for the requested edit only, not face identity transfer, unless the user explicitly says to swap or replace a face.",
+            "Only the face_swap task may default to replacing face identity. For every other image editing task, keep the original person's identity unchanged unless the user explicitly requests identity replacement.",
             "If the user request is short, expand it only with neutral quality constraints such as natural lighting, clean edges, consistent shadows, realistic texture, and no artifacts.",
             "Never add nudity, erotic details, intimate body descriptions, seduction, violence, minors, celebrities, names, LoRA names, or unrelated style changes unless the user explicitly requested a compliant style detail.",
             "Final prompt should be one compact Chinese paragraph, 30 to 140 Chinese characters, comma-separated when useful.",
@@ -8702,6 +8756,8 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         rewritten = _normalize_tg_chinese_image_prompt_format(rewritten)
         rewritten = re.sub(r"([和与及跟同])，", r"\1", rewritten)
         rewritten = re.sub(r"^把，", "", rewritten).strip()
+        if _tg_edit_prompt_violates_user_request(rewritten, original_request or user_request, typ):
+            rewritten = _build_tg_image_edit_fallback_prompt(original_request or user_request, typ)
         if not rewritten or not _looks_like_chinese_image_prompt(rewritten):
             rewritten = _build_tg_image_edit_fallback_prompt(original_request or user_request, typ)
         final_prompt = rewritten
@@ -9201,7 +9257,7 @@ def _cancel_task_record_for_user(
                 "id": tid,
                 "type": task.get("type"),
                 "status": status,
-                "message": f"任务 {tid} 当前状态为 {status or 'unknown'}，无法再强制停止。",
+                "message": f"任務 {tid} 目前狀態為 {status or 'unknown'}，無法再強制停止。",
             }
         now = _now_ts()
         reason = f"{actor} 已强制停止此任务"
@@ -9261,6 +9317,35 @@ def _find_latest_internal_tg_active_task(chat_id: int) -> dict[str, Any] | None:
         if _get_tg_chat_id_from_payload(input_payload) == int(chat_id):
             return item
     return None
+
+
+def _find_latest_internal_tg_task(chat_id: int) -> dict[str, Any] | None:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, user_id, type, status, input_json, created_at, updated_at
+            FROM tasks
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
+    for row in rows:
+        item = dict(row)
+        input_payload = _json_loads(item.get("input_json"), {})
+        if _get_tg_chat_id_from_payload(input_payload) == int(chat_id):
+            return item
+    return None
+
+
+def _internal_tg_task_status_label(status: Any) -> str:
+    normalized = str(status or "").strip().lower()
+    return {
+        "queued": "排隊中",
+        "running": "生成中",
+        "success": "已完成",
+        "failed": "失敗",
+        "cancelled": "已取消",
+    }.get(normalized, normalized or "unknown")
 
 
 def _emit_stage(
@@ -9490,7 +9575,7 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
 
     if typ == "single_image_edit":
         input_image = payload.get("input_image_local_path") or payload.get("image_local_path")
-        payload["input_image_local_path"] = _validated_local_file(input_image, label="原图")
+        payload["input_image_local_path"] = _validated_local_file(input_image, label="原圖")
         payload["reference_image_local_path"] = payload["input_image_local_path"]
         payload = _enhance_tg_payload_with_llm_prompt(typ, payload)
         return payload
@@ -9498,16 +9583,16 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
     if typ == "get_nano_banana":
         input_image = payload.get("input_image_local_path") or payload.get("image_local_path")
         reference_image = payload.get("reference_image_local_path") or payload.get("second_image_local_path") or payload.get("image2_local_path") or payload.get("model_image_local_path")
-        payload["input_image_local_path"] = _validated_local_file(input_image, label="原图")
-        payload["reference_image_local_path"] = _validated_local_file(reference_image, label="参考图")
+        payload["input_image_local_path"] = _validated_local_file(input_image, label="原圖")
+        payload["reference_image_local_path"] = _validated_local_file(reference_image, label="參考圖")
         payload = _enhance_tg_payload_with_llm_prompt(typ, payload)
         return payload
 
     if typ == "face_swap":
         target_image = payload.get("target_image_local_path") or payload.get("image_local_path")
         source_image = payload.get("source_image_local_path") or payload.get("reference_image_local_path") or payload.get("face_image_local_path")
-        payload["target_image_local_path"] = _validated_local_file(target_image, label="原图")
-        payload["source_image_local_path"] = _validated_local_file(source_image, label="人脸参考图")
+        payload["target_image_local_path"] = _validated_local_file(target_image, label="原圖")
+        payload["source_image_local_path"] = _validated_local_file(source_image, label="人臉參考圖")
         payload = _enhance_tg_payload_with_llm_prompt(typ, payload)
         return payload
 
@@ -9545,7 +9630,8 @@ _TG_CHINESE_IMAGE_PROMPT_TASK_TYPES = {
     "commerce_video",
 }
 
-PERSON_T2I_DEFAULT_BATCH_SIZE = 6
+PERSON_T2I_DEFAULT_BATCH_SIZE = 3
+PERSON_T2I_TELEGRAM_RETURN_COUNT = 6
 
 
 def _remote_comfy_default_batch_size(task_type: str, workflow_path: str) -> int:
@@ -9553,6 +9639,21 @@ def _remote_comfy_default_batch_size(task_type: str, workflow_path: str) -> int:
     if str(task_type or "").strip() == "text_to_image" and ("person_t2i" in workflow_text or "人设_t2i" in workflow_text or "人設_t2i" in workflow_text):
         return PERSON_T2I_DEFAULT_BATCH_SIZE
     return 1
+
+
+def _text_to_image_qa_target_count(payload: dict[str, Any], *, batch_size: int, workflow_path: str) -> int:
+    explicit = _to_int(
+        payload.get("text_to_image_qa_target_count")
+        or payload.get("text_to_image_return_count")
+        or payload.get("telegram_return_count"),
+        0,
+    )
+    if explicit > 0:
+        return explicit
+    workflow_text = str(workflow_path or "").lower()
+    if "person_t2i" in workflow_text or "人设_t2i" in workflow_text or "人設_t2i" in workflow_text:
+        return PERSON_T2I_TELEGRAM_RETURN_COUNT
+    return max(batch_size, 1)
 
 
 def _primary_tg_generation_prompt(payload: dict[str, Any]) -> str:
@@ -10263,7 +10364,27 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="chat_id 必须为正整数")
         target = _find_latest_internal_tg_active_task(chat_id)
         if target is None:
-            return {"ok": True, "cancelled": False, "state": "none", "message": "目前没有可强制停止的后台生成任务。"}
+            latest = _find_latest_internal_tg_task(chat_id)
+            if latest is not None:
+                status = str(latest.get("status") or "").strip().lower()
+                status_label = _internal_tg_task_status_label(status)
+                return {
+                    "ok": True,
+                    "cancelled": False,
+                    "state": "none",
+                    "latest": {
+                        "id": latest.get("id"),
+                        "type": latest.get("type"),
+                        "status": status,
+                        "status_label": status_label,
+                        "updated_at": int(latest.get("updated_at") or 0),
+                    },
+                    "message": (
+                        "目前沒有可強制停止的後臺生成任務。"
+                        f"最近後臺任務 {latest.get('id')} 目前狀態為{status_label}，無法再強制停止。"
+                    ),
+                }
+            return {"ok": True, "cancelled": False, "state": "none", "message": "目前沒有可強制停止的後臺生成任務。"}
         return _cancel_task_record_for_user(
             task_id=str(target.get("id") or ""),
             user_id=int(target.get("user_id") or 0),
@@ -11197,12 +11318,12 @@ def create_app() -> FastAPI:
                 payload["input_image_local_path"] = str(images[0]["path"])
             elif typ == "get_nano_banana":
                 if len(images) < 2:
-                    raise HTTPException(status_code=400, detail=f"图片编辑需要上传 2 张图片（先原图，后参考图）（已识别：{_format_uploaded_files(saved)}）")
+                    raise HTTPException(status_code=400, detail=f"圖片編輯需要上傳 2 張圖片（先原圖，後參考圖）（已識別：{_format_uploaded_files(saved)}）")
                 payload["input_image_local_path"] = str(images[0]["path"])
                 payload["reference_image_local_path"] = str(images[1]["path"])
             elif typ == "face_swap":
                 if len(images) < 2:
-                    raise HTTPException(status_code=400, detail=f"人物换脸需要上传 2 张图片（先原图，后人脸参考图）（已识别：{_format_uploaded_files(saved)}）")
+                    raise HTTPException(status_code=400, detail=f"人物換臉需要上傳 2 張圖片（先原圖，後人臉參考圖）（已識別：{_format_uploaded_files(saved)}）")
                 payload["target_image_local_path"] = str(images[0]["path"])
                 payload["source_image_local_path"] = str(images[1]["path"])
             elif typ == "get_gemini":
