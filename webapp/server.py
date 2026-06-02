@@ -4564,6 +4564,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         used_seeds.add(int(seed))
     result: dict[str, Any] = {}
     output_path = ""
+    image_paths: list[str] = []
     selected_seed = seed
     last_qa_reason = ""
     for attempt in range(1, max_attempts + 1):
@@ -4700,15 +4701,15 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         if auto_qa_enabled and qa_reports and _should_reject_generated_person_image(qa_reports[-1]):
             raise RuntimeError(f"自动 QA 已筛选 {len(qa_reports)} 轮仍未获得可交付图片：{last_qa_reason or '候选图未通过质量检查'}")
 
-        current_task_type = str(task_type or "").strip()
-        if batch_qa_enabled:
-            image_paths = qa_passed_image_paths[:qa_target_count]
-            output_path = image_paths[0] if image_paths else ""
-        elif current_task_type == "text_to_image":
-            image_paths = _remote_comfy_output_image_paths(result)
-            output_path = image_paths[0] if image_paths else output_path
-        else:
-            image_paths = [output_path] if output_path and Path(output_path).suffix.lower() in IMAGE_EXTS else []
+    current_task_type = str(task_type or "").strip()
+    if batch_qa_enabled:
+        image_paths = qa_passed_image_paths[:qa_target_count]
+        output_path = image_paths[0] if image_paths else output_path
+    elif current_task_type == "text_to_image":
+        image_paths = _remote_comfy_output_image_paths(result)
+        output_path = image_paths[0] if image_paths else output_path
+    else:
+        image_paths = [output_path] if output_path and Path(output_path).suffix.lower() in IMAGE_EXTS else []
 
     output_key = "download_path"
     suffix = Path(output_path).suffix.lower() if output_path else ""

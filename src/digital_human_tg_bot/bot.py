@@ -1828,19 +1828,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "face_swap": "人物换脸",
             "video_i2v": "图生视频",
         }.get(str(task_type), str(task_type))
-        prompt_preview = str(result.get("prompt_preview") or "").strip()
-        prompt_preview_display = str(params.get("tg_prompt_display_text") or "").strip()
-        if not prompt_preview_display and prompt_preview:
-            prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
-            if not _looks_like_clean_chinese_preview(prompt_preview_display):
-                prompt_preview_display = _tg_prompt_preview_unavailable_text()
         await message.answer(
             "\n".join(
                 part
                 for part in [
                     "任务已提交到后台队列。",
                     f"工作流: {task_label}",
-                    f"提示词: {prompt_preview_display}" if prompt_preview_display else "",
                     f"任务编号: {result.get('id')}",
                     "可按「查看工作台状态」跟进进度。",
                 ]
@@ -4856,26 +4849,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 reply = "请补充具体生产任务和必要素材，或按面板入口依序提交。"
             await message.answer(reply, reply_markup=_menu_keyboard())
             return
-        prompt_preview = str(result.get("prompt_preview") or "").strip()
-        prompt_preview_display = ""
-        if prompt_preview:
-            try:
-                prompt_preview_display = await _display_internal_webapp_prompt(
-                    chat_id=int(message.chat.id),
-                    task_type=str(result.get("task_type") or "text_to_image"),
-                    prompt_text=prompt_preview,
-                )
-            except Exception as exc:
-                prompt_preview_display = _telegram_prompt_chinese_preview(prompt_preview)
-                if not _looks_like_clean_chinese_preview(prompt_preview_display):
-                    prompt_preview_display = _format_prompt_display_fallback(exc)
         await message.answer(
             "\n".join(
                 part
                 for part in [
                     "已通过文字模型理解你的会话，并生成工作流提示词。",
                     summary,
-                    f"Grok 生成提示词: {prompt_preview_display}" if prompt_preview_display else "",
                     f"工作流: {result.get('task_type')}",
                     f"任务编号: {result.get('id')}",
                     "可按「查看工作台状态」跟进进度。",
