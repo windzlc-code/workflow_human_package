@@ -283,6 +283,7 @@ def _image_edit_prompt_failure_keyboard() -> ReplyKeyboardMarkup:
 
 
 FACE_SWAP_NATURAL_PROMPT = "自然换脸，保持原图姿态、服装、光线和背景，只替换人物脸部身份。"
+KEEP_CURRENT_RESOURCE_BUTTON = "沿用当前资源"
 
 
 def _face_swap_prompt_keyboard() -> ReplyKeyboardMarkup:
@@ -296,8 +297,15 @@ def _face_swap_prompt_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def _image_task_step_keyboard(*, back: bool = True) -> ReplyKeyboardMarkup:
+def _recorded_local_resource(value: Any) -> bool:
+    path = str(value or "").strip()
+    return bool(path and Path(path).exists())
+
+
+def _image_task_step_keyboard(*, back: bool = True, keep_current: bool = False) -> ReplyKeyboardMarkup:
     rows: list[list[KeyboardButton]] = []
+    if keep_current:
+        rows.append([KeyboardButton(text=KEEP_CURRENT_RESOURCE_BUTTON)])
     if back:
         rows.append([KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)])
     else:
@@ -969,12 +977,14 @@ def _video_i2v_prompt_failure_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def _video_i2v_audio_keyboard() -> ReplyKeyboardMarkup:
+def _video_i2v_audio_keyboard(*, keep_current: bool = False) -> ReplyKeyboardMarkup:
+    rows: list[list[KeyboardButton]] = []
+    if keep_current:
+        rows.append([KeyboardButton(text=KEEP_CURRENT_RESOURCE_BUTTON)])
+    rows.append([KeyboardButton(text="\u8df3\u8fc7\u97f3\u9891")])
+    rows.append([KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text=MAIN_MENU_BUTTON)])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="\u8df3\u8fc7\u97f3\u9891")],
-            [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text=MAIN_MENU_BUTTON)],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
     )
 
@@ -2270,7 +2280,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 resize_keyboard=True,
             )
         if step == "audio":
-            return _video_i2v_audio_keyboard()
+            return _video_i2v_audio_keyboard(keep_current=_recorded_local_resource(params.get("audio_local_path")))
+        if step == "image":
+            return _image_task_step_keyboard(keep_current=_recorded_local_resource(params.get("image_local_path")))
         return ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
@@ -2302,9 +2314,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if step == "duration":
             text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
         elif step == "audio":
-            text += "\n\n\u53ef\u4ee5\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff08mp3/wav/m4a/ogg \u7b49\uff09\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002"
+            if _recorded_local_resource(params.get("audio_local_path")):
+                text += "\n\n已记录当前音频。可以上传新音频替换，点击“沿用当前资源”继续，或点击“跳过音频”让本次不使用音频。"
+            else:
+                text += "\n\n\u53ef\u4ee5\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff08mp3/wav/m4a/ogg \u7b49\uff09\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002"
         elif step == "image":
-            text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u4e0b\u4e00\u6b65\u518d\u9009\u62e9\u662f\u5426\u4e0a\u4f20\u97f3\u9891\u3002"
+            if _recorded_local_resource(params.get("image_local_path")):
+                text += "\n\n已记录当前参考图。可以上传新图片替换，或点击“沿用当前资源”继续。"
+            else:
+                text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u4e0b\u4e00\u6b65\u518d\u9009\u62e9\u662f\u5426\u4e0a\u4f20\u97f3\u9891\u3002"
         elif step == "prompt_mode":
             text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd\uff0c\u6216\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
         elif step == "prompt":
@@ -2341,9 +2359,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if step == "duration":
             text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
         elif step == "audio":
-            text += "\n\n\u53ef\u4ee5\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff08mp3/wav/m4a/ogg \u7b49\uff09\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002"
+            if _recorded_local_resource(params.get("audio_local_path")):
+                text += "\n\n已记录当前音频。可以上传新音频替换，点击“沿用当前资源”继续，或点击“跳过音频”让本次不使用音频。"
+            else:
+                text += "\n\n\u53ef\u4ee5\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff08mp3/wav/m4a/ogg \u7b49\uff09\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002"
         elif step == "image":
-            text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u4e0b\u4e00\u6b65\u518d\u9009\u62e9\u662f\u5426\u4e0a\u4f20\u97f3\u9891\u3002"
+            if _recorded_local_resource(params.get("image_local_path")):
+                text += "\n\n已记录当前参考图。可以上传新图片替换，或点击“沿用当前资源”继续。"
+            else:
+                text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u4e0b\u4e00\u6b65\u518d\u9009\u62e9\u662f\u5426\u4e0a\u4f20\u97f3\u9891\u3002"
         elif step == "prompt_mode":
             text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd\uff0c\u6216\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
         elif step == "prompt":
@@ -3830,6 +3854,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 work_dir=str(work_dir),
                 prompt_reference_image_local_path=reference_image_path,
             )
+            await message.answer("已更新参考图。")
             if not prompt:
                 prompt = "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by commas (，): 1.[人物+全身姿态+场景] 2.穿着[服装] 3.[暴露器官] 4.她的[左手动作]而[右手动作] 5.她的身体[朝向] 6.她的头[转向+眼神] 7.[背景] 8.[光线] 9.[技术参数]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Example: 一位美丽女郎全身站立在豪华卧室中，穿着优雅的黑色丝绸睡裙，薄薄的意大利面条肩带，低领部部分解开露出深深的乳沟和侧乳，她的左手放在臀部上而右手触摸着裸露的大腿，她的身体微微侧向一边朝向镜头，她的头转向直视镜头带着诱惑的眼神，卧室背景有大大的特大号床铺，白色床单凌乱不堪，柔和的卧室灯投射出温柔的阴影，浅景深让主体清晰而背景微微模糊，真实皮肤纹理，细节的织物褶皱，自然的身体曲线，高细节，写实摄影风格，电影摄影。 This is the ONLY acceptable format."
         if not prompt:
@@ -4232,7 +4257,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         single_input = str(data.get("image_edit_mode") or "").strip() == "single"
         title = "单图编辑" if single_input else "图片编辑"
         total_steps = "3" if single_input else "4"
+        has_input_image = _recorded_local_resource(data.get("input_image_local_path"))
+        if text == KEEP_CURRENT_RESOURCE_BUTTON and has_input_image:
+            if single_input:
+                await state.update_data(reference_image_local_path=str(data.get("reference_image_local_path") or data.get("input_image_local_path") or ""))
+                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
+                await message.answer("单图编辑\n已沿用当前原图。\n步骤 2/3：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+                return
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
+            await message.answer(
+                "图片编辑\n已沿用当前原图。\n步骤 2/4：请上传参考图或素材图；如果要继续使用已记录的参考图，请点击“沿用当前资源”。",
+                reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("reference_image_local_path"))),
+            )
+            return
         if suffix is None:
+            if has_input_image:
+                await message.answer(
+                    f"{title}\n已记录当前原图。可以上传新原图替换，或点击“沿用当前资源”继续。",
+                    reply_markup=_image_task_step_keyboard(back=False, keep_current=True),
+                )
+                return
             await message.answer(f"{title}\n步骤 1/{total_steps}：请上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_image_edit")))
@@ -4247,11 +4291,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             update_payload["reference_image_local_path"] = str(target.resolve())
             await state.update_data(**update_payload)
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await message.answer("单图编辑\n步骤 2/3：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await message.answer("单图编辑\n已更新原图。\n步骤 2/3：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
             return
         await state.update_data(**update_payload)
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
-        await message.answer("图片编辑\n步骤 2/4：请上传参考图或素材图。", reply_markup=_image_task_step_keyboard())
+        await message.answer(
+            "图片编辑\n已更新原图。\n步骤 2/4：请上传参考图或素材图。",
+            reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("reference_image_local_path"))),
+        )
 
     @router.message(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
     async def on_image_edit_reference_image(message: Message, state: FSMContext) -> None:
@@ -4263,15 +4310,29 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
-            await state.update_data(**_clear_image_edit_prompt_fields())
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
-            await message.answer("图片编辑\n步骤 1/4：请重新上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
+            data = await state.get_data()
+            await message.answer(
+                "图片编辑\n步骤 1/4：如需替换原图，请上传新图片；否则点击“沿用当前资源”。",
+                reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("input_image_local_path"))),
+            )
             return
         suffix = _image_ext_from_message(message)
+        data = await state.get_data()
+        has_reference_image = _recorded_local_resource(data.get("reference_image_local_path"))
+        if text == KEEP_CURRENT_RESOURCE_BUTTON and has_reference_image:
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
+            await message.answer("图片编辑\n已沿用当前参考图。\n步骤 3/4：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            return
         if suffix is None:
+            if has_reference_image:
+                await message.answer(
+                    "图片编辑\n已记录当前参考图。可以上传新参考图替换，或点击“沿用当前资源”继续。",
+                    reply_markup=_image_task_step_keyboard(keep_current=True),
+                )
+                return
             await message.answer("图片编辑\n步骤 2/4：请上传参考图或素材图。", reply_markup=_image_task_step_keyboard())
             return
-        data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_image_edit")))
         target = work_dir / f"reference_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
@@ -4281,7 +4342,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             **_clear_image_edit_prompt_fields(),
         )
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-        await message.answer("图片编辑\n步骤 3/4：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+        await message.answer("图片编辑\n已更新参考图。\n步骤 3/4：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
 
     @router.message(ProductionWorkflowForm.image_edit_waiting_for_prompt)
     async def on_image_edit_prompt(message: Message, state: FSMContext) -> None:
@@ -4298,10 +4359,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await state.update_data(**_clear_image_edit_prompt_fields())
             if single_input:
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
-                await message.answer("单图编辑\n步骤 1/3：请重新上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
+                await message.answer(
+                    "单图编辑\n步骤 1/3：如需替换原图，请上传新图片；否则点击“沿用当前资源”。",
+                    reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("input_image_local_path"))),
+                )
             else:
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
-                await message.answer("图片编辑\n步骤 2/4：请重新上传参考图或素材图。", reply_markup=_image_task_step_keyboard())
+                await message.answer(
+                    "图片编辑\n步骤 2/4：如需替换参考图，请上传新图片；否则点击“沿用当前资源”。",
+                    reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("reference_image_local_path"))),
+                )
             return
         prompt = _message_text(message)
         if not prompt:
@@ -4431,21 +4498,37 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await start_image_generate_flow(message, state)
             return
         suffix = _image_ext_from_message(message)
+        data = await state.get_data()
+        has_target_image = _recorded_local_resource(data.get("target_image_local_path"))
+        if text == KEEP_CURRENT_RESOURCE_BUTTON and has_target_image:
+            await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
+            await message.answer(
+                "人物换脸\n已沿用当前原图。\n步骤 2/4：请上传人脸参考图；如果要继续使用已记录的人脸参考图，请点击“沿用当前资源”。",
+                reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("source_image_local_path"))),
+            )
+            return
         if suffix is None:
+            if has_target_image:
+                await message.answer(
+                    "人物换脸\n已记录当前原图。可以上传新原图替换，或点击“沿用当前资源”继续。",
+                    reply_markup=_image_task_step_keyboard(back=False, keep_current=True),
+                )
+                return
             await message.answer("人物换脸\n步骤 1/4：请上传原图。", reply_markup=_image_task_step_keyboard(back=False))
             return
-        data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_face_swap")))
         target = work_dir / f"target_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
         await state.update_data(
             work_dir=str(work_dir),
             target_image_local_path=str(target.resolve()),
-            source_image_local_path="",
             **_clear_face_swap_prompt_fields(),
         )
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
-        await message.answer("人物换脸\n步骤 2/4：请上传人脸参考图。", reply_markup=_image_task_step_keyboard())
+        await message.answer(
+            "人物换脸\n已更新原图。\n步骤 2/4：请上传人脸参考图。",
+            reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("source_image_local_path"))),
+        )
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_source_image)
     async def on_face_swap_source_image(message: Message, state: FSMContext) -> None:
@@ -4457,15 +4540,29 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
-            await state.update_data(source_image_local_path="", **_clear_face_swap_prompt_fields())
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_target_image)
-            await message.answer("人物换脸\n步骤 1/4：请重新上传原图。", reply_markup=_image_task_step_keyboard(back=False))
+            data = await state.get_data()
+            await message.answer(
+                "人物换脸\n步骤 1/4：如需替换原图，请上传新图片；否则点击“沿用当前资源”。",
+                reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("target_image_local_path"))),
+            )
             return
         suffix = _image_ext_from_message(message)
+        data = await state.get_data()
+        has_source_image = _recorded_local_resource(data.get("source_image_local_path"))
+        if text == KEEP_CURRENT_RESOURCE_BUTTON and has_source_image:
+            await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
+            await message.answer("人物换脸\n已沿用当前人脸参考图。\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+            return
         if suffix is None:
+            if has_source_image:
+                await message.answer(
+                    "人物换脸\n已记录当前人脸参考图。可以上传新参考图替换，或点击“沿用当前资源”继续。",
+                    reply_markup=_image_task_step_keyboard(keep_current=True),
+                )
+                return
             await message.answer("人物换脸\n步骤 2/4：请上传人脸参考图。", reply_markup=_image_task_step_keyboard())
             return
-        data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_face_swap")))
         target = work_dir / f"source_face_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
@@ -4475,7 +4572,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             **_clear_face_swap_prompt_fields(),
         )
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
-        await message.answer("人物换脸\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+        await message.answer("人物换脸\n已更新人脸参考图。\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_prompt)
     async def on_face_swap_prompt(message: Message, state: FSMContext) -> None:
@@ -4489,7 +4586,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if text == "上一步":
             await state.update_data(**_clear_face_swap_prompt_fields())
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
-            await message.answer("人物换脸\n步骤 2/4：请重新上传人脸参考图。", reply_markup=_image_task_step_keyboard())
+            data = await state.get_data()
+            await message.answer(
+                "人物换脸\n步骤 2/4：如需替换人脸参考图，请上传新图片；否则点击“沿用当前资源”。",
+                reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("source_image_local_path"))),
+            )
             return
         if text == MAIN_MENU_BUTTON:
             await state.clear()
@@ -4664,14 +4765,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await _show_video_i2v_step(message, state, step="duration")
             return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_audio.state:
+            if button_text == KEEP_CURRENT_RESOURCE_BUTTON and _recorded_local_resource(params.get("audio_local_path")):
+                params["audio_selected"] = True
+                await state.update_data(**params)
+                await _show_video_i2v_step(message, state, step="prompt_mode")
+                return
             if button_text == "\u8df3\u8fc7\u97f3\u9891":
                 params["audio_selected"] = True
                 params["audio_local_path"] = ""
                 await state.update_data(**params, **_clear_video_i2v_prompt_fields())
+                await message.answer("已跳过音频，本次不会使用之前记录的音频。")
                 await _show_video_i2v_step(message, state, step="prompt_mode")
                 return
             audio_suffix = _audio_ext_from_message(message)
             if audio_suffix is None:
+                if _recorded_local_resource(params.get("audio_local_path")):
+                    await message.answer(
+                        "已记录当前音频。可以上传新音频替换，点击“沿用当前资源”继续，或点击“跳过音频”让本次不使用音频。",
+                        reply_markup=_video_i2v_audio_keyboard(keep_current=True),
+                    )
+                    return
                 await message.answer("\u8bf7\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002", reply_markup=_video_i2v_audio_keyboard())
                 return
             work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
@@ -4680,6 +4793,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params["audio_selected"] = True
             params["audio_local_path"] = str(target.resolve())
             await state.update_data(**params, work_dir=str(work_dir), **_clear_video_i2v_prompt_fields())
+            await message.answer("已更新音频。")
             await _show_video_i2v_step(message, state, step="prompt_mode")
             return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
@@ -4728,19 +4842,27 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
-        if _canonical_button_text(_message_text(message)).strip() == "\u4e0a\u4e00\u6b65":
+        button_text = _canonical_button_text(_message_text(message)).strip()
+        if button_text == "\u4e0a\u4e00\u6b65":
             data = await state.get_data()
             params = _video_i2v_state_params(data)
             params["duration_selected"] = False
             await state.update_data(**params)
             await _show_video_i2v_step(message, state, step="duration")
             return
+        data = await state.get_data()
+        params = _video_i2v_state_params(data)
+        if button_text == KEEP_CURRENT_RESOURCE_BUTTON and _recorded_local_resource(params.get("image_local_path")):
+            await _show_video_i2v_step(message, state, step="audio")
+            return
         suffix = _image_ext_from_message(message)
         if suffix is None:
-            await message.answer("请上传一张参考图片。")
+            if _recorded_local_resource(params.get("image_local_path")):
+                await message.answer("已记录当前参考图。可以上传新图片替换，或点击“沿用当前资源”继续。")
+            else:
+                await message.answer("请上传一张参考图片。")
             await _show_video_i2v_step(message, state, step="image")
             return
-        data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
         target = work_dir / f"reference_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
@@ -4751,6 +4873,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             video_i2v_initial_prompt=caption,
             **_clear_video_i2v_prompt_fields(),
         )
+        await message.answer("已更新参考图。")
         await _show_video_i2v_step(message, state, step="audio")
         return
 
