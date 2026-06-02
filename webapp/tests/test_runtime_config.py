@@ -690,6 +690,19 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertTrue(server._should_reject_generated_person_image(report))
 
+    def test_text_to_image_auto_qa_accepts_ten_point_scores(self):
+        report = {
+            "inspected": True,
+            "overall_score": server._qa_score(9),
+            "prompt_match_score": server._qa_score(9),
+            "anatomy_score": server._qa_score(9),
+            "visual_score": server._qa_score(9),
+            "deliverable_ready": True,
+        }
+
+        self.assertEqual(report["overall_score"], 90)
+        self.assertFalse(server._should_reject_generated_person_image(report))
+
     def test_text_to_image_auto_qa_requires_head_when_prompt_mentions_expression(self):
         self.assertTrue(server._text_to_image_prompt_requires_visible_head("人物直视镜头，眼神自然，表情柔和"))
         self.assertFalse(server._text_to_image_prompt_requires_visible_head("人物站在室内，全身构图，背景自然"))

@@ -137,6 +137,40 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertEqual(restored["prompt_mode_label"], "Grok 生成")
         self.assertTrue(restored["persona_enabled"])
 
+    def test_person_t2i_node_inputs_leave_lora_controls_to_gateway_workflow(self) -> None:
+        params = bot._text_to_image_params({"text_to_image_workflow_profile": "person_t2i"})
+        node_inputs = bot._text_to_image_remote_node_inputs(params)
+
+        self.assertEqual(node_inputs["160"]["batch_size"], 6)
+        self.assertNotIn("184", node_inputs)
+        self.assertNotIn("185", node_inputs)
+        self.assertNotIn("186", node_inputs)
+        self.assertNotIn("191", node_inputs)
+        self.assertNotIn("195", node_inputs)
+        self.assertNotIn("196", node_inputs)
+        self.assertNotIn("197", node_inputs)
+
+    def test_person_t2i_reroll_does_not_reuse_stale_lora_controls(self) -> None:
+        payload, _seed = bot._text_to_image_reroll_payload(
+            {
+                "text_to_image_workflow_profile": "person_t2i",
+                "prompt": "臥室人物",
+                "remote_comfy_node_inputs": {
+                    "185": {"lora_name": r"ZIT\臀部Z-Hip-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
+                    "186": {"lora_name": r"ZIT\胸部Z-Breast-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
+                    "191": {"lora_name": r"Z-Image\Z-ImageTubro big-nipples.safetensors", "strength_model": 0.0, "strength_clip": 0.0},
+                },
+            }
+        )
+
+        node_inputs = payload["remote_comfy_node_inputs"]
+        self.assertNotIn("185", node_inputs)
+        self.assertNotIn("186", node_inputs)
+        self.assertNotIn("191", node_inputs)
+        self.assertNotIn("195", node_inputs)
+        self.assertNotIn("196", node_inputs)
+        self.assertNotIn("197", node_inputs)
+
 
 if __name__ == "__main__":
     unittest.main()

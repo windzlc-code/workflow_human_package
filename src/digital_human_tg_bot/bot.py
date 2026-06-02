@@ -555,18 +555,8 @@ def _text_to_image_remote_node_inputs(params: dict[str, Any]) -> dict[str, Any]:
                 "scheduler": "simple",
                 "denoise": 1.0,
             },
-            "185": {"lora_name": r"ZIT\臀部Z-Hip-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
-            "186": {"lora_name": r"ZIT\胸部Z-Breast-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
-            "191": {"lora_name": r"Z-Image\Z-ImageTubro big-nipples.safetensors", "strength_model": 0.0, "strength_clip": 0.0},
             "171": {"filename_prefix": "telegram/person_t2i"},
         }
-        node_inputs.update(
-            _text_to_image_persona_node_inputs(
-                enabled=bool(params.get("persona_enabled")),
-                persona_lora=str(params.get("persona_lora") or ""),
-                profile=profile,
-            )
-        )
         return node_inputs
     detailer_inputs = {
         "guide_size": 512.0,
@@ -718,7 +708,9 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
         raise ValueError("上次任務沒有可複用的最終提示詞")
 
     node_inputs = payload.get("remote_comfy_node_inputs")
-    if not isinstance(node_inputs, dict) or not node_inputs:
+    if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i":
+        node_inputs = _text_to_image_remote_node_inputs(params)
+    elif not isinstance(node_inputs, dict) or not node_inputs:
         node_inputs = _text_to_image_remote_node_inputs(params)
     else:
         node_inputs = copy.deepcopy(node_inputs)

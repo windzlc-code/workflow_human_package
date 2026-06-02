@@ -3590,6 +3590,11 @@ def _run_remote_comfy_gateway_test(
     if apply_prompt and not prompt_text_value:
         prompt_text_value = "a simple red apple on a wooden table, studio lighting"
     zit_final_workflow = "ZIT_final" in workflow_text
+    person_t2i_workflow = (
+        "person_t2i" in workflow_text.lower()
+        or "人设_t2i" in workflow_text
+        or "人設_t2i" in workflow_text
+    )
     body: dict[str, Any] = {"path": workflow_text}
     merged_node_inputs: dict[str, Any] = {}
     if isinstance(node_inputs, dict) and node_inputs:
@@ -3610,6 +3615,12 @@ def _run_remote_comfy_gateway_test(
     elif apply_prompt:
         body["prompt_text"] = prompt_text_value
         body["negative_prompt"] = str(negative_prompt or "").strip()
+        if person_t2i_workflow:
+            body["prompt_text_node_ids"] = ["164"]
+            body["negative_text_node_ids"] = ["166"]
+            merged_node_inputs.setdefault("164", {})["text"] = prompt_text_value
+            if str(negative_prompt or "").strip():
+                merged_node_inputs.setdefault("166", {})["text"] = str(negative_prompt or "").strip()
         for key, value in {
             "width": width,
             "height": height,
@@ -3881,6 +3892,53 @@ def _remote_comfy_prompt_node_inputs_from_payload(
     return {}
 
 
+def _is_person_t2i_workflow(task_type: str, workflow_path: str) -> bool:
+    workflow_text = str(workflow_path or "")
+    return (
+        str(task_type or "").strip() in {"text_to_image", "image_generate"}
+        and (
+            "person_t2i" in workflow_text.lower()
+            or "人设_t2i" in workflow_text
+            or "人設_t2i" in workflow_text
+        )
+    )
+
+
+PERSON_T2I_LORA_NODE_IDS = {"184", "185", "186", "191", "195", "196", "197"}
+
+
+def _strip_person_t2i_lora_node_inputs(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, Any] = {}
+    for node_id, inputs in value.items():
+        node_key = str(node_id)
+        if not isinstance(inputs, dict):
+            continue
+        if node_key in PERSON_T2I_LORA_NODE_IDS or "lora_name" in inputs:
+            continue
+        cleaned[node_key] = dict(inputs)
+    return cleaned
+
+
+def _person_t2i_runtime_node_inputs(payload: dict[str, Any], task_type: str, workflow_path: str) -> dict[str, Any]:
+    return {
+        "160": {
+            "width": max(_to_int(payload.get("width"), 640), 1),
+            "height": max(_to_int(payload.get("height"), 960), 1),
+            "batch_size": max(_to_int(payload.get("batch_size"), _remote_comfy_default_batch_size(task_type, workflow_path)), 1),
+        },
+        "167": {
+            "steps": 10,
+            "cfg": 1.0,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "denoise": 1.0,
+        },
+        "171": {"filename_prefix": "telegram/person_t2i"},
+    }
+
+
 def _remote_comfy_node_inputs_from_payload(
     payload: dict[str, Any],
     *,
@@ -3892,12 +3950,17 @@ def _remote_comfy_node_inputs_from_payload(
         task_type=task_type,
         workflow_path=workflow_path,
     )
+    person_t2i_workflow = _is_person_t2i_workflow(task_type, workflow_path)
     raw = payload.get("remote_comfy_node_inputs")
     if isinstance(raw, dict):
+        if person_t2i_workflow:
+            return _merge_node_inputs(_strip_person_t2i_lora_node_inputs(raw), _person_t2i_runtime_node_inputs(payload, task_type, workflow_path), prompt_node_inputs)
         return _merge_node_inputs(raw, prompt_node_inputs)
     raw_json = str(payload.get("remote_comfy_node_inputs_json") or "").strip()
     if raw_json:
         parsed = _json_loads(raw_json, {})
+        if isinstance(parsed, dict) and person_t2i_workflow:
+            return _merge_node_inputs(_strip_person_t2i_lora_node_inputs(parsed), _person_t2i_runtime_node_inputs(payload, task_type, workflow_path), prompt_node_inputs)
         return _merge_node_inputs(parsed, prompt_node_inputs) if isinstance(parsed, dict) else prompt_node_inputs
     mapping_value = _remote_comfy_workflow_mapping_value(payload, task_type)
     if isinstance(mapping_value, dict):
@@ -3922,6 +3985,8 @@ def _remote_comfy_node_inputs_from_payload(
                     },
                 )
         if mapped_inputs:
+            if person_t2i_workflow:
+                return _merge_node_inputs(_strip_person_t2i_lora_node_inputs(mapped_inputs), _person_t2i_runtime_node_inputs(payload, task_type, workflow_path), prompt_node_inputs)
             return _merge_node_inputs(mapped_inputs, prompt_node_inputs)
     if str(task_type or "").strip() == "face_swap" and "flux_" in str(workflow_path or "").lower():
         seed = _to_int(payload.get("face_swap_random_seed") or payload.get("seed"), 0)
@@ -3959,18 +4024,8 @@ def _remote_comfy_node_inputs_from_payload(
                 },
             )
         return mapped_inputs
-    if (
-        str(task_type or "").strip() in {"text_to_image", "image_generate"}
-        and ("person_t2i" in str(workflow_path or "").lower() or "人设_t2i" in str(workflow_path or "") or "人設_t2i" in str(workflow_path or ""))
-    ):
-        return {
-            "160": {
-                "width": max(_to_int(payload.get("width"), 640), 1),
-                "height": max(_to_int(payload.get("height"), 960), 1),
-                "batch_size": max(_to_int(payload.get("batch_size"), _remote_comfy_default_batch_size(task_type, workflow_path)), 1),
-            },
-            "171": {"filename_prefix": "telegram/person_t2i"},
-        }
+    if person_t2i_workflow:
+        return _merge_node_inputs(_person_t2i_runtime_node_inputs(payload, task_type, workflow_path), prompt_node_inputs)
     if (
         str(task_type or "").strip() in {"text_to_image", "image_generate"}
         and "ZIT_final" in str(workflow_path or "")
@@ -4521,7 +4576,10 @@ def _parse_qa_string_list(value: Any, limit: int = 6) -> list[str]:
 
 def _qa_score(value: Any, default: int = 75) -> int:
     try:
-        return max(0, min(100, int(round(float(value)))))
+        score = float(value)
+        if 0 < score <= 10:
+            score *= 10
+        return max(0, min(100, int(round(score))))
     except Exception:
         return int(default)
 

@@ -152,6 +152,66 @@ def test_firered_image_edit_prompt_overrides_cr_prompt_node():
     assert result["66"]["prompt"] == "将主图脸部和头发替换为参考图的脸部与双马尾发型"
 
 
+def test_person_t2i_gateway_call_locks_prompt_nodes():
+    captured: list[dict[str, object]] = []
+
+    def fake_gateway_json(**kwargs):
+        captured.append(kwargs)
+        if kwargs["method"] == "POST":
+            return {"prompt_id": "prompt_person_t2i"}
+        return {"ok": True, "done": True, "prompt_id": "prompt_person_t2i", "outputs": []}
+
+    with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json):
+        result = server._run_remote_comfy_gateway_test(
+            gateway_url="http://gateway",
+            token="secret",
+            workflow_path="__converted__/person_t2i.api.json",
+            prompt_text="一位人物站在卧室中",
+            negative_prompt="low quality",
+            width=1024,
+            height=1536,
+            batch_size=6,
+            node_inputs={"160": {"width": 1024, "height": 1536, "batch_size": 6}},
+            timeout_seconds=30,
+        )
+
+    assert result["ok"] is True
+    body = captured[0]["json_body"]
+    assert body["prompt_text_node_ids"] == ["164"]
+    assert body["negative_text_node_ids"] == ["166"]
+    assert body["batch_size"] == 6
+    assert body["node_inputs"]["160"]["batch_size"] == 6
+    assert body["node_inputs"]["164"]["text"] == "一位人物站在卧室中"
+    assert body["node_inputs"]["166"]["text"] == "low quality"
+
+
+def test_person_t2i_node_inputs_strip_stale_lora_controls():
+    result = server._remote_comfy_node_inputs_from_payload(
+        {
+            "width": 1024,
+            "height": 1536,
+            "batch_size": 6,
+            "remote_comfy_node_inputs": {
+                "185": {"lora_name": r"ZIT\臀部Z-Hip-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
+                "186": {"lora_name": r"ZIT\胸部Z-Breast-Slider.safetensors", "strength_model": 0.6, "strength_clip": 1.0},
+                "191": {"lora_name": r"Z-Image\Z-ImageTubro big-nipples.safetensors", "strength_model": 0.0, "strength_clip": 0.0},
+                "184": {"lora_name": r"Character Setting\人设1捞女1金君雅.safetensors", "strength_model": 0.8, "strength_clip": 1.0},
+            },
+        },
+        task_type="text_to_image",
+        workflow_path="__converted__/person_t2i.api.json",
+    )
+
+    assert result["160"] == {"width": 1024, "height": 1536, "batch_size": 6}
+    assert "184" not in result
+    assert "185" not in result
+    assert "186" not in result
+    assert "191" not in result
+    assert "195" not in result
+    assert "196" not in result
+    assert "197" not in result
+
+
 def test_remote_comfy_prefers_saved_output_over_preview_images(tmp_path):
     preview = tmp_path / "ComfyUI_temp_preview.png"
     final = tmp_path / "face_swap_00001_.png"
