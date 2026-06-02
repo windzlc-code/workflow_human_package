@@ -259,6 +259,29 @@ def _image_task_confirm_keyboard(submit_text: str) -> ReplyKeyboardMarkup:
     )
 
 
+def _image_edit_prompt_review_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="使用这个提示词提交")],
+            [KeyboardButton(text="输入自定义提示词提交")],
+            [KeyboardButton(text="继续让 Grok 调整"), KeyboardButton(text="重新生成提示词")],
+            [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _image_edit_prompt_failure_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="重新生成提示词")],
+            [KeyboardButton(text="输入自定义提示词提交")],
+            [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def _image_task_step_keyboard(*, back: bool = True) -> ReplyKeyboardMarkup:
     rows: list[list[KeyboardButton]] = []
     if back:
@@ -1902,18 +1925,105 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         mode = "single" if single_input else "two"
         title = "单图编辑" if single_input else "图片编辑"
         total_steps = "3" if single_input else "4"
-        workflow_type = "single_image_edit" if single_input else "get_nano_banana"
         await state.update_data(work_dir=str(service.create_job_dir(prefix="tg_image_edit")), image_edit_mode=mode)
         await message.answer(
             "\n".join(
                 [
                     title,
-                    _tg_mapped_workflow_line(workflow_type),
                     f"步骤 1/{total_steps}：请上传需要编辑的原图。",
                 ]
             ),
             reply_markup=_image_task_step_keyboard(back=False),
         )
+
+    def _image_edit_flow_meta(data: dict[str, Any]) -> tuple[bool, str, int, str]:
+        single_input = str(data.get("image_edit_mode") or "").strip() == "single"
+        return (
+            single_input,
+            "单图编辑" if single_input else "图片编辑",
+            3 if single_input else 4,
+            "single_image_edit" if single_input else "get_nano_banana",
+        )
+
+    def _build_image_edit_payload(data: dict[str, Any], final_prompt: str, *, user_request: str = "", use_grok: bool) -> dict[str, Any]:
+        prompt_text = str(final_prompt or "").strip()
+        request_text = str(user_request or prompt_text).strip()
+        return {
+            "input_image_local_path": str(data.get("input_image_local_path") or ""),
+            "reference_image_local_path": str(data.get("reference_image_local_path") or ""),
+            "prompt": prompt_text,
+            "prompt_text": prompt_text,
+            "message": prompt_text,
+            "tg_use_llm_prompt": bool(use_grok),
+            "tg_original_user_request": request_text,
+            "tg_user_instruction": f"User image editing request: {request_text}",
+        }
+
+    async def _preview_image_edit_prompt(message: Message, state: FSMContext, user_request: str) -> None:
+        data = await state.get_data()
+        _, title, total_steps, task_type = _image_edit_flow_meta(data)
+        request_text = str(user_request or "").strip()
+        if not request_text:
+            await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请直接输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            return
+        await state.update_data(
+            image_edit_user_request=request_text,
+            image_edit_prompt_ready=False,
+            image_edit_waiting_for_adjustment=False,
+            image_edit_waiting_for_custom_prompt=False,
+        )
+        await message.answer("正在让 Grok 生成图片编辑提示词...")
+        preview_payload = _build_image_edit_payload(data, request_text, user_request=request_text, use_grok=True)
+        preview = await _preview_internal_webapp_prompt(
+            chat_id=int(message.chat.id),
+            task_type=task_type,
+            params=preview_payload,
+        )
+        generated_prompt = str(preview.get("prompt_text") or "").strip()
+        selected_model = str(preview.get("selected_model") or "").strip()
+        if not generated_prompt:
+            raise RuntimeError("Grok 未返回可用的图片编辑提示词")
+        await state.update_data(
+            image_edit_prompt=generated_prompt,
+            image_edit_generated_prompt=generated_prompt,
+            image_edit_user_request=request_text,
+            image_edit_selected_model=selected_model,
+            image_edit_prompt_ready=True,
+            image_edit_waiting_for_adjustment=False,
+            image_edit_waiting_for_custom_prompt=False,
+        )
+        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
+        model_line = f"\n\n模型：{selected_model}" if selected_model else ""
+        await _send_long_text(
+            message,
+            f"{title}\nGrok 已生成图片编辑提示词：\n\n{generated_prompt}{model_line}\n\n请确认提示词是否合适，确认后再提交编辑任务。",
+            reply_markup=_image_edit_prompt_review_keyboard(),
+        )
+
+    async def _submit_image_edit_from_state(message: Message, state: FSMContext, final_prompt: str) -> None:
+        data = await state.get_data()
+        _, title, _, task_type = _image_edit_flow_meta(data)
+        prompt = str(final_prompt or "").strip()
+        if not prompt:
+            await message.answer("还没有可用的图片编辑提示词，请先输入要求让 Grok 生成。", reply_markup=_image_edit_prompt_failure_keyboard())
+            return
+        payload = _build_image_edit_payload(
+            data,
+            prompt,
+            user_request=str(data.get("image_edit_user_request") or prompt),
+            use_grok=False,
+        )
+        payload.update(
+            {
+                "tg_llm_rewritten_prompt": prompt,
+                "tg_prompt_confirmed": True,
+            }
+        )
+        try:
+            await submit_webapp_task_and_reply(message, task_type, payload)
+            await state.clear()
+        except Exception as exc:
+            await message.answer(f"{title}任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_image_edit_prompt_review_keyboard())
 
     async def start_face_swap_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
@@ -4062,9 +4172,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         data = await state.get_data()
-        single_input = str(data.get("image_edit_mode") or "").strip() == "single"
-        title = "单图编辑" if single_input else "图片编辑"
-        total_steps = "3" if single_input else "4"
+        single_input, title, total_steps, _ = _image_edit_flow_meta(data)
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
             if single_input:
@@ -4076,23 +4184,25 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         prompt = _message_text(message)
         if not prompt:
-            await message.answer(f"{title}\n步骤 {int(total_steps) - 1}/{total_steps}：请直接输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请直接输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
             return
-        await state.update_data(image_edit_prompt=prompt)
-        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
-        submit_text = "提交单图编辑任务" if single_input else "提交图片编辑任务"
-        workflow_type = "single_image_edit" if single_input else "get_nano_banana"
-        await message.answer(
-            "\n".join(
-                [
-                    title,
-                    f"步骤 {total_steps}/{total_steps}：请确认任务信息，点击提交后才会进入后台队列。",
-                    _tg_mapped_workflow_line(workflow_type),
-                    f"编辑要求：{prompt}",
-                ]
-            ),
-            reply_markup=_image_task_confirm_keyboard(submit_text),
-        )
+        try:
+            await _preview_image_edit_prompt(message, state, prompt)
+        except Exception as exc:
+            await state.update_data(
+                image_edit_user_request=prompt,
+                image_edit_prompt_ready=False,
+                image_edit_generated_prompt="",
+                image_edit_waiting_for_custom_prompt=False,
+                image_edit_waiting_for_adjustment=False,
+            )
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
+            await message.answer(
+                "Grok 图片编辑提示词生成失败："
+                f"{_format_grok_preview_error(exc)}\n\n"
+                "任务还没有提交，已保留当前素材。可以重新生成提示词，或输入自定义提示词提交。",
+                reply_markup=_image_edit_prompt_failure_keyboard(),
+            )
 
     @router.message(ProductionWorkflowForm.image_edit_waiting_for_confirm)
     async def on_image_edit_confirm(message: Message, state: FSMContext) -> None:
@@ -4103,38 +4213,88 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         data = await state.get_data()
-        single_input = str(data.get("image_edit_mode") or "").strip() == "single"
-        title = "单图编辑" if single_input else "图片编辑"
-        total_steps = "3" if single_input else "4"
-        submit_text = "提交单图编辑任务" if single_input else "提交图片编辑任务"
-        task_type = "single_image_edit" if single_input else "get_nano_banana"
+        _, title, total_steps, _ = _image_edit_flow_meta(data)
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await message.answer(f"{title}\n步骤 {int(total_steps) - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
             return
-        if text != submit_text:
-            await message.answer(f"{title}\n步骤 {total_steps}/{total_steps}：请点击「{submit_text}」后再提交。", reply_markup=_image_task_confirm_keyboard(submit_text))
+        if text == MAIN_MENU_BUTTON:
+            await state.clear()
+            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
             return
-        prompt = str(data.get("image_edit_prompt") or "").strip()
+        if text == "输入自定义提示词提交":
+            await state.update_data(image_edit_waiting_for_custom_prompt=True, image_edit_waiting_for_adjustment=False)
+            await message.answer("请输入自定义最终图片编辑提示词。下一条消息会跳过 Grok，直接提交编辑任务。", reply_markup=_image_task_step_keyboard())
+            return
+        if text == "重新生成提示词":
+            original_request = str(data.get("image_edit_user_request") or data.get("image_edit_prompt") or "").strip()
+            if not original_request:
+                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
+                await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+                return
+            try:
+                await _preview_image_edit_prompt(message, state, original_request)
+            except Exception as exc:
+                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
+                await message.answer(
+                    f"Grok 图片编辑提示词生成失败：{_format_grok_preview_error(exc)}",
+                    reply_markup=_image_edit_prompt_failure_keyboard(),
+                )
+            return
+        if text == "继续让 Grok 调整":
+            await state.update_data(image_edit_waiting_for_adjustment=True, image_edit_waiting_for_custom_prompt=False)
+            await message.answer("请直接输入调整要求，例如：只换衣服、保留人物姿势、背景不要变。", reply_markup=_image_edit_prompt_review_keyboard())
+            return
+        if bool(data.get("image_edit_waiting_for_adjustment")):
+            adjustment = _message_text(message)
+            if not adjustment:
+                await message.answer("请直接输入调整要求。", reply_markup=_image_edit_prompt_review_keyboard())
+                return
+            base_prompt = str(data.get("image_edit_generated_prompt") or data.get("image_edit_prompt") or "").strip()
+            original_request = str(data.get("image_edit_user_request") or "").strip()
+            adjusted_request = "\n".join(
+                part
+                for part in [
+                    f"Original image edit request: {original_request}" if original_request else "",
+                    f"Current image edit prompt: {base_prompt}" if base_prompt else "",
+                    f"Revision request: {adjustment}",
+                    "Rewrite the current image editing prompt according to the revision request. Output only the latest final prompt.",
+                ]
+                if part
+            )
+            try:
+                await _preview_image_edit_prompt(message, state, adjusted_request)
+            except Exception as exc:
+                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
+                await message.answer(
+                    f"Grok 图片编辑提示词调整失败：{_format_grok_preview_error(exc)}",
+                    reply_markup=_image_edit_prompt_failure_keyboard(),
+                )
+            return
+        if bool(data.get("image_edit_waiting_for_custom_prompt")):
+            custom_prompt = _message_text(message)
+            if not custom_prompt:
+                await message.answer("请输入自定义最终图片编辑提示词。", reply_markup=_image_task_step_keyboard())
+                return
+            await state.update_data(
+                image_edit_prompt=custom_prompt,
+                image_edit_generated_prompt=custom_prompt,
+                image_edit_prompt_ready=True,
+                image_edit_waiting_for_custom_prompt=False,
+                image_edit_user_request=str(data.get("image_edit_user_request") or custom_prompt),
+            )
+            await _submit_image_edit_from_state(message, state, custom_prompt)
+            return
+        if text != "使用这个提示词提交":
+            await message.answer(f"{title}\n请先查看 Grok 生成的提示词，确认合适后点击「使用这个提示词提交」。", reply_markup=_image_edit_prompt_review_keyboard())
+            return
+        prompt = str(data.get("image_edit_generated_prompt") or data.get("image_edit_prompt") or "").strip()
         if not prompt:
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await message.answer(f"{title}\n步骤 {int(total_steps) - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
             return
-        params = {
-            "input_image_local_path": str(data.get("input_image_local_path") or ""),
-            "reference_image_local_path": str(data.get("reference_image_local_path") or ""),
-            "prompt": prompt,
-            "prompt_text": prompt,
-            "message": prompt,
-            "tg_use_llm_prompt": True,
-            "tg_user_instruction": f"User image editing request: {prompt}",
-        }
-        await state.clear()
-        try:
-            await submit_webapp_task_and_reply(message, task_type, params)
-        except Exception as exc:
-            await message.answer(f"{title}任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+        await _submit_image_edit_from_state(message, state, prompt)
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_target_image)
     async def on_face_swap_target_image(message: Message, state: FSMContext) -> None:

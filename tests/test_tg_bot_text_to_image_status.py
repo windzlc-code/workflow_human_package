@@ -73,6 +73,24 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertNotIn("使用这个提示词生成", labels)
         self.assertNotIn("继续让 Grok 调整", labels)
 
+    def test_image_edit_prompt_review_keyboard_requires_prompt_confirmation(self) -> None:
+        markup = bot._image_edit_prompt_review_keyboard()
+
+        self.assertIsInstance(markup, ReplyKeyboardMarkup)
+        rows = [[button.text for button in row] for row in markup.keyboard]
+        self.assertEqual(
+            rows,
+            [
+                ["使用这个提示词提交"],
+                ["输入自定义提示词提交"],
+                ["继续让 Grok 调整", "重新生成提示词"],
+                ["上一步", bot.MAIN_MENU_BUTTON],
+            ],
+        )
+        labels = [label for row in rows for label in row]
+        self.assertNotIn("提交单图编辑任务", labels)
+        self.assertNotIn("提交图片编辑任务", labels)
+
 
 if __name__ == "__main__":
     unittest.main()
