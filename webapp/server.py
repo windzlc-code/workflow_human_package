@@ -3689,6 +3689,11 @@ def _remote_comfy_image_input_bindings(payload: dict[str, Any], task_type: str) 
             "image1": {"node_id": "2", "input_name": "image"},
             "image2": {"node_id": "19", "input_name": "image"},
         }
+    if str(task_type or "").strip() == "face_swap" and "flux_" in str(workflow_path or "").lower():
+        return {
+            "target": {"node_id": "81", "input_name": "image"},
+            "source_face": {"node_id": "244", "input_name": "image"},
+        }
     return None
 
 
@@ -3787,6 +3792,42 @@ def _remote_comfy_node_inputs_from_payload(
                 )
         if mapped_inputs:
             return mapped_inputs
+    if str(task_type or "").strip() == "face_swap" and "flux_" in str(workflow_path or "").lower():
+        seed = _to_int(payload.get("face_swap_random_seed") or payload.get("seed"), 0)
+        mapped_inputs = {
+            "462": {"mask": None},
+            "463": {"mask": None},
+            "468": {
+                "crop_position": "center",
+                "device": "gpu",
+                "divisible_by": 2,
+                "keep_proportion": "resize",
+                "upscale_method": "bicubic",
+                "pad_color": "0, 0, 0",
+                "mask": None,
+            },
+            "326": {
+                "temporal_overlap": 0,
+                "offload_device": "cpu",
+                "batch_size": 1,
+                "resolution": 1080,
+                "color_correction": "lab",
+            },
+            "467": {"images": ["251", 0], "filename_prefix": "telegram/face_swap"},
+        }
+        if seed > 0:
+            mapped_inputs = _merge_node_inputs(mapped_inputs, {"256": {"noise_seed": seed}})
+        if _to_bool(payload.get("face_swap_seedvr_upscale"), False):
+            return _merge_node_inputs(
+                mapped_inputs,
+                {
+                    "467": {
+                        "images": ["326", 0],
+                        "filename_prefix": "telegram/face_swap_seedvr",
+                    }
+                },
+            )
+        return mapped_inputs
     if (
         str(task_type or "").strip() in {"text_to_image", "image_generate"}
         and ("person_t2i" in str(workflow_path or "").lower() or "人设_t2i" in str(workflow_path or "") or "人設_t2i" in str(workflow_path or ""))

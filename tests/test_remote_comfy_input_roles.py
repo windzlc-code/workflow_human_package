@@ -173,6 +173,57 @@ def test_face_swap_random_seed_updates_noise_node_without_seedvr():
     assert result["467"] == {"images": ["251", 0], "filename_prefix": "telegram/face_swap"}
 
 
+def test_face_swap_flux_path_uses_default_image_bindings():
+    payload = {
+        "remote_comfy_workflow_mappings": {
+            "face_swap": "__converted__/flux_換臉工作流.api.json",
+        },
+    }
+
+    result = server._remote_comfy_image_input_bindings(payload, "face_swap")
+
+    assert result == {
+        "target": {"node_id": "81", "input_name": "image"},
+        "source_face": {"node_id": "244", "input_name": "image"},
+    }
+
+
+def test_face_swap_flux_path_uses_local_success_node_overrides():
+    payload = {
+        "remote_comfy_workflow_mappings": {
+            "face_swap": "__converted__/flux_換臉工作流.api.json",
+        },
+        "face_swap_random_seed": 2468,
+    }
+
+    result = server._remote_comfy_node_inputs_from_payload(
+        payload,
+        task_type="face_swap",
+        workflow_path="__converted__/flux_換臉工作流.api.json",
+    )
+
+    assert result["462"] == {"mask": None}
+    assert result["463"] == {"mask": None}
+    assert result["468"] == {
+        "crop_position": "center",
+        "device": "gpu",
+        "divisible_by": 2,
+        "keep_proportion": "resize",
+        "upscale_method": "bicubic",
+        "pad_color": "0, 0, 0",
+        "mask": None,
+    }
+    assert result["326"] == {
+        "temporal_overlap": 0,
+        "offload_device": "cpu",
+        "batch_size": 1,
+        "resolution": 1080,
+        "color_correction": "lab",
+    }
+    assert result["467"] == {"images": ["251", 0], "filename_prefix": "telegram/face_swap"}
+    assert result["256"] == {"noise_seed": 2468}
+
+
 def test_face_swap_finished_markup_has_followup_actions():
     markup = server._send_telegram_reply_markup_for_finished_task("task_1", "face_swap")
 
