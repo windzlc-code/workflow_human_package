@@ -3,6 +3,37 @@ from unittest.mock import patch
 from webapp import server
 
 
+class _FixedUuid:
+    hex = "abcdef1234567890"
+
+
+def test_remote_comfy_gateway_upload_image_uses_unique_remote_filename(tmp_path):
+    image = tmp_path / "target.jpg"
+    image.write_bytes(b"new image")
+    captured: dict[str, object] = {}
+
+    def fake_gateway_json(**kwargs):
+        captured.update(kwargs)
+        return {
+            "name": kwargs["json_body"]["filename"],
+            "subfolder": kwargs["json_body"]["subfolder"],
+        }
+
+    with patch.object(server.uuid, "uuid4", return_value=_FixedUuid()):
+        with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json):
+            result = server._remote_comfy_gateway_upload_image(
+                gateway_url="http://gateway",
+                token="",
+                image_path=image,
+                subfolder="telegram/task_1",
+            )
+
+    body = captured["json_body"]
+    assert body["filename"] == "target_abcdef12.jpg"
+    assert body["overwrite"] is False
+    assert result["image"] == "telegram/task_1/target_abcdef12.jpg"
+
+
 def test_remote_comfy_upload_input_images_preserves_face_swap_roles(tmp_path):
     target = tmp_path / "target.jpg"
     source = tmp_path / "source.jpg"

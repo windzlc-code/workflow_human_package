@@ -91,6 +91,20 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertNotIn("提交单图编辑任务", labels)
         self.assertNotIn("提交图片编辑任务", labels)
 
+    def test_face_swap_prompt_keyboard_offers_natural_swap_button(self) -> None:
+        markup = bot._face_swap_prompt_keyboard()
+
+        self.assertIsInstance(markup, ReplyKeyboardMarkup)
+        rows = [[button.text for button in row] for row in markup.keyboard]
+        self.assertEqual(
+            rows,
+            [
+                ["自然换脸"],
+                ["输入自定义换脸要求"],
+                ["上一步", bot.MAIN_MENU_BUTTON],
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

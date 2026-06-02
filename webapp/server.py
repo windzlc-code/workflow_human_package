@@ -3542,8 +3542,9 @@ def _remote_comfy_gateway_upload_image(
         raise FileNotFoundError(f"ComfyUI input image not found: {path}")
     if path.suffix.lower() not in IMAGE_EXTS:
         raise RuntimeError(f"ComfyUI input must be an image file: {path}")
+    upload_name = f"{path.stem}_{uuid.uuid4().hex[:8]}{path.suffix.lower()}"
     body = {
-        "filename": path.name,
+        "filename": upload_name,
         "subfolder": str(subfolder or "telegram").strip().strip("/"),
         "overwrite": False,
         "content_b64": base64.b64encode(path.read_bytes()).decode("ascii"),

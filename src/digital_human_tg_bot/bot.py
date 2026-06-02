@@ -282,6 +282,20 @@ def _image_edit_prompt_failure_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+FACE_SWAP_NATURAL_PROMPT = "自然换脸，保持原图姿态、服装、光线和背景，只替换人物脸部身份。"
+
+
+def _face_swap_prompt_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="自然换脸")],
+            [KeyboardButton(text="输入自定义换脸要求")],
+            [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def _image_task_step_keyboard(*, back: bool = True) -> ReplyKeyboardMarkup:
     rows: list[list[KeyboardButton]] = []
     if back:
@@ -1945,6 +1959,17 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "single_image_edit" if single_input else "get_nano_banana",
         )
 
+    def _clear_image_edit_prompt_fields() -> dict[str, Any]:
+        return {
+            "image_edit_prompt": "",
+            "image_edit_generated_prompt": "",
+            "image_edit_selected_model": "",
+            "image_edit_user_request": "",
+            "image_edit_prompt_ready": False,
+            "image_edit_waiting_for_adjustment": False,
+            "image_edit_waiting_for_custom_prompt": False,
+        }
+
     def _build_image_edit_payload(data: dict[str, Any], final_prompt: str, *, user_request: str = "", use_grok: bool) -> dict[str, Any]:
         prompt_text = str(final_prompt or "").strip()
         request_text = str(user_request or prompt_text).strip()
@@ -2040,6 +2065,107 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             reply_markup=_image_task_step_keyboard(back=False),
         )
 
+    def _clear_face_swap_prompt_fields() -> dict[str, Any]:
+        return {
+            "face_swap_prompt": "",
+            "face_swap_generated_prompt": "",
+            "face_swap_selected_model": "",
+            "face_swap_user_request": "",
+            "face_swap_prompt_ready": False,
+            "face_swap_waiting_for_adjustment": False,
+            "face_swap_waiting_for_custom_prompt": False,
+        }
+
+    def _build_face_swap_payload(data: dict[str, Any], final_prompt: str, *, user_request: str = "", use_grok: bool) -> dict[str, Any]:
+        prompt_text = str(final_prompt or "").strip()
+        request_text = str(user_request or prompt_text or FACE_SWAP_NATURAL_PROMPT).strip()
+        seed_value = int(data.get("face_swap_random_seed") or 0)
+        if seed_value <= 0:
+            seed_value = secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
+        return {
+            "target_image_local_path": str(data.get("target_image_local_path") or ""),
+            "source_image_local_path": str(data.get("source_image_local_path") or ""),
+            "prompt": prompt_text,
+            "prompt_text": prompt_text,
+            "message": prompt_text,
+            "seed": seed_value,
+            "face_swap_random_seed": seed_value,
+            "tg_use_llm_prompt": bool(use_grok),
+            "tg_original_user_request": request_text,
+            "tg_user_instruction": f"User face swap request: {request_text}",
+        }
+
+    async def _preview_face_swap_prompt(message: Message, state: FSMContext, user_request: str) -> None:
+        data = await state.get_data()
+        request_text = str(user_request or FACE_SWAP_NATURAL_PROMPT).strip()
+        seed_value = int(data.get("face_swap_random_seed") or 0)
+        if seed_value <= 0:
+            seed_value = secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
+        await state.update_data(
+            face_swap_user_request=request_text,
+            face_swap_prompt_ready=False,
+            face_swap_waiting_for_adjustment=False,
+            face_swap_waiting_for_custom_prompt=False,
+            face_swap_random_seed=seed_value,
+        )
+        await message.answer("正在让 Grok 生成人物换脸提示词...")
+        preview_payload = _build_face_swap_payload(
+            {**data, "face_swap_random_seed": seed_value},
+            request_text,
+            user_request=request_text,
+            use_grok=True,
+        )
+        preview = await _preview_internal_webapp_prompt(
+            chat_id=int(message.chat.id),
+            task_type="face_swap",
+            params=preview_payload,
+        )
+        generated_prompt = str(preview.get("prompt_text") or "").strip()
+        selected_model = str(preview.get("selected_model") or "").strip()
+        if not generated_prompt:
+            raise RuntimeError("Grok 未返回可用的人物换脸提示词")
+        await state.update_data(
+            face_swap_prompt=generated_prompt,
+            face_swap_generated_prompt=generated_prompt,
+            face_swap_user_request=request_text,
+            face_swap_selected_model=selected_model,
+            face_swap_prompt_ready=True,
+            face_swap_waiting_for_adjustment=False,
+            face_swap_waiting_for_custom_prompt=False,
+            face_swap_random_seed=seed_value,
+        )
+        await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
+        model_line = f"\n\n模型：{selected_model}" if selected_model else ""
+        await _send_long_text(
+            message,
+            f"人物换脸\nGrok 已生成换脸提示词：\n\n{generated_prompt}{model_line}\n\n请确认提示词是否合适，确认后点击「使用这个提示词提交」。",
+            reply_markup=_image_edit_prompt_review_keyboard(),
+        )
+
+    async def _submit_face_swap_from_state(message: Message, state: FSMContext, final_prompt: str) -> None:
+        data = await state.get_data()
+        prompt = str(final_prompt or "").strip()
+        if not prompt:
+            await message.answer("还没有可用的人物换脸提示词，请先选择“自然换脸”或输入自定义要求。", reply_markup=_image_edit_prompt_failure_keyboard())
+            return
+        payload = _build_face_swap_payload(
+            data,
+            prompt,
+            user_request=str(data.get("face_swap_user_request") or prompt),
+            use_grok=False,
+        )
+        payload.update(
+            {
+                "tg_llm_rewritten_prompt": prompt,
+                "tg_prompt_confirmed": True,
+            }
+        )
+        try:
+            await submit_webapp_task_and_reply(message, "face_swap", payload)
+            await state.clear()
+        except Exception as exc:
+            await message.answer(f"人物换脸任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_image_edit_prompt_review_keyboard())
+
     def _video_i2v_defaults() -> dict[str, Any]:
         return {
             "resolution": "720p",
@@ -2106,6 +2232,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             prompt_mode_text = label or ("Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4")
             lines.append(f"\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{prompt_mode_text}")
         return "\n".join(lines)
+
+    def _clear_video_i2v_prompt_fields() -> dict[str, Any]:
+        return {
+            "video_i2v_user_request": "",
+            "video_i2v_generated_prompt": "",
+            "video_i2v_prompt_ready": False,
+            "video_i2v_waiting_for_adjustment": False,
+        }
 
     def _video_i2v_step_keyboard(step: str, params: dict[str, Any]) -> ReplyKeyboardMarkup:
         if step == "resolution":
@@ -4004,31 +4138,6 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         except Exception as exc:
             await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
-    @router.message(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
-    async def on_text_to_image_prompt(message: Message, state: FSMContext) -> None:
-        if await handle_entry_keyword(message, state):
-            return
-        if await handle_stop_request(message, state):
-            return
-        if not await ensure_authorized(message):
-            return
-        prompt = _message_text(message)
-        if not prompt:
-            await message.answer("文生图\n步骤 1/1：可以直接输入图片需求，也可以上传参考图片并在图片说明里补充要求。", reply_markup=_image_edit_keyboard())
-            return
-        params = {
-            "prompt": prompt,
-            "prompt_text": prompt,
-            "message": prompt,
-            "tg_use_llm_prompt": True,
-            "tg_user_instruction": f"User text-to-image request: {prompt}",
-        }
-        await state.clear()
-        try:
-            await submit_webapp_task_and_reply(message, "text_to_image", params)
-        except Exception as exc:
-            await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
-
     @router.message(ProductionWorkflowForm.image_waiting_for_product_image)
     async def on_image_first_reference(message: Message, state: FSMContext) -> None:
         if await handle_entry_keyword(message, state):
@@ -4127,14 +4236,20 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await message.answer(f"{title}\n步骤 1/{total_steps}：请上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_image_edit")))
-        target = work_dir / f"input{suffix}"
+        target = work_dir / f"input_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
-        await state.update_data(work_dir=str(work_dir), input_image_local_path=str(target.resolve()))
+        update_payload: dict[str, Any] = {
+            "work_dir": str(work_dir),
+            "input_image_local_path": str(target.resolve()),
+            **_clear_image_edit_prompt_fields(),
+        }
         if single_input:
-            await state.update_data(reference_image_local_path=str(target.resolve()))
+            update_payload["reference_image_local_path"] = str(target.resolve())
+            await state.update_data(**update_payload)
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
             await message.answer("单图编辑\n步骤 2/3：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
             return
+        await state.update_data(**update_payload)
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
         await message.answer("图片编辑\n步骤 2/4：请上传参考图或素材图。", reply_markup=_image_task_step_keyboard())
 
@@ -4148,6 +4263,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
+            await state.update_data(**_clear_image_edit_prompt_fields())
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
             await message.answer("图片编辑\n步骤 1/4：请重新上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
             return
@@ -4157,9 +4273,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_image_edit")))
-        target = work_dir / f"reference{suffix}"
+        target = work_dir / f"reference_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
-        await state.update_data(work_dir=str(work_dir), reference_image_local_path=str(target.resolve()))
+        await state.update_data(
+            work_dir=str(work_dir),
+            reference_image_local_path=str(target.resolve()),
+            **_clear_image_edit_prompt_fields(),
+        )
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
         await message.answer("图片编辑\n步骤 3/4：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
 
@@ -4175,6 +4295,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         single_input, title, total_steps, _ = _image_edit_flow_meta(data)
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
+            await state.update_data(**_clear_image_edit_prompt_fields())
             if single_input:
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
                 await message.answer("单图编辑\n步骤 1/3：请重新上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
@@ -4216,6 +4337,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         _, title, total_steps, _ = _image_edit_flow_meta(data)
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
+            await state.update_data(**_clear_image_edit_prompt_fields())
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
             await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
             return
@@ -4314,9 +4436,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_face_swap")))
-        target = work_dir / f"target{suffix}"
+        target = work_dir / f"target_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
-        await state.update_data(work_dir=str(work_dir), target_image_local_path=str(target.resolve()))
+        await state.update_data(
+            work_dir=str(work_dir),
+            target_image_local_path=str(target.resolve()),
+            source_image_local_path="",
+            **_clear_face_swap_prompt_fields(),
+        )
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
         await message.answer("人物换脸\n步骤 2/4：请上传人脸参考图。", reply_markup=_image_task_step_keyboard())
 
@@ -4330,6 +4457,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
+            await state.update_data(source_image_local_path="", **_clear_face_swap_prompt_fields())
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_target_image)
             await message.answer("人物换脸\n步骤 1/4：请重新上传原图。", reply_markup=_image_task_step_keyboard(back=False))
             return
@@ -4339,11 +4467,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_face_swap")))
-        target = work_dir / f"source_face{suffix}"
+        target = work_dir / f"source_face_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
-        await state.update_data(work_dir=str(work_dir), source_image_local_path=str(target.resolve()))
+        await state.update_data(
+            work_dir=str(work_dir),
+            source_image_local_path=str(target.resolve()),
+            **_clear_face_swap_prompt_fields(),
+        )
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
-        await message.answer("人物换脸\n步骤 3/4：请输入换脸要求；如果没有额外要求，可输入“自然换脸”。", reply_markup=_image_task_step_keyboard())
+        await message.answer("人物换脸\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_prompt)
     async def on_face_swap_prompt(message: Message, state: FSMContext) -> None:
@@ -4355,23 +4487,40 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
+            await state.update_data(**_clear_face_swap_prompt_fields())
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
             await message.answer("人物换脸\n步骤 2/4：请重新上传人脸参考图。", reply_markup=_image_task_step_keyboard())
             return
-        prompt = _message_text(message) or "自然换脸，保持原图姿态、服装、光线和背景，只替换人物脸部身份。"
-        await state.update_data(face_swap_prompt=prompt)
-        await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
-        await message.answer(
-            "\n".join(
-                [
-                    "人物换脸",
-                    "步骤 4/4：请确认任务信息，点击提交后才会进入后台队列。",
-                    _tg_mapped_workflow_line("face_swap"),
-                    f"换脸要求：{prompt}",
-                ]
-            ),
-            reply_markup=_image_task_confirm_keyboard("提交人物换脸任务"),
-        )
+        if text == MAIN_MENU_BUTTON:
+            await state.clear()
+            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+            return
+        prompt = _message_text(message)
+        if text == "自然换脸":
+            prompt = FACE_SWAP_NATURAL_PROMPT
+        elif text == "输入自定义换脸要求":
+            await message.answer("请直接输入这次人物换脸要求。", reply_markup=_image_task_step_keyboard())
+            return
+        if not prompt:
+            await message.answer("人物换脸\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+            return
+        try:
+            await _preview_face_swap_prompt(message, state, prompt)
+        except Exception as exc:
+            await state.update_data(
+                face_swap_user_request=prompt,
+                face_swap_prompt_ready=False,
+                face_swap_generated_prompt="",
+                face_swap_waiting_for_custom_prompt=False,
+                face_swap_waiting_for_adjustment=False,
+            )
+            await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
+            await message.answer(
+                "Grok 人物换脸提示词生成失败："
+                f"{_format_grok_preview_error(exc)}\n\n"
+                "任务还没有提交，已保留当前素材。可以重新生成提示词，或输入自定义提示词提交。",
+                reply_markup=_image_edit_prompt_failure_keyboard(),
+            )
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_confirm)
     async def on_face_swap_confirm(message: Message, state: FSMContext) -> None:
@@ -4383,31 +4532,83 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
+            await state.update_data(**_clear_face_swap_prompt_fields())
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
-            await message.answer("人物换脸\n步骤 3/4：请重新输入换脸要求；如果没有额外要求，可输入“自然换脸”。", reply_markup=_image_task_step_keyboard())
+            await message.answer("人物换脸\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
             return
-        if text != "提交人物换脸任务":
-            await message.answer("人物换脸\n步骤 4/4：请点击「提交人物换脸任务」后再提交。", reply_markup=_image_task_confirm_keyboard("提交人物换脸任务"))
+        if text == MAIN_MENU_BUTTON:
+            await state.clear()
+            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
             return
         data = await state.get_data()
-        prompt = str(data.get("face_swap_prompt") or "").strip() or "自然换脸，保持原图姿态、服装、光线和背景，只替换人物脸部身份。"
-        seed_value = secrets.randbelow(TEXT_TO_IMAGE_MAX_SEED) + 1
-        params = {
-            "target_image_local_path": str(data.get("target_image_local_path") or ""),
-            "source_image_local_path": str(data.get("source_image_local_path") or ""),
-            "prompt": prompt,
-            "prompt_text": prompt,
-            "message": prompt,
-            "seed": seed_value,
-            "face_swap_random_seed": seed_value,
-            "tg_use_llm_prompt": True,
-            "tg_user_instruction": f"User face swap request: {prompt}",
-        }
-        await state.clear()
-        try:
-            await submit_webapp_task_and_reply(message, "face_swap", params)
-        except Exception as exc:
-            await message.answer(f"人物换脸任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+        if text == "输入自定义提示词提交":
+            await state.update_data(face_swap_waiting_for_custom_prompt=True, face_swap_waiting_for_adjustment=False)
+            await message.answer("请输入自定义最终人物换脸提示词。下一条消息会跳过 Grok，直接提交换脸任务。", reply_markup=_image_task_step_keyboard())
+            return
+        if text == "重新生成提示词":
+            original_request = str(data.get("face_swap_user_request") or data.get("face_swap_prompt") or FACE_SWAP_NATURAL_PROMPT).strip()
+            try:
+                await _preview_face_swap_prompt(message, state, original_request)
+            except Exception as exc:
+                await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
+                await message.answer(
+                    f"Grok 人物换脸提示词生成失败：{_format_grok_preview_error(exc)}",
+                    reply_markup=_image_edit_prompt_failure_keyboard(),
+                )
+            return
+        if text == "继续让 Grok 调整":
+            await state.update_data(face_swap_waiting_for_adjustment=True, face_swap_waiting_for_custom_prompt=False)
+            await message.answer("请直接输入调整要求，例如：更自然、保留原图表情、脸部融合更柔和。", reply_markup=_image_edit_prompt_review_keyboard())
+            return
+        if bool(data.get("face_swap_waiting_for_adjustment")):
+            adjustment = _message_text(message)
+            if not adjustment:
+                await message.answer("请直接输入调整要求。", reply_markup=_image_edit_prompt_review_keyboard())
+                return
+            base_prompt = str(data.get("face_swap_generated_prompt") or data.get("face_swap_prompt") or "").strip()
+            original_request = str(data.get("face_swap_user_request") or "").strip()
+            adjusted_request = "\n".join(
+                part
+                for part in [
+                    f"Original face swap request: {original_request}" if original_request else "",
+                    f"Current face swap prompt: {base_prompt}" if base_prompt else "",
+                    f"Revision request: {adjustment}",
+                    "Rewrite the current face swap prompt according to the revision request. Output only the latest final prompt.",
+                ]
+                if part
+            )
+            try:
+                await _preview_face_swap_prompt(message, state, adjusted_request)
+            except Exception as exc:
+                await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
+                await message.answer(
+                    f"Grok 人物换脸提示词调整失败：{_format_grok_preview_error(exc)}",
+                    reply_markup=_image_edit_prompt_failure_keyboard(),
+                )
+            return
+        if bool(data.get("face_swap_waiting_for_custom_prompt")):
+            custom_prompt = _message_text(message)
+            if not custom_prompt:
+                await message.answer("请输入自定义最终人物换脸提示词。", reply_markup=_image_task_step_keyboard())
+                return
+            await state.update_data(
+                face_swap_prompt=custom_prompt,
+                face_swap_generated_prompt=custom_prompt,
+                face_swap_prompt_ready=True,
+                face_swap_waiting_for_custom_prompt=False,
+                face_swap_user_request=str(data.get("face_swap_user_request") or custom_prompt),
+            )
+            await _submit_face_swap_from_state(message, state, custom_prompt)
+            return
+        if text != "使用这个提示词提交":
+            await message.answer("人物换脸\n请先查看 Grok 生成的提示词，确认合适后点击「使用这个提示词提交」。", reply_markup=_image_edit_prompt_review_keyboard())
+            return
+        prompt = str(data.get("face_swap_generated_prompt") or data.get("face_swap_prompt") or "").strip()
+        if not prompt:
+            await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
+            await message.answer("人物换脸\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+            return
+        await _submit_face_swap_from_state(message, state, prompt)
 
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_resolution)
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_duration)
@@ -4444,7 +4645,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await _show_video_i2v_step(message, state, step="audio")
                 return
             if current_state == ProductionWorkflowForm.video_i2v_waiting_for_audio.state:
-                params.update({"audio_selected": False, "audio_local_path": "", "prompt_mode_selected": False})
+                params.update({"prompt_mode_selected": False})
                 await state.update_data(**params)
                 await _show_video_i2v_step(message, state, step="image")
                 return
@@ -4466,7 +4667,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             if button_text == "\u8df3\u8fc7\u97f3\u9891":
                 params["audio_selected"] = True
                 params["audio_local_path"] = ""
-                await state.update_data(**params)
+                await state.update_data(**params, **_clear_video_i2v_prompt_fields())
                 await _show_video_i2v_step(message, state, step="prompt_mode")
                 return
             audio_suffix = _audio_ext_from_message(message)
@@ -4474,11 +4675,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await message.answer("\u8bf7\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002", reply_markup=_video_i2v_audio_keyboard())
                 return
             work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
-            target = work_dir / f"audio{audio_suffix}"
+            target = work_dir / f"audio_{int(message.message_id)}{audio_suffix}"
             await _download_message_media(message, target)
             params["audio_selected"] = True
             params["audio_local_path"] = str(target.resolve())
-            await state.update_data(**params, work_dir=str(work_dir))
+            await state.update_data(**params, work_dir=str(work_dir), **_clear_video_i2v_prompt_fields())
             await _show_video_i2v_step(message, state, step="prompt_mode")
             return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
@@ -4541,10 +4742,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         data = await state.get_data()
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
-        target = work_dir / f"reference{suffix}"
+        target = work_dir / f"reference_{int(message.message_id)}{suffix}"
         await _download_message_media(message, target)
         caption = _message_text(message)
-        await state.update_data(work_dir=str(work_dir), image_local_path=str(target.resolve()), video_i2v_initial_prompt=caption)
+        await state.update_data(
+            work_dir=str(work_dir),
+            image_local_path=str(target.resolve()),
+            video_i2v_initial_prompt=caption,
+            **_clear_video_i2v_prompt_fields(),
+        )
         await _show_video_i2v_step(message, state, step="audio")
         return
 
