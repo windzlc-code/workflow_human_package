@@ -466,6 +466,20 @@ def _object_input_order(object_info: dict[str, Any], class_type: str) -> list[st
     return ordered
 
 
+def _rgthree_power_lora_inputs(widgets: Any) -> dict[str, Any]:
+    if not isinstance(widgets, list):
+        return {}
+    lora_inputs: dict[str, Any] = {}
+    for value in widgets:
+        if not isinstance(value, dict):
+            continue
+        if "lora" not in value:
+            continue
+        index = len(lora_inputs) + 1
+        lora_inputs[f"lora_{index}"] = dict(value)
+    return lora_inputs
+
+
 def _ui_link_origins(data: dict[str, Any]) -> dict[int, list[Any]]:
     origins: dict[int, list[Any]] = {}
     for item in data.get("links") or []:
@@ -529,6 +543,15 @@ def _ui_workflow_to_api_prompt(data: dict[str, Any], object_info: dict[str, Any]
                 if name and name not in inputs_payload:
                     inputs_payload[name] = value
         elif isinstance(widgets, list):
+            if class_type == "Power Lora Loader (rgthree)":
+                inputs_payload.update(
+                    {
+                        key: value
+                        for key, value in _rgthree_power_lora_inputs(widgets).items()
+                        if key not in inputs_payload
+                    }
+                )
+                widgets = []
             if class_type == "KSampler" and len(widgets) >= 7 and str(widgets[1]).strip().lower() in {
                 "fixed",
                 "randomize",
