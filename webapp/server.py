@@ -4690,6 +4690,15 @@ def _analyze_generated_person_image_quality(
             "fix_priorities": _parse_qa_string_list(parsed.get("fixPriorities"), 4),
         }
         reject = _should_reject_generated_person_image(report)
+        if not reject:
+            audit = _analyze_generated_person_hand_limb_quality(
+                image_path=str(path),
+                prompt_text=prompt_text,
+                payload=payload,
+                attempt=attempt,
+            )
+            _merge_generated_person_hand_limb_audit(report, audit)
+            reject = _should_reject_generated_person_image(report)
         report["passed"] = not reject
         return report
     except Exception as exc:
@@ -4703,6 +4712,132 @@ def _analyze_generated_person_image_quality(
         }
 
 
+def _analyze_generated_person_hand_limb_quality(
+    *,
+    image_path: str,
+    prompt_text: str,
+    payload: dict[str, Any],
+    attempt: int,
+) -> dict[str, Any]:
+    path = Path(str(image_path or "")).expanduser()
+    if not path.exists() or not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+        return {"inspected": False, "summary": "未找到可复审的图片文件。"}
+    system_prompt = "\n".join(
+        [
+            "你是专门检查人物图片手部和肢体结构的 QA 复审员。",
+            "只检查可见人体结构，不评价题材、服装、姿势风格或审美偏好。",
+            "重点查找：多出来的手、重复手掌、额外手臂、手臂从错误位置长出、手臂或手掌与身体/衣服/背景融合、手指严重粘连或数量明显异常、肢体穿模、肢体断裂、身体轮廓出现重复人体部位。",
+            "只要怀疑存在额外手掌、额外手臂、手部明显崩坏、肢体融合或连接错误，就必须标记 suspected 字段为 true。不要因为整体画面好看而放行。",
+            "如果是单个人物图，正常最多只能有 2 只可见手和 2 条可见手臂；看到 3 个以上类似手掌/手臂的结构时，按额外肢体处理。",
+            "必须只返回 JSON，不要输出解释性正文。",
+            "JSON schema:",
+            "{",
+            '  "summary": "中文一句话总结",',
+            '  "visibleHandCount": 0,',
+            '  "visibleArmCount": 0,',
+            '  "extraHandSuspected": false,',
+            '  "extraArmSuspected": false,',
+            '  "handFingerAnomalySuspected": false,',
+            '  "armAttachmentAnomalySuspected": false,',
+            '  "limbFusionSuspected": false,',
+            '  "bodyDuplicatePartSuspected": false,',
+            '  "confidence": 0,',
+            '  "issues": ["中文问题1"]',
+            "}",
+        ]
+    )
+    user_input = "\n".join(
+        [
+            f"生成提示词：{str(prompt_text or '').strip()}",
+            f"当前为第 {max(int(attempt), 1)} 轮候选图，通过了第一轮通用 QA，现在进行手部和肢体复审。",
+            "请从整张图里逐个数可见手掌/手部结构和可见手臂结构。若有类似第三只手、重复手掌、手臂位置不合理、手臂穿过身体或手和衣服/背景融合，请标记为异常。",
+        ]
+    )
+    try:
+        result, selected, attempts = _request_llm_json_with_fallback(
+            source=payload,
+            user_input=user_input,
+            system_prompt=system_prompt,
+            image_paths=[str(path)],
+            retry_count=1,
+            request_label="图像手部肢体复审",
+        )
+        parsed = result.get("parsed") if isinstance(result, dict) else None
+        if not isinstance(parsed, dict):
+            raise RuntimeError("图像手部肢体复审未返回 JSON 对象")
+        return {
+            "inspected": True,
+            "selected_model": str(selected.get("model") or "").strip() if isinstance(selected, dict) else "",
+            "attempts": attempts,
+            "summary": str(parsed.get("summary") or "手部肢体复审完成。").strip(),
+            "visible_hand_count": _to_int(parsed.get("visibleHandCount"), 0),
+            "visible_arm_count": _to_int(parsed.get("visibleArmCount"), 0),
+            "extra_hand_suspected": parsed.get("extraHandSuspected") is True,
+            "extra_arm_suspected": parsed.get("extraArmSuspected") is True,
+            "hand_finger_anomaly_suspected": parsed.get("handFingerAnomalySuspected") is True,
+            "arm_attachment_anomaly_suspected": parsed.get("armAttachmentAnomalySuspected") is True,
+            "limb_fusion_suspected": parsed.get("limbFusionSuspected") is True,
+            "body_duplicate_part_suspected": parsed.get("bodyDuplicatePartSuspected") is True,
+            "confidence": _qa_score(parsed.get("confidence"), 75),
+            "issues": _parse_qa_string_list(parsed.get("issues"), 6),
+        }
+    except Exception as exc:
+        return {
+            "inspected": False,
+            "qa_unavailable": True,
+            "summary": "图像手部肢体复审暂不可用，未放行当前结果。",
+            "error": str(exc),
+            "issues": ["图像手部肢体复审未完成，不能确认候选图可交付。"],
+        }
+
+
+def _merge_generated_person_hand_limb_audit(report: dict[str, Any], audit: dict[str, Any] | None) -> None:
+    if not isinstance(report, dict) or not isinstance(audit, dict):
+        return
+    report["hand_limb_audit"] = audit
+    if not _to_bool(audit.get("inspected"), False):
+        if _to_bool(audit.get("qa_unavailable"), False):
+            report["qa_unavailable"] = True
+            issues = _parse_qa_string_list(report.get("issues"), 6)
+            issues.extend(_parse_qa_string_list(audit.get("issues"), 3))
+            report["issues"] = _parse_qa_string_list(issues, 6)
+        return
+
+    visible_hand_count = _to_int(audit.get("visible_hand_count"), 0)
+    visible_arm_count = _to_int(audit.get("visible_arm_count"), 0)
+    suspect_keys = (
+        "extra_hand_suspected",
+        "extra_arm_suspected",
+        "hand_finger_anomaly_suspected",
+        "arm_attachment_anomaly_suspected",
+        "limb_fusion_suspected",
+        "body_duplicate_part_suspected",
+    )
+    suspicious = any(_to_bool(audit.get(key), False) for key in suspect_keys)
+    suspicious = suspicious or visible_hand_count > 2 or visible_arm_count > 2
+    if not suspicious:
+        return
+
+    report["limb_or_body_broken"] = True
+    if _to_bool(audit.get("extra_hand_suspected"), False) or _to_bool(audit.get("extra_arm_suspected"), False) or visible_hand_count > 2 or visible_arm_count > 2:
+        report["extra_or_missing_limbs"] = True
+    if _to_bool(audit.get("limb_fusion_suspected"), False) or _to_bool(audit.get("body_duplicate_part_suspected"), False):
+        report["limb_overlap_or_fusion"] = True
+    if _to_bool(audit.get("hand_finger_anomaly_suspected"), False) or _to_bool(audit.get("extra_hand_suspected"), False) or visible_hand_count > 2:
+        report["hand_anomaly_visible"] = True
+    if _to_bool(audit.get("arm_attachment_anomaly_suspected"), False) or visible_arm_count > 2:
+        report["pose_geometry_broken"] = True
+    report["anatomy_score"] = min(_to_int(report.get("anatomy_score"), 75), 45)
+    report["deliverable_ready"] = False
+    issues = _parse_qa_string_list(report.get("issues"), 6)
+    audit_issues = _parse_qa_string_list(audit.get("issues"), 6)
+    if audit_issues:
+        issues.extend(audit_issues)
+    else:
+        issues.append(str(audit.get("summary") or "手部或肢体结构复审发现异常。").strip())
+    report["issues"] = _parse_qa_string_list(issues, 6)
+
+
 def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool:
     if not isinstance(report, dict):
         return False
@@ -4710,6 +4845,22 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         return True
     if not _to_bool(report.get("inspected"), False):
         return _to_bool(report.get("qa_unavailable"), False)
+    audit = report.get("hand_limb_audit") if isinstance(report.get("hand_limb_audit"), dict) else {}
+    if audit and not _to_bool(audit.get("inspected"), False):
+        return _to_bool(audit.get("qa_unavailable"), False)
+    if audit:
+        if _to_int(audit.get("visible_hand_count"), 0) > 2 or _to_int(audit.get("visible_arm_count"), 0) > 2:
+            return True
+        for key in (
+            "extra_hand_suspected",
+            "extra_arm_suspected",
+            "hand_finger_anomaly_suspected",
+            "arm_attachment_anomaly_suspected",
+            "limb_fusion_suspected",
+            "body_duplicate_part_suspected",
+        ):
+            if _to_bool(audit.get(key), False):
+                return True
     if _to_bool(report.get("limb_or_body_broken"), False):
         return True
     for key in (
@@ -8724,6 +8875,9 @@ def _agent_chat_payload(*, reply: str, summary: str = "") -> tuple[str, dict[str
 
 def _task_worker(task_id: str, user_id: int, task_type: str, payload: dict[str, Any]) -> None:
     with db() as conn:
+        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (str(task_id),)).fetchone()
+        if row is None or str(row["status"] or "").strip().lower() != "queued":
+            return
         conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", ("running", _now_ts(), task_id))
         _insert_task_event(
             conn,
@@ -8807,6 +8961,22 @@ def _task_worker(task_id: str, user_id: int, task_type: str, payload: dict[str, 
         _emit_stage(effective_payload, stage="finished", status="failed", message="生成失败", data={"error": str(task_error)})
 
     with db() as conn:
+        current_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (str(task_id),)).fetchone()
+        if current_row is not None and str(current_row["status"] or "").strip().lower() == "cancelled":
+            _insert_task_event(
+                conn,
+                task_id=task_id,
+                user_id=int(user_id),
+                kind="log",
+                message="任务已取消，忽略迟到的生成结果",
+                data={
+                    "status": "cancelled",
+                    "stage": "cancelled_late_result",
+                    "source": "webapp",
+                    "user_visible": True,
+                },
+            )
+            return
         pricing = _get_pricing_config(conn)
         charge_info: dict[str, Any] = {}
         skip_billing = bool(task_output.get("skip_billing"))
@@ -8998,6 +9168,99 @@ def _insert_task_event(conn, *, task_id: str, user_id: int, kind: str, message: 
 def _emit_task_event(*, task_id: str, user_id: int, kind: str, message: str, data: Any) -> None:
     with db() as conn:
         _insert_task_event(conn, task_id=str(task_id), user_id=int(user_id), kind=str(kind), message=str(message), data=data)
+
+
+def _cancel_task_record_for_user(
+    *,
+    task_id: str,
+    user_id: int,
+    requested_by: str,
+    expected_chat_id: int | None = None,
+) -> dict[str, Any]:
+    tid = str(task_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="task_id 不能为空")
+    actor = str(requested_by or "用户").strip() or "用户"
+    with db() as conn:
+        row = conn.execute("SELECT id, user_id, type, status, input_json FROM tasks WHERE id = ?", (tid,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        task = dict(row)
+        if int(task.get("user_id") or 0) != int(user_id):
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if expected_chat_id is not None:
+            input_payload = _json_loads(task.get("input_json"), {})
+            if _get_tg_chat_id_from_payload(input_payload) != int(expected_chat_id):
+                raise HTTPException(status_code=404, detail="任务不存在")
+        status = str(task.get("status") or "").strip().lower()
+        if status not in {"queued", "running"}:
+            return {
+                "ok": True,
+                "cancelled": False,
+                "state": "finished",
+                "id": tid,
+                "type": task.get("type"),
+                "status": status,
+                "message": f"任务 {tid} 当前状态为 {status or 'unknown'}，无法再强制停止。",
+            }
+        now = _now_ts()
+        reason = f"{actor} 已强制停止此任务"
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?, error = ?, updated_at = ?
+            WHERE id = ? AND status IN ('queued', 'running')
+            """,
+            ("cancelled", reason, now, tid),
+        )
+        _insert_task_event(
+            conn,
+            task_id=tid,
+            user_id=int(user_id),
+            kind="done",
+            message="任务已强制停止",
+            data={
+                "status": "cancelled",
+                "stage": "cancel",
+                "source": "webapp",
+                "requested_by": actor,
+                "previous_status": status,
+                "error": reason,
+                "cost_cents": 0,
+            },
+        )
+    return {
+        "ok": True,
+        "cancelled": True,
+        "state": "cancelled",
+        "id": tid,
+        "type": task.get("type"),
+        "status": "cancelled",
+        "previous_status": status,
+        "message": f"任务 {tid} 已强制停止。",
+    }
+
+
+def _find_latest_internal_tg_active_task(chat_id: int) -> dict[str, Any] | None:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, user_id, type, status, input_json, created_at, updated_at
+            FROM tasks
+            WHERE status IN ('running', 'queued')
+            ORDER BY
+              CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+              updated_at DESC,
+              created_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
+    for row in rows:
+        item = dict(row)
+        input_payload = _json_loads(item.get("input_json"), {})
+        if _get_tg_chat_id_from_payload(input_payload) == int(chat_id):
+            return item
+    return None
 
 
 def _emit_stage(
@@ -9988,6 +10251,25 @@ def create_app() -> FastAPI:
             if len(tasks) >= limit:
                 break
         return {"ok": True, "tasks": tasks}
+
+    @app.post("/api/internal/tg/tasks/cancel_latest")
+    def api_internal_tg_cancel_latest(request: Request):
+        _require_internal_tg_request(request)
+        try:
+            chat_id = int(str(request.query_params.get("chat_id") or "0").strip() or "0")
+        except Exception:
+            chat_id = 0
+        if chat_id <= 0:
+            raise HTTPException(status_code=400, detail="chat_id 必须为正整数")
+        target = _find_latest_internal_tg_active_task(chat_id)
+        if target is None:
+            return {"ok": True, "cancelled": False, "state": "none", "message": "目前没有可强制停止的后台生成任务。"}
+        return _cancel_task_record_for_user(
+            task_id=str(target.get("id") or ""),
+            user_id=int(target.get("user_id") or 0),
+            requested_by=f"TG-{chat_id}",
+            expected_chat_id=chat_id,
+        )
 
     @app.get("/api/internal/tg/tasks/{task_id}")
     def api_internal_tg_task_detail(task_id: str, request: Request):

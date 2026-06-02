@@ -753,6 +753,162 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertTrue(server._should_reject_generated_person_image(report))
 
+    def test_internal_tg_cancel_finds_latest_active_webapp_task(self):
+        server._create_task_record("task_old", 1, "text_to_image", {"tg_chat_id": 8100401093})
+        server._create_task_record("task_other_chat", 1, "text_to_image", {"tg_chat_id": 123})
+        server._create_task_record("task_latest", 1, "text_to_image", {"tg_chat_id": 8100401093})
+        with db_module.db() as conn:
+            conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", ("running", server._now_ts() + 10, "task_latest"))
+
+        target = server._find_latest_internal_tg_active_task(8100401093)
+        result = server._cancel_task_record_for_user(
+            task_id=str(target["id"]),
+            user_id=int(target["user_id"]),
+            requested_by="TG-8100401093",
+            expected_chat_id=8100401093,
+        )
+
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["id"], "task_latest")
+        with db_module.db() as conn:
+            latest = conn.execute("SELECT status, error FROM tasks WHERE id = ?", ("task_latest",)).fetchone()
+            old = conn.execute("SELECT status FROM tasks WHERE id = ?", ("task_old",)).fetchone()
+            other = conn.execute("SELECT status FROM tasks WHERE id = ?", ("task_other_chat",)).fetchone()
+        self.assertEqual(latest["status"], "cancelled")
+        self.assertIn("TG-8100401093", latest["error"])
+        self.assertEqual(old["status"], "queued")
+        self.assertEqual(other["status"], "queued")
+
+    def test_cancelled_queued_webapp_task_is_not_started_by_worker(self):
+        server._create_task_record("task_cancelled_before_start", 1, "text_to_image", {"tg_chat_id": 8100401093})
+        server._cancel_task_record_for_user(
+            task_id="task_cancelled_before_start",
+            user_id=1,
+            requested_by="TG-8100401093",
+            expected_chat_id=8100401093,
+        )
+
+        with patch.dict(server.TASK_RUNNERS, {"text_to_image": lambda task_id, payload: {"ok": True}}, clear=False) as runners:
+            server._task_worker("task_cancelled_before_start", 1, "text_to_image", {"tg_chat_id": 8100401093})
+
+        with db_module.db() as conn:
+            row = conn.execute("SELECT status FROM tasks WHERE id = ?", ("task_cancelled_before_start",)).fetchone()
+        self.assertEqual(row["status"], "cancelled")
+
+    def test_running_webapp_cancel_ignores_late_success_result(self):
+        server._create_task_record("task_cancelled_late", 1, "text_to_image", {"tg_chat_id": 8100401093})
+
+        def runner(task_id: str, payload: dict):
+            server._cancel_task_record_for_user(
+                task_id=task_id,
+                user_id=1,
+                requested_by="TG-8100401093",
+                expected_chat_id=8100401093,
+            )
+            return {"ok": True, "image_path": str(Path(self._tmpdir.name) / "late.png"), "runninghub_task_id": "late_success"}
+
+        with patch.dict(server.TASK_RUNNERS, {"text_to_image": runner}, clear=False):
+            server._task_worker("task_cancelled_late", 1, "text_to_image", {"tg_chat_id": 8100401093})
+
+        with db_module.db() as conn:
+            task = conn.execute(
+                "SELECT status, runninghub_task_id, cost_cents FROM tasks WHERE id = ?",
+                ("task_cancelled_late",),
+            ).fetchone()
+            late_event = conn.execute(
+                "SELECT message FROM task_events WHERE task_id = ? AND message = ?",
+                ("task_cancelled_late", "任务已取消，忽略迟到的生成结果"),
+            ).fetchone()
+        self.assertEqual(task["status"], "cancelled")
+        self.assertEqual(task["runninghub_task_id"], "")
+        self.assertEqual(task["cost_cents"], 0)
+        self.assertIsNotNone(late_event)
+
+    def test_text_to_image_auto_qa_rejects_hand_limb_audit_extra_hands(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 98,
+            "prompt_match_score": 98,
+            "anatomy_score": 99,
+            "visual_score": 98,
+            "deliverable_ready": True,
+            "issues": [],
+            "hand_limb_audit": {
+                "inspected": True,
+                "visible_hand_count": 3,
+                "visible_arm_count": 2,
+                "extra_hand_suspected": True,
+                "confidence": 92,
+            },
+        }
+
+        self.assertTrue(server._should_reject_generated_person_image(report))
+
+    def test_generated_person_qa_runs_hand_limb_audit_after_general_pass(self):
+        image_path = Path(self._tmpdir.name) / "candidate.png"
+        image_path.write_bytes(b"not-a-real-png-but-existing")
+        general_pass = {
+            "parsed": {
+                "summary": "整体画面可交付。",
+                "overallScore": 98,
+                "promptMatchScore": 98,
+                "anatomyScore": 99,
+                "visualScore": 98,
+                "limbOrBodyBroken": False,
+                "extraOrMissingLimbs": False,
+                "limbOverlapOrFusion": False,
+                "handAnomalyVisible": False,
+                "poseGeometryBroken": False,
+                "bodyPartScaleAnomaly": False,
+                "promptMismatchVisible": False,
+                "meaninglessOrCollapsed": False,
+                "textOrWatermarkVisible": False,
+                "headVisible": True,
+                "headCroppedOrMissing": False,
+                "deliverableReady": True,
+                "issues": [],
+                "fixPriorities": [],
+            }
+        }
+        hand_audit_reject = {
+            "parsed": {
+                "summary": "画面中疑似出现第三只手。",
+                "visibleHandCount": 3,
+                "visibleArmCount": 2,
+                "extraHandSuspected": True,
+                "extraArmSuspected": False,
+                "handFingerAnomalySuspected": False,
+                "armAttachmentAnomalySuspected": False,
+                "limbFusionSuspected": False,
+                "bodyDuplicatePartSuspected": False,
+                "confidence": 92,
+                "issues": ["疑似额外手掌"],
+            }
+        }
+
+        with patch.object(
+            server,
+            "_request_llm_json_with_fallback",
+            side_effect=[
+                (general_pass, {"model": "qa-general"}, 1),
+                (hand_audit_reject, {"model": "qa-audit"}, 1),
+            ],
+        ) as qa_mock:
+            report = server._analyze_generated_person_image_quality(
+                image_path=str(image_path),
+                prompt_text="一个人物站在室内，完整身体构图",
+                payload={},
+                attempt=1,
+            )
+
+        self.assertEqual(qa_mock.call_count, 2)
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["extra_or_missing_limbs"])
+        self.assertTrue(report["hand_anomaly_visible"])
+        self.assertEqual(report["hand_limb_audit"]["visible_hand_count"], 3)
+        self.assertIn("疑似额外手掌", report["issues"])
+
     def test_text_to_image_aspect_ratio_pose_guidance_matches_orientation(self):
         portrait = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "9:16", "width": 576, "height": 1024})
         landscape = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "16:9", "width": 1024, "height": 576})

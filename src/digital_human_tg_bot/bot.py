@@ -1793,6 +1793,31 @@ async def _fetch_internal_webapp_tg_tasks(*, chat_id: int, limit: int = 5) -> li
     return [item for item in tasks if isinstance(item, dict)] if isinstance(tasks, list) else []
 
 
+async def _cancel_latest_internal_webapp_tg_task(*, chat_id: int) -> dict[str, Any]:
+    headers: dict[str, str] = {}
+    token = str(os.getenv("TG_INTERNAL_API_TOKEN") or "").strip()
+    if token:
+        headers["x-tg-internal-token"] = token
+    url = f"{_internal_webapp_base_url()}/api/internal/tg/tasks/cancel_latest"
+    async with ClientSession() as session:
+        async with session.post(
+            url,
+            params={"chat_id": int(chat_id)},
+            headers=headers,
+            timeout=20,
+        ) as response:
+            body = await response.text()
+            if response.status >= 400:
+                raise RuntimeError(f"後臺 TG 任務停止失敗 HTTP {response.status}: {body[:500]}")
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"後臺 TG 任務停止返回非 JSON: {body[:300]}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"後臺 TG 任務停止格式異常: {data}")
+    return data
+
+
 async def _fetch_internal_webapp_tg_task_detail(*, chat_id: int, task_id: str) -> dict[str, Any]:
     headers: dict[str, str] = {}
     token = str(os.getenv("TG_INTERNAL_API_TOKEN") or "").strip()
@@ -1981,6 +2006,40 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return True
         await state.clear()
+
+        try:
+            webapp_cancel = await _cancel_latest_internal_webapp_tg_task(chat_id=int(message.chat.id))
+        except Exception as exc:
+            webapp_cancel = {
+                "cancelled": False,
+                "state": "error",
+                "message": f"後臺生成任務停止查詢失敗：{_format_tg_user_error(exc)}",
+            }
+        if webapp_cancel.get("cancelled") is True:
+            task_label = {
+                "text_to_image": "文生圖",
+                "image_generate": "圖像生成",
+                "get_nano_banana": "圖片編輯",
+                "single_image_edit": "單圖編輯",
+                "face_swap": "人物換臉",
+                "video_i2v": "圖生視頻",
+            }.get(str(webapp_cancel.get("type") or ""), str(webapp_cancel.get("type") or "後臺生成"))
+            await _answer(
+                message,
+                "\n".join(
+                    [
+                        "已強制停止後臺生成任務。",
+                        f"工作流: {task_label}",
+                        f"任務編號: {webapp_cancel.get('id')}",
+                        "如果 4090 已經開始推理，遠端可能仍會跑完，但本地不會再把結果當作完成任務推送。",
+                    ]
+                ),
+                reply_markup=_menu_keyboard(),
+            )
+            return True
+        if str(webapp_cancel.get("state") or "") == "error":
+            await _answer(message, str(webapp_cancel.get("message") or "後臺生成任務停止失敗。"), reply_markup=_menu_keyboard())
+            return True
 
         active_task = service.store.get_active_task()
         target_task = active_task or service.get_latest_open_task_for_submitter(int(message.chat.id))
