@@ -377,7 +377,7 @@ TEXT_TO_IMAGE_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
 
 
 TEXT_TO_IMAGE_PERSON_T2I_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
-    "8:15": {"label": "8:15 人設豎圖", "note": "人設_t2i 原生豎圖", "width": 1024, "height": 1920, "final": "關閉"},
+    "8:15": {"label": "基本比例", "note": "人設_t2i 基本比例", "width": 1024, "height": 1920, "final": "關閉"},
     "2:3": {"label": "2:3 基礎豎圖", "note": "人設_t2i 基礎豎圖", "width": 1024, "height": 1536, "final": "關閉"},
     "3:4": {"label": "3:4 穩定豎圖", "note": "人設_t2i 穩定豎圖", "width": 1024, "height": 1365, "final": "關閉"},
     "9:16": {"label": "9:16 手機豎屏長圖", "note": "人設_t2i 手機豎屏長圖", "width": 1024, "height": 1820, "final": "關閉"},
@@ -813,7 +813,7 @@ def _text_to_image_status_text(*, step: str, params: dict[str, Any]) -> str:
     if params.get("ratio_selected"):
         lines.append(f"畫面比例：{params['aspect_ratio']}（{params['note']}）")
         lines.append(f"基礎分辨率：{params['width']} x {params['height']}")
-    if params.get("resolution_selected"):
+    if params.get("resolution_selected") and params.get("final_resolution_available"):
         final_resolution_text = "開啓，預計 " + params["final"] if params.get("final_resolution_enabled") else "關閉，使用基礎分辨率"
         lines.append(f"最終分辨率：{final_resolution_text}")
     if params.get("persona_selected"):
@@ -829,6 +829,30 @@ def _text_to_image_status_text(*, step: str, params: dict[str, Any]) -> str:
         if prompt_mode_text:
             lines.append(f"提示詞方式：{prompt_mode_text}")
     return "\n".join(lines)
+
+
+def _text_to_image_has_resolution_step(params: dict[str, Any]) -> bool:
+    return bool(params.get("final_resolution_available"))
+
+
+def _text_to_image_persona_step_text(params: dict[str, Any], *, prefix: str = "請選擇") -> str:
+    return f"{'3/4' if _text_to_image_has_resolution_step(params) else '2/3'} {prefix}人設 LoRA"
+
+
+def _text_to_image_prompt_mode_step_text(params: dict[str, Any], *, prefix: str = "請選擇") -> str:
+    if params.get("persona_available"):
+        step_no = "4/4" if _text_to_image_has_resolution_step(params) else "3/3"
+    else:
+        step_no = "3/3" if _text_to_image_has_resolution_step(params) else "2/2"
+    return f"{step_no} {prefix}提示詞方式"
+
+
+def _text_to_image_prompt_entry_step_text(params: dict[str, Any], *, custom: bool = False) -> str:
+    if params.get("persona_available"):
+        step_no = "4/4" if _text_to_image_has_resolution_step(params) else "3/3"
+    else:
+        step_no = "3/3" if _text_to_image_has_resolution_step(params) else "2/2"
+    return f"{step_no} 請輸入{'自定義最終提示詞' if custom else '圖片需求或上傳參考圖'}"
 
 
 def _text_to_image_ratio_keyboard(*, selected_ratio: str = "", profile: str = "zit_final") -> InlineKeyboardMarkup:
@@ -3126,7 +3150,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _show_text_to_image_prompt_entry(message: Message, state: FSMContext) -> None:
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
         params = _text_to_image_params(await state.get_data())
-        step = "4/4 輸入圖片需求或上傳參考圖" if params.get("persona_available") else "3/3 輸入圖片需求或上傳參考圖"
+        step = _text_to_image_prompt_entry_step_text(params).replace("請輸入", "輸入", 1)
         await _answer(message,
             _text_to_image_status_text(step=step, params=params)
             + "\n\n可以直接輸入圖片需求，也可以上傳參考圖片；上傳圖片時可在圖片說明裏補充要求。Grok 會識別圖片內容，並結合你的文字生成最終提示詞供你確認。",
@@ -3136,7 +3160,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _show_text_to_image_prompt_mode(message: Message, state: FSMContext) -> None:
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
         params = _text_to_image_params(await state.get_data())
-        step = "4/4 請選擇提示詞方式" if params.get("persona_available") else "3/3 請選擇提示詞方式"
+        step = _text_to_image_prompt_mode_step_text(params)
         await _answer(message,
             _text_to_image_status_text(step=step, params=params)
             + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。",
@@ -3529,22 +3553,43 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     aspect_ratio=ratio,
                     width=option["width"],
                     height=option["height"],
-                    final_resolution_enabled=final_enabled,
+                    final_resolution_enabled=final_enabled if bool(option.get("final_resolution_available")) else False,
                     persona_available=bool(option["persona_available"]),
                     persona_enabled=bool(option["persona_enabled"]),
                     persona_lora=str(option.get("persona_lora") or ""),
                     ratio_selected=True,
-                    resolution_selected=False,
+                    resolution_selected=not bool(option.get("final_resolution_available")),
                     persona_selected=False,
                     prompt_mode_selected=False,
                     prompt_mode_label="",
                 )
-                await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                 option["ratio_selected"] = True
-                option["resolution_selected"] = False
+                option["final_resolution_enabled"] = final_enabled if bool(option.get("final_resolution_available")) else False
+                option["resolution_selected"] = not bool(option.get("final_resolution_available"))
                 option["persona_selected"] = False
                 option["prompt_mode_selected"] = False
                 option["prompt_mode_label"] = ""
+                if not bool(option.get("final_resolution_available")):
+                    if option.get("persona_available"):
+                        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
+                        text = _text_to_image_status_text(step=_text_to_image_persona_step_text(option), params=option)
+                        markup = _text_to_image_persona_keyboard(
+                            persona_enabled=bool(option["persona_enabled"]),
+                            persona_lora=str(option.get("persona_lora") or ""),
+                            selected=False,
+                            profile=str(option.get("text_to_image_workflow_profile") or "zit_final"),
+                        )
+                    else:
+                        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
+                        text = _text_to_image_status_text(step=_text_to_image_prompt_mode_step_text(option), params=option) + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
+                        markup = _text_to_image_prompt_mode_keyboard()
+                    try:
+                        await callback.message.edit_text(text, reply_markup=markup)
+                    except Exception:
+                        await _answer(callback.message, text, reply_markup=markup)
+                    await callback.answer("已使用基礎分辨率")
+                    return
+                await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                 try:
                     await callback.message.edit_text(
                         _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=option),
@@ -3619,7 +3664,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "Grok 生成"})
             text = (
                 _text_to_image_status_text(
-                    step="4/4 請輸入圖片需求或上傳參考圖" if params.get("persona_available") else "3/3 請輸入圖片需求或上傳參考圖",
+                    step=_text_to_image_prompt_entry_step_text(params),
                     params=params,
                 )
                 + "\n\n可以直接輸入圖片需求，也可以上傳參考圖片；上傳圖片時可在圖片說明裏補充要求。Grok 會識別圖片內容，並結合你的文字生成最終提示詞供你確認。"
@@ -3658,7 +3703,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             if params.get("persona_available"):
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
-                text = _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params)
+                text = _text_to_image_status_text(step=_text_to_image_persona_step_text(params), params=params)
                 markup = _text_to_image_persona_keyboard(
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
@@ -3672,7 +3717,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await callback.answer("請選擇人設")
             else:
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
-                step = "3/3 請選擇提示詞方式"
+                step = _text_to_image_prompt_mode_step_text(params)
                 text = _text_to_image_status_text(step=step, params=params) + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
                 try:
                     await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_mode_keyboard())
@@ -3684,7 +3729,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params(data)
             if params.get("persona_available"):
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
-                text = _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params)
+                text = _text_to_image_status_text(step=_text_to_image_persona_step_text(params), params=params)
                 markup = _text_to_image_persona_keyboard(
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
@@ -3698,7 +3743,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await callback.answer("請選擇人設")
             else:
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
-                text = _text_to_image_status_text(step="3/3 請選擇提示詞方式", params=params) + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
+                text = _text_to_image_status_text(step=_text_to_image_prompt_mode_step_text(params), params=params) + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
                 try:
                     await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_mode_keyboard())
                 except Exception:
@@ -3708,6 +3753,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if action == "t2i:back:resolution":
             params = _text_to_image_params(data)
             await state.update_data(persona_selected=False, prompt_mode_selected=False, prompt_mode_label="")
+            if not _text_to_image_has_resolution_step(params):
+                await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
+                try:
+                    await callback.message.edit_text(
+                        _text_to_image_status_text(step="1/3 請選擇圖像比例", params=params),
+                        reply_markup=_text_to_image_ratio_keyboard(
+                            selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
+                            profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                        ),
+                    )
+                except Exception:
+                    await _answer(callback.message,
+                        _text_to_image_status_text(step="1/3 請選擇圖像比例", params=params),
+                        reply_markup=_text_to_image_ratio_keyboard(
+                            selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
+                            profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                        ),
+                    )
+                await callback.answer("已返回比例")
+                return
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
             params = _text_to_image_params(
                 {
@@ -3771,7 +3836,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             text = (
-                _text_to_image_status_text(step="4/4 請選擇提示詞方式", params=params)
+                _text_to_image_status_text(step=_text_to_image_prompt_mode_step_text(params), params=params)
                 + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
             )
             try:
@@ -3784,7 +3849,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params(data)
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             text = (
-                _text_to_image_status_text(step="4/4 請選擇提示詞方式", params=params)
+                _text_to_image_status_text(step=_text_to_image_prompt_mode_step_text(params), params=params)
                 + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
             )
             try:
@@ -3796,7 +3861,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if action == "t2i:back:prompt_mode":
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             params = _text_to_image_params(data)
-            step = "4/4 請選擇提示詞方式" if params.get("persona_available") else "3/3 請選擇提示詞方式"
+            step = _text_to_image_prompt_mode_step_text(params)
             text = _text_to_image_status_text(step=step, params=params) + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
             try:
                 await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_mode_keyboard())
@@ -3810,7 +3875,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params({**data, "prompt_mode_selected": False, "prompt_mode_label": ""})
             if params.get("persona_available"):
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
-                text = _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params)
+                text = _text_to_image_status_text(step=_text_to_image_persona_step_text(params), params=params)
                 markup = _text_to_image_persona_keyboard(
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
@@ -3822,6 +3887,19 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 except Exception:
                     await _answer(callback.message, text, reply_markup=markup)
             else:
+                if not _text_to_image_has_resolution_step(params):
+                    await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
+                    text = _text_to_image_status_text(step="1/2 請選擇圖像比例", params=params)
+                    markup = _text_to_image_ratio_keyboard(
+                        selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
+                        profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                    )
+                    try:
+                        await callback.message.edit_text(text, reply_markup=markup)
+                    except Exception:
+                        await _answer(callback.message, text, reply_markup=markup)
+                    await callback.answer("已返回比例")
+                    return
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                 text = _text_to_image_status_text(step="2/3 請選擇最終分辨率", params=params)
                 markup = _text_to_image_resolution_keyboard(
@@ -3872,7 +3950,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "自定義輸入"})
             text = (
                 _text_to_image_status_text(
-                    step="4/4 請輸入自定義最終提示詞" if params.get("persona_available") else "3/3 請輸入自定義最終提示詞",
+                    step=_text_to_image_prompt_entry_step_text(params, custom=True),
                     params=params,
                 )
                 + "\n\n請輸入自定義最終提示詞。下一條消息會跳過 Grok，直接提交到 ComfyUI 工作流生成。"
@@ -3971,13 +4049,25 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     aspect_ratio=selected_ratio,
                     width=option["width"],
                     height=option["height"],
-                    final_resolution_enabled=bool(option["final_resolution_enabled"]),
+                    final_resolution_enabled=bool(option["final_resolution_enabled"]) if bool(option.get("final_resolution_available")) else False,
                     ratio_selected=True,
-                    resolution_selected=False,
+                    resolution_selected=not bool(option.get("final_resolution_available")),
                     persona_selected=False,
                     prompt_mode_selected=False,
                     prompt_mode_label="",
                 )
+                option["final_resolution_enabled"] = bool(option["final_resolution_enabled"]) if bool(option.get("final_resolution_available")) else False
+                option["resolution_selected"] = not bool(option.get("final_resolution_available"))
+                if not bool(option.get("final_resolution_available")):
+                    if option.get("persona_available"):
+                        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
+                        await _answer(message,
+                            _text_to_image_status_text(step=_text_to_image_persona_step_text(option), params=option),
+                            reply_markup=_text_to_image_persona_reply_keyboard(profile=str(option.get("text_to_image_workflow_profile") or "zit_final")),
+                        )
+                    else:
+                        await _show_text_to_image_prompt_mode(message, state)
+                    return
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                 await _answer(message,
                     _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=option),
@@ -4028,7 +4118,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 if params.get("persona_available"):
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
                     await _answer(message,
-                        _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params),
+                        _text_to_image_status_text(step=_text_to_image_persona_step_text(params), params=params),
                         reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                 else:
@@ -4045,6 +4135,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if current_state == ProductionWorkflowForm.text_to_image_waiting_for_persona.state:
             if text == "上一步":
                 await state.update_data(persona_selected=False, prompt_mode_selected=False, prompt_mode_label="")
+                if not _text_to_image_has_resolution_step(params):
+                    await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
+                    await _answer(message,
+                        _text_to_image_status_text(step="1/3 請選擇圖像比例", params=params),
+                        reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
+                    )
+                    return
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                 await _answer(message,
                     _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=params),
@@ -4062,7 +4159,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         break
                 if not selected_lora:
                     await _answer(message,
-                        _text_to_image_status_text(step="3/4 請先選擇人設 LoRA", params=params),
+                        _text_to_image_status_text(step=_text_to_image_persona_step_text(params, prefix="請先選擇"), params=params),
                         reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                     return
@@ -4091,10 +4188,17 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 if params.get("persona_available"):
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
                     await _answer(message,
-                        _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params),
+                        _text_to_image_status_text(step=_text_to_image_persona_step_text(params), params=params),
                         reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                 else:
+                    if not _text_to_image_has_resolution_step(params):
+                        await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
+                        await _answer(message,
+                            _text_to_image_status_text(step="1/2 請選擇圖像比例", params=params),
+                            reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
+                        )
+                        return
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
                     await _answer(message,
                         _text_to_image_status_text(step="2/3 請選擇最終分辨率", params=params),
@@ -4108,7 +4212,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
                 await _answer(message,
                     _text_to_image_status_text(
-                        step="4/4 請輸入圖片需求或上傳參考圖" if params.get("persona_available") else "3/3 請輸入圖片需求或上傳參考圖",
+                        step=_text_to_image_prompt_entry_step_text(params),
                         params={**params, "prompt_mode_selected": True, "prompt_mode_label": "Grok 生成"},
                     )
                     + "\n\n可以直接輸入圖片需求，也可以上傳參考圖片；上傳圖片時可在圖片說明裏補充要求。Grok 會識別圖片內容，並結合你的文字生成最終提示詞供你確認。",
@@ -4120,14 +4224,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
                 await _answer(message,
                     _text_to_image_status_text(
-                        step="4/4 請輸入自定義最終提示詞" if params.get("persona_available") else "3/3 請輸入自定義最終提示詞",
+                        step=_text_to_image_prompt_entry_step_text(params, custom=True),
                         params={**params, "prompt_mode_selected": True, "prompt_mode_label": "自定義提示詞"},
                     )
                     + "\n\n請輸入自定義最終提示詞。",
                     reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
                 )
                 return
-            step = "4/4 請先選擇提示詞方式" if params.get("persona_available") else "3/3 請先選擇提示詞方式"
+            step = _text_to_image_prompt_mode_step_text(params, prefix="請先選擇")
             await _answer(message,
                 _text_to_image_status_text(step=step, params=params),
                 reply_markup=_text_to_image_prompt_mode_reply_keyboard(),
@@ -4172,7 +4276,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "自定義輸入"})
             await _answer(message,
                 _text_to_image_status_text(
-                    step="4/4 請輸入自定義最終提示詞" if params.get("persona_available") else "3/3 請輸入自定義最終提示詞",
+                    step=_text_to_image_prompt_entry_step_text(params, custom=True),
                     params=params,
                 )
                 + "\n\n請輸入自定義最終提示詞。下一條消息會跳過 Grok，直接提交到 ComfyUI 工作流生成。",
@@ -4214,7 +4318,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not prompt:
             params = _text_to_image_params(data)
             await _answer(message,
-                _text_to_image_status_text(step="4/4 請輸入圖片需求或上傳參考圖" if params.get("persona_available") else "3/3 請輸入圖片需求或上傳參考圖", params=params)
+                _text_to_image_status_text(step=_text_to_image_prompt_entry_step_text(params), params=params)
                 + "\n\n可以傳送文字需求，也可以上傳一張參考圖片；上傳圖片時可在圖片說明裏補充要求。",
                 reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
             )

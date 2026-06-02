@@ -47,6 +47,28 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertNotIn("人設 LoRA：", text)
         self.assertNotIn("提示詞方式：", text)
 
+    def test_status_text_hides_final_resolution_when_workflow_has_base_only(self) -> None:
+        text = bot._text_to_image_status_text(
+            step="2/3 請選擇人設 LoRA",
+            params={
+                "ratio_selected": True,
+                "aspect_ratio": "8:15",
+                "note": "人設_t2i 基本比例",
+                "width": 1024,
+                "height": 1920,
+                "final_resolution_available": False,
+                "final_resolution_enabled": False,
+                "resolution_selected": True,
+                "persona_selected": False,
+                "prompt_mode_selected": False,
+            },
+        )
+
+        self.assertIn("當前步驟：2/3 請選擇人設 LoRA", text)
+        self.assertIn("畫面比例：8:15（人設_t2i 基本比例）", text)
+        self.assertIn("基礎分辨率：1024 x 1920", text)
+        self.assertNotIn("最終分辨率：", text)
+
     def test_prompt_failure_keyboard_uses_reply_keyboard(self) -> None:
         markup = bot._text_to_image_prompt_failure_reply_keyboard()
 
@@ -161,6 +183,13 @@ class TextToImageStatusTextTests(unittest.TestCase):
         for ratio in expected:
             self.assertIn(ratio, standard_ratios)
             self.assertIn(ratio, person_ratios)
+
+    def test_person_t2i_native_ratio_label_is_basic_ratio(self) -> None:
+        options = bot._text_to_image_ratio_options("person_t2i")
+
+        self.assertEqual(options["8:15"]["label"], "基本比例")
+        self.assertEqual(options["8:15"]["width"], 1024)
+        self.assertEqual(options["8:15"]["height"], 1920)
 
     def test_person_t2i_widescreen_ratio_updates_comfy_dimensions(self) -> None:
         params = bot._text_to_image_params(

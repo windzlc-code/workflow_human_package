@@ -5517,8 +5517,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     qa_target_count = _text_to_image_qa_target_count(payload, batch_size=batch_size, workflow_path=workflow_path) if str(task_type or "").strip() == "text_to_image" else 1
     batch_qa_enabled = auto_qa_enabled and qa_target_count > 1
     if batch_qa_enabled:
-        configured_attempts = _to_int(payload.get("text_to_image_auto_qa_max_attempts"), qa_target_count)
-        max_attempts = min(max(configured_attempts, qa_target_count, 1), 12)
+        max_attempts = 0
     else:
         max_attempts = min(max(_to_int(payload.get("text_to_image_auto_qa_max_attempts"), 3), 1), 6) if auto_qa_enabled else 1
     qa_reports: list[dict[str, Any]] = []
@@ -5531,7 +5530,11 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     image_paths: list[str] = []
     selected_seed = seed
     last_qa_reason = ""
-    for attempt in range(1, max_attempts + 1):
+    attempt = 0
+    while True:
+        attempt += 1
+        if _task_cancelled_for_payload(payload):
+            raise RuntimeError("任务已取消，已停止继续生成。")
         attempt_seed = selected_seed
         node_inputs = copy.deepcopy(base_node_inputs)
         if attempt > 1:
@@ -5542,7 +5545,9 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
                 _replace_seed_values(node_inputs, int(attempt_seed))
             payload["seed"] = int(attempt_seed)
         message = f"提交{source_label}工作流: {workflow_path}"
-        if auto_qa_enabled and max_attempts > 1:
+        if batch_qa_enabled:
+            message = f"{message}（自动 QA 第 {attempt} 轮，目标 {qa_target_count} 张）"
+        elif auto_qa_enabled and max_attempts > 1:
             message = f"{message}（自动 QA 第 {attempt}/{max_attempts} 轮）"
         _emit_stage(payload, stage="remote_comfy", status="running", message=message, data={"qa_attempt": attempt, "seed": attempt_seed})
         result = _run_remote_comfy_gateway_test(
@@ -5585,7 +5590,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
                     "local_outputs_count": len(result.get("local_outputs") if isinstance(result.get("local_outputs"), list) else []),
                 },
             )
-            if auto_qa_enabled and attempt < max_attempts:
+            if auto_qa_enabled and not batch_qa_enabled and attempt < max_attempts:
                 continue
             raise RuntimeError(last_qa_reason)
         if image_task_requires_output and Path(output_path).suffix.lower() not in IMAGE_EXTS:
@@ -5667,14 +5672,15 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
             message=f"自动 QA 第 {attempt} 轮拦截候选图，准备重新生成",
             data={"qa_attempt": attempt, "qa_report": _sanitize_payload(qa_report), "reason": last_qa_reason},
         )
-    else:
-        if batch_qa_enabled and len(qa_passed_image_paths) < qa_target_count:
-            raise RuntimeError(
-                f"自動 QA 已檢查 {len(qa_reports)} 張候選圖，"
-                f"累積通過 {len(qa_passed_image_paths)}/{qa_target_count} 張，仍未滿 Telegram 回傳數量要求。"
-            )
-        if auto_qa_enabled and qa_reports and _should_reject_generated_person_image(qa_reports[-1]):
-            raise RuntimeError(f"自动 QA 已筛选 {len(qa_reports)} 轮仍未获得可交付图片：{last_qa_reason or '候选图未通过质量检查'}")
+        if max_attempts > 0 and attempt >= max_attempts:
+            break
+    if batch_qa_enabled and len(qa_passed_image_paths) < qa_target_count:
+        raise RuntimeError(
+            f"自動 QA 已檢查 {len(qa_reports)} 張候選圖，"
+            f"累積通過 {len(qa_passed_image_paths)}/{qa_target_count} 張，仍未滿 Telegram 回傳數量要求。"
+        )
+    if auto_qa_enabled and not batch_qa_enabled and qa_reports and _should_reject_generated_person_image(qa_reports[-1]):
+        raise RuntimeError(f"自动 QA 已筛选 {len(qa_reports)} 轮仍未获得可交付图片：{last_qa_reason or '候选图未通过质量检查'}")
 
     current_task_type = str(task_type or "").strip()
     if batch_qa_enabled:

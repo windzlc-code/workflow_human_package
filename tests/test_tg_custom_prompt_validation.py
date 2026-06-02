@@ -144,6 +144,139 @@ class RemoteComfyImageOutputTests(unittest.TestCase):
         self.assertEqual(output["image_qa"]["passed_count"], 6)
         self.assertFalse(output["image_qa"]["insufficient_count"])
 
+    def test_text_to_image_batch_qa_keeps_generating_past_configured_attempts_until_target(self) -> None:
+        def pass_report():
+            return {
+                "inspected": True,
+                "passed": True,
+                "overall_score": 90,
+                "prompt_match_score": 88,
+                "anatomy_score": 92,
+                "visual_score": 88,
+                "deliverable_ready": True,
+                "issues": [],
+            }
+
+        def reject_report():
+            return {
+                "inspected": True,
+                "passed": False,
+                "overall_score": 55,
+                "prompt_match_score": 70,
+                "anatomy_score": 40,
+                "visual_score": 60,
+                "limb_or_body_broken": True,
+                "deliverable_ready": False,
+                "issues": ["肢体结构不稳定"],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rounds = []
+            for round_index in range(1, 4):
+                paths = []
+                for image_index in range(1, 4):
+                    path = root / f"round{round_index}_{image_index}.png"
+                    path.write_bytes(f"round-{round_index}-{image_index}".encode("utf-8"))
+                    paths.append(str(path))
+                rounds.append(paths)
+
+            comfy_results = [
+                {"ok": True, "prompt_id": f"prompt_{idx}", "local_outputs": [{"local_path": path} for path in paths]}
+                for idx, paths in enumerate(rounds, start=1)
+            ]
+            qa_results = [
+                pass_report(),
+                reject_report(),
+                pass_report(),
+                reject_report(),
+                pass_report(),
+                pass_report(),
+                pass_report(),
+                pass_report(),
+                reject_report(),
+            ]
+
+            with (
+                patch.object(server, "_run_remote_comfy_gateway_test", side_effect=comfy_results) as run_mock,
+                patch.object(server, "_analyze_generated_person_image_quality", side_effect=qa_results),
+                patch.object(server, "_new_image_qa_seed", side_effect=[123456, 123457]),
+                patch.object(server, "_emit_stage"),
+            ):
+                output = server._run_remote_comfy_mapped_task(
+                    "task_batch_qa_unbounded",
+                    {
+                        "remote_comfy_gateway_url": "http://comfy.local",
+                        "remote_comfy_workflow_mappings": {"text_to_image": "person_t2i.api.json"},
+                        "prompt": "一位成人女性肖像，清晰自然",
+                        "width": 640,
+                        "height": 960,
+                        "batch_size": 3,
+                        "text_to_image_qa_target_count": 6,
+                        "text_to_image_auto_qa_enabled": True,
+                        "text_to_image_auto_qa_max_attempts": 1,
+                    },
+                    "text_to_image",
+                )
+
+        self.assertEqual(run_mock.call_count, 3)
+        self.assertEqual(len(output["image_paths"]), 6)
+        self.assertEqual(output["image_qa"]["attempts"], 3)
+        self.assertEqual(output["image_qa"]["checked_count"], 9)
+        self.assertEqual(output["image_qa"]["passed_count"], 6)
+        self.assertFalse(output["image_qa"]["insufficient_count"])
+
+    def test_text_to_image_batch_qa_stops_before_next_round_when_cancelled(self) -> None:
+        def reject_report():
+            return {
+                "inspected": True,
+                "passed": False,
+                "overall_score": 55,
+                "prompt_match_score": 70,
+                "anatomy_score": 40,
+                "visual_score": 60,
+                "limb_or_body_broken": True,
+                "deliverable_ready": False,
+                "issues": ["肢体结构不稳定"],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_round = []
+            for index in range(1, 4):
+                path = root / f"round1_{index}.png"
+                path.write_bytes(b"first")
+                first_round.append(str(path))
+
+            with (
+                patch.object(
+                    server,
+                    "_run_remote_comfy_gateway_test",
+                    return_value={"ok": True, "prompt_id": "prompt_1", "local_outputs": [{"local_path": path} for path in first_round]},
+                ) as run_mock,
+                patch.object(server, "_analyze_generated_person_image_quality", return_value=reject_report()),
+                patch.object(server, "_task_cancelled_for_payload", side_effect=[False, True]),
+                patch.object(server, "_emit_stage"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "任务已取消"):
+                    server._run_remote_comfy_mapped_task(
+                        "task_batch_qa_cancel",
+                        {
+                            "remote_comfy_gateway_url": "http://comfy.local",
+                            "remote_comfy_workflow_mappings": {"text_to_image": "person_t2i.api.json"},
+                            "prompt": "一位成人女性肖像，清晰自然",
+                            "width": 640,
+                            "height": 960,
+                            "batch_size": 3,
+                            "text_to_image_qa_target_count": 6,
+                            "text_to_image_auto_qa_enabled": True,
+                            "text_to_image_auto_qa_max_attempts": 1,
+                        },
+                        "text_to_image",
+                    )
+
+        self.assertEqual(run_mock.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
