@@ -529,6 +529,13 @@ def _ui_workflow_to_api_prompt(data: dict[str, Any], object_info: dict[str, Any]
                 if name and name not in inputs_payload:
                     inputs_payload[name] = value
         elif isinstance(widgets, list):
+            if class_type == "KSampler" and len(widgets) >= 7 and str(widgets[1]).strip().lower() in {
+                "fixed",
+                "randomize",
+                "increment",
+                "decrement",
+            }:
+                widgets = [widgets[0], *widgets[2:]]
             widget_index = 0
             for name in order:
                 if name in inputs_payload:
