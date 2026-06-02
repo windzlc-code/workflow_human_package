@@ -87,6 +87,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "local_comfy_gateway_token": "",
     "local_comfy_workflow_mappings": {},
     "comfy_workflow_source": "remote",
+    "comfy_gpu_max_concurrency": 4,
     "upload_server_ip": "",
     "upload_file_api_key": "",
     "image_generate_mode_default": "closed_model_api",
@@ -176,18 +177,19 @@ def _env_bool(name: str, default: bool) -> bool:
 
 RH_MAX_CONCURRENCY = max(_env_int("RH_MAX_CONCURRENCY", 20), 1)
 TASK_QUEUE_MAXSIZE = max(_env_int("TASK_QUEUE_MAXSIZE", 0), 0)
-COMFY_GPU_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_MAX_CONCURRENCY", 2), 1)
+COMFY_GPU_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_MAX_CONCURRENCY", 4), 1)
+COMFY_GPU_LOCAL_SEMAPHORE_LIMIT = max(_env_int("COMFY_GPU_LOCAL_SEMAPHORE_LIMIT", 64), COMFY_GPU_MAX_CONCURRENCY)
 COMFY_GPU_QUEUE_TIMEOUT_SECONDS = max(_env_int("COMFY_GPU_QUEUE_TIMEOUT_SECONDS", 3600), 30)
 COMFY_GPU_QUEUE_POLL_SECONDS = max(_env_int("COMFY_GPU_QUEUE_POLL_SECONDS", 2), 1)
 COMFY_GPU_DYNAMIC_ENABLED = _env_bool("COMFY_GPU_DYNAMIC_ENABLED", True)
 COMFY_GPU_MIN_FREE_GB = max(_env_float("COMFY_GPU_MIN_FREE_GB", 6.0), 0.0)
 COMFY_GPU_RESERVE_GB = max(_env_float("COMFY_GPU_RESERVE_GB", 3.0), 0.0)
-COMFY_GPU_MAX_COMFY_PENDING = max(_env_int("COMFY_GPU_MAX_COMFY_PENDING", 1), 0)
+COMFY_GPU_MAX_COMFY_PENDING = max(_env_int("COMFY_GPU_MAX_COMFY_PENDING", 4), 0)
 _TASK_QUEUE: queue.Queue[tuple[str, int, str, dict[str, Any]]] = queue.Queue(maxsize=int(TASK_QUEUE_MAXSIZE or 0))
 _WORKERS: list[threading.Thread] = []
 _WORKERS_LOCK = threading.Lock()
 _RUNTIME_CONFIG_LOCK = threading.RLock()
-_COMFY_GPU_SEMAPHORE = threading.BoundedSemaphore(int(COMFY_GPU_MAX_CONCURRENCY))
+_COMFY_GPU_SEMAPHORE = threading.BoundedSemaphore(int(COMFY_GPU_LOCAL_SEMAPHORE_LIMIT))
 _COMFY_GPU_LOCK = threading.Lock()
 _COMFY_GPU_WAITING = 0
 _COMFY_GPU_RUNNING = 0
@@ -2084,6 +2086,7 @@ def _load_runtime_config_file(conn) -> dict[str, Any]:
                     "local_comfy_gateway_token",
                     "local_comfy_workflow_mappings",
                     "local_comfy_image_input_bindings",
+                    "comfy_gpu_max_concurrency",
                 ):
                     current_value = merged.get(key)
                     fallback_value = fallback.get(key)
@@ -2122,6 +2125,10 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["local_comfy_gateway_token"] = str(merged.get("local_comfy_gateway_token") or "").strip()
     source = str(merged.get("comfy_workflow_source") or "remote").strip().lower()
     merged["comfy_workflow_source"] = source if source in {"remote", "local"} else "remote"
+    merged["comfy_gpu_max_concurrency"] = min(
+        max(_to_int(merged.get("comfy_gpu_max_concurrency"), COMFY_GPU_MAX_CONCURRENCY), 1),
+        int(COMFY_GPU_LOCAL_SEMAPHORE_LIMIT),
+    )
     raw_remote_mappings = current.get("remote_comfy_workflow_mappings")
     remote_mappings: dict[str, Any] = {}
     if isinstance(raw_remote_mappings, dict):
@@ -2279,6 +2286,16 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["cleanup_time"] = str(merged.get("cleanup_time") or "03:30").strip() or "03:30"
     merged["cleanup_retention_days"] = max(_to_int(merged.get("cleanup_retention_days"), 7), 1)
     return merged
+
+
+def _runtime_comfy_gpu_max_concurrency() -> int:
+    try:
+        with _RUNTIME_CONFIG_LOCK:
+            raw = _read_runtime_config_file_dict()
+        value = _to_int(raw.get("comfy_gpu_max_concurrency"), COMFY_GPU_MAX_CONCURRENCY)
+    except Exception:
+        value = int(COMFY_GPU_MAX_CONCURRENCY)
+    return min(max(int(value), 1), int(COMFY_GPU_LOCAL_SEMAPHORE_LIMIT))
 
 
 def _normalize_runtime_workflow_chain(value: Any) -> list[str]:
@@ -3612,9 +3629,10 @@ def _task_cancelled_for_payload(payload: dict[str, Any] | None) -> bool:
 
 
 def _comfy_gpu_snapshot() -> dict[str, int]:
+    max_concurrency = _runtime_comfy_gpu_max_concurrency()
     with _COMFY_GPU_LOCK:
         return {
-            "max_concurrency": int(COMFY_GPU_MAX_CONCURRENCY),
+            "max_concurrency": int(max_concurrency),
             "waiting": int(_COMFY_GPU_WAITING),
             "running": int(_COMFY_GPU_RUNNING),
         }
@@ -3741,16 +3759,18 @@ def _comfy_gpu_capacity_check(
     memory = _extract_comfy_gpu_memory_stats(health)
     queue_counts = _comfy_queue_counts(queue_data)
     result.update({"memory": memory, "comfy_queue": queue_counts})
-    if queue_counts.get("running", 0) >= int(COMFY_GPU_MAX_CONCURRENCY):
-        return {**result, "ok": False, "reason": "comfy_running"}
-    if queue_counts.get("pending", 0) > int(COMFY_GPU_MAX_COMFY_PENDING):
+    queue_load = int(queue_counts.get("running", 0)) + int(queue_counts.get("pending", 0))
+    max_concurrency = _runtime_comfy_gpu_max_concurrency()
+    result["max_concurrency"] = int(max_concurrency)
+    if queue_load >= int(max_concurrency):
+        return {**result, "ok": False, "reason": "comfy_slots_full", "queue_load": queue_load}
+    max_pending = max(int(COMFY_GPU_MAX_COMFY_PENDING), int(max_concurrency))
+    if queue_counts.get("pending", 0) > int(max_pending):
         return {**result, "ok": False, "reason": "comfy_pending"}
     if not memory.get("available"):
-        return {**result, "ok": True, "reason": "memory_unavailable_fallback"}
+        return {**result, "ok": True, "reason": "queue_slot_available_memory_unavailable"}
     free_gb = float(memory.get("vram_free_gb") or 0.0)
-    if free_gb < required_free_gb:
-        return {**result, "ok": False, "reason": "insufficient_vram", "free_gb": free_gb}
-    return {**result, "ok": True, "reason": "capacity_available", "free_gb": free_gb}
+    return {**result, "ok": True, "reason": "queue_slot_available", "free_gb": free_gb, "queue_load": queue_load}
 
 
 @contextlib.contextmanager
@@ -3771,7 +3791,7 @@ def _comfy_gpu_execution_slot(
         _COMFY_GPU_WAITING += 1
         queue_position = _COMFY_GPU_WAITING
         queued_snapshot = {
-            "max_concurrency": int(COMFY_GPU_MAX_CONCURRENCY),
+            "max_concurrency": int(_runtime_comfy_gpu_max_concurrency()),
             "waiting": int(_COMFY_GPU_WAITING),
             "running": int(_COMFY_GPU_RUNNING),
             "queue_position": int(queue_position),
@@ -3780,10 +3800,11 @@ def _comfy_gpu_execution_slot(
         source_payload,
         stage="comfy_gpu_queue",
         status="queued",
-        message=f"等待 4090 生成資源，前方約 {max(queue_position - 1, 0)} 個 ComfyUI 任務",
+        message=f"等待 4090 隊列槽位，前方約 {max(queue_position - 1, 0)} 個任務",
         data={"workflow": workflow_label, **queued_snapshot},
     )
     acquired = False
+    running_snapshot: dict[str, Any] = {}
     started = time.time()
     try:
         while not acquired:
@@ -3795,7 +3816,26 @@ def _comfy_gpu_execution_slot(
                 detail = ""
                 if last_capacity:
                     detail = f"，最後檢測：{last_capacity.get('reason') or 'unknown'}"
-                raise RuntimeError(f"等待 4090 生成資源超時（超過 {COMFY_GPU_QUEUE_TIMEOUT_SECONDS} 秒{detail}），請稍後重試。")
+                raise RuntimeError(f"等待 4090 隊列槽位超時（超過 {COMFY_GPU_QUEUE_TIMEOUT_SECONDS} 秒{detail}），請稍後重試。")
+            with _COMFY_GPU_LOCK:
+                current_max = _runtime_comfy_gpu_max_concurrency()
+                local_queue_full = _COMFY_GPU_RUNNING >= current_max
+                local_wait_snapshot = {
+                    "max_concurrency": int(current_max),
+                    "waiting": int(_COMFY_GPU_WAITING),
+                    "running": int(_COMFY_GPU_RUNNING),
+                }
+            if local_queue_full:
+                last_capacity = {"ok": False, "reason": "local_slots_full", **local_wait_snapshot}
+                _emit_stage(
+                    source_payload,
+                    stage="comfy_gpu_queue",
+                    status="queued",
+                    message="4090 本地隊列槽位已滿，繼續排隊等待",
+                    data={"workflow": workflow_label, "reason": "local_slots_full", **local_wait_snapshot},
+                )
+                time.sleep(min(float(COMFY_GPU_QUEUE_POLL_SECONDS), max(remaining, 0.1)))
+                continue
             acquired = _COMFY_GPU_SEMAPHORE.acquire(timeout=min(float(COMFY_GPU_QUEUE_POLL_SECONDS), remaining))
             if not acquired:
                 continue
@@ -3818,7 +3858,7 @@ def _comfy_gpu_execution_slot(
                     source_payload,
                     stage="comfy_gpu_queue",
                     status="queued",
-                    message="4090 資源暫不足，繼續排隊等待",
+                    message="4090 隊列已滿，繼續排隊等待",
                     data={
                         "workflow": workflow_label,
                         "reason": reason,
@@ -3829,15 +3869,38 @@ def _comfy_gpu_execution_slot(
                     },
                 )
                 time.sleep(float(COMFY_GPU_QUEUE_POLL_SECONDS))
-        with _COMFY_GPU_LOCK:
-            _COMFY_GPU_WAITING = max(_COMFY_GPU_WAITING - 1, 0)
-            _COMFY_GPU_RUNNING += 1
-            running_snapshot = {
-                "max_concurrency": int(COMFY_GPU_MAX_CONCURRENCY),
-                "waiting": int(_COMFY_GPU_WAITING),
-                "running": int(_COMFY_GPU_RUNNING),
-                "queue_wait_seconds": int(time.time() - started),
-            }
+                continue
+            with _COMFY_GPU_LOCK:
+                current_max = _runtime_comfy_gpu_max_concurrency()
+                if _COMFY_GPU_RUNNING >= current_max:
+                    local_wait_snapshot = {
+                        "max_concurrency": int(current_max),
+                        "waiting": int(_COMFY_GPU_WAITING),
+                        "running": int(_COMFY_GPU_RUNNING),
+                    }
+                else:
+                    local_wait_snapshot = {}
+                    _COMFY_GPU_WAITING = max(_COMFY_GPU_WAITING - 1, 0)
+                    _COMFY_GPU_RUNNING += 1
+                    running_snapshot = {
+                        "max_concurrency": int(current_max),
+                        "waiting": int(_COMFY_GPU_WAITING),
+                        "running": int(_COMFY_GPU_RUNNING),
+                        "queue_wait_seconds": int(time.time() - started),
+                    }
+            if local_wait_snapshot:
+                _COMFY_GPU_SEMAPHORE.release()
+                acquired = False
+                last_capacity = {"ok": False, "reason": "local_slots_full", **local_wait_snapshot}
+                _emit_stage(
+                    source_payload,
+                    stage="comfy_gpu_queue",
+                    status="queued",
+                    message="4090 本地隊列槽位已滿，繼續排隊等待",
+                    data={"workflow": workflow_label, "reason": "local_slots_full", **local_wait_snapshot},
+                )
+                time.sleep(float(COMFY_GPU_QUEUE_POLL_SECONDS))
+                continue
         if last_capacity:
             running_snapshot["gpu_capacity"] = last_capacity
         if _task_cancelled_for_payload(source_payload):
@@ -3846,7 +3909,7 @@ def _comfy_gpu_execution_slot(
             source_payload,
             stage="comfy_gpu_queue",
             status="running",
-            message="已取得 4090 生成資源，開始提交 ComfyUI 工作流",
+            message="已取得 4090 隊列槽位，開始提交 ComfyUI 工作流",
             data={"workflow": workflow_label, **running_snapshot},
         )
         yield running_snapshot
@@ -3858,7 +3921,7 @@ def _comfy_gpu_execution_slot(
             with _COMFY_GPU_LOCK:
                 _COMFY_GPU_RUNNING = max(_COMFY_GPU_RUNNING - 1, 0)
                 released_snapshot = {
-                    "max_concurrency": int(COMFY_GPU_MAX_CONCURRENCY),
+                    "max_concurrency": int(_runtime_comfy_gpu_max_concurrency()),
                     "waiting": int(_COMFY_GPU_WAITING),
                     "running": int(_COMFY_GPU_RUNNING),
                 }
@@ -3867,7 +3930,7 @@ def _comfy_gpu_execution_slot(
                 source_payload,
                 stage="comfy_gpu_queue",
                 status="success",
-                message="4090 生成資源已釋放",
+                message="4090 隊列槽位已釋放",
                 data={"workflow": workflow_label, **released_snapshot},
             )
 
@@ -4283,6 +4346,24 @@ def _persona_body_prompt_anchor_for_profile(profile: dict[str, Any]) -> str:
     return ""
 
 
+def _prompt_already_has_persona_body_anchor(prompt_text: str, anchor: str) -> bool:
+    text = re.sub(r"[，。；、,.;:\s]+", "", str(prompt_text or ""))
+    target = re.sub(r"[，。；、,.;:\s]+", "", str(anchor or ""))
+    if not text or not target:
+        return False
+    if target in text:
+        return True
+    body_terms = (
+        "身形修長纖細",
+        "身形修长纤细",
+        "肩頸線條柔和",
+        "肩颈线条柔和",
+        "腰胯比例輕盈自然",
+        "腰胯比例轻盈自然",
+    )
+    return sum(1 for term in body_terms if term in text) >= 2
+
+
 def _strip_persona_body_profile_from_final_prompt(prompt_text: str, body_prompt: str) -> str:
     text = str(prompt_text or "").strip()
     body = str(body_prompt or "").strip()
@@ -4318,7 +4399,7 @@ def _apply_persona_body_profile_to_payload(task_type: str, payload: dict[str, An
     )
     if not current_prompt:
         return source
-    if visible_anchor and visible_anchor not in current_prompt:
+    if visible_anchor and not _prompt_already_has_persona_body_anchor(current_prompt, visible_anchor):
         current_prompt = f"{visible_anchor}，{current_prompt}"
     source = _set_tg_generation_prompt(source, current_prompt)
     source["tg_persona_body_profile_id"] = str(profile.get("id") or "").strip()
@@ -9119,9 +9200,22 @@ def _tg_image_prompt_has_clothing_structure(prompt_text: str) -> bool:
     return bool(_TG_CLOTHING_STRUCTURE_PATTERN.search(str(prompt_text or "")))
 
 
+def _tg_prompt_has_no_clothing_intent(original_request: str, prompt_text: str) -> bool:
+    text = f"{original_request or ''} {prompt_text or ''}"
+    return bool(
+        re.search(
+            r"全裸|裸体|裸體|裸身|赤裸|不穿衣|不著衣|不着衣|無衣|无衣|没有穿衣|沒有穿衣|不添加衣服|不要衣服|no\s+clothes|nude|naked",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _ensure_tg_image_clothing_anchor(prompt_text: str, original_request: str, payload: dict[str, Any] | None) -> str:
     text = _strip_prompt_response_wrappers(prompt_text)
     if not text or not _tg_prompt_needs_person_clothing_anchor(original_request, text, payload):
+        return text
+    if _tg_prompt_has_no_clothing_intent(original_request, text):
         return text
     additions: list[str] = []
     if not _tg_image_prompt_has_clothing_color(text):
@@ -9210,6 +9304,7 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "Pose description must be concise and direct: use simple posture terms such as standing, sitting, kneeling, or lying. Specify exact body orientation and hand placement in one short clause. Avoid verbose or poetic pose descriptions.",
         "The character's head and face must always be visible within the frame. Full head must be in frame with natural headroom. Never crop the head or face. Back-facing poses are not allowed. Side profiles are acceptable only if the face remains clearly visible.",
         "MANDATORY CLOTHING ANCHOR: for person images, the clothing phrase must include explicit clothing colors and a simple basic structure, such as color + top/bottom/dress + neckline/sleeves/waistline/hem. Do not leave clothing as vague words like beautiful outfit, sexy outfit, fashion style, or clothing state only.",
+        "If the user explicitly requests no clothing, nude body, or unclothed appearance, do not add garment colors or garment structures. In that case describe the no-clothing state directly and keep the body-shape anchor separate from clothing.",
         "Keep clothing logic physically plausible. Use intact garments with normal seams, gravity, and fabric tension. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings. If the user explicitly asks for damaged clothing, the damage must still follow fabric tension and pulling direction.",
         "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple and non-repetitive; do not repeat garment structure details across the prompt.",
         "Keep the final prompt compact and reusable: body posture, hand placement, body orientation, one clear clothing color, one simple clothing structure, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
@@ -10069,6 +10164,37 @@ def _internal_tg_task_status_label(status: Any) -> str:
     }.get(normalized, normalized or "unknown")
 
 
+def _latest_user_visible_task_event(task_id: str) -> dict[str, Any]:
+    tid = str(task_id or "").strip()
+    if not tid:
+        return {}
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                """
+                SELECT kind, message, data_json, created_at
+                FROM task_events
+                WHERE task_id = ?
+                ORDER BY id DESC
+                LIMIT 30
+                """,
+                (tid,),
+            ).fetchall()
+    except Exception:
+        return {}
+    for row in rows:
+        data = _json_loads(row["data_json"], {})
+        if isinstance(data, dict) and data.get("user_visible") is False:
+            continue
+        return {
+            "kind": str(row["kind"] or "").strip(),
+            "message": str(row["message"] or "").strip(),
+            "data": data.get("data") if isinstance(data.get("data"), dict) else data,
+            "created_at": int(row["created_at"] or 0),
+        }
+    return {}
+
+
 def _emit_stage(
     payload: dict[str, Any],
     *,
@@ -10525,6 +10651,7 @@ class RuntimeConfigPayload(BaseModel):
     local_comfy_gateway_token: str = ""
     local_comfy_workflow_mappings: dict[str, Any] = Field(default_factory=dict)
     local_comfy_image_input_bindings: dict[str, Any] = Field(default_factory=dict)
+    comfy_gpu_max_concurrency: int = 4
     upload_server_ip: str = ""
     upload_file_api_key: str = ""
     image_generate_mode_default: str = "closed_model_api"
@@ -11068,6 +11195,7 @@ def create_app() -> FastAPI:
                     "has_download": _task_has_download_file(output_payload),
                     "download_path": _extract_download_path(output_payload),
                     "batch_summary": batch_summary,
+                    "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
                 }
             )
             if len(tasks) >= limit:
@@ -11155,6 +11283,7 @@ def create_app() -> FastAPI:
                 "has_download": _task_has_download_file(output_payload),
                 "download_path": _extract_download_path(output_payload),
                 "batch_summary": batch_summary,
+                "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
             },
         }
 
@@ -12198,6 +12327,7 @@ def create_app() -> FastAPI:
             "local_comfy_gateway_token",
             "local_comfy_workflow_mappings",
             "local_comfy_image_input_bindings",
+            "comfy_gpu_max_concurrency",
         )
         for key in comfy_preserve_keys:
             current_value = explicit_data.get(key)

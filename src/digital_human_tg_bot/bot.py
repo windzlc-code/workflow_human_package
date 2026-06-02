@@ -1900,7 +1900,25 @@ def _format_internal_webapp_tg_tasks(tasks: list[dict[str, Any]]) -> str:
         error = _format_tg_user_error(item.get("error") or "")
         if len(error) > 80:
             error = f"{error[:80]}..."
-        suffix = f"，{error}" if status == "failed" and error else download
+        event = item.get("latest_event") if isinstance(item.get("latest_event"), dict) else {}
+        event_message = str(event.get("message") or "").strip()
+        event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        queue_parts: list[str] = []
+        if isinstance(event_data, dict):
+            if event_data.get("queue_position"):
+                queue_parts.append(f"位置{event_data.get('queue_position')}")
+            if event_data.get("waiting") is not None:
+                queue_parts.append(f"等待{event_data.get('waiting')}")
+            if event_data.get("running") is not None:
+                queue_parts.append(f"執行{event_data.get('running')}")
+            if event_data.get("max_concurrency") is not None:
+                queue_parts.append(f"上限{event_data.get('max_concurrency')}")
+        progress = ""
+        if event_message and status in {"queued", "running"}:
+            progress = f"，{event_message}"
+        if queue_parts and status in {"queued", "running"}:
+            progress += f"（{'，'.join(queue_parts)}）"
+        suffix = f"，{error}" if status == "failed" and error else (download or progress)
         lines.append(f"- {item.get('type')}: {label}{suffix}（{item.get('id')}）")
     return "\n".join(lines)
 
@@ -2131,19 +2149,113 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "face_swap": "人物換臉",
             "video_i2v": "圖生視頻",
         }.get(str(task_type), str(task_type))
-        await _answer(message,
-            "\n".join(
-                part
-                for part in [
-                    "任務已提交到後臺隊列。",
-                    f"工作流: {task_label}",
-                    f"任務編號: {result.get('id')}",
-                    "可按「查看工作臺狀態」跟進進度。",
-                ]
-                if part
+        task_id = str(result.get("id") or "").strip()
+        sent = await _answer(
+            message,
+            _format_webapp_task_live_status(
+                task_id=task_id,
+                task_label=task_label,
+                status="queued",
+                latest_event={"message": "任務已提交到後臺隊列。"},
             ),
             reply_markup=_menu_keyboard(),
         )
+        if task_id:
+            asyncio.create_task(
+                _monitor_webapp_task_status_message(
+                    message=sent,
+                    chat_id=int(message.chat.id),
+                    task_id=task_id,
+                    task_label=task_label,
+                )
+            )
+
+    def _format_webapp_task_live_status(
+        *,
+        task_id: str,
+        task_label: str,
+        status: str,
+        latest_event: dict[str, Any] | None = None,
+    ) -> str:
+        status_labels = {
+            "queued": "排隊中",
+            "running": "生成中",
+            "success": "已完成",
+            "failed": "失敗",
+            "cancelled": "已取消",
+        }
+        event = latest_event if isinstance(latest_event, dict) else {}
+        event_message = str(event.get("message") or "").strip()
+        event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        queue_line = ""
+        if isinstance(event_data, dict):
+            queue_position = event_data.get("queue_position")
+            waiting = event_data.get("waiting")
+            running = event_data.get("running")
+            max_concurrency = event_data.get("max_concurrency")
+            reason = str(event_data.get("reason") or "").strip()
+            if queue_position or waiting is not None or running is not None:
+                parts = []
+                if queue_position:
+                    parts.append(f"位置: {queue_position}")
+                if waiting is not None:
+                    parts.append(f"等待: {waiting}")
+                if running is not None:
+                    parts.append(f"執行中: {running}")
+                if max_concurrency is not None:
+                    parts.append(f"上限: {max_concurrency}")
+                queue_line = "隊列: " + "，".join(str(part) for part in parts)
+            elif reason:
+                queue_line = f"隊列: {reason}"
+        lines = [
+            "後臺任務狀態更新",
+            f"工作流: {task_label}",
+            f"任務編號: {task_id}",
+            f"狀態: {status_labels.get(str(status), str(status) or 'unknown')}",
+        ]
+        if event_message:
+            lines.append(f"進度: {event_message}")
+        if queue_line:
+            lines.append(queue_line)
+        if str(status) in {"queued", "running"}:
+            lines.append("此消息會自動更新；也可按「查看工作臺狀態」。")
+        elif str(status) == "success":
+            lines.append("生成完成，結果會自動返回；也可到工作臺查看。")
+        return "\n".join(lines)
+
+    async def _monitor_webapp_task_status_message(
+        *,
+        message: Message,
+        chat_id: int,
+        task_id: str,
+        task_label: str,
+    ) -> None:
+        last_text = ""
+        for _ in range(720):
+            await asyncio.sleep(5)
+            try:
+                task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(chat_id), task_id=task_id)
+            except Exception:
+                continue
+            status = str(task.get("status") or "").strip().lower()
+            text = _format_webapp_task_live_status(
+                task_id=task_id,
+                task_label=task_label,
+                status=status,
+                latest_event=task.get("latest_event") if isinstance(task.get("latest_event"), dict) else {},
+            )
+            if status == "failed":
+                error = _format_tg_user_error(task.get("error") or "")
+                if error:
+                    text = f"{text}\n原因: {error[:600]}"
+            if text != last_text:
+                try:
+                    await message.edit_text(text)
+                    last_text = text
+                except Exception:
+                    pass
+            if status in {"success", "failed", "cancelled"}:
+                return
 
     async def answer_status(message: Message) -> None:
         parts: list[str] = []

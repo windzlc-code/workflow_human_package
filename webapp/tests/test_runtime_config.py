@@ -156,6 +156,18 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(current["nano_host"], "runtime.example.internal")
         self.assertEqual(current["cleanup_enabled"], False)
 
+    def test_runtime_config_api_saves_comfy_gpu_queue_limit(self):
+        put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
+        get_runtime_config = self._route_endpoint("/api/admin/runtime_config", "GET")
+
+        resp = put_runtime_config(server.RuntimeConfigPayload(comfy_gpu_max_concurrency=6), self.admin_user)
+
+        self.assertEqual(resp["runtime_config"]["comfy_gpu_max_concurrency"], 6)
+        stored = json.loads(self.runtime_config_path.read_text(encoding="utf-8"))
+        self.assertEqual(stored["comfy_gpu_max_concurrency"], 6)
+        current = get_runtime_config(self.admin_user)
+        self.assertEqual(current["comfy_gpu_max_concurrency"], 6)
+
     def test_runtime_config_api_preserves_comfy_when_saving_partial_config(self):
         put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
         server._write_runtime_config_file(
@@ -582,6 +594,23 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertNotIn("簡潔上衣", anchored)
         self.assertNotIn("直筒下裝", anchored)
 
+    def test_tg_image_clothing_anchor_skips_default_clothes_for_no_clothing_request(self):
+        prompt = (
+            "一位成人女性全身站立在卧室中，保持无衣状态，"
+            "她的左手扶着床沿而右手自然下垂，她的身体朝向镜头，她的头转向镜头"
+        )
+
+        anchored = server._ensure_tg_image_clothing_anchor(
+            prompt,
+            "美女无衣写真",
+            {"text_to_image_workflow_profile": "person_t2i"},
+        )
+
+        self.assertIn("无衣状态", anchored)
+        self.assertNotIn("服裝以米白色", anchored)
+        self.assertNotIn("簡潔上衣", anchored)
+        self.assertNotIn("直筒下裝", anchored)
+
     def test_persona_body_profile_uses_short_visible_anchor_for_jinjunya_lora(self):
         payload = server._apply_persona_body_profile_to_payload(
             "text_to_image",
@@ -603,6 +632,24 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(payload["tg_persona_body_prompt_anchor"], "身形修長纖細，肩頸線條柔和，腰胯比例輕盈自然")
         self.assertIn("粗腰", payload["negative_prompt"])
         self.assertIn("low quality", payload["negative_prompt"])
+
+    def test_persona_body_profile_does_not_prepend_anchor_when_prompt_already_has_it(self):
+        payload = server._apply_persona_body_profile_to_payload(
+            "text_to_image",
+            {
+                "prompt": (
+                    "一位身形修長纖細，肩頸線條柔和，腰胯比例輕盈自然的成人女性"
+                    "站在现代卧室中，她的左手扶着椅背而右手自然下垂，"
+                    "她的身体朝向镜头，她的头转向镜头"
+                ),
+                "persona_enabled": True,
+                "persona_lora": r"Character Setting\人设1捞女1金君雅.safetensors",
+                "persona_label": "人设1捞女1金君雅",
+            },
+        )
+
+        self.assertEqual(payload["prompt"].count("身形修長纖細"), 1)
+        self.assertNotRegex(payload["prompt"], r"^身形修長纖細，肩頸線條柔和，腰胯比例輕盈自然，一位身形修長纖細")
 
     def test_persona_body_profile_not_injected_when_persona_disabled(self):
         payload = server._apply_persona_body_profile_to_payload(
@@ -1086,7 +1133,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(parsed["vram_total_gb"], 24.0)
         self.assertEqual(parsed["vram_free_gb"], 18.0)
 
-    def test_comfy_gpu_capacity_check_rejects_low_vram_conservatively(self):
+    def test_comfy_gpu_capacity_check_ignores_low_vram_when_queue_has_slot(self):
         def fake_gateway_json(**kwargs):
             if kwargs["path"] == "/api/health":
                 return {
@@ -1106,7 +1153,8 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json), \
              patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True), \
              patch.object(server, "COMFY_GPU_MIN_FREE_GB", 8.0), \
-             patch.object(server, "COMFY_GPU_RESERVE_GB", 4.0):
+             patch.object(server, "COMFY_GPU_RESERVE_GB", 4.0), \
+             patch.object(server, "COMFY_GPU_MAX_CONCURRENCY", 4):
             check = server._comfy_gpu_capacity_check(
                 gateway_url="http://gateway",
                 token="secret",
@@ -1115,8 +1163,10 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 body={"path": "person_t2i.api.json", "batch_size": 3, "width": 1024, "height": 1536},
             )
 
-        self.assertFalse(check["ok"])
-        self.assertEqual(check["reason"], "insufficient_vram")
+        self.assertTrue(check["ok"])
+        self.assertEqual(check["reason"], "queue_slot_available")
+        self.assertEqual(check["queue_load"], 0)
+        self.assertEqual(check["free_gb"], 7.0)
         self.assertGreater(check["required_free_gb"], 7)
 
     def test_comfy_gpu_capacity_check_allows_queue_running_below_limit(self):
@@ -1138,7 +1188,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json), \
              patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True), \
-             patch.object(server, "COMFY_GPU_MAX_CONCURRENCY", 2):
+             patch.object(server, "COMFY_GPU_MAX_CONCURRENCY", 4):
             check = server._comfy_gpu_capacity_check(
                 gateway_url="http://gateway",
                 token="secret",
@@ -1148,9 +1198,11 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             )
 
         self.assertTrue(check["ok"])
-        self.assertEqual(check["reason"], "capacity_available")
+        self.assertEqual(check["reason"], "queue_slot_available")
 
-    def test_comfy_gpu_capacity_check_waits_when_comfy_queue_reaches_limit(self):
+    def test_comfy_gpu_capacity_check_uses_runtime_concurrency_limit(self):
+        server._write_runtime_config_file({"comfy_gpu_max_concurrency": 2})
+
         def fake_gateway_json(**kwargs):
             if kwargs["path"] == "/api/health":
                 return {
@@ -1169,7 +1221,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json), \
              patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True), \
-             patch.object(server, "COMFY_GPU_MAX_CONCURRENCY", 2):
+             patch.object(server, "COMFY_GPU_MAX_CONCURRENCY", 4):
             check = server._comfy_gpu_capacity_check(
                 gateway_url="http://gateway",
                 token="secret",
@@ -1179,7 +1231,44 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             )
 
         self.assertFalse(check["ok"])
-        self.assertEqual(check["reason"], "comfy_running")
+        self.assertEqual(check["reason"], "comfy_slots_full")
+        self.assertEqual(check["max_concurrency"], 2)
+        self.assertEqual(check["queue_load"], 2)
+
+    def test_comfy_gpu_capacity_check_waits_when_comfy_queue_reaches_limit(self):
+        def fake_gateway_json(**kwargs):
+            if kwargs["path"] == "/api/health":
+                return {
+                    "devices": [
+                        {
+                            "name": "4090",
+                            "type": "cuda",
+                            "vram_total": 24 * 1024**3,
+                            "vram_free": 22 * 1024**3,
+                        }
+                    ]
+                }
+            if kwargs["path"] == "/api/queue":
+                return {
+                    "queue_running": [["prompt-running"], ["prompt-running-2"]],
+                    "queue_pending": [["prompt-pending"], ["prompt-pending-2"]],
+                }
+            return {}
+
+        with patch.object(server, "_remote_comfy_gateway_json", side_effect=fake_gateway_json), \
+             patch.object(server, "COMFY_GPU_DYNAMIC_ENABLED", True), \
+             patch.object(server, "COMFY_GPU_MAX_CONCURRENCY", 4):
+            check = server._comfy_gpu_capacity_check(
+                gateway_url="http://gateway",
+                token="secret",
+                payload={"_task_id": "task_gpu_queue", "_task_type": "single_image_edit"},
+                workflow_path="edit.api.json",
+                body={"path": "edit.api.json"},
+            )
+
+        self.assertFalse(check["ok"])
+        self.assertEqual(check["reason"], "comfy_slots_full")
+        self.assertEqual(check["queue_load"], 4)
 
     def test_person_t2i_keeps_batch_three_but_returns_six_to_telegram(self):
         workflow = "__converted__/person_t2i.api.json"
