@@ -137,6 +137,21 @@ def test_remote_comfy_uploaded_bindings_become_node_inputs():
     }
 
 
+def test_firered_image_edit_prompt_overrides_cr_prompt_node():
+    result = server._remote_comfy_node_inputs_from_payload(
+        {
+            "prompt_text": "将主图脸部和头发替换为参考图的脸部与双马尾发型",
+            "remote_comfy_workflow_mappings": {
+                "get_nano_banana": "__converted__/firered_api.json",
+            },
+        },
+        task_type="get_nano_banana",
+        workflow_path="__converted__/firered_api.json",
+    )
+
+    assert result["66"]["prompt"] == "将主图脸部和头发替换为参考图的脸部与双马尾发型"
+
+
 def test_remote_comfy_prefers_saved_output_over_preview_images(tmp_path):
     preview = tmp_path / "ComfyUI_temp_preview.png"
     final = tmp_path / "face_swap_00001_.png"

@@ -3853,19 +3853,52 @@ def _remote_comfy_prompt_from_payload(task_type: str, payload: dict[str, Any]) -
     return f"{REMOTE_COMFY_TASK_LABELS.get(task_type, task_type)} test generation, high quality"
 
 
+def _remote_comfy_prompt_node_inputs_from_payload(
+    payload: dict[str, Any],
+    *,
+    task_type: str = "",
+    workflow_path: str = "",
+) -> dict[str, Any]:
+    typ = str(task_type or "").strip()
+    prompt_text = _remote_comfy_prompt_from_payload(typ, payload).strip()
+    if not prompt_text:
+        return {}
+    mapping_value = _remote_comfy_workflow_mapping_value(payload, typ)
+    if isinstance(mapping_value, dict):
+        input_name = str(mapping_value.get("prompt_input_name") or "prompt").strip() or "prompt"
+        node_ids = mapping_value.get("prompt_node_ids") or mapping_value.get("prompt_text_node_ids")
+        if isinstance(node_ids, str):
+            node_ids = [node_ids]
+        if isinstance(node_ids, list):
+            return {
+                str(node_id).strip(): {input_name: prompt_text}
+                for node_id in node_ids
+                if str(node_id or "").strip()
+            }
+    workflow_lower = str(workflow_path or "").lower()
+    if typ in {"get_nano_banana", "single_image_edit"} and "firered" in workflow_lower:
+        return {"66": {"prompt": prompt_text}}
+    return {}
+
+
 def _remote_comfy_node_inputs_from_payload(
     payload: dict[str, Any],
     *,
     task_type: str = "",
     workflow_path: str = "",
 ) -> dict[str, Any]:
+    prompt_node_inputs = _remote_comfy_prompt_node_inputs_from_payload(
+        payload,
+        task_type=task_type,
+        workflow_path=workflow_path,
+    )
     raw = payload.get("remote_comfy_node_inputs")
     if isinstance(raw, dict):
-        return raw
+        return _merge_node_inputs(raw, prompt_node_inputs)
     raw_json = str(payload.get("remote_comfy_node_inputs_json") or "").strip()
     if raw_json:
         parsed = _json_loads(raw_json, {})
-        return parsed if isinstance(parsed, dict) else {}
+        return _merge_node_inputs(parsed, prompt_node_inputs) if isinstance(parsed, dict) else prompt_node_inputs
     mapping_value = _remote_comfy_workflow_mapping_value(payload, task_type)
     if isinstance(mapping_value, dict):
         mapped_inputs: dict[str, Any] = {}
@@ -3889,7 +3922,7 @@ def _remote_comfy_node_inputs_from_payload(
                     },
                 )
         if mapped_inputs:
-            return mapped_inputs
+            return _merge_node_inputs(mapped_inputs, prompt_node_inputs)
     if str(task_type or "").strip() == "face_swap" and "flux_" in str(workflow_path or "").lower():
         seed = _to_int(payload.get("face_swap_random_seed") or payload.get("seed"), 0)
         mapped_inputs = {
@@ -4028,7 +4061,7 @@ def _remote_comfy_node_inputs_from_payload(
             "790": {"image": ["663", 0]},
             **safe_save_prefixes,
         }
-    return {}
+    return prompt_node_inputs
 
 
 def _remote_comfy_input_image_paths_from_payload(payload: dict[str, Any], task_type: str) -> list[dict[str, str]]:

@@ -35,7 +35,7 @@ VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".flac"}
 ZIP_EXTS = {".zip"}
-AUTO_DURATION_TEXTS = {"跳过", "自动", "auto", "AUTO"}
+AUTO_DURATION_TEXTS = {"跳過", "自動", "auto", "AUTO"}
 TG_PROMPT_PREVIEW_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_PREVIEW_TIMEOUT_SECONDS") or "240")
 TG_PROMPT_DISPLAY_TIMEOUT_SECONDS = int(os.getenv("TG_PROMPT_DISPLAY_TIMEOUT_SECONDS") or "45")
 TEXT_TO_IMAGE_MAX_SEED = 2147483647
@@ -49,85 +49,125 @@ TEXT_TO_IMAGE_REROLL_RUNTIME_KEYS = (
     "local_comfy_workflow_mappings",
 )
 
-DIGITAL_HUMAN_VIDEO_BUTTON = "数字人视频生成"
-DIGITAL_HUMAN_REALISTIC_BUTTON = "写实带货视频"
-DIGITAL_HUMAN_LIVE_BUTTON = "直播口播视频"
-DIGITAL_HUMAN_PRODUCT_BUTTON = "产品展示视频"
-DIGITAL_HUMAN_CUSTOM_BUTTON = "自定义数字人要求"
+DIGITAL_HUMAN_VIDEO_BUTTON = "數字人視頻生成"
+DIGITAL_HUMAN_REALISTIC_BUTTON = "寫實帶貨視頻"
+DIGITAL_HUMAN_LIVE_BUTTON = "直播口播視頻"
+DIGITAL_HUMAN_PRODUCT_BUTTON = "產品展示視頻"
+DIGITAL_HUMAN_CUSTOM_BUTTON = "自定義數字人要求"
 ORAL_UPLOAD_BUTTON = DIGITAL_HUMAN_VIDEO_BUTTON
-LEGACY_ORAL_UPLOAD_BUTTON = "口播数字人：上传素材"
-WORKFLOW_CONFIG_BUTTON = "查看后台工作流配置"
-IMAGE_WORKFLOW_BUTTON = "图像生成"
-TEXT_TO_IMAGE_BUTTON = "文生图"
-TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON = "重新生成图片"
-TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON = "继续生成图片"
-MULTI_IMAGE_BUTTON = "多图生成"
-SINGLE_IMAGE_EDIT_BUTTON = "单图编辑"
-IMAGE_EDIT_BUTTON = "图片编辑"
-FACE_SWAP_BUTTON = "人物换脸"
-IMAGE_REPLACE_BUTTON = "图片替换"
-VIDEO_GENERAL_EDIT_BUTTON = "图生视频"
+LEGACY_ORAL_UPLOAD_BUTTON = "口播數字人：上傳素材"
+WORKFLOW_CONFIG_BUTTON = "查看後臺工作流配置"
+IMAGE_WORKFLOW_BUTTON = "圖像生成"
+TEXT_TO_IMAGE_BUTTON = "文生圖"
+TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON = "重新生成圖片"
+TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON = "繼續生成圖片"
+MULTI_IMAGE_BUTTON = "多圖生成"
+SINGLE_IMAGE_EDIT_BUTTON = "單圖編輯"
+IMAGE_EDIT_BUTTON = "圖片編輯"
+FACE_SWAP_BUTTON = "人物換臉"
+IMAGE_REPLACE_BUTTON = "圖片替換"
+VIDEO_GENERAL_EDIT_BUTTON = "圖生視頻"
 PERSON_T2I_DEFAULT_BATCH_SIZE = 6
-LEGACY_IMAGE_WORKFLOW_BUTTON = "图像编辑工作流"
-LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "图片生成工作流"
-VIDEO_EDIT_BUTTON = "视频生成"
-MAIN_MENU_BUTTON = "返回主菜单"
-REPLACE_MODEL_WORKFLOW_BUTTON = "视频模特替换"
-LEGACY_REPLACE_MODEL_WORKFLOW_BUTTON = "模特替换工作流"
-REPLACE_PRODUCT_WORKFLOW_BUTTON = "视频商品替换"
-LEGACY_REPLACE_PRODUCT_WORKFLOW_BUTTON = "商品替换工作流"
-REPLACE_UNION_WORKFLOW_BUTTON = "联合替换工作流"
+LEGACY_IMAGE_WORKFLOW_BUTTON = "圖像編輯工作流"
+LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "圖片生成工作流"
+VIDEO_EDIT_BUTTON = "視頻生成"
+MAIN_MENU_BUTTON = "返回主選單"
+REPLACE_MODEL_WORKFLOW_BUTTON = "視頻模特替換"
+LEGACY_REPLACE_MODEL_WORKFLOW_BUTTON = "模特替換工作流"
+REPLACE_PRODUCT_WORKFLOW_BUTTON = "視頻商品替換"
+LEGACY_REPLACE_PRODUCT_WORKFLOW_BUTTON = "商品替換工作流"
+REPLACE_UNION_WORKFLOW_BUTTON = "聯合替換工作流"
 
-LEGACY_UPLOAD_BUTTON = "上传素材建立任务"
-STATUS_BUTTON = "查看工作台状态"
-WORKBENCH_BUTTON = "工作台网址"
-SET_SCRIPT_BUTTON = "设置预设文案"
-RERUN_BUTTON = "重跑最近任务"
-STOP_BUTTON = "强制停止当前任务"
+LEGACY_UPLOAD_BUTTON = "上傳素材建立任務"
+STATUS_BUTTON = "查看工作臺狀態"
+WORKBENCH_BUTTON = "工作臺網址"
+SET_SCRIPT_BUTTON = "設定預設文案"
+RERUN_BUTTON = "重跑最近任務"
+STOP_BUTTON = "強制停止目前任務"
 
-TRADITIONAL_BUTTON_ALIASES = {
+BUTTON_ALIASES = {
+    "数字人视频生成": DIGITAL_HUMAN_VIDEO_BUTTON,
     "數字人視頻生成": DIGITAL_HUMAN_VIDEO_BUTTON,
+    "写实带货视频": DIGITAL_HUMAN_REALISTIC_BUTTON,
     "寫實帶貨視頻": DIGITAL_HUMAN_REALISTIC_BUTTON,
+    "直播口播视频": DIGITAL_HUMAN_LIVE_BUTTON,
     "直播口播視頻": DIGITAL_HUMAN_LIVE_BUTTON,
+    "产品展示视频": DIGITAL_HUMAN_PRODUCT_BUTTON,
     "產品展示視頻": DIGITAL_HUMAN_PRODUCT_BUTTON,
+    "自定义数字人要求": DIGITAL_HUMAN_CUSTOM_BUTTON,
     "自定義數字人要求": DIGITAL_HUMAN_CUSTOM_BUTTON,
+    "口播数字人：上传素材": LEGACY_ORAL_UPLOAD_BUTTON,
     "口播數字人：上傳素材": LEGACY_ORAL_UPLOAD_BUTTON,
+    "上传素材建立任务": LEGACY_UPLOAD_BUTTON,
     "上傳素材建立任務": LEGACY_UPLOAD_BUTTON,
+    "查看后台工作流配置": WORKFLOW_CONFIG_BUTTON,
     "查看後台工作流配置": WORKFLOW_CONFIG_BUTTON,
-    "图像编辑": IMAGE_WORKFLOW_BUTTON,
+    "图像生成": IMAGE_WORKFLOW_BUTTON,
     "圖像生成": IMAGE_WORKFLOW_BUTTON,
+    "图片生成": IMAGE_WORKFLOW_BUTTON,
     "圖片生成": IMAGE_WORKFLOW_BUTTON,
-    "圖片編輯": IMAGE_WORKFLOW_BUTTON,
+    "图像编辑": IMAGE_WORKFLOW_BUTTON,
     "圖像編輯": IMAGE_WORKFLOW_BUTTON,
+    "文生图片": TEXT_TO_IMAGE_BUTTON,
     "文生圖片": TEXT_TO_IMAGE_BUTTON,
+    "多图生成": MULTI_IMAGE_BUTTON,
     "多圖生成": MULTI_IMAGE_BUTTON,
+    "单图编辑": SINGLE_IMAGE_EDIT_BUTTON,
     "單圖編輯": SINGLE_IMAGE_EDIT_BUTTON,
+    "图片编辑": IMAGE_EDIT_BUTTON,
     "圖片編輯": IMAGE_EDIT_BUTTON,
-    "圖像編輯": IMAGE_EDIT_BUTTON,
+    "人物换脸": FACE_SWAP_BUTTON,
     "人物換臉": FACE_SWAP_BUTTON,
+    "图片替换": IMAGE_REPLACE_BUTTON,
     "圖片替換": IMAGE_REPLACE_BUTTON,
+    "图像编辑工作流": LEGACY_IMAGE_WORKFLOW_BUTTON,
     "圖像編輯工作流": LEGACY_IMAGE_WORKFLOW_BUTTON,
+    "图片生成工作流": LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON,
     "圖片生成工作流": LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON,
     "视频编辑": VIDEO_EDIT_BUTTON,
-    "視頻生成": VIDEO_EDIT_BUTTON,
     "視頻編輯": VIDEO_EDIT_BUTTON,
+    "视频生成": VIDEO_EDIT_BUTTON,
+    "視頻生成": VIDEO_EDIT_BUTTON,
+    "视频编辑任务": VIDEO_GENERAL_EDIT_BUTTON,
     "視頻編輯任務": VIDEO_GENERAL_EDIT_BUTTON,
+    "图生视频": VIDEO_GENERAL_EDIT_BUTTON,
     "圖生視頻": VIDEO_GENERAL_EDIT_BUTTON,
+    "返回主菜单": MAIN_MENU_BUTTON,
     "返回主菜單": MAIN_MENU_BUTTON,
+    "返回主選單": MAIN_MENU_BUTTON,
+    "视频模特替换": REPLACE_MODEL_WORKFLOW_BUTTON,
     "視頻模特替換": REPLACE_MODEL_WORKFLOW_BUTTON,
+    "模特替换工作流": LEGACY_REPLACE_MODEL_WORKFLOW_BUTTON,
     "模特替換工作流": LEGACY_REPLACE_MODEL_WORKFLOW_BUTTON,
+    "视频商品替换": REPLACE_PRODUCT_WORKFLOW_BUTTON,
     "視頻商品替換": REPLACE_PRODUCT_WORKFLOW_BUTTON,
+    "商品替换工作流": LEGACY_REPLACE_PRODUCT_WORKFLOW_BUTTON,
     "商品替換工作流": LEGACY_REPLACE_PRODUCT_WORKFLOW_BUTTON,
+    "联合替换工作流": REPLACE_UNION_WORKFLOW_BUTTON,
     "聯合替換工作流": REPLACE_UNION_WORKFLOW_BUTTON,
+    "查看工作台状态": STATUS_BUTTON,
     "查看工作台狀態": STATUS_BUTTON,
+    "工作台网址": WORKBENCH_BUTTON,
     "工作台網址": WORKBENCH_BUTTON,
+    "设置预设文案": SET_SCRIPT_BUTTON,
     "設置預設文案": SET_SCRIPT_BUTTON,
     "設定預設文案": SET_SCRIPT_BUTTON,
+    "重跑最近任务": RERUN_BUTTON,
     "重跑最近任務": RERUN_BUTTON,
+    "强制停止当前任务": STOP_BUTTON,
     "強制停止目前任務": STOP_BUTTON,
     "強制停止當前任務": STOP_BUTTON,
-    "多智能體數字人": "多智能体数字人",
 }
+
+
+async def _answer(message: Message, text: Any = "", *args: Any, reply_markup: Any | None = None, **kwargs: Any) -> Message:
+    return await Message.answer(
+        message,
+        str(text or ""),
+        *args,
+        reply_markup=reply_markup,
+        **kwargs,
+    )
 
 WORKFLOW_REFERENCE_BUTTONS = {
     WORKFLOW_CONFIG_BUTTON,
@@ -143,7 +183,8 @@ WORKFLOW_REFERENCE_BUTTONS = {
 
 
 def _canonical_button_text(text: str) -> str:
-    return TRADITIONAL_BUTTON_ALIASES.get(str(text or "").strip(), str(text or "").strip())
+    raw = str(text or "").strip()
+    return BUTTON_ALIASES.get(raw, raw)
 
 
 class _ThreadedResolverConnector(TCPConnector):
@@ -262,9 +303,9 @@ def _image_task_confirm_keyboard(submit_text: str) -> ReplyKeyboardMarkup:
 def _image_edit_prompt_review_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="使用这个提示词提交")],
-            [KeyboardButton(text="输入自定义提示词提交")],
-            [KeyboardButton(text="继续让 Grok 调整"), KeyboardButton(text="重新生成提示词")],
+            [KeyboardButton(text="使用這個提示詞提交")],
+            [KeyboardButton(text="輸入自定義提示詞提交")],
+            [KeyboardButton(text="繼續讓 Grok 調整"), KeyboardButton(text="重新生成提示詞")],
             [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
@@ -274,23 +315,23 @@ def _image_edit_prompt_review_keyboard() -> ReplyKeyboardMarkup:
 def _image_edit_prompt_failure_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="重新生成提示词")],
-            [KeyboardButton(text="输入自定义提示词提交")],
+            [KeyboardButton(text="重新生成提示詞")],
+            [KeyboardButton(text="輸入自定義提示詞提交")],
             [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
     )
 
 
-FACE_SWAP_NATURAL_PROMPT = "自然换脸，保持原图姿态、服装、光线和背景，只替换人物脸部身份。"
-KEEP_CURRENT_RESOURCE_BUTTON = "沿用当前资源"
+FACE_SWAP_NATURAL_PROMPT = "自然換臉，保持原圖姿態、服裝、光線和背景，只替換人物臉部身份。"
+KEEP_CURRENT_RESOURCE_BUTTON = "沿用目前資源"
 
 
 def _face_swap_prompt_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="自然换脸")],
-            [KeyboardButton(text="输入自定义换脸要求")],
+            [KeyboardButton(text="自然換臉")],
+            [KeyboardButton(text="輸入自定義換臉要求")],
             [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
@@ -314,20 +355,20 @@ def _image_task_step_keyboard(*, back: bool = True, keep_current: bool = False) 
 
 
 TEXT_TO_IMAGE_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
-    "2:3": {"label": "2:3 竖图", "note": "基础竖图", "width": 640, "height": 960, "final": "2176 x 3264"},
-    "3:4": {"label": "3:4 稳定竖图", "note": "稳定竖图", "width": 672, "height": 896, "final": "2285 x 3046"},
-    "9:16": {"label": "9:16 手机竖屏", "note": "手机竖屏长图", "width": 576, "height": 1024, "final": "1958 x 3482"},
-    "3:2": {"label": "3:2 横图", "note": "横图基准", "width": 960, "height": 640, "final": "3264 x 2176"},
-    "4:3": {"label": "4:3 平衡横图", "note": "平衡横图", "width": 896, "height": 672, "final": "3046 x 2285"},
-    "16:9": {"label": "16:9 宽屏", "note": "宽屏视频", "width": 1024, "height": 576, "final": "3482 x 1958"},
+    "2:3": {"label": "2:3 豎圖", "note": "基礎豎圖", "width": 640, "height": 960, "final": "2176 x 3264"},
+    "3:4": {"label": "3:4 穩定豎圖", "note": "穩定豎圖", "width": 672, "height": 896, "final": "2285 x 3046"},
+    "9:16": {"label": "9:16 手機豎屏", "note": "手機豎屏長圖", "width": 576, "height": 1024, "final": "1958 x 3482"},
+    "3:2": {"label": "3:2 橫圖", "note": "橫圖基準", "width": 960, "height": 640, "final": "3264 x 2176"},
+    "4:3": {"label": "4:3 平衡橫圖", "note": "平衡橫圖", "width": 896, "height": 672, "final": "3046 x 2285"},
+    "16:9": {"label": "16:9 寬屏", "note": "寬屏視頻", "width": 1024, "height": 576, "final": "3482 x 1958"},
     "1:1": {"label": "1:1 正方形", "note": "正方形", "width": 768, "height": 768, "final": "2611 x 2611"},
 }
 
 
 TEXT_TO_IMAGE_PERSON_T2I_RATIO_OPTIONS: dict[str, dict[str, Any]] = {
-    "8:15": {"label": "8:15 人设竖图", "note": "人设_t2i 原生竖图", "width": 1024, "height": 1920, "final": "关闭"},
-    "2:3": {"label": "2:3 人设竖图", "note": "人设_t2i 竖图", "width": 1024, "height": 1536, "final": "关闭"},
-    "3:4": {"label": "3:4 人设竖图", "note": "人设_t2i 稳定竖图", "width": 1024, "height": 1365, "final": "关闭"},
+    "8:15": {"label": "8:15 人設豎圖", "note": "人設_t2i 原生豎圖", "width": 1024, "height": 1920, "final": "關閉"},
+    "2:3": {"label": "2:3 人設豎圖", "note": "人設_t2i 豎圖", "width": 1024, "height": 1536, "final": "關閉"},
+    "3:4": {"label": "3:4 人設豎圖", "note": "人設_t2i 穩定豎圖", "width": 1024, "height": 1365, "final": "關閉"},
 }
 
 
@@ -362,7 +403,7 @@ TEXT_TO_IMAGE_PERSONA_LORA_NODE_INPUTS: dict[str, dict[str, Any]] = {
 
 def _text_to_image_workflow_profile_from_path(value: Any) -> str:
     text = str(value or "").replace("\\", "/").lower()
-    if "person_t2i" in text or "\u4eba\u8bbe_t2i" in text or "\u4eba\u8a2d_t2i" in text:
+    if "person_t2i" in text or "人设_t2i" in text or "人設_t2i" in text:
         return "person_t2i"
     return "person_t2i" if "person_t2i" in text or "人设_t2i" in text or "人設_t2i" in text else "zit_final"
 
@@ -371,7 +412,7 @@ def _text_to_image_profile(data: dict[str, Any] | None = None) -> str:
     source = data or {}
     explicit = str(source.get("text_to_image_workflow_profile") or "").strip().lower()
     if explicit:
-        if explicit in {"person_t2i", "persona_t2i", "\u4eba\u8bbe_t2i", "\u4eba\u8a2d_t2i"}:
+        if explicit in {"person_t2i", "persona_t2i", "人设_t2i", "人設_t2i"}:
             return "person_t2i"
         return "person_t2i" if explicit in {"person_t2i", "persona_t2i", "人设_t2i", "人設_t2i"} else "zit_final"
     for key in ("text_to_image_workflow_path", "remote_comfy_workflow_path", "local_comfy_workflow_path"):
@@ -668,7 +709,7 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
         or ""
     ).strip()
     if not final_prompt:
-        raise ValueError("上次任务没有可复用的最终提示词")
+        raise ValueError("上次任務沒有可複用的最終提示詞")
 
     node_inputs = payload.get("remote_comfy_node_inputs")
     if not isinstance(node_inputs, dict) or not node_inputs:
@@ -707,25 +748,25 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
 
 
 def _text_to_image_status_text(*, step: str, params: dict[str, Any]) -> str:
-    lines = ["文生图设置", f"当前步骤：{step}"]
+    lines = ["文生圖設置", f"當前步驟：{step}"]
     if params.get("ratio_selected"):
-        lines.append(f"画面比例：{params['aspect_ratio']}（{params['note']}）")
-        lines.append(f"基础分辨率：{params['width']} x {params['height']}")
+        lines.append(f"畫面比例：{params['aspect_ratio']}（{params['note']}）")
+        lines.append(f"基礎分辨率：{params['width']} x {params['height']}")
     if params.get("resolution_selected"):
-        final_resolution_text = "开启，预计 " + params["final"] if params.get("final_resolution_enabled") else "关闭，使用基础分辨率"
-        lines.append(f"最终分辨率：{final_resolution_text}")
+        final_resolution_text = "開啓，預計 " + params["final"] if params.get("final_resolution_enabled") else "關閉，使用基礎分辨率"
+        lines.append(f"最終分辨率：{final_resolution_text}")
     if params.get("persona_selected"):
         if params.get("persona_enabled"):
-            persona_text = params.get("persona_label") or "使用人设"
+            persona_text = params.get("persona_label") or "使用人設"
         elif params.get("persona_available"):
             persona_text = "不使用"
         else:
-            persona_text = "当前工作流未检测到可选人设"
-        lines.append(f"人设 LoRA：{persona_text}")
+            persona_text = "當前工作流未檢測到可選人設"
+        lines.append(f"人設 LoRA：{persona_text}")
     if params.get("prompt_mode_selected"):
         prompt_mode_text = str(params.get("prompt_mode_label") or "").strip()
         if prompt_mode_text:
-            lines.append(f"提示词方式：{prompt_mode_text}")
+            lines.append(f"提示詞方式：{prompt_mode_text}")
     return "\n".join(lines)
 
 
@@ -738,7 +779,7 @@ def _text_to_image_ratio_keyboard(*, selected_ratio: str = "", profile: str = "z
             prefix = "✓ " if ratio == selected_ratio else ""
             row.append(InlineKeyboardButton(text=f"{prefix}{option['label']}", callback_data=f"t2i:ratio:{ratio}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")])
+    rows.append([InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -751,7 +792,7 @@ def _text_to_image_resolution_keyboard(
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{'✓ ' if selected and not final_resolution_enabled else ''}使用基础分辨率",
+                text=f"{'✓ ' if selected and not final_resolution_enabled else ''}使用基礎分辨率",
                 callback_data="t2i:final:off",
             )
         ],
@@ -760,13 +801,13 @@ def _text_to_image_resolution_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{'✓ ' if selected and final_resolution_enabled else ''}开启最终分辨率",
+                    text=f"{'✓ ' if selected and final_resolution_enabled else ''}開啓最終分辨率",
                     callback_data="t2i:final:on",
                 )
             ]
         )
     rows.append([InlineKeyboardButton(text="上一步", callback_data="t2i:back:ratio")])
-    rows.append([InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")])
+    rows.append([InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -776,23 +817,23 @@ def _text_to_image_persona_keyboard(*, persona_enabled: bool = True, persona_lor
     for option in _text_to_image_persona_options(profile=profile):
         prefix = "✓ " if selected and persona_enabled and option["path"] == selected_lora else ""
         rows.append([InlineKeyboardButton(text=f"{prefix}{option['label']}", callback_data=f"t2i:persona:{option['id']}")])
-    rows.append([InlineKeyboardButton(text=f"{'✓ ' if selected and not persona_enabled else ''}不使用人设", callback_data="t2i:persona:off")])
+    rows.append([InlineKeyboardButton(text=f"{'✓ ' if selected and not persona_enabled else ''}不使用人設", callback_data="t2i:persona:off")])
     rows.append(
         [
             InlineKeyboardButton(text="上一步", callback_data="t2i:back:resolution"),
         ]
     )
-    rows.append([InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")])
+    rows.append([InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _text_to_image_prompt_mode_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="让 Grok 生成提示词", callback_data="t2i:ready_prompt")],
-            [InlineKeyboardButton(text="输入自定义提示词", callback_data="t2i:custom_prompt")],
+            [InlineKeyboardButton(text="讓 Grok 生成提示詞", callback_data="t2i:ready_prompt")],
+            [InlineKeyboardButton(text="輸入自定義提示詞", callback_data="t2i:custom_prompt")],
             [InlineKeyboardButton(text="上一步", callback_data="t2i:back:persona")],
-            [InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")],
+            [InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")],
         ]
     )
 
@@ -801,7 +842,7 @@ def _text_to_image_prompt_entry_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="上一步", callback_data="t2i:back:prompt_mode")],
-            [InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")],
+            [InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")],
         ]
     )
 
@@ -809,11 +850,11 @@ def _text_to_image_prompt_entry_keyboard() -> InlineKeyboardMarkup:
 def _text_to_image_prompt_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="使用这个提示词生成", callback_data="t2i:submit")],
-            [InlineKeyboardButton(text="输入自定义提示词提交", callback_data="t2i:custom_prompt")],
-            [InlineKeyboardButton(text="继续让 Grok 调整", callback_data="t2i:adjust")],
-            [InlineKeyboardButton(text="重新生成提示词", callback_data="t2i:regen")],
-            [InlineKeyboardButton(text="返回参数设置", callback_data="t2i:settings"), InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")],
+            [InlineKeyboardButton(text="使用這個提示詞生成", callback_data="t2i:submit")],
+            [InlineKeyboardButton(text="輸入自定義提示詞提交", callback_data="t2i:custom_prompt")],
+            [InlineKeyboardButton(text="繼續讓 Grok 調整", callback_data="t2i:adjust")],
+            [InlineKeyboardButton(text="重新生成提示詞", callback_data="t2i:regen")],
+            [InlineKeyboardButton(text="返回參數設定", callback_data="t2i:settings"), InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")],
         ]
     )
 
@@ -821,10 +862,10 @@ def _text_to_image_prompt_keyboard() -> InlineKeyboardMarkup:
 def _text_to_image_prompt_failure_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="重新生成提示词", callback_data="t2i:regen")],
-            [InlineKeyboardButton(text="输入自定义提示词", callback_data="t2i:custom_prompt")],
+            [InlineKeyboardButton(text="重新生成提示詞", callback_data="t2i:regen")],
+            [InlineKeyboardButton(text="輸入自定義提示詞", callback_data="t2i:custom_prompt")],
             [InlineKeyboardButton(text="上一步", callback_data="t2i:back:prompt_mode")],
-            [InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")],
+            [InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")],
         ]
     )
 
@@ -832,10 +873,10 @@ def _text_to_image_prompt_failure_keyboard() -> InlineKeyboardMarkup:
 def _text_to_image_prompt_display_retry_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="重新生成中文预览", callback_data="t2i:retry_display")],
-            [InlineKeyboardButton(text="重新生成提示词", callback_data="t2i:regen")],
-            [InlineKeyboardButton(text="输入自定义提示词", callback_data="t2i:custom_prompt")],
-            [InlineKeyboardButton(text="返回主菜单", callback_data="t2i:main_menu")],
+            [InlineKeyboardButton(text="重新生成中文預覽", callback_data="t2i:retry_display")],
+            [InlineKeyboardButton(text="重新生成提示詞", callback_data="t2i:regen")],
+            [InlineKeyboardButton(text="輸入自定義提示詞", callback_data="t2i:custom_prompt")],
+            [InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")],
         ]
     )
 
@@ -853,16 +894,16 @@ def _text_to_image_ratio_reply_keyboard(*, profile: str = "zit_final") -> ReplyK
 
 
 def _text_to_image_resolution_reply_keyboard(*, final_resolution_available: bool = True) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text="使用基础分辨率")]]
+    rows = [[KeyboardButton(text="使用基礎分辨率")]]
     if final_resolution_available:
-        rows.append([KeyboardButton(text="开启最终分辨率")])
+        rows.append([KeyboardButton(text="開啓最終分辨率")])
     rows.append([KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def _text_to_image_persona_reply_keyboard(*, profile: str = "zit_final") -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(text=str(option["label"]))] for option in _text_to_image_persona_options(profile=profile)]
-    rows.append([KeyboardButton(text="不使用人设")])
+    rows.append([KeyboardButton(text="不使用人設")])
     rows.append([KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
@@ -870,8 +911,8 @@ def _text_to_image_persona_reply_keyboard(*, profile: str = "zit_final") -> Repl
 def _text_to_image_prompt_mode_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="让 Grok 生成提示词")],
-            [KeyboardButton(text="输入自定义提示词")],
+            [KeyboardButton(text="讓 Grok 生成提示詞")],
+            [KeyboardButton(text="輸入自定義提示詞")],
             [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
@@ -890,10 +931,10 @@ def _text_to_image_prompt_entry_reply_keyboard() -> ReplyKeyboardMarkup:
 def _text_to_image_prompt_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="使用这个提示词生成")],
-            [KeyboardButton(text="输入自定义提示词提交")],
-            [KeyboardButton(text="继续让 Grok 调整"), KeyboardButton(text="重新生成提示词")],
-            [KeyboardButton(text="返回参数设置"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+            [KeyboardButton(text="使用這個提示詞生成")],
+            [KeyboardButton(text="輸入自定義提示詞提交")],
+            [KeyboardButton(text="繼續讓 Grok 調整"), KeyboardButton(text="重新生成提示詞")],
+            [KeyboardButton(text="返回參數設定"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
     )
@@ -902,8 +943,8 @@ def _text_to_image_prompt_reply_keyboard() -> ReplyKeyboardMarkup:
 def _text_to_image_prompt_failure_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="重新生成提示词")],
-            [KeyboardButton(text="输入自定义提示词")],
+            [KeyboardButton(text="重新生成提示詞")],
+            [KeyboardButton(text="輸入自定義提示詞")],
             [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
@@ -912,27 +953,27 @@ def _text_to_image_prompt_failure_reply_keyboard() -> ReplyKeyboardMarkup:
 
 def _format_grok_preview_error(exc: Exception) -> str:
     if isinstance(exc, asyncio.TimeoutError):
-        return f"Grok 响应超时（超过 {TG_PROMPT_PREVIEW_TIMEOUT_SECONDS} 秒）。可以点击“重新生成提示词”再试一次，或先输入自定义提示词。"
+        return f"Grok 響應超時（超過 {TG_PROMPT_PREVIEW_TIMEOUT_SECONDS} 秒）。可以點擊“重新生成提示詞”再試一次，或先輸入自定義提示詞。"
     text = str(exc or "").strip()
     lower_text = text.lower()
     if "read timed out" in lower_text or "read timeout" in lower_text or "timed out" in lower_text:
-        return "Grok 模型响应超时，上游接口长时间没有返回。可以点击“重新生成提示词”再试一次，或先输入自定义提示词。"
-    if "http 502" in lower_text and ("全部候选模型调用失败" in text or "connectionpool" in lower_text):
-        return "Grok 模型服务暂时不可用或响应超时。可以点击“重新生成提示词”再试一次，或先输入自定义提示词。"
+        return "Grok 模型響應超時，上游接口長時間沒有返回。可以點擊“重新生成提示詞”再試一次，或先輸入自定義提示詞。"
+    if "http 502" in lower_text and ("全部候選模型調用失敗" in text or "connectionpool" in lower_text):
+        return "Grok 模型服務暫時不可用或響應超時。可以點擊“重新生成提示詞”再試一次，或先輸入自定義提示詞。"
     if not text:
-        return f"Grok 提示词生成失败（{type(exc).__name__}）。可以点击“重新生成提示词”再试一次。"
+        return f"Grok 提示詞生成失敗（{type(exc).__name__}）。可以點擊“重新生成提示詞”再試一次。"
     return _format_tg_user_error(text)
 
 
 def _format_tg_user_error(error: Any) -> str:
     text = str(error or "").strip()
-    text = re.sub(r"工作台[:：]\s*https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"工作臺[:：]\s*https?://\S+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\bfor url:\s*https?://\S+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\burl:\s*https?://\S+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"https?://\S+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/[^\s，。；;]*)?", "", text)
     text = re.sub(r"\s+", " ", text)
-    return text.strip(" ：:，,。；;") or "未知错误"
+    return text.strip(" ：:，,。；;") or "未知錯誤"
 
 
 def _video_edit_keyboard() -> ReplyKeyboardMarkup:
@@ -957,10 +998,10 @@ def _video_i2v_prompt_keyboard() -> ReplyKeyboardMarkup:
 def _video_i2v_prompt_review_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="使用这个提示词生成")],
-            [KeyboardButton(text="输入自定义提示词提交")],
-            [KeyboardButton(text="继续让 Grok 调整"), KeyboardButton(text="重新生成提示词")],
-            [KeyboardButton(text="返回参数设置"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+            [KeyboardButton(text="使用這個提示詞生成")],
+            [KeyboardButton(text="輸入自定義提示詞提交")],
+            [KeyboardButton(text="繼續讓 Grok 調整"), KeyboardButton(text="重新生成提示詞")],
+            [KeyboardButton(text="返回參數設定"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
     )
@@ -969,9 +1010,9 @@ def _video_i2v_prompt_review_keyboard() -> ReplyKeyboardMarkup:
 def _video_i2v_prompt_failure_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="重新生成提示词")],
-            [KeyboardButton(text="输入自定义提示词提交")],
-            [KeyboardButton(text="返回参数设置"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+            [KeyboardButton(text="重新生成提示詞")],
+            [KeyboardButton(text="輸入自定義提示詞提交")],
+            [KeyboardButton(text="返回參數設定"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
     )
@@ -981,8 +1022,8 @@ def _video_i2v_audio_keyboard(*, keep_current: bool = False) -> ReplyKeyboardMar
     rows: list[list[KeyboardButton]] = []
     if keep_current:
         rows.append([KeyboardButton(text=KEEP_CURRENT_RESOURCE_BUTTON)])
-    rows.append([KeyboardButton(text="\u8df3\u8fc7\u97f3\u9891")])
-    rows.append([KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text=MAIN_MENU_BUTTON)])
+    rows.append([KeyboardButton(text="跳過音頻")])
+    rows.append([KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
@@ -1009,83 +1050,83 @@ def _telegram_prompt_chinese_preview(prompt_text: str) -> str:
     if not text:
         return ""
     phrase_map = [
-        ("a half body portrait", "半身人像构图"),
-        ("a full body portrait", "全身人像构图"),
-        ("half body portrait", "半身人像构图"),
-        ("full body portrait", "全身人像构图"),
-        ("full body composition", "全身构图"),
-        ("half body composition", "半身构图"),
-        ("full body visible", "全身可见"),
-        ("head and face clearly unobstructed", "头部和脸部无遮挡、清晰可见"),
-        ("face clearly visible", "脸部清晰可见"),
-        ("head fully in frame", "头部完整入镜"),
-        ("facing the viewer", "面向观看者"),
-        ("facing the camera", "面向镜头"),
-        ("eyes looking at the camera", "视线看向镜头"),
-        ("looking at the camera", "看向镜头"),
-        ("direct eye contact", "直视镜头"),
-        ("mouth slightly open", "嘴部微张"),
+        ("a half body portrait", "半身人像構圖"),
+        ("a full body portrait", "全身人像構圖"),
+        ("half body portrait", "半身人像構圖"),
+        ("full body portrait", "全身人像構圖"),
+        ("full body composition", "全身構圖"),
+        ("half body composition", "半身構圖"),
+        ("full body visible", "全身可見"),
+        ("head and face clearly unobstructed", "頭部和臉部無遮擋、清晰可見"),
+        ("face clearly visible", "臉部清晰可見"),
+        ("head fully in frame", "頭部完整入鏡"),
+        ("facing the viewer", "面向觀看者"),
+        ("facing the camera", "面向鏡頭"),
+        ("eyes looking at the camera", "視線看向鏡頭"),
+        ("looking at the camera", "看向鏡頭"),
+        ("direct eye contact", "直視鏡頭"),
+        ("mouth slightly open", "嘴部微張"),
         ("natural expression", "自然表情"),
-        ("neutral expression", "自然平静的表情"),
-        ("soft indoor light", "柔和室内光线"),
-        ("soft warm bedroom lighting", "柔和暖色卧室光线"),
-        ("soft side light", "柔和侧光"),
-        ("side lamps", "侧边台灯"),
-        ("warm bedside light", "暖色床头灯"),
-        ("shallow depth of field", "浅景深"),
-        ("realistic skin texture", "真实皮肤纹理"),
-        ("natural fabric folds", "自然布料褶皱"),
-        ("fabric folds", "布料褶皱"),
-        ("body curves", "身体曲线"),
-        ("subtle shadows on curves", "身体曲线带有细腻阴影"),
-        ("stable anatomy", "人体结构稳定"),
-        ("high quality photography", "高质量摄影质感"),
+        ("neutral expression", "自然平靜的表情"),
+        ("soft indoor light", "柔和室內光線"),
+        ("soft warm bedroom lighting", "柔和暖色臥室光線"),
+        ("soft side light", "柔和側光"),
+        ("side lamps", "側邊檯燈"),
+        ("warm bedside light", "暖色牀頭燈"),
+        ("shallow depth of field", "淺景深"),
+        ("realistic skin texture", "真實皮膚紋理"),
+        ("natural fabric folds", "自然布料褶皺"),
+        ("fabric folds", "布料褶皺"),
+        ("body curves", "身體曲線"),
+        ("subtle shadows on curves", "身體曲線帶有細膩陰影"),
+        ("stable anatomy", "人體結構穩定"),
+        ("high quality photography", "高質量攝影質感"),
         ("high resolution", "高分辨率"),
-        ("intricate details", "细节丰富"),
-        ("masterpiece", "高完成度画面"),
-        ("best quality", "最佳画质"),
-        ("cinematic lighting", "电影感光线"),
-        ("photorealistic", "真实摄影风格"),
-        ("realistic", "写实风格"),
-        ("luxurious bedroom", "豪华卧室"),
-        ("bedroom", "卧室"),
-        ("indoor", "室内"),
-        ("studio", "棚拍空间"),
-        ("camera", "镜头"),
+        ("intricate details", "細節豐富"),
+        ("masterpiece", "高完成度畫面"),
+        ("best quality", "最佳畫質"),
+        ("cinematic lighting", "電影感光線"),
+        ("photorealistic", "真實攝影風格"),
+        ("realistic", "寫實風格"),
+        ("luxurious bedroom", "豪華臥室"),
+        ("bedroom", "臥室"),
+        ("indoor", "室內"),
+        ("studio", "棚拍空間"),
+        ("camera", "鏡頭"),
         ("front facing", "正面朝向"),
-        ("body facing the camera", "身体朝向镜头"),
-        ("body slightly angled but fully framed", "身体轻微侧向但完整入镜"),
+        ("body facing the camera", "身體朝向鏡頭"),
+        ("body slightly angled but fully framed", "身體輕微側向但完整入鏡"),
         ("wearing a", "穿着"),
         ("wearing", "穿着"),
         ("with", ""),
-        ("from", "来自"),
+        ("from", "來自"),
         ("hands placed", "手部放置"),
-        ("hands resting", "双手自然放置"),
-        ("one hand", "一只手"),
-        ("both hands", "双手"),
-        ("partially open", "半开状态"),
-        ("silk blouse", "丝质上衣"),
-        ("short tight skirt", "短款紧身裙"),
-        ("button undone", "纽扣解开"),
-        ("buttons undone", "纽扣解开"),
-        ("clothing naturally loosened", "服装自然松开"),
-        ("unbuttoned", "纽扣解开"),
-        ("zipper loosened", "拉链松开"),
-        ("hem lifted", "衣摆掀起"),
-        ("skirt lifted", "裙摆上移"),
-        ("skirt moved upward", "裙摆上移"),
-        ("shoulder strap slipped", "肩带滑落"),
-        ("waistband pulled down", "腰头下拉"),
-        ("clear clothing state", "衣物状态清晰"),
-        ("detailed composition", "构图细节清晰"),
+        ("hands resting", "雙手自然放置"),
+        ("one hand", "一隻手"),
+        ("both hands", "雙手"),
+        ("partially open", "半開狀態"),
+        ("silk blouse", "絲質上衣"),
+        ("short tight skirt", "短款緊身裙"),
+        ("button undone", "紐扣解開"),
+        ("buttons undone", "紐扣解開"),
+        ("clothing naturally loosened", "服裝自然鬆開"),
+        ("unbuttoned", "紐扣解開"),
+        ("zipper loosened", "拉鍊鬆開"),
+        ("hem lifted", "衣襬掀起"),
+        ("skirt lifted", "裙襬上移"),
+        ("skirt moved upward", "裙襬上移"),
+        ("shoulder strap slipped", "肩帶滑落"),
+        ("waistband pulled down", "腰頭下拉"),
+        ("clear clothing state", "衣物狀態清晰"),
+        ("detailed composition", "構圖細節清晰"),
         ("soft background", "柔和背景"),
-        ("clean background", "干净背景"),
-        ("natural pose", "自然姿态"),
+        ("clean background", "乾淨背景"),
+        ("natural pose", "自然姿態"),
         ("standing", "站立"),
-        ("slightly parted", "轻微分开"),
-        ("legs slightly parted", "双腿轻微分开"),
-        ("inner thighs", "大腿内侧"),
-        ("standing pose", "站立姿态"),
+        ("slightly parted", "輕微分開"),
+        ("legs slightly parted", "雙腿輕微分開"),
+        ("inner thighs", "大腿內側"),
+        ("standing pose", "站立姿態"),
         ("sitting pose", "坐姿"),
         ("kneeling pose", "跪姿"),
         ("lying pose", "躺姿"),
@@ -1104,19 +1145,19 @@ def _telegram_prompt_chinese_preview(prompt_text: str) -> str:
 
 def _looks_like_clean_chinese_preview(prompt_text: str) -> bool:
     text = str(prompt_text or "")
-    cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
+    cjk_chars = re.findall(r"[一-鿿]", text)
     english_words = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", text)
     return len(cjk_chars) >= 6 and not english_words
 
 
 def _tg_prompt_preview_unavailable_text() -> str:
-    return "提示词预览暂时不可用，实际提交到后台的原提示词已保存。"
+    return "提示詞預覽暫時不可用，實際提交到後臺的原提示詞已保存。"
 
 
 def _format_prompt_display_fallback(exc: Exception | None = None) -> str:
     text = str(exc or "").strip().lower()
-    if isinstance(exc, asyncio.TimeoutError) or "timed out" in text or "timeout" in text or "超时" in text or "504" in text:
-        return "提示词预览生成超时，实际提交到后台的提示词已保存，可直接使用。"
+    if isinstance(exc, asyncio.TimeoutError) or "timed out" in text or "timeout" in text or "超時" in text or "504" in text:
+        return "提示詞預覽生成超時，實際提交到後臺的提示詞已保存，可直接使用。"
     return _tg_prompt_preview_unavailable_text()
 
 
@@ -1140,7 +1181,7 @@ def _chat_identity_text(message: Message) -> str:
     lines.extend(
         [
             "",
-            "私聊机器人时请添加 chat_id；在群里使用时可以添加 user_id 或群 chat_id。不要填写机器人 ID。",
+            "私聊機器人時請添加 chat_id；在羣裏使用時可以添加 user_id 或羣 chat_id。不要填寫機器人 ID。",
         ]
     )
     return "\n".join(lines)
@@ -1300,40 +1341,40 @@ def _workflow_config_text(service: WorkspaceService, selected_button: str = "") 
     }
     display_selected_button = legacy_button_labels.get(selected_button, selected_button)
     if display_selected_button and display_selected_button != WORKFLOW_CONFIG_BUTTON:
-        selected_note = f"你选择的是「{display_selected_button}」。"
+        selected_note = f"你選擇的是「{display_selected_button}」。"
 
     if display_selected_button and display_selected_button != WORKFLOW_CONFIG_BUTTON:
         selected_map = {
-            IMAGE_WORKFLOW_BUTTON: _format_chain("图像生成", image_chain),
-            REPLACE_MODEL_WORKFLOW_BUTTON: _format_chain("视频模特替换", replace_model_original_chain),
-            SINGLE_IMAGE_EDIT_BUTTON: _format_mapping("单图编辑", image_edit_workflow),
-            IMAGE_EDIT_BUTTON: _format_mapping("图片编辑", image_edit_workflow),
-            FACE_SWAP_BUTTON: _format_mapping("人物换脸", face_swap_workflow),
+            IMAGE_WORKFLOW_BUTTON: _format_chain("圖像生成", image_chain),
+            REPLACE_MODEL_WORKFLOW_BUTTON: _format_chain("視頻模特替換", replace_model_original_chain),
+            SINGLE_IMAGE_EDIT_BUTTON: _format_mapping("單圖編輯", image_edit_workflow),
+            IMAGE_EDIT_BUTTON: _format_mapping("圖片編輯", image_edit_workflow),
+            FACE_SWAP_BUTTON: _format_mapping("人物換臉", face_swap_workflow),
         }
         return "\n".join(
             [
-                f"你选择的是「{display_selected_button}」。",
+                f"你選擇的是「{display_selected_button}」。",
                 selected_map.get(display_selected_button, "").strip(),
                 "",
-                "这是生产工作流入口。",
-                "请按面板提示依序上传素材；提交后可按「查看工作台状态」跟进进度。",
-                f"工作台网址: {config.public_base_url}",
+                "這是生產工作流入口。",
+                "請按面板提示依序上傳素材；提交後可按「查看工作臺狀態」跟進進度。",
+                f"工作臺網址: {config.public_base_url}",
             ]
         ).strip()
 
     return "\n".join(
         [
-            "后台工作流配置：",
-            _format_chain("口播数字人工作流", oral_chain),
-            _format_chain("图像生成", image_chain),
-            _format_mapping("单图编辑", image_edit_workflow),
-            _format_mapping("图片编辑", image_edit_workflow),
-            _format_mapping("人物换脸", face_swap_workflow),
-            _format_chain("视频模特替换", replace_model_original_chain),
+            "後臺工作流配置：",
+            _format_chain("口播數字人工作流", oral_chain),
+            _format_chain("圖像生成", image_chain),
+            _format_mapping("單圖編輯", image_edit_workflow),
+            _format_mapping("圖片編輯", image_edit_workflow),
+            _format_mapping("人物換臉", face_swap_workflow),
+            _format_chain("視頻模特替換", replace_model_original_chain),
             "",
             selected_note,
-            "TG 面板可直接建立任务：图像生成、图片编辑、人物换脸、视频生成。",
-            f"工作台网址: {config.public_base_url}",
+            "TG 面板可直接建立任務：圖像生成、圖片編輯、人物換臉、視頻生成。",
+            f"工作臺網址: {config.public_base_url}",
         ]
     ).strip()
 
@@ -1341,23 +1382,23 @@ def _workflow_config_text(service: WorkspaceService, selected_button: str = "") 
 def _quick_start_text(service: WorkspaceService) -> str:
     return "\n".join(
         [
-            f"🌟 {service.get_app_title()} 已启动",
+            f"🌟 {service.get_app_title()} 已啓動",
             "",
             "🌟 可用工作流",
             f"1. {IMAGE_WORKFLOW_BUTTON}",
-            "   点击后选择文生图、图片编辑或人物换脸。",
+            "   點擊後選擇文生圖、圖片編輯或人物換臉。",
             f"2. {VIDEO_EDIT_BUTTON}",
-            "   点击后选择图生视频，可用按钮设置分辨率、时长、音频和提示词。",
+            "   點擊後選擇圖生視頻，可用按鈕設置分辨率、時長、音頻和提示詞。",
             "",
-            "🌟 直接对话",
-            "也可以发送 /status 查看后台任务进度，发送 /stop 停止当前任务。",
+            "🌟 直接對話",
+            "也可以傳送 /status 查看後臺任務進度，傳送 /stop 停止當前任務。",
             "",
             "🌟 常用操作",
-            f"- {RERUN_BUTTON}：重跑最近一次任务。",
-            f"- {STATUS_BUTTON}：查看任务进度。",
-            f"- {STOP_BUTTON} 或 /stop：强制停止目前任务。",
+            f"- {RERUN_BUTTON}：重跑最近一次任務。",
+            f"- {STATUS_BUTTON}：查看任務進度。",
+            f"- {STOP_BUTTON} 或 /stop：強制停止目前任務。",
             "",
-            "✨ 详细执行纪录请到工作台任务详情查看。",
+            "✨ 詳細執行紀錄請到工作臺任務詳情查看。",
         ]
     )
 
@@ -1414,12 +1455,12 @@ def _agent_file_ext_from_message(message: Message) -> tuple[str, str] | None:
 def _parse_duration_seconds(text: str) -> int | None:
     value = str(text or "").strip()
     if not value:
-        raise ValueError("秒数不能为空")
+        raise ValueError("秒數不能爲空")
     if value in AUTO_DURATION_TEXTS:
         return None
     seconds = math.ceil(float(value))
     if seconds <= 0:
-        raise ValueError("秒数必須大於 0")
+        raise ValueError("秒數必須大於 0")
     return seconds
 
 
@@ -1437,7 +1478,7 @@ async def _download_message_media(message: Message, target_path: Path) -> Path:
     elif message.document:
         downloadable = message.document
     else:
-        raise RuntimeError("这則讯息没有可下载的媒体文件")
+        raise RuntimeError("這則訊息沒有可下載的媒體文件")
     await message.bot.download(downloadable, destination=target_path)
     return target_path
 
@@ -1501,13 +1542,13 @@ async def _submit_internal_webapp_task(
         ) as response:
             body = await response.text()
             if response.status >= 400:
-                raise RuntimeError(f"后台任务提交失败 HTTP {response.status}: {body[:500]}")
+                raise RuntimeError(f"後臺任務提交失敗 HTTP {response.status}: {body[:500]}")
             try:
                 data = json.loads(body)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"后台任务提交返回非 JSON: {body[:300]}") from exc
+                raise RuntimeError(f"後臺任務提交返回非 JSON: {body[:300]}") from exc
     if not isinstance(data, dict) or not data.get("id"):
-        raise RuntimeError(f"后台任务提交返回缺少任务 ID: {data}")
+        raise RuntimeError(f"後臺任務提交返回缺少任務 ID: {data}")
     return data
 
 
@@ -1548,30 +1589,30 @@ async def _preview_internal_webapp_prompt(
                         except json.JSONDecodeError:
                             detail = ""
                         raise RuntimeError(
-                            f"后台 Grok 提示词生成失败 HTTP {response.status}: {(detail or body)[:500]}"
+                            f"後臺 Grok 提示詞生成失敗 HTTP {response.status}: {(detail or body)[:500]}"
                         )
                     try:
                         data = json.loads(body)
                     except json.JSONDecodeError as exc:
-                        raise RuntimeError(f"后台 Grok 提示词生成返回非 JSON: {body[:300]}") from exc
+                        raise RuntimeError(f"後臺 Grok 提示詞生成返回非 JSON: {body[:300]}") from exc
                     break
         except asyncio.TimeoutError as exc:
             raise RuntimeError(
-                f"后台 Grok 提示词生成超时（超过 {TG_PROMPT_PREVIEW_TIMEOUT_SECONDS} 秒）。"
-                "通常是 Grok 响应慢、供应商排队，或提示词被二次校验重试拖长。"
+                f"後臺 Grok 提示詞生成超時（超過 {TG_PROMPT_PREVIEW_TIMEOUT_SECONDS} 秒）。"
+                "通常是 Grok 響應慢、供應商排隊，或提示詞被二次校驗重試拖長。"
             ) from exc
         except ClientError as exc:
             last_client_error = exc
             if attempt >= 3:
-                raise RuntimeError(f"连接后台 Grok 提示词服务失败：{exc}") from exc
+                raise RuntimeError(f"連接後臺 Grok 提示詞服務失敗：{exc}") from exc
             await asyncio.sleep(0.8 * attempt)
     if data is None:
-        raise RuntimeError(f"连接后台 Grok 提示词服务失败：{last_client_error}")
+        raise RuntimeError(f"連接後臺 Grok 提示詞服務失敗：{last_client_error}")
     if not isinstance(data, dict):
-        raise RuntimeError(f"后台 Grok 提示词生成返回格式异常: {data}")
+        raise RuntimeError(f"後臺 Grok 提示詞生成返回格式異常: {data}")
     prompt_text = str(data.get("prompt_text") or "").strip()
     if not prompt_text:
-        raise RuntimeError("Grok 未返回可用提示词")
+        raise RuntimeError("Grok 未返回可用提示詞")
     return data
 
 
@@ -1598,27 +1639,27 @@ async def _display_internal_webapp_prompt(
         ) as response:
             body = await response.text()
             if response.status >= 400:
-                raise RuntimeError(f"后台提示词中文预览失败 HTTP {response.status}: {body[:500]}")
+                raise RuntimeError(f"後臺提示詞中文預覽失敗 HTTP {response.status}: {body[:500]}")
             try:
                 data = json.loads(body)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"后台提示词中文预览返回非 JSON: {body[:300]}") from exc
+                raise RuntimeError(f"後臺提示詞中文預覽返回非 JSON: {body[:300]}") from exc
     if not isinstance(data, dict):
         return ""
     display_text = str(data.get("display_text") or "").strip()
     if display_text and not _looks_like_clean_chinese_preview(display_text):
-        raise RuntimeError("后台提示词中文预览包含英文残留")
+        raise RuntimeError("後臺提示詞中文預覽包含英文殘留")
     return display_text
 
 
 async def _send_long_text(message: Message, text: str, *, reply_markup: Any | None = None) -> None:
     body = str(text or "")
     if len(body) <= 3900:
-        await message.answer(body, reply_markup=reply_markup)
+        await _answer(message, body, reply_markup=reply_markup)
         return
     chunks = [body[idx : idx + 3900] for idx in range(0, len(body), 3900)]
     for idx, chunk in enumerate(chunks):
-        await message.answer(chunk, reply_markup=reply_markup if idx == len(chunks) - 1 else None)
+        await _answer(message, chunk, reply_markup=reply_markup if idx == len(chunks) - 1 else None)
 
 
 async def _submit_internal_webapp_agent_task(
@@ -1648,17 +1689,17 @@ async def _submit_internal_webapp_agent_task(
         ) as response:
             body = await response.text()
             if response.status >= 400:
-                raise RuntimeError(f"后台智能提交失败 HTTP {response.status}: {body[:500]}")
+                raise RuntimeError(f"後臺智能提交失敗 HTTP {response.status}: {body[:500]}")
             try:
                 data = json.loads(body)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"后台智能提交返回非 JSON: {body[:300]}") from exc
+                raise RuntimeError(f"後臺智能提交返回非 JSON: {body[:300]}") from exc
     if not isinstance(data, dict):
-        raise RuntimeError(f"后台智能提交返回格式异常: {data}")
+        raise RuntimeError(f"後臺智能提交返回格式異常: {data}")
     if data.get("submitted") is False:
         return data
     if not data.get("id"):
-        raise RuntimeError(f"后台智能提交返回缺少任务 ID: {data}")
+        raise RuntimeError(f"後臺智能提交返回缺少任務 ID: {data}")
     return data
 
 
@@ -1677,11 +1718,11 @@ async def _fetch_internal_webapp_tg_tasks(*, chat_id: int, limit: int = 5) -> li
         ) as response:
             body = await response.text()
             if response.status >= 400:
-                raise RuntimeError(f"后台 TG 任务查询失败 HTTP {response.status}: {body[:500]}")
+                raise RuntimeError(f"後臺 TG 任務查詢失敗 HTTP {response.status}: {body[:500]}")
             try:
                 data = json.loads(body)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"后台 TG 任务查询返回非 JSON: {body[:300]}") from exc
+                raise RuntimeError(f"後臺 TG 任務查詢返回非 JSON: {body[:300]}") from exc
     tasks = data.get("tasks") if isinstance(data, dict) else None
     return [item for item in tasks if isinstance(item, dict)] if isinstance(tasks, list) else []
 
@@ -1702,32 +1743,32 @@ async def _fetch_internal_webapp_tg_task_detail(*, chat_id: int, task_id: str) -
         ) as response:
             body = await response.text()
             if response.status >= 400:
-                raise RuntimeError(f"后台 TG 任务详情查询失败 HTTP {response.status}: {body[:500]}")
+                raise RuntimeError(f"後臺 TG 任務詳情查詢失敗 HTTP {response.status}: {body[:500]}")
             try:
                 data = json.loads(body)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"后台 TG 任务详情返回非 JSON: {body[:300]}") from exc
+                raise RuntimeError(f"後臺 TG 任務詳情返回非 JSON: {body[:300]}") from exc
     task = data.get("task") if isinstance(data, dict) else None
     if not isinstance(task, dict):
-        raise RuntimeError(f"后台 TG 任务详情格式异常: {data}")
+        raise RuntimeError(f"後臺 TG 任務詳情格式異常: {data}")
     return task
 
 
 def _format_internal_webapp_tg_tasks(tasks: list[dict[str, Any]]) -> str:
     if not tasks:
-        return "后台生成任务：暂无记录。"
+        return "後臺生成任務：暫無記錄。"
     status_labels = {
-        "queued": "排队中",
+        "queued": "排隊中",
         "running": "生成中",
         "success": "已完成",
-        "failed": "失败",
+        "failed": "失敗",
         "cancelled": "已取消",
     }
-    lines = ["后台生成任务："]
+    lines = ["後臺生成任務："]
     for item in tasks[:5]:
         status = str(item.get("status") or "").strip()
         label = status_labels.get(status, status or "unknown")
-        download = "，有结果文件" if item.get("has_download") else ""
+        download = "，有結果文件" if item.get("has_download") else ""
         error = _format_tg_user_error(item.get("error") or "")
         if len(error) > 80:
             error = f"{error[:80]}..."
@@ -1745,10 +1786,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def ensure_authorized(message: Message) -> bool:
         if _is_message_authorized(service, message):
             return True
-        await message.answer(
+        await _answer(message,
             "\n".join(
                 [
-                    "你的 Telegram 账号还没有加入后台可信用户。",
+                    "你的 Telegram 賬號還沒有加入後臺可信用戶。",
                     "",
                     _chat_identity_text(message),
                 ]
@@ -1761,15 +1802,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.clear()
         await state.set_state(UploadFlowForm.waiting_for_video)
         await state.update_data(work_dir=str(work_dir), digital_human_requirement=str(requirement or "").strip())
-        await message.answer(
+        await _answer(message,
             "\n".join(
                 [
-                    "🌟 数字人视频生成",
-                    f"已选择：{requirement}" if requirement else "请先上传素材，后续会交给 Grok 生成提示词。",
-                    "步骤 1/4：上传原视频",
+                    "🌟 數字人視頻生成",
+                    f"已選擇：{requirement}" if requirement else "請先上傳素材，後續會交給 Grok 生成提示詞。",
+                    "步驟 1/4：上傳原視頻",
                     "",
-                    "✨ 用途：运镜与首帧参考。",
-                    "可以直接传视频，也可以当成 document 传送。",
+                    "✨ 用途：運鏡與首幀參考。",
+                    "可以直接傳視頻，也可以當成 document 傳送。",
                 ]
             ),
             reply_markup=_menu_keyboard(),
@@ -1778,7 +1819,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def handle_entry_keyword(message: Message, state: FSMContext) -> bool:
         text = _canonical_button_text(_message_text(message))
         if text not in {
-            "多智能体数字人",
+            "多智能體數字人",
             IMAGE_WORKFLOW_BUTTON,
             TEXT_TO_IMAGE_BUTTON,
             SINGLE_IMAGE_EDIT_BUTTON,
@@ -1795,7 +1836,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return True
         await state.clear()
         if text == MAIN_MENU_BUTTON:
-            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+            await _answer(message, "已返回主選單。", reply_markup=_menu_keyboard())
         elif text == IMAGE_WORKFLOW_BUTTON:
             await start_image_generate_flow(message, state)
         elif text == TEXT_TO_IMAGE_BUTTON:
@@ -1811,11 +1852,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         elif text == IMAGE_REPLACE_BUTTON:
             await start_image_reference_flow(message, state, mode="image_replace")
         elif text == VIDEO_EDIT_BUTTON:
-            await message.answer("视频生成：请选择要建立的任务。", reply_markup=_video_edit_keyboard())
+            await _answer(message, "視頻生成：請選擇要建立的任務。", reply_markup=_video_edit_keyboard())
         elif text == VIDEO_GENERAL_EDIT_BUTTON:
             await start_video_i2v_flow(message, state)
         else:
-            await message.answer(_quick_start_text(service), reply_markup=_menu_keyboard())
+            await _answer(message, _quick_start_text(service), reply_markup=_menu_keyboard())
         return True
 
     async def handle_workflow_reference_request(message: Message, state: FSMContext | None = None) -> bool:
@@ -1826,7 +1867,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return True
         if state is not None:
             await state.clear()
-        await message.answer(_workflow_config_text(service, selected_button=text), reply_markup=_menu_keyboard())
+        await _answer(message, _workflow_config_text(service, selected_button=text), reply_markup=_menu_keyboard())
         return True
 
     async def handle_stop_request(message: Message, state: FSMContext) -> bool:
@@ -1840,11 +1881,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         active_task = service.store.get_active_task()
         target_task = active_task or service.get_latest_open_task_for_submitter(int(message.chat.id))
         if target_task is None:
-            await message.answer("目前没有可强制停止的任务。", reply_markup=_menu_keyboard())
+            await _answer(message, "目前沒有可強制停止的任務。", reply_markup=_menu_keyboard())
             return True
 
         result = await service.cancel_task(target_task.id, requested_by=f"TG-{int(message.chat.id)}")
-        await message.answer(result.message, reply_markup=_menu_keyboard())
+        await _answer(message, result.message, reply_markup=_menu_keyboard())
         return True
 
     async def enqueue_request(
@@ -1868,21 +1909,21 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params=params,
         )
         task_label = {
-            "text_to_image": "文生图",
-            "image_generate": "图像生成",
-            "get_nano_banana": "图片编辑",
-            "single_image_edit": "单图编辑",
-            "face_swap": "人物换脸",
-            "video_i2v": "图生视频",
+            "text_to_image": "文生圖",
+            "image_generate": "圖像生成",
+            "get_nano_banana": "圖片編輯",
+            "single_image_edit": "單圖編輯",
+            "face_swap": "人物換臉",
+            "video_i2v": "圖生視頻",
         }.get(str(task_type), str(task_type))
-        await message.answer(
+        await _answer(message,
             "\n".join(
                 part
                 for part in [
-                    "任务已提交到后台队列。",
+                    "任務已提交到後臺隊列。",
                     f"工作流: {task_label}",
-                    f"任务编号: {result.get('id')}",
-                    "可按「查看工作台状态」跟进进度。",
+                    f"任務編號: {result.get('id')}",
+                    "可按「查看工作臺狀態」跟進進度。",
                 ]
                 if part
             ),
@@ -1895,21 +1936,21 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             tasks = await _fetch_internal_webapp_tg_tasks(chat_id=int(message.chat.id), limit=5)
             parts.append(_format_internal_webapp_tg_tasks(tasks))
         except Exception as exc:
-            parts.append(f"后台生成任务：查询失败（{_format_tg_user_error(exc)}）")
+            parts.append(f"後臺生成任務：查詢失敗（{_format_tg_user_error(exc)}）")
         legacy_status = service.get_status_text(chat_id=int(message.chat.id))
         if legacy_status:
             parts.append(legacy_status)
-        await message.answer("\n\n".join(parts), reply_markup=_menu_keyboard())
+        await _answer(message, "\n\n".join(parts), reply_markup=_menu_keyboard())
 
     async def start_image_generate_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
-        await message.answer(
-            "图像生成：请选择要执行的图片模式。",
+        await _answer(message,
+            "圖像生成：請選擇要執行的圖片模式。",
             reply_markup=_image_edit_keyboard(),
         )
 
     def _image_mode_title(mode: str) -> str:
-        return "图片替换" if mode == "image_replace" else "多图生成"
+        return "圖片替換" if mode == "image_replace" else "多圖生成"
 
     def _tg_workflow_display_name(workflow_path: str) -> str:
         text = str(workflow_path or "").strip().replace("\\", "/")
@@ -1928,7 +1969,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         runtime = _load_runtime_config(service.resolve_config())
         workflow_path = _runtime_mapped_workflow(runtime, task_type)
         if not workflow_path:
-            return "可用工作流：未配置，请先在后台映射工作流。"
+            return "可用工作流：未配置，請先在後臺映射工作流。"
         return f"可用工作流：{_tg_workflow_display_name(workflow_path)}"
 
     async def start_image_reference_flow(message: Message, state: FSMContext, *, mode: str) -> None:
@@ -1937,9 +1978,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.clear()
         await state.set_state(ProductionWorkflowForm.image_waiting_for_product_image)
         await state.update_data(image_mode=mode, work_dir=str(service.create_job_dir(prefix=f"tg_{mode}")))
-        first_step = "请上传原图。" if mode == "image_replace" else "请上传第一张参考图。"
-        await message.answer(
-            f"{title}\n步骤 1/3：{first_step}",
+        first_step = "請上傳原圖。" if mode == "image_replace" else "請上傳第一張參考圖。"
+        await _answer(message,
+            f"{title}\n步驟 1/3：{first_step}",
             reply_markup=_image_edit_keyboard(),
         )
 
@@ -1947,14 +1988,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.clear()
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
         mode = "single" if single_input else "two"
-        title = "单图编辑" if single_input else "图片编辑"
+        title = "單圖編輯" if single_input else "圖片編輯"
         total_steps = "3" if single_input else "4"
         await state.update_data(work_dir=str(service.create_job_dir(prefix="tg_image_edit")), image_edit_mode=mode)
-        await message.answer(
+        await _answer(message,
             "\n".join(
                 [
                     title,
-                    f"步骤 1/{total_steps}：请上传需要编辑的原图。",
+                    f"步驟 1/{total_steps}：請上傳需要編輯的原圖。",
                 ]
             ),
             reply_markup=_image_task_step_keyboard(back=False),
@@ -1964,7 +2005,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         single_input = str(data.get("image_edit_mode") or "").strip() == "single"
         return (
             single_input,
-            "单图编辑" if single_input else "图片编辑",
+            "單圖編輯" if single_input else "圖片編輯",
             3 if single_input else 4,
             "single_image_edit" if single_input else "get_nano_banana",
         )
@@ -1999,7 +2040,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         _, title, total_steps, task_type = _image_edit_flow_meta(data)
         request_text = str(user_request or "").strip()
         if not request_text:
-            await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请直接输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請直接輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
             return
         await state.update_data(
             image_edit_user_request=request_text,
@@ -2007,7 +2048,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             image_edit_waiting_for_adjustment=False,
             image_edit_waiting_for_custom_prompt=False,
         )
-        await message.answer("正在让 Grok 生成图片编辑提示词...")
+        await _answer(message, "正在讓 Grok 生成圖片編輯提示詞...")
         preview_payload = _build_image_edit_payload(data, request_text, user_request=request_text, use_grok=True)
         preview = await _preview_internal_webapp_prompt(
             chat_id=int(message.chat.id),
@@ -2017,7 +2058,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         generated_prompt = str(preview.get("prompt_text") or "").strip()
         selected_model = str(preview.get("selected_model") or "").strip()
         if not generated_prompt:
-            raise RuntimeError("Grok 未返回可用的图片编辑提示词")
+            raise RuntimeError("Grok 未返回可用的圖片編輯提示詞")
         await state.update_data(
             image_edit_prompt=generated_prompt,
             image_edit_generated_prompt=generated_prompt,
@@ -2031,7 +2072,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         model_line = f"\n\n模型：{selected_model}" if selected_model else ""
         await _send_long_text(
             message,
-            f"{title}\nGrok 已生成图片编辑提示词：\n\n{generated_prompt}{model_line}\n\n请确认提示词是否合适，确认后再提交编辑任务。",
+            f"{title}\nGrok 已生成圖片編輯提示詞：\n\n{generated_prompt}{model_line}\n\n請確認提示詞是否合適，確認後再提交編輯任務。",
             reply_markup=_image_edit_prompt_review_keyboard(),
         )
 
@@ -2040,7 +2081,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         _, title, _, task_type = _image_edit_flow_meta(data)
         prompt = str(final_prompt or "").strip()
         if not prompt:
-            await message.answer("还没有可用的图片编辑提示词，请先输入要求让 Grok 生成。", reply_markup=_image_edit_prompt_failure_keyboard())
+            await _answer(message, "還沒有可用的圖片編輯提示詞，請先輸入要求讓 Grok 生成。", reply_markup=_image_edit_prompt_failure_keyboard())
             return
         payload = _build_image_edit_payload(
             data,
@@ -2058,18 +2099,18 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await submit_webapp_task_and_reply(message, task_type, payload)
             await state.clear()
         except Exception as exc:
-            await message.answer(f"{title}任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_image_edit_prompt_review_keyboard())
+            await _answer(message, f"{title}任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_image_edit_prompt_review_keyboard())
 
     async def start_face_swap_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_target_image)
         await state.update_data(work_dir=str(service.create_job_dir(prefix="tg_face_swap")))
-        await message.answer(
+        await _answer(message,
             "\n".join(
                 [
-                    "人物换脸",
+                    "人物換臉",
                     _tg_mapped_workflow_line("face_swap"),
-                    "步骤 1/4：请上传原图，也就是需要被换脸的图片。",
+                    "步驟 1/4：請上傳原圖，也就是需要被換臉的圖片。",
                 ]
             ),
             reply_markup=_image_task_step_keyboard(back=False),
@@ -2118,7 +2159,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             face_swap_waiting_for_custom_prompt=False,
             face_swap_random_seed=seed_value,
         )
-        await message.answer("正在让 Grok 生成人物换脸提示词...")
+        await _answer(message, "正在讓 Grok 生成人物換臉提示詞...")
         preview_payload = _build_face_swap_payload(
             {**data, "face_swap_random_seed": seed_value},
             request_text,
@@ -2133,7 +2174,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         generated_prompt = str(preview.get("prompt_text") or "").strip()
         selected_model = str(preview.get("selected_model") or "").strip()
         if not generated_prompt:
-            raise RuntimeError("Grok 未返回可用的人物换脸提示词")
+            raise RuntimeError("Grok 未返回可用的人物換臉提示詞")
         await state.update_data(
             face_swap_prompt=generated_prompt,
             face_swap_generated_prompt=generated_prompt,
@@ -2148,7 +2189,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         model_line = f"\n\n模型：{selected_model}" if selected_model else ""
         await _send_long_text(
             message,
-            f"人物换脸\nGrok 已生成换脸提示词：\n\n{generated_prompt}{model_line}\n\n请确认提示词是否合适，确认后点击「使用这个提示词提交」。",
+            f"人物換臉\nGrok 已生成換臉提示詞：\n\n{generated_prompt}{model_line}\n\n請確認提示詞是否合適，確認後點擊「使用這個提示詞提交」。",
             reply_markup=_image_edit_prompt_review_keyboard(),
         )
 
@@ -2156,7 +2197,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         data = await state.get_data()
         prompt = str(final_prompt or "").strip()
         if not prompt:
-            await message.answer("还没有可用的人物换脸提示词，请先选择“自然换脸”或输入自定义要求。", reply_markup=_image_edit_prompt_failure_keyboard())
+            await _answer(message, "還沒有可用的人物換臉提示詞，請先選擇“自然換臉”或輸入自定義要求。", reply_markup=_image_edit_prompt_failure_keyboard())
             return
         payload = _build_face_swap_payload(
             data,
@@ -2174,7 +2215,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await submit_webapp_task_and_reply(message, "face_swap", payload)
             await state.clear()
         except Exception as exc:
-            await message.answer(f"人物换脸任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_image_edit_prompt_review_keyboard())
+            await _answer(message, f"人物換臉任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_image_edit_prompt_review_keyboard())
 
     def _video_i2v_defaults() -> dict[str, Any]:
         return {
@@ -2230,17 +2271,17 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         return params
 
     def _video_i2v_status_text(*, step: str, params: dict[str, Any]) -> str:
-        lines = ["\u89c6\u9891\u751f\u6210\u8bbe\u7f6e", f"\u5f53\u524d\u6b65\u9aa4\uff1a{step}"]
+        lines = ["視頻生成設置", f"當前步驟：{step}"]
         if params.get("resolution_selected"):
-            lines.append(f"\u5206\u8fa8\u7387\uff1a{params['resolution']}")
+            lines.append(f"分辨率：{params['resolution']}")
         if params.get("duration_selected"):
-            lines.append(f"\u65f6\u957f\uff1a{params['duration']}\u79d2")
+            lines.append(f"時長：{params['duration']}秒")
         if params.get("audio_selected"):
-            lines.append("\u97f3\u9891\uff1a\u5df2\u4e0a\u4f20" if params.get("audio_local_path") else "\u97f3\u9891\uff1a\u8df3\u8fc7")
+            lines.append("音頻：已上傳" if params.get("audio_local_path") else "音頻：跳過")
         if params.get("prompt_mode_selected"):
             label = str(params.get("prompt_mode_label") or "").strip()
-            prompt_mode_text = label or ("Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4")
-            lines.append(f"\u63d0\u793a\u8bcd\u65b9\u5f0f\uff1a{prompt_mode_text}")
+            prompt_mode_text = label or ("Grok 生成" if params["use_grok"] else "自定義提交")
+            lines.append(f"提示詞方式：{prompt_mode_text}")
         return "\n".join(lines)
 
     def _clear_video_i2v_prompt_fields() -> dict[str, Any]:
@@ -2256,26 +2297,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return ReplyKeyboardMarkup(
                 keyboard=[
                     [
-                        KeyboardButton(text="720p\uff08\u6700\u5c0f\u8d44\u6e90\uff09"),
+                        KeyboardButton(text="720p（最小資源）"),
                         KeyboardButton(text="1080p"),
                     ],
-                    [KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+                    [KeyboardButton(text="返回主菜單")],
                 ],
                 resize_keyboard=True,
             )
         if step == "duration":
             return ReplyKeyboardMarkup(
                 keyboard=[
-                    [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+                    [KeyboardButton(text="上一步"), KeyboardButton(text="返回主菜單")],
                 ],
                 resize_keyboard=True,
             )
         if step == "prompt_mode":
             return ReplyKeyboardMarkup(
                 keyboard=[
-                    [KeyboardButton(text="\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd")],
-                    [KeyboardButton(text="\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4")],
-                    [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+                    [KeyboardButton(text="讓 Grok 生成提示詞")],
+                    [KeyboardButton(text="輸入自定義提示詞提交")],
+                    [KeyboardButton(text="上一步"), KeyboardButton(text="返回主菜單")],
                 ],
                 resize_keyboard=True,
             )
@@ -2285,7 +2326,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return _image_task_step_keyboard(keep_current=_recorded_local_resource(params.get("image_local_path")))
         return ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="\u4e0a\u4e00\u6b65"), KeyboardButton(text="\u8fd4\u56de\u4e3b\u83dc\u5355")],
+                [KeyboardButton(text="上一步"), KeyboardButton(text="返回主菜單")],
             ],
             resize_keyboard=True,
         )
@@ -2303,35 +2344,35 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         }
         await state.set_state(state_map.get(step, ProductionWorkflowForm.video_i2v_waiting_for_resolution))
         labels = {
-            "resolution": "1/5 \u9009\u62e9\u5206\u8fa8\u7387",
-            "duration": "2/5 \u8f93\u5165\u89c6\u9891\u65f6\u957f",
-            "image": "3/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
-            "audio": "4/5 \u4e0a\u4f20\u97f3\u9891\uff08\u53ef\u9009\uff09",
-            "prompt_mode": "5/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
-            "prompt": "\u5df2\u6536\u5230\u53c2\u8003\u56fe\uff0c\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42",
+            "resolution": "1/5 選擇分辨率",
+            "duration": "2/5 輸入視頻時長",
+            "image": "3/5 上傳參考圖",
+            "audio": "4/5 上傳音頻（可選）",
+            "prompt_mode": "5/5 選擇提示詞方式",
+            "prompt": "已收到參考圖，請輸入視頻需求",
         }
         text = _video_i2v_status_text(step=labels.get(step, step), params=params)
         if step == "duration":
-            text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
+            text += "\n\n請直接輸入視頻時長，範圍 2 到 15 秒，例如：5。"
         elif step == "audio":
             if _recorded_local_resource(params.get("audio_local_path")):
-                text += "\n\n已记录当前音频。可以上传新音频替换，点击“沿用当前资源”继续，或点击“跳过音频”让本次不使用音频。"
+                text += "\n\n已記錄當前音頻。可以上傳新音頻替換，點擊“沿用目前資源”繼續，或點擊“跳過音頻”讓本次不使用音頻。"
             else:
-                text += "\n\n\u53ef\u4ee5\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff08mp3/wav/m4a/ogg \u7b49\uff09\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002"
+                text += "\n\n可以上傳音頻文件（mp3/wav/m4a/ogg 等），或點擊“跳過音頻”。"
         elif step == "image":
             if _recorded_local_resource(params.get("image_local_path")):
-                text += "\n\n已记录当前参考图。可以上传新图片替换，或点击“沿用当前资源”继续。"
+                text += "\n\n已記錄當前參考圖。可以上傳新圖片替換，或點擊“沿用目前資源”繼續。"
             else:
-                text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u4e0b\u4e00\u6b65\u518d\u9009\u62e9\u662f\u5426\u4e0a\u4f20\u97f3\u9891\u3002"
+                text += "\n\n請上傳一張參考圖片。下一步再選擇是否上傳音頻。"
         elif step == "prompt_mode":
-            text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd\uff0c\u6216\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
+            text += "\n\n請選擇讓 Grok 生成提示詞，或輸入自定義提示詞提交。"
         elif step == "prompt":
             if params.get("use_grok"):
-                text += "\n\n\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42\u3002Grok \u4f1a\u5728\u6700\u540e\u751f\u6210\u5b8c\u6574\u63d0\u793a\u8bcd\uff0c\u5e76\u5728\u804a\u5929\u4e2d\u5b8c\u6574\u663e\u793a\u540e\u518d\u63d0\u4ea4\u3002"
+                text += "\n\n請輸入視頻需求。Grok 會在最後生成完整提示詞，並在聊天中完整顯示後再提交。"
             else:
-                text += "\n\n\u8bf7\u8f93\u5165\u81ea\u5b9a\u4e49\u6700\u7ec8\u63d0\u793a\u8bcd\u3002\u4e0b\u4e00\u6761\u6d88\u606f\u4f1a\u8df3\u8fc7 Grok \u76f4\u63a5\u63d0\u4ea4\u3002"
+                text += "\n\n請輸入自定義最終提示詞。下一條消息會跳過 Grok 直接提交。"
         markup = _video_i2v_step_keyboard(step, params)
-        await message.answer(text, reply_markup=markup)
+        await _answer(message, text, reply_markup=markup)
 
     async def _show_video_i2v_step_from_callback(callback: CallbackQuery, state: FSMContext, *, step: str) -> None:
         if callback.message is None:
@@ -2348,38 +2389,38 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         }
         await state.set_state(state_map.get(step, ProductionWorkflowForm.video_i2v_waiting_for_resolution))
         labels = {
-            "resolution": "1/5 \u9009\u62e9\u5206\u8fa8\u7387",
-            "duration": "2/5 \u8f93\u5165\u89c6\u9891\u65f6\u957f",
-            "image": "3/5 \u4e0a\u4f20\u53c2\u8003\u56fe",
-            "audio": "4/5 \u4e0a\u4f20\u97f3\u9891\uff08\u53ef\u9009\uff09",
-            "prompt_mode": "5/5 \u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f",
-            "prompt": "\u5df2\u6536\u5230\u53c2\u8003\u56fe\uff0c\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42",
+            "resolution": "1/5 選擇分辨率",
+            "duration": "2/5 輸入視頻時長",
+            "image": "3/5 上傳參考圖",
+            "audio": "4/5 上傳音頻（可選）",
+            "prompt_mode": "5/5 選擇提示詞方式",
+            "prompt": "已收到參考圖，請輸入視頻需求",
         }
         text = _video_i2v_status_text(step=labels.get(step, step), params=params)
         if step == "duration":
-            text += "\n\n\u8bf7\u76f4\u63a5\u8f93\u5165\u89c6\u9891\u65f6\u957f\uff0c\u8303\u56f4 2 \u5230 15 \u79d2\uff0c\u4f8b\u5982\uff1a5\u3002"
+            text += "\n\n請直接輸入視頻時長，範圍 2 到 15 秒，例如：5。"
         elif step == "audio":
             if _recorded_local_resource(params.get("audio_local_path")):
-                text += "\n\n已记录当前音频。可以上传新音频替换，点击“沿用当前资源”继续，或点击“跳过音频”让本次不使用音频。"
+                text += "\n\n已記錄當前音頻。可以上傳新音頻替換，點擊“沿用目前資源”繼續，或點擊“跳過音頻”讓本次不使用音頻。"
             else:
-                text += "\n\n\u53ef\u4ee5\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff08mp3/wav/m4a/ogg \u7b49\uff09\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002"
+                text += "\n\n可以上傳音頻文件（mp3/wav/m4a/ogg 等），或點擊“跳過音頻”。"
         elif step == "image":
             if _recorded_local_resource(params.get("image_local_path")):
-                text += "\n\n已记录当前参考图。可以上传新图片替换，或点击“沿用当前资源”继续。"
+                text += "\n\n已記錄當前參考圖。可以上傳新圖片替換，或點擊“沿用目前資源”繼續。"
             else:
-                text += "\n\n\u8bf7\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u7247\u3002\u4e0b\u4e00\u6b65\u518d\u9009\u62e9\u662f\u5426\u4e0a\u4f20\u97f3\u9891\u3002"
+                text += "\n\n請上傳一張參考圖片。下一步再選擇是否上傳音頻。"
         elif step == "prompt_mode":
-            text += "\n\n\u8bf7\u9009\u62e9\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd\uff0c\u6216\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4\u3002"
+            text += "\n\n請選擇讓 Grok 生成提示詞，或輸入自定義提示詞提交。"
         elif step == "prompt":
             if params.get("use_grok"):
-                text += "\n\n\u8bf7\u8f93\u5165\u89c6\u9891\u9700\u6c42\u3002Grok \u4f1a\u5728\u6700\u540e\u751f\u6210\u5b8c\u6574\u63d0\u793a\u8bcd\uff0c\u5e76\u5728\u804a\u5929\u4e2d\u5b8c\u6574\u663e\u793a\u540e\u518d\u63d0\u4ea4\u3002"
+                text += "\n\n請輸入視頻需求。Grok 會在最後生成完整提示詞，並在聊天中完整顯示後再提交。"
             else:
-                text += "\n\n\u8bf7\u8f93\u5165\u81ea\u5b9a\u4e49\u6700\u7ec8\u63d0\u793a\u8bcd\u3002\u4e0b\u4e00\u6761\u6d88\u606f\u4f1a\u8df3\u8fc7 Grok \u76f4\u63a5\u63d0\u4ea4\u3002"
-        await callback.message.answer(text, reply_markup=_video_i2v_step_keyboard(step, params))
+                text += "\n\n請輸入自定義最終提示詞。下一條消息會跳過 Grok 直接提交。"
+        await _answer(callback.message, text, reply_markup=_video_i2v_step_keyboard(step, params))
 
-    async def _remove_reply_keyboard(message: Message, *, text: str = "\u8bf7\u4f7f\u7528\u4e0a\u65b9\u6309\u94ae\u7ee7\u7eed\u3002") -> None:
+    async def _remove_reply_keyboard(message: Message, *, text: str = "請使用上方按鈕繼續。") -> None:
         try:
-            sent = await message.answer(text, reply_markup=ReplyKeyboardRemove())
+            sent = await _answer(message, text, reply_markup=ReplyKeyboardRemove())
             await sent.delete()
         except Exception:
             pass
@@ -2397,7 +2438,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 "audio_local_path": "",
                 "prompt_mode_selected": False,
                 "prompt_extend_selected": False,
-                "prompt_mode_label": "Grok \u751f\u6210",
+                "prompt_mode_label": "Grok 生成",
                 "work_dir": str(service.create_job_dir(prefix="tg_video_i2v")),
             }
         )
@@ -2436,28 +2477,28 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _submit_video_i2v_payload(message: Message, state: FSMContext, payload: dict[str, Any], params: dict[str, Any]) -> None:
         await state.clear()
         result = await _submit_internal_webapp_task(chat_id=int(message.chat.id), task_type="video_i2v", params=payload)
-        prompt_mode_text = str(params.get("prompt_mode_label") or "").strip() or ("Grok 生成" if params["use_grok"] else "自定义提交")
+        prompt_mode_text = str(params.get("prompt_mode_label") or "").strip() or ("Grok 生成" if params["use_grok"] else "自定義提交")
         reply = "\n".join(
             part for part in [
-                "图生视频任务已提交。",
-                f"任务编号：{result.get('id')}",
-                f"分辨率：{params['resolution']}，时长：{params['duration']}秒，提示词方式：{prompt_mode_text}",
-                "生成完成后会自动把视频发回这里。",
+                "圖生視頻任務已提交。",
+                f"任務編號：{result.get('id')}",
+                f"分辨率：{params['resolution']}，時長：{params['duration']}秒，提示詞方式：{prompt_mode_text}",
+                "生成完成後會自動把視頻傳回這裏。",
             ] if part
         )
-        await message.answer(reply, reply_markup=_menu_keyboard())
+        await _answer(message, reply, reply_markup=_menu_keyboard())
 
     async def _submit_video_i2v_from_state(message: Message, state: FSMContext, prompt: str) -> None:
         data = await state.get_data()
         params = _video_i2v_state_params(data)
         payload = _build_video_i2v_payload(data, params, prompt)
         if payload is None:
-            await message.answer("\u8bf7\u5148\u4e0a\u4f20\u4e00\u5f20\u53c2\u8003\u56fe\u3002")
+            await _answer(message, "請先上傳一張參考圖。")
             await _show_video_i2v_step(message, state, step="image")
             return
         try:
             if params["use_grok"]:
-                await message.answer("\u6b63\u5728\u8ba9 Grok \u751f\u6210\u89c6\u9891\u63d0\u793a\u8bcd...")
+                await _answer(message, "正在讓 Grok 生成視頻提示詞...")
                 preview = await _preview_internal_webapp_prompt(
                     chat_id=int(message.chat.id),
                     task_type="video_i2v",
@@ -2465,7 +2506,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 )
                 generated_prompt = str(preview.get("prompt_text") or "").strip()
                 if not generated_prompt:
-                    raise RuntimeError("Grok \u672a\u8fd4\u56de\u53ef\u7528\u7684\u89c6\u9891\u63d0\u793a\u8bcd")
+                    raise RuntimeError("Grok 未返回可用的視頻提示詞")
                 await state.update_data(
                     video_i2v_user_request=prompt,
                     video_i2v_generated_prompt=generated_prompt,
@@ -2474,7 +2515,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
                 await _send_long_text(
                     message,
-                    "\u89c6\u9891 Grok \u751f\u6210\u63d0\u793a\u8bcd\uff1a\n\n" + generated_prompt + "\n\n请确认后再提交。",
+                    "視頻 Grok 生成提示詞：\n\n" + generated_prompt + "\n\n請確認後再提交。",
                     reply_markup=_video_i2v_prompt_review_keyboard(),
                 )
                 return
@@ -2488,15 +2529,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     video_i2v_generated_prompt="",
                 )
                 await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
-                await message.answer(
-                    "Grok 视频提示词生成失败："
+                await _answer(message,
+                    "Grok 視頻提示詞生成失敗："
                     f"{_format_grok_preview_error(exc)}\n\n"
-                    "任务还没有提交，当前图生视频参数已保留。可以点击“重新生成提示词”再试一次，"
-                    "或点击“输入自定义提示词提交”跳过 Grok。",
+                    "任務還沒有提交，當前圖生視頻參數已保留。可以點擊“重新生成提示詞”再試一次，"
+                    "或點擊“輸入自定義提示詞提交”跳過 Grok。",
                     reply_markup=_video_i2v_prompt_failure_keyboard(),
                 )
                 return
-            await message.answer(f"\u56fe\u751f\u89c6\u9891\u4efb\u52a1\u63d0\u4ea4\u5931\u8d25\uff1a{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"圖生視頻任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.callback_query(F.data.startswith("video_i2v:"))
     async def on_video_i2v_callback(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2504,7 +2545,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await callback.answer()
             return
         if not _is_message_authorized(service, callback.message):
-            await callback.answer("\u5f53\u524d\u8d26\u53f7\u672a\u6388\u6743", show_alert=True)
+            await callback.answer("當前賬號未授權", show_alert=True)
             return
         action = str(callback.data or "")
         data = await state.get_data()
@@ -2512,10 +2553,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if action.endswith(":main_menu"):
             await state.clear()
             try:
-                await callback.message.edit_text("\u5df2\u8fd4\u56de\u4e3b\u83dc\u5355\u3002")
+                await callback.message.edit_text("已返回主菜單。")
             except Exception:
                 pass
-            await callback.message.answer("\u8bf7\u9009\u62e9\u4efb\u52a1\u7c7b\u578b\u3002", reply_markup=_menu_keyboard())
+            await _answer(callback.message, "請選擇任務類型。", reply_markup=_menu_keyboard())
             await callback.answer()
             return
         if action == "video_i2v:back:resolution":
@@ -2557,7 +2598,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if action == "video_i2v:next:prompt_mode":
             if not params.get("audio_selected"):
-                await callback.answer("\u8bf7\u5148\u9009\u62e9\u97f3\u9891\u6b65\u9aa4", show_alert=True)
+                await callback.answer("請先選擇音頻步驟", show_alert=True)
                 return
             await _show_video_i2v_step_from_callback(callback, state, step="prompt_mode")
             await callback.answer()
@@ -2565,7 +2606,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if action == "video_i2v:next:prompt_extend":
             if not params.get("prompt_mode_selected"):
                 params["prompt_mode_selected"] = True
-                params["prompt_mode_label"] = "Grok \u751f\u6210" if params.get("use_grok") else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
+                params["prompt_mode_label"] = "Grok 生成" if params.get("use_grok") else "自定義提交"
                 await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="prompt")
             await callback.answer()
@@ -2583,7 +2624,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params.update({"duration_selected": False, "prompt_mode_selected": False, "prompt_extend_selected": False})
             await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="duration")
-            await callback.answer("\u5df2\u9009\u62e9\u5206\u8fa8\u7387")
+            await callback.answer("已選擇分辨率")
             return
         if action.startswith("video_i2v:duration:"):
             value = action.rsplit(":", 1)[-1]
@@ -2592,24 +2633,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             except ValueError:
                 duration = 2
             if duration not in {2, 5, 8, 15}:
-                await callback.answer("\u8bf7\u9009\u62e9\u53ef\u7528\u7684\u89c6\u9891\u65f6\u957f", show_alert=True)
+                await callback.answer("請選擇可用的視頻時長", show_alert=True)
                 return
             params["duration"] = duration
             params["duration_selected"] = True
             params.update({"prompt_mode_selected": False, "prompt_extend_selected": False})
             await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="image")
-            await callback.answer("\u5df2\u9009\u62e9\u89c6\u9891\u65f6\u957f")
+            await callback.answer("已選擇視頻時長")
             return
         if action.startswith("video_i2v:prompt_mode:"):
             params["use_grok"] = action.endswith(":grok")
             params["prompt_mode_selected"] = True
-            params["prompt_mode_label"] = "Grok \u751f\u6210" if params["use_grok"] else "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
+            params["prompt_mode_label"] = "Grok 生成" if params["use_grok"] else "自定義提交"
             params["prompt_extend"] = False
             params["prompt_extend_selected"] = True
             await state.update_data(**params)
             await _show_video_i2v_step_from_callback(callback, state, step="prompt")
-            await callback.answer("\u5df2\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f")
+            await callback.answer("已選擇提示詞方式")
             return
         if action.startswith("video_i2v:extend:"):
             params["prompt_extend"] = False
@@ -2625,21 +2666,21 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.clear()
         await state.set_state(ProductionWorkflowForm.replace_model_waiting_for_video)
         await state.update_data(work_dir=str(work_dir))
-        await message.answer("🌟 视频模特替换\n步骤 1/4：请上传原视频。", reply_markup=_menu_keyboard())
+        await _answer(message, "🌟 視頻模特替換\n步驟 1/4：請上傳原視頻。", reply_markup=_menu_keyboard())
 
     async def start_replace_product_flow(message: Message, state: FSMContext) -> None:
         work_dir = service.create_job_dir(prefix="tg_replace_product")
         await state.clear()
         await state.set_state(ProductionWorkflowForm.replace_product_waiting_for_video)
         await state.update_data(work_dir=str(work_dir))
-        await message.answer("🌟 视频商品替换\n步骤 1/5：请上传原视频。", reply_markup=_menu_keyboard())
+        await _answer(message, "🌟 視頻商品替換\n步驟 1/5：請上傳原視頻。", reply_markup=_menu_keyboard())
 
     async def start_union_flow(message: Message, state: FSMContext) -> None:
         work_dir = service.create_job_dir(prefix="tg_union")
         await state.clear()
         await state.set_state(ProductionWorkflowForm.union_waiting_for_video)
         await state.update_data(work_dir=str(work_dir))
-        await message.answer("🌟 联合替换工作流\n步骤 1/5：请上传原视频。", reply_markup=_menu_keyboard())
+        await _answer(message, "🌟 聯合替換工作流\n步驟 1/5：請上傳原視頻。", reply_markup=_menu_keyboard())
 
     async def _current_text_to_image_runtime_params() -> dict[str, Any]:
         try:
@@ -2717,8 +2758,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params = await _current_text_to_image_runtime_params()
         workflow_profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
         await _set_text_to_image_runtime_state(state, params)
-        await message.answer(
-            _text_to_image_status_text(step="1/4 请选择图像比例", params=params),
+        await _answer(message,
+            _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
             reply_markup=_text_to_image_ratio_reply_keyboard(profile=workflow_profile),
         )
 
@@ -2727,7 +2768,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params = _text_to_image_params(data)
         display_prompt_text = str(prompt_text or "").strip()
         if not display_prompt_text:
-            raise RuntimeError("Grok \u672a\u8fd4\u56de\u53ef\u7528\u63d0\u793a\u8bcd\uff0c\u8bf7\u91cd\u65b0\u751f\u6210\u63d0\u793a\u8bcd\u3002")
+            raise RuntimeError("Grok 未返回可用提示詞，請重新生成提示詞。")
         await state.update_data(
             prompt_display_text=display_prompt_text,
             prompt_display_ready=True,
@@ -2736,24 +2777,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
         text = "\n\n".join(
             [
-                "文生图 3/3：Grok 已生成最终提示词。",
-                f"画面比例：{params['aspect_ratio']}，基础分辨率：{params['width']} x {params['height']}，最终分辨率：{'开启，预计 ' + params['final'] if params.get('final_resolution_enabled') else '关闭'}",
-                f"人设 LoRA：{params.get('persona_label') or '使用人设'}" if params.get("persona_enabled") else ("人设 LoRA：不使用" if params.get("persona_available") else ""),
+                "文生圖 3/3：Grok 已生成最終提示詞。",
+                f"畫面比例：{params['aspect_ratio']}，基礎分辨率：{params['width']} x {params['height']}，最終分辨率：{'開啓，預計 ' + params['final'] if params.get('final_resolution_enabled') else '關閉'}",
+                f"人設 LoRA：{params.get('persona_label') or '使用人設'}" if params.get("persona_enabled") else ("人設 LoRA：不使用" if params.get("persona_available") else ""),
                 f"模型：{selected_model or 'Grok'}",
-                "最终提示词：",
+                "最終提示詞：",
                 display_prompt_text,
-                "你可以直接使用，也可以继续告诉 Grok 如何调整。",
+                "你可以直接使用，也可以繼續告訴 Grok 如何調整。",
             ]
         )
-        await message.answer(text, reply_markup=_text_to_image_prompt_reply_keyboard())
+        await _answer(message, text, reply_markup=_text_to_image_prompt_reply_keyboard())
 
     async def _show_text_to_image_display_pending(message: Message, state: FSMContext, *, exc: Exception | None = None) -> None:
         await state.update_data(prompt_display_ready=False, prompt_display_pending=True)
-        await message.answer(
+        await _answer(message,
             "\n".join(
                 [
-                    "Grok 生成的提示词还没有通过中文校验。",
-                    "暂不提交到队列。请重新生成提示词，或输入自定义提示词。",
+                    "Grok 生成的提示詞還沒有通過中文校驗。",
+                    "暫不提交到隊列。請重新生成提示詞，或輸入自定義提示詞。",
                     _format_prompt_display_fallback(exc),
                 ]
             ),
@@ -2813,12 +2854,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if reference_image:
             payload["input_image_local_path"] = reference_image
             payload["image_local_path"] = reference_image
-        await message.answer("正在让 Grok 生成最终提示词...")
+        await _answer(message, "正在讓 Grok 生成最終提示詞...")
         result = await _preview_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="text_to_image", params=payload)
         prompt_text = str(result.get("prompt_text") or "").strip()
         selected_model = str(result.get("selected_model") or "").strip()
         if not prompt_text:
-            raise RuntimeError("Grok 未返回可用提示词，请重新生成提示词。")
+            raise RuntimeError("Grok 未返回可用提示詞，請重新生成提示詞。")
         await state.update_data(
             original_user_request=original_for_state,
             final_prompt_text=prompt_text,
@@ -2833,9 +2874,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
         if runtime_changed:
             profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
-            await message.answer(
-                "\u540e\u53f0\u6587\u751f\u56fe\u5de5\u4f5c\u6d41\u5df2\u66f4\u65b0\uff0c"
-                "\u672c\u6b21\u672a\u63d0\u4ea4\u5230\u961f\u5217\u3002\u8bf7\u6309\u6700\u65b0\u53c2\u6570\u91cd\u65b0\u9009\u62e9\u3002",
+            await _answer(message,
+                "後臺文生圖工作流已更新，"
+                "本次未提交到隊列。請按最新參數重新選擇。",
                 reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
             )
             return
@@ -2844,12 +2885,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         final_prompt = str(data.get("final_prompt_text") or "").strip()
         if not final_prompt:
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
-            await message.answer("还没有可用的 Grok 提示词，请先输入图片需求。")
+            await _answer(message, "還沒有可用的 Grok 提示詞，請先輸入圖片需求。")
             return
         if (not bool(data.get("custom_prompt_used"))) and not bool(data.get("prompt_display_ready")):
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
-            await message.answer(
-                "当前提示词还没有通过中文校验，暂不提交到队列。请重新生成提示词，或输入自定义提示词。",
+            await _answer(message,
+                "當前提示詞還沒有通過中文校驗，暫不提交到隊列。請重新生成提示詞，或輸入自定義提示詞。",
                 reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
             )
             return
@@ -2882,20 +2923,20 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def _show_text_to_image_prompt_entry(message: Message, state: FSMContext) -> None:
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
         params = _text_to_image_params(await state.get_data())
-        step = "4/4 输入图片需求或上传参考图" if params.get("persona_available") else "3/3 输入图片需求或上传参考图"
-        await message.answer(
+        step = "4/4 輸入圖片需求或上傳參考圖" if params.get("persona_available") else "3/3 輸入圖片需求或上傳參考圖"
+        await _answer(message,
             _text_to_image_status_text(step=step, params=params)
-            + "\n\n可以直接输入图片需求，也可以上传参考图片；上传图片时可在图片说明里补充要求。Grok 会识别图片内容，并结合你的文字生成最终提示词供你确认。",
+            + "\n\n可以直接輸入圖片需求，也可以上傳參考圖片；上傳圖片時可在圖片說明裏補充要求。Grok 會識別圖片內容，並結合你的文字生成最終提示詞供你確認。",
             reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
         )
 
     async def _show_text_to_image_prompt_mode(message: Message, state: FSMContext) -> None:
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
         params = _text_to_image_params(await state.get_data())
-        step = "4/4 请选择提示词方式" if params.get("persona_available") else "3/3 请选择提示词方式"
-        await message.answer(
+        step = "4/4 請選擇提示詞方式" if params.get("persona_available") else "3/3 請選擇提示詞方式"
+        await _answer(message,
             _text_to_image_status_text(step=step, params=params)
-            + "\n\n请选择让 Grok 根据你的需求生成提示词，或直接输入自定义最终提示词。",
+            + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。",
             reply_markup=_text_to_image_prompt_mode_reply_keyboard(),
         )
 
@@ -2913,28 +2954,28 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if selected is None:
             selected = next((item for item in tasks if str(item.get("type") or "").strip() == "text_to_image"), None)
         if not isinstance(selected, dict):
-            raise RuntimeError("没有找到最近的文生图任务")
+            raise RuntimeError("沒有找到最近的文生圖任務")
         task_id = str(selected.get("id") or "").strip()
         if not task_id:
-            raise RuntimeError("最近的文生图任务缺少任务编号")
+            raise RuntimeError("最近的文生圖任務缺少任務編號")
         return await _fetch_internal_webapp_tg_task_detail(chat_id=int(chat_id), task_id=task_id)
 
     async def _reroll_latest_text_to_image(message: Message, state: FSMContext) -> None:
         task = await _latest_text_to_image_task(int(message.chat.id))
         if str(task.get("type") or "").strip() != "text_to_image":
-            raise RuntimeError("最近任务不是文生图任务")
+            raise RuntimeError("最近任務不是文生圖任務")
         input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
         payload, seed = _text_to_image_reroll_payload(input_payload)
         payload["tg_reroll_from_task_id"] = str(task.get("id") or "").strip()
         await state.clear()
-        await message.answer(f"已切换 seed，重新提交生成。Seed: {seed}", reply_markup=_menu_keyboard())
+        await _answer(message, f"已切換 seed，重新提交生成。Seed: {seed}", reply_markup=_menu_keyboard())
         await submit_webapp_task_and_reply(message, "text_to_image", payload)
         logger.info("Submitted text_to_image reroll from latest task %s with seed %s", task.get("id"), seed)
 
     async def _continue_latest_text_to_image(message: Message, state: FSMContext) -> None:
         task = await _latest_text_to_image_task(int(message.chat.id))
         if str(task.get("type") or "").strip() != "text_to_image":
-            raise RuntimeError("最近任务不是文生图任务")
+            raise RuntimeError("最近任務不是文生圖任務")
         input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
         params = _text_to_image_params(input_payload)
         await state.clear()
@@ -2956,7 +2997,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             selected_model="",
             custom_prompt_used=False,
         )
-        await message.answer("继续生成图片：保留上次参数，重新进入提示词步骤。", reply_markup=_menu_keyboard())
+        await _answer(message, "繼續生成圖片：保留上次參數，重新進入提示詞步驟。", reply_markup=_menu_keyboard())
         await _show_text_to_image_prompt_mode(message, state)
 
     def _face_swap_resubmit_payload(input_payload: dict[str, Any], *, seedvr_upscale: bool = False) -> dict[str, Any]:
@@ -2971,10 +3012,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             input_payload.get("prompt_text")
             or input_payload.get("prompt")
             or input_payload.get("message")
-            or "自然换脸，保持目标图姿态、服装、光线和背景，只替换脸部身份"
+            or "自然換臉，保持目標圖姿態、服裝、光線和背景，只替換臉部身份"
         ).strip()
         if not target_image or not source_image:
-            raise RuntimeError("上次人物换脸任务缺少原图或人脸参考图，无法重新提交。")
+            raise RuntimeError("上次人物換臉任務缺少原圖或人臉參考圖，無法重新提交。")
         payload = {
             "target_image_local_path": target_image,
             "source_image_local_path": source_image,
@@ -3012,7 +3053,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     ) -> None:
         task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(message.chat.id), task_id=str(task_id))
         if str(task.get("type") or "").strip() != "face_swap":
-            raise RuntimeError("这条记录不是人物换脸任务，无法继续操作。")
+            raise RuntimeError("這條記錄不是人物換臉任務，無法繼續操作。")
         input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
         payload = _face_swap_resubmit_payload(input_payload, seedvr_upscale=seedvr_upscale)
         if seedvr_upscale:
@@ -3028,7 +3069,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await callback.answer()
             return
         if not _is_message_authorized(service, callback.message):
-            await callback.answer("当前账号未授权", show_alert=True)
+            await callback.answer("當前賬號未授權", show_alert=True)
             return
         action = str(callback.data or "")
         if action == "face_swap:main_menu":
@@ -3037,7 +3078,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
-            await callback.message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+            await _answer(callback.message, "已返回主選單。", reply_markup=_menu_keyboard())
             await callback.answer()
             return
         if action.startswith("face_swap:seedvr:") or action.startswith("face_swap:rerun:"):
@@ -3045,7 +3086,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             task_id = parts[2].strip() if len(parts) >= 3 else ""
             seedvr_upscale = parts[1] == "seedvr"
             if not task_id:
-                await callback.answer("缺少任务编号", show_alert=True)
+                await callback.answer("缺少任務編號", show_alert=True)
                 return
             try:
                 await _resubmit_face_swap_from_task(
@@ -3056,13 +3097,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 )
             except Exception as exc:
                 label = "SeedVR 放大" if seedvr_upscale else "重新生成"
-                await callback.answer(f"{label}提交失败：{_format_tg_user_error(exc)}", show_alert=True)
+                await callback.answer(f"{label}提交失敗：{_format_tg_user_error(exc)}", show_alert=True)
                 return
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
-            await callback.answer("已提交 SeedVR 放大任务" if seedvr_upscale else "已提交重新生成任务")
+            await callback.answer("已提交 SeedVR 放大任務" if seedvr_upscale else "已提交重新生成任務")
             return
         await callback.answer("未知操作", show_alert=True)
 
@@ -3072,17 +3113,17 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await callback.answer()
             return
         if not _is_message_authorized(service, callback.message):
-            await callback.answer("当前账号未授权", show_alert=True)
+            await callback.answer("當前賬號未授權", show_alert=True)
             return
         action = str(callback.data or "")
         data = await state.get_data()
         if action == "t2i:main_menu":
             await state.clear()
             try:
-                await callback.message.edit_text("已返回主菜单。")
+                await callback.message.edit_text("已返回主選單。")
             except Exception:
                 pass
-            await callback.message.answer("请选择任务类型。", reply_markup=_menu_keyboard())
+            await _answer(callback.message, "請選擇任務類型。", reply_markup=_menu_keyboard())
             await callback.answer()
             return
         if action.startswith("t2i:reroll:"):
@@ -3090,20 +3131,20 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             try:
                 task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(callback.message.chat.id), task_id=task_id)
             except Exception as exc:
-                await callback.answer(f"读取上次任务失败：{_format_tg_user_error(exc)}", show_alert=True)
+                await callback.answer(f"讀取上次任務失敗：{_format_tg_user_error(exc)}", show_alert=True)
                 return
             if str(task.get("type") or "").strip() != "text_to_image":
-                await callback.answer("这个任务不是文生图任务", show_alert=True)
+                await callback.answer("這個任務不是文生圖任務", show_alert=True)
                 return
             input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
             try:
                 payload, seed = _text_to_image_reroll_payload(input_payload)
             except Exception as exc:
-                await callback.answer(f"重新生成图片失败：{_format_tg_user_error(exc)}", show_alert=True)
+                await callback.answer(f"重新生成圖片失敗：{_format_tg_user_error(exc)}", show_alert=True)
                 return
             payload["tg_reroll_from_task_id"] = task_id
             await state.clear()
-            await callback.answer("已切换 seed，重新提交生成")
+            await callback.answer("已切換 seed，重新提交生成")
             await submit_webapp_task_and_reply(callback.message, "text_to_image", payload)
             logger.info("Submitted text_to_image reroll from task %s with seed %s", task_id, seed)
             return
@@ -3112,10 +3153,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             try:
                 task = await _fetch_internal_webapp_tg_task_detail(chat_id=int(callback.message.chat.id), task_id=task_id)
             except Exception as exc:
-                await callback.answer(f"读取上次任务失败：{_format_tg_user_error(exc)}", show_alert=True)
+                await callback.answer(f"讀取上次任務失敗：{_format_tg_user_error(exc)}", show_alert=True)
                 return
             if str(task.get("type") or "").strip() != "text_to_image":
-                await callback.answer("这个任务不是文生图任务", show_alert=True)
+                await callback.answer("這個任務不是文生圖任務", show_alert=True)
                 return
             input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
             params = _text_to_image_params(input_payload)
@@ -3139,28 +3180,28 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 custom_prompt_used=False,
             )
             try:
-                await callback.message.edit_caption(caption="继续生成图片：保留上次参数，重新进入提示词步骤。")
+                await callback.message.edit_caption(caption="繼續生成圖片：保留上次參數，重新進入提示詞步驟。")
             except Exception:
                 try:
-                    await callback.message.edit_text("继续生成图片：保留上次参数，重新进入提示词步骤。")
+                    await callback.message.edit_text("繼續生成圖片：保留上次參數，重新進入提示詞步驟。")
                 except Exception:
                     pass
             await _show_text_to_image_prompt_mode(callback.message, state)
-            await callback.answer("请继续输入提示词")
+            await callback.answer("請繼續輸入提示詞")
             return
         params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
         if runtime_changed:
             profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
             text = (
-                "\u540e\u53f0\u6587\u751f\u56fe\u5de5\u4f5c\u6d41\u5df2\u66f4\u65b0\uff0c"
-                "\u5df2\u540c\u6b65\u6700\u65b0\u53ef\u9009\u53c2\u6570\u3002\n\n"
-                + _text_to_image_status_text(step="1/4 \u8bf7\u9009\u62e9\u56fe\u50cf\u6bd4\u4f8b", params=params)
+                "後臺文生圖工作流已更新，"
+                "已同步最新可選參數。\n\n"
+                + _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params)
             )
             try:
                 await callback.message.edit_text(text, reply_markup=_text_to_image_ratio_keyboard(profile=profile))
             except Exception:
-                await callback.message.answer(text, reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile))
-            await callback.answer("\u5df2\u540c\u6b65\u540e\u53f0\u5de5\u4f5c\u6d41")
+                await _answer(callback.message, text, reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile))
+            await callback.answer("已同步後臺工作流")
             return
         data = await state.get_data()
         if action.startswith("t2i:ratio:"):
@@ -3193,30 +3234,30 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 option["prompt_mode_label"] = ""
                 try:
                     await callback.message.edit_text(
-                        _text_to_image_status_text(step="2/4 请选择最终分辨率", params=option),
+                        _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=option),
                         reply_markup=_text_to_image_resolution_keyboard(
                             final_resolution_enabled=final_enabled,
                             final_resolution_available=bool(option.get("final_resolution_available")),
                         ),
                     )
                 except Exception:
-                    await callback.message.answer(
-                        _text_to_image_status_text(step="2/4 请选择最终分辨率", params=option),
+                    await _answer(callback.message,
+                        _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=option),
                         reply_markup=_text_to_image_resolution_keyboard(
                             final_resolution_enabled=final_enabled,
                             final_resolution_available=bool(option.get("final_resolution_available")),
                         ),
                     )
-                await callback.answer("请选择分辨率")
+                await callback.answer("請選擇分辨率")
                 return
-            await callback.answer("无效比例", show_alert=True)
+            await callback.answer("無效比例", show_alert=True)
             return
         if action == "t2i:next:resolution":
             params = _text_to_image_params(data)
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
             try:
                 await callback.message.edit_text(
-                    _text_to_image_status_text(step="2/4 请选择最终分辨率", params=params),
+                    _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=params),
                     reply_markup=_text_to_image_resolution_keyboard(
                         final_resolution_enabled=bool(params["final_resolution_enabled"]),
                         selected=bool(params.get("resolution_selected")),
@@ -3224,30 +3265,30 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     ),
                 )
             except Exception:
-                await callback.message.answer(
-                    _text_to_image_status_text(step="2/4 请选择最终分辨率", params=params),
+                await _answer(callback.message,
+                    _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=params),
                     reply_markup=_text_to_image_resolution_keyboard(
                         final_resolution_enabled=bool(params["final_resolution_enabled"]),
                         selected=bool(params.get("resolution_selected")),
                         final_resolution_available=bool(params.get("final_resolution_available")),
                     ),
                 )
-            await callback.answer("请选择分辨率")
+            await callback.answer("請選擇分辨率")
             return
         if action == "t2i:back:ratio":
             params = _text_to_image_params(data)
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
             try:
                 await callback.message.edit_text(
-                    _text_to_image_status_text(step="1/4 请选择图像比例", params=params),
+                    _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
                     reply_markup=_text_to_image_ratio_keyboard(
                         selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
                         profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
                     ),
                 )
             except Exception:
-                await callback.message.answer(
-                    _text_to_image_status_text(step="1/4 请选择图像比例", params=params),
+                await _answer(callback.message,
+                    _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
                     reply_markup=_text_to_image_ratio_keyboard(
                         selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
                         profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
@@ -3257,7 +3298,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if action == "t2i:choose_prompt_mode":
             await _show_text_to_image_prompt_mode(callback.message, state)
-            await callback.answer("请选择提示词方式")
+            await callback.answer("請選擇提示詞方式")
             return
         if action == "t2i:ready_prompt":
             await state.update_data(prompt_mode_selected=True, prompt_mode_label="Grok 生成")
@@ -3265,16 +3306,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "Grok 生成"})
             text = (
                 _text_to_image_status_text(
-                    step="4/4 请输入图片需求或上传参考图" if params.get("persona_available") else "3/3 请输入图片需求或上传参考图",
+                    step="4/4 請輸入圖片需求或上傳參考圖" if params.get("persona_available") else "3/3 請輸入圖片需求或上傳參考圖",
                     params=params,
                 )
-                + "\n\n可以直接输入图片需求，也可以上传参考图片；上传图片时可在图片说明里补充要求。Grok 会识别图片内容，并结合你的文字生成最终提示词供你确认。"
+                + "\n\n可以直接輸入圖片需求，也可以上傳參考圖片；上傳圖片時可在圖片說明裏補充要求。Grok 會識別圖片內容，並結合你的文字生成最終提示詞供你確認。"
             )
             try:
                 await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_entry_keyboard())
             except Exception:
-                await callback.message.answer(text, reply_markup=_text_to_image_prompt_entry_keyboard())
-            await callback.answer("请输入需求或上传参考图")
+                await _answer(callback.message, text, reply_markup=_text_to_image_prompt_entry_keyboard())
+            await callback.answer("請輸入需求或上傳參考圖")
             return
         if action.startswith("t2i:final:") or action == "t2i:toggle_final":
             params = _text_to_image_params(data)
@@ -3283,7 +3324,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             else:
                 final_enabled = action.endswith(":on")
             if final_enabled and not bool(params.get("final_resolution_available")):
-                await callback.answer("当前工作流不支持最终分辨率，请选择使用基础分辨率。", show_alert=True)
+                await callback.answer("當前工作流不支持最終分辨率，請選擇使用基礎分辨率。", show_alert=True)
                 return
             await state.update_data(
                 final_resolution_enabled=final_enabled,
@@ -3304,7 +3345,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             if params.get("persona_available"):
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
-                text = _text_to_image_status_text(step="3/4 请选择人设 LoRA", params=params)
+                text = _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params)
                 markup = _text_to_image_persona_keyboard(
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
@@ -3314,23 +3355,23 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 try:
                     await callback.message.edit_text(text, reply_markup=markup)
                 except Exception:
-                    await callback.message.answer(text, reply_markup=markup)
-                await callback.answer("请选择人设")
+                    await _answer(callback.message, text, reply_markup=markup)
+                await callback.answer("請選擇人設")
             else:
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
-                step = "3/3 请选择提示词方式"
-                text = _text_to_image_status_text(step=step, params=params) + "\n\n请选择让 Grok 根据你的需求生成提示词，或直接输入自定义最终提示词。"
+                step = "3/3 請選擇提示詞方式"
+                text = _text_to_image_status_text(step=step, params=params) + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
                 try:
                     await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_mode_keyboard())
                 except Exception:
-                    await callback.message.answer(text, reply_markup=_text_to_image_prompt_mode_keyboard())
-                await callback.answer("请选择提示词方式")
+                    await _answer(callback.message, text, reply_markup=_text_to_image_prompt_mode_keyboard())
+                await callback.answer("請選擇提示詞方式")
             return
         if action == "t2i:next:persona":
             params = _text_to_image_params(data)
             if params.get("persona_available"):
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
-                text = _text_to_image_status_text(step="3/4 请选择人设 LoRA", params=params)
+                text = _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params)
                 markup = _text_to_image_persona_keyboard(
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
@@ -3340,16 +3381,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 try:
                     await callback.message.edit_text(text, reply_markup=markup)
                 except Exception:
-                    await callback.message.answer(text, reply_markup=markup)
-                await callback.answer("请选择人设")
+                    await _answer(callback.message, text, reply_markup=markup)
+                await callback.answer("請選擇人設")
             else:
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
-                text = _text_to_image_status_text(step="3/3 请选择提示词方式", params=params) + "\n\n请选择让 Grok 根据你的需求生成提示词，或直接输入自定义最终提示词。"
+                text = _text_to_image_status_text(step="3/3 請選擇提示詞方式", params=params) + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
                 try:
                     await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_mode_keyboard())
                 except Exception:
-                    await callback.message.answer(text, reply_markup=_text_to_image_prompt_mode_keyboard())
-                await callback.answer("请选择提示词方式")
+                    await _answer(callback.message, text, reply_markup=_text_to_image_prompt_mode_keyboard())
+                await callback.answer("請選擇提示詞方式")
             return
         if action == "t2i:back:resolution":
             params = _text_to_image_params(data)
@@ -3365,7 +3406,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             try:
                 await callback.message.edit_text(
-                    _text_to_image_status_text(step="2/4 请选择最终分辨率", params=params),
+                    _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=params),
                     reply_markup=_text_to_image_resolution_keyboard(
                         final_resolution_enabled=bool(params["final_resolution_enabled"]),
                         selected=bool(params.get("resolution_selected")),
@@ -3373,8 +3414,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     ),
                 )
             except Exception:
-                await callback.message.answer(
-                    _text_to_image_status_text(step="2/4 请选择最终分辨率", params=params),
+                await _answer(callback.message,
+                    _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=params),
                     reply_markup=_text_to_image_resolution_keyboard(
                         final_resolution_enabled=bool(params["final_resolution_enabled"]),
                         selected=bool(params.get("resolution_selected")),
@@ -3396,7 +3437,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         selected_lora = option["path"]
                         break
                 if not selected_lora:
-                    await callback.answer("没有找到这个人设", show_alert=True)
+                    await callback.answer("沒有找到這個人設", show_alert=True)
                     return
             await state.update_data(
                 persona_enabled=persona_enabled,
@@ -3417,38 +3458,38 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             text = (
-                _text_to_image_status_text(step="4/4 请选择提示词方式", params=params)
-                + "\n\n请选择让 Grok 根据你的需求生成提示词，或直接输入自定义最终提示词。"
+                _text_to_image_status_text(step="4/4 請選擇提示詞方式", params=params)
+                + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
             )
             try:
                 await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_mode_keyboard())
             except Exception:
-                await callback.message.answer(text, reply_markup=_text_to_image_prompt_mode_keyboard())
-            await callback.answer("请选择提示词方式")
+                await _answer(callback.message, text, reply_markup=_text_to_image_prompt_mode_keyboard())
+            await callback.answer("請選擇提示詞方式")
             return
         if action == "t2i:next:prompt":
             params = _text_to_image_params(data)
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             text = (
-                _text_to_image_status_text(step="4/4 请选择提示词方式", params=params)
-                + "\n\n请选择让 Grok 根据你的需求生成提示词，或直接输入自定义最终提示词。"
+                _text_to_image_status_text(step="4/4 請選擇提示詞方式", params=params)
+                + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
             )
             try:
                 await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_mode_keyboard())
             except Exception:
-                await callback.message.answer(text, reply_markup=_text_to_image_prompt_mode_keyboard())
-            await callback.answer("请选择提示词方式")
+                await _answer(callback.message, text, reply_markup=_text_to_image_prompt_mode_keyboard())
+            await callback.answer("請選擇提示詞方式")
             return
         if action == "t2i:back:prompt_mode":
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             params = _text_to_image_params(data)
-            step = "4/4 请选择提示词方式" if params.get("persona_available") else "3/3 请选择提示词方式"
-            text = _text_to_image_status_text(step=step, params=params) + "\n\n请选择让 Grok 根据你的需求生成提示词，或直接输入自定义最终提示词。"
+            step = "4/4 請選擇提示詞方式" if params.get("persona_available") else "3/3 請選擇提示詞方式"
+            text = _text_to_image_status_text(step=step, params=params) + "\n\n請選擇讓 Grok 根據你的需求生成提示詞，或直接輸入自定義最終提示詞。"
             try:
                 await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_mode_keyboard())
             except Exception:
-                await callback.message.answer(text, reply_markup=_text_to_image_prompt_mode_keyboard())
-            await callback.answer("已返回提示词方式")
+                await _answer(callback.message, text, reply_markup=_text_to_image_prompt_mode_keyboard())
+            await callback.answer("已返回提示詞方式")
             return
         if action == "t2i:back:persona":
             params = _text_to_image_params(data)
@@ -3456,7 +3497,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params = _text_to_image_params({**data, "prompt_mode_selected": False, "prompt_mode_label": ""})
             if params.get("persona_available"):
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
-                text = _text_to_image_status_text(step="3/4 请选择人设 LoRA", params=params)
+                text = _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params)
                 markup = _text_to_image_persona_keyboard(
                     persona_enabled=bool(params["persona_enabled"]),
                     persona_lora=str(params.get("persona_lora") or ""),
@@ -3466,10 +3507,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 try:
                     await callback.message.edit_text(text, reply_markup=markup)
                 except Exception:
-                    await callback.message.answer(text, reply_markup=markup)
+                    await _answer(callback.message, text, reply_markup=markup)
             else:
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
-                text = _text_to_image_status_text(step="2/3 请选择最终分辨率", params=params)
+                text = _text_to_image_status_text(step="2/3 請選擇最終分辨率", params=params)
                 markup = _text_to_image_resolution_keyboard(
                     final_resolution_enabled=bool(params["final_resolution_enabled"]),
                     selected=bool(params.get("resolution_selected")),
@@ -3478,7 +3519,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 try:
                     await callback.message.edit_text(text, reply_markup=markup)
                 except Exception:
-                    await callback.message.answer(text, reply_markup=markup)
+                    await _answer(callback.message, text, reply_markup=markup)
             await callback.answer("已返回上一步")
             return
         if action == "t2i:settings":
@@ -3501,38 +3542,38 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     "prompt_mode_label": "",
                 }
             )
-            await callback.message.answer(
-                _text_to_image_status_text(step="1/4 请重新选择图像比例", params=params),
+            await _answer(callback.message,
+                _text_to_image_status_text(step="1/4 請重新選擇圖像比例", params=params),
                 reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
             )
             await callback.answer()
             return
         if action == "t2i:adjust":
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
-            await callback.message.answer("请直接输入你希望 Grok 如何调整提示词，例如：更写实、换成夜景、保留人物姿势但改变服装。")
+            await _answer(callback.message, "請直接輸入你希望 Grok 如何調整提示詞，例如：更寫實、換成夜景、保留人物姿勢但改變服裝。")
             await callback.answer()
             return
         if action == "t2i:custom_prompt":
-            await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定义输入")
+            await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定義輸入")
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
-            params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "自定义输入"})
+            params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "自定義輸入"})
             text = (
                 _text_to_image_status_text(
-                    step="4/4 请输入自定义最终提示词" if params.get("persona_available") else "3/3 请输入自定义最终提示词",
+                    step="4/4 請輸入自定義最終提示詞" if params.get("persona_available") else "3/3 請輸入自定義最終提示詞",
                     params=params,
                 )
-                + "\n\n请输入自定义最终提示词。下一条消息会跳过 Grok，直接提交到 ComfyUI 工作流生成。"
+                + "\n\n請輸入自定義最終提示詞。下一條消息會跳過 Grok，直接提交到 ComfyUI 工作流生成。"
             )
             try:
                 await callback.message.edit_text(text, reply_markup=_text_to_image_prompt_entry_keyboard())
             except Exception:
-                await callback.message.answer(text, reply_markup=_text_to_image_prompt_entry_keyboard())
+                await _answer(callback.message, text, reply_markup=_text_to_image_prompt_entry_keyboard())
             await callback.answer()
             return
         if action == "t2i:regen":
             original = str(data.get("last_grok_user_request") or data.get("original_user_request") or data.get("final_prompt_text") or "").strip()
             if not original:
-                await callback.answer("没有原始需求，请重新输入", show_alert=True)
+                await callback.answer("沒有原始需求，請重新輸入", show_alert=True)
                 return
             try:
                 await _preview_text_to_image_prompt(
@@ -3542,8 +3583,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reference_image_path=str(data.get("last_grok_reference_image_path") or data.get("prompt_reference_image_local_path") or ""),
                 )
             except Exception as exc:
-                await callback.message.answer(
-                    f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
+                await _answer(callback.message,
+                    f"Grok 提示詞生成失敗：{_format_grok_preview_error(exc)}",
                     reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
                 )
             await callback.answer()
@@ -3551,7 +3592,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if action == "t2i:retry_display":
             final_prompt = _strip_prompt_char_count_note(str(data.get("final_prompt_text") or "").strip(), preserve_english=True)
             if not final_prompt:
-                await callback.answer("没有已保存的提示词，请重新生成", show_alert=True)
+                await callback.answer("沒有已保存的提示詞，請重新生成", show_alert=True)
                 return
             try:
                 await _show_text_to_image_prompt_review(
@@ -3560,17 +3601,17 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     prompt_text=final_prompt,
                     selected_model=str(data.get("selected_model") or "").strip(),
                 )
-                await callback.answer("中文预览已通过")
+                await callback.answer("中文預覽已通過")
             except Exception as exc:
                 await _show_text_to_image_display_pending(callback.message, state, exc=exc)
-                await callback.answer("中文预览未通过", show_alert=True)
+                await callback.answer("中文預覽未通過", show_alert=True)
             return
         if action == "t2i:submit":
             try:
                 await _submit_text_to_image_from_state(callback.message, state)
                 await callback.answer("已提交生成")
             except Exception as exc:
-                await callback.message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+                await _answer(callback.message, f"文生圖任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
                 await callback.answer()
             return
 
@@ -3588,10 +3629,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
         if runtime_changed:
             profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
-            await message.answer(
-                "\u540e\u53f0\u6587\u751f\u56fe\u5de5\u4f5c\u6d41\u5df2\u66f4\u65b0\uff0c"
-                "\u5df2\u540c\u6b65\u6700\u65b0\u53ef\u9009\u53c2\u6570\u3002\n\n"
-                + _text_to_image_status_text(step="1/4 \u8bf7\u9009\u62e9\u56fe\u50cf\u6bd4\u4f8b", params=params),
+            await _answer(message,
+                "後臺文生圖工作流已更新，"
+                "已同步最新可選參數。\n\n"
+                + _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
                 reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
             )
             return
@@ -3625,15 +3666,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     prompt_mode_label="",
                 )
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
-                await message.answer(
-                    _text_to_image_status_text(step="2/4 请选择最终分辨率", params=option),
+                await _answer(message,
+                    _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=option),
                     reply_markup=_text_to_image_resolution_reply_keyboard(
                         final_resolution_available=bool(option.get("final_resolution_available"))
                     ),
                 )
                 return
-            await message.answer(
-                _text_to_image_status_text(step="1/4 请先选择图像比例", params=params),
+            await _answer(message,
+                _text_to_image_status_text(step="1/4 請先選擇圖像比例", params=params),
                 reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
             )
             return
@@ -3641,19 +3682,19 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if current_state == ProductionWorkflowForm.text_to_image_waiting_for_resolution.state:
             if text == "上一步":
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
-                await message.answer(
-                    _text_to_image_status_text(step="1/4 请选择图像比例", params=params),
+                await _answer(message,
+                    _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
                     reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                 )
                 return
-            if text in {"使用基础分辨率", "开启最终分辨率"}:
-                if text == "开启最终分辨率" and not bool(params.get("final_resolution_available")):
-                    await message.answer(
-                        "当前工作流不支持最终分辨率，请选择“使用基础分辨率”。",
+            if text in {"使用基礎分辨率", "開啓最終分辨率"}:
+                if text == "開啓最終分辨率" and not bool(params.get("final_resolution_available")):
+                    await _answer(message,
+                        "當前工作流不支持最終分辨率，請選擇“使用基礎分辨率”。",
                         reply_markup=_text_to_image_resolution_reply_keyboard(final_resolution_available=False),
                     )
                     return
-                final_enabled = text == "开启最终分辨率"
+                final_enabled = text == "開啓最終分辨率"
                 await state.update_data(
                     final_resolution_enabled=final_enabled,
                     resolution_selected=True,
@@ -3673,15 +3714,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 )
                 if params.get("persona_available"):
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
-                    await message.answer(
-                        _text_to_image_status_text(step="3/4 请选择人设 LoRA", params=params),
+                    await _answer(message,
+                        _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params),
                         reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                 else:
                     await _show_text_to_image_prompt_mode(message, state)
                 return
-                await message.answer(
-                    _text_to_image_status_text(step="2/4 请先选择最终分辨率", params=params),
+                await _answer(message,
+                    _text_to_image_status_text(step="2/4 請先選擇最終分辨率", params=params),
                     reply_markup=_text_to_image_resolution_reply_keyboard(
                         final_resolution_available=bool(params.get("final_resolution_available"))
                     ),
@@ -3692,14 +3733,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             if text == "上一步":
                 await state.update_data(persona_selected=False, prompt_mode_selected=False, prompt_mode_label="")
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
-                await message.answer(
-                    _text_to_image_status_text(step="2/4 请选择最终分辨率", params=params),
+                await _answer(message,
+                    _text_to_image_status_text(step="2/4 請選擇最終分辨率", params=params),
                     reply_markup=_text_to_image_resolution_reply_keyboard(
                         final_resolution_available=bool(params.get("final_resolution_available"))
                     ),
                 )
                 return
-            persona_enabled = text != "不使用人设"
+            persona_enabled = text != "不使用人設"
             selected_lora = ""
             if persona_enabled:
                 for option in _text_to_image_persona_options(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")):
@@ -3707,8 +3748,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         selected_lora = str(option.get("path") or "")
                         break
                 if not selected_lora:
-                    await message.answer(
-                        _text_to_image_status_text(step="3/4 请先选择人设 LoRA", params=params),
+                    await _answer(message,
+                        _text_to_image_status_text(step="3/4 請先選擇人設 LoRA", params=params),
                         reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                     return
@@ -3736,45 +3777,45 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             if text == "上一步":
                 if params.get("persona_available"):
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_persona)
-                    await message.answer(
-                        _text_to_image_status_text(step="3/4 请选择人设 LoRA", params=params),
+                    await _answer(message,
+                        _text_to_image_status_text(step="3/4 請選擇人設 LoRA", params=params),
                         reply_markup=_text_to_image_persona_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
                     )
                 else:
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
-                    await message.answer(
-                        _text_to_image_status_text(step="2/3 请选择最终分辨率", params=params),
+                    await _answer(message,
+                        _text_to_image_status_text(step="2/3 請選擇最終分辨率", params=params),
                         reply_markup=_text_to_image_resolution_reply_keyboard(
                             final_resolution_available=bool(params.get("final_resolution_available"))
                         ),
                     )
                 return
-            if text == "让 Grok 生成提示词":
+            if text == "讓 Grok 生成提示詞":
                 await state.update_data(prompt_mode_selected=True, prompt_mode_label="Grok 生成")
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
-                await message.answer(
+                await _answer(message,
                     _text_to_image_status_text(
-                        step="4/4 请输入图片需求或上传参考图" if params.get("persona_available") else "3/3 请输入图片需求或上传参考图",
+                        step="4/4 請輸入圖片需求或上傳參考圖" if params.get("persona_available") else "3/3 請輸入圖片需求或上傳參考圖",
                         params={**params, "prompt_mode_selected": True, "prompt_mode_label": "Grok 生成"},
                     )
-                    + "\n\n可以直接输入图片需求，也可以上传参考图片；上传图片时可在图片说明里补充要求。Grok 会识别图片内容，并结合你的文字生成最终提示词供你确认。",
+                    + "\n\n可以直接輸入圖片需求，也可以上傳參考圖片；上傳圖片時可在圖片說明裏補充要求。Grok 會識別圖片內容，並結合你的文字生成最終提示詞供你確認。",
                     reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
                 )
                 return
-            if text == "输入自定义提示词":
-                await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定义提示词", custom_prompt_used=True)
+            if text == "輸入自定義提示詞":
+                await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定義提示詞", custom_prompt_used=True)
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
-                await message.answer(
+                await _answer(message,
                     _text_to_image_status_text(
-                        step="4/4 请输入自定义最终提示词" if params.get("persona_available") else "3/3 请输入自定义最终提示词",
-                        params={**params, "prompt_mode_selected": True, "prompt_mode_label": "自定义提示词"},
+                        step="4/4 請輸入自定義最終提示詞" if params.get("persona_available") else "3/3 請輸入自定義最終提示詞",
+                        params={**params, "prompt_mode_selected": True, "prompt_mode_label": "自定義提示詞"},
                     )
-                    + "\n\n请输入自定义最终提示词。",
+                    + "\n\n請輸入自定義最終提示詞。",
                     reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
                 )
                 return
-            step = "4/4 请先选择提示词方式" if params.get("persona_available") else "3/3 请先选择提示词方式"
-            await message.answer(
+            step = "4/4 請先選擇提示詞方式" if params.get("persona_available") else "3/3 請先選擇提示詞方式"
+            await _answer(message,
                 _text_to_image_status_text(step=step, params=params),
                 reply_markup=_text_to_image_prompt_mode_reply_keyboard(),
             )
@@ -3790,45 +3831,45 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
         if runtime_changed:
             profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
-            await message.answer(
-                "\u540e\u53f0\u6587\u751f\u56fe\u5de5\u4f5c\u6d41\u5df2\u66f4\u65b0\uff0c"
-                "\u5df2\u540c\u6b65\u6700\u65b0\u53ef\u9009\u53c2\u6570\u3002\n\n"
-                + _text_to_image_status_text(step="1/4 \u8bf7\u9009\u62e9\u56fe\u50cf\u6bd4\u4f8b", params=params),
+            await _answer(message,
+                "後臺文生圖工作流已更新，"
+                "已同步最新可選參數。\n\n"
+                + _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
                 reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
             )
             return
         prompt = _message_text(message)
         data = await state.get_data()
-        if prompt == "使用这个提示词生成" and not _image_ext_from_message(message):
+        if prompt == "使用這個提示詞生成" and not _image_ext_from_message(message):
             if str(data.get("final_prompt_text") or "").strip():
                 try:
                     await _submit_text_to_image_from_state(message, state)
                 except Exception as exc:
-                    await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_text_to_image_prompt_reply_keyboard())
+                    await _answer(message, f"文生圖任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_text_to_image_prompt_reply_keyboard())
                 return
-            await message.answer("还没有可用的最终提示词，请先输入图片需求。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
+            await _answer(message, "還沒有可用的最終提示詞，請先輸入圖片需求。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
             return
         if prompt == "上一步" and not _image_ext_from_message(message):
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt_mode)
             await _show_text_to_image_prompt_mode(message, state)
             return
-        if prompt == "输入自定义提示词" and not _image_ext_from_message(message):
-            await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定义输入")
+        if prompt == "輸入自定義提示詞" and not _image_ext_from_message(message):
+            await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定義輸入")
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
-            params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "自定义输入"})
-            await message.answer(
+            params = _text_to_image_params({**data, "prompt_mode_selected": True, "prompt_mode_label": "自定義輸入"})
+            await _answer(message,
                 _text_to_image_status_text(
-                    step="4/4 请输入自定义最终提示词" if params.get("persona_available") else "3/3 请输入自定义最终提示词",
+                    step="4/4 請輸入自定義最終提示詞" if params.get("persona_available") else "3/3 請輸入自定義最終提示詞",
                     params=params,
                 )
-                + "\n\n请输入自定义最终提示词。下一条消息会跳过 Grok，直接提交到 ComfyUI 工作流生成。",
+                + "\n\n請輸入自定義最終提示詞。下一條消息會跳過 Grok，直接提交到 ComfyUI 工作流生成。",
                 reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
             )
             return
-        if prompt == "重新生成提示词" and not _image_ext_from_message(message):
+        if prompt == "重新生成提示詞" and not _image_ext_from_message(message):
             original = str(data.get("last_grok_user_request") or data.get("original_user_request") or "").strip()
             if not original:
-                await message.answer("没有原始需求，请先输入图片需求。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
+                await _answer(message, "沒有原始需求，請先輸入圖片需求。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
                 return
             try:
                 await _preview_text_to_image_prompt(
@@ -3838,8 +3879,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reference_image_path=str(data.get("last_grok_reference_image_path") or data.get("prompt_reference_image_local_path") or ""),
                 )
             except Exception as exc:
-                await message.answer(
-                    f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
+                await _answer(message,
+                    f"Grok 提示詞生成失敗：{_format_grok_preview_error(exc)}",
                     reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
                 )
             return
@@ -3854,14 +3895,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 work_dir=str(work_dir),
                 prompt_reference_image_local_path=reference_image_path,
             )
-            await message.answer("已更新参考图。")
+            await _answer(message, "已更新參考圖。")
             if not prompt:
-                prompt = "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by commas (，): 1.[人物+全身姿态+场景] 2.穿着[服装] 3.[暴露器官] 4.她的[左手动作]而[右手动作] 5.她的身体[朝向] 6.她的头[转向+眼神] 7.[背景] 8.[光线] 9.[技术参数]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Example: 一位美丽女郎全身站立在豪华卧室中，穿着优雅的黑色丝绸睡裙，薄薄的意大利面条肩带，低领部部分解开露出深深的乳沟和侧乳，她的左手放在臀部上而右手触摸着裸露的大腿，她的身体微微侧向一边朝向镜头，她的头转向直视镜头带着诱惑的眼神，卧室背景有大大的特大号床铺，白色床单凌乱不堪，柔和的卧室灯投射出温柔的阴影，浅景深让主体清晰而背景微微模糊，真实皮肤纹理，细节的织物褶皱，自然的身体曲线，高细节，写实摄影风格，电影摄影。 This is the ONLY acceptable format."
+                prompt = "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by commas (，): 1.[人物+全身姿態+場景] 2.穿着[服裝] 3.[暴露器官] 4.她的[左手動作]而[右手動作] 5.她的身體[朝向] 6.她的頭[轉向+眼神] 7.[背景] 8.[光線] 9.[技術參數]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Example: 一位美麗女郎全身站立在豪華臥室中，穿着優雅的黑色絲綢睡裙，薄薄的意大利麪條肩帶，低領部部分解開露出深深的乳溝和側乳，她的左手放在臀部上而右手觸摸着裸露的大腿，她的身體微微側向一邊朝向鏡頭，她的頭轉向直視鏡頭帶着誘惑的眼神，臥室背景有大大的特大號牀鋪，白色牀單凌亂不堪，柔和的臥室燈投射出溫柔的陰影，淺景深讓主體清晰而背景微微模糊，真實皮膚紋理，細節的織物褶皺，自然的身體曲線，高細節，寫實攝影風格，電影攝影。 This is the ONLY acceptable format."
         if not prompt:
             params = _text_to_image_params(data)
-            await message.answer(
-                _text_to_image_status_text(step="4/4 请输入图片需求或上传参考图" if params.get("persona_available") else "3/3 请输入图片需求或上传参考图", params=params)
-                + "\n\n可以发送文字需求，也可以上传一张参考图片；上传图片时可在图片说明里补充要求。",
+            await _answer(message,
+                _text_to_image_status_text(step="4/4 請輸入圖片需求或上傳參考圖" if params.get("persona_available") else "3/3 請輸入圖片需求或上傳參考圖", params=params)
+                + "\n\n可以傳送文字需求，也可以上傳一張參考圖片；上傳圖片時可在圖片說明裏補充要求。",
                 reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
             )
             return
@@ -3874,8 +3915,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
         except Exception as exc:
             params = _text_to_image_params(await state.get_data())
-            await message.answer(
-                f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
+            await _answer(message,
+                f"Grok 提示詞生成失敗：{_format_grok_preview_error(exc)}",
                 reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
             )
 
@@ -3889,30 +3930,30 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         revision = _message_text(message)
         if not revision:
-            await message.answer("请直接输入调整要求，或点击“使用这个提示词生成”。", reply_markup=_text_to_image_prompt_reply_keyboard())
+            await _answer(message, "請直接輸入調整要求，或點擊“使用這個提示詞生成”。", reply_markup=_text_to_image_prompt_reply_keyboard())
             return
         data = await state.get_data()
-        if revision == "使用这个提示词生成":
+        if revision == "使用這個提示詞生成":
             try:
                 await _submit_text_to_image_from_state(message, state)
             except Exception as exc:
-                await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_text_to_image_prompt_reply_keyboard())
+                await _answer(message, f"文生圖任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_text_to_image_prompt_reply_keyboard())
             return
-        if revision in {"输入自定义提示词提交", "输入自定义提示词"}:
-            await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定义输入")
+        if revision in {"輸入自定義提示詞提交", "輸入自定義提示詞"}:
+            await state.update_data(prompt_mode_selected=True, prompt_mode_label="自定義輸入")
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
-            await message.answer("请输入自定义最终提示词。下一条消息会跳过 Grok，直接提交到 ComfyUI 工作流生成。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
+            await _answer(message, "請輸入自定義最終提示詞。下一條消息會跳過 Grok，直接提交到 ComfyUI 工作流生成。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
             return
         if revision == "上一步":
             await _show_text_to_image_prompt_mode(message, state)
             return
-        if revision == "继续让 Grok 调整":
-            await message.answer("请直接输入你希望 Grok 如何调整提示词，例如：更写实、换成夜景、保留人物姿势但改变服装。", reply_markup=_text_to_image_prompt_reply_keyboard())
+        if revision == "繼續讓 Grok 調整":
+            await _answer(message, "請直接輸入你希望 Grok 如何調整提示詞，例如：更寫實、換成夜景、保留人物姿勢但改變服裝。", reply_markup=_text_to_image_prompt_reply_keyboard())
             return
-        if revision == "重新生成提示词":
+        if revision == "重新生成提示詞":
             original = str(data.get("last_grok_user_request") or data.get("original_user_request") or data.get("final_prompt_text") or "").strip()
             if not original:
-                await message.answer("没有原始需求，请重新输入。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
+                await _answer(message, "沒有原始需求，請重新輸入。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_prompt)
                 return
             try:
@@ -3923,12 +3964,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reference_image_path=str(data.get("last_grok_reference_image_path") or data.get("prompt_reference_image_local_path") or ""),
                 )
             except Exception as exc:
-                await message.answer(
-                    f"Grok 提示词生成失败：{_format_grok_preview_error(exc)}",
+                await _answer(message,
+                    f"Grok 提示詞生成失敗：{_format_grok_preview_error(exc)}",
                     reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
                 )
             return
-        if revision == "返回参数设置":
+        if revision == "返回參數設定":
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
             params = _text_to_image_params(
                 {
@@ -3947,8 +3988,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 prompt_mode_selected=False,
                 prompt_mode_label="",
             )
-            await message.answer(
-                _text_to_image_status_text(step="1/4 请重新选择图像比例", params=params),
+            await _answer(message,
+                _text_to_image_status_text(step="1/4 請重新選擇圖像比例", params=params),
                 reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
             )
             return
@@ -3974,8 +4015,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 latest_only=True,
             )
         except Exception as exc:
-            await message.answer(
-                f"Grok 提示词调整失败：{_format_grok_preview_error(exc)}",
+            await _answer(message,
+                f"Grok 提示詞調整失敗：{_format_grok_preview_error(exc)}",
                 reply_markup=_text_to_image_prompt_failure_reply_keyboard(),
             )
 
@@ -3993,45 +4034,45 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await _show_text_to_image_prompt_mode(message, state)
             return
         if not custom_prompt:
-            await message.answer("请输入自定义最终提示词。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
+            await _answer(message, "請輸入自定義最終提示詞。", reply_markup=_text_to_image_prompt_entry_reply_keyboard())
             return
         data = await state.get_data()
         await state.update_data(
             final_prompt_text=custom_prompt,
-            selected_model="自定义提示词",
+            selected_model="自定義提示詞",
             original_user_request=str(data.get("original_user_request") or custom_prompt).strip(),
             custom_prompt_used=True,
             prompt_display_ready=True,
             prompt_display_pending=False,
         )
         try:
-            await message.answer("已收到自定义提示词，正在提交生成。")
+            await _answer(message, "已收到自定義提示詞，正在提交生成。")
             await _submit_text_to_image_from_state(message, state)
         except Exception as exc:
             await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_custom_prompt)
-            await message.answer(
-                f"自定义提示词提交失败：{_format_tg_user_error(exc)}\n\n请重新输入提示词，或返回上一步。",
+            await _answer(message,
+                f"自定義提示詞提交失敗：{_format_tg_user_error(exc)}\n\n請重新輸入提示詞，或返回上一步。",
                 reply_markup=_text_to_image_prompt_entry_reply_keyboard(),
             )
 
     @router.message(Command("whoami"))
     @router.message(Command("id"))
     async def cmd_whoami(message: Message) -> None:
-        await message.answer(_chat_identity_text(message))
+        await _answer(message, _chat_identity_text(message))
 
     @router.message(CommandStart())
     async def cmd_start(message: Message) -> None:
         if not await ensure_authorized(message):
             return
-        await message.answer(_quick_start_text(service), reply_markup=_menu_keyboard())
+        await _answer(message, _quick_start_text(service), reply_markup=_menu_keyboard())
 
-    @router.message(F.text == "多智能体数字人")
+    @router.message(F.text == "多智能體數字人")
     @router.message(F.text == "多智能體數字人")
     async def on_keyword_entry(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
         await state.clear()
-        await message.answer(_quick_start_text(service), reply_markup=_menu_keyboard())
+        await _answer(message, _quick_start_text(service), reply_markup=_menu_keyboard())
 
     @router.message(Command("status"))
     async def cmd_status(message: Message) -> None:
@@ -4043,7 +4084,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def cmd_workflow(message: Message) -> None:
         if not await ensure_authorized(message):
             return
-        await message.answer(_workflow_config_text(service), reply_markup=_menu_keyboard())
+        await _answer(message, _workflow_config_text(service), reply_markup=_menu_keyboard())
 
     @router.message(Command("stop"))
     async def cmd_stop(message: Message, state: FSMContext) -> None:
@@ -4054,8 +4095,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def cmd_workbench(message: Message) -> None:
         if not await ensure_authorized(message):
             return
-        await message.answer(
-            f"工作台网址: {service.resolve_config().public_base_url}",
+        await _answer(message,
+            f"工作臺網址: {service.resolve_config().public_base_url}",
             reply_markup=_menu_keyboard(),
         )
 
@@ -4065,14 +4106,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await state.clear()
         await state.set_state(ScriptForm.waiting_for_script)
-        await message.answer("请直接贴上你想作为预设的文案内容。", reply_markup=_menu_keyboard())
+        await _answer(message, "請直接貼上你想作爲預設的文案內容。", reply_markup=_menu_keyboard())
 
     @router.message(Command("cancel"))
     async def cmd_cancel(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
         await state.clear()
-        await message.answer("本次素材上传流程已取消。", reply_markup=_menu_keyboard())
+        await _answer(message, "本次素材上傳流程已取消。", reply_markup=_menu_keyboard())
 
     @router.message(Command("custom"))
     async def cmd_custom(message: Message, state: FSMContext) -> None:
@@ -4088,13 +4129,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if _canonical_button_text(_message_text(message)) == MAIN_MENU_BUTTON:
             await state.clear()
-            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+            await _answer(message, "已返回主選單。", reply_markup=_menu_keyboard())
             return
         if not await ensure_authorized(message):
             return
         requirement = _message_text(message)
         if not requirement:
-            await message.answer("请用一句话写出这次数字人视频的风格或要求。", reply_markup=_digital_human_keyboard())
+            await _answer(message, "請用一句話寫出這次數字人視頻的風格或要求。", reply_markup=_digital_human_keyboard())
             return
         await start_upload_flow(message, state, requirement=requirement)
 
@@ -4103,7 +4144,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         await state.clear()
-        await message.answer(f"预设素材功能已移除。请使用「{DIGITAL_HUMAN_VIDEO_BUTTON}」建立数字人视频。", reply_markup=_menu_keyboard())
+        await _answer(message, f"預設素材功能已移除。請使用「{DIGITAL_HUMAN_VIDEO_BUTTON}」建立數字人視頻。", reply_markup=_menu_keyboard())
 
     @router.message(Command("rerun"))
     async def cmd_rerun(message: Message) -> None:
@@ -4111,7 +4152,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         latest_task = service.get_latest_task_for_submitter(int(message.chat.id))
         if latest_task is None:
-            await message.answer("你目前还没有可重跑的历史任务。", reply_markup=_menu_keyboard())
+            await _answer(message, "你目前還沒有可重跑的歷史任務。", reply_markup=_menu_keyboard())
             return
         request = service.clone_task_request(latest_task.id)
         await enqueue_request(message, request, source="telegram-rerun", is_default_assets=request.publish_to_default_paths)
@@ -4128,11 +4169,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         script = _message_text(message)
         if not script:
-            await message.answer("文案不能为空，请重新输入。", reply_markup=_menu_keyboard())
+            await _answer(message, "文案不能爲空，請重新輸入。", reply_markup=_menu_keyboard())
             return
         chat_script_drafts[int(message.chat.id)] = script
         await state.clear()
-        await message.answer("你的预设文案已更新。", reply_markup=_menu_keyboard())
+        await _answer(message, "你的預設文案已更新。", reply_markup=_menu_keyboard())
 
     @router.message(UploadFlowForm.waiting_for_video)
     async def on_upload_video(message: Message, state: FSMContext) -> None:
@@ -4146,12 +4187,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         suffix = _video_ext_from_message(message)
         if suffix is None:
-            await message.answer("请上传视频文件，或把视频当成 document 传送。", reply_markup=_menu_keyboard())
+            await _answer(message, "請上傳視頻文件，或把視頻當成 document 傳送。", reply_markup=_menu_keyboard())
             return
         params = {
             "speech_text": str(data["script_text"]),
             "prompt_text": prompt_text,
-            "style_hint": portrait_prompt or "口播数字人写实人像",
+            "style_hint": portrait_prompt or "口播數字人寫實人像",
             "duration_seconds": int(duration or 15),
             "use_ai_copy": False,
             "tg_use_llm_prompt": True,
@@ -4161,7 +4202,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "text_to_image", params)
         except Exception as exc:
-            await message.answer(f"文生图任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"文生圖任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.image_waiting_for_product_image)
     async def on_image_first_reference(message: Message, state: FSMContext) -> None:
@@ -4176,16 +4217,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         mode = str(data.get("image_mode") or "multi_image")
         title = _image_mode_title(mode)
         if suffix is None:
-            first_step = "请上传原图。" if mode == "image_replace" else "请上传第一张参考图。"
-            await message.answer(f"{title}\n步骤 1/3：{first_step}", reply_markup=_image_edit_keyboard())
+            first_step = "請上傳原圖。" if mode == "image_replace" else "請上傳第一張參考圖。"
+            await _answer(message, f"{title}\n步驟 1/3：{first_step}", reply_markup=_image_edit_keyboard())
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix=f"tg_{mode}")))
         target = work_dir / f"primary{suffix}"
         await _download_message_media(message, target)
         await state.update_data(work_dir=str(work_dir), product_image_local_path=str(target.resolve()))
         await state.set_state(ProductionWorkflowForm.image_waiting_for_model_image)
-        second_step = "请上传要替换成的参考图。" if mode == "image_replace" else "请上传第二张参考图。"
-        await message.answer(f"{title}\n步骤 2/3：{second_step}", reply_markup=_image_edit_keyboard())
+        second_step = "請上傳要替換成的參考圖。" if mode == "image_replace" else "請上傳第二張參考圖。"
+        await _answer(message, f"{title}\n步驟 2/3：{second_step}", reply_markup=_image_edit_keyboard())
 
     @router.message(ProductionWorkflowForm.image_waiting_for_model_image)
     async def on_image_second_reference(message: Message, state: FSMContext) -> None:
@@ -4200,15 +4241,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         mode = str(data.get("image_mode") or "multi_image")
         title = _image_mode_title(mode)
         if suffix is None:
-            second_step = "请上传要替换成的参考图。" if mode == "image_replace" else "请上传第二张参考图。"
-            await message.answer(f"{title}\n步骤 2/3：{second_step}", reply_markup=_image_edit_keyboard())
+            second_step = "請上傳要替換成的參考圖。" if mode == "image_replace" else "請上傳第二張參考圖。"
+            await _answer(message, f"{title}\n步驟 2/3：{second_step}", reply_markup=_image_edit_keyboard())
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix=f"tg_{mode}")))
         target = work_dir / f"secondary{suffix}"
         await _download_message_media(message, target)
         await state.update_data(work_dir=str(work_dir), model_image_local_path=str(target.resolve()))
         await state.set_state(ProductionWorkflowForm.image_waiting_for_prompt)
-        await message.answer(f"{title}\n步骤 3/3：请输入这次图片生成需求。", reply_markup=_image_edit_keyboard())
+        await _answer(message, f"{title}\n步驟 3/3：請輸入這次圖片生成需求。", reply_markup=_image_edit_keyboard())
 
     @router.message(ProductionWorkflowForm.image_waiting_for_prompt)
     async def on_image_reference_prompt(message: Message, state: FSMContext) -> None:
@@ -4223,7 +4264,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         mode = str(data.get("image_mode") or "multi_image")
         title = _image_mode_title(mode)
         if not prompt:
-            await message.answer(f"{title}\n步骤 3/3：请直接输入这次图片生成需求。", reply_markup=_image_edit_keyboard())
+            await _answer(message, f"{title}\n步驟 3/3：請直接輸入這次圖片生成需求。", reply_markup=_image_edit_keyboard())
             return
         params = {
             "product_image_local_path": str(data.get("product_image_local_path") or ""),
@@ -4238,7 +4279,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "image_generate", params)
         except Exception as exc:
-            await message.answer(f"{title}任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"{title}任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.image_edit_waiting_for_image)
     async def on_image_edit_image(message: Message, state: FSMContext) -> None:
@@ -4255,29 +4296,29 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         suffix = _image_ext_from_message(message)
         data = await state.get_data()
         single_input = str(data.get("image_edit_mode") or "").strip() == "single"
-        title = "单图编辑" if single_input else "图片编辑"
+        title = "單圖編輯" if single_input else "圖片編輯"
         total_steps = "3" if single_input else "4"
         has_input_image = _recorded_local_resource(data.get("input_image_local_path"))
         if text == KEEP_CURRENT_RESOURCE_BUTTON and has_input_image:
             if single_input:
                 await state.update_data(reference_image_local_path=str(data.get("reference_image_local_path") or data.get("input_image_local_path") or ""))
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-                await message.answer("单图编辑\n已沿用当前原图。\n步骤 2/3：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+                await _answer(message, "單圖編輯\n已沿用當前原圖。\n步驟 2/3：請輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
                 return
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
-            await message.answer(
-                "图片编辑\n已沿用当前原图。\n步骤 2/4：请上传参考图或素材图；如果要继续使用已记录的参考图，请点击“沿用当前资源”。",
+            await _answer(message,
+                "圖片編輯\n已沿用當前原圖。\n步驟 2/4：請上傳參考圖或素材圖；如果要繼續使用已記錄的參考圖，請點擊“沿用目前資源”。",
                 reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("reference_image_local_path"))),
             )
             return
         if suffix is None:
             if has_input_image:
-                await message.answer(
-                    f"{title}\n已记录当前原图。可以上传新原图替换，或点击“沿用当前资源”继续。",
+                await _answer(message,
+                    f"{title}\n已記錄當前原圖。可以上傳新原圖替換，或點擊“沿用目前資源”繼續。",
                     reply_markup=_image_task_step_keyboard(back=False, keep_current=True),
                 )
                 return
-            await message.answer(f"{title}\n步骤 1/{total_steps}：请上传需要编辑的原图。", reply_markup=_image_task_step_keyboard(back=False))
+            await _answer(message, f"{title}\n步驟 1/{total_steps}：請上傳需要編輯的原圖。", reply_markup=_image_task_step_keyboard(back=False))
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_image_edit")))
         target = work_dir / f"input_{int(message.message_id)}{suffix}"
@@ -4291,12 +4332,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             update_payload["reference_image_local_path"] = str(target.resolve())
             await state.update_data(**update_payload)
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await message.answer("单图编辑\n已更新原图。\n步骤 2/3：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, "單圖編輯\n已更新原圖。\n步驟 2/3：請輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
             return
         await state.update_data(**update_payload)
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
-        await message.answer(
-            "图片编辑\n已更新原图。\n步骤 2/4：请上传参考图或素材图。",
+        await _answer(message,
+            "圖片編輯\n已更新原圖。\n步驟 2/4：請上傳參考圖或素材圖。",
             reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("reference_image_local_path"))),
         )
 
@@ -4312,8 +4353,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if text == "上一步":
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
             data = await state.get_data()
-            await message.answer(
-                "图片编辑\n步骤 1/4：如需替换原图，请上传新图片；否则点击“沿用当前资源”。",
+            await _answer(message,
+                "圖片編輯\n步驟 1/4：如需替換原圖，請上傳新圖片；否則點擊“沿用目前資源”。",
                 reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("input_image_local_path"))),
             )
             return
@@ -4322,16 +4363,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         has_reference_image = _recorded_local_resource(data.get("reference_image_local_path"))
         if text == KEEP_CURRENT_RESOURCE_BUTTON and has_reference_image:
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await message.answer("图片编辑\n已沿用当前参考图。\n步骤 3/4：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, "圖片編輯\n已沿用當前參考圖。\n步驟 3/4：請輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
             return
         if suffix is None:
             if has_reference_image:
-                await message.answer(
-                    "图片编辑\n已记录当前参考图。可以上传新参考图替换，或点击“沿用当前资源”继续。",
+                await _answer(message,
+                    "圖片編輯\n已記錄當前參考圖。可以上傳新參考圖替換，或點擊“沿用目前資源”繼續。",
                     reply_markup=_image_task_step_keyboard(keep_current=True),
                 )
                 return
-            await message.answer("图片编辑\n步骤 2/4：请上传参考图或素材图。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, "圖片編輯\n步驟 2/4：請上傳參考圖或素材圖。", reply_markup=_image_task_step_keyboard())
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_image_edit")))
         target = work_dir / f"reference_{int(message.message_id)}{suffix}"
@@ -4342,7 +4383,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             **_clear_image_edit_prompt_fields(),
         )
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-        await message.answer("图片编辑\n已更新参考图。\n步骤 3/4：请输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+        await _answer(message, "圖片編輯\n已更新參考圖。\n步驟 3/4：請輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
 
     @router.message(ProductionWorkflowForm.image_edit_waiting_for_prompt)
     async def on_image_edit_prompt(message: Message, state: FSMContext) -> None:
@@ -4359,20 +4400,20 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await state.update_data(**_clear_image_edit_prompt_fields())
             if single_input:
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
-                await message.answer(
-                    "单图编辑\n步骤 1/3：如需替换原图，请上传新图片；否则点击“沿用当前资源”。",
+                await _answer(message,
+                    "單圖編輯\n步驟 1/3：如需替換原圖，請上傳新圖片；否則點擊“沿用目前資源”。",
                     reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("input_image_local_path"))),
                 )
             else:
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
-                await message.answer(
-                    "图片编辑\n步骤 2/4：如需替换参考图，请上传新图片；否则点击“沿用当前资源”。",
+                await _answer(message,
+                    "圖片編輯\n步驟 2/4：如需替換參考圖，請上傳新圖片；否則點擊“沿用目前資源”。",
                     reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("reference_image_local_path"))),
                 )
             return
         prompt = _message_text(message)
         if not prompt:
-            await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请直接输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請直接輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
             return
         try:
             await _preview_image_edit_prompt(message, state, prompt)
@@ -4385,10 +4426,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 image_edit_waiting_for_adjustment=False,
             )
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
-            await message.answer(
-                "Grok 图片编辑提示词生成失败："
+            await _answer(message,
+                "Grok 圖片編輯提示詞生成失敗："
                 f"{_format_grok_preview_error(exc)}\n\n"
-                "任务还没有提交，已保留当前素材。可以重新生成提示词，或输入自定义提示词提交。",
+                "任務還沒有提交，已保留當前素材。可以重新生成提示詞，或輸入自定義提示詞提交。",
                 reply_markup=_image_edit_prompt_failure_keyboard(),
             )
 
@@ -4406,39 +4447,39 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if text == "上一步":
             await state.update_data(**_clear_image_edit_prompt_fields())
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請重新輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
             return
         if text == MAIN_MENU_BUTTON:
             await state.clear()
-            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+            await _answer(message, "已返回主選單。", reply_markup=_menu_keyboard())
             return
-        if text == "输入自定义提示词提交":
+        if text == "輸入自定義提示詞提交":
             await state.update_data(image_edit_waiting_for_custom_prompt=True, image_edit_waiting_for_adjustment=False)
-            await message.answer("请输入自定义最终图片编辑提示词。下一条消息会跳过 Grok，直接提交编辑任务。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, "請輸入自定義最終圖片編輯提示詞。下一條消息會跳過 Grok，直接提交編輯任務。", reply_markup=_image_task_step_keyboard())
             return
-        if text == "重新生成提示词":
+        if text == "重新生成提示詞":
             original_request = str(data.get("image_edit_user_request") or data.get("image_edit_prompt") or "").strip()
             if not original_request:
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-                await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+                await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請重新輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
                 return
             try:
                 await _preview_image_edit_prompt(message, state, original_request)
             except Exception as exc:
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
-                await message.answer(
-                    f"Grok 图片编辑提示词生成失败：{_format_grok_preview_error(exc)}",
+                await _answer(message,
+                    f"Grok 圖片編輯提示詞生成失敗：{_format_grok_preview_error(exc)}",
                     reply_markup=_image_edit_prompt_failure_keyboard(),
                 )
             return
-        if text == "继续让 Grok 调整":
+        if text == "繼續讓 Grok 調整":
             await state.update_data(image_edit_waiting_for_adjustment=True, image_edit_waiting_for_custom_prompt=False)
-            await message.answer("请直接输入调整要求，例如：只换衣服、保留人物姿势、背景不要变。", reply_markup=_image_edit_prompt_review_keyboard())
+            await _answer(message, "請直接輸入調整要求，例如：只換衣服、保留人物姿勢、背景不要變。", reply_markup=_image_edit_prompt_review_keyboard())
             return
         if bool(data.get("image_edit_waiting_for_adjustment")):
             adjustment = _message_text(message)
             if not adjustment:
-                await message.answer("请直接输入调整要求。", reply_markup=_image_edit_prompt_review_keyboard())
+                await _answer(message, "請直接輸入調整要求。", reply_markup=_image_edit_prompt_review_keyboard())
                 return
             base_prompt = str(data.get("image_edit_generated_prompt") or data.get("image_edit_prompt") or "").strip()
             original_request = str(data.get("image_edit_user_request") or "").strip()
@@ -4456,15 +4497,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await _preview_image_edit_prompt(message, state, adjusted_request)
             except Exception as exc:
                 await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
-                await message.answer(
-                    f"Grok 图片编辑提示词调整失败：{_format_grok_preview_error(exc)}",
+                await _answer(message,
+                    f"Grok 圖片編輯提示詞調整失敗：{_format_grok_preview_error(exc)}",
                     reply_markup=_image_edit_prompt_failure_keyboard(),
                 )
             return
         if bool(data.get("image_edit_waiting_for_custom_prompt")):
             custom_prompt = _message_text(message)
             if not custom_prompt:
-                await message.answer("请输入自定义最终图片编辑提示词。", reply_markup=_image_task_step_keyboard())
+                await _answer(message, "請輸入自定義最終圖片編輯提示詞。", reply_markup=_image_task_step_keyboard())
                 return
             await state.update_data(
                 image_edit_prompt=custom_prompt,
@@ -4475,13 +4516,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             await _submit_image_edit_from_state(message, state, custom_prompt)
             return
-        if text != "使用这个提示词提交":
-            await message.answer(f"{title}\n请先查看 Grok 生成的提示词，确认合适后点击「使用这个提示词提交」。", reply_markup=_image_edit_prompt_review_keyboard())
+        if text != "使用這個提示詞提交":
+            await _answer(message, f"{title}\n請先查看 Grok 生成的提示詞，確認合適後點擊「使用這個提示詞提交」。", reply_markup=_image_edit_prompt_review_keyboard())
             return
         prompt = str(data.get("image_edit_generated_prompt") or data.get("image_edit_prompt") or "").strip()
         if not prompt:
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await message.answer(f"{title}\n步骤 {total_steps - 1}/{total_steps}：请重新输入这次图片编辑要求。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請重新輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
             return
         await _submit_image_edit_from_state(message, state, prompt)
 
@@ -4502,19 +4543,19 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         has_target_image = _recorded_local_resource(data.get("target_image_local_path"))
         if text == KEEP_CURRENT_RESOURCE_BUTTON and has_target_image:
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
-            await message.answer(
-                "人物换脸\n已沿用当前原图。\n步骤 2/4：请上传人脸参考图；如果要继续使用已记录的人脸参考图，请点击“沿用当前资源”。",
+            await _answer(message,
+                "人物換臉\n已沿用當前原圖。\n步驟 2/4：請上傳人臉參考圖；如果要繼續使用已記錄的人臉參考圖，請點擊“沿用目前資源”。",
                 reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("source_image_local_path"))),
             )
             return
         if suffix is None:
             if has_target_image:
-                await message.answer(
-                    "人物换脸\n已记录当前原图。可以上传新原图替换，或点击“沿用当前资源”继续。",
+                await _answer(message,
+                    "人物換臉\n已記錄當前原圖。可以上傳新原圖替換，或點擊“沿用目前資源”繼續。",
                     reply_markup=_image_task_step_keyboard(back=False, keep_current=True),
                 )
                 return
-            await message.answer("人物换脸\n步骤 1/4：请上传原图。", reply_markup=_image_task_step_keyboard(back=False))
+            await _answer(message, "人物換臉\n步驟 1/4：請上傳原圖。", reply_markup=_image_task_step_keyboard(back=False))
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_face_swap")))
         target = work_dir / f"target_{int(message.message_id)}{suffix}"
@@ -4525,8 +4566,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             **_clear_face_swap_prompt_fields(),
         )
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
-        await message.answer(
-            "人物换脸\n已更新原图。\n步骤 2/4：请上传人脸参考图。",
+        await _answer(message,
+            "人物換臉\n已更新原圖。\n步驟 2/4：請上傳人臉參考圖。",
             reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("source_image_local_path"))),
         )
 
@@ -4542,8 +4583,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if text == "上一步":
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_target_image)
             data = await state.get_data()
-            await message.answer(
-                "人物换脸\n步骤 1/4：如需替换原图，请上传新图片；否则点击“沿用当前资源”。",
+            await _answer(message,
+                "人物換臉\n步驟 1/4：如需替換原圖，請上傳新圖片；否則點擊“沿用目前資源”。",
                 reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("target_image_local_path"))),
             )
             return
@@ -4552,16 +4593,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         has_source_image = _recorded_local_resource(data.get("source_image_local_path"))
         if text == KEEP_CURRENT_RESOURCE_BUTTON and has_source_image:
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
-            await message.answer("人物换脸\n已沿用当前人脸参考图。\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+            await _answer(message, "人物換臉\n已沿用當前人臉參考圖。\n步驟 3/4：請選擇默認自然換臉，或輸入自定義換臉要求。", reply_markup=_face_swap_prompt_keyboard())
             return
         if suffix is None:
             if has_source_image:
-                await message.answer(
-                    "人物换脸\n已记录当前人脸参考图。可以上传新参考图替换，或点击“沿用当前资源”继续。",
+                await _answer(message,
+                    "人物換臉\n已記錄當前人臉參考圖。可以上傳新參考圖替換，或點擊“沿用目前資源”繼續。",
                     reply_markup=_image_task_step_keyboard(keep_current=True),
                 )
                 return
-            await message.answer("人物换脸\n步骤 2/4：请上传人脸参考图。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, "人物換臉\n步驟 2/4：請上傳人臉參考圖。", reply_markup=_image_task_step_keyboard())
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_face_swap")))
         target = work_dir / f"source_face_{int(message.message_id)}{suffix}"
@@ -4572,7 +4613,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             **_clear_face_swap_prompt_fields(),
         )
         await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
-        await message.answer("人物换脸\n已更新人脸参考图。\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+        await _answer(message, "人物換臉\n已更新人臉參考圖。\n步驟 3/4：請選擇默認自然換臉，或輸入自定義換臉要求。", reply_markup=_face_swap_prompt_keyboard())
 
     @router.message(ProductionWorkflowForm.face_swap_waiting_for_prompt)
     async def on_face_swap_prompt(message: Message, state: FSMContext) -> None:
@@ -4587,23 +4628,23 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await state.update_data(**_clear_face_swap_prompt_fields())
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_source_image)
             data = await state.get_data()
-            await message.answer(
-                "人物换脸\n步骤 2/4：如需替换人脸参考图，请上传新图片；否则点击“沿用当前资源”。",
+            await _answer(message,
+                "人物換臉\n步驟 2/4：如需替換人臉參考圖，請上傳新圖片；否則點擊“沿用目前資源”。",
                 reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("source_image_local_path"))),
             )
             return
         if text == MAIN_MENU_BUTTON:
             await state.clear()
-            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+            await _answer(message, "已返回主選單。", reply_markup=_menu_keyboard())
             return
         prompt = _message_text(message)
-        if text == "自然换脸":
+        if text == "自然換臉":
             prompt = FACE_SWAP_NATURAL_PROMPT
-        elif text == "输入自定义换脸要求":
-            await message.answer("请直接输入这次人物换脸要求。", reply_markup=_image_task_step_keyboard())
+        elif text == "輸入自定義換臉要求":
+            await _answer(message, "請直接輸入這次人物換臉要求。", reply_markup=_image_task_step_keyboard())
             return
         if not prompt:
-            await message.answer("人物换脸\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+            await _answer(message, "人物換臉\n步驟 3/4：請選擇默認自然換臉，或輸入自定義換臉要求。", reply_markup=_face_swap_prompt_keyboard())
             return
         try:
             await _preview_face_swap_prompt(message, state, prompt)
@@ -4616,10 +4657,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 face_swap_waiting_for_adjustment=False,
             )
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
-            await message.answer(
-                "Grok 人物换脸提示词生成失败："
+            await _answer(message,
+                "Grok 人物換臉提示詞生成失敗："
                 f"{_format_grok_preview_error(exc)}\n\n"
-                "任务还没有提交，已保留当前素材。可以重新生成提示词，或输入自定义提示词提交。",
+                "任務還沒有提交，已保留當前素材。可以重新生成提示詞，或輸入自定義提示詞提交。",
                 reply_markup=_image_edit_prompt_failure_keyboard(),
             )
 
@@ -4635,36 +4676,36 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if text == "上一步":
             await state.update_data(**_clear_face_swap_prompt_fields())
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
-            await message.answer("人物换脸\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+            await _answer(message, "人物換臉\n步驟 3/4：請選擇默認自然換臉，或輸入自定義換臉要求。", reply_markup=_face_swap_prompt_keyboard())
             return
         if text == MAIN_MENU_BUTTON:
             await state.clear()
-            await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+            await _answer(message, "已返回主選單。", reply_markup=_menu_keyboard())
             return
         data = await state.get_data()
-        if text == "输入自定义提示词提交":
+        if text == "輸入自定義提示詞提交":
             await state.update_data(face_swap_waiting_for_custom_prompt=True, face_swap_waiting_for_adjustment=False)
-            await message.answer("请输入自定义最终人物换脸提示词。下一条消息会跳过 Grok，直接提交换脸任务。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, "請輸入自定義最終人物換臉提示詞。下一條消息會跳過 Grok，直接提交換臉任務。", reply_markup=_image_task_step_keyboard())
             return
-        if text == "重新生成提示词":
+        if text == "重新生成提示詞":
             original_request = str(data.get("face_swap_user_request") or data.get("face_swap_prompt") or FACE_SWAP_NATURAL_PROMPT).strip()
             try:
                 await _preview_face_swap_prompt(message, state, original_request)
             except Exception as exc:
                 await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
-                await message.answer(
-                    f"Grok 人物换脸提示词生成失败：{_format_grok_preview_error(exc)}",
+                await _answer(message,
+                    f"Grok 人物換臉提示詞生成失敗：{_format_grok_preview_error(exc)}",
                     reply_markup=_image_edit_prompt_failure_keyboard(),
                 )
             return
-        if text == "继续让 Grok 调整":
+        if text == "繼續讓 Grok 調整":
             await state.update_data(face_swap_waiting_for_adjustment=True, face_swap_waiting_for_custom_prompt=False)
-            await message.answer("请直接输入调整要求，例如：更自然、保留原图表情、脸部融合更柔和。", reply_markup=_image_edit_prompt_review_keyboard())
+            await _answer(message, "請直接輸入調整要求，例如：更自然、保留原圖表情、臉部融合更柔和。", reply_markup=_image_edit_prompt_review_keyboard())
             return
         if bool(data.get("face_swap_waiting_for_adjustment")):
             adjustment = _message_text(message)
             if not adjustment:
-                await message.answer("请直接输入调整要求。", reply_markup=_image_edit_prompt_review_keyboard())
+                await _answer(message, "請直接輸入調整要求。", reply_markup=_image_edit_prompt_review_keyboard())
                 return
             base_prompt = str(data.get("face_swap_generated_prompt") or data.get("face_swap_prompt") or "").strip()
             original_request = str(data.get("face_swap_user_request") or "").strip()
@@ -4682,15 +4723,15 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await _preview_face_swap_prompt(message, state, adjusted_request)
             except Exception as exc:
                 await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
-                await message.answer(
-                    f"Grok 人物换脸提示词调整失败：{_format_grok_preview_error(exc)}",
+                await _answer(message,
+                    f"Grok 人物換臉提示詞調整失敗：{_format_grok_preview_error(exc)}",
                     reply_markup=_image_edit_prompt_failure_keyboard(),
                 )
             return
         if bool(data.get("face_swap_waiting_for_custom_prompt")):
             custom_prompt = _message_text(message)
             if not custom_prompt:
-                await message.answer("请输入自定义最终人物换脸提示词。", reply_markup=_image_task_step_keyboard())
+                await _answer(message, "請輸入自定義最終人物換臉提示詞。", reply_markup=_image_task_step_keyboard())
                 return
             await state.update_data(
                 face_swap_prompt=custom_prompt,
@@ -4701,13 +4742,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             await _submit_face_swap_from_state(message, state, custom_prompt)
             return
-        if text != "使用这个提示词提交":
-            await message.answer("人物换脸\n请先查看 Grok 生成的提示词，确认合适后点击「使用这个提示词提交」。", reply_markup=_image_edit_prompt_review_keyboard())
+        if text != "使用這個提示詞提交":
+            await _answer(message, "人物換臉\n請先查看 Grok 生成的提示詞，確認合適後點擊「使用這個提示詞提交」。", reply_markup=_image_edit_prompt_review_keyboard())
             return
         prompt = str(data.get("face_swap_generated_prompt") or data.get("face_swap_prompt") or "").strip()
         if not prompt:
             await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_prompt)
-            await message.answer("人物换脸\n步骤 3/4：请选择默认自然换脸，或输入自定义换脸要求。", reply_markup=_face_swap_prompt_keyboard())
+            await _answer(message, "人物換臉\n步驟 3/4：請選擇默認自然換臉，或輸入自定義換臉要求。", reply_markup=_face_swap_prompt_keyboard())
             return
         await _submit_face_swap_from_state(message, state, prompt)
 
@@ -4724,10 +4765,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         current_state = await state.get_state()
         text = _message_text(message).strip()
-        button_text = _canonical_button_text(text).replace("\u2713", "").strip()
+        button_text = _canonical_button_text(text).replace("✓", "").strip()
         data = await state.get_data()
         params = _video_i2v_state_params(data)
-        if button_text == "\u4e0a\u4e00\u6b65":
+        if button_text == "上一步":
             if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
                 params.update(
                     {
@@ -4756,7 +4797,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             elif button_text.startswith("1080p"):
                 params["resolution"] = "1080p"
             else:
-                await message.answer("\u8bf7\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u9009\u62e9\u5206\u8fa8\u7387\u3002")
+                await _answer(message, "請點擊下方按鈕選擇分辨率。")
                 await _show_video_i2v_step(message, state, step="resolution")
                 return
             params["resolution_selected"] = True
@@ -4770,22 +4811,22 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.update_data(**params)
                 await _show_video_i2v_step(message, state, step="prompt_mode")
                 return
-            if button_text == "\u8df3\u8fc7\u97f3\u9891":
+            if button_text == "跳過音頻":
                 params["audio_selected"] = True
                 params["audio_local_path"] = ""
                 await state.update_data(**params, **_clear_video_i2v_prompt_fields())
-                await message.answer("已跳过音频，本次不会使用之前记录的音频。")
+                await _answer(message, "已跳過音頻，本次不會使用之前記錄的音頻。")
                 await _show_video_i2v_step(message, state, step="prompt_mode")
                 return
             audio_suffix = _audio_ext_from_message(message)
             if audio_suffix is None:
                 if _recorded_local_resource(params.get("audio_local_path")):
-                    await message.answer(
-                        "已记录当前音频。可以上传新音频替换，点击“沿用当前资源”继续，或点击“跳过音频”让本次不使用音频。",
+                    await _answer(message,
+                        "已記錄當前音頻。可以上傳新音頻替換，點擊“沿用目前資源”繼續，或點擊“跳過音頻”讓本次不使用音頻。",
                         reply_markup=_video_i2v_audio_keyboard(keep_current=True),
                     )
                     return
-                await message.answer("\u8bf7\u4e0a\u4f20\u97f3\u9891\u6587\u4ef6\uff0c\u6216\u70b9\u51fb\u201c\u8df3\u8fc7\u97f3\u9891\u201d\u3002", reply_markup=_video_i2v_audio_keyboard())
+                await _answer(message, "請上傳音頻文件，或點擊“跳過音頻”。", reply_markup=_video_i2v_audio_keyboard())
                 return
             work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
             target = work_dir / f"audio_{int(message.message_id)}{audio_suffix}"
@@ -4793,21 +4834,21 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params["audio_selected"] = True
             params["audio_local_path"] = str(target.resolve())
             await state.update_data(**params, work_dir=str(work_dir), **_clear_video_i2v_prompt_fields())
-            await message.answer("已更新音频。")
+            await _answer(message, "已更新音頻。")
             await _show_video_i2v_step(message, state, step="prompt_mode")
             return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
             if button_text != text:
                 text = button_text
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode.state:
-            if button_text == "\u8ba9 Grok \u751f\u6210\u63d0\u793a\u8bcd":
+            if button_text == "讓 Grok 生成提示詞":
                 params["use_grok"] = True
-                params["prompt_mode_label"] = "Grok \u751f\u6210"
-            elif button_text == "\u8f93\u5165\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u63d0\u4ea4":
+                params["prompt_mode_label"] = "Grok 生成"
+            elif button_text == "輸入自定義提示詞提交":
                 params["use_grok"] = False
-                params["prompt_mode_label"] = "\u81ea\u5b9a\u4e49\u63d0\u4ea4"
+                params["prompt_mode_label"] = "自定義提交"
             else:
-                await message.answer("\u8bf7\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u9009\u62e9\u63d0\u793a\u8bcd\u65b9\u5f0f\u3002")
+                await _answer(message, "請點擊下方按鈕選擇提示詞方式。")
                 await _show_video_i2v_step(message, state, step="prompt_mode")
                 return
             params["prompt_mode_selected"] = True
@@ -4817,12 +4858,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_duration.state:
             if not text.isdigit():
-                await message.answer("请输入 2 到 15 秒之间的整数，例如：5。")
+                await _answer(message, "請輸入 2 到 15 秒之間的整數，例如：5。")
                 await _show_video_i2v_step(message, state, step="duration")
                 return
             duration = int(text)
             if duration < 2 or duration > 15:
-                await message.answer("时长范围是 2 到 15 秒，请重新输入。")
+                await _answer(message, "時長範圍是 2 到 15 秒，請重新輸入。")
                 await _show_video_i2v_step(message, state, step="duration")
                 return
             await state.update_data(duration=duration, duration_selected=True, prompt_mode_selected=False, prompt_extend_selected=False)
@@ -4831,7 +4872,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         step = "resolution"
         if current_state == ProductionWorkflowForm.video_i2v_waiting_for_prompt_mode.state:
             step = "prompt_mode"
-        await message.answer("请点击上方按钮选择当前参数。")
+        await _answer(message, "請點擊上方按鈕選擇當前參數。")
         await _show_video_i2v_step(message, state, step=step)
 
     @router.message(ProductionWorkflowForm.video_i2v_waiting_for_image)
@@ -4843,7 +4884,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         button_text = _canonical_button_text(_message_text(message)).strip()
-        if button_text == "\u4e0a\u4e00\u6b65":
+        if button_text == "上一步":
             data = await state.get_data()
             params = _video_i2v_state_params(data)
             params["duration_selected"] = False
@@ -4858,9 +4899,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         suffix = _image_ext_from_message(message)
         if suffix is None:
             if _recorded_local_resource(params.get("image_local_path")):
-                await message.answer("已记录当前参考图。可以上传新图片替换，或点击“沿用当前资源”继续。")
+                await _answer(message, "已記錄當前參考圖。可以上傳新圖片替換，或點擊“沿用目前資源”繼續。")
             else:
-                await message.answer("请上传一张参考图片。")
+                await _answer(message, "請上傳一張參考圖片。")
             await _show_video_i2v_step(message, state, step="image")
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix="tg_video_i2v")))
@@ -4873,7 +4914,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             video_i2v_initial_prompt=caption,
             **_clear_video_i2v_prompt_fields(),
         )
-        await message.answer("已更新参考图。")
+        await _answer(message, "已更新參考圖。")
         await _show_video_i2v_step(message, state, step="audio")
         return
 
@@ -4886,23 +4927,23 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         prompt = _message_text(message)
-        button_text = _canonical_button_text(prompt).replace("\u2713", "").strip()
-        if button_text == "\u4e0a\u4e00\u6b65":
+        button_text = _canonical_button_text(prompt).replace("✓", "").strip()
+        if button_text == "上一步":
             await _show_video_i2v_step(message, state, step="prompt_mode")
             return
         data = await state.get_data()
         params = _video_i2v_state_params(data)
-        if button_text == "使用这个提示词生成":
+        if button_text == "使用這個提示詞生成":
             final_prompt = str(data.get("video_i2v_generated_prompt") or "").strip()
             if not final_prompt:
-                await message.answer("还没有可用的视频提示词，请先输入需求让 Grok 生成。", reply_markup=_video_i2v_prompt_failure_keyboard())
+                await _answer(message, "還沒有可用的視頻提示詞，請先輸入需求讓 Grok 生成。", reply_markup=_video_i2v_prompt_failure_keyboard())
                 return
             submit_params = dict(params)
             submit_params["use_grok"] = False
             submit_params["prompt_mode_label"] = "Grok 生成"
             payload = _build_video_i2v_payload(data, submit_params, final_prompt)
             if payload is None:
-                await message.answer("请先上传一张参考图。")
+                await _answer(message, "請先上傳一張參考圖。")
                 await _show_video_i2v_step(message, state, step="image")
                 return
             payload.update(
@@ -4915,31 +4956,31 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             try:
                 await _submit_video_i2v_payload(message, state, payload, submit_params)
             except Exception as exc:
-                await message.answer(f"图生视频任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_video_i2v_prompt_review_keyboard())
+                await _answer(message, f"圖生視頻任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_video_i2v_prompt_review_keyboard())
             return
-        if button_text == "输入自定义提示词提交":
+        if button_text == "輸入自定義提示詞提交":
             params["use_grok"] = False
-            params["prompt_mode_label"] = "自定义提交"
+            params["prompt_mode_label"] = "自定義提交"
             await state.update_data(**params, video_i2v_prompt_ready=False)
-            await message.answer("请输入自定义最终视频提示词。下一条消息会跳过 Grok，直接提交。", reply_markup=_video_i2v_prompt_keyboard())
+            await _answer(message, "請輸入自定義最終視頻提示詞。下一條消息會跳過 Grok，直接提交。", reply_markup=_video_i2v_prompt_keyboard())
             return
-        if button_text == "返回参数设置":
+        if button_text == "返回參數設定":
             params["prompt_mode_selected"] = False
             await state.update_data(**params)
             await _show_video_i2v_step(message, state, step="prompt_mode")
             return
-        if button_text == "重新生成提示词":
+        if button_text == "重新生成提示詞":
             original_request = str(data.get("video_i2v_user_request") or data.get("video_i2v_initial_prompt") or "").strip()
             if not original_request:
-                await message.answer("没有原始视频需求，请重新输入。", reply_markup=_video_i2v_prompt_keyboard())
+                await _answer(message, "沒有原始視頻需求，請重新輸入。", reply_markup=_video_i2v_prompt_keyboard())
                 return
             params["use_grok"] = True
             params["prompt_mode_label"] = "Grok 生成"
             await state.update_data(**params)
             await _submit_video_i2v_from_state(message, state, original_request)
             return
-        if button_text == "继续让 Grok 调整":
-            await message.answer("请直接输入调整要求，例如：动作更慢、镜头更近、保持原图姿态。", reply_markup=_video_i2v_prompt_review_keyboard())
+        if button_text == "繼續讓 Grok 調整":
+            await _answer(message, "請直接輸入調整要求，例如：動作更慢、鏡頭更近、保持原圖姿態。", reply_markup=_video_i2v_prompt_review_keyboard())
             await state.update_data(video_i2v_waiting_for_adjustment=True)
             return
         if bool(data.get("video_i2v_waiting_for_adjustment")):
@@ -4959,7 +5000,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await _submit_video_i2v_from_state(message, state, adjusted_request)
             return
         if not prompt:
-            await message.answer("请直接输入这次图生视频的画面和动作需求。", reply_markup=_video_i2v_prompt_keyboard())
+            await _answer(message, "請直接輸入這次圖生視頻的畫面和動作需求。", reply_markup=_video_i2v_prompt_keyboard())
             return
         await _submit_video_i2v_from_state(message, state, prompt)
 
@@ -4973,7 +5014,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         suffix = _video_ext_from_message(message)
         if suffix is None:
-            await message.answer("请上传原视频，或把视频当成 document 传送。", reply_markup=_menu_keyboard())
+            await _answer(message, "請上傳原視頻，或把視頻當成 document 傳送。", reply_markup=_menu_keyboard())
             return
         params = {
             "video_local_path": str(data["video_local_path"]),
@@ -4988,7 +5029,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "replace_model", params)
         except Exception as exc:
-            await message.answer(f"视频模特替换任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"視頻模特替換任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.replace_product_waiting_for_video)
     async def on_replace_product_video(message: Message, state: FSMContext) -> None:
@@ -5000,7 +5041,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         suffix = _video_ext_from_message(message)
         if suffix is None:
-            await message.answer("请上传原视频，或把视频当成 document 传送。", reply_markup=_menu_keyboard())
+            await _answer(message, "請上傳原視頻，或把視頻當成 document 傳送。", reply_markup=_menu_keyboard())
             return
         params = {
             "video_local_path": str(data["video_local_path"]),
@@ -5020,7 +5061,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "replace_product", params)
         except Exception as exc:
-            await message.answer(f"视频商品替换任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"視頻商品替換任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(ProductionWorkflowForm.union_waiting_for_video)
     async def on_union_video(message: Message, state: FSMContext) -> None:
@@ -5032,7 +5073,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         suffix = _video_ext_from_message(message)
         if suffix is None:
-            await message.answer("请上传原视频，或把视频当成 document 传送。", reply_markup=_menu_keyboard())
+            await _answer(message, "請上傳原視頻，或把視頻當成 document 傳送。", reply_markup=_menu_keyboard())
             return
         params = {
             "video_local_path": str(data["video_local_path"]),
@@ -5048,10 +5089,10 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await submit_webapp_task_and_reply(message, "replace_productANDmodel", params)
         except Exception as exc:
-            await message.answer(f"联合替换任务提交失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"聯合替換任務提交失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == DIGITAL_HUMAN_VIDEO_BUTTON)
-    @router.message(F.text == "数字人视频生成")
+    @router.message(F.text == "數字人視頻生成")
     @router.message(F.text == "數字人視頻生成")
     @router.message(F.text == LEGACY_ORAL_UPLOAD_BUTTON)
     @router.message(F.text == "口播數字人：上傳素材")
@@ -5061,8 +5102,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not await ensure_authorized(message):
             return
         await state.clear()
-        await message.answer(
-            "请选择这次数字人视频的方向；选择后继续上传素材，Grok 会根据你的选项和文字生成提示词。",
+        await _answer(message,
+            "請選擇這次數字人視頻的方向；選擇後繼續上傳素材，Grok 會根據你的選項和文字生成提示詞。",
             reply_markup=_digital_human_keyboard(),
         )
 
@@ -5071,21 +5112,21 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
     async def on_digital_human_realistic(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
-        await start_upload_flow(message, state, requirement="写实电商带货视频，人物自然展示商品，镜头干净，真实质感，无文字水印。")
+        await start_upload_flow(message, state, requirement="寫實電商帶貨視頻，人物自然展示商品，鏡頭乾淨，真實質感，無文字水印。")
 
     @router.message(F.text == DIGITAL_HUMAN_LIVE_BUTTON)
     @router.message(F.text == "直播口播視頻")
     async def on_digital_human_live(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
-        await start_upload_flow(message, state, requirement="直播间口播风格，人物正面自然讲解商品，光线柔和，节奏清晰，适合短视频带货。")
+        await start_upload_flow(message, state, requirement="直播間口播風格，人物正面自然講解商品，光線柔和，節奏清晰，適合短視頻帶貨。")
 
     @router.message(F.text == DIGITAL_HUMAN_PRODUCT_BUTTON)
     @router.message(F.text == "產品展示視頻")
     async def on_digital_human_product(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
-        await start_upload_flow(message, state, requirement="产品展示型数字人视频，突出商品细节和使用场景，人物动作自然，画面高级干净。")
+        await start_upload_flow(message, state, requirement="產品展示型數字人視頻，突出商品細節和使用場景，人物動作自然，畫面高級乾淨。")
 
     @router.message(F.text == DIGITAL_HUMAN_CUSTOM_BUTTON)
     @router.message(F.text == "自定義數字人要求")
@@ -5094,11 +5135,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await state.clear()
         await state.set_state(UploadFlowForm.waiting_for_custom_requirement)
-        await message.answer("请直接输入这次数字人视频的客制化要求；收到后我会继续让你上传素材。", reply_markup=_digital_human_keyboard())
+        await _answer(message, "請直接輸入這次數字人視頻的客製化要求；收到後我會繼續讓你上傳素材。", reply_markup=_digital_human_keyboard())
 
     @router.message(F.text == TEXT_TO_IMAGE_BUTTON)
-    @router.message(F.text == "文生图")
-    @router.message(F.text == "文生图片")
+    @router.message(F.text == "文生圖")
+    @router.message(F.text == "文生圖片")
     @router.message(F.text == "文生圖")
     @router.message(F.text == "文生圖片")
     async def on_text_to_image_button(message: Message, state: FSMContext) -> None:
@@ -5113,7 +5154,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await _reroll_latest_text_to_image(message, state)
         except Exception as exc:
-            await message.answer(f"重新生成图片失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"重新生成圖片失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON)
     async def on_text_to_image_continue_image_button(message: Message, state: FSMContext) -> None:
@@ -5122,7 +5163,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         try:
             await _continue_latest_text_to_image(message, state)
         except Exception as exc:
-            await message.answer(f"继续生成图片失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"繼續生成圖片失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == MULTI_IMAGE_BUTTON)
     @router.message(F.text == "多圖生成")
@@ -5132,14 +5173,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await start_image_reference_flow(message, state, mode="multi_image")
 
     @router.message(F.text == SINGLE_IMAGE_EDIT_BUTTON)
-    @router.message(F.text == "单图编辑")
+    @router.message(F.text == "單圖編輯")
     async def on_single_image_edit_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
         await start_single_image_edit_flow(message, state, single_input=True)
 
     @router.message(F.text == IMAGE_EDIT_BUTTON)
-    @router.message(F.text == "图片编辑")
+    @router.message(F.text == "圖片編輯")
     @router.message(F.text == "圖片編輯")
     async def on_image_edit_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
@@ -5161,7 +5202,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await start_image_reference_flow(message, state, mode="image_replace")
 
     @router.message(F.text == IMAGE_WORKFLOW_BUTTON)
-    @router.message(F.text == "图像编辑")
+    @router.message(F.text == "圖像編輯")
     @router.message(F.text == LEGACY_IMAGE_WORKFLOW_BUTTON)
     @router.message(F.text == "圖像編輯工作流")
     @router.message(F.text == LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON)
@@ -5172,19 +5213,19 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await start_image_generate_flow(message, state)
 
     @router.message(F.text == VIDEO_EDIT_BUTTON)
-    @router.message(F.text == "视频编辑")
+    @router.message(F.text == "視頻編輯")
     @router.message(F.text == "視頻編輯")
     async def on_video_edit_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
         await state.clear()
-        await message.answer(
-            "视频生成：请选择要建立的任务。",
+        await _answer(message,
+            "視頻生成：請選擇要建立的任務。",
             reply_markup=_video_edit_keyboard(),
         )
 
     @router.message(F.text == VIDEO_GENERAL_EDIT_BUTTON)
-    @router.message(F.text == "视频编辑任务")
+    @router.message(F.text == "視頻編輯任務")
     @router.message(F.text == "圖生視頻")
     @router.message(F.text == "視頻編輯任務")
     async def on_video_general_edit_button(message: Message, state: FSMContext) -> None:
@@ -5193,16 +5234,16 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await start_video_i2v_flow(message, state)
 
     @router.message(F.text == MAIN_MENU_BUTTON)
-    @router.message(F.text == "返回主菜单")
+    @router.message(F.text == "返回主選單")
     @router.message(F.text == "返回主菜單")
     async def on_main_menu_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
         await state.clear()
-        await message.answer("已返回主菜单。", reply_markup=_menu_keyboard())
+        await _answer(message, "已返回主選單。", reply_markup=_menu_keyboard())
 
     @router.message(F.text == REPLACE_MODEL_WORKFLOW_BUTTON)
-    @router.message(F.text == "视频模特替换")
+    @router.message(F.text == "視頻模特替換")
     @router.message(F.text == "視頻模特替換")
     @router.message(F.text == LEGACY_REPLACE_MODEL_WORKFLOW_BUTTON)
     @router.message(F.text == "模特替換工作流")
@@ -5212,7 +5253,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await start_replace_model_flow(message, state)
 
     @router.message(F.text == REPLACE_PRODUCT_WORKFLOW_BUTTON)
-    @router.message(F.text == "视频商品替换")
+    @router.message(F.text == "視頻商品替換")
     @router.message(F.text == "視頻商品替換")
     @router.message(F.text == LEGACY_REPLACE_PRODUCT_WORKFLOW_BUTTON)
     @router.message(F.text == "商品替換工作流")
@@ -5222,7 +5263,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await start_replace_product_flow(message, state)
 
     @router.message(F.text == REPLACE_UNION_WORKFLOW_BUTTON)
-    @router.message(F.text == "联合替换工作流")
+    @router.message(F.text == "聯合替換工作流")
     @router.message(F.text == "聯合替換工作流")
     async def on_replace_union_workflow_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
@@ -5230,27 +5271,27 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await start_union_flow(message, state)
 
     @router.message(F.text == WORKFLOW_CONFIG_BUTTON)
-    @router.message(F.text == "查看後台工作流配置")
+    @router.message(F.text == "查看後臺工作流配置")
     async def on_workflow_config_button(message: Message) -> None:
         if not await ensure_authorized(message):
             return
-        await message.answer(_workflow_config_text(service, selected_button=_message_text(message)), reply_markup=_menu_keyboard())
+        await _answer(message, _workflow_config_text(service, selected_button=_message_text(message)), reply_markup=_menu_keyboard())
 
     @router.message(F.text == STATUS_BUTTON)
-    @router.message(F.text == "查看工作台状态")
-    @router.message(F.text == "查看工作台狀態")
+    @router.message(F.text == "查看工作臺狀態")
+    @router.message(F.text == "查看工作臺狀態")
     async def on_status_button(message: Message) -> None:
         if not await ensure_authorized(message):
             return
         await answer_status(message)
 
     @router.message(F.text == WORKBENCH_BUTTON)
-    @router.message(F.text == "工作台網址")
+    @router.message(F.text == "工作臺網址")
     async def on_workbench_button(message: Message) -> None:
         if not await ensure_authorized(message):
             return
-        await message.answer(
-            f"工作台网址: {service.resolve_config().public_base_url}",
+        await _answer(message,
+            f"工作臺網址: {service.resolve_config().public_base_url}",
             reply_markup=_menu_keyboard(),
         )
 
@@ -5262,23 +5303,23 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await state.clear()
         await state.set_state(ScriptForm.waiting_for_script)
-        await message.answer("请直接贴上你想作为预设的文案内容。", reply_markup=_menu_keyboard())
+        await _answer(message, "請直接貼上你想作爲預設的文案內容。", reply_markup=_menu_keyboard())
 
     @router.message(F.text == RERUN_BUTTON)
-    @router.message(F.text == "重跑最近任务")
+    @router.message(F.text == "重跑最近任務")
     @router.message(F.text == "重跑最近任務")
     async def on_rerun_button(message: Message) -> None:
         if not await ensure_authorized(message):
             return
         latest_task = service.get_latest_task_for_submitter(int(message.chat.id))
         if latest_task is None:
-            await message.answer("你目前还没有可重跑的历史任务。", reply_markup=_menu_keyboard())
+            await _answer(message, "你目前還沒有可重跑的歷史任務。", reply_markup=_menu_keyboard())
             return
         request = service.clone_task_request(latest_task.id)
         await enqueue_request(message, request, source="telegram-rerun", is_default_assets=request.publish_to_default_paths)
 
     @router.message(F.text == STOP_BUTTON)
-    @router.message(F.text == "强制停止当前任务")
+    @router.message(F.text == "強制停止目前任務")
     @router.message(F.text == "強制停止目前任務")
     @router.message(F.text == "強制停止當前任務")
     async def on_stop_button(message: Message, state: FSMContext) -> None:
@@ -5303,13 +5344,13 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             if downloaded:
                 files.append(downloaded)
         except Exception as exc:
-            await message.answer(f"素材下载失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            await _answer(message, f"素材下載失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
             return
         if not text and not files:
-            await message.answer("请用文字描述你要建立的生产任务，或按面板入口依序提交素材。", reply_markup=_menu_keyboard())
+            await _answer(message, "請用文字描述你要建立的生產任務，或按面板入口依序提交素材。", reply_markup=_menu_keyboard())
             return
         if not text:
-            text = "根据我上传的素材判断最合适的生产工作流，并生成需要的提示词。"
+            text = "根據我上傳的素材判斷最合適的生產工作流，並生成需要的提示詞。"
         await state.clear()
         if text and not files:
             try:
@@ -5317,7 +5358,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.update_data(aspect_ratio=params["aspect_ratio"], width=params["width"], height=params["height"])
                 await _preview_text_to_image_prompt(message, state, user_request=text)
             except Exception as exc:
-                await message.answer(f"Grok 提示词生成失败：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+                await _answer(message, f"Grok 提示詞生成失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
             return
         try:
             result = await _submit_internal_webapp_agent_task(
@@ -5326,27 +5367,27 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 files=files,
             )
         except Exception as exc:
-            await message.answer(
-                f"智能任务提交失败：{_format_tg_user_error(exc)}\n\n你也可以按面板中的具体工作流入口，依序上传素材。",
+            await _answer(message,
+                f"智能任務提交失敗：{_format_tg_user_error(exc)}\n\n你也可以按面板中的具體工作流入口，依序上傳素材。",
                 reply_markup=_menu_keyboard(),
             )
             return
-        summary = str(result.get("summary") or "已通过文字模型識別任务").strip()
+        summary = str(result.get("summary") or "已通過文字模型識別任務").strip()
         if result.get("submitted") is False:
             reply = str(result.get("reply") or summary or "").strip()
             if not reply:
-                reply = "请补充具体生产任务和必要素材，或按面板入口依序提交。"
-            await message.answer(reply, reply_markup=_menu_keyboard())
+                reply = "請補充具體生產任務和必要素材，或按面板入口依序提交。"
+            await _answer(message, reply, reply_markup=_menu_keyboard())
             return
-        await message.answer(
+        await _answer(message,
             "\n".join(
                 part
                 for part in [
-                    "已通过文字模型理解你的会话，并生成工作流提示词。",
+                    "已通過文字模型理解你的會話，並生成工作流提示詞。",
                     summary,
                     f"工作流: {result.get('task_type')}",
-                    f"任务编号: {result.get('id')}",
-                    "可按「查看工作台状态」跟进进度。",
+                    f"任務編號: {result.get('id')}",
+                    "可按「查看工作臺狀態」跟進進度。",
                 ]
                 if part
             ),
@@ -5385,10 +5426,10 @@ class TelegramWorkbenchBot:
                         member.chat_id,
                         "\n".join(
                             [
-                                f"{self.service.get_app_title()} 已上线。",
-                                f"图像任务按「{IMAGE_WORKFLOW_BUTTON}」后选择「{TEXT_TO_IMAGE_BUTTON}」。",
-                                f"视频任务按「{VIDEO_EDIT_BUTTON}」后选择「{VIDEO_GENERAL_EDIT_BUTTON}」。",
-                                "提交后任务会进入后台队列；可按「查看工作台状态」，并在 Web 任务详情查看进度与成品。",
+                                f"{self.service.get_app_title()} 已上線。",
+                                f"圖像任務按「{IMAGE_WORKFLOW_BUTTON}」後選擇「{TEXT_TO_IMAGE_BUTTON}」。",
+                                f"視頻任務按「{VIDEO_EDIT_BUTTON}」後選擇「{VIDEO_GENERAL_EDIT_BUTTON}」。",
+                                "提交後任務會進入後臺隊列；可按「查看工作臺狀態」，並在 Web 任務詳情查看進度與成品。",
                             ]
                         ),
                         reply_markup=_menu_keyboard(),
