@@ -480,6 +480,89 @@ def _rgthree_power_lora_inputs(widgets: Any) -> dict[str, Any]:
     return lora_inputs
 
 
+def _ui_widget_value(node: dict[str, Any], widget_name: str) -> Any:
+    widgets = node.get("widgets_values")
+    if isinstance(widgets, dict):
+        return widgets.get(widget_name)
+    if not isinstance(widgets, list):
+        return None
+    widget_names: list[str] = []
+    for input_item in node.get("inputs") or []:
+        if not isinstance(input_item, dict):
+            continue
+        widget = input_item.get("widget")
+        if isinstance(widget, dict):
+            name = str(widget.get("name") or input_item.get("name") or "").strip()
+            if name:
+                widget_names.append(name)
+    if widget_name in widget_names:
+        index = widget_names.index(widget_name)
+        if index < len(widgets):
+            return widgets[index]
+    if widget_name == "text" and widgets and isinstance(widgets[0], str):
+        return widgets[0]
+    return None
+
+
+def _proxy_widget_default_value(data: dict[str, Any], class_type: str, node: dict[str, Any], widget_name: str) -> Any:
+    properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+    proxy_widgets = properties.get("proxyWidgets")
+    if not isinstance(proxy_widgets, list):
+        return None
+    definitions = data.get("definitions") if isinstance(data.get("definitions"), dict) else {}
+    subgraphs = definitions.get("subgraphs")
+    if not isinstance(subgraphs, list):
+        return None
+    for proxy_item in proxy_widgets:
+        if not isinstance(proxy_item, list) or len(proxy_item) < 2 or str(proxy_item[1]) != widget_name:
+            continue
+        proxy_node_id = str(proxy_item[0])
+        for subgraph in subgraphs:
+            if not isinstance(subgraph, dict) or str(subgraph.get("id") or "") != class_type:
+                continue
+            for inner_node in subgraph.get("nodes") or []:
+                if not isinstance(inner_node, dict) or str(inner_node.get("id") or "") != proxy_node_id:
+                    continue
+                value = _ui_widget_value(inner_node, widget_name)
+                if value is not None:
+                    return value
+    return None
+
+
+def _prepend_prompt_text(addition: str, existing: str) -> str:
+    prefix = str(addition or "").strip()
+    current = str(existing or "").strip()
+    if not prefix:
+        return current
+    if not current:
+        return prefix
+    if current == prefix or current.startswith(f"{prefix}\n"):
+        return current
+    return f"{prefix}\n\n{current}"
+
+
+def _normalize_ui_node_class_type(node: dict[str, Any], class_type: str, object_info: dict[str, Any]) -> str:
+    if class_type in object_info:
+        return class_type
+    properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+    proxy_widgets = properties.get("proxyWidgets")
+    has_text_proxy = any(
+        isinstance(item, list) and len(item) >= 2 and str(item[1]) == "text"
+        for item in (proxy_widgets if isinstance(proxy_widgets, list) else [])
+    )
+    has_clip_input = any(
+        isinstance(item, dict) and str(item.get("name") or "") == "clip" and str(item.get("type") or "") == "CLIP"
+        for item in (node.get("inputs") or [])
+    )
+    has_conditioning_output = any(
+        isinstance(item, dict) and str(item.get("type") or "") == "CONDITIONING"
+        for item in (node.get("outputs") or [])
+    )
+    if has_text_proxy and has_clip_input and has_conditioning_output and "CLIPTextEncode" in object_info:
+        return "CLIPTextEncode"
+    return class_type
+
+
 def _ui_link_origins(data: dict[str, Any]) -> dict[int, list[Any]]:
     origins: dict[int, list[Any]] = {}
     for item in data.get("links") or []:
@@ -511,9 +594,12 @@ def _ui_workflow_to_api_prompt(data: dict[str, Any], object_info: dict[str, Any]
         if not isinstance(node, dict):
             continue
         node_id = str(node.get("id") or "").strip()
-        class_type = str(node.get("type") or "").strip()
+        original_class_type = str(node.get("type") or "").strip()
+        class_type = original_class_type
         if not node_id or not class_type:
             continue
+        proxy_text_default = _proxy_widget_default_value(data, original_class_type, node, "text")
+        class_type = _normalize_ui_node_class_type(node, class_type, object_info)
         inputs_payload: dict[str, Any] = {}
 
         for input_item in node.get("inputs") or []:
@@ -571,6 +657,8 @@ def _ui_workflow_to_api_prompt(data: dict[str, Any], object_info: dict[str, Any]
                 warnings.append(
                     f"{node_id}:{class_type} has {len(widgets) - widget_index} unmapped widget value(s)"
                 )
+        if class_type == "CLIPTextEncode" and "text" not in inputs_payload:
+            inputs_payload["text"] = proxy_text_default if isinstance(proxy_text_default, str) else ""
 
         title = str((node.get("properties") or {}).get("Node name for S&R") or node.get("title") or "").strip()
         prompt[node_id] = {
@@ -752,16 +840,17 @@ def _apply_prompt_overrides(prompt: dict[str, Any], body: dict[str, Any]) -> dic
             continue
         title = str((node.get("_meta") or {}).get("title") or "").lower()
 
-        if positive and class_type == "CLIPTextEncode" and isinstance(inputs.get("text"), str):
+        if class_type == "CLIPTextEncode" and isinstance(inputs.get("text"), str):
             if positive_node_ids:
-                if str(node_id) in positive_node_ids:
+                if positive and str(node_id) in positive_node_ids:
                     inputs["text"] = positive
-            elif negative_node_ids:
-                if negative and str(node_id) in negative_node_ids:
-                    inputs["text"] = negative
+                elif negative and str(node_id) in negative_node_ids:
+                    inputs["text"] = _prepend_prompt_text(negative, inputs.get("text") or "")
+            elif negative_node_ids and negative and str(node_id) in negative_node_ids:
+                inputs["text"] = _prepend_prompt_text(negative, inputs.get("text") or "")
             elif ("negative" in title or "neg" in title) and negative:
-                inputs["text"] = negative
-            elif "negative" not in title and "neg" not in title:
+                inputs["text"] = _prepend_prompt_text(negative, inputs.get("text") or "")
+            elif positive and "negative" not in title and "neg" not in title:
                 inputs["text"] = positive
 
         if width is not None and isinstance(inputs.get("width"), int):
@@ -786,7 +875,15 @@ def _apply_prompt_overrides(prompt: dict[str, Any], body: dict[str, Any]) -> dic
                 continue
             inputs = node.setdefault("inputs", {})
             if isinstance(inputs, dict):
-                inputs.update(values)
+                if (
+                    str(node_id) in negative_node_ids
+                    and str(node.get("class_type") or "") == "CLIPTextEncode"
+                    and isinstance(values.get("text"), str)
+                ):
+                    inputs["text"] = _prepend_prompt_text(values.get("text") or "", inputs.get("text") or "")
+                    inputs.update({key: value for key, value in values.items() if key != "text"})
+                else:
+                    inputs.update(values)
     return prompt
 
 

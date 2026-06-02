@@ -566,7 +566,23 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertNotIn("米白色", anchored)
         self.assertNotIn("直筒下裝", anchored)
 
-    def test_persona_body_profile_is_injected_for_jinjunya_lora(self):
+    def test_tg_image_clothing_anchor_treats_bathrobe_as_structure(self):
+        prompt = (
+            "一位成人女性坐在宽敞浴室的浴缸边缘，穿着半透明白色浴袍低开领，"
+            "她的左手扶着浴缸而右手自然下垂，她的身体朝向镜头，她的头转向镜头"
+        )
+
+        anchored = server._ensure_tg_image_clothing_anchor(
+            prompt,
+            "生成浴室人物图",
+            {"text_to_image_workflow_profile": "person_t2i"},
+        )
+
+        self.assertIn("白色浴袍", anchored)
+        self.assertNotIn("簡潔上衣", anchored)
+        self.assertNotIn("直筒下裝", anchored)
+
+    def test_persona_body_profile_uses_short_visible_anchor_for_jinjunya_lora(self):
         payload = server._apply_persona_body_profile_to_payload(
             "text_to_image",
             {
@@ -578,11 +594,13 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("身材约束", payload["prompt"])
-        self.assertIn("腰部很细", payload["prompt"])
-        self.assertIn("胯部和臀部曲线明显", payload["prompt"])
+        self.assertIn("身形修長纖細，肩頸線條柔和，腰胯比例輕盈自然", payload["prompt"])
+        self.assertNotIn("身材约束", payload["prompt"])
+        self.assertNotIn("腰腹线条平滑", payload["prompt"])
         self.assertEqual(payload["prompt_text"], payload["prompt"])
         self.assertEqual(payload["tg_persona_body_profile_id"], "jinjunya_gy")
+        self.assertIn("身材约束", payload["tg_persona_body_profile_prompt"])
+        self.assertEqual(payload["tg_persona_body_prompt_anchor"], "身形修長纖細，肩頸線條柔和，腰胯比例輕盈自然")
         self.assertIn("粗腰", payload["negative_prompt"])
         self.assertIn("low quality", payload["negative_prompt"])
 
@@ -612,7 +630,8 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(payload["prompt"].count(body_profile), 1)
+        self.assertNotIn(body_profile, payload["prompt"])
+        self.assertEqual(payload["prompt"].count("身形修長纖細"), 1)
         self.assertEqual(payload["negative_prompt"].count(negative), 1)
 
     def test_persona_body_profile_runtime_config_can_override_profile(self):
@@ -634,7 +653,9 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["tg_persona_body_profile_id"], "custom_jinjunya")
-        self.assertIn("自定义纤细沙漏体型", payload["prompt"])
+        self.assertIn("身形修長纖細，腰胯比例輕盈自然", payload["prompt"])
+        self.assertNotIn("身材约束：自定义纤细沙漏体型", payload["prompt"])
+        self.assertIn("自定义纤细沙漏体型", payload["tg_persona_body_profile_prompt"])
         self.assertIn("自定义负面体型漂移", payload["negative_prompt"])
 
     def test_finished_text_to_image_uses_reply_keyboard(self):
@@ -1160,13 +1181,13 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertFalse(check["ok"])
         self.assertEqual(check["reason"], "comfy_running")
 
-    def test_person_t2i_keeps_batch_three_but_returns_nine_to_telegram(self):
+    def test_person_t2i_keeps_batch_three_but_returns_six_to_telegram(self):
         workflow = "__converted__/person_t2i.api.json"
 
         self.assertEqual(server._remote_comfy_default_batch_size("text_to_image", workflow), 3)
         self.assertEqual(
             server._text_to_image_qa_target_count({}, batch_size=3, workflow_path=workflow),
-            9,
+            6,
         )
 
     def test_text_to_image_auto_qa_rejects_hand_limb_audit_extra_hands(self):

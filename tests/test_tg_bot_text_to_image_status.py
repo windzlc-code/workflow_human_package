@@ -137,7 +137,7 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertEqual(bot._canonical_button_text("繼續編輯結果圖"), bot.IMAGE_EDIT_CONTINUE_RESULT_BUTTON)
         self.assertEqual(bot._canonical_button_text("重新生成圖片編輯"), bot.IMAGE_EDIT_RERUN_BUTTON)
 
-    def test_continue_text_to_image_restores_previous_prompt_context(self) -> None:
+    def test_continue_text_to_image_restores_params_but_requires_new_prompt(self) -> None:
         restored = bot._text_to_image_continue_state_from_payload(
             {
                 "aspect_ratio": "2:3",
@@ -155,9 +155,10 @@ class TextToImageStatusTextTests(unittest.TestCase):
         )
 
         self.assertEqual(restored["original_user_request"], "臥室白髮少女")
-        self.assertEqual(restored["last_grok_user_request"], "臥室白髮少女")
-        self.assertEqual(restored["final_prompt_text"], "一位白髮少女站在現代臥室中，柔和光線，寫實攝影")
-        self.assertTrue(restored["prompt_display_ready"])
+        self.assertEqual(restored["last_grok_user_request"], "")
+        self.assertEqual(restored["previous_final_prompt_text"], "一位白髮少女站在現代臥室中，柔和光線，寫實攝影")
+        self.assertEqual(restored["final_prompt_text"], "")
+        self.assertFalse(restored["prompt_display_ready"])
         self.assertEqual(restored["prompt_mode_label"], "Grok 生成")
         self.assertTrue(restored["persona_enabled"])
 

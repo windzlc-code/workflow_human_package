@@ -3925,8 +3925,6 @@ def _run_remote_comfy_gateway_test(
             body["prompt_text_node_ids"] = ["164"]
             body["negative_text_node_ids"] = ["166"]
             merged_node_inputs.setdefault("164", {})["text"] = prompt_text_value
-            if str(negative_prompt or "").strip():
-                merged_node_inputs.setdefault("166", {})["text"] = str(negative_prompt or "").strip()
         for key, value in {
             "width": width,
             "height": height,
@@ -4207,6 +4205,7 @@ PERSONA_BODY_PROFILES: dict[str, dict[str, Any]] = {
             "乳房特征：饱满圆润的乳房，乳晕大小适中呈粉褐色，乳头清晰可见略微突出，乳头颜色比乳晕稍深，"
             "乳晕边缘自然清晰，乳房形状自然下垂感，轻微乳沟，乳房质感柔软真实"
         ),
+        "prompt_anchor": "身形修長纖細，肩頸線條柔和，腰胯比例輕盈自然",
         "negative_body_prompt": (
             "宽肩，粗腰，短腿，厚重体型，男性化躯干，腰胯比例消失，身体比例漂移，"
             "过度肌肉，粗壮手臂，畸形躯干，额外肢体，重复手臂，手脚错乱，"
@@ -4222,11 +4221,13 @@ def _persona_body_profile_for_payload(payload: dict[str, Any] | None) -> dict[st
     explicit_prompt = str(source.get("persona_body_profile_prompt") or source.get("tg_persona_body_profile_prompt") or "").strip()
     explicit_negative = str(source.get("persona_negative_body_prompt") or source.get("tg_persona_negative_body_prompt") or "").strip()
     explicit_label = str(source.get("persona_body_profile_label") or source.get("tg_persona_body_profile_label") or "").strip()
+    explicit_anchor = str(source.get("persona_body_prompt_anchor") or source.get("tg_persona_body_prompt_anchor") or "").strip()
     if explicit_prompt:
         return {
             "id": str(source.get("persona_body_profile_id") or source.get("tg_persona_body_profile_id") or "custom").strip() or "custom",
             "label": explicit_label or str(source.get("persona_label") or "当前人设").strip() or "当前人设",
             "body_profile_prompt": explicit_prompt,
+            "prompt_anchor": explicit_anchor,
             "negative_body_prompt": explicit_negative,
         }
 
@@ -4266,9 +4267,37 @@ def _persona_body_profile_for_payload(payload: dict[str, Any] | None) -> dict[st
                 "id": profile_id,
                 "label": str(profile.get("label") or "").strip(),
                 "body_profile_prompt": str(profile.get("body_profile_prompt") or "").strip(),
+                "prompt_anchor": str(profile.get("prompt_anchor") or profile.get("body_prompt_anchor") or "").strip(),
                 "negative_body_prompt": str(profile.get("negative_body_prompt") or "").strip(),
             }
     return {}
+
+
+def _persona_body_prompt_anchor_for_profile(profile: dict[str, Any]) -> str:
+    anchor = str(profile.get("prompt_anchor") or profile.get("body_prompt_anchor") or "").strip()
+    if anchor:
+        return anchor
+    body_prompt = str(profile.get("body_profile_prompt") or "").strip()
+    if re.search(r"纤细|纖細|沙漏|腰胯|腰身|修长|修長", body_prompt):
+        return "身形修長纖細，腰胯比例輕盈自然"
+    return ""
+
+
+def _strip_persona_body_profile_from_final_prompt(prompt_text: str, body_prompt: str) -> str:
+    text = str(prompt_text or "").strip()
+    body = str(body_prompt or "").strip()
+    if not text:
+        return ""
+    if body:
+        text = text.replace(body, "")
+    text = re.sub(r"^\s*[，。；、,.;\s]+", "", text).strip()
+    if re.match(r"^(?:身材[约約]束|年轻女性|年輕女性|头身比例|頭身比例|上半身纤细|上半身纖細)", text):
+        scene_markers = ("一位", "側坐", "侧坐", "站立", "坐在", "跪坐", "躺在", "倚靠", "穿着", "穿著")
+        positions = [text.find(marker) for marker in scene_markers if text.find(marker) > 8]
+        if positions:
+            text = text[min(positions) :]
+    text = re.sub(r"^\s*[，。；、,.;\s]+", "", text).strip()
+    return text
 
 
 def _apply_persona_body_profile_to_payload(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4282,15 +4311,20 @@ def _apply_persona_body_profile_to_payload(task_type: str, payload: dict[str, An
     body_prompt = str(profile.get("body_profile_prompt") or "").strip()
     if not body_prompt:
         return source
-    current_prompt = _remote_comfy_prompt_from_payload(typ, source).strip()
+    visible_anchor = _persona_body_prompt_anchor_for_profile(profile)
+    current_prompt = _strip_persona_body_profile_from_final_prompt(
+        _remote_comfy_prompt_from_payload(typ, source).strip(),
+        body_prompt,
+    )
     if not current_prompt:
         return source
-    if body_prompt not in current_prompt:
-        current_prompt = f"{body_prompt}，{current_prompt}"
-        source = _set_tg_generation_prompt(source, current_prompt)
+    if visible_anchor and visible_anchor not in current_prompt:
+        current_prompt = f"{visible_anchor}，{current_prompt}"
+    source = _set_tg_generation_prompt(source, current_prompt)
     source["tg_persona_body_profile_id"] = str(profile.get("id") or "").strip()
     source["tg_persona_body_profile_label"] = str(profile.get("label") or "").strip()
     source["tg_persona_body_profile_prompt"] = body_prompt
+    source["tg_persona_body_prompt_anchor"] = visible_anchor
     negative_body = str(profile.get("negative_body_prompt") or "").strip()
     if negative_body:
         source["tg_persona_negative_body_prompt"] = negative_body
@@ -4845,7 +4879,7 @@ def _run_image_generate_via_remote_comfy_firered_chain(task_id: str, payload: di
     if not gateway_url:
         raise RuntimeError(f"{source_label} 网关未配置，请先在后台保存网关地址")
     prompt_text = _remote_comfy_prompt_from_payload("image_generate", payload)
-    negative_prompt = str(payload.get("negative_prompt") or payload.get("negative") or "low quality, blurry, distorted").strip()
+    negative_prompt = str(payload.get("negative_prompt") or payload.get("negative") or "").strip()
     width = _to_int(payload.get("width"), 640)
     height = _to_int(payload.get("height"), 960)
     steps = _to_int(payload.get("steps"), 6)
@@ -4870,6 +4904,9 @@ def _run_image_generate_via_remote_comfy_firered_chain(task_id: str, payload: di
     )
     if not persona_workflow or not zit_workflow or not firered_workflow:
         raise RuntimeError("image_generate 链式工作流缺少 persona_workflow、zit_workflow 或 firered_workflow")
+
+    if not negative_prompt and not _is_person_t2i_workflow("image_generate", persona_workflow):
+        negative_prompt = "low quality, blurry, distorted"
 
     stage_results: list[dict[str, Any]] = []
     _emit_stage(payload, stage="remote_comfy_chain", status="running", message=f"生成图1：{persona_workflow}", data={"workflow": persona_workflow})
@@ -5511,7 +5548,9 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
         raise RuntimeError(f"{REMOTE_COMFY_TASK_LABELS.get(task_type, task_type)} 未映射{source_label}工作流")
 
     prompt_text = _remote_comfy_prompt_from_payload(task_type, payload)
-    negative_prompt = str(payload.get("negative_prompt") or payload.get("negative") or "low quality, blurry, distorted").strip()
+    negative_prompt = str(payload.get("negative_prompt") or payload.get("negative") or "").strip()
+    if not negative_prompt and not _is_person_t2i_workflow(task_type, workflow_path):
+        negative_prompt = "low quality, blurry, distorted"
     steps = _to_int(payload.get("steps"), 6)
     seed_raw = payload.get("seed")
     seed = None if str(seed_raw or "").strip() in {"", "auto", "None", "null"} else min(max(_to_int(seed_raw, 0), 0), 2147483647)
@@ -9056,7 +9095,8 @@ _TG_CLOTHING_COLOR_PATTERN = re.compile(
 )
 _TG_CLOTHING_STRUCTURE_PATTERN = re.compile(
     r"上衣|下装|下裝|衬衫|襯衫|恤|短袖|长袖|長袖|背心|吊带|吊帶|外套|夹克|夾克|西装|西裝|制服|连衣裙|連衣裙|"
-    r"半裙|短裙|长裙|長裙|裤|褲|短裤|短褲|长裤|長褲|领口|領口|袖口|腰线|腰線|腰头|腰頭|裙摆|裙擺|裤腰|褲腰|"
+    r"吊带裙|吊帶裙|睡裙|浴袍|睡袍|长袍|長袍|内衣|內衣|胸衣|半裙|短裙|长裙|長裙|裤|褲|短裤|短褲|长裤|長褲|"
+    r"领口|領口|低开领|低開領|袖口|腰线|腰線|腰头|腰頭|裙摆|裙擺|裤腰|褲腰|"
     r"纽扣|鈕扣|扣子|拉链|拉鏈|衣摆|衣擺|肩带|肩帶|衣领|衣領|shirt|skirt|dress|pants|trousers|jacket|sleeve|collar|waistline|hem",
     re.IGNORECASE,
 )
@@ -9275,7 +9315,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     edit_image_task = typ in {"single_image_edit", "get_nano_banana", "face_swap"}
     persona_face_brief = _tg_image_persona_face_brief(enhanced) if prompt_chain == "image" and not edit_image_task else ""
     persona_body_profile = _persona_body_profile_for_payload(enhanced) if prompt_chain == "image" and typ in {"text_to_image", "image_generate"} and _to_bool(enhanced.get("persona_enabled"), False) else {}
-    persona_body_prompt = str(persona_body_profile.get("body_profile_prompt") or "").strip()
+    persona_body_anchor = _persona_body_prompt_anchor_for_profile(persona_body_profile) if persona_body_profile else ""
     aspect_pose_guidance = _tg_image_aspect_ratio_pose_guidance(enhanced) if prompt_chain == "image" and not edit_image_task else ""
     if aspect_pose_guidance:
         system_prompt = "\n".join(
@@ -9286,13 +9326,13 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 "Before writing the final prompt, choose a pose and action that naturally fits the selected aspect ratio. Do not reuse a generic pose when the ratio would make it cramped, cropped, or visually unstable.",
             ]
         )
-    if persona_body_prompt:
+    if persona_body_anchor:
         system_prompt = "\n".join(
             [
                 system_prompt,
-                "MANDATORY PERSONA BODY PROFILE:",
-                persona_body_prompt,
-                "This body profile comes from the selected persona LoRA reference set. Preserve it in every final image prompt as an overall body-shape constraint. Do not replace it with unrelated body type, broad shoulders, thick waist, short legs, masculine torso, or generic model body.",
+                "MANDATORY PERSONA BODY ANCHOR:",
+                persona_body_anchor,
+                "This concise body anchor comes from the selected persona LoRA reference set. Preserve it as a short overall body-shape constraint. Do not copy the full internal body profile, do not repeat body-shape clauses, and do not replace it with unrelated body type, broad shoulders, thick waist, short legs, masculine torso, or generic model body.",
             ]
         )
     llm_user_input = user_request
@@ -9310,14 +9350,14 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             f"User original request: {user_request}\n"
             + (f"Aspect-ratio composition requirement: {aspect_pose_guidance}\n" if aspect_pose_guidance else "")
             + f"Persona/LoRA constraint: {persona_face_brief}\n"
-            + (f"Persona body profile that must be included as body-shape wording: {persona_body_prompt}\n" if persona_body_prompt else "")
+            + (f"Persona body anchor to include once as concise body-shape wording: {persona_body_anchor}\n" if persona_body_anchor else "")
             + "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names."
         )
-    elif persona_body_prompt:
+    elif persona_body_anchor:
         llm_user_input = "\n".join(
             [
                 f"User original request: {user_request}",
-                f"Persona body profile that must be included as body-shape wording: {persona_body_prompt}",
+                f"Persona body anchor to include once as concise body-shape wording: {persona_body_anchor}",
                 "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names.",
             ]
         )
@@ -10312,7 +10352,7 @@ _TG_CHINESE_IMAGE_PROMPT_TASK_TYPES = {
 }
 
 PERSON_T2I_DEFAULT_BATCH_SIZE = 3
-PERSON_T2I_TELEGRAM_RETURN_COUNT = 9
+PERSON_T2I_TELEGRAM_RETURN_COUNT = 6
 
 
 def _remote_comfy_default_batch_size(task_type: str, workflow_path: str) -> int:
