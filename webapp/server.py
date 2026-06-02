@@ -4635,6 +4635,9 @@ def _analyze_generated_person_image_quality(
             '  "handAnomalyVisible": false,',
             '  "poseGeometryBroken": false,',
             '  "bodyPartScaleAnomaly": false,',
+            '  "bodyShapeTooFull": false,',
+            '  "bodyShapeBulkyOrObese": false,',
+            '  "bodySilhouetteScore": 0,',
             '  "promptMismatchVisible": false,',
             '  "meaninglessOrCollapsed": false,',
             '  "textOrWatermarkVisible": false,',
@@ -4653,6 +4656,7 @@ def _analyze_generated_person_image_quality(
             f"当前为第 {max(int(attempt), 1)} 轮候选图，请判断是否可以直接显示给用户。",
             "请先逐项核对可见人体几何：是否只有合理数量的手臂和手掌；每只手是否连接到正确手臂；手臂是否异常变粗、变长、断裂、穿过身体或与腿/枕头/床单融合；身体轮廓是否存在不可能的重叠、交叉或重复肢体。",
             "若存在严重人体结构错误、肢体重叠错乱、身体融合、手部明显崩坏、手臂比例异常、额外肢体或画面无意义，请将 deliverableReady 设为 false，并把 limbOrBodyBroken 以及对应的细分字段设为 true。",
+            "额外检查人物身形：若可见人物身形明显过于丰满、厚重、臃肿、肥胖，或躯干/腰腹/四肢体量明显偏离轻盈自然的人物图交付要求，请将 bodyShapeTooFull 或 bodyShapeBulkyOrObese 设为 true，并降低 bodySilhouetteScore。",
             "本次提示词要求头部/脸部/眼神/表情可见：是。若候选图没有完整头部，或头部/脸部/眼神/表情被裁切、缺失、遮挡到无法判断，请将 headVisible 设为 false，headCroppedOrMissing 设为 true，deliverableReady 设为 false。"
             if requires_visible_head
             else "本次提示词没有明确要求头部/脸部/眼神/表情可见：否。无需仅因普通构图裁切头部而拦截，但仍需按主体和画面语义判断。",
@@ -4685,6 +4689,9 @@ def _analyze_generated_person_image_quality(
             "hand_anomaly_visible": parsed.get("handAnomalyVisible") is True,
             "pose_geometry_broken": parsed.get("poseGeometryBroken") is True,
             "body_part_scale_anomaly": parsed.get("bodyPartScaleAnomaly") is True,
+            "body_shape_too_full": parsed.get("bodyShapeTooFull") is True,
+            "body_shape_bulky_or_obese": parsed.get("bodyShapeBulkyOrObese") is True,
+            "body_silhouette_score": _qa_score(parsed.get("bodySilhouetteScore"), 85),
             "prompt_mismatch_visible": parsed.get("promptMismatchVisible") is True,
             "meaningless_or_collapsed": parsed.get("meaninglessOrCollapsed") is True,
             "text_or_watermark_visible": parsed.get("textOrWatermarkVisible") is True,
@@ -4696,6 +4703,15 @@ def _analyze_generated_person_image_quality(
             "fix_priorities": _parse_qa_string_list(parsed.get("fixPriorities"), 4),
         }
         reject = _should_reject_generated_person_image(report)
+        if not reject:
+            body_audit = _analyze_generated_person_body_shape_quality(
+                image_path=str(path),
+                prompt_text=prompt_text,
+                payload=payload,
+                attempt=attempt,
+            )
+            _merge_generated_person_body_shape_audit(report, body_audit)
+            reject = _should_reject_generated_person_image(report)
         if not reject:
             audit = _analyze_generated_person_hand_limb_quality(
                 image_path=str(path),
@@ -4715,6 +4731,78 @@ def _analyze_generated_person_image_quality(
             "summary": "图像自动 QA 暂不可用，未放行当前结果。",
             "error": str(exc),
             "issues": ["图像自动 QA 未完成，不能确认候选图可交付。"],
+        }
+
+
+def _analyze_generated_person_body_shape_quality(
+    *,
+    image_path: str,
+    prompt_text: str,
+    payload: dict[str, Any],
+    attempt: int,
+) -> dict[str, Any]:
+    path = Path(str(image_path or "")).expanduser()
+    if not path.exists() or not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+        return {"inspected": False, "summary": "未找到可複審的圖片文件。"}
+    system_prompt = "\n".join(
+        [
+            "你是人物圖像身形視覺 QA 複審員，只判斷候選圖是否適合交付。",
+            "目標：篩掉身形明顯過於豐滿、厚重、臃腫或肥胖的人物候選圖，保留身形自然、輕盈、比例穩定、符合提示詞的人物圖。",
+            "只根據可見畫面判斷，不推測真實身份、年齡、健康狀態或現實個人屬性；不要輸出冒犯性描述。",
+            "若人物身體不可見、只有臉部特寫、被衣物或遮擋物完全遮住，不能可靠判斷身形時，將 clearPersonBodyVisible 設為 false，且不要僅因此攔截。",
+            "若可見單人或主體人物的腰腹、軀幹、四肢或整體輪廓明顯偏厚、偏圓、偏臃腫、體量過大，或與提示詞中的輕盈/纖細/自然人物形象明顯不符，必須標記 bodyShapeTooFull 或 bodyShapeBulkyOrObese。",
+            "正常透視、寬鬆衣物、自然姿勢、鏡頭壓縮或健康自然曲線不應被誤判；只有明顯不符合交付要求時才攔截。",
+            "必須只返回 JSON，不要輸出解釋性正文。",
+            "JSON schema:",
+            "{",
+            '  "summary": "中文一句話總結",',
+            '  "clearPersonBodyVisible": false,',
+            '  "bodyShapeTooFull": false,',
+            '  "bodyShapeBulkyOrObese": false,',
+            '  "bodySilhouetteScore": 0,',
+            '  "confidence": 0,',
+            '  "issues": ["中文問題1"]',
+            "}",
+        ]
+    )
+    user_input = "\n".join(
+        [
+            f"生成提示詞：{str(prompt_text or '').strip()}",
+            f"當前為第 {max(int(attempt), 1)} 輪候選圖，通過第一輪通用 QA，現在進行身形視覺複審。",
+            "請觀察主體人物的整體輪廓、肩腰比例、腰腹厚度、四肢體量和衣物下的身形輪廓。若身形明顯過於豐滿、厚重、臃腫或肥胖，請標記為不可交付。",
+        ]
+    )
+    try:
+        result, selected, attempts = _request_llm_json_with_fallback(
+            source=payload,
+            user_input=user_input,
+            system_prompt=system_prompt,
+            image_paths=[str(path)],
+            retry_count=1,
+            request_label="圖像身形視覺複審",
+        )
+        parsed = result.get("parsed") if isinstance(result, dict) else None
+        if not isinstance(parsed, dict):
+            raise RuntimeError("圖像身形視覺複審未返回 JSON 對象")
+        return {
+            "inspected": True,
+            "selected_model": str(selected.get("model") or "").strip() if isinstance(selected, dict) else "",
+            "attempts": attempts,
+            "summary": str(parsed.get("summary") or "身形視覺複審完成。").strip(),
+            "clear_person_body_visible": parsed.get("clearPersonBodyVisible") is True,
+            "body_shape_too_full": parsed.get("bodyShapeTooFull") is True,
+            "body_shape_bulky_or_obese": parsed.get("bodyShapeBulkyOrObese") is True,
+            "body_silhouette_score": _qa_score(parsed.get("bodySilhouetteScore"), 85),
+            "confidence": _qa_score(parsed.get("confidence"), 75),
+            "issues": _parse_qa_string_list(parsed.get("issues"), 6),
+        }
+    except Exception as exc:
+        return {
+            "inspected": False,
+            "qa_unavailable": True,
+            "summary": "圖像身形視覺複審暫不可用，未放行當前結果。",
+            "error": str(exc),
+            "issues": ["圖像身形視覺複審未完成，不能確認候選圖可交付。"],
         }
 
 
@@ -4797,6 +4885,43 @@ def _analyze_generated_person_hand_limb_quality(
         }
 
 
+def _merge_generated_person_body_shape_audit(report: dict[str, Any], audit: dict[str, Any] | None) -> None:
+    if not isinstance(report, dict) or not isinstance(audit, dict):
+        return
+    report["body_shape_audit"] = audit
+    if not _to_bool(audit.get("inspected"), False):
+        if _to_bool(audit.get("qa_unavailable"), False):
+            report["qa_unavailable"] = True
+            issues = _parse_qa_string_list(report.get("issues"), 6)
+            issues.extend(_parse_qa_string_list(audit.get("issues"), 3))
+            report["issues"] = _parse_qa_string_list(issues, 6)
+        return
+    if not _to_bool(audit.get("clear_person_body_visible"), False):
+        return
+
+    silhouette_score = _to_int(audit.get("body_silhouette_score"), 85)
+    confidence = _to_int(audit.get("confidence"), 75)
+    too_full = _to_bool(audit.get("body_shape_too_full"), False)
+    bulky_or_obese = _to_bool(audit.get("body_shape_bulky_or_obese"), False)
+    suspicious = too_full or bulky_or_obese or (silhouette_score < 72 and confidence >= 70)
+    if not suspicious:
+        return
+
+    report["body_shape_too_full"] = True
+    if bulky_or_obese:
+        report["body_shape_bulky_or_obese"] = True
+    report["body_silhouette_score"] = min(_to_int(report.get("body_silhouette_score"), 85), silhouette_score)
+    report["prompt_mismatch_visible"] = True
+    report["deliverable_ready"] = False
+    issues = _parse_qa_string_list(report.get("issues"), 6)
+    audit_issues = _parse_qa_string_list(audit.get("issues"), 6)
+    if audit_issues:
+        issues.extend(audit_issues)
+    else:
+        issues.append(str(audit.get("summary") or "身形視覺複審發現人物身形不符合交付要求。").strip())
+    report["issues"] = _parse_qa_string_list(issues, 6)
+
+
 def _merge_generated_person_hand_limb_audit(report: dict[str, Any], audit: dict[str, Any] | None) -> None:
     if not isinstance(report, dict) or not isinstance(audit, dict):
         return
@@ -4851,6 +4976,15 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         return True
     if not _to_bool(report.get("inspected"), False):
         return _to_bool(report.get("qa_unavailable"), False)
+    body_audit = report.get("body_shape_audit") if isinstance(report.get("body_shape_audit"), dict) else {}
+    if body_audit and not _to_bool(body_audit.get("inspected"), False):
+        return _to_bool(body_audit.get("qa_unavailable"), False)
+    if body_audit:
+        if _to_bool(body_audit.get("clear_person_body_visible"), False):
+            if _to_bool(body_audit.get("body_shape_too_full"), False) or _to_bool(body_audit.get("body_shape_bulky_or_obese"), False):
+                return True
+            if _to_int(body_audit.get("body_silhouette_score"), 85) < 72 and _to_int(body_audit.get("confidence"), 75) >= 70:
+                return True
     audit = report.get("hand_limb_audit") if isinstance(report.get("hand_limb_audit"), dict) else {}
     if audit and not _to_bool(audit.get("inspected"), False):
         return _to_bool(audit.get("qa_unavailable"), False)
@@ -4868,6 +5002,12 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
             if _to_bool(audit.get(key), False):
                 return True
     if _to_bool(report.get("limb_or_body_broken"), False):
+        return True
+    if _to_bool(report.get("body_shape_too_full"), False):
+        return True
+    if _to_bool(report.get("body_shape_bulky_or_obese"), False):
+        return True
+    if _to_int(report.get("body_silhouette_score"), 85) < 72:
         return True
     for key in (
         "extra_or_missing_limbs",

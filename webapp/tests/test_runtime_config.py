@@ -753,6 +753,23 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertTrue(server._should_reject_generated_person_image(report))
 
+    def test_text_to_image_auto_qa_rejects_body_shape_flags(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 95,
+            "prompt_match_score": 95,
+            "anatomy_score": 95,
+            "visual_score": 95,
+            "body_shape_too_full": True,
+            "body_shape_bulky_or_obese": True,
+            "body_silhouette_score": 58,
+            "deliverable_ready": True,
+            "issues": [],
+        }
+
+        self.assertTrue(server._should_reject_generated_person_image(report))
+
     def test_internal_tg_cancel_finds_latest_active_webapp_task(self):
         server._create_task_record("task_old", 1, "text_to_image", {"tg_chat_id": 8100401093})
         server._create_task_record("task_other_chat", 1, "text_to_image", {"tg_chat_id": 123})
@@ -913,12 +930,24 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 "issues": ["疑似额外手掌"],
             }
         }
+        body_audit_pass = {
+            "parsed": {
+                "summary": "身形自然可交付。",
+                "clearPersonBodyVisible": True,
+                "bodyShapeTooFull": False,
+                "bodyShapeBulkyOrObese": False,
+                "bodySilhouetteScore": 92,
+                "confidence": 91,
+                "issues": [],
+            }
+        }
 
         with patch.object(
             server,
             "_request_llm_json_with_fallback",
             side_effect=[
                 (general_pass, {"model": "qa-general"}, 1),
+                (body_audit_pass, {"model": "qa-body"}, 1),
                 (hand_audit_reject, {"model": "qa-audit"}, 1),
             ],
         ) as qa_mock:
@@ -929,12 +958,76 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 attempt=1,
             )
 
-        self.assertEqual(qa_mock.call_count, 2)
+        self.assertEqual(qa_mock.call_count, 3)
         self.assertFalse(report["passed"])
+        self.assertEqual(report["body_shape_audit"]["body_silhouette_score"], 92)
         self.assertTrue(report["extra_or_missing_limbs"])
         self.assertTrue(report["hand_anomaly_visible"])
         self.assertEqual(report["hand_limb_audit"]["visible_hand_count"], 3)
         self.assertIn("疑似额外手掌", report["issues"])
+
+    def test_generated_person_qa_rejects_body_shape_audit_before_hand_audit(self):
+        image_path = Path(self._tmpdir.name) / "candidate_body.png"
+        image_path.write_bytes(b"not-a-real-png-but-existing")
+        general_pass = {
+            "parsed": {
+                "summary": "整体画面可交付。",
+                "overallScore": 98,
+                "promptMatchScore": 98,
+                "anatomyScore": 99,
+                "visualScore": 98,
+                "limbOrBodyBroken": False,
+                "extraOrMissingLimbs": False,
+                "limbOverlapOrFusion": False,
+                "handAnomalyVisible": False,
+                "poseGeometryBroken": False,
+                "bodyPartScaleAnomaly": False,
+                "bodyShapeTooFull": False,
+                "bodyShapeBulkyOrObese": False,
+                "bodySilhouetteScore": 92,
+                "promptMismatchVisible": False,
+                "meaninglessOrCollapsed": False,
+                "textOrWatermarkVisible": False,
+                "headVisible": True,
+                "headCroppedOrMissing": False,
+                "deliverableReady": True,
+                "issues": [],
+                "fixPriorities": [],
+            }
+        }
+        body_audit_reject = {
+            "parsed": {
+                "summary": "人物身形過於厚重，不符合交付要求。",
+                "clearPersonBodyVisible": True,
+                "bodyShapeTooFull": True,
+                "bodyShapeBulkyOrObese": True,
+                "bodySilhouetteScore": 45,
+                "confidence": 92,
+                "issues": ["人物身形過於厚重"],
+            }
+        }
+
+        with patch.object(
+            server,
+            "_request_llm_json_with_fallback",
+            side_effect=[
+                (general_pass, {"model": "qa-general"}, 1),
+                (body_audit_reject, {"model": "qa-body"}, 1),
+            ],
+        ) as qa_mock:
+            report = server._analyze_generated_person_image_quality(
+                image_path=str(image_path),
+                prompt_text="一位人物站在室内，完整身体构图",
+                payload={},
+                attempt=1,
+            )
+
+        self.assertEqual(qa_mock.call_count, 2)
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["body_shape_too_full"])
+        self.assertTrue(report["body_shape_bulky_or_obese"])
+        self.assertEqual(report["body_shape_audit"]["body_silhouette_score"], 45)
+        self.assertNotIn("hand_limb_audit", report)
 
     def test_text_to_image_aspect_ratio_pose_guidance_matches_orientation(self):
         portrait = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "9:16", "width": 576, "height": 1024})
