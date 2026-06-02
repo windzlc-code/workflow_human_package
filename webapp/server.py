@@ -5180,13 +5180,17 @@ def _analyze_generated_person_body_shape_quality(
     path = Path(str(image_path or "")).expanduser()
     if not path.exists() or not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
         return {"inspected": False, "summary": "未找到可複審的圖片文件。"}
+    persona_body_profile = _persona_body_profile_for_payload(payload)
+    persona_body_reference = str(persona_body_profile.get("body_profile_prompt") or "").strip()
     system_prompt = "\n".join(
         [
             "你是人物圖像身形視覺 QA 複審員，只判斷候選圖是否適合交付。",
             "目標：篩掉身形明顯過於豐滿、厚重、臃腫或肥胖的人物候選圖，保留身形自然、輕盈、比例穩定、符合提示詞的人物圖。",
             "只根據可見畫面判斷，不推測真實身份、年齡、健康狀態或現實個人屬性；不要輸出冒犯性描述。",
+            "如果輸入中提供了人設體型參考，請只把它作為非露骨的體型比例與輪廓一致性標準：肩頸、上半身輪廓、腰腹、胯部、腿部和手臂比例需要接近參考；若明顯漂移成寬肩、粗腰、短腿、厚重體型、男性化軀幹或通用模特身形，應標記不通過。",
             "若人物身體不可見、只有臉部特寫、被衣物或遮擋物完全遮住，不能可靠判斷身形時，將 clearPersonBodyVisible 設為 false，且不要僅因此攔截。",
             "若可見單人或主體人物的腰腹、軀幹、四肢或整體輪廓明顯偏厚、偏圓、偏臃腫、體量過大，或與提示詞中的輕盈/纖細/自然人物形象明顯不符，必須標記 bodyShapeTooFull 或 bodyShapeBulkyOrObese。",
+            "額外檢查上半身前側輪廓：若出現誇張球形、硬邊貼圖感、比例過大、左右結構明顯失衡、與軀幹連接不自然、像局部被放大或覆蓋到身體上的錯誤造型，必須將 upperTorsoContourAnomaly 設為 true，並視為不可交付。",
             "正常透視、寬鬆衣物、自然姿勢、鏡頭壓縮或健康自然曲線不應被誤判；只有明顯不符合交付要求時才攔截。",
             "必須只返回 JSON，不要輸出解釋性正文。",
             "JSON schema:",
@@ -5195,6 +5199,7 @@ def _analyze_generated_person_body_shape_quality(
             '  "clearPersonBodyVisible": false,',
             '  "bodyShapeTooFull": false,',
             '  "bodyShapeBulkyOrObese": false,',
+            '  "upperTorsoContourAnomaly": false,',
             '  "bodySilhouetteScore": 0,',
             '  "confidence": 0,',
             '  "issues": ["中文問題1"]',
@@ -5204,8 +5209,10 @@ def _analyze_generated_person_body_shape_quality(
     user_input = "\n".join(
         [
             f"生成提示詞：{str(prompt_text or '').strip()}",
+            f"人設體型參考：{persona_body_reference}" if persona_body_reference else "",
             f"當前為第 {max(int(attempt), 1)} 輪候選圖，通過第一輪通用 QA，現在進行身形視覺複審。",
             "請觀察主體人物的整體輪廓、肩腰比例、腰腹厚度、四肢體量和衣物下的身形輪廓。若身形明顯過於豐滿、厚重、臃腫或肥胖，請標記為不可交付。",
+            "請特別檢查上半身前側輪廓是否出現錯誤造型：誇張球形、硬邊貼圖感、局部尺寸過大、左右不平衡、與軀幹銜接不自然、比例明顯偏離人設體型參考。若存在，upperTorsoContourAnomaly 必須為 true。",
         ]
     )
     try:
@@ -5228,6 +5235,7 @@ def _analyze_generated_person_body_shape_quality(
             "clear_person_body_visible": parsed.get("clearPersonBodyVisible") is True,
             "body_shape_too_full": parsed.get("bodyShapeTooFull") is True,
             "body_shape_bulky_or_obese": parsed.get("bodyShapeBulkyOrObese") is True,
+            "upper_torso_contour_anomaly": parsed.get("upperTorsoContourAnomaly") is True,
             "body_silhouette_score": _qa_score(parsed.get("bodySilhouetteScore"), 85),
             "confidence": _qa_score(parsed.get("confidence"), 75),
             "issues": _parse_qa_string_list(parsed.get("issues"), 6),
@@ -5339,13 +5347,17 @@ def _merge_generated_person_body_shape_audit(report: dict[str, Any], audit: dict
     confidence = _to_int(audit.get("confidence"), 75)
     too_full = _to_bool(audit.get("body_shape_too_full"), False)
     bulky_or_obese = _to_bool(audit.get("body_shape_bulky_or_obese"), False)
-    suspicious = too_full or bulky_or_obese or (silhouette_score < 72 and confidence >= 70)
+    upper_torso_anomaly = _to_bool(audit.get("upper_torso_contour_anomaly"), False)
+    suspicious = too_full or bulky_or_obese or upper_torso_anomaly or (silhouette_score < 72 and confidence >= 70)
     if not suspicious:
         return
 
     report["body_shape_too_full"] = True
     if bulky_or_obese:
         report["body_shape_bulky_or_obese"] = True
+    if upper_torso_anomaly:
+        report["upper_torso_contour_anomaly"] = True
+        report["body_part_scale_anomaly"] = True
     report["body_silhouette_score"] = min(_to_int(report.get("body_silhouette_score"), 85), silhouette_score)
     report["prompt_mismatch_visible"] = True
     report["deliverable_ready"] = False
@@ -5419,6 +5431,8 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         if _to_bool(body_audit.get("clear_person_body_visible"), False):
             if _to_bool(body_audit.get("body_shape_too_full"), False) or _to_bool(body_audit.get("body_shape_bulky_or_obese"), False):
                 return True
+            if _to_bool(body_audit.get("upper_torso_contour_anomaly"), False):
+                return True
             if _to_int(body_audit.get("body_silhouette_score"), 85) < 72 and _to_int(body_audit.get("confidence"), 75) >= 70:
                 return True
     audit = report.get("hand_limb_audit") if isinstance(report.get("hand_limb_audit"), dict) else {}
@@ -5442,6 +5456,8 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
     if _to_bool(report.get("body_shape_too_full"), False):
         return True
     if _to_bool(report.get("body_shape_bulky_or_obese"), False):
+        return True
+    if _to_bool(report.get("upper_torso_contour_anomaly"), False):
         return True
     if _to_int(report.get("body_silhouette_score"), 85) < 72:
         return True

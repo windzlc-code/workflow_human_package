@@ -1330,6 +1330,70 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(report["body_shape_audit"]["body_silhouette_score"], 45)
         self.assertNotIn("hand_limb_audit", report)
 
+    def test_generated_person_qa_rejects_upper_torso_contour_anomaly(self):
+        image_path = Path(self._tmpdir.name) / "candidate_upper_torso.png"
+        image_path.write_bytes(b"not-a-real-png-but-existing")
+        general_pass = {
+            "parsed": {
+                "summary": "general pass",
+                "overallScore": 98,
+                "promptMatchScore": 98,
+                "anatomyScore": 99,
+                "visualScore": 98,
+                "limbOrBodyBroken": False,
+                "extraOrMissingLimbs": False,
+                "limbOverlapOrFusion": False,
+                "handAnomalyVisible": False,
+                "poseGeometryBroken": False,
+                "bodyPartScaleAnomaly": False,
+                "bodyShapeTooFull": False,
+                "bodyShapeBulkyOrObese": False,
+                "bodySilhouetteScore": 92,
+                "promptMismatchVisible": False,
+                "meaninglessOrCollapsed": False,
+                "textOrWatermarkVisible": False,
+                "headVisible": True,
+                "headCroppedOrMissing": False,
+                "deliverableReady": True,
+                "issues": [],
+                "fixPriorities": [],
+            }
+        }
+        body_audit_reject = {
+            "parsed": {
+                "summary": "upper torso contour anomaly",
+                "clearPersonBodyVisible": True,
+                "bodyShapeTooFull": False,
+                "bodyShapeBulkyOrObese": False,
+                "upperTorsoContourAnomaly": True,
+                "bodySilhouetteScore": 90,
+                "confidence": 94,
+                "issues": ["upper torso contour anomaly"],
+            }
+        }
+
+        with patch.object(
+            server,
+            "_request_llm_json_with_fallback",
+            side_effect=[
+                (general_pass, {"model": "qa-general"}, 1),
+                (body_audit_reject, {"model": "qa-body"}, 1),
+            ],
+        ) as qa_mock:
+            report = server._analyze_generated_person_image_quality(
+                image_path=str(image_path),
+                prompt_text="portrait candidate",
+                payload={},
+                attempt=1,
+            )
+
+        self.assertEqual(qa_mock.call_count, 2)
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["upper_torso_contour_anomaly"])
+        self.assertTrue(report["body_part_scale_anomaly"])
+        self.assertTrue(report["body_shape_audit"]["upper_torso_contour_anomaly"])
+        self.assertNotIn("hand_limb_audit", report)
+
     def test_text_to_image_aspect_ratio_pose_guidance_matches_orientation(self):
         portrait = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "9:16", "width": 576, "height": 1024})
         landscape = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "16:9", "width": 1024, "height": 576})
