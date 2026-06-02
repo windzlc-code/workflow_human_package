@@ -110,6 +110,32 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertEqual(bot._canonical_button_text("返回主菜单"), bot.MAIN_MENU_BUTTON)
         self.assertEqual(bot._canonical_button_text("图生视频"), bot.VIDEO_GENERAL_EDIT_BUTTON)
         self.assertEqual(bot._canonical_button_text("人物换脸"), bot.FACE_SWAP_BUTTON)
+        self.assertEqual(bot._canonical_button_text("增加解析度 2 倍"), bot.FACE_SWAP_UPSCALE_BUTTON)
+        self.assertEqual(bot._canonical_button_text("重新生成人物換臉"), bot.FACE_SWAP_RERUN_BUTTON)
+
+    def test_continue_text_to_image_restores_previous_prompt_context(self) -> None:
+        restored = bot._text_to_image_continue_state_from_payload(
+            {
+                "aspect_ratio": "2:3",
+                "width": 640,
+                "height": 960,
+                "final_resolution_enabled": False,
+                "persona_enabled": True,
+                "persona_lora": r"Character Setting\人设1捞女1金君雅.safetensors",
+                "persona_label": "人設1撈女1金君雅",
+                "tg_original_prompt": "臥室白髮少女",
+                "tg_llm_rewritten_prompt": "一位白髮少女站在現代臥室中，柔和光線，寫實攝影",
+                "tg_llm_selected_model": "xai/grok-4.3",
+                "tg_prompt_display_text": "一位白髮少女站在現代臥室中，柔和光線，寫實攝影",
+            }
+        )
+
+        self.assertEqual(restored["original_user_request"], "臥室白髮少女")
+        self.assertEqual(restored["last_grok_user_request"], "臥室白髮少女")
+        self.assertEqual(restored["final_prompt_text"], "一位白髮少女站在現代臥室中，柔和光線，寫實攝影")
+        self.assertTrue(restored["prompt_display_ready"])
+        self.assertEqual(restored["prompt_mode_label"], "Grok 生成")
+        self.assertTrue(restored["persona_enabled"])
 
 
 if __name__ == "__main__":

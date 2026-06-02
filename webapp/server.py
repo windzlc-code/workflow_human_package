@@ -1166,13 +1166,13 @@ def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) 
     typ = str(task_type or "").strip()
     if typ == "face_swap":
         return {
-            "inline_keyboard": [
-                [{"text": "SeedVR 单独放大", "callback_data": f"face_swap:seedvr:{task_id}"}],
-                [
-                    {"text": "重新生成", "callback_data": f"face_swap:rerun:{task_id}"},
-                    {"text": "返回菜单", "callback_data": "face_swap:main_menu"},
-                ],
-            ]
+            "keyboard": [
+                [{"text": "增加解析度 2 倍"}],
+                [{"text": "重新生成人物換臉"}],
+                [{"text": "人物換臉"}, {"text": "圖片編輯"}],
+                [{"text": "返回主選單"}],
+            ],
+            "resize_keyboard": True,
         }
     if typ in {"single_image_edit", "get_nano_banana"}:
         return {

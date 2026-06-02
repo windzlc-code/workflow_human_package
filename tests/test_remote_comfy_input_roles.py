@@ -274,13 +274,13 @@ def test_face_swap_finished_markup_has_followup_actions():
     markup = server._send_telegram_reply_markup_for_finished_task("task_1", "face_swap")
 
     assert markup == {
-        "inline_keyboard": [
-            [{"text": "SeedVR 单独放大", "callback_data": "face_swap:seedvr:task_1"}],
-            [
-                {"text": "重新生成", "callback_data": "face_swap:rerun:task_1"},
-                {"text": "返回菜单", "callback_data": "face_swap:main_menu"},
-            ],
-        ]
+        "keyboard": [
+            [{"text": "增加解析度 2 倍"}],
+            [{"text": "重新生成人物換臉"}],
+            [{"text": "人物換臉"}, {"text": "圖片編輯"}],
+            [{"text": "返回主選單"}],
+        ],
+        "resize_keyboard": True,
     }
 
 

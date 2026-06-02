@@ -65,6 +65,8 @@ MULTI_IMAGE_BUTTON = "多圖生成"
 SINGLE_IMAGE_EDIT_BUTTON = "單圖編輯"
 IMAGE_EDIT_BUTTON = "圖片編輯"
 FACE_SWAP_BUTTON = "人物換臉"
+FACE_SWAP_UPSCALE_BUTTON = "增加解析度 2 倍"
+FACE_SWAP_RERUN_BUTTON = "重新生成人物換臉"
 IMAGE_REPLACE_BUTTON = "圖片替換"
 VIDEO_GENERAL_EDIT_BUTTON = "圖生視頻"
 PERSON_T2I_DEFAULT_BATCH_SIZE = 6
@@ -118,6 +120,10 @@ BUTTON_ALIASES = {
     "圖片編輯": IMAGE_EDIT_BUTTON,
     "人物换脸": FACE_SWAP_BUTTON,
     "人物換臉": FACE_SWAP_BUTTON,
+    "增加分辨率 2 倍": FACE_SWAP_UPSCALE_BUTTON,
+    "增加解析度 2 倍": FACE_SWAP_UPSCALE_BUTTON,
+    "重新生成人物换脸": FACE_SWAP_RERUN_BUTTON,
+    "重新生成人物換臉": FACE_SWAP_RERUN_BUTTON,
     "图片替换": IMAGE_REPLACE_BUTTON,
     "圖片替換": IMAGE_REPLACE_BUTTON,
     "图像编辑工作流": LEGACY_IMAGE_WORKFLOW_BUTTON,
@@ -745,6 +751,58 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
         }
     )
     return payload, seed
+
+
+def _text_to_image_continue_state_from_payload(input_payload: dict[str, Any]) -> dict[str, Any]:
+    payload = copy.deepcopy(input_payload if isinstance(input_payload, dict) else {})
+    params = _text_to_image_params(payload)
+    final_prompt = str(
+        payload.get("tg_llm_rewritten_prompt")
+        or payload.get("prompt_text")
+        or payload.get("prompt")
+        or payload.get("message")
+        or ""
+    ).strip()
+    original_request = str(
+        payload.get("tg_original_prompt")
+        or payload.get("tg_original_user_request")
+        or payload.get("tg_user_instruction")
+        or final_prompt
+        or ""
+    ).strip()
+    reference_image = str(
+        payload.get("prompt_reference_image_local_path")
+        or payload.get("input_image_local_path")
+        or payload.get("image_local_path")
+        or ""
+    ).strip()
+    return {
+        "aspect_ratio": params["aspect_ratio"],
+        "width": params["width"],
+        "height": params["height"],
+        "final_resolution_enabled": bool(payload.get("final_resolution_enabled", params["final_resolution_enabled"])),
+        "persona_available": bool(params["persona_available"]),
+        "persona_enabled": bool(payload.get("persona_enabled", params["persona_enabled"])),
+        "persona_lora": str(payload.get("persona_lora") or params.get("persona_lora") or ""),
+        "persona_label": str(payload.get("persona_label") or params.get("persona_label") or ""),
+        "text_to_image_workflow_profile": str(params.get("text_to_image_workflow_profile") or ""),
+        "text_to_image_workflow_path": str(payload.get("text_to_image_workflow_path") or ""),
+        "ratio_selected": True,
+        "resolution_selected": True,
+        "persona_selected": bool(params["persona_available"]),
+        "prompt_mode_selected": True,
+        "prompt_mode_label": "Grok 生成",
+        "original_user_request": original_request,
+        "last_grok_user_request": original_request,
+        "last_grok_reference_image_path": reference_image,
+        "prompt_reference_image_local_path": reference_image,
+        "final_prompt_text": final_prompt,
+        "selected_model": str(payload.get("tg_llm_selected_model") or "").strip(),
+        "custom_prompt_used": bool(payload.get("custom_prompt_used")),
+        "prompt_display_text": str(payload.get("tg_prompt_display_text") or final_prompt).strip(),
+        "prompt_display_ready": bool(final_prompt),
+        "prompt_display_pending": False,
+    }
 
 
 def _text_to_image_status_text(*, step: str, params: dict[str, Any]) -> str:
@@ -1662,6 +1720,22 @@ async def _send_long_text(message: Message, text: str, *, reply_markup: Any | No
         await _answer(message, chunk, reply_markup=reply_markup if idx == len(chunks) - 1 else None)
 
 
+async def _send_transient_status(message: Message, text: str) -> Message | None:
+    try:
+        return await _answer(message, text)
+    except Exception:
+        return None
+
+
+async def _delete_message_silently(message: Message | None) -> None:
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
 async def _submit_internal_webapp_agent_task(
     *,
     chat_id: int,
@@ -1825,14 +1899,30 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             SINGLE_IMAGE_EDIT_BUTTON,
             IMAGE_EDIT_BUTTON,
             FACE_SWAP_BUTTON,
+            FACE_SWAP_UPSCALE_BUTTON,
+            FACE_SWAP_RERUN_BUTTON,
             MULTI_IMAGE_BUTTON,
             IMAGE_REPLACE_BUTTON,
             VIDEO_EDIT_BUTTON,
             VIDEO_GENERAL_EDIT_BUTTON,
+            TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON,
+            TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON,
             MAIN_MENU_BUTTON,
         }:
             return False
         if not await ensure_authorized(message):
+            return True
+        if text == TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON:
+            try:
+                await _reroll_latest_text_to_image(message, state)
+            except Exception as exc:
+                await _answer(message, f"重新生成圖片失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+            return True
+        if text == TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON:
+            try:
+                await _continue_latest_text_to_image(message, state)
+            except Exception as exc:
+                await _answer(message, f"繼續生成圖片失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
             return True
         await state.clear()
         if text == MAIN_MENU_BUTTON:
@@ -1847,6 +1937,28 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await start_single_image_edit_flow(message, state, single_input=False)
         elif text == FACE_SWAP_BUTTON:
             await start_face_swap_flow(message, state)
+        elif text == FACE_SWAP_UPSCALE_BUTTON:
+            try:
+                task = await _latest_face_swap_task(int(message.chat.id))
+                await _resubmit_face_swap_from_task(
+                    message,
+                    state,
+                    task_id=str(task.get("id") or ""),
+                    seedvr_upscale=True,
+                )
+            except Exception as exc:
+                await _answer(message, f"增加解析度 2 倍提交失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
+        elif text == FACE_SWAP_RERUN_BUTTON:
+            try:
+                task = await _latest_face_swap_task(int(message.chat.id))
+                await _resubmit_face_swap_from_task(
+                    message,
+                    state,
+                    task_id=str(task.get("id") or ""),
+                    seedvr_upscale=False,
+                )
+            except Exception as exc:
+                await _answer(message, f"重新生成人物換臉失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
         elif text == MULTI_IMAGE_BUTTON:
             await start_image_reference_flow(message, state, mode="multi_image")
         elif text == IMAGE_REPLACE_BUTTON:
@@ -2048,33 +2160,36 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             image_edit_waiting_for_adjustment=False,
             image_edit_waiting_for_custom_prompt=False,
         )
-        await _answer(message, "正在讓 Grok 生成圖片編輯提示詞...")
-        preview_payload = _build_image_edit_payload(data, request_text, user_request=request_text, use_grok=True)
-        preview = await _preview_internal_webapp_prompt(
-            chat_id=int(message.chat.id),
-            task_type=task_type,
-            params=preview_payload,
-        )
-        generated_prompt = str(preview.get("prompt_text") or "").strip()
-        selected_model = str(preview.get("selected_model") or "").strip()
-        if not generated_prompt:
-            raise RuntimeError("Grok 未返回可用的圖片編輯提示詞")
-        await state.update_data(
-            image_edit_prompt=generated_prompt,
-            image_edit_generated_prompt=generated_prompt,
-            image_edit_user_request=request_text,
-            image_edit_selected_model=selected_model,
-            image_edit_prompt_ready=True,
-            image_edit_waiting_for_adjustment=False,
-            image_edit_waiting_for_custom_prompt=False,
-        )
-        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
-        model_line = f"\n\n模型：{selected_model}" if selected_model else ""
-        await _send_long_text(
-            message,
-            f"{title}\nGrok 已生成圖片編輯提示詞：\n\n{generated_prompt}{model_line}\n\n請確認提示詞是否合適，確認後再提交編輯任務。",
-            reply_markup=_image_edit_prompt_review_keyboard(),
-        )
+        status_message = await _send_transient_status(message, "正在讓 Grok 生成圖片編輯提示詞...")
+        try:
+            preview_payload = _build_image_edit_payload(data, request_text, user_request=request_text, use_grok=True)
+            preview = await _preview_internal_webapp_prompt(
+                chat_id=int(message.chat.id),
+                task_type=task_type,
+                params=preview_payload,
+            )
+            generated_prompt = str(preview.get("prompt_text") or "").strip()
+            selected_model = str(preview.get("selected_model") or "").strip()
+            if not generated_prompt:
+                raise RuntimeError("Grok 未返回可用的圖片編輯提示詞")
+            await state.update_data(
+                image_edit_prompt=generated_prompt,
+                image_edit_generated_prompt=generated_prompt,
+                image_edit_user_request=request_text,
+                image_edit_selected_model=selected_model,
+                image_edit_prompt_ready=True,
+                image_edit_waiting_for_adjustment=False,
+                image_edit_waiting_for_custom_prompt=False,
+            )
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
+            model_line = f"\n\n模型：{selected_model}" if selected_model else ""
+            await _send_long_text(
+                message,
+                f"{title}\nGrok 已生成圖片編輯提示詞：\n\n{generated_prompt}{model_line}\n\n請確認提示詞是否合適，確認後再提交編輯任務。",
+                reply_markup=_image_edit_prompt_review_keyboard(),
+            )
+        finally:
+            await _delete_message_silently(status_message)
 
     async def _submit_image_edit_from_state(message: Message, state: FSMContext, final_prompt: str) -> None:
         data = await state.get_data()
@@ -2159,39 +2274,42 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             face_swap_waiting_for_custom_prompt=False,
             face_swap_random_seed=seed_value,
         )
-        await _answer(message, "正在讓 Grok 生成人物換臉提示詞...")
-        preview_payload = _build_face_swap_payload(
-            {**data, "face_swap_random_seed": seed_value},
-            request_text,
-            user_request=request_text,
-            use_grok=True,
-        )
-        preview = await _preview_internal_webapp_prompt(
-            chat_id=int(message.chat.id),
-            task_type="face_swap",
-            params=preview_payload,
-        )
-        generated_prompt = str(preview.get("prompt_text") or "").strip()
-        selected_model = str(preview.get("selected_model") or "").strip()
-        if not generated_prompt:
-            raise RuntimeError("Grok 未返回可用的人物換臉提示詞")
-        await state.update_data(
-            face_swap_prompt=generated_prompt,
-            face_swap_generated_prompt=generated_prompt,
-            face_swap_user_request=request_text,
-            face_swap_selected_model=selected_model,
-            face_swap_prompt_ready=True,
-            face_swap_waiting_for_adjustment=False,
-            face_swap_waiting_for_custom_prompt=False,
-            face_swap_random_seed=seed_value,
-        )
-        await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
-        model_line = f"\n\n模型：{selected_model}" if selected_model else ""
-        await _send_long_text(
-            message,
-            f"人物換臉\nGrok 已生成換臉提示詞：\n\n{generated_prompt}{model_line}\n\n請確認提示詞是否合適，確認後點擊「使用這個提示詞提交」。",
-            reply_markup=_image_edit_prompt_review_keyboard(),
-        )
+        status_message = await _send_transient_status(message, "正在讓 Grok 生成人物換臉提示詞...")
+        try:
+            preview_payload = _build_face_swap_payload(
+                {**data, "face_swap_random_seed": seed_value},
+                request_text,
+                user_request=request_text,
+                use_grok=True,
+            )
+            preview = await _preview_internal_webapp_prompt(
+                chat_id=int(message.chat.id),
+                task_type="face_swap",
+                params=preview_payload,
+            )
+            generated_prompt = str(preview.get("prompt_text") or "").strip()
+            selected_model = str(preview.get("selected_model") or "").strip()
+            if not generated_prompt:
+                raise RuntimeError("Grok 未返回可用的人物換臉提示詞")
+            await state.update_data(
+                face_swap_prompt=generated_prompt,
+                face_swap_generated_prompt=generated_prompt,
+                face_swap_user_request=request_text,
+                face_swap_selected_model=selected_model,
+                face_swap_prompt_ready=True,
+                face_swap_waiting_for_adjustment=False,
+                face_swap_waiting_for_custom_prompt=False,
+                face_swap_random_seed=seed_value,
+            )
+            await state.set_state(ProductionWorkflowForm.face_swap_waiting_for_confirm)
+            model_line = f"\n\n模型：{selected_model}" if selected_model else ""
+            await _send_long_text(
+                message,
+                f"人物換臉\nGrok 已生成換臉提示詞：\n\n{generated_prompt}{model_line}\n\n請確認提示詞是否合適，確認後點擊「使用這個提示詞提交」。",
+                reply_markup=_image_edit_prompt_review_keyboard(),
+            )
+        finally:
+            await _delete_message_silently(status_message)
 
     async def _submit_face_swap_from_state(message: Message, state: FSMContext, final_prompt: str) -> None:
         data = await state.get_data()
@@ -2498,26 +2616,29 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         try:
             if params["use_grok"]:
-                await _answer(message, "正在讓 Grok 生成視頻提示詞...")
-                preview = await _preview_internal_webapp_prompt(
-                    chat_id=int(message.chat.id),
-                    task_type="video_i2v",
-                    params=payload,
-                )
-                generated_prompt = str(preview.get("prompt_text") or "").strip()
-                if not generated_prompt:
-                    raise RuntimeError("Grok 未返回可用的視頻提示詞")
-                await state.update_data(
-                    video_i2v_user_request=prompt,
-                    video_i2v_generated_prompt=generated_prompt,
-                    video_i2v_prompt_ready=True,
-                )
-                await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
-                await _send_long_text(
-                    message,
-                    "視頻 Grok 生成提示詞：\n\n" + generated_prompt + "\n\n請確認後再提交。",
-                    reply_markup=_video_i2v_prompt_review_keyboard(),
-                )
+                status_message = await _send_transient_status(message, "正在讓 Grok 生成視頻提示詞...")
+                try:
+                    preview = await _preview_internal_webapp_prompt(
+                        chat_id=int(message.chat.id),
+                        task_type="video_i2v",
+                        params=payload,
+                    )
+                    generated_prompt = str(preview.get("prompt_text") or "").strip()
+                    if not generated_prompt:
+                        raise RuntimeError("Grok 未返回可用的視頻提示詞")
+                    await state.update_data(
+                        video_i2v_user_request=prompt,
+                        video_i2v_generated_prompt=generated_prompt,
+                        video_i2v_prompt_ready=True,
+                    )
+                    await state.set_state(ProductionWorkflowForm.video_i2v_waiting_for_prompt)
+                    await _send_long_text(
+                        message,
+                        "視頻 Grok 生成提示詞：\n\n" + generated_prompt + "\n\n請確認後再提交。",
+                        reply_markup=_video_i2v_prompt_review_keyboard(),
+                    )
+                finally:
+                    await _delete_message_silently(status_message)
                 return
             await _submit_video_i2v_payload(message, state, payload, params)
         except Exception as exc:
@@ -2854,21 +2975,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if reference_image:
             payload["input_image_local_path"] = reference_image
             payload["image_local_path"] = reference_image
-        await _answer(message, "正在讓 Grok 生成最終提示詞...")
-        result = await _preview_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="text_to_image", params=payload)
-        prompt_text = str(result.get("prompt_text") or "").strip()
-        selected_model = str(result.get("selected_model") or "").strip()
-        if not prompt_text:
-            raise RuntimeError("Grok 未返回可用提示詞，請重新生成提示詞。")
-        await state.update_data(
-            original_user_request=original_for_state,
-            final_prompt_text=prompt_text,
-            selected_model=selected_model,
-            prompt_display_text=prompt_text,
-            prompt_display_ready=True,
-            prompt_display_pending=False,
-        )
-        await _show_text_to_image_prompt_review(message, state, prompt_text=prompt_text, selected_model=selected_model)
+        status_message = await _send_transient_status(message, "正在讓 Grok 生成最終提示詞...")
+        try:
+            result = await _preview_internal_webapp_prompt(chat_id=int(message.chat.id), task_type="text_to_image", params=payload)
+            prompt_text = str(result.get("prompt_text") or "").strip()
+            selected_model = str(result.get("selected_model") or "").strip()
+            if not prompt_text:
+                raise RuntimeError("Grok 未返回可用提示詞，請重新生成提示詞。")
+            await state.update_data(
+                original_user_request=original_for_state,
+                final_prompt_text=prompt_text,
+                selected_model=selected_model,
+                prompt_display_text=prompt_text,
+                prompt_display_ready=True,
+                prompt_display_pending=False,
+            )
+            await _show_text_to_image_prompt_review(message, state, prompt_text=prompt_text, selected_model=selected_model)
+        finally:
+            await _delete_message_silently(status_message)
 
     async def _submit_text_to_image_from_state(message: Message, state: FSMContext) -> None:
         params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
@@ -2977,28 +3101,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if str(task.get("type") or "").strip() != "text_to_image":
             raise RuntimeError("最近任務不是文生圖任務")
         input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
-        params = _text_to_image_params(input_payload)
+        restored = _text_to_image_continue_state_from_payload(input_payload)
         await state.clear()
-        await state.update_data(
-            aspect_ratio=params["aspect_ratio"],
-            width=params["width"],
-            height=params["height"],
-            final_resolution_enabled=bool(input_payload.get("final_resolution_enabled", params["final_resolution_enabled"])),
-            persona_available=bool(params["persona_available"]),
-            persona_enabled=bool(input_payload.get("persona_enabled", params["persona_enabled"])),
-            persona_lora=str(input_payload.get("persona_lora") or params.get("persona_lora") or ""),
-            ratio_selected=True,
-            resolution_selected=True,
-            persona_selected=bool(params["persona_available"]),
-            prompt_mode_selected=False,
-            prompt_mode_label="",
-            original_user_request="",
-            final_prompt_text="",
-            selected_model="",
-            custom_prompt_used=False,
-        )
-        await _answer(message, "繼續生成圖片：保留上次參數，重新進入提示詞步驟。", reply_markup=_menu_keyboard())
-        await _show_text_to_image_prompt_mode(message, state)
+        await state.update_data(**restored)
+        if str(restored.get("final_prompt_text") or "").strip():
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
+            status_message = await _send_transient_status(message, "繼續生成圖片：正在載入上次參數和提示詞...")
+            try:
+                await _show_text_to_image_prompt_review(
+                    message,
+                    state,
+                    prompt_text=str(restored.get("final_prompt_text") or ""),
+                    selected_model=str(restored.get("selected_model") or ""),
+                )
+            finally:
+                await _delete_message_silently(status_message)
+            return
+        await _answer(message, "繼續生成圖片：已載入上次參數，請重新輸入圖片需求。")
+        await _show_text_to_image_prompt_entry(message, state)
 
     def _face_swap_resubmit_payload(input_payload: dict[str, Any], *, seedvr_upscale: bool = False) -> dict[str, Any]:
         target_image = str(input_payload.get("target_image_local_path") or input_payload.get("image_local_path") or "").strip()
@@ -3043,6 +3163,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             payload["seed"] = seed_value
             payload["face_swap_random_seed"] = seed_value
         return payload
+
+    async def _latest_face_swap_task(chat_id: int) -> dict[str, Any]:
+        tasks = await _fetch_internal_webapp_tg_tasks(chat_id=int(chat_id), limit=20)
+        selected = next(
+            (
+                item
+                for item in tasks
+                if str(item.get("type") or "").strip() == "face_swap"
+                and str(item.get("status") or "").strip() == "success"
+            ),
+            None,
+        )
+        if selected is None:
+            selected = next((item for item in tasks if str(item.get("type") or "").strip() == "face_swap"), None)
+        if not isinstance(selected, dict):
+            raise RuntimeError("沒有找到最近的人物換臉任務")
+        task_id = str(selected.get("id") or "").strip()
+        if not task_id:
+            raise RuntimeError("最近的人物換臉任務缺少任務編號")
+        return await _fetch_internal_webapp_tg_task_detail(chat_id=int(chat_id), task_id=task_id)
 
     async def _resubmit_face_swap_from_task(
         message: Message,
@@ -3096,14 +3236,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     seedvr_upscale=seedvr_upscale,
                 )
             except Exception as exc:
-                label = "SeedVR 放大" if seedvr_upscale else "重新生成"
+                label = "增加解析度 2 倍" if seedvr_upscale else "重新生成"
                 await callback.answer(f"{label}提交失敗：{_format_tg_user_error(exc)}", show_alert=True)
                 return
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
-            await callback.answer("已提交 SeedVR 放大任務" if seedvr_upscale else "已提交重新生成任務")
+            await callback.answer("已提交增加解析度 2 倍任務" if seedvr_upscale else "已提交重新生成任務")
             return
         await callback.answer("未知操作", show_alert=True)
 
@@ -3159,35 +3299,26 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await callback.answer("這個任務不是文生圖任務", show_alert=True)
                 return
             input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
-            params = _text_to_image_params(input_payload)
+            restored = _text_to_image_continue_state_from_payload(input_payload)
             await state.clear()
-            await state.update_data(
-                aspect_ratio=params["aspect_ratio"],
-                width=params["width"],
-                height=params["height"],
-                final_resolution_enabled=bool(input_payload.get("final_resolution_enabled", params["final_resolution_enabled"])),
-                persona_available=bool(params["persona_available"]),
-                persona_enabled=bool(input_payload.get("persona_enabled", params["persona_enabled"])),
-                persona_lora=str(input_payload.get("persona_lora") or params.get("persona_lora") or ""),
-                ratio_selected=True,
-                resolution_selected=True,
-                persona_selected=bool(params["persona_available"]),
-                prompt_mode_selected=False,
-                prompt_mode_label="",
-                original_user_request="",
-                final_prompt_text="",
-                selected_model="",
-                custom_prompt_used=False,
-            )
-            try:
-                await callback.message.edit_caption(caption="繼續生成圖片：保留上次參數，重新進入提示詞步驟。")
-            except Exception:
+            await state.update_data(**restored)
+            if str(restored.get("final_prompt_text") or "").strip():
+                await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
+                status_message = await _send_transient_status(callback.message, "繼續生成圖片：正在載入上次參數和提示詞...")
                 try:
-                    await callback.message.edit_text("繼續生成圖片：保留上次參數，重新進入提示詞步驟。")
-                except Exception:
-                    pass
-            await _show_text_to_image_prompt_mode(callback.message, state)
-            await callback.answer("請繼續輸入提示詞")
+                    await _show_text_to_image_prompt_review(
+                        callback.message,
+                        state,
+                        prompt_text=str(restored.get("final_prompt_text") or ""),
+                        selected_model=str(restored.get("selected_model") or ""),
+                    )
+                finally:
+                    await _delete_message_silently(status_message)
+                await callback.answer("已載入上次提示詞")
+                return
+            await _answer(callback.message, "繼續生成圖片：已載入上次參數，請重新輸入圖片需求。")
+            await _show_text_to_image_prompt_entry(callback.message, state)
+            await callback.answer("請輸入圖片需求")
             return
         params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
         if runtime_changed:
