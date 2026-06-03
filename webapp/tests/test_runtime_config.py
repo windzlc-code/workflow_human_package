@@ -156,17 +156,33 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(current["nano_host"], "runtime.example.internal")
         self.assertEqual(current["cleanup_enabled"], False)
 
-    def test_runtime_config_api_saves_comfy_gpu_queue_limit(self):
+    def test_runtime_config_api_saves_comfy_gpu_queue_limit_and_switch(self):
         put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
         get_runtime_config = self._route_endpoint("/api/admin/runtime_config", "GET")
 
-        resp = put_runtime_config(server.RuntimeConfigPayload(comfy_gpu_max_concurrency=6), self.admin_user)
+        resp = put_runtime_config(
+            server.RuntimeConfigPayload(comfy_gpu_queue_enabled=True, comfy_gpu_max_concurrency=6),
+            self.admin_user,
+        )
 
-        self.assertEqual(resp["runtime_config"]["comfy_gpu_max_concurrency"], 6)
+        self.assertEqual(resp["runtime_config"]["comfy_gpu_queue_enabled"], True)
+        self.assertEqual(resp["runtime_config"]["comfy_gpu_max_concurrency"], 4)
         stored = json.loads(self.runtime_config_path.read_text(encoding="utf-8"))
-        self.assertEqual(stored["comfy_gpu_max_concurrency"], 6)
+        self.assertEqual(stored["comfy_gpu_queue_enabled"], True)
+        self.assertEqual(stored["comfy_gpu_max_concurrency"], 4)
         current = get_runtime_config(self.admin_user)
-        self.assertEqual(current["comfy_gpu_max_concurrency"], 6)
+        self.assertEqual(current["comfy_gpu_queue_enabled"], True)
+        self.assertEqual(current["comfy_gpu_max_concurrency"], 4)
+
+    def test_comfy_gpu_queue_is_disabled_by_default(self):
+        server._write_runtime_config_file({})
+
+        self.assertEqual(server._runtime_comfy_gpu_queue_enabled(), False)
+        with server._comfy_gpu_execution_slot({"_task_id": "task_direct"}, workflow_path="wf.api.json") as slot:
+            self.assertEqual(slot["queue_enabled"], False)
+            self.assertEqual(slot["mode"], "direct")
+        self.assertEqual(server._comfy_gpu_snapshot()["waiting"], 0)
+        self.assertEqual(server._comfy_gpu_snapshot()["running"], 0)
 
     def test_runtime_config_api_preserves_comfy_when_saving_partial_config(self):
         put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
@@ -1046,6 +1062,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIsNotNone(late_event)
 
     def test_comfy_gpu_gate_serializes_remote_workflow_submits(self):
+        server._write_runtime_config_file({"comfy_gpu_queue_enabled": True, "comfy_gpu_max_concurrency": 1})
         active_posts = 0
         max_active_posts = 0
         calls: list[str] = []
@@ -1091,6 +1108,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(server._comfy_gpu_snapshot()["running"], 0)
 
     def test_comfy_gpu_gate_blocks_cancelled_task_before_submit(self):
+        server._write_runtime_config_file({"comfy_gpu_queue_enabled": True, "comfy_gpu_max_concurrency": 1})
         server._create_task_record("task_wait_cancel", 1, "text_to_image", {"tg_chat_id": 8100401093})
         server._cancel_task_record_for_user(
             task_id="task_wait_cancel",
@@ -1114,6 +1132,121 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 self.assertEqual(server._comfy_gpu_snapshot()["running"], 0)
         finally:
             semaphore.release()
+
+    def test_latest_user_visible_event_prefers_terminal_event_after_failed_task(self):
+        server._create_task_record("task_terminal_event", 1, "text_to_image", {"tg_chat_id": 8100401093})
+        with db_module.db() as conn:
+            conn.execute(
+                "UPDATE tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                ("failed", "restart interrupted", server._now_ts(), "task_terminal_event"),
+            )
+            server._insert_task_event(
+                conn,
+                task_id="task_terminal_event",
+                user_id=1,
+                kind="done",
+                message="服務重啟，上一輪生成已中斷，請重新提交任務。",
+                data={"status": "failed", "stage": "finish", "user_visible": True},
+            )
+            server._insert_task_event(
+                conn,
+                task_id="task_terminal_event",
+                user_id=1,
+                kind="progress",
+                message="4090 正在生成，prompt_id: stale",
+                data={"stage": "remote_comfy", "status": "running", "user_visible": True},
+            )
+
+        event = server._latest_user_visible_task_event("task_terminal_event")
+
+        self.assertEqual(event["kind"], "done")
+        self.assertIn("服務重啟", event["message"])
+
+    def test_emit_task_event_ignores_progress_after_terminal_status(self):
+        server._create_task_record("task_terminal_progress", 1, "text_to_image", {"tg_chat_id": 8100401093})
+        with db_module.db() as conn:
+            conn.execute(
+                "UPDATE tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                ("failed", "already failed", server._now_ts(), "task_terminal_progress"),
+            )
+
+        server._emit_task_event(
+            task_id="task_terminal_progress",
+            user_id=1,
+            kind="progress",
+            message="stale progress",
+            data={"stage": "remote_comfy", "status": "running"},
+        )
+
+        with db_module.db() as conn:
+            stale = conn.execute(
+                "SELECT id FROM task_events WHERE task_id = ? AND message = ?",
+                ("task_terminal_progress", "stale progress"),
+            ).fetchone()
+        self.assertIsNone(stale)
+
+    def test_resume_pending_tasks_marks_running_task_interrupted(self):
+        server._create_task_record("task_restart_running", 1, "text_to_image", {"tg_chat_id": 8100401093})
+        with db_module.db() as conn:
+            conn.execute(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                ("running", server._now_ts(), "task_restart_running"),
+            )
+
+        server._resume_pending_tasks()
+
+        with db_module.db() as conn:
+            task = conn.execute(
+                "SELECT status, error FROM tasks WHERE id = ?",
+                ("task_restart_running",),
+            ).fetchone()
+            event = conn.execute(
+                "SELECT kind, message FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                ("task_restart_running",),
+            ).fetchone()
+
+        self.assertEqual(task["status"], "failed")
+        self.assertIn("服務重啟", task["error"])
+        self.assertEqual(event["kind"], "done")
+
+    def test_person_t2i_batch_qa_defaults_to_six_attempts(self):
+        calls: list[int] = []
+
+        def fake_run_remote(**kwargs):
+            calls.append(len(calls) + 1)
+            idx = len(calls)
+            outputs = []
+            for image_idx in range(3):
+                path = Path(self._tmpdir.name) / f"candidate_{idx}_{image_idx}.jpg"
+                path.write_bytes(b"fake")
+                outputs.append({"local_path": str(path), "type": "output", "filename": path.name})
+            return {
+                "ok": True,
+                "prompt_id": f"prompt_{idx}",
+                "local_outputs": outputs,
+            }
+
+        def fake_qa(**kwargs):
+            return {"ok": True, "passed": False, "reason": "test reject"}
+
+        payload = {
+            "_task_id": "task_batch_qa_limit",
+            "_task_type": "text_to_image",
+            "prompt": "test prompt",
+            "remote_comfy_gateway_url": "http://gateway",
+            "remote_comfy_gateway_token": "secret",
+            "remote_comfy_workflow_mappings": {"text_to_image": "person_t2i.api.json"},
+            "text_to_image_auto_qa_enabled": True,
+            "text_to_image_qa_target_count": 6,
+            "batch_size": 3,
+        }
+
+        with patch.object(server, "_run_remote_comfy_gateway_test", side_effect=fake_run_remote), \
+             patch.object(server, "_analyze_generated_person_image_quality", side_effect=fake_qa):
+            with self.assertRaisesRegex(RuntimeError, "6"):
+                server._run_remote_comfy_mapped_task("task_batch_qa_limit", payload, "text_to_image")
+
+        self.assertEqual(len(calls), 6)
 
     def test_comfy_gpu_memory_stats_parse_comfy_system_stats(self):
         stats = {
@@ -1200,7 +1333,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertTrue(check["ok"])
         self.assertEqual(check["reason"], "queue_slot_available")
 
-    def test_comfy_gpu_capacity_check_uses_runtime_concurrency_limit(self):
+    def test_comfy_gpu_capacity_check_reports_remote_queue_over_limit_without_blocking(self):
         server._write_runtime_config_file({"comfy_gpu_max_concurrency": 2})
 
         def fake_gateway_json(**kwargs):
@@ -1230,10 +1363,11 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 body={"path": "edit.api.json"},
             )
 
-        self.assertFalse(check["ok"])
-        self.assertEqual(check["reason"], "comfy_slots_full")
+        self.assertTrue(check["ok"])
+        self.assertEqual(check["reason"], "queue_slot_available")
         self.assertEqual(check["max_concurrency"], 2)
         self.assertEqual(check["queue_load"], 2)
+        self.assertEqual(check["remote_queue_over_limit"], True)
 
     def test_comfy_gpu_capacity_check_waits_when_comfy_queue_reaches_limit(self):
         def fake_gateway_json(**kwargs):
@@ -1266,11 +1400,12 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 body={"path": "edit.api.json"},
             )
 
-        self.assertFalse(check["ok"])
-        self.assertEqual(check["reason"], "comfy_slots_full")
+        self.assertTrue(check["ok"])
+        self.assertEqual(check["reason"], "queue_slot_available")
         self.assertEqual(check["queue_load"], 4)
+        self.assertEqual(check["remote_queue_over_limit"], True)
 
-    def test_person_t2i_keeps_batch_three_but_returns_six_to_telegram(self):
+    def test_person_t2i_generates_three_per_attempt_and_returns_six_to_telegram(self):
         workflow = "__converted__/person_t2i.api.json"
 
         self.assertEqual(server._remote_comfy_default_batch_size("text_to_image", workflow), 3)

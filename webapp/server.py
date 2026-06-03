@@ -87,6 +87,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "local_comfy_gateway_token": "",
     "local_comfy_workflow_mappings": {},
     "comfy_workflow_source": "remote",
+    "comfy_gpu_queue_enabled": False,
     "comfy_gpu_max_concurrency": 4,
     "upload_server_ip": "",
     "upload_file_api_key": "",
@@ -178,7 +179,8 @@ def _env_bool(name: str, default: bool) -> bool:
 RH_MAX_CONCURRENCY = max(_env_int("RH_MAX_CONCURRENCY", 20), 1)
 TASK_QUEUE_MAXSIZE = max(_env_int("TASK_QUEUE_MAXSIZE", 0), 0)
 COMFY_GPU_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_MAX_CONCURRENCY", 4), 1)
-COMFY_GPU_LOCAL_SEMAPHORE_LIMIT = max(_env_int("COMFY_GPU_LOCAL_SEMAPHORE_LIMIT", 64), COMFY_GPU_MAX_CONCURRENCY)
+COMFY_GPU_CONFIG_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_CONFIG_MAX_CONCURRENCY", 4), 1)
+COMFY_GPU_LOCAL_SEMAPHORE_LIMIT = max(_env_int("COMFY_GPU_LOCAL_SEMAPHORE_LIMIT", 4), COMFY_GPU_CONFIG_MAX_CONCURRENCY)
 COMFY_GPU_QUEUE_TIMEOUT_SECONDS = max(_env_int("COMFY_GPU_QUEUE_TIMEOUT_SECONDS", 3600), 30)
 COMFY_GPU_QUEUE_POLL_SECONDS = max(_env_int("COMFY_GPU_QUEUE_POLL_SECONDS", 2), 1)
 COMFY_GPU_DYNAMIC_ENABLED = _env_bool("COMFY_GPU_DYNAMIC_ENABLED", True)
@@ -421,8 +423,20 @@ def _resume_pending_tasks() -> None:
                 continue
             payload = _apply_runtime_defaults(task_type, payload)
             if status == "running":
-                conn.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", ("queued", _now_ts(), tid))
-                _insert_task_event(conn, task_id=tid, user_id=user_id, kind="queued", message="服务重启，任务重新排队", data={})
+                restart_error = "服務重啟，上一輪生成已中斷，請重新提交任務。"
+                conn.execute(
+                    "UPDATE tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                    ("failed", restart_error, _now_ts(), tid),
+                )
+                _insert_task_event(
+                    conn,
+                    task_id=tid,
+                    user_id=user_id,
+                    kind="done",
+                    message=restart_error,
+                    data={"status": "failed", "error": restart_error},
+                )
+                continue
             try:
                 _TASK_QUEUE.put((tid, user_id, task_type, payload), block=False)
             except Exception:
@@ -2086,6 +2100,7 @@ def _load_runtime_config_file(conn) -> dict[str, Any]:
                     "local_comfy_gateway_token",
                     "local_comfy_workflow_mappings",
                     "local_comfy_image_input_bindings",
+                    "comfy_gpu_queue_enabled",
                     "comfy_gpu_max_concurrency",
                 ):
                     current_value = merged.get(key)
@@ -2125,9 +2140,10 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["local_comfy_gateway_token"] = str(merged.get("local_comfy_gateway_token") or "").strip()
     source = str(merged.get("comfy_workflow_source") or "remote").strip().lower()
     merged["comfy_workflow_source"] = source if source in {"remote", "local"} else "remote"
+    merged["comfy_gpu_queue_enabled"] = _to_bool(merged.get("comfy_gpu_queue_enabled"), False)
     merged["comfy_gpu_max_concurrency"] = min(
         max(_to_int(merged.get("comfy_gpu_max_concurrency"), COMFY_GPU_MAX_CONCURRENCY), 1),
-        int(COMFY_GPU_LOCAL_SEMAPHORE_LIMIT),
+        int(COMFY_GPU_CONFIG_MAX_CONCURRENCY),
     )
     raw_remote_mappings = current.get("remote_comfy_workflow_mappings")
     remote_mappings: dict[str, Any] = {}
@@ -2295,7 +2311,15 @@ def _runtime_comfy_gpu_max_concurrency() -> int:
         value = _to_int(raw.get("comfy_gpu_max_concurrency"), COMFY_GPU_MAX_CONCURRENCY)
     except Exception:
         value = int(COMFY_GPU_MAX_CONCURRENCY)
-    return min(max(int(value), 1), int(COMFY_GPU_LOCAL_SEMAPHORE_LIMIT))
+    return min(max(int(value), 1), int(COMFY_GPU_CONFIG_MAX_CONCURRENCY))
+
+
+def _runtime_comfy_gpu_queue_enabled() -> bool:
+    try:
+        raw = _read_runtime_config_file_dict()
+        return _to_bool(raw.get("comfy_gpu_queue_enabled"), False)
+    except Exception:
+        return False
 
 
 def _normalize_runtime_workflow_chain(value: Any) -> list[str]:
@@ -3762,15 +3786,13 @@ def _comfy_gpu_capacity_check(
     queue_load = int(queue_counts.get("running", 0)) + int(queue_counts.get("pending", 0))
     max_concurrency = _runtime_comfy_gpu_max_concurrency()
     result["max_concurrency"] = int(max_concurrency)
-    if queue_load >= int(max_concurrency):
-        return {**result, "ok": False, "reason": "comfy_slots_full", "queue_load": queue_load}
     max_pending = max(int(COMFY_GPU_MAX_COMFY_PENDING), int(max_concurrency))
-    if queue_counts.get("pending", 0) > int(max_pending):
-        return {**result, "ok": False, "reason": "comfy_pending"}
+    result["queue_load"] = queue_load
+    result["remote_queue_over_limit"] = queue_load >= int(max_concurrency) or queue_counts.get("pending", 0) > int(max_pending)
     if not memory.get("available"):
         return {**result, "ok": True, "reason": "queue_slot_available_memory_unavailable"}
     free_gb = float(memory.get("vram_free_gb") or 0.0)
-    return {**result, "ok": True, "reason": "queue_slot_available", "free_gb": free_gb, "queue_load": queue_load}
+    return {**result, "ok": True, "reason": "queue_slot_available", "free_gb": free_gb}
 
 
 @contextlib.contextmanager
@@ -3786,6 +3808,15 @@ def _comfy_gpu_execution_slot(
     source_payload = payload if isinstance(payload, dict) else {}
     request_body = body if isinstance(body, dict) else {}
     workflow_label = str(workflow_path or "").strip() or "ComfyUI workflow"
+    if not _runtime_comfy_gpu_queue_enabled():
+        if _task_cancelled_for_payload(source_payload):
+            raise RuntimeError("任務已取消，未提交到 4090。")
+        yield {
+            "queue_enabled": False,
+            "workflow": workflow_label,
+            "mode": "direct",
+        }
+        return
     last_capacity: dict[str, Any] = {}
     with _COMFY_GPU_LOCK:
         _COMFY_GPU_WAITING += 1
@@ -4011,6 +4042,7 @@ def _run_remote_comfy_gateway_test(
             token=token,
             body=body,
             timeout_seconds=timeout_seconds,
+            payload=payload,
         )
 
 
@@ -4020,6 +4052,7 @@ def _execute_remote_comfy_gateway_body(
     token: str,
     body: dict[str, Any],
     timeout_seconds: int = 900,
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     submitted = _remote_comfy_gateway_json(
         gateway_url=gateway_url,
@@ -4032,9 +4065,20 @@ def _execute_remote_comfy_gateway_body(
     prompt_id = str(submitted.get("prompt_id") or "").strip()
     if not prompt_id:
         raise RuntimeError(f"远程 ComfyUI 未返回 prompt_id: {submitted}")
+    workflow_path = str(body.get("path") or "").strip()
+    _emit_stage(
+        payload,
+        stage="remote_comfy",
+        status="running",
+        message=f"已提交到 4090，prompt_id: {prompt_id}",
+        data={"prompt_id": prompt_id, "workflow": workflow_path},
+    )
     deadline = time.time() + max(int(timeout_seconds or 900), 30)
     last_job: dict[str, Any] = {}
+    poll_count = 0
+    started = time.time()
     while time.time() < deadline:
+        poll_count += 1
         last_job = _remote_comfy_gateway_json(
             gateway_url=gateway_url,
             token=token,
@@ -4104,6 +4148,20 @@ def _execute_remote_comfy_gateway_body(
                 "raw_submit": submitted,
                 "raw_job": last_job,
             }
+        if poll_count == 1 or poll_count % 6 == 0:
+            _emit_stage(
+                payload,
+                stage="remote_comfy",
+                status="running",
+                message=f"4090 正在生成，prompt_id: {prompt_id}",
+                data={
+                    "prompt_id": prompt_id,
+                    "workflow": workflow_path,
+                    "elapsed_seconds": int(time.time() - started),
+                    "poll_count": poll_count,
+                    "job": _sanitize_payload(last_job),
+                },
+            )
         time.sleep(5)
     return {"ok": False, "prompt_id": prompt_id, "message": "远程 ComfyUI 测试超时", "raw_job": last_job}
 
@@ -4268,11 +4326,14 @@ PERSONA_BODY_PROFILES: dict[str, dict[str, Any]] = {
             "乳房特征：饱满圆润的乳房，乳晕大小适中呈粉褐色，乳头清晰可见略微突出，乳头颜色比乳晕稍深，"
             "乳晕边缘自然清晰，乳房形状自然下垂感，轻微乳沟，乳房质感柔软真实"
         ),
-        "prompt_anchor": "身形修長纖細，肩頸線條柔和，腰胯比例輕盈自然",
+        "prompt_anchor": (
+            "身形修长纤细，肩颈线条柔和，腰腹线条平滑，腰胯比例轻盈自然，"
+            "胯臀曲线明显，腿部和手臂纤细自然，整体比例轻盈柔和"
+        ),
         "negative_body_prompt": (
             "宽肩，粗腰，短腿，厚重体型，男性化躯干，腰胯比例消失，身体比例漂移，"
             "过度肌肉，粗壮手臂，畸形躯干，额外肢体，重复手臂，手脚错乱，"
-            "乳晕过大，乳晕过小，乳头模糊，乳头缺失，乳房形状不自然，乳房僵硬，乳沟过深，"
+            "乳晕过大，乳晕过小，乳头模糊，乳头缺失，乳房形状不自然，乳房僵硬，乳沟过浅，"
             "乳头颜色异常，乳晕边缘模糊，乳房比例失调"
         ),
     }
@@ -4339,11 +4400,46 @@ def _persona_body_profile_for_payload(payload: dict[str, Any] | None) -> dict[st
 def _persona_body_prompt_anchor_for_profile(profile: dict[str, Any]) -> str:
     anchor = str(profile.get("prompt_anchor") or profile.get("body_prompt_anchor") or "").strip()
     if anchor:
-        return anchor
+        return _naturalize_persona_body_positive_prompt(anchor)
     body_prompt = str(profile.get("body_profile_prompt") or "").strip()
-    if re.search(r"纤细|纖細|沙漏|腰胯|腰身|修长|修長", body_prompt):
-        return "身形修長纖細，腰胯比例輕盈自然"
+    visible_prompt = _naturalize_persona_body_positive_prompt(body_prompt)
+    if visible_prompt:
+        return visible_prompt
     return ""
+
+
+def _naturalize_persona_body_positive_prompt(prompt_text: str) -> str:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    if not text:
+        return ""
+    text = text.replace("身材约束：", "").replace("身材約束：", "")
+    text = text.replace("乳房特征：", "").replace("乳房特徵：", "")
+    text = re.sub(r"年轻女性[，、\s]*|年輕女性[，、\s]*", "", text)
+    text = re.sub(r"不要[^。；;]*[。；;]?", "", text)
+    text = re.sub(r"不应[^。；;]*[。；;]?", "", text)
+    text = re.sub(r"不能[^。；;]*[。；;]?", "", text)
+    text = re.sub(r"避免[^。；;]*[。；;]?", "", text)
+    text = text.replace("头身比例修长", "整体比例修长")
+    text = re.sub(r"[。；;]+", "，", text)
+    text = re.sub(r"\s+", "", text)
+    parts: list[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"[，、,]+", text):
+        part = raw.strip(" ，、,。；;")
+        if not part:
+            continue
+        if re.search(r"厚重|宽肩|寬肩|粗腰|短腿|男性化|畸形|缺失|异常|異常|失调|失調|模糊|过大|過大|过小|過小", part):
+            continue
+        if re.search(r"乳房|乳头|乳頭|乳晕|乳暈|胸|皮肤|皮膚|脸|臉|五官|眼|眉|鼻|唇|嘴|发型|髮型|头发|頭髮|发色|髮色|发|髮", part):
+            continue
+        key = re.sub(r"\s+", "", part)
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(part)
+    if not parts:
+        return ""
+    return "，".join(parts[:10]).strip("，")
 
 
 def _prompt_already_has_persona_body_anchor(prompt_text: str, anchor: str) -> bool:
@@ -4353,6 +4449,15 @@ def _prompt_already_has_persona_body_anchor(prompt_text: str, anchor: str) -> bo
         return False
     if target in text:
         return True
+    anchor_parts = [
+        re.sub(r"[，。；、,.;:\s]+", "", part)
+        for part in re.split(r"[，。；、,.;:\s]+", str(anchor or ""))
+        if len(re.sub(r"[，。；、,.;:\s]+", "", part)) >= 4
+    ]
+    if anchor_parts:
+        covered = sum(1 for part in anchor_parts if part in text)
+        if covered >= min(4, len(anchor_parts)) or covered / max(len(anchor_parts), 1) >= 0.55:
+            return True
     body_terms = (
         "身形修長纖細",
         "身形修长纤细",
@@ -4362,6 +4467,30 @@ def _prompt_already_has_persona_body_anchor(prompt_text: str, anchor: str) -> bo
         "腰胯比例轻盈自然",
     )
     return sum(1 for term in body_terms if term in text) >= 2
+
+
+def _merge_persona_body_anchor_into_prompt(prompt_text: str, anchor: str) -> str:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    visible_anchor = _naturalize_persona_body_positive_prompt(anchor)
+    if not text or not visible_anchor or _prompt_already_has_persona_body_anchor(text, visible_anchor):
+        return text
+    if _tg_image_first_segment_has_subject_start(text):
+        subject_match = re.match(
+            r"^(?:(一位|一名|一个|一個))?(成人女性|成熟女性|女性|女人|女子|女郎|美女|美人|女教师|女教?师|教师|老师|人物|模特|女模特|主角|角色)?",
+            text,
+        )
+        if subject_match and (subject_match.group(1) or subject_match.group(2)):
+            quantifier = subject_match.group(1) or "一名"
+            subject = subject_match.group(2) or ""
+            rest = text[subject_match.end():].lstrip("的，、 ")
+            if subject:
+                return f"{quantifier}{visible_anchor}的{subject}{rest}"
+            return f"{quantifier}{visible_anchor}的{rest}"
+    match = re.match(r"^(成人|女性|女人|女子|女郎|美女|美人|女教师|女教?师|教师|老师|人物|模特)", text)
+    if match:
+        end = match.end()
+        return f"{text[:end]}{visible_anchor}，{text[end:].lstrip('，、 ')}"
+    return f"一名{visible_anchor}的{text.lstrip('，、；; ')}"
 
 
 def _strip_persona_body_profile_from_final_prompt(prompt_text: str, body_prompt: str) -> str:
@@ -4399,8 +4528,8 @@ def _apply_persona_body_profile_to_payload(task_type: str, payload: dict[str, An
     )
     if not current_prompt:
         return source
-    if visible_anchor and not _prompt_already_has_persona_body_anchor(current_prompt, visible_anchor):
-        current_prompt = f"{visible_anchor}，{current_prompt}"
+    if visible_anchor:
+        current_prompt = _merge_persona_body_anchor_into_prompt(current_prompt, visible_anchor)
     source = _set_tg_generation_prompt(source, current_prompt)
     source["tg_persona_body_profile_id"] = str(profile.get("id") or "").strip()
     source["tg_persona_body_profile_label"] = str(profile.get("label") or "").strip()
@@ -5656,10 +5785,8 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     image_task_requires_output = str(task_type or "").strip() in {"text_to_image", "image_generate", "single_image_edit", "get_nano_banana", "face_swap"}
     qa_target_count = _text_to_image_qa_target_count(payload, batch_size=batch_size, workflow_path=workflow_path) if str(task_type or "").strip() == "text_to_image" else 1
     batch_qa_enabled = auto_qa_enabled and qa_target_count > 1
-    if batch_qa_enabled:
-        max_attempts = 0
-    else:
-        max_attempts = min(max(_to_int(payload.get("text_to_image_auto_qa_max_attempts"), 3), 1), 6) if auto_qa_enabled else 1
+    default_max_attempts = PERSON_T2I_AUTO_QA_MAX_ATTEMPTS if _is_person_t2i_workflow(task_type, workflow_path) else 3
+    max_attempts = min(max(_to_int(payload.get("text_to_image_auto_qa_max_attempts"), default_max_attempts), 1), 6) if auto_qa_enabled else 1
     qa_reports: list[dict[str, Any]] = []
     qa_passed_image_paths: list[str] = []
     used_seeds = _collect_seed_values(base_node_inputs)
@@ -5785,6 +5912,8 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
                         "attempt_passed_count": len(attempt_passed_image_paths),
                     },
                 )
+                if max_attempts > 0 and attempt >= max_attempts:
+                    break
                 continue
         qa_report = _analyze_generated_person_image_quality(
             image_path=output_path,
@@ -9133,22 +9262,56 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
     return text.strip(" ，。；、,.;\n\t ")
 
 
+def _normalize_tg_image_body_anchor_punctuation(prompt_text: str) -> str:
+    text = str(prompt_text or "")
+    if not text:
+        return ""
+    # Keep body-profile clauses inside the first subject segment comma-separated.
+    # They are sub-attributes, not visible major separators.
+    text = text.replace("肩颈线条；柔和", "肩颈线条柔和")
+    text = text.replace("肩頸線條；柔和", "肩頸線條柔和")
+    text = text.replace("肩颈线条，柔和", "肩颈线条柔和")
+    text = text.replace("肩頸線條，柔和", "肩頸線條柔和")
+    body_clause_markers = (
+        "肩颈线条",
+        "肩頸線條",
+        "腰腹线条",
+        "腰腹線條",
+        "腰胯比例",
+        "胯臀曲线",
+        "胯臀曲線",
+        "腿部和手臂",
+        "腿部與手臂",
+        "整体比例",
+        "整體比例",
+    )
+    for marker in body_clause_markers:
+        text = re.sub(rf"(?<=[\u4e00-\u9fff])(?={re.escape(marker)})", "，", text)
+    text = re.sub(r"([，、])+", "，", text)
+    text = re.sub(r"；(?=(?:肩颈线条|肩頸線條|腰腹线条|腰腹線條|腰胯比例|胯臀曲线|胯臀曲線|腿部和手臂|腿部與手臂|整体比例|整體比例))", "，", text)
+    return text.strip("，")
+
+
 def _normalize_tg_chinese_image_prompt_format(prompt_text: str) -> str:
     text = _strip_prompt_response_wrappers(prompt_text)
     if not text:
         return ""
-    text = text.replace(",", "，").replace(";", "；").replace(":", "：")
+    text = text.replace(",", "，").replace(";", "，").replace("；", "，").replace(":", "：")
     text = re.sub(r"\s+", "", text)
     text = re.sub(r"(?i)8\s*[kｋＫ]?", "8K", text)
+    text = _normalize_tg_image_body_anchor_punctuation(text)
     text = re.sub(r"(?<=[\u4e00-\u9fff0-9K])(?=穿着)", "，", text)
     for marker in ("她的左手", "她的身体", "她的头"):
         text = re.sub(rf"(?<![，。；、])(?={re.escape(marker)})", "，", text)
-    for marker in ("背景", "柔和", "自然光", "浅景深", "高细节", "8K", "写实摄影"):
+    for marker in ("背景", "自然光", "浅景深", "高细节", "8K", "写实摄影"):
         text = re.sub(rf"(?<=[\u4e00-\u9fff0-9K])(?={re.escape(marker)})", "，", text)
+    text = _normalize_tg_image_body_anchor_punctuation(text)
     text = re.sub(r"真实[，、]皮肤[，、]纹理", "真实皮肤纹理", text)
     text = re.sub(r"真实[，、]皮肤", "真实皮肤", text)
     text = re.sub(r"皮肤[，、]纹理", "皮肤纹理", text)
     text = re.sub(r"布料[，、]褶皱", "布料褶皱", text)
+    text = text.replace("和，浅景深", "和浅景深")
+    text = text.replace("與，淺景深", "與淺景深")
     text = re.sub(r"浅景深[，、]?真实皮肤纹理", "浅景深，真实皮肤纹理", text)
     text = re.sub(r"高细节，?8K，?写实", "高细节，8K，写实", text)
     text = re.sub(r"高细节，?写实", "高细节，8K，写实", text)
@@ -9219,12 +9382,19 @@ def _ensure_tg_image_clothing_anchor(prompt_text: str, original_request: str, pa
         return text
     additions: list[str] = []
     if not _tg_image_prompt_has_clothing_color(text):
-        additions.append("服裝以米白色和深灰色為主")
+        additions.append("米白色和深灰色")
     if not _tg_image_prompt_has_clothing_structure(text):
-        additions.append("服裝為簡潔上衣與直筒下裝，領口、袖口、腰線清楚")
+        additions.append("简洁上衣与直筒下装，领口、袖口、腰线清楚")
     if not additions:
         return text
-    return _normalize_tg_chinese_image_prompt_format(f"{text}，{'，'.join(additions)}")
+    clothing_anchor = "".join(additions)
+    if "穿着" not in text and "穿著" not in text:
+        if text.startswith("一位"):
+            text = re.sub(r"^(一位[^，。；、]{1,50}?)(在|站|坐|躺|跪|倚|靠)", rf"\1穿着{clothing_anchor}\2", text, count=1)
+            if "穿着" in text or "穿著" in text:
+                return _normalize_tg_chinese_image_prompt_format(text)
+        return _normalize_tg_chinese_image_prompt_format(f"{text}，穿着{clothing_anchor}")
+    return _normalize_tg_chinese_image_prompt_format(f"{text}，服装细节为{clothing_anchor}")
 
 
 def _looks_like_clean_chinese_display(prompt_text: str) -> bool:
@@ -9303,16 +9473,16 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "The character face is controlled by the workflow LoRA. Do not write face shape, facial features, skin quality, or hairstyle descriptions in the final prompt. You may keep expression, gaze direction, face clearly visible, unobstructed face, and full head in frame as composition instructions. The composition must show the face, preferably half-body or full-body framing. Avoid cropped faces, covered faces, back-facing poses, and body-only shots. Do not include person names, persona names, or LoRA file names.",
         "Pose description must be concise and direct: use simple posture terms such as standing, sitting, kneeling, or lying. Specify exact body orientation and hand placement in one short clause. Avoid verbose or poetic pose descriptions.",
         "The character's head and face must always be visible within the frame. Full head must be in frame with natural headroom. Never crop the head or face. Back-facing poses are not allowed. Side profiles are acceptable only if the face remains clearly visible.",
-        "MANDATORY CLOTHING ANCHOR: for person images, the clothing phrase must include explicit clothing colors and a simple basic structure, such as color + top/bottom/dress + neckline/sleeves/waistline/hem. Do not leave clothing as vague words like beautiful outfit, sexy outfit, fashion style, or clothing state only.",
+        "MANDATORY CLOTHING ANCHOR: for person images, weave clothing into the same natural sentence as the pose and scene. Include explicit clothing colors and one simple basic structure, such as color + top/bottom/dress + neckline/sleeves/waistline/hem. Do not leave clothing as vague words like beautiful outfit, sexy outfit, fashion style, or clothing state only.",
         "If the user explicitly requests no clothing, nude body, or unclothed appearance, do not add garment colors or garment structures. In that case describe the no-clothing state directly and keep the body-shape anchor separate from clothing.",
         "Keep clothing logic physically plausible. Use intact garments with normal seams, gravity, and fabric tension. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings. If the user explicitly asks for damaged clothing, the damage must still follow fabric tension and pulling direction.",
-        "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple and non-repetitive; do not repeat garment structure details across the prompt.",
-        "Keep the final prompt compact and reusable: body posture, hand placement, body orientation, one clear clothing color, one simple clothing structure, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
-        "CRITICAL FORMAT RULE - COPY THIS EXACT PATTERN: The prompt MUST be ONE continuous Chinese sentence with EXACTLY these 9 segments separated by commas (，): 1.[人物+全身姿态+场景] 2.穿着[服装] 3.[暴露器官] 4.她的[左手动作]而[右手动作] 5.她的身体[朝向] 6.她的头[转向+眼神] 7.[背景] 8.[光线] 9.[技术参数]。 You MUST include segment 4, 5, and 6 exactly as shown. DO NOT skip them. DO NOT change their order. Example with all segments: 一位美丽女郎全身站立在豪华卧室中，穿着优雅的黑色丝绸睡裙，薄薄的意大利面条肩带，低领部部分解开露出深深的乳沟和侧乳，她的左手放在臀部上而右手触摸着裸露的大腿，她的身体微微侧向一边朝向镜头，她的头转向直视镜头带着诱惑的眼神，卧室背景有大大的特大号床铺，白色床单凌乱不堪，柔和的卧室灯投射出温柔的阴影，浅景深让主体清晰而背景微微模糊，真实皮肤纹理，细节的织物褶皱，自然的身体曲线，高细节，8k，写实摄影风格，电影摄影。 This is the ONLY acceptable format.",
+        "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple, physically plausible, and integrated with the action; do not repeat garment structure details across the prompt.",
+        "Keep the final prompt compact and reusable: persona body positive constraints, body posture, hand placement, body orientation, one clear clothing color, one simple clothing structure, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
+        "CRITICAL FORMAT RULE - NATURAL ORDERED SEGMENTS: The prompt MUST be one continuous natural Chinese sentence, using Chinese commas (，) to connect the clauses. Use at least these 9 ordered content blocks, but do not output numbers, labels, semicolons, or list formatting: 1.[natural single-subject opening + body/persona figure constraint + female subject + full or half-body pose + scene; the first block should start naturally with wording such as 一位, 一名, 一个, 一個, 一名女性, 一位成熟女性, 女子, 女郎, 女模特, 主角, or similar subject wording. Do not force only 一位. The persona constraint here must describe figure/proportion only, not breasts, face, hairstyle, skin, or exposure] 2.穿着[clothing color + one simple garment structure, or direct unclothed state when requested] 3.[explicit exposure range / visible erotic focus] 4.她的[left hand action]而右手[right hand action] 5.她的身体[orientation toward camera] 6.她的头[turn direction + gaze/expression, face visible] 7.[background / props / spatial relation] 8.[lighting / shadows / depth of field] 9.[technical quality / realism / texture]. You may add block 10 or 11 for anatomy stability, camera distance, or fabric logic, but keep the final text as one smooth comma-connected paragraph. Keep each block concise and non-repetitive.",
         "MANDATORY EROTIC CONTENT: The generated prompt MUST include explicit description of AT LEAST ONE female reproductive organ: either full and firm breasts with visible nipples, OR clearly visible labia contours with moist intimate areas and slightly parted legs. Choose one based on the pose and clothing state. Use seductive poses: fingers gently touching breasts or inner thighs, arched waist, moist parted lips, alluring gaze toward camera. Lighting should highlight sensual body textures: shadows on breasts, wet sheen on labia, subtle sweat on skin, semi-transparent fabric teasing the body underneath. At least one erotic element is REQUIRED.",
         "MANDATORY ANATOMY - NO OVERLAPS: The prompt MUST ensure anatomically correct poses with NO body part overlaps or intersections. Arms must not cross through torso. Hands must rest naturally on surfaces or body without penetration. Legs must not intersect unnaturally. Body must have clear spatial separation from background objects. Use natural weight distribution and gravity. If sitting, buttocks compress naturally on seat. If lying, body rests flat without floating or intersecting surfaces.",
         "MANDATORY HEAD VISIBILITY: The character's head and face MUST always be fully visible in frame with natural headroom. Never crop the head. Back-facing poses are forbidden.",
-        "Final output must be Chinese only, one plain paragraph, 80 to 180 Chinese characters, comma-separated photographic prompt style. Do not output English, reasoning, titles, labels, or word/character counts.",
+        "Final output must be Chinese only, one plain paragraph, 120 to 260 Chinese characters, natural comma-connected photographic prompt style. Do not output English, reasoning, titles, labels, semicolons, or word/character counts.",
         f"Current task type: {task_label}.",
     ]
     video_rules = [
@@ -9344,6 +9514,61 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
     ]
     rules = image_rules if prompt_chain == "image" else video_rules
     return "\n".join(rules), prompt_chain
+
+
+_TG_IMAGE_SUBJECT_START_RE = re.compile(
+    r"^(?:一位|一名|一个|一個|成人女性|成熟女性|女性|女人|女子|女郎|美女|美人|女教师|教师|老师|人物|模特|女模特|主角|角色)"
+)
+
+
+def _tg_image_first_segment_has_subject_start(prompt_text: str) -> bool:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    if not text:
+        return False
+    first = re.split(r"[，；;]", text, maxsplit=1)[0].strip(" ，、；;")
+    return bool(_TG_IMAGE_SUBJECT_START_RE.match(first))
+
+
+def _validate_tg_image_structured_prompt(final_prompt: str) -> None:
+    text = _strip_prompt_response_wrappers(final_prompt)
+    if not text:
+        raise RuntimeError("Grok final image prompt is empty; blocked before submission.")
+    natural_clauses = [part.strip() for part in re.split(r"[，；;]", text) if part.strip()]
+    if len(natural_clauses) < 9:
+        raise RuntimeError("Grok final image prompt missing enough comma-connected structured clauses; blocked before submission.")
+    if natural_clauses and not _tg_image_first_segment_has_subject_start(text):
+        raise RuntimeError("Grok final image prompt first segment must begin with a natural subject opening; blocked before submission.")
+    required_groups: list[tuple[str, tuple[str, ...]]] = [
+        ("clothing", ("穿着", "穿著", "服装", "服裝", "上衣", "衬衫", "襯衫", "裙", "睡裙", "制服", "内衣", "內衣", "裸")),
+        ("erotic exposure", ("乳沟", "乳溝", "乳房", "乳头", "乳頭", "胸部", "阴部", "陰部", "阴唇", "陰唇", "私密", "大腿内侧", "大腿內側")),
+        ("left hand action", ("她的左手", "左手")),
+        ("right hand action", ("而右手", "右手")),
+        ("body orientation", ("她的身体", "她的身體", "身体朝向", "身體朝向", "身体", "身體", "朝向镜头", "朝向鏡頭")),
+        ("head and gaze", ("她的头", "她的頭", "头转向", "頭轉向", "头部", "頭部", "脸部", "臉部", "视线", "視線", "眼神", "表情")),
+        ("background", ("背景", "场景", "場景", "卧室", "臥室", "室内", "室內", "房间", "房間", "床", "窗", "沙发", "沙發", "椅")),
+        ("lighting", ("光线", "光線", "灯光", "燈光", "侧光", "側光", "柔光", "自然光", "阴影", "陰影", "浅景深", "淺景深")),
+        ("technical quality", ("写实", "寫實", "摄影", "攝影", "真实", "真實", "质感", "質感", "纹理", "紋理", "高细节", "高細節", "8K", "电影", "電影")),
+    ]
+    missing = [name for name, terms in required_groups if not any(term in text for term in terms)]
+    if missing:
+        raise RuntimeError(
+            "Grok final image prompt missing required structured segment(s): "
+            + ", ".join(missing)
+            + "; blocked before submission."
+        )
+
+
+def _ensure_tg_image_subject_prefix(prompt_text: str) -> str:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    if not text:
+        return ""
+    parts = re.split(r"([，；;])", text, maxsplit=1)
+    first = parts[0].strip(" ，、；;")
+    rest = "".join(parts[1:]) if len(parts) > 1 else ""
+    if _tg_image_first_segment_has_subject_start(text):
+        return text
+    first = re.sub(r"^(?:成人|成熟女性|女性|女人|女子|女郎|美女|美人|女教师|教师|老师)", "", first).lstrip("的，、 ")
+    return f"一名{first}{rest}"
 
 
 def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -9427,7 +9652,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 system_prompt,
                 "MANDATORY PERSONA BODY ANCHOR:",
                 persona_body_anchor,
-                "This concise body anchor comes from the selected persona LoRA reference set. Preserve it as a short overall body-shape constraint. Do not copy the full internal body profile, do not repeat body-shape clauses, and do not replace it with unrelated body type, broad shoulders, thick waist, short legs, masculine torso, or generic model body.",
+                "This visible positive persona constraint comes from the selected persona LoRA reference set. Preserve as much of it as possible in the final prompt, but write it as natural visual language woven into the subject description. Do not output labels such as persona, body profile, anchor, or LoRA. Do not repeat body-shape clauses, and do not replace it with unrelated body type.",
             ]
         )
     llm_user_input = user_request
@@ -9445,14 +9670,14 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             f"User original request: {user_request}\n"
             + (f"Aspect-ratio composition requirement: {aspect_pose_guidance}\n" if aspect_pose_guidance else "")
             + f"Persona/LoRA constraint: {persona_face_brief}\n"
-            + (f"Persona body anchor to include once as concise body-shape wording: {persona_body_anchor}\n" if persona_body_anchor else "")
+            + (f"Persona positive visual constraint to include once in natural language: {persona_body_anchor}\n" if persona_body_anchor else "")
             + "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names."
         )
     elif persona_body_anchor:
         llm_user_input = "\n".join(
             [
                 f"User original request: {user_request}",
-                f"Persona body anchor to include once as concise body-shape wording: {persona_body_anchor}",
+                f"Persona positive visual constraint to include once in natural language: {persona_body_anchor}",
                 "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names.",
             ]
         )
@@ -9655,11 +9880,11 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         final_prompt = _ensure_tg_image_clothing_anchor(final_prompt, preserved_request, enhanced)
         enhanced = _apply_persona_body_profile_to_payload(typ, {**enhanced, "prompt": final_prompt, "prompt_text": final_prompt, "message": final_prompt})
         final_prompt = _remote_comfy_prompt_from_payload(typ, enhanced)
+        final_prompt = _ensure_tg_image_subject_prefix(final_prompt)
+        enhanced = _set_tg_generation_prompt(enhanced, final_prompt)
         rewritten = final_prompt
-        required_segments = ["她的左手", "而右手", "她的身体", "她的头"]
-        for seg in required_segments:
-            if seg not in final_prompt:
-                raise RuntimeError(f"Grok final image prompt missing required format segment: {seg}; blocked before submission.")
+
+        _validate_tg_image_structured_prompt(final_prompt)
 
         if not any(x in final_prompt for x in ["乳沟", "乳房", "乳头", "胸部", "阴部", "阴唇", "私密", "大腿内侧"]):
             raise RuntimeError("Grok final image prompt missing required erotic content (breasts or labia); blocked before submission.")
@@ -10039,6 +10264,11 @@ def _insert_task_event(conn, *, task_id: str, user_id: int, kind: str, message: 
 
 def _emit_task_event(*, task_id: str, user_id: int, kind: str, message: str, data: Any) -> None:
     with db() as conn:
+        if str(kind or "").strip().lower() in {"progress", "running"}:
+            row = conn.execute("SELECT status FROM tasks WHERE id = ?", (str(task_id),)).fetchone()
+            current_status = str(row["status"] or "").strip().lower() if row is not None else ""
+            if current_status in {"success", "failed", "cancelled"}:
+                return
         _insert_task_event(conn, task_id=str(task_id), user_id=int(user_id), kind=str(kind), message=str(message), data=data)
 
 
@@ -10170,6 +10400,8 @@ def _latest_user_visible_task_event(task_id: str) -> dict[str, Any]:
         return {}
     try:
         with db() as conn:
+            task_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
+            task_status = str(task_row["status"] or "").strip().lower() if task_row is not None else ""
             rows = conn.execute(
                 """
                 SELECT kind, message, data_json, created_at
@@ -10183,11 +10415,14 @@ def _latest_user_visible_task_event(task_id: str) -> dict[str, Any]:
     except Exception:
         return {}
     for row in rows:
+        kind = str(row["kind"] or "").strip()
+        if task_status in {"success", "failed", "cancelled"} and kind in {"progress", "running", "queued"}:
+            continue
         data = _json_loads(row["data_json"], {})
         if isinstance(data, dict) and data.get("user_visible") is False:
             continue
         return {
-            "kind": str(row["kind"] or "").strip(),
+            "kind": kind,
             "message": str(row["message"] or "").strip(),
             "data": data.get("data") if isinstance(data.get("data"), dict) else data,
             "created_at": int(row["created_at"] or 0),
@@ -10196,7 +10431,7 @@ def _latest_user_visible_task_event(task_id: str) -> dict[str, Any]:
 
 
 def _emit_stage(
-    payload: dict[str, Any],
+    payload: dict[str, Any] | None,
     *,
     stage: str,
     status: str,
@@ -10204,6 +10439,8 @@ def _emit_stage(
     data: dict[str, Any] | None = None,
     progress: float | int | None = None,
 ) -> None:
+    if not isinstance(payload, dict):
+        return
     cb = payload.get("_event_progress")
     if cb is None:
         return
@@ -10479,6 +10716,7 @@ _TG_CHINESE_IMAGE_PROMPT_TASK_TYPES = {
 
 PERSON_T2I_DEFAULT_BATCH_SIZE = 3
 PERSON_T2I_TELEGRAM_RETURN_COUNT = 6
+PERSON_T2I_AUTO_QA_MAX_ATTEMPTS = 6
 
 
 def _remote_comfy_default_batch_size(task_type: str, workflow_path: str) -> int:
@@ -10651,6 +10889,7 @@ class RuntimeConfigPayload(BaseModel):
     local_comfy_gateway_token: str = ""
     local_comfy_workflow_mappings: dict[str, Any] = Field(default_factory=dict)
     local_comfy_image_input_bindings: dict[str, Any] = Field(default_factory=dict)
+    comfy_gpu_queue_enabled: bool = False
     comfy_gpu_max_concurrency: int = 4
     upload_server_ip: str = ""
     upload_file_api_key: str = ""
@@ -12327,6 +12566,7 @@ def create_app() -> FastAPI:
             "local_comfy_gateway_token",
             "local_comfy_workflow_mappings",
             "local_comfy_image_input_bindings",
+            "comfy_gpu_queue_enabled",
             "comfy_gpu_max_concurrency",
         )
         for key in comfy_preserve_keys:

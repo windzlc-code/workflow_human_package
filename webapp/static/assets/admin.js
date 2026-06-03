@@ -1589,7 +1589,8 @@ function runtimeFormToPayload() {
     remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
     remote_comfy_gateway_token: el("rtRemoteComfyGatewayToken").value.trim(),
     remote_comfy_workflow_mappings: collectRemoteComfyWorkflowMappings(),
-    comfy_gpu_max_concurrency: Math.max(1, Math.min(64, Number(el("rtComfyGpuMaxConcurrency").value || 4))),
+    comfy_gpu_queue_enabled: Boolean(el("rtComfyGpuQueueEnabled").checked),
+    comfy_gpu_max_concurrency: Math.max(1, Math.min(4, Number(el("rtComfyGpuMaxConcurrency").value || 4))),
     local_comfy_gateway_url: el("rtLocalComfyGatewayUrl").value.trim(),
     local_comfy_gateway_token: el("rtLocalComfyGatewayToken").value.trim(),
     local_comfy_workflow_mappings: collectLocalComfyWorkflowMappings(),
@@ -1630,6 +1631,7 @@ function fillRuntimeForm(data) {
   const v = data || {};
   el("rtRemoteComfyGatewayUrl").value = v.remote_comfy_gateway_url || "";
   el("rtRemoteComfyGatewayToken").value = v.remote_comfy_gateway_token || "";
+  el("rtComfyGpuQueueEnabled").checked = Boolean(v.comfy_gpu_queue_enabled);
   el("rtComfyGpuMaxConcurrency").value = String(v.comfy_gpu_max_concurrency || 4);
   el("rtLocalComfyGatewayUrl").value = v.local_comfy_gateway_url || "http://127.0.0.1:9001";
   el("rtLocalComfyGatewayToken").value = v.local_comfy_gateway_token || "";

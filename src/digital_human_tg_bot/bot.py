@@ -73,6 +73,7 @@ IMAGE_REPLACE_BUTTON = "圖片替換"
 VIDEO_GENERAL_EDIT_BUTTON = "圖生視頻"
 PERSON_T2I_DEFAULT_BATCH_SIZE = 3
 PERSON_T2I_TELEGRAM_RETURN_COUNT = 6
+PERSON_T2I_AUTO_QA_MAX_ATTEMPTS = 6
 LEGACY_IMAGE_WORKFLOW_BUTTON = "圖像編輯工作流"
 LEGACY_IMAGE_GENERATE_WORKFLOW_BUTTON = "圖片生成工作流"
 VIDEO_EDIT_BUTTON = "視頻生成"
@@ -742,6 +743,7 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_auto_qa_max_attempts": PERSON_T2I_AUTO_QA_MAX_ATTEMPTS if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
@@ -3177,6 +3179,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_auto_qa_max_attempts": PERSON_T2I_AUTO_QA_MAX_ATTEMPTS if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),
@@ -3245,6 +3248,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_auto_qa_max_attempts": PERSON_T2I_AUTO_QA_MAX_ATTEMPTS if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
             "persona_lora": str(params.get("persona_lora") or ""),

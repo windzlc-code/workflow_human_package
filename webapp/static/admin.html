@@ -323,9 +323,10 @@
                   <input id="rtRemoteComfyGatewayUrl" type="text" placeholder="http://47.243.99.2/gpu">
                   <label>&#32593;&#20851;&#35775;&#38382; Token</label>
                   <input id="rtRemoteComfyGatewayToken" type="password" placeholder="Bearer Token">
+                  <label class="inline-check"><input id="rtComfyGpuQueueEnabled" type="checkbox"> 啟用 4090 本地隊列限制</label>
                   <label for="rtComfyGpuMaxConcurrency">4090 隊列上限</label>
-                  <input id="rtComfyGpuMaxConcurrency" type="number" min="1" max="64" step="1" placeholder="4">
-                  <div class="small">保存後立即生效；已在執行的任務不會被中斷，新任務會按新的上限排隊。</div>
+                  <input id="rtComfyGpuMaxConcurrency" type="number" min="1" max="4" step="1" placeholder="4">
+                  <div class="small">停用時會恢復原本直接提交 4090 的模式；啟用後才會按上限排隊。</div>
                   <div class="remote-comfy-toolbar">
                     <button id="btnRemoteComfyHealth" type="button" class="ghost">&#26816;&#27979;&#36828;&#31243;&#32593;&#20851;</button>
                     <button id="btnRemoteComfyRunTest" type="button" class="blue">&#27979;&#35797;&#24403;&#21069;&#26144;&#23556;</button>
