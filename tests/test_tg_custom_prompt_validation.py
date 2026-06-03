@@ -144,7 +144,7 @@ class RemoteComfyImageOutputTests(unittest.TestCase):
         self.assertEqual(output["image_qa"]["passed_count"], 6)
         self.assertFalse(output["image_qa"]["insufficient_count"])
 
-    def test_text_to_image_batch_qa_keeps_generating_past_configured_attempts_until_target(self) -> None:
+    def test_text_to_image_batch_qa_fails_when_configured_attempts_end_before_target(self) -> None:
         def pass_report():
             return {
                 "inspected": True,
@@ -203,28 +203,24 @@ class RemoteComfyImageOutputTests(unittest.TestCase):
                 patch.object(server, "_new_image_qa_seed", side_effect=[123456, 123457]),
                 patch.object(server, "_emit_stage"),
             ):
-                output = server._run_remote_comfy_mapped_task(
-                    "task_batch_qa_unbounded",
-                    {
-                        "remote_comfy_gateway_url": "http://comfy.local",
-                        "remote_comfy_workflow_mappings": {"text_to_image": "person_t2i.api.json"},
-                        "prompt": "一位成人女性肖像，清晰自然",
-                        "width": 640,
-                        "height": 960,
-                        "batch_size": 3,
-                        "text_to_image_qa_target_count": 6,
-                        "text_to_image_auto_qa_enabled": True,
-                        "text_to_image_auto_qa_max_attempts": 1,
-                    },
-                    "text_to_image",
-                )
+                with self.assertRaisesRegex(RuntimeError, "6"):
+                    server._run_remote_comfy_mapped_task(
+                        "task_batch_qa_unbounded",
+                        {
+                            "remote_comfy_gateway_url": "http://comfy.local",
+                            "remote_comfy_workflow_mappings": {"text_to_image": "person_t2i.api.json"},
+                            "prompt": "一位成人女性肖像，清晰自然",
+                            "width": 640,
+                            "height": 960,
+                            "batch_size": 3,
+                            "text_to_image_qa_target_count": 6,
+                            "text_to_image_auto_qa_enabled": True,
+                            "text_to_image_auto_qa_max_attempts": 1,
+                        },
+                        "text_to_image",
+                    )
 
-        self.assertEqual(run_mock.call_count, 3)
-        self.assertEqual(len(output["image_paths"]), 6)
-        self.assertEqual(output["image_qa"]["attempts"], 3)
-        self.assertEqual(output["image_qa"]["checked_count"], 9)
-        self.assertEqual(output["image_qa"]["passed_count"], 6)
-        self.assertFalse(output["image_qa"]["insufficient_count"])
+        self.assertEqual(run_mock.call_count, 1)
 
     def test_text_to_image_batch_qa_stops_before_next_round_when_cancelled(self) -> None:
         def reject_report():
@@ -270,7 +266,7 @@ class RemoteComfyImageOutputTests(unittest.TestCase):
                             "batch_size": 3,
                             "text_to_image_qa_target_count": 6,
                             "text_to_image_auto_qa_enabled": True,
-                            "text_to_image_auto_qa_max_attempts": 1,
+                            "text_to_image_auto_qa_max_attempts": 3,
                         },
                         "text_to_image",
                     )

@@ -898,6 +898,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
     def test_text_to_image_auto_qa_requires_head_when_prompt_mentions_expression(self):
         self.assertTrue(server._text_to_image_prompt_requires_visible_head("人物直视镜头，眼神自然，表情柔和"))
+        self.assertTrue(server._text_to_image_prompt_requires_visible_head("她的头微微侧转注视着前方"))
         self.assertFalse(server._text_to_image_prompt_requires_visible_head("人物站在室内，全身构图，背景自然"))
 
         report = {
@@ -916,7 +917,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertTrue(server._should_reject_generated_person_image(report))
 
-    def test_text_to_image_auto_qa_rejects_borderline_anatomy_even_if_deliverable(self):
+    def test_text_to_image_auto_qa_accepts_borderline_anatomy_when_deliverable(self):
         report = {
             "inspected": True,
             "passed": True,
@@ -929,7 +930,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             "issues": [],
         }
 
-        self.assertTrue(server._should_reject_generated_person_image(report))
+        self.assertFalse(server._should_reject_generated_person_image(report))
 
     def test_text_to_image_auto_qa_rejects_limb_geometry_flags(self):
         report = {
@@ -956,12 +957,53 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             "visual_score": 95,
             "body_shape_too_full": True,
             "body_shape_bulky_or_obese": True,
-            "body_silhouette_score": 58,
+            "body_silhouette_score": 25,
             "deliverable_ready": True,
             "issues": [],
         }
 
         self.assertTrue(server._should_reject_generated_person_image(report))
+
+    def test_text_to_image_auto_qa_accepts_borderline_body_shape_audit(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 95,
+            "prompt_match_score": 95,
+            "anatomy_score": 95,
+            "visual_score": 95,
+            "deliverable_ready": True,
+            "issues": [],
+            "body_shape_audit": {
+                "inspected": True,
+                "clear_person_body_visible": True,
+                "body_shape_too_full": True,
+                "body_shape_bulky_or_obese": False,
+                "upper_torso_contour_anomaly": True,
+                "body_silhouette_score": 30,
+                "confidence": 85,
+            },
+        }
+
+        self.assertFalse(server._should_reject_generated_person_image(report))
+
+    def test_text_to_image_auto_qa_accepts_non_extreme_body_shape_flags(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 95,
+            "prompt_match_score": 95,
+            "anatomy_score": 95,
+            "visual_score": 95,
+            "body_shape_too_full": True,
+            "upper_torso_contour_anomaly": True,
+            "body_part_scale_anomaly": True,
+            "body_silhouette_score": 76,
+            "deliverable_ready": True,
+            "issues": [],
+        }
+
+        self.assertFalse(server._should_reject_generated_person_image(report))
 
     def test_internal_tg_cancel_finds_latest_active_webapp_task(self):
         server._create_task_record("task_old", 1, "text_to_image", {"tg_chat_id": 8100401093})
@@ -1227,7 +1269,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             }
 
         def fake_qa(**kwargs):
-            return {"ok": True, "passed": False, "reason": "test reject"}
+            return {"inspected": True, "passed": False, "limb_or_body_broken": True, "issues": ["test reject"]}
 
         payload = {
             "_task_id": "task_batch_qa_limit",
@@ -1435,6 +1477,130 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertTrue(server._should_reject_generated_person_image(report))
 
+    def test_text_to_image_auto_qa_rejects_clothing_color_mismatch(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 98,
+            "prompt_match_score": 98,
+            "anatomy_score": 99,
+            "visual_score": 98,
+            "deliverable_ready": True,
+            "issues": [],
+            "clothing_audit": {
+                "inspected": True,
+                "clothing_requirement_visible": True,
+                "garment_mismatch_visible": False,
+                "color_mismatch_visible": True,
+                "clothing_state_mismatch_visible": False,
+                "clothing_match_score": 90,
+                "color_match_score": 45,
+                "confidence": 88,
+            },
+        }
+
+        self.assertTrue(server._should_reject_generated_person_image(report))
+
+    def test_generated_person_qa_rejects_clothing_audit_before_hand_audit(self):
+        image_path = Path(self._tmpdir.name) / "candidate_clothing.png"
+        image_path.write_bytes(b"not-a-real-png-but-existing")
+        general_pass = {
+            "parsed": {
+                "summary": "general pass",
+                "overallScore": 98,
+                "promptMatchScore": 98,
+                "anatomyScore": 99,
+                "visualScore": 98,
+                "limbOrBodyBroken": False,
+                "extraOrMissingLimbs": False,
+                "limbOverlapOrFusion": False,
+                "handAnomalyVisible": False,
+                "poseGeometryBroken": False,
+                "bodyPartScaleAnomaly": False,
+                "bodyShapeTooFull": False,
+                "bodyShapeBulkyOrObese": False,
+                "bodySilhouetteScore": 92,
+                "promptMismatchVisible": False,
+                "meaninglessOrCollapsed": False,
+                "textOrWatermarkVisible": False,
+                "headVisible": True,
+                "headCroppedOrMissing": False,
+                "deliverableReady": True,
+                "issues": [],
+                "fixPriorities": [],
+            }
+        }
+        body_audit_pass = {
+            "parsed": {
+                "summary": "body pass",
+                "clearPersonBodyVisible": True,
+                "bodyShapeTooFull": False,
+                "bodyShapeBulkyOrObese": False,
+                "upperTorsoContourAnomaly": False,
+                "bodySilhouetteScore": 92,
+                "confidence": 91,
+                "issues": [],
+            }
+        }
+        clothing_audit_reject = {
+            "parsed": {
+                "summary": "服装颜色不匹配",
+                "clothingRequirementVisible": True,
+                "requiredClothing": ["白色衬衫", "黑色短裙"],
+                "requiredColors": ["白色", "黑色"],
+                "visibleClothing": ["红色连衣裙"],
+                "visibleColors": ["红色"],
+                "garmentMismatchVisible": True,
+                "colorMismatchVisible": True,
+                "clothingStateMismatchVisible": False,
+                "clothingMatchScore": 35,
+                "colorMatchScore": 25,
+                "confidence": 92,
+                "issues": ["服装类型和主色与提示词不一致"],
+            }
+        }
+
+        hand_audit_pass = {
+            "parsed": {
+                "summary": "hand limb pass",
+                "visibleHandCount": 2,
+                "visibleArmCount": 2,
+                "extraHandSuspected": False,
+                "extraArmSuspected": False,
+                "handFingerAnomalySuspected": False,
+                "armAttachmentAnomalySuspected": False,
+                "limbFusionSuspected": False,
+                "bodyDuplicatePartSuspected": False,
+                "confidence": 92,
+                "issues": [],
+            }
+        }
+
+        with patch.object(
+            server,
+            "_request_llm_json_with_fallback",
+            side_effect=[
+                (general_pass, {"model": "qa-general"}, 1),
+                (body_audit_pass, {"model": "qa-body"}, 1),
+                (clothing_audit_reject, {"model": "qa-clothing"}, 1),
+                (hand_audit_pass, {"model": "qa-hand"}, 1),
+            ],
+        ) as qa_mock:
+            report = server._analyze_generated_person_image_quality(
+                image_path=str(image_path),
+                prompt_text="一位女性站在卧室中，穿着白色衬衫和黑色短裙，写实摄影",
+                payload={},
+                attempt=1,
+            )
+
+        self.assertEqual(qa_mock.call_count, 4)
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["clothing_mismatch_visible"])
+        self.assertTrue(report["garment_mismatch_visible"])
+        self.assertTrue(report["clothing_color_mismatch_visible"])
+        self.assertEqual(report["clothing_audit"]["color_match_score"], 25)
+        self.assertNotIn("hand_limb_audit", report)
+
     def test_generated_person_qa_runs_hand_limb_audit_after_general_pass(self):
         image_path = Path(self._tmpdir.name) / "candidate.png"
         image_path.write_bytes(b"not-a-real-png-but-existing")
@@ -1547,7 +1713,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 "clearPersonBodyVisible": True,
                 "bodyShapeTooFull": True,
                 "bodyShapeBulkyOrObese": True,
-                "bodySilhouetteScore": 45,
+                "bodySilhouetteScore": 25,
                 "confidence": 92,
                 "issues": ["人物身形過於厚重"],
             }
@@ -1559,6 +1725,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             side_effect=[
                 (general_pass, {"model": "qa-general"}, 1),
                 (body_audit_reject, {"model": "qa-body"}, 1),
+                (body_audit_reject, {"model": "qa-hand"}, 1),
             ],
         ) as qa_mock:
             report = server._analyze_generated_person_image_quality(
@@ -1568,14 +1735,14 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 attempt=1,
             )
 
-        self.assertEqual(qa_mock.call_count, 2)
+        self.assertEqual(qa_mock.call_count, 3)
         self.assertFalse(report["passed"])
         self.assertTrue(report["body_shape_too_full"])
         self.assertTrue(report["body_shape_bulky_or_obese"])
-        self.assertEqual(report["body_shape_audit"]["body_silhouette_score"], 45)
+        self.assertEqual(report["body_shape_audit"]["body_silhouette_score"], 25)
         self.assertNotIn("hand_limb_audit", report)
 
-    def test_generated_person_qa_rejects_upper_torso_contour_anomaly(self):
+    def test_generated_person_qa_accepts_non_extreme_upper_torso_contour_anomaly(self):
         image_path = Path(self._tmpdir.name) / "candidate_upper_torso.png"
         image_path.write_bytes(b"not-a-real-png-but-existing")
         general_pass = {
@@ -1616,6 +1783,21 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 "issues": ["upper torso contour anomaly"],
             }
         }
+        hand_audit_pass = {
+            "parsed": {
+                "summary": "hand limb pass",
+                "visibleHandCount": 2,
+                "visibleArmCount": 2,
+                "extraHandSuspected": False,
+                "extraArmSuspected": False,
+                "handFingerAnomalySuspected": False,
+                "armAttachmentAnomalySuspected": False,
+                "limbFusionSuspected": False,
+                "bodyDuplicatePartSuspected": False,
+                "confidence": 92,
+                "issues": [],
+            }
+        }
 
         with patch.object(
             server,
@@ -1623,6 +1805,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
             side_effect=[
                 (general_pass, {"model": "qa-general"}, 1),
                 (body_audit_reject, {"model": "qa-body"}, 1),
+                (hand_audit_pass, {"model": "qa-hand"}, 1),
             ],
         ) as qa_mock:
             report = server._analyze_generated_person_image_quality(
@@ -1632,12 +1815,12 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 attempt=1,
             )
 
-        self.assertEqual(qa_mock.call_count, 2)
-        self.assertFalse(report["passed"])
-        self.assertTrue(report["upper_torso_contour_anomaly"])
-        self.assertTrue(report["body_part_scale_anomaly"])
+        self.assertEqual(qa_mock.call_count, 3)
+        self.assertTrue(report["passed"])
+        self.assertFalse(report.get("upper_torso_contour_anomaly", False))
+        self.assertFalse(report.get("body_part_scale_anomaly", False))
         self.assertTrue(report["body_shape_audit"]["upper_torso_contour_anomaly"])
-        self.assertNotIn("hand_limb_audit", report)
+        self.assertIn("hand_limb_audit", report)
 
     def test_text_to_image_aspect_ratio_pose_guidance_matches_orientation(self):
         portrait = server._tg_image_aspect_ratio_pose_guidance({"aspect_ratio": "9:16", "width": 576, "height": 1024})

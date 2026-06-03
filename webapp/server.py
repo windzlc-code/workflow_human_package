@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
@@ -5289,7 +5290,8 @@ def _qa_score(value: Any, default: int = 75) -> int:
 
 
 _HEAD_REQUIRED_PROMPT_PATTERN = re.compile(
-    r"(?:头部|头脸|脸部|面部|脸|眼神|眼睛|目光|视线|凝视|看向镜头|直视镜头|望向镜头|注视镜头|表情|神情|微笑|嘴唇|"
+    r"(?:头部|头脸|脸部|面部|露脸|完整头部|完整面部|完整脸部|她的头|他的头|人物头|主角头|"
+    r"眼神|眼睛|目光|视线|凝视|注视|看向|望向|直视|表情|神情|微笑|嘴唇|"
     r"head|face|facial|eyes?|gaze|expression|look(?:ing)?\s+(?:at|towards?)\s+(?:the\s+)?camera)",
     re.IGNORECASE,
 )
@@ -5297,6 +5299,17 @@ _HEAD_REQUIRED_PROMPT_PATTERN = re.compile(
 
 def _text_to_image_prompt_requires_visible_head(prompt_text: str) -> bool:
     return bool(_HEAD_REQUIRED_PROMPT_PATTERN.search(str(prompt_text or "")))
+
+
+_GENERATED_PERSON_CLOTHING_REQUIREMENT_PATTERN = re.compile(
+    r"(?:穿着|穿著|服装|服裝|衣服|衣着|衣著|上衣|衬衫|襯衫|裙|短裙|长裙|長裙|裤|褲|外套|制服|校服|水手服|内衣|內衣|吊带|吊帶|睡衣|泳装|泳裝|"
+    r"shirt|blouse|skirt|dress|uniform|jacket|coat|pants|shorts|lingerie|bra|clothes|clothing|outfit)",
+    re.IGNORECASE,
+)
+
+
+def _generated_person_prompt_has_clothing_requirement(prompt_text: str) -> bool:
+    return bool(_GENERATED_PERSON_CLOTHING_REQUIREMENT_PATTERN.search(str(prompt_text or "")))
 
 
 def _analyze_generated_person_image_quality(
@@ -5402,21 +5415,40 @@ def _analyze_generated_person_image_quality(
         }
         reject = _should_reject_generated_person_image(report)
         if not reject:
-            body_audit = _analyze_generated_person_body_shape_quality(
-                image_path=str(path),
-                prompt_text=prompt_text,
-                payload=payload,
-                attempt=attempt,
-            )
+            review_futures: dict[str, Any] = {}
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                review_futures["body"] = executor.submit(
+                    _analyze_generated_person_body_shape_quality,
+                    image_path=str(path),
+                    prompt_text=prompt_text,
+                    payload=payload,
+                    attempt=attempt,
+                )
+                if _generated_person_prompt_has_clothing_requirement(prompt_text):
+                    review_futures["clothing"] = executor.submit(
+                        _analyze_generated_person_clothing_quality,
+                        image_path=str(path),
+                        prompt_text=prompt_text,
+                        payload=payload,
+                        attempt=attempt,
+                    )
+                review_futures["hand"] = executor.submit(
+                    _analyze_generated_person_hand_limb_quality,
+                    image_path=str(path),
+                    prompt_text=prompt_text,
+                    payload=payload,
+                    attempt=attempt,
+                )
+                body_audit = review_futures["body"].result()
+                clothing_audit = review_futures["clothing"].result() if "clothing" in review_futures else None
+                audit = review_futures["hand"].result()
+
             _merge_generated_person_body_shape_audit(report, body_audit)
             reject = _should_reject_generated_person_image(report)
         if not reject:
-            audit = _analyze_generated_person_hand_limb_quality(
-                image_path=str(path),
-                prompt_text=prompt_text,
-                payload=payload,
-                attempt=attempt,
-            )
+            _merge_generated_person_clothing_audit(report, clothing_audit)
+            reject = _should_reject_generated_person_image(report)
+        if not reject:
             _merge_generated_person_hand_limb_audit(report, audit)
             reject = _should_reject_generated_person_image(report)
         report["passed"] = not reject
@@ -5509,6 +5541,94 @@ def _analyze_generated_person_body_shape_quality(
             "summary": "圖像身形視覺複審暫不可用，未放行當前結果。",
             "error": str(exc),
             "issues": ["圖像身形視覺複審未完成，不能確認候選圖可交付。"],
+        }
+
+
+def _analyze_generated_person_clothing_quality(
+    *,
+    image_path: str,
+    prompt_text: str,
+    payload: dict[str, Any],
+    attempt: int,
+) -> dict[str, Any]:
+    path = Path(str(image_path or "")).expanduser()
+    if not _generated_person_prompt_has_clothing_requirement(prompt_text):
+        return {"inspected": False, "skipped": True, "summary": "No explicit clothing requirement in prompt."}
+    if not path.exists() or not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+        return {"inspected": False, "summary": "No image file available for clothing QA."}
+    system_prompt = "\n".join(
+        [
+            "You are a strict clothing and clothing-color QA reviewer for generated person images.",
+            "Only compare visible clothing against the generation prompt. Do not judge aesthetics, body shape, pose style, or subject matter.",
+            "Check three things: garment type, main garment color, and requested clothing state such as open shirt, raised skirt, lowered waistband, intact uniform, jacket, dress, pants, or underwear.",
+            "Be tolerant of shadows, highlights, folds, transparency, small trim colors, and minor lighting shifts. Do not fail a candidate for tiny color-temperature differences.",
+            "Fail only when the requested garment type is clearly absent or replaced, the main requested garment color is clearly wrong, or the requested clothing state is clearly contradicted.",
+            "If clothing is mostly hidden and cannot be reliably judged, mark clothingRequirementVisible as false and do not mark mismatch.",
+            "Return JSON only. Put user-facing issues in Chinese.",
+            "JSON schema:",
+            "{",
+            '  "summary": "中文一句话总结",',
+            '  "clothingRequirementVisible": false,',
+            '  "requiredClothing": ["白色衬衫"],',
+            '  "requiredColors": ["白色"],',
+            '  "visibleClothing": ["白色衬衫"],',
+            '  "visibleColors": ["白色"],',
+            '  "garmentMismatchVisible": false,',
+            '  "colorMismatchVisible": false,',
+            '  "clothingStateMismatchVisible": false,',
+            '  "clothingMatchScore": 0,',
+            '  "colorMatchScore": 0,',
+            '  "confidence": 0,',
+            '  "issues": ["中文问题1"]',
+            "}",
+        ]
+    )
+    user_input = "\n".join(
+        [
+            f"Generation prompt: {str(prompt_text or '').strip()}",
+            f"Candidate round: {max(int(attempt), 1)}.",
+            "Extract the clothing and color requirements from the prompt, then compare them to the visible candidate image.",
+            "If the prompt says white shirt and black skirt, a red dress or blue jacket is a visible mismatch. If the prompt requests an open shirt or raised skirt, a fully closed or different garment state is a state mismatch.",
+            "If the candidate preserves the garment type and main color but lighting makes it warmer/cooler, pass it.",
+        ]
+    )
+    try:
+        result, selected, attempts = _request_llm_json_with_fallback(
+            source=payload,
+            user_input=user_input,
+            system_prompt=system_prompt,
+            image_paths=[str(path)],
+            retry_count=1,
+            request_label="image clothing color QA",
+        )
+        parsed = result.get("parsed") if isinstance(result, dict) else None
+        if not isinstance(parsed, dict):
+            raise RuntimeError("image clothing color QA did not return a JSON object")
+        return {
+            "inspected": True,
+            "selected_model": str(selected.get("model") or "").strip() if isinstance(selected, dict) else "",
+            "attempts": attempts,
+            "summary": str(parsed.get("summary") or "服装颜色 QA 检查完成。").strip(),
+            "clothing_requirement_visible": parsed.get("clothingRequirementVisible") is True,
+            "required_clothing": _parse_qa_string_list(parsed.get("requiredClothing"), 6),
+            "required_colors": _parse_qa_string_list(parsed.get("requiredColors"), 6),
+            "visible_clothing": _parse_qa_string_list(parsed.get("visibleClothing"), 6),
+            "visible_colors": _parse_qa_string_list(parsed.get("visibleColors"), 6),
+            "garment_mismatch_visible": parsed.get("garmentMismatchVisible") is True,
+            "color_mismatch_visible": parsed.get("colorMismatchVisible") is True,
+            "clothing_state_mismatch_visible": parsed.get("clothingStateMismatchVisible") is True,
+            "clothing_match_score": _qa_score(parsed.get("clothingMatchScore"), 85),
+            "color_match_score": _qa_score(parsed.get("colorMatchScore"), 85),
+            "confidence": _qa_score(parsed.get("confidence"), 75),
+            "issues": _parse_qa_string_list(parsed.get("issues"), 6),
+        }
+    except Exception as exc:
+        return {
+            "inspected": False,
+            "qa_unavailable": True,
+            "summary": "服装颜色 QA 暂不可用，已跳过专项复审。",
+            "error": str(exc),
+            "issues": ["服装颜色 QA 未完成。"],
         }
 
 
@@ -5610,8 +5730,13 @@ def _merge_generated_person_body_shape_audit(report: dict[str, Any], audit: dict
     too_full = _to_bool(audit.get("body_shape_too_full"), False)
     bulky_or_obese = _to_bool(audit.get("body_shape_bulky_or_obese"), False)
     upper_torso_anomaly = _to_bool(audit.get("upper_torso_contour_anomaly"), False)
-    suspicious = too_full or bulky_or_obese or upper_torso_anomaly or (silhouette_score < 72 and confidence >= 70)
-    if not suspicious:
+    extreme_body_shape = (
+        silhouette_score < 30
+        or (silhouette_score < 40 and confidence >= 90 and (too_full or bulky_or_obese or upper_torso_anomaly))
+        or (silhouette_score < 55 and confidence >= 95 and bulky_or_obese and upper_torso_anomaly)
+    )
+    if not extreme_body_shape:
+        report["body_silhouette_score"] = min(_to_int(report.get("body_silhouette_score"), 85), silhouette_score)
         return
 
     report["body_shape_too_full"] = True
@@ -5629,6 +5754,50 @@ def _merge_generated_person_body_shape_audit(report: dict[str, Any], audit: dict
         issues.extend(audit_issues)
     else:
         issues.append(str(audit.get("summary") or "身形視覺複審發現人物身形不符合交付要求。").strip())
+    report["issues"] = _parse_qa_string_list(issues, 6)
+
+
+def _merge_generated_person_clothing_audit(report: dict[str, Any], audit: dict[str, Any] | None) -> None:
+    if not isinstance(report, dict) or not isinstance(audit, dict):
+        return
+    report["clothing_audit"] = audit
+    if not _to_bool(audit.get("inspected"), False):
+        return
+    if not _to_bool(audit.get("clothing_requirement_visible"), False):
+        return
+
+    clothing_score = _to_int(audit.get("clothing_match_score"), 85)
+    color_score = _to_int(audit.get("color_match_score"), 85)
+    confidence = _to_int(audit.get("confidence"), 75)
+    garment_mismatch = _to_bool(audit.get("garment_mismatch_visible"), False)
+    color_mismatch = _to_bool(audit.get("color_mismatch_visible"), False)
+    state_mismatch = _to_bool(audit.get("clothing_state_mismatch_visible"), False)
+    rejectable = (
+        (garment_mismatch and clothing_score < 75 and confidence >= 70)
+        or (state_mismatch and clothing_score < 75 and confidence >= 70)
+        or (color_mismatch and color_score < 70 and confidence >= 75)
+        or (clothing_score < 55 and confidence >= 70)
+        or (color_score < 55 and confidence >= 75)
+    )
+    if not rejectable:
+        return
+
+    report["clothing_mismatch_visible"] = True
+    if garment_mismatch:
+        report["garment_mismatch_visible"] = True
+    if color_mismatch:
+        report["clothing_color_mismatch_visible"] = True
+    if state_mismatch:
+        report["clothing_state_mismatch_visible"] = True
+    report["prompt_mismatch_visible"] = True
+    report["prompt_match_score"] = min(_to_int(report.get("prompt_match_score"), 75), clothing_score, color_score)
+    report["deliverable_ready"] = False
+    issues = _parse_qa_string_list(report.get("issues"), 6)
+    audit_issues = _parse_qa_string_list(audit.get("issues"), 6)
+    if audit_issues:
+        issues.extend(audit_issues)
+    else:
+        issues.append(str(audit.get("summary") or "服装或服装颜色与提示词不匹配。").strip())
     report["issues"] = _parse_qa_string_list(issues, 6)
 
 
@@ -5691,12 +5860,34 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         return _to_bool(body_audit.get("qa_unavailable"), False)
     if body_audit:
         if _to_bool(body_audit.get("clear_person_body_visible"), False):
-            if _to_bool(body_audit.get("body_shape_too_full"), False) or _to_bool(body_audit.get("body_shape_bulky_or_obese"), False):
+            audit_silhouette = _to_int(body_audit.get("body_silhouette_score"), 85)
+            audit_confidence = _to_int(body_audit.get("confidence"), 75)
+            audit_too_full = _to_bool(body_audit.get("body_shape_too_full"), False)
+            audit_bulky_or_obese = _to_bool(body_audit.get("body_shape_bulky_or_obese"), False)
+            audit_upper_torso_anomaly = _to_bool(body_audit.get("upper_torso_contour_anomaly"), False)
+            if audit_silhouette < 30:
                 return True
-            if _to_bool(body_audit.get("upper_torso_contour_anomaly"), False):
+            if audit_silhouette < 40 and audit_confidence >= 90 and (
+                audit_too_full or audit_bulky_or_obese or audit_upper_torso_anomaly
+            ):
                 return True
-            if _to_int(body_audit.get("body_silhouette_score"), 85) < 72 and _to_int(body_audit.get("confidence"), 75) >= 70:
+            if audit_silhouette < 55 and audit_confidence >= 95 and audit_bulky_or_obese and audit_upper_torso_anomaly:
                 return True
+    clothing_audit = report.get("clothing_audit") if isinstance(report.get("clothing_audit"), dict) else {}
+    if clothing_audit and _to_bool(clothing_audit.get("inspected"), False) and _to_bool(clothing_audit.get("clothing_requirement_visible"), False):
+        clothing_score = _to_int(clothing_audit.get("clothing_match_score"), 85)
+        color_score = _to_int(clothing_audit.get("color_match_score"), 85)
+        clothing_confidence = _to_int(clothing_audit.get("confidence"), 75)
+        if _to_bool(clothing_audit.get("garment_mismatch_visible"), False) and clothing_score < 75 and clothing_confidence >= 70:
+            return True
+        if _to_bool(clothing_audit.get("clothing_state_mismatch_visible"), False) and clothing_score < 75 and clothing_confidence >= 70:
+            return True
+        if _to_bool(clothing_audit.get("color_mismatch_visible"), False) and color_score < 70 and clothing_confidence >= 75:
+            return True
+        if clothing_score < 55 and clothing_confidence >= 70:
+            return True
+        if color_score < 55 and clothing_confidence >= 75:
+            return True
     audit = report.get("hand_limb_audit") if isinstance(report.get("hand_limb_audit"), dict) else {}
     if audit and not _to_bool(audit.get("inspected"), False):
         return _to_bool(audit.get("qa_unavailable"), False)
@@ -5715,20 +5906,24 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
                 return True
     if _to_bool(report.get("limb_or_body_broken"), False):
         return True
-    if _to_bool(report.get("body_shape_too_full"), False):
+    if _to_bool(report.get("clothing_mismatch_visible"), False):
         return True
-    if _to_bool(report.get("body_shape_bulky_or_obese"), False):
+    body_silhouette_score = _to_int(report.get("body_silhouette_score"), 85)
+    body_shape_flagged = (
+        _to_bool(report.get("body_shape_too_full"), False)
+        or _to_bool(report.get("body_shape_bulky_or_obese"), False)
+        or _to_bool(report.get("upper_torso_contour_anomaly"), False)
+        or _to_bool(report.get("body_part_scale_anomaly"), False)
+    )
+    if body_silhouette_score < 30:
         return True
-    if _to_bool(report.get("upper_torso_contour_anomaly"), False):
-        return True
-    if _to_int(report.get("body_silhouette_score"), 85) < 72:
+    if body_silhouette_score < 40 and body_shape_flagged:
         return True
     for key in (
         "extra_or_missing_limbs",
         "limb_overlap_or_fusion",
         "hand_anomaly_visible",
         "pose_geometry_broken",
-        "body_part_scale_anomaly",
     ):
         if _to_bool(report.get(key), False):
             return True
@@ -5741,17 +5936,17 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         or _to_bool(report.get("head_cropped_or_missing"), False)
     ):
         return True
-    if _to_int(report.get("overall_score"), 75) < 82:
+    if _to_int(report.get("overall_score"), 75) < 72:
         return True
-    if _to_int(report.get("prompt_match_score"), 75) < 76:
+    if _to_int(report.get("prompt_match_score"), 75) < 65:
         return True
-    if _to_int(report.get("anatomy_score"), 75) < 88:
+    if _to_int(report.get("anatomy_score"), 75) < 75:
         return True
-    if _to_int(report.get("visual_score"), 75) < 76:
+    if _to_int(report.get("visual_score"), 75) < 65:
         return True
     if _to_bool(report.get("deliverable_ready"), False):
         return False
-    return bool(report.get("issues"))
+    return False
 
 
 def _qa_failure_reason(report: dict[str, Any]) -> str:
