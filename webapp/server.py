@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -4477,12 +4478,16 @@ def _prompt_already_has_persona_body_anchor(prompt_text: str, anchor: str) -> bo
     body_terms = (
         "身形修長纖細",
         "身形修长纤细",
+        "身形纖細修長",
+        "身形纤细修长",
         "肩頸線條柔和",
         "肩颈线条柔和",
         "腰胯比例輕盈自然",
         "腰胯比例轻盈自然",
     )
-    return sum(1 for term in body_terms if term in text) >= 2
+    if sum(1 for term in body_terms if term in text) >= 2:
+        return True
+    return bool(re.search(r"身形[^，。；、]{0,12}(?:纤细|纖細|修长|修長)[^，。；、]{0,12}(?:纤细|纖細|修长|修長)", text) and re.search(r"腰胯比例|腰臀比例", text))
 
 
 def _merge_persona_body_anchor_into_prompt(prompt_text: str, anchor: str) -> str:
@@ -9131,8 +9136,27 @@ def _tg_image_aspect_ratio_pose_guidance(payload: dict[str, Any] | None) -> str:
 
     return (
         f"画面比例构图规则：当前比例 {ratio or '未指定'}，分辨率 {width or '-'} x {height or '-'}。"
-        f"{detail}提示词必须让人物姿势、手部动作、身体朝向、镜头距离和场景空间与该比例匹配，保证头部完整入镜、身体结构自然、肢体不交叠。"
+        f"{detail}Grok 必须根据当前画面比例选择合理姿势、手部动作、身体朝向、镜头距离和场景空间，不能套用会裁掉头部或挤压脸部的通用姿势，必须保证头部完整入镜、脸部处在镜头范围内、身体结构自然、肢体不交叠。"
     )
+
+
+def _tg_image_uses_landscape_view(payload: dict[str, Any] | None) -> bool:
+    source = payload if isinstance(payload, dict) else {}
+    ratio = str(source.get("aspect_ratio") or source.get("image_aspect_ratio") or "").strip()
+    if ratio in {"3:2", "4:3", "16:9"}:
+        return True
+    width = _to_int(source.get("width"), 0)
+    height = _to_int(source.get("height"), 0)
+    return width > 0 and height > 0 and width > height
+
+
+def _tg_append_landscape_view_suffix(prompt_text: str, payload: dict[str, Any] | None) -> str:
+    text = str(prompt_text or "").strip(" ，。；、")
+    if not text or not _tg_image_uses_landscape_view(payload):
+        return text
+    if re.search(r"横向视图|横向視圖|横图|橫圖|横向构图|橫向構圖", text):
+        return text
+    return f"{text}，横向视图"
 
 
 def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, Any]) -> str:
@@ -9213,7 +9237,7 @@ def _tg_image_persona_face_brief(payload: dict[str, Any]) -> str:
     )
     if "金君雅" not in persona_text and "人设1" not in persona_text:
         return ""
-    return "The current persona face is controlled by LoRA. The final prompt must not include person names, persona names, face shape, facial features, skin quality, or hairstyle descriptions. It may keep expression, gaze direction, clearly visible face, and unobstructed face as composition instructions."
+    return "The current persona face is controlled by LoRA. The final prompt must not include person names, persona names, face shape, facial features, skin quality, or hairstyle descriptions. It may keep head-turn process words, gaze direction, and clear expression as composition instructions."
 
 
 def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
@@ -9721,17 +9745,805 @@ def _tg_request_has_lower_body_intent(request_text: str) -> bool:
     return bool(re.search(r"阴道|陰道|阴部|陰部|阴唇|陰唇|私处|私處|下体|下體|性器官", text))
 
 
+def _tg_request_has_lower_body_action_intent(request_text: str) -> bool:
+    text = str(request_text or "")
+    return bool(re.search(r"自慰|自摸|手淫|手指|指尖|触碰|觸碰|抚摸|撫摸|插入|插进|插進|伸入|伸进|伸進|下体动作|下體動作|私处动作|私處動作", text))
+
+
+def _tg_request_has_explicit_lower_clothing_state(request_text: str) -> bool:
+    text = str(request_text or "")
+    return bool(
+        re.search(
+            r"短裙(?:向上)?(?:上掀|掀起|上撩|撩起|上拉|拉起|上移)|裙摆(?:上掀|上移)|裙擺(?:上掀|上移)|下装(?:向下)?(?:拉开|拉開|褪下)|裤腰(?:下拉|向下拉开|向下拉開)|内裤(?:边缘)?(?:自然)?拉开|內褲(?:邊緣)?(?:自然)?拉開",
+            text,
+        )
+    )
+
+
+def _tg_request_should_probably_include_lower_exposure(request_text: str, nonce: str = "") -> bool:
+    text = _strip_prompt_response_wrappers(request_text)
+    if not text:
+        return False
+    if _tg_request_has_lower_body_intent(text) or _tg_request_has_lower_body_action_intent(text):
+        return True
+    if re.search(r"不露下半身|不要下半身|只要上半身|上半身构图|上半身構圖|胸像|半身特写|半身特寫", text):
+        return False
+    seed = _tg_stable_prompt_seed(f"{text}|{nonce}" if nonce else text)
+    return seed % 100 < 15
+
+
 def _tg_request_has_upper_body_intent(request_text: str) -> bool:
     text = str(request_text or "")
-    return bool(re.search(r"乳房|乳头|乳頭|乳晕|乳暈|胸部|上身|上半身|露点", text))
+    return bool(re.search(r"乳房|乳头|乳頭|乳晕|乳暈|胸部|上身|上半身|露点|半裸|全裸|裸身|裸露", text))
 
 
 def _tg_request_has_manual_lower_action(request_text: str) -> bool:
     text = str(request_text or "")
+    return bool(re.search(r"手指|指尖|手|自慰|自摸|手淫|插入|插进|插進|伸入|伸进|伸進|抚摸|撫摸|触碰|觸碰", text))
+
+
+def _tg_request_has_explicit_head_expression(request_text: str) -> bool:
+    text = str(request_text or "")
     return bool(
-        _tg_request_has_lower_body_intent(text)
-        and re.search(r"手指|手|自慰|插入|插进|插進|伸入|伸进|伸進|抚摸|撫摸|触碰|觸碰", text)
+        re.search(
+            r"目光|眼神|视线|視線|看镜头|看鏡頭|对着镜头|對著鏡頭|直视|直視|凝视|凝視|注视|注視|表情|神情|微笑|笑意|嘴角|抿唇|羞涩|羞澀|挑逗|诱惑|誘惑|暧昧|曖昧|自信|冷淡|高冷|温柔|溫柔|甜美|紧张|緊張|局促|不安|慌张|慌張|放松|放鬆|自然",
+            text,
+        )
     )
+
+
+def _tg_stable_prompt_seed(seed_text: str) -> int:
+    raw = str(seed_text or "").encode("utf-8", errors="ignore")
+    digest = hashlib.sha256(raw).digest()
+    return int.from_bytes(digest[:8], "big", signed=False)
+
+
+def _tg_pick_prompt_variant(seed_text: str, options: list[str], nonce: str = "") -> str:
+    choices = [str(item or "").strip(" ，。；、") for item in options if str(item or "").strip(" ，。；、")]
+    if not choices:
+        return ""
+    seed = _tg_stable_prompt_seed(f"{seed_text}|{nonce}" if nonce else seed_text)
+    return choices[seed % len(choices)]
+
+
+def _tg_default_eye_state(seed_text: str, nonce: str = "") -> str:
+    text = _strip_prompt_response_wrappers(seed_text)
+    if re.search(r"挑逗|诱惑|誘惑|媚|勾人|撩人", text):
+        return _tg_pick_prompt_variant(text, ["暧昧", "主动", "从容", "带有试探感"], nonce)
+    if re.search(r"害羞|羞涩|羞澀|脸红|臉紅", text):
+        return _tg_pick_prompt_variant(text, ["克制", "羞涩", "轻微躲闪", "柔和"], nonce)
+    if re.search(r"自信|冷淡|高冷", text):
+        return _tg_pick_prompt_variant(text, ["自信", "冷静", "坚定", "平稳"], nonce)
+    if re.search(r"专注|專注|凝视|凝視|注视|注視|看着|看著", text):
+        return _tg_pick_prompt_variant(text, ["专注", "平稳", "集中", "认真"], nonce)
+    return _tg_pick_prompt_variant(text or "default-eye", ["柔和", "从容", "松弛", "专注", "平稳", "带有试探感"], nonce)
+
+
+def _tg_default_expression_state(seed_text: str, nonce: str = "") -> str:
+    text = _strip_prompt_response_wrappers(seed_text)
+    if re.search(r"笑|微笑|笑意", text):
+        return _tg_pick_prompt_variant(text, ["带着明显笑意", "轻微微笑", "嘴角上扬"], nonce)
+    if re.search(r"挑逗|诱惑|誘惑|媚|勾人|撩人", text):
+        return _tg_pick_prompt_variant(text, ["嘴角上扬", "带着明显笑意", "呼吸放缓", "主动明确"], nonce)
+    if re.search(r"害羞|羞涩|羞澀|脸红|臉紅", text):
+        return _tg_pick_prompt_variant(text, ["羞涩抿唇", "轻微低眉", "带着紧张笑意"], nonce)
+    if re.search(r"紧张|局促|不安|慌张|慌張", text):
+        return _tg_pick_prompt_variant(text, ["嘴唇微张", "神情紧绷", "呼吸急促"], nonce)
+    if re.search(r"自信|冷淡|高冷", text):
+        return _tg_pick_prompt_variant(text, ["从容克制", "冷静平稳", "带着克制笑意"], nonce)
+    return _tg_pick_prompt_variant(text or "default-expression", ["带着明显笑意", "嘴角上扬", "呼吸放缓", "轻微微笑"], nonce)
+
+
+def _tg_request_clause_matching(request_text: str, pattern: str) -> str:
+    text = _strip_prompt_response_wrappers(request_text)
+    if not text:
+        return ""
+    text = text.replace(",", "，").replace(";", "，").replace("；", "，").replace("、", "，")
+    for clause in re.split(r"[，。！？!?]+", text):
+        cleaned = clause.strip(" ，。！？!?；、")
+        if cleaned and re.search(pattern, cleaned):
+            return cleaned
+    return ""
+
+
+def _tg_request_pose_scene(request_text: str, nonce: str = "") -> str:
+    text = _strip_prompt_response_wrappers(request_text)
+    clause = _tg_request_clause_matching(
+        text,
+        r"站|坐|躺|跪|靠|倚|趴|蹲|俯身|前倾|侧身|横坐|斜坐|半身|全身|床|沙发|椅|教室|卧室|客厅|浴室|办公室|车厢|舞台",
+    )
+    if clause:
+        match = re.search(
+            r"(?:半身|全身)?(?:站在|坐在|横坐在|斜坐在|躺在|跪在|靠坐在|倚在|趴在|蹲在|俯身在|前倾在|侧身站在|侧身坐在)[^，。！？!?；、]{0,40}",
+            clause,
+        )
+        if match:
+            return match.group(0).strip(" ，。！？!?；、")
+    if re.search(r"床|卧室|臥室", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "坐在床边",
+                "靠坐在床头",
+                "斜坐在床沿",
+                "跪坐在床上",
+                "侧身躺在床上面向镜头",
+                "半身坐在床边靠近枕头",
+            ],
+            nonce,
+        )
+    if re.search(r"教室|讲台|黑板|老師|老师|教师", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "站在教室讲台前",
+                "坐在教室讲台边",
+                "站在黑板前",
+                "倚在讲台旁",
+                "半身坐在课桌边",
+                "侧身站在教室黑板旁",
+            ],
+            nonce,
+        )
+    if re.search(r"沙发|客厅|客廳", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "坐在沙发边",
+                "靠坐在客厅沙发上",
+                "站在客厅沙发前",
+                "斜坐在沙发扶手旁",
+                "半身靠坐在沙发中央",
+            ],
+            nonce,
+        )
+    if re.search(r"浴室|浴缸|淋浴", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "站在浴室镜前",
+                "坐在浴缸边缘",
+                "靠在浴室墙边",
+                "半身站在洗手台旁",
+                "侧身坐在浴缸边",
+            ],
+            nonce,
+        )
+    if re.search(r"办公室|辦公室|桌|工位", text):
+        return _tg_pick_prompt_variant(text, ["坐在办公桌边", "站在办公桌旁", "倚在办公室桌沿", "半身坐在办公椅上"], nonce)
+    if re.search(r"车厢|車廂|机舱|機艙|飞机|飛機", text):
+        return _tg_pick_prompt_variant(text, ["站在机舱过道旁", "坐在机舱座椅边", "倚在车厢座椅旁", "半身站在狭窄过道中"], nonce)
+    return ""
+
+
+def _tg_request_hand_action(request_text: str, nonce: str = "") -> str:
+    text = _strip_prompt_response_wrappers(request_text)
+    if not text:
+        return ""
+    left_match = re.search(r"左手[^，。！？!?；、]{1,30}", text)
+    right_match = re.search(r"右手[^，。！？!?；、]{1,30}", text)
+    if left_match and right_match:
+        left = re.sub(r"^.*?左手", "她的左手", left_match.group(0), count=1).strip(" ，。！？!?；、")
+        right = re.sub(r"^.*?右手", "右手", right_match.group(0), count=1).strip(" ，。！？!?；、")
+        if left and right:
+            return f"{left}而{right}"
+    clause = _tg_request_clause_matching(text, r"左手|右手|双手|雙手|手指|手掌|扶|托|抬|撑|撐|拉|扯|掀|撩|抓|按|摸|抚|撫|触|觸|拨|撥|分开|分開|整理|遮")
+    if clause and re.search(r"左手|右手|双手|雙手", clause):
+        if "而右手" in clause and ("她的左手" in clause or "左手" in clause):
+            return clause if clause.startswith("她的") else f"她的{clause}"
+        if "左手" in clause and "右手" in clause:
+            normalized = re.sub(r"^.*?左手", "她的左手", clause, count=1)
+            normalized = re.sub(r"右手", "而右手", normalized, count=1)
+            return normalized.strip(" ，。！？!?；、")
+    if re.search(r"自慰|自摸|手淫|手指|指尖|插入|插进|插進|伸入|伸进|伸進", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的左手支撑身体而右手手指触碰私密部位",
+                "她的左手扶住身侧而右手手指按在下腹与大腿内侧之间",
+                "她的左手按在身旁支点而右手手指伸向私密部位",
+                "她的左手轻按身旁布料而右手手指沿大腿内侧向身体中央移动",
+                "她的左手撑住床面而右手手指直接停在私密部位前方",
+                "她的左手扶着大腿外侧而右手手指触碰身体中央",
+            ],
+            nonce,
+        )
+    if re.search(r"拉|扯|掀|撩", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的左手扶住衣物边缘而右手轻轻拉开衣摆",
+                "她的左手按住身体一侧而右手调整衣物边缘",
+                "她的左手撑在身侧而右手轻拉衣料形成自然褶皱",
+                "她的左手压住衣角而右手向外拉开衣料",
+                "她的左手扶在腰侧而右手托起下摆",
+                "她的左手固定衣物边缘而右手顺着布料向侧边拉开",
+            ],
+            nonce,
+        )
+    if re.search(r"扶|托|抬|撑|撐", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的左手支撑在身侧而右手轻扶衣物边缘",
+                "她的左手托住身体一侧而右手自然放在腿侧",
+                "她的左手扶住身旁支点而右手贴近衣摆",
+                "她的左手撑在座面上而右手轻放在腿侧",
+                "她的左手扶着桌沿而右手整理衣物边缘",
+                "她的左手托住身体重心而右手停在腰侧",
+            ],
+            nonce,
+        )
+    if re.search(r"摸|抚|撫|触|觸|按|抓", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的左手轻扶身体一侧而右手贴近动作区域",
+                "她的左手支撑身体而右手贴近衣物边缘",
+                "她的左手自然撑在身侧而右手贴近衣物边缘",
+                "她的左手按在座面上而右手轻触身体前侧",
+                "她的左手扶住腿侧而右手保持清楚触碰关系",
+                "她的左手稳定身体而右手顺着动作方向停留",
+            ],
+            nonce,
+        )
+    return ""
+
+
+def _tg_image_action_decomposition_for_llm(request_text: str) -> str:
+    text = _strip_prompt_response_wrappers(request_text)
+    if not text:
+        return ""
+    parts: list[str] = []
+    if re.search(r"自慰|自摸|手淫", text):
+        parts.extend(
+            [
+                "用户动作拆解：不要只写“自慰”这个抽象词，要拆成可见的身体姿态、双手位置、手指动作、衣物状态、身体朝向和头部朝向。",
+                "姿态：人物保持稳定坐姿、站姿或靠坐姿，身体重心明确，镜头距离拉开，避免局部特写。",
+                "手部拆解：一只手支撑身体、按住身侧支点或轻扶衣物边缘；另一只手负责该动作，写清手指靠近、触碰、进入或离开的动作关系，不要替换成无关摆拍，也不要输出“用户指定动作”这类占位词。",
+                "衣物状态：手部动作必须和衣物开口、衣摆位置或下装状态对应，避免手部动作被衣物遮挡。",
+                "身体朝向：身体可以微微前倾或侧向镜头，但主体必须完整入镜，动作区域和手部关系要清楚。",
+                "头部：头部段可以使用“自然转向镜头、看向镜头、注视镜头”等动态过程词，必须写明目光方向、眼神状态和明确直白的表情。",
+            ]
+        )
+    elif re.search(r"挑逗|诱惑|誘惑|勾人|撩人", text):
+        parts.extend(
+            [
+                "用户动作拆解：把抽象氛围拆成可见动作，不要只写挑逗或诱惑。",
+                "姿态：身体轻微前倾或自然侧坐，镜头距离拉开。",
+                "手部：手指轻扶衣物边缘、腿侧、椅边或床边，动作与服装状态对应。",
+                "头部：头部自然转向镜头或看向镜头，目光方向、眼神状态和表情必须写出，表情要明确直白。",
+            ]
+        )
+    elif re.search(r"对着镜头|對著鏡頭|看镜头|看鏡頭|直视镜头|直視鏡頭", text):
+        parts.append("镜头要求：把“对着镜头/看镜头”转写到头部段，可写成自然转向镜头、看向镜头或注视镜头；头部动态、目光方向、眼神状态、表情必须同时出现，不要输出脸部可见这类保护词。")
+    return "\n".join(parts)
+
+
+def _tg_request_body_orientation(request_text: str) -> str:
+    text = _strip_prompt_response_wrappers(request_text)
+    if re.search(r"侧身|側身|侧向|側向", text):
+        return "她的身体侧向镜头"
+    if re.search(r"俯身|前倾|前傾", text):
+        return "她的身体微微前倾面向镜头"
+    if re.search(r"背对|背對", text):
+        return "她的身体侧向镜头"
+    if re.search(r"正面|面对|面對|看镜头|看鏡頭", text):
+        return "她的身体正面朝向镜头"
+    return ""
+
+
+def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
+    text = _strip_prompt_response_wrappers(request_text)
+    if re.search(r"挑逗|诱惑|誘惑|媚|勾人", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光直视镜头，眼神暧昧且表情嘴角上扬",
+                "她的头轻轻看向镜头，目光柔和扫向镜头，眼神从容且表情带着明显笑意",
+                "她的头微微侧转看向镜头，目光直视前方，眼神主动且表情带着明显笑意",
+                "她的头抬起注视镜头，目光主动迎向镜头，眼神松弛且表情呼吸放缓",
+            ],
+            nonce,
+        )
+    if re.search(r"害羞|羞涩|羞澀|脸红|臉紅", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光略微下垂后看向镜头，眼神克制且表情羞涩",
+                "她的头轻轻看向镜头，目光望向镜头，眼神克制且表情羞涩抿唇",
+                "她的头微微侧转看向镜头，目光短暂回避后看向镜头，眼神柔和且表情带着紧张笑意",
+            ],
+            nonce,
+        )
+    if re.search(r"自信|冷淡|高冷", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光直视镜头，眼神自信且表情从容",
+                "她的头轻轻看向镜头，目光稳定望向镜头，眼神冷静且表情带着克制笑意",
+                "她的头抬起注视镜头，目光坚定看向镜头，眼神克制且表情从容克制",
+            ],
+            nonce,
+        )
+    if re.search(r"温柔|溫柔|甜美", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光温柔望向镜头，眼神柔和且表情轻微微笑",
+                "她的头轻轻看向镜头，目光柔和落向镜头，眼神平静且表情嘴角上扬",
+                "她的头微微侧转看向镜头，目光亲近迎向镜头，眼神温柔且表情带着明显笑意",
+            ],
+            nonce,
+        )
+    if re.search(r"微笑|笑意|笑|嘴角", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光看向镜头，眼神柔和且表情嘴角上扬",
+                "她的头轻轻看向镜头，目光平稳望向镜头，眼神松弛且表情带着明显笑意",
+                "她的头微微侧转看向镜头，目光直视镜头，眼神从容且表情轻微微笑",
+                "她的头抬起注视镜头，目光亲近迎向镜头，眼神平稳且表情嘴角微微上扬",
+            ],
+            nonce,
+        )
+    if re.search(r"紧张|局促|不安|慌张|慌張", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光看向镜头，眼神紧张且表情克制",
+                "她的头轻轻看向镜头，目光不安望向镜头，眼神收敛且表情克制",
+                "她的头微微侧转看向镜头，目光游移后落向镜头，眼神轻微躲闪且表情嘴唇微张",
+            ],
+            nonce,
+        )
+    if re.search(r"专注|專注|凝视|凝視|注视|注視|看着|看著", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光专注凝视镜头，眼神平稳且表情认真",
+                "她的头轻轻看向镜头，目光集中落在镜头，眼神专注且表情认真",
+                "她的头抬起注视镜头，目光凝视前方，眼神集中且表情认真专注",
+            ],
+            nonce,
+        )
+    if re.search(r"放松|自然|随意|隨意|日常", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光看向镜头，眼神放松且表情嘴角上扬",
+                "她的头轻轻看向镜头，目光平稳望向镜头，眼神松弛且表情呼吸放缓",
+                "她的头微微侧转看向镜头，目光柔和落向镜头，眼神柔和且表情轻微微笑",
+            ],
+            nonce,
+        )
+    if re.search(r"目光|眼神|视线|視線|看镜头|看鏡頭|对着镜头|對著鏡頭|直视|直視|凝视|凝視|注视|注視", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光直视镜头，眼神平稳且表情嘴角上扬",
+                "她的头轻轻看向镜头，目光稳定望向镜头，眼神从容且表情轻微微笑",
+                "她的头微微侧转看向镜头，目光专注落向镜头，眼神柔和且表情呼吸放缓",
+                "她的头抬起注视镜头，目光亲近迎向镜头，眼神松弛且表情带着明显笑意",
+            ],
+            nonce,
+        )
+    return ""
+
+
+def _tg_clean_head_expression_clause(text: str, seed_text: str = "") -> str:
+    cleaned = str(text or "").strip(" ，。；、")
+    seed = str(seed_text or "")
+    if not cleaned:
+        return ""
+
+    def _split_eye_direction(match: re.Match[str]) -> str:
+        content = (match.group(1) or "").strip()
+        direction_match = re.search(
+            r"(略微下垂后看向|短暂回避后看向|游移后落向|集中落在|直视|看向|望向|凝视|注视|落向|迎向|扫向)(.*)",
+            content,
+        )
+        if not direction_match:
+            return f"目光看向镜头，眼神{content or '自然'}"
+        mood = content[: direction_match.start()].strip()
+        direction = f"{direction_match.group(1)}{direction_match.group(2)}".strip()
+        if not re.search(r"镜头|鏡頭|前方", direction):
+            direction = f"{direction}镜头"
+        return f"目光{direction}，眼神{mood or '自然'}"
+
+    cleaned = re.sub(r"^(她的头|头部|脸部|视线|眼神|表情)[：:，、\s]*", "", cleaned)
+    cleaned = re.sub(r"(脸型|五官|眉眼|鼻梁|嘴唇|唇形|发型|头发|肤质|皮肤)[^，。；、]*", "", cleaned)
+    cleaned = re.sub(r"脸部(?:清晰可见|完整入镜|无遮挡|可见)|脸部没有遮挡|脸部不遮挡|脸部完整露出|头部完整入镜|完整入镜", "", cleaned)
+    cleaned = re.sub(r"对着镜头|對著鏡頭|看镜头|看鏡頭|保持正向入镜|保持正向入鏡|正向入镜|正向入鏡", "自然转向镜头", cleaned)
+    cleaned = re.sub(
+        r"眼神([^，。；、且]*(?:镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向|扫向|集中落在)[^，。；、且]*)",
+        _split_eye_direction,
+        cleaned,
+        count=1,
+    )
+    cleaned = cleaned.strip(" ，。；、")
+    if not cleaned:
+        cleaned = _tg_pick_prompt_variant(
+            seed_text or "head",
+            [
+                "自然转向镜头，目光看向镜头，眼神柔和且表情自然放松",
+                "轻轻看向镜头，目光平稳望向镜头，眼神放松且表情直白",
+                "微微侧转看向镜头，目光专注落向镜头，眼神从容且表情自然",
+            ],
+        )
+    if not re.search(r"自然转向镜头|轻轻转向镜头|微微侧转看向镜头|转向镜头|看向镜头|看着镜头|注视镜头|凝视镜头|轉向鏡頭|看向鏡頭|看著鏡頭|注視鏡頭|凝視鏡頭", cleaned):
+        cleaned = re.sub(r"^\s*(微微|轻轻|自然|抬起|低垂|偏向|侧转|轉向|转向)[^，。；、]*", "", cleaned).strip(" ，。；、")
+        cleaned = f"自然转向镜头，{cleaned}" if cleaned else "自然转向镜头"
+    if not re.search(r"眼神|目光|视线|視線|凝视|凝視", cleaned):
+        cleaned = f"{cleaned}，目光看向镜头"
+    elif not re.search(r"(目光|视线|視線)[^，。；、且]*(镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向)", cleaned):
+        cleaned = re.sub(r"(目光|视线|視線)([^，。；、且]*)", lambda m: f"{m.group(1)}{m.group(2).strip() or '自然'}看向镜头", cleaned, count=1)
+        if not re.search(r"(目光|视线|視線)[^，。；、且]*(镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向)", cleaned):
+            cleaned = re.sub(r"(眼神)([^，。；、且]*)", lambda m: f"目光看向镜头，{m.group(1)}{m.group(2).strip() or '自然'}", cleaned, count=1)
+        if not re.search(r"(目光|视线|視線)[^，。；、且]*(镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向)", cleaned):
+            cleaned = f"{cleaned}，目光看向镜头"
+    cleaned = re.sub(r"(表情[^，。；、]*)看向镜头", r"\1", cleaned)
+    if "眼神" not in cleaned:
+        cleaned = f"{cleaned}，眼神{_tg_default_eye_state(seed or cleaned)}"
+    else:
+        cleaned = re.sub(r"眼神(?:自然|清晰|明确|明確)(?=，|且|$)", f"眼神{_tg_default_eye_state(seed or cleaned)}", cleaned)
+    if "表情" not in cleaned:
+        cleaned = f"{cleaned}，表情{_tg_default_expression_state(seed or cleaned)}"
+    else:
+        cleaned = re.sub(r"表情(?:明确自然|明確自然|自然|放松|放鬆|平稳|平穩|柔和)(?=，|且|$)", f"表情{_tg_default_expression_state(seed or cleaned)}", cleaned)
+    cleaned = re.sub(r"[，、]{2,}", "，", cleaned)
+    cleaned = re.sub(r"(自然转向镜头[，、]*){2,}", "自然转向镜头，", cleaned)
+    cleaned = re.sub(r"，+$", "", cleaned)
+    return f"她的头{cleaned}".strip(" ，。；、")
+
+
+def _tg_prompt_head_material_clause(clauses: list[str], original_request: str = "", random_nonce: str = "") -> str:
+    source_text = "，".join(clauses)
+    request_expression = _tg_request_head_expression(original_request, random_nonce)
+    if request_expression:
+        return _tg_clean_head_expression_clause(request_expression, f"{original_request}|{random_nonce}")
+    if random_nonce and not _tg_request_has_explicit_head_expression(original_request):
+        return _tg_clean_head_expression_clause(
+            _tg_pick_prompt_variant(
+                original_request or source_text or "default",
+                [
+                    "自然转向镜头，目光看向镜头，眼神柔和且表情放松",
+                    "轻轻看向镜头，目光专注落向镜头，眼神从容且表情带着明显笑意",
+                    "微微侧转看向镜头，目光平稳望向镜头，眼神专注且表情嘴角上扬",
+                    "抬起头注视镜头，目光亲近迎向镜头，眼神松弛且表情柔和",
+                    "自然转向镜头，目光直视镜头，眼神自信且表情神情从容",
+                    "轻轻看向镜头，目光稳定望向镜头，眼神柔和且表情轻微微笑",
+                ],
+                random_nonce,
+            ),
+            f"{original_request or source_text}|{random_nonce}",
+        )
+    head = _first_tg_clause_matching(clauses, r"^她的头|^她的頭|^头转向|^頭轉向|^头部|^頭部|^脸部|^臉部")
+    expression = _first_tg_clause_matching(clauses, r"眼神|目光|视线|視線|注视|注視|凝视|凝視|看向|看着|看著|表情|神情")
+    if head and expression and expression not in head:
+        return _tg_clean_head_expression_clause(f"{head}，{expression}", original_request or source_text)
+    if head:
+        return _tg_clean_head_expression_clause(head, original_request or source_text)
+    if expression:
+        return _tg_clean_head_expression_clause(expression, original_request or source_text)
+    return _tg_clean_head_expression_clause(
+        _tg_pick_prompt_variant(
+            original_request or source_text or "default",
+            [
+                "自然转向镜头，目光看向镜头，眼神柔和且表情放松",
+                "轻轻看向镜头，目光专注落向镜头，眼神从容且表情带着明显笑意",
+                "微微侧转看向镜头，目光平稳望向镜头，眼神专注且表情嘴角上扬",
+                "抬起头注视镜头，目光亲近迎向镜头，眼神松弛且表情柔和",
+                "自然转向镜头，目光直视镜头，眼神自信且表情神情从容",
+                "轻轻看向镜头，目光稳定望向镜头，眼神柔和且表情轻微微笑",
+            ],
+            random_nonce,
+        ),
+        original_request or source_text,
+    )
+
+
+def _tg_finalize_static_image_prompt_text(text: str) -> str:
+    final = str(text or "")
+    final = re.sub(r"对着镜头|對著鏡頭|看镜头|看鏡頭|保持正向入镜|保持正向入鏡|正向入镜|正向入鏡", "自然转向镜头", final)
+    final = re.sub(r"脸部(?:清晰可见|完整入镜|无遮挡|可见)|脸部没有遮挡|脸部不遮挡|脸部完整露出|头部完整入镜|完整入镜|面部清晰可见", "", final)
+    final = re.sub(r"用户指定动作|用户指定区域|用户指定动作区域|用户要求的手指动作|用户要求的触碰动作|用户指定的手部动作|用户要求的手部动作|用戶指定動作|用戶指定區域", "手部动作清楚", final)
+    final = re.sub(r"[，、]{2,}", "，", final)
+    final = re.sub(r"\s+", "", final)
+    return final.strip(" ，。；、")
+
+
+def _tg_clothing_family_label(clothing_text: str) -> str:
+    text = str(clothing_text or "")
+    if re.search(r"空乘|空姐|空服|制服", text):
+        return "uniform"
+    if re.search(r"护士|護理|护理", text):
+        return "nurse"
+    if re.search(r"睡裙|吊带裙|吊帶裙|连衣裙|連衣裙|裙装|裙裝", text):
+        return "dress"
+    if re.search(r"浴袍|睡袍|袍", text):
+        return "robe"
+    if re.search(r"开衫|開衫|针织|針織", text):
+        return "cardigan"
+    if re.search(r"吊带|吊帶|背心", text):
+        return "camisole"
+    if re.search(r"衬衫|襯衫", text):
+        return "shirt"
+    if re.search(r"短裙|窄裙|包臀|裙", text):
+        return "skirt"
+    if re.search(r"T恤|上衣", text, re.IGNORECASE):
+        return "top"
+    return "other"
+
+
+def _tg_pick_clothing_variant(seed_text: str, options: list[str], nonce: str = "", recent_families: list[str] | None = None) -> str:
+    choices = [str(option or "").strip() for option in options if str(option or "").strip()]
+    if not choices:
+        return ""
+    recent = [str(item or "").strip() for item in (recent_families or []) if str(item or "").strip()]
+    blocked_family = recent[-1] if len(recent) >= 2 and recent[-1] == recent[-2] else ""
+    if blocked_family:
+        filtered = [item for item in choices if _tg_clothing_family_label(item) != blocked_family]
+        if filtered:
+            choices = filtered
+    return _tg_pick_prompt_variant(seed_text, choices, nonce)
+
+
+def _tg_request_default_clothing(
+    request_text: str,
+    subject_text: str = "",
+    random_nonce: str = "",
+    recent_families: list[str] | None = None,
+) -> str:
+    text = f"{request_text} {subject_text}"
+    if re.search(r"空姐|乘务|乘務|空服|飞机|飛機|机舱|機艙", text):
+        return _tg_pick_clothing_variant(
+            text,
+            [
+                "蓝色空乘制服和短裙",
+                "深蓝色空乘衬衫制服和黑色包臀短裙",
+                "浅蓝色空乘衬衫和深灰色修身短裙",
+                "海军蓝制服上衣和黑色窄裙",
+                "白色空乘衬衫和深蓝色制服短裙",
+                "深蓝色修身制服外套和黑色包臀短裙",
+                "酒红色空乘制服连衣裙",
+                "浅蓝色空乘制服上衣和白色窄裙",
+            ],
+            random_nonce,
+            recent_families,
+        )
+    if re.search(r"教师|教師|老师|老師|教室|讲台|講台|黑板", text):
+        return _tg_pick_clothing_variant(
+            text,
+            [
+                "白色衬衫和黑色包臀短裙",
+                "米白色衬衫和深灰色短裙",
+                "白色修身衬衫和黑色窄裙",
+                "米白色衬衫和深灰短裙",
+                "浅蓝色衬衫和黑色窄裙",
+                "米色针织开衫内搭白色衬衫和深灰色短裙",
+                "深灰色针织上衣和黑色高腰窄裙",
+                "米白色连衣裙外搭浅灰色针织开衫",
+                "浅粉色针织上衣和深灰色半身裙",
+                "藏青色修身连衣裙",
+            ],
+            random_nonce,
+            recent_families,
+        )
+    if re.search(r"护士|護士|病房", text):
+        return _tg_pick_clothing_variant(
+            text,
+            [
+                "白色护士制服短裙",
+                "浅蓝色护士上衣和白色短裙",
+                "白色护理制服和修身短裙",
+                "浅粉色护理上衣和白色短裙",
+                "浅蓝色护士制服和修身短裙",
+                "米白色护理连衣裙",
+                "浅粉色护理制服裙",
+            ],
+            random_nonce,
+            recent_families,
+        )
+    if re.search(r"卧室|臥室|床|私密|居家", text):
+        return _tg_pick_clothing_variant(
+            text,
+            [
+                "米白色丝质衬衫和黑色短裙",
+                "浅粉色薄纱睡裙",
+                "白色宽松衬衫和黑色短裙",
+                "米白色睡袍和浅灰色短裙",
+                "浅粉色柔软吊带上衣和米白色丝质短裙",
+                "米色宽松针织上衣和深灰色短裙",
+                "酒红色丝质吊带睡裙",
+                "奶油色宽松针织长上衣",
+                "浅蓝色柔软睡袍",
+                "黑色丝质吊带连衣裙",
+                "米白色薄款开衫和浅粉色吊带裙",
+                "深灰色宽松T恤和白色短裤",
+                "浅紫色丝质睡裙",
+                "白色薄款浴袍",
+            ],
+            random_nonce,
+            recent_families,
+        )
+    if re.search(r"办公室|辦公室|公司|工位|桌", text):
+        return _tg_pick_clothing_variant(
+            text,
+            [
+                "白色通勤衬衫和黑色窄裙",
+                "浅灰色衬衫和深灰色包臀短裙",
+                "黑色修身西装外套和深灰色短裙",
+                "米白色上衣和黑色高腰窄裙",
+                "藏青色修身连衣裙",
+                "米色针织上衣和深灰色西装裙",
+                "浅蓝色通勤连衣裙",
+            ],
+            random_nonce,
+            recent_families,
+        )
+    if re.search(r"浴室|浴缸|淋浴", text):
+        return _tg_pick_clothing_variant(text, ["白色浴袍", "米白色薄衬衫", "浅粉色柔软吊带和米白色短裙", "浅蓝色轻薄睡裙", "奶油色浴袍", "浅紫色吊带睡裙"], random_nonce, recent_families)
+    return _tg_pick_clothing_variant(
+        text,
+        [
+            "白色衬衫和黑色短裙",
+            "米白色丝质衬衫和黑色修身短裙",
+            "米白色上衣和深灰色短裙",
+            "浅粉色贴身吊带和黑色短裙",
+            "米色柔软针织上衣和深灰色高腰短裙",
+            "浅蓝色衬衫和黑色包臀短裙",
+            "深灰色吊带和黑色修身短裙",
+            "米白色轻薄开衫和黑色窄裙",
+            "酒红色吊带连衣裙",
+            "浅紫色丝质睡裙",
+            "奶油色针织长上衣",
+            "黑色修身连衣裙",
+            "浅蓝色宽松T恤和白色短裤",
+            "米白色薄款睡袍",
+            "浅粉色吊带裙",
+        ],
+        random_nonce,
+        recent_families,
+    )
+
+
+def _tg_request_has_explicit_clothing(request_text: str) -> bool:
+    text = str(request_text or "")
+    return bool(
+        re.search(
+            r"穿着|穿著|服装|服裝|衣服|衣着|衣著|衬衫|襯衫|制服|短裙|长裙|長裙|裙|裤|褲|内衣|內衣|睡裙|吊带|吊帶|浴袍|开衫|開衫|外套|上衣|下装|下裝|丝袜|絲襪|高跟鞋",
+            text,
+        )
+    )
+
+
+_TG_CONCRETE_CLOTHING_COLOR_PATTERN = re.compile(
+    r"黑色|白色|灰色|深灰色|浅灰色|淺灰色|米白色|米色|红色|紅色|蓝色|藍色|深蓝色|深藍色|浅蓝色|淺藍色|海军蓝|海軍藍|绿色|綠色|黄色|黃色|粉色|浅粉色|淺粉色|紫色|棕色|咖啡色|卡其色|奶油色|藏青色|银色|銀色|金色|酒红色|酒紅色|墨绿色|墨綠色|天蓝色|天藍色",
+    re.IGNORECASE,
+)
+
+
+def _tg_clothing_has_concrete_color(text: str) -> bool:
+    return bool(_TG_CONCRETE_CLOTHING_COLOR_PATTERN.search(str(text or "")))
+
+
+def _tg_ensure_concrete_clothing_color(clothing_text: str, seed_text: str = "") -> str:
+    text = str(clothing_text or "").strip(" ，。；、")
+    if not text:
+        return ""
+    text = text.replace("浅色", "米白色").replace("淺色", "米白色")
+    text = text.replace("深色", "深灰色")
+    if _tg_clothing_has_concrete_color(text):
+        return text
+
+    phrase_replacements = {
+        "深色空乘衬衫制服和包臀短裙": "深蓝色空乘衬衫制服和黑色包臀短裙",
+        "浅色空乘衬衫和修身短裙": "浅蓝色空乘衬衫和深灰色修身短裙",
+        "修身制服外套和包臀短裙": "深蓝色修身制服外套和黑色包臀短裙",
+        "浅色衬衫和深色短裙": "米白色衬衫和深灰色短裙",
+        "修身衬衫和黑色窄裙": "白色修身衬衫和黑色窄裙",
+        "针织开衫内搭衬衫和深色短裙": "米色针织开衫内搭白色衬衫和深灰色短裙",
+        "浅色护士上衣和白色短裙": "浅蓝色护士上衣和白色短裙",
+        "丝质衬衫和黑色短裙": "米白色丝质衬衫和黑色短裙",
+        "丝质衬衫和修身短裙": "米白色丝质衬衫和黑色修身短裙",
+        "薄纱睡裙": "浅粉色薄纱睡裙",
+        "宽松衬衫和短裙": "白色宽松衬衫和黑色短裙",
+        "浅色睡袍和短裙": "米白色睡袍和浅灰色短裙",
+        "柔软吊带上衣和丝质短裙": "浅粉色柔软吊带上衣和米白色丝质短裙",
+        "宽松针织上衣和深色短裙": "米色宽松针织上衣和深灰色短裙",
+        "浅灰色衬衫和深色包臀短裙": "浅灰色衬衫和深灰色包臀短裙",
+        "修身西装外套和短裙": "黑色修身西装外套和深灰色短裙",
+        "浅色上衣和高腰窄裙": "米白色上衣和黑色高腰窄裙",
+        "浅色薄衬衫": "米白色薄衬衫",
+        "柔软吊带和短裙": "浅粉色柔软吊带和米白色短裙",
+        "轻薄睡裙": "浅蓝色轻薄睡裙",
+        "浅色上衣和深色短裙": "米白色上衣和深灰色短裙",
+        "贴身吊带和短裙": "浅粉色贴身吊带和黑色短裙",
+        "柔软针织上衣和高腰短裙": "米色柔软针织上衣和深灰色高腰短裙",
+        "浅色衬衫和包臀短裙": "浅蓝色衬衫和黑色包臀短裙",
+        "深色吊带和修身短裙": "深灰色吊带和黑色修身短裙",
+        "轻薄开衫和窄裙": "米白色轻薄开衫和黑色窄裙",
+    }
+    for old, new in phrase_replacements.items():
+        text = text.replace(old, new)
+
+    if _tg_clothing_has_concrete_color(text):
+        return text
+
+    if re.search(r"空乘|空姐|制服", text):
+        return f"深蓝色{text}"
+    if re.search(r"护士|護理|护理", text):
+        return f"浅蓝色{text}"
+    if re.search(r"睡裙|吊带|吊帶", text):
+        return f"浅粉色{text}"
+    if re.search(r"开衫|開衫|针织|針織", text):
+        return f"米色{text}"
+    if re.search(r"西装|西裝|外套", text):
+        return f"黑色{text}"
+    if re.search(r"衬衫|襯衫|上衣|浴袍|睡袍", text):
+        return f"米白色{text}"
+    if re.search(r"短裙|窄裙|包臀|裙|裤|褲", text):
+        return f"黑色{text}"
+    color = _tg_pick_prompt_variant(seed_text or text, ["米白色", "浅蓝色", "浅粉色", "深灰色"], "")
+    return f"{color}{text}"
+
+
+def _tg_normalize_upper_clothing_state(text: str) -> str:
+    source = str(text or "")
+    if re.search(r"肩带滑落|肩帶滑落", source):
+        return "肩带自然滑落"
+    if re.search(r"领口下滑|領口下滑", source):
+        return "领口自然下滑"
+    if re.search(r"半透明|薄透|透视|透視", source):
+        return "上衣面料薄透"
+    if re.search(r"前襟|衣襟|胸口|敞开|敞開|解开|解開|拉开|拉開|半开|半開|大敞", source):
+        return "上衣前襟完全敞开"
+    return ""
+
+
+def _tg_strip_clothing_state_from_base(text: str) -> str:
+    base = str(text or "")
+    previous = None
+    while previous != base:
+        previous = base
+        base = re.sub(r"(?:上衣|衬衫|襯衫|制服)?(?:前襟|衣襟|领口|領口|胸口)(?:全部|完全|半)?(?:大敞|敞开|敞開|解开|解開|拉开|拉開|半开|半開)的?", "", base)
+        base = re.sub(r"(?:前襟|衣襟|领口|領口|胸口)(?:全部|完全|半)?(?:大敞|敞开|敞開|解开|解開|拉开|拉開|半开|半開)的?", "", base)
+        base = re.sub(r"(?:上衣)?(?:面料)?(?:半透明|薄透|透视|透視)的?", "", base)
+        base = re.sub(r"(?:肩带|肩帶)(?:自然)?滑落的?", "", base)
+        base = re.sub(r"(?:领口|領口)(?:自然)?下滑的?", "", base)
+        base = re.sub(r"(?:向上)?(?:上掀|掀起|上撩|撩起|上拉|拉起|上移)的?", "", base)
+        base = re.sub(r"(?:向下)?(?:下拉|褪下|脱下|脫下)的?", "", base)
+        base = re.sub(r"(?:内裤|內褲|底裤|底褲)?边缘自然拉开的?", "", base)
+        base = re.sub(r"(?:内裤|內褲|底裤|底褲)?拉开的?", "", base)
+    base = re.sub(r"(?:前襟完全敞开的?)+", "", base)
+    base = re.sub(r"和向(?:上|下)?的", "和", base)
+    base = re.sub(r"\s+", "", base)
+    return base.strip(" ，。；、")
+
+
+def _tg_default_lower_clothing_state_for_text(clothing_text: str) -> str:
+    text = str(clothing_text or "")
+    if re.search(r"T恤|长上衣|長上衣|长款上衣|長款上衣|针织长上衣|針織長上衣|浴袍|睡袍|袍|宽松上衣|寬鬆上衣", text, re.IGNORECASE):
+        return "衣摆向上掀起"
+    if re.search(r"内裤|內褲|底裤|底褲", text):
+        return "内裤边缘自然拉开"
+    if re.search(r"睡裙|连衣裙|連衣裙|吊带裙|吊帶裙", text):
+        return "裙摆向上掀起"
+    if re.search(r"短裙|长裙|長裙|裙摆|裙襬|裙", text):
+        return "短裙向上掀起"
+    if re.search(r"裤|褲|裤腰|褲腰", text):
+        return "裤腰向下拉开"
+    return "下装向下拉开"
+
+
+def _tg_default_upper_clothing_state_for_text(clothing_text: str) -> str:
+    text = str(clothing_text or "")
+    if re.search(r"吊带|吊帶|背心|睡裙|吊带裙|吊帶裙", text):
+        return "肩带自然滑落"
+    if re.search(r"T恤|长上衣|長上衣|针织长上衣|針織長上衣|宽松上衣|寬鬆上衣|上衣", text, re.IGNORECASE):
+        return "领口自然下滑"
+    return "上衣前襟完全敞开"
 
 
 def _tg_clause_has_upper_clothing_state(text: str) -> bool:
@@ -9739,7 +10551,7 @@ def _tg_clause_has_upper_clothing_state(text: str) -> bool:
 
 
 def _tg_clause_has_lower_clothing_state(text: str) -> bool:
-    return bool(re.search(r"短裙向上掀起|裙摆上掀|裙擺上掀|裙摆上移|裙擺上移|下装向下拉开|下裝向下拉開|裤腰下拉|褲腰下拉|下装褪下|下裝褪下|上掀|掀起|上撩|下拉|褪下|脱下|脫下", text))
+    return bool(re.search(r"短裙向上掀起|裙摆上掀|裙擺上掀|裙摆上移|裙擺上移|衣摆向上掀起|衣擺向上掀起|下摆向上掀起|下擺向上掀起|下装向下拉开|下裝向下拉開|裤腰下拉|褲腰下拉|裤腰向下拉开|褲腰向下拉開|内裤边缘自然拉开|內褲邊緣自然拉開|内裤拉开|內褲拉開|下装褪下|下裝褪下|上掀|掀起|上撩|下拉|褪下|脱下|脫下", text))
 
 
 def _insert_unique_tg_clause(clauses: list[str], index: int, value: str) -> None:
@@ -9758,10 +10570,11 @@ def _ensure_tg_image_user_request_anchors(prompt_text: str, original_request: st
     request = _strip_prompt_response_wrappers(original_request)
     if not text or not request:
         return text
-    needs_lower = _tg_request_has_lower_body_intent(request)
-    needs_upper = _tg_request_has_upper_body_intent(request) or needs_lower
+    random_nonce = str(payload.get("_tg_prompt_random_nonce") or "") if isinstance(payload, dict) else ""
+    needs_lower = _tg_request_should_probably_include_lower_exposure(request, random_nonce)
+    needs_upper = True
     needs_manual_lower_action = _tg_request_has_manual_lower_action(request)
-    if not needs_lower and not needs_upper and not needs_manual_lower_action:
+    if not needs_upper and not needs_lower and not needs_manual_lower_action:
         return text
 
     clauses = _split_tg_image_prompt_clauses(text)
@@ -9793,20 +10606,18 @@ def _ensure_tg_image_user_request_anchors(prompt_text: str, original_request: st
 
     ordered_middle: list[str] = []
     if needs_upper:
-        ordered_middle.append(upper_states[0] if upper_states else "上衣前襟完全敞开")
+        ordered_middle.append(upper_states[0] if upper_states else _tg_default_upper_clothing_state_for_text(clauses[clothing_index] if 0 <= clothing_index < len(clauses) else text))
     elif upper_states:
         ordered_middle.append(upper_states[0])
+    preserve_lower_from_request = needs_lower or _tg_request_has_explicit_lower_clothing_state(request)
     if needs_lower:
-        ordered_middle.append(lower_states[0] if lower_states else "短裙向上掀起")
-    elif lower_states:
+        ordered_middle.append(lower_states[0] if lower_states else _tg_default_lower_clothing_state_for_text(clauses[clothing_index] if 0 <= clothing_index < len(clauses) else text))
+    elif lower_states and preserve_lower_from_request:
         ordered_middle.append(lower_states[0])
 
     if needs_upper:
-        breast_feature = _persona_breast_exposure_feature_for_payload(payload)
-        breast_clause = upper_exposures[0] if upper_exposures else "乳房完整裸露，乳头与乳晕清晰可见"
-        if breast_feature and not any(part in breast_clause for part in re.split(r"[，、,]+", breast_feature)[:2]):
-            breast_clause = f"{breast_clause}，{breast_feature}"
-        ordered_middle.append(_dedupe_tg_exposure_text(breast_clause))
+        breast_clause = upper_exposures[0] if upper_exposures else ""
+        ordered_middle.append(_tg_normalize_upper_exposure_clause(breast_clause, payload))
     elif upper_exposures:
         ordered_middle.append(_dedupe_tg_exposure_text(upper_exposures[0]))
 
@@ -9816,7 +10627,7 @@ def _ensure_tg_image_user_request_anchors(prompt_text: str, original_request: st
         if genital_feature and not any(part in lower_clause for part in re.split(r"[，、,]+", genital_feature)[:1]):
             lower_clause = f"{lower_clause}，{genital_feature}"
         ordered_middle.append(_dedupe_tg_exposure_text(lower_clause))
-    elif lower_exposures:
+    elif lower_exposures and preserve_lower_from_request:
         ordered_middle.append(_dedupe_tg_exposure_text(lower_exposures[0]))
 
     for clause in other_middle:
@@ -9824,7 +10635,7 @@ def _ensure_tg_image_user_request_anchors(prompt_text: str, original_request: st
     clauses = rest_before + ordered_middle + rest_after
 
     if needs_manual_lower_action:
-        action_clause = "她的左手支撑身体而右手手指伸向阴道区域"
+        action_clause = _tg_request_hand_action(request) or "她的左手支撑身体而右手贴近衣物边缘"
         for idx, clause in enumerate(clauses):
             if re.search(r"她的左手|左手|而右手|右手", clause):
                 clauses[idx] = action_clause
@@ -9835,7 +10646,7 @@ def _ensure_tg_image_user_request_anchors(prompt_text: str, original_request: st
 
     result = "，".join(part.strip(" ，。；、") for part in clauses if part.strip(" ，。；、"))
     result = re.sub(r"[，、]{2,}", "，", result)
-    return result.strip(" ，。；、")
+    return _tg_finalize_static_image_prompt_text(result)
 
 
 def _persona_breast_exposure_feature_for_payload(payload: dict[str, Any] | None) -> str:
@@ -9951,10 +10762,13 @@ def _tg_prompt_subject_role(prompt_text: str) -> str:
     return "女性"
 
 
-def _tg_prompt_pose_and_scene(clauses: list[str]) -> str:
+def _tg_prompt_pose_and_scene(clauses: list[str], original_request: str = "", random_nonce: str = "") -> str:
+    request_pose = _tg_request_pose_scene(original_request, random_nonce)
+    if request_pose:
+        return request_pose
     pose_clause = _first_tg_clause_matching(clauses, r"站在|坐在|躺在|跪在|靠坐在|倚在|趴在|半身|全身")
     if not pose_clause:
-        return "站在画面中央"
+        return _tg_pick_prompt_variant(original_request or "default", ["站在画面中央", "坐在床边", "靠坐在沙发边"], random_nonce)
     match = re.search(r"(?:半身|全身)?(?:站在|坐在|躺在|跪在|靠坐在|倚在|趴在)[^，。；、]{0,60}", pose_clause)
     if match:
         pose = match.group(0)
@@ -10010,7 +10824,13 @@ def _tg_build_subject_segment(anchor: str, subject: str, pose_scene: str) -> str
     return f"一名{anchor}的{subject}{pose_scene}"
 
 
-def _tg_prompt_clothing_clause(clauses: list[str]) -> str:
+def _tg_prompt_clothing_clause(
+    clauses: list[str],
+    original_request: str = "",
+    subject_text: str = "",
+    random_nonce: str = "",
+    recent_clothing_families: list[str] | None = None,
+) -> str:
     text = "，".join(clauses)
     if re.search(r"全裸|裸体|裸身|不穿衣|不着衣|未穿衣|无衣物遮体|無衣物遮體", text):
         return "未穿衣物"
@@ -10025,36 +10845,44 @@ def _tg_prompt_clothing_clause(clauses: list[str]) -> str:
     clothing = re.sub(r"^穿著", "", clothing)
     clothing = re.sub(r"(她的左手|而右手|她的身体|她的头|背景|光线|浅景深).*$", "", clothing).strip(" ，。；、")
     clothing = re.sub(r"^(服装|服裝|衣服|衣着|衣著)(?:状态|狀態)?[:：]?", "", clothing).strip()
+    request_has_clothing = _tg_request_has_explicit_clothing(original_request)
+    randomized_clothing = False
+    if clothing and random_nonce and not request_has_clothing:
+        clothing = _tg_request_default_clothing(original_request, subject_text, random_nonce, recent_clothing_families)
+        randomized_clothing = True
     if not clothing or clothing in {"上衣", "下装", "下裝", "裙摆", "裙襬", "衣襟", "前襟"}:
-        clothing = "白色衬衫和黑色短裙"
+        clothing = _tg_request_default_clothing(original_request, subject_text, random_nonce, recent_clothing_families)
     upper_state = ""
     lower_state = ""
     if re.search(r"衬衫|襯衫|上衣|制服|衣襟|前襟|领口|領口|胸衣|内衣|內衣|吊带|吊帶", clothing):
-        if re.search(r"全部敞开|全部敞開|完全敞开|完全敞開|大敞|敞开|敞開|解开|解開|拉开|拉開|半开|半開", clothing):
-            upper_state = "上衣前襟完全敞开"
-    if re.search(r"短裙|长裙|長裙|裙|裤|褲|下装|下裝|裤腰|褲腰|裙摆|裙襬", clothing):
+        upper_state = _tg_normalize_upper_clothing_state(clothing)
+    if re.search(r"短裙|长裙|長裙|裙|裤|褲|下装|下裝|裤腰|褲腰|裙摆|裙襬|内裤|內褲|底裤|底褲", clothing):
         if re.search(r"上掀|掀起|上撩|撩起|上拉|拉起|上移", clothing):
-            lower_state = "短裙向上掀起"
+            lower_state = _tg_default_lower_clothing_state_for_text(clothing)
         elif re.search(r"下拉|褪下|脱下|脫下", clothing):
-            lower_state = "下装向下拉开"
-    if lower_state and not upper_state and re.search(r"衬衫|襯衫|上衣|制服|衣襟|前襟|领口|領口|胸衣|内衣|內衣|吊带|吊帶", clothing):
-        upper_state = "上衣前襟完全敞开"
-    base = re.sub(r"(?:向上)?(?:上掀|掀起|上撩|撩起|上拉|拉起|上移)的?", "", clothing)
-    base = re.sub(r"(?:向下)?(?:下拉|褪下|脱下|脫下)的?", "", base)
-    base = re.sub(r"(前襟|衣襟|领口|領口|裙摆|裙襬)?(?:全部|完全|半)?(?:大敞|敞开|敞開|解开|解開|拉开|拉開|半开|半開)的?", "", base)
-    base = re.sub(r"和向(?:上|下)?的", "和", base)
-    base = re.sub(r"\s+", "", base).strip(" ，。；、")
+            lower_state = _tg_default_lower_clothing_state_for_text(clothing)
+    if lower_state and not upper_state and re.search(r"衬衫|襯衫|上衣|制服|衣襟|前襟|领口|領口|胸衣|内衣|內衣|吊带|吊帶|睡裙|浴袍|睡袍|T恤", clothing, re.IGNORECASE):
+        upper_state = _tg_default_upper_clothing_state_for_text(clothing)
+    base = _tg_strip_clothing_state_from_base(clothing)
     if not base:
         base = clothing
     if base in {"上衣", "下装", "下裝", "裙摆", "裙襬", "衣襟", "前襟"}:
-        base = "白色衬衫和黑色短裙"
+        base = _tg_request_default_clothing(original_request, subject_text, random_nonce, recent_clothing_families)
+    base = _tg_ensure_concrete_clothing_color(base, f"{original_request}|{subject_text}|{random_nonce}")
     parts = [f"穿着{base}"]
     upper_state_clause = _first_tg_clause_matching(clauses, r"上衣前襟完全敞开|前襟敞开|前襟敞開|领口下滑|領口下滑|肩带滑落|肩帶滑落|胸口敞开|胸口敞開|半透明|薄透|透视|透視")
-    lower_state_clause = _first_tg_clause_matching(clauses, r"短裙向上掀起|裙摆上掀|裙擺上掀|裙摆上移|裙擺上移|下装向下拉开|下裝向下拉開|裤腰下拉|褲腰下拉|下装褪下|下裝褪下")
+    lower_state_allowed = _tg_request_should_probably_include_lower_exposure(original_request, random_nonce) or _tg_request_has_explicit_lower_clothing_state(original_request)
+    lower_state_clause = (
+        _first_tg_clause_matching(clauses, r"短裙向上掀起|裙摆上掀|裙擺上掀|裙摆上移|裙擺上移|下装向下拉开|下裝向下拉開|裤腰下拉|褲腰下拉|裤腰向下拉开|褲腰向下拉開|内裤边缘自然拉开|內褲邊緣自然拉開|内裤拉开|內褲拉開|下装褪下|下裝褪下")
+        if lower_state_allowed and not randomized_clothing
+        else ""
+    )
     if upper_state_clause:
-        upper_state = upper_state_clause
+        upper_state = _tg_normalize_upper_clothing_state(upper_state_clause)
     if lower_state_clause:
         lower_state = lower_state_clause
+    if lower_state_allowed and not lower_state:
+        lower_state = _tg_default_lower_clothing_state_for_text(base)
     if upper_state:
         parts.append(upper_state)
     if lower_state:
@@ -10064,6 +10892,29 @@ def _tg_prompt_clothing_clause(clauses: list[str]) -> str:
 
 def _tg_exposure_has_upper_part(text: str) -> bool:
     return bool(re.search(r"乳房|乳头|乳頭|乳晕|乳暈|胸部", str(text or "")))
+
+
+def _tg_required_upper_exposure_clause(payload: dict[str, Any] | None = None) -> str:
+    base = "露出丰满坚挺的乳房和清晰可见的乳头"
+    feature = _persona_breast_exposure_feature_for_payload(payload)
+    if feature:
+        return _dedupe_tg_exposure_text(f"{base}，{feature}")
+    return base
+
+
+def _tg_normalize_upper_exposure_clause(clause: str, payload: dict[str, Any] | None = None) -> str:
+    text = str(clause or "").strip(" ，。；、")
+    required = _tg_required_upper_exposure_clause(payload)
+    if not text or not _tg_exposure_has_upper_part(text):
+        return required
+    # Upper exposure is a canonical block. Drop all model-generated variants first;
+    # otherwise repeated fragments such as "露出丰满坚挺的..." accumulate across retries.
+    leftovers = [
+        part.strip(" ，。；、")
+        for part in re.split(r"[，、,]+", text)
+        if part.strip(" ，。；、") and not _tg_exposure_has_upper_part(part)
+    ]
+    return _dedupe_tg_exposure_text("，".join([required, *leftovers]))
 
 
 def _tg_exposure_has_lower_part(text: str) -> bool:
@@ -10081,26 +10932,18 @@ def _tg_ensure_clothing_state_matches_exposure(clothing_clause: str, exposure_cl
     has_upper = _tg_exposure_has_upper_part(exposure)
     has_lower = _tg_exposure_has_lower_part(exposure)
     if has_upper and not _tg_clothing_implies_breast_exposure(clothing):
-        upper_state = "上衣前襟完全敞开"
+        upper_state = _tg_default_upper_clothing_state_for_text(clothing)
         if not any(_tg_clause_has_upper_clothing_state(part) for part in parts):
             parts.append(upper_state)
     if has_lower and not _tg_clothing_implies_genital_exposure(clothing):
-        lower_state = "短裙向上掀起" if re.search(r"短裙|裙", clothing) else "下装向下拉开"
+        lower_state = _tg_default_lower_clothing_state_for_text(clothing)
         if not any(_tg_clause_has_lower_clothing_state(part) for part in parts):
             parts.append(lower_state)
     return _tg_join_unique_prompt_clauses(parts)
 
 
-def _tg_prompt_head_clause(clauses: list[str]) -> str:
-    head = _first_tg_clause_matching(clauses, r"^她的头|^她的頭|^头转向|^頭轉向|^头部|^頭部|^脸部|^臉部|^视线|^視線|^眼神|^表情")
-    expression = _first_tg_clause_matching(clauses, r"^眼神|^表情|^视线|^視線")
-    if head:
-        if expression and expression not in head:
-            return f"{head}，{expression}"
-        return head
-    if expression:
-        return f"她的头抬起注视前方，{expression}"
-    return "她的头抬起注视前方，眼神专注且表情自然"
+def _tg_prompt_head_clause(clauses: list[str], original_request: str = "", random_nonce: str = "") -> str:
+    return _tg_prompt_head_material_clause(clauses, original_request, random_nonce)
 
 
 def _tg_prompt_background_clause(clauses: list[str], pose_scene: str) -> str:
@@ -10153,8 +10996,8 @@ def _tg_clothing_implies_breast_exposure(clothing_clause: str) -> bool:
 
 def _tg_clothing_implies_genital_exposure(clothing_clause: str) -> bool:
     text = str(clothing_clause or "")
-    has_lower = bool(re.search(r"短裙|长裙|長裙|裙|裤|褲|下装|下裝|裤腰|褲腰|裙摆|裙襬", text))
-    has_open = bool(re.search(r"短裙向上掀起|下装向下拉开|上掀|掀起|上撩|撩起|上拉|拉起|上移|下拉|褪下|脱下|脫下", text))
+    has_lower = bool(re.search(r"短裙|长裙|長裙|裙|裤|褲|下装|下裝|裤腰|褲腰|裙摆|裙襬|衣摆|衣擺|下摆|下擺|内裤|內褲|底裤|底褲|浴袍|睡袍|T恤|长上衣|長上衣", text, re.IGNORECASE))
+    has_open = bool(re.search(r"短裙向上掀起|裙摆向上掀起|裙擺向上掀起|衣摆向上掀起|衣擺向上掀起|下摆向上掀起|下擺向上掀起|下装向下拉开|裤腰向下拉开|内裤边缘自然拉开|内裤拉开|上掀|掀起|上撩|撩起|上拉|拉起|上移|下拉|褪下|脱下|脫下", text))
     return has_lower and has_open
 
 
@@ -10211,9 +11054,9 @@ def _tg_prompt_exposure_clause(
 ) -> str:
     exposure_parts: list[str] = []
     request_text = _strip_prompt_response_wrappers(original_request)
-    upper_request_exposes = _tg_request_has_upper_body_intent(request_text)
-    lower_request_exposes = _tg_request_has_lower_body_intent(request_text)
-    upper_state_exposes = _tg_clothing_implies_breast_exposure(clothing_clause) or upper_request_exposes or lower_request_exposes
+    random_nonce = str(payload.get("_tg_prompt_random_nonce") or "") if isinstance(payload, dict) else ""
+    lower_request_exposes = _tg_request_should_probably_include_lower_exposure(request_text, random_nonce)
+    upper_state_exposes = True
     lower_state_exposes = _tg_clothing_implies_genital_exposure(clothing_clause) or lower_request_exposes
     for clause in clauses:
         if re.search(r"乳房|乳头|乳頭|乳晕|乳暈|阴部|陰部|阴唇|陰唇|性器官|私密|裸露", clause):
@@ -10225,9 +11068,7 @@ def _tg_prompt_exposure_clause(
                 if re.search(r"乳房|乳头|乳頭|乳晕|乳暈|胸部", cleaned):
                     if not (upper_state_exposes or lower_state_exposes):
                         continue
-                    feature = _persona_breast_exposure_feature_for_payload(payload)
-                    if feature and not any(part in cleaned for part in re.split(r"[，、,]+", feature)[:2]):
-                        cleaned = f"{cleaned}，{feature}"
+                    cleaned = _tg_normalize_upper_exposure_clause(cleaned, payload)
                 elif re.search(r"阴部|陰部|阴唇|陰唇|私处|私處|性器官", cleaned):
                     if not lower_state_exposes:
                         continue
@@ -10239,11 +11080,7 @@ def _tg_prompt_exposure_clause(
     if (upper_state_exposes or lower_state_exposes or _tg_prompt_has_exposure_text("，".join(clauses))) and not any(
         re.search(r"乳房|乳头|乳頭|乳晕|乳暈|胸部", part) for part in exposure_parts
     ):
-        breast_exposure = "乳房完整裸露，清晰可见的乳头"
-        breast_feature = _persona_breast_exposure_feature_for_payload(payload)
-        if breast_feature:
-            breast_exposure = f"{breast_exposure}，{breast_feature}"
-        breast_exposure = _dedupe_tg_exposure_text(breast_exposure)
+        breast_exposure = _tg_required_upper_exposure_clause(payload)
         _append_unique_exposure_part(exposure_parts, breast_exposure)
     if lower_state_exposes and not any(
         re.search(r"阴部|陰部|阴唇|陰唇|私处|私處|性器官", part) for part in exposure_parts
@@ -10270,9 +11107,17 @@ def _canonicalize_tg_image_nine_segment_prompt(
     anchor = _persona_body_prompt_anchor_for_profile(profile) if profile else ""
     anchor = anchor or "身形纤细修长且腰胯比例轻盈自然"
     subject = _tg_prompt_subject_role(text)
-    pose_scene = _tg_prompt_pose_and_scene(clauses)
+    random_nonce = str(payload.get("_tg_prompt_random_nonce") or "") if isinstance(payload, dict) else ""
+    recent_clothing_families = payload.get("tg_recent_clothing_families") if isinstance(payload, dict) else []
+    if not isinstance(recent_clothing_families, list):
+        recent_clothing_families = []
+    requested_pose_scene = _tg_request_pose_scene(original_request, random_nonce)
+    pose_scene = _tg_prompt_pose_and_scene(clauses, original_request, random_nonce)
     first_clause = clauses[0].strip(" ，。；、")
-    if (
+    if requested_pose_scene:
+        segment_1 = _tg_build_subject_segment(anchor, subject, requested_pose_scene)
+        pose_scene = requested_pose_scene
+    elif (
         _tg_image_first_segment_has_subject_start(first_clause)
         and _tg_prompt_has_subject_role(first_clause)
         and _tg_prompt_has_pose_or_scene(first_clause)
@@ -10283,7 +11128,7 @@ def _canonicalize_tg_image_nine_segment_prompt(
             segment_1 = _tg_build_subject_segment(anchor, subject, pose_scene)
     else:
         segment_1 = _tg_build_subject_segment(anchor, subject, pose_scene)
-    segment_2 = _tg_prompt_clothing_clause(clauses)
+    segment_2 = _tg_prompt_clothing_clause(clauses, original_request, text, random_nonce, recent_clothing_families)
     segment_3 = _tg_prompt_exposure_clause(clauses, payload, segment_2, original_request)
     if not segment_3:
         if not _tg_clothing_implies_breast_exposure(segment_2):
@@ -10292,6 +11137,9 @@ def _canonicalize_tg_image_nine_segment_prompt(
     segment_2 = _tg_ensure_clothing_state_matches_exposure(segment_2, segment_3)
     left_right_clauses = _tg_prompt_matching_clauses(clauses, r"她的左手|左手|而右手|右手", max_items=2)
     left_right = _tg_join_unique_prompt_clauses(left_right_clauses, max_items=2)
+    request_hand_action = _tg_request_hand_action(original_request, random_nonce)
+    if request_hand_action:
+        left_right = request_hand_action
     if left_right:
         if "她的左手" not in left_right and "左手" in left_right:
             left_right = re.sub(r"^.*?左手", "她的左手", left_right, count=1)
@@ -10300,9 +11148,9 @@ def _canonicalize_tg_image_nine_segment_prompt(
     if not left_right or "她的左手" not in left_right or "右手" not in left_right:
         left_right = "她的左手轻托身体一侧而右手自然放在大腿内侧"
     segment_4 = left_right.strip(" ，。；、")
-    segment_5 = _first_tg_clause_matching(clauses, r"她的身体|她的身體|身体朝向|身體朝向|面向镜头|面向鏡頭|侧向镜头|側向鏡頭|侧身|側身|前倾|前傾|俯身|转向|轉向")
+    segment_5 = _tg_request_body_orientation(original_request) or _first_tg_clause_matching(clauses, r"她的身体|她的身體|身体朝向|身體朝向|面向镜头|面向鏡頭|侧向镜头|側向鏡頭|侧身|側身|前倾|前傾|俯身|转向|轉向")
     segment_5 = segment_5 if segment_5.startswith("她的身体") else "她的身体微微前倾面向镜头"
-    segment_6 = _tg_prompt_head_clause(clauses)
+    segment_6 = _tg_prompt_head_clause(clauses, original_request, random_nonce)
     segment_7 = _tg_prompt_background_clause(clauses, pose_scene)
     segment_8 = _tg_prompt_lighting_clause(clauses)
     segment_9 = _tg_prompt_quality_clause(clauses)
@@ -10319,7 +11167,8 @@ def _canonicalize_tg_image_nine_segment_prompt(
     ]
     result = "，".join(segment.strip(" ，。；、") for segment in segments if segment.strip(" ，。；、"))
     result = re.sub(r"[，、]{2,}", "，", result)
-    return result.strip(" ，。；、")
+    result = _tg_finalize_static_image_prompt_text(result)
+    return _tg_append_landscape_view_suffix(result, payload)
 
 
 _TG_IMAGE_PROMPT_TYPES = {"text_to_image", "image_generate", "single_image_edit", "get_nano_banana", "face_swap"}
@@ -10371,9 +11220,12 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "Output only a single-frame still image prompt. Do not output role labels, explanations, refusals, policy text, JSON, Markdown, lists, video scripts, timelines, or camera-movement procedures.",
         "Faithfully preserve the subject, clothing, pose, scene, props, materials, colors, camera angle, style, and restrictions specified by the user. Do not change the scene or soften the requested visual intensity.",
         "USER REQUIREMENT EXTRACTION IS MANDATORY: before writing the final paragraph, identify the user's requested subject, scene, pose, clothing, exposed body area, and hand action. Every explicitly requested body area and hand action must appear in the final prompt as a concrete visual clause. Do not replace a requested lower-body action with a generic breast-only scene. Do not replace the user's specified action with a default pose.",
+        "ACTION DECOMPOSITION IS MANDATORY: parse the user's action words before writing. Identify posture verbs such as standing, sitting, lying, kneeling, leaning, bending, turning, pulling, lifting, touching, holding, supporting, covering, spreading, or adjusting clothing. Convert them into segment 1 pose, segment 4 hand action, segment 5 body orientation, and segment 6 gaze/expression. If the user gives an action, that action must override generic default hands and default pose.",
+        "CAMERA-FACING WORDS BELONG TO THE HEAD SEGMENT: if the user says 对着镜头, 看镜头, 直视镜头, selfie, or similar, write dynamic process wording in segment 6 such as 她的头自然转向镜头 / 她的头看向镜头 / 她的头注视镜头, then explicitly state three independent parts: 目光方向, 眼神状态, and a concrete visible expression such as 嘴角上扬 / 带着明显笑意 / 呼吸放缓 / 羞涩抿唇 / 从容克制. Do not output 脸部可见 / 脸部清晰可见 / 脸部完整入镜.",
+        "USE A REASONABLE VISUAL MATERIAL LIBRARY ONLY WHEN DETAILS ARE MISSING: choose scene-matched clothing, posture, hand action, expression, lighting, and props from the user's role and location. Keep the match logical: teacher/classroom uses blouse, shirt, cardigan, skirt, lectern, blackboard, desk-edge poses; flight attendant/cabin uses uniform, aisle, seat, cabin light, narrow standing or seated poses; bedroom/private scene uses soft shirt, robe, slip dress, bed, pillows, bedside lamp, window light, sitting, kneeling, leaning, or side-lying poses; office uses commuting shirt, blazer, desk, chair, and edge-supported hands. Do not use the same default clothing, pose, hand action, or expression for every request.",
         "If reference images are provided, preserve the visible subject, composition, environment, clothing, action, props, lighting, and visual relationships. Do not add unrelated elements.",
         "Make the scene direct and visually specific. Convert abstract concepts into visible elements: posture, body orientation, hand placement, scene objects, and camera distance. Clothing must be described with physically plausible structure and fabric tension. Prefer half-body or full-body framing, pulled-back camera distance, eye-level or slight high angle, and a small margin above the head. Avoid close-ups, low-angle close-ups, or intimate-area close-ups that crop out the face.",
-        "The character face is controlled by the workflow LoRA. Do not write face shape, facial features, skin quality, or hairstyle descriptions in the final prompt. You may keep expression, gaze direction, face clearly visible, unobstructed face, and full head in frame as composition instructions. The composition must show the face, preferably half-body or full-body framing. Avoid cropped faces, covered faces, back-facing poses, and body-only shots. Do not include person names, persona names, or LoRA file names.",
+        "The character face is controlled by the workflow LoRA. Do not write face shape, facial features, skin quality, or hairstyle descriptions in the final prompt. Keep expression and 目光方向; keep headroom and camera distance as composition instructions. The composition must keep the face inside the camera frame, preferably half-body or full-body framing. Avoid cropped faces, covered faces, back-facing poses, and body-only shots. Do not include person names, persona names, or LoRA file names.",
         "Pose description must be concise and direct: use simple posture terms such as standing, sitting, kneeling, or lying. Specify exact body orientation and hand placement in one short clause. Avoid verbose or poetic pose descriptions.",
         "The character's head and face must always be visible within the frame. Full head must be in frame with natural headroom. Never crop the head or face. Back-facing poses are not allowed. Side profiles are acceptable only if the face remains clearly visible.",
         "MANDATORY CLOTHING ANCHOR: for person images, describe clothing and clothing state together in ONE short direct clause. Merge garment type, color, and state into the same phrase, such as 穿着前襟敞开的白色衬衫和黑色短裙. Do not write clothing first and then a separate clothing-state clause. Do not leave clothing as vague words like beautiful outfit, sexy outfit, fashion style, or clothing state only.",
@@ -10381,8 +11233,8 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "Keep clothing logic physically plausible. Use intact garments with normal seams, gravity, and fabric tension. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings. If the user explicitly asks for damaged clothing, the damage must still follow fabric tension and pulling direction.",
         "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple, physically plausible, and merged with the garment in one direct clause; do not repeat garment structure details across the prompt.",
         "Keep the final prompt compact and reusable: persona body positive constraints, body posture, hand placement, body orientation, one clear clothing color, one simple clothing structure, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
-        "CRITICAL FORMAT RULE - NATURAL ORDERED SEGMENTS: The prompt MUST be one continuous natural Chinese sentence, using Chinese commas (，) to connect the clauses. Use at least these 9 ordered content blocks, but do not output numbers, labels, semicolons, or list formatting: 1.[natural single-subject opening + concise body/persona figure constraint + female subject + full or half-body pose + scene; the first block should start naturally with wording such as 一位, 一名, 一个, 一個, 一名女性, 一位成熟女性, 女子, 女郎, 女模特, 主角, or similar subject wording. Do not force only 一位. The persona constraint here must be very short and only describe big body structure such as 身形纤细修长且腰胯比例轻盈. Do not mention shoulders, neck, waist-abdomen details, limb details, breasts, face, hairstyle, skin, small body details, or exposure in this first block] 2.穿着[clothing body and clothing states must be explicit. Write upper-garment state and lower-garment state separately when both exist, such as 穿着白色衬衫和黑色短裙，上衣前襟完全敞开，短裙向上掀起] 3.[visible exposure block: automatically extract exposed parts from clothing states, not from defaults. Upper-body exposure has higher priority and should be described first. The number of exposed parts is not fixed. If lower-body exposure appears, upper-body exposure must also appear before it. Every exposed part must correspond to a written clothing state. If this block exposes breasts, nipples, areola, labia, or another specific body part, immediately follow that exposed part with the selected persona's matching exposed-part feature description. Do not use 边缘可见, 部分可见, 可见, 隐约可见, or any ambiguous wording] 4.她的[left hand action]而右手[right hand action] 5.她的身体[orientation toward camera] 6.她的头[turn direction + gaze/expression, face visible] 7.[background / props / spatial relation] 8.[lighting / shadows / depth of field] 9.[technical quality / realism / texture]. You may add block 10 or 11 for anatomy stability, camera distance, or fabric logic, but keep the final text as one smooth comma-connected paragraph. Keep each block concise and non-repetitive.",
-        "MANDATORY EXPOSURE LOGIC: Exposure is state-driven. Do not add a default exposed body area. First read clothing state: upper garment open/slipped/lowered means upper exposure; lower garment raised/lowered/removed means lower exposure. Upper exposure has greater weight and is always written first. If lower exposure is included, upper exposure must also be included. If no clothing state implies exposure and the user did not explicitly request exposure, do not invent exposure.",
+        "CRITICAL FORMAT RULE - NATURAL ORDERED SEGMENTS: The prompt MUST be one continuous natural Chinese sentence, using Chinese commas (，) to connect the clauses. Use at least these 9 ordered content blocks, but do not output numbers, labels, semicolons, or list formatting: 1.[natural single-subject opening + concise body/persona figure constraint + female subject + full or half-body pose + scene; the first block should start naturally with wording such as 一位, 一名, 一个, 一個, 一名女性, 一位成熟女性, 女子, 女郎, 女模特, 主角, or similar subject wording. Do not force only 一位. The persona constraint here must be very short and only describe big body structure such as 身形纤细修长且腰胯比例轻盈. Do not mention shoulders, neck, waist-abdomen details, limb details, breasts, face, hairstyle, skin, small body details, or exposure in this first block] 2.穿着[clothing body and clothing states must be explicit. Write upper-garment state and lower-garment state separately when both exist, such as 穿着白色衬衫和黑色短裙，上衣前襟完全敞开，短裙向上掀起] 3.[visible exposure block: upper-body exposure is mandatory and must be written first with the exact phrase 露出丰满坚挺的乳房和清晰可见的乳头; lower-body exposure is low-probability unless the user explicitly requests it. If lower-body exposure appears, upper-body exposure must also appear before it. Every exposed part must correspond to a written clothing state. If this block exposes breasts, nipples, areola, labia, or another specific body part, immediately follow that exposed part with the selected persona's matching exposed-part feature description. Do not use 边缘可见, 部分可见, 可见, 隐约可见, or any ambiguous wording] 4.她的[left hand action]而右手[right hand action] 5.她的身体[orientation toward camera] 6.她的头[dynamic head process + explicit 目光方向 + independent 眼神状态 + direct expression; prefer 她的头自然转向镜头，目光看向镜头，眼神柔和且表情嘴角上扬. Never merge 目光 and 眼神 into one phrase, and never use vague expressions like 表情自然 or 表情明确自然] 7.[background / props / spatial relation] 8.[lighting / shadows / depth of field] 9.[technical quality / realism / texture]. You may add block 10 or 11 for anatomy stability, camera distance, or fabric logic, but keep the final text as one smooth comma-connected paragraph. Keep each block concise and non-repetitive.",
+        "MANDATORY EXPOSURE LOGIC: Upper-body exposure is mandatory for the image prompt and must be supported by an upper-garment state. Lower-body exposure is low-probability and should appear only when the user explicitly asks for a lower-body area/action or when the scene logic strongly requires it; when lower-body exposure is included, write the lower-garment state first and keep upper-body exposure before lower-body exposure. Do not invent a lower-body exposure when the prompt is clearly upper-body-only.",
         "If the user explicitly requests a lower-body exposed area or a hand-to-lower-body action, write a physically plausible lower-garment state first, then write the matching lower-body exposure and hand action in the ordered 9-segment paragraph. Keep the original user action visible and concrete.",
         "MANDATORY ANATOMY - NO OVERLAPS: The prompt MUST ensure anatomically correct poses with NO body part overlaps or intersections. Arms must not cross through torso. Hands must rest naturally on surfaces or body without penetration. Legs must not intersect unnaturally. Body must have clear spatial separation from background objects. Use natural weight distribution and gravity. If sitting, buttocks compress naturally on seat. If lying, body rests flat without floating or intersecting surfaces.",
         "MANDATORY HEAD VISIBILITY: The character's head and face MUST always be fully visible in frame with natural headroom. Never crop the head. Back-facing poses are forbidden.",
@@ -10475,6 +11327,22 @@ def _ensure_tg_image_subject_prefix(prompt_text: str) -> str:
     return f"一名{first}{rest}"
 
 
+def _tg_prompt_semantic_request(original_request: str, user_request: str) -> str:
+    original = _clean_tg_prompt_request(original_request)
+    current = _clean_tg_prompt_request(user_request)
+    if not original:
+        return current
+    if not current or current == original:
+        return original
+    revision_match = re.search(r"(?is)Revision request:\s*(.+?)(?:\n|$)", current)
+    if revision_match:
+        revision = _clean_tg_prompt_request(revision_match.group(1))
+        return f"{original}\n调整要求：{revision}" if revision else original
+    if original in current:
+        return current
+    return f"{original}\n补充要求：{current}"
+
+
 def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     enhanced = dict(payload or {})
     if enhanced.get("tg_llm_prompt_enhanced"):
@@ -10523,6 +11391,9 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         or enhanced.get("message")
         or user_request
     )
+    semantic_request = _tg_prompt_semantic_request(original_request, user_request)
+    if typ in {"text_to_image", "image_generate"}:
+        enhanced["_tg_prompt_random_nonce"] = uuid.uuid4().hex
 
     task_labels = {
         "text_to_image": "text-to-image",
@@ -10548,6 +11419,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 "MANDATORY ASPECT-RATIO COMPOSITION MATCHING:",
                 aspect_pose_guidance,
                 "Before writing the final prompt, choose a pose and action that naturally fits the selected aspect ratio. Do not reuse a generic pose when the ratio would make it cramped, cropped, or visually unstable.",
+                "If the selected aspect ratio is landscape, such as 3:2, 4:3, or 16:9, append the exact Chinese suffix 横向视图 at the end of the final prompt.",
             ]
         )
     if persona_body_anchor:
@@ -10583,6 +11455,20 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 f"User original request: {user_request}",
                 f"Persona positive visual constraint to include once in natural language: {persona_body_anchor}",
                 "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names.",
+            ]
+        )
+    action_decomposition = (
+        _tg_image_action_decomposition_for_llm(semantic_request)
+        if prompt_chain == "image" and not edit_image_task
+        else ""
+    )
+    if action_decomposition:
+        llm_user_input = "\n".join(
+            [
+                llm_user_input,
+                "",
+                action_decomposition,
+                "Use this decomposition when writing the final 9-segment Chinese prompt. Output only the final Chinese image prompt body.",
             ]
         )
     image_hint_paths: list[str] = []
@@ -10754,7 +11640,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             if not _looks_like_chinese_image_prompt(rewritten):
                 raise RuntimeError("Grok 最终提示词不是中文，已阻止提交。请重新生成提示词。")
     final_prompt = rewritten
-    preserved_request = original_request or user_request
+    preserved_request = semantic_request or original_request or user_request
     if (
         not _to_bool(enhanced.get("tg_latest_prompt_only"), False)
         and _to_bool(enhanced.get("tg_preserve_original_prompt"), False)
@@ -10802,14 +11688,29 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
 
         try:
             _validate_tg_image_structured_prompt(final_prompt)
-        except RuntimeError:
+        except RuntimeError as validation_error:
             final_prompt = _ensure_tg_image_user_request_anchors(final_prompt, preserved_request, enhanced)
             final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
             final_prompt = _canonicalize_tg_image_nine_segment_prompt(final_prompt, enhanced, preserved_request)
             final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
             enhanced = _set_tg_generation_prompt(enhanced, final_prompt)
             rewritten = final_prompt
-            _validate_tg_image_structured_prompt(final_prompt)
+            try:
+                _validate_tg_image_structured_prompt(final_prompt)
+            except RuntimeError:
+                fallback_prompt = _build_tg_image_fallback_prompt(preserved_request, enhanced)
+                fallback_prompt = _ensure_tg_image_clothing_anchor(fallback_prompt, preserved_request, enhanced)
+                fallback_prompt = _ensure_tg_image_user_request_anchors(fallback_prompt, preserved_request, enhanced)
+                fallback_prompt = _normalize_tg_chinese_image_prompt_format(fallback_prompt)
+                fallback_prompt = _canonicalize_tg_image_nine_segment_prompt(fallback_prompt, enhanced, preserved_request)
+                fallback_prompt = _normalize_tg_chinese_image_prompt_format(fallback_prompt)
+                enhanced = _set_tg_generation_prompt(enhanced, fallback_prompt)
+                rewritten = fallback_prompt
+                final_prompt = fallback_prompt
+                try:
+                    _validate_tg_image_structured_prompt(final_prompt)
+                except RuntimeError:
+                    raise validation_error
 
         if not any(x in final_prompt for x in ["乳沟", "乳房", "乳头", "胸部", "阴部", "阴唇", "私密", "大腿内侧"]):
             raise RuntimeError("Grok final image prompt missing required erotic content (breasts or labia); blocked before submission.")

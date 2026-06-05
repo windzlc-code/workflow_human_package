@@ -3062,6 +3062,28 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             params["text_to_image_workflow_path"] = current_path
         return params, changed
 
+    def _text_to_image_prompt_clothing_family(prompt_text: str) -> str:
+        text = str(prompt_text or "")
+        if re.search(r"空乘|空姐|空服|制服", text):
+            return "uniform"
+        if re.search(r"护士|護理|护理", text):
+            return "nurse"
+        if re.search(r"睡裙|吊带裙|吊帶裙|连衣裙|連衣裙|裙装|裙裝", text):
+            return "dress"
+        if re.search(r"浴袍|睡袍|袍", text):
+            return "robe"
+        if re.search(r"开衫|開衫|针织|針織", text):
+            return "cardigan"
+        if re.search(r"吊带|吊帶|背心", text):
+            return "camisole"
+        if re.search(r"衬衫|襯衫", text):
+            return "shirt"
+        if re.search(r"短裙|窄裙|包臀|裙", text):
+            return "skirt"
+        if re.search(r"T恤|上衣", text, re.IGNORECASE):
+            return "top"
+        return ""
+
     async def start_text_to_image_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
@@ -3191,6 +3213,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "tg_generation_context": generation_context,
             "tg_user_instruction": user_request,
         }
+        recent_clothing_families = data.get("tg_recent_clothing_families")
+        if isinstance(recent_clothing_families, list):
+            payload["tg_recent_clothing_families"] = [str(item or "").strip() for item in recent_clothing_families[-4:] if str(item or "").strip()]
         if reference_image:
             payload["input_image_local_path"] = reference_image
             payload["image_local_path"] = reference_image
@@ -3201,6 +3226,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             selected_model = str(result.get("selected_model") or "").strip()
             if not prompt_text:
                 raise RuntimeError("Grok 未返回可用提示詞，請重新生成提示詞。")
+            clothing_family = _text_to_image_prompt_clothing_family(prompt_text)
+            updated_clothing_families = list(payload.get("tg_recent_clothing_families") or [])
+            if clothing_family:
+                updated_clothing_families.append(clothing_family)
+            updated_clothing_families = updated_clothing_families[-4:]
             await state.update_data(
                 original_user_request=original_for_state,
                 final_prompt_text=prompt_text,
@@ -3208,6 +3238,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 prompt_display_text=prompt_text,
                 prompt_display_ready=True,
                 prompt_display_pending=False,
+                tg_recent_clothing_families=updated_clothing_families,
             )
             await _show_text_to_image_prompt_review(message, state, prompt_text=prompt_text, selected_model=selected_model)
         finally:
