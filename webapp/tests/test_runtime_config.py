@@ -1849,6 +1849,97 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIn("横向场景动作", prompt)
         self.assertIn("头部完整入镜", prompt)
 
+    def test_tg_video_duration_guidance_uses_selected_seconds(self):
+        guidance = server._tg_video_duration_timing_guidance({"duration_seconds": 8})
+
+        self.assertIn("Selected video duration: 8 seconds", guidance)
+        self.assertIn("begin", guidance)
+        self.assertIn("continue", guidance)
+        self.assertIn("ending state", guidance)
+        self.assertNotIn("0-2s", guidance)
+        self.assertNotIn("2-6s", guidance)
+        self.assertNotIn("6-8s", guidance)
+        self.assertIn("stable", guidance)
+
+    def test_tg_video_prompt_normalizer_splits_long_tail_and_stabilizes_camera(self):
+        prompt = server._normalize_tg_chinese_video_prompt_format(
+            "\u5979\u7684\u5de6\u624b\u8f7b\u8f7b\u79fb\u52a8\u800c\u53f3\u624b\u6276\u5728\u817f\u4fa7\uff0c"
+            "\u5979\u7684\u8eab\u4f53\u9762\u5411\u753b\u9762\uff0c\u5979\u7684\u5934\u8f6c\u5411\u524d\u65b9\uff0c"
+            "\u52a8\u4f5c\u9010\u6e10\u52a0\u5feb\u4f34\u968f\u7740\u6e7f\u6da6\u6c34\u58f0\u548c\u5979\u7684\u547c\u5438\u58f0\u8d28\u611f\u7ec6\u817b\u771f\u5b9e",
+            {"duration_seconds": 5},
+        )
+
+        self.assertIn("\u52a0\u5feb\uff0c\u4f34\u968f", prompt)
+        self.assertIn("\u547c\u5438\u58f0\uff0c\u8d28\u611f", prompt)
+        self.assertIn("\u955c\u5934\u57fa\u672c\u4fdd\u6301\u7a33\u5b9a", prompt)
+
+    def test_tg_video_prompt_normalizer_removes_numeric_timestamps(self):
+        prompt = server._normalize_tg_chinese_video_prompt_format(
+            "\u955c\u59340-1\u79d2\u521d\u59cb\u59ff\u52bf\uff0c1-4\u79d2\u624b\u6307\u52a0\u901f\u79fb\u52a8\uff0c"
+            "4-5\u79d2\u8eab\u4f53\u8f7b\u98a4\uff0c\u7ed3\u675f\uff0c\u9ad8\u6e05\u6d41\u7545\u89c6\u9891\uff0c\u8d28\u611f",
+            {"duration_seconds": 5},
+        )
+
+        self.assertNotIn("0-1\u79d2", prompt)
+        self.assertNotIn("1-4\u79d2", prompt)
+        self.assertNotIn("4-5\u79d2", prompt)
+        self.assertIn("\u955c\u5934\u57fa\u672c\u4fdd\u6301\u7a33\u5b9a", prompt)
+        self.assertNotIn("\u9ad8\u6e05\u6d41\u7545\u89c6\u9891\uff0c\u8d28\u611f", prompt)
+
+    def test_tg_video_prompt_normalizer_keeps_camera_phrases_natural(self):
+        prompt = server._normalize_tg_chinese_video_prompt_format(
+            "\u5979\u9762\u5bf9\u955c\u5934\uff0c\u624b\u90e8\u5f00\u59cb\u52a8\u4f5c\uff0c"
+            "\u753b\u9762\u6d41\u7545\u771f\u5b9e\u4e14\u8d28\u611f\u7ec6\u817b",
+            {"duration_seconds": 5},
+        )
+
+        self.assertIn("\u9762\u5bf9\u955c\u5934", prompt)
+        self.assertNotIn("\u9762\u5bf9\uff0c\u955c\u5934", prompt)
+        self.assertNotIn("\u955c\u5934\u57fa\u672c\u4fdd\u6301\u7a33\u5b9a\uff0c\u955c\u5934", prompt)
+        self.assertNotIn("\u624b\u90e8\uff0c\u5f00\u59cb\u52a8\u4f5c", prompt)
+        self.assertNotIn("\u753b\u9762\uff0c\u6d41\u7545", prompt)
+        self.assertNotIn("\u771f\u5b9e\uff0c\u4e14\u8d28\u611f", prompt)
+        self.assertIn("\u955c\u5934\u57fa\u672c\u4fdd\u6301\u7a33\u5b9a", prompt)
+
+    def test_tg_video_narrative_order_is_added_when_missing(self):
+        prompt = server._ensure_tg_video_narrative_order(
+            "\u5973\u6027\u4fdd\u6301\u53c2\u8003\u56fe\u59ff\u52bf\uff0c\u624b\u90e8\u5f00\u59cb\u52a8\u4f5c\uff0c"
+            "\u8eab\u4f53\u4ea7\u751f\u81ea\u7136\u53cd\u5e94\uff0c\u58f0\u97f3\u548c\u8868\u60c5\u9010\u6e10\u53d8\u5316\uff0c"
+            "\u955c\u5934\u57fa\u672c\u4fdd\u6301\u7a33\u5b9a\uff0c\u753b\u9762\u6d41\u7545\u771f\u5b9e"
+        )
+
+        self.assertTrue(server._tg_video_has_narrative_order(prompt))
+        self.assertIn("\u753b\u9762\u5f00\u59cb\u65f6", prompt)
+        self.assertIn("\u968f\u540e", prompt)
+        self.assertIn("\u6700\u540e", prompt)
+
+    def test_tg_video_prompt_rules_request_detailed_subject_and_action(self):
+        system_prompt, prompt_chain = server._build_tg_prompt_system_prompt("video_i2v", "图生视频")
+        user_prompt = server._build_tg_video_llm_user_input("人物动作", {"duration_seconds": 5})
+
+        self.assertEqual("video", prompt_chain)
+        self.assertIn("SUBJECT STYLING DETAIL IS MANDATORY", system_prompt)
+        self.assertIn("SUBJECT AND ACTION DETAIL IS MANDATORY", system_prompt)
+        self.assertIn("hairstyle", system_prompt)
+        self.assertIn("makeup or facial expression", system_prompt)
+        self.assertIn("body silhouette", system_prompt)
+        self.assertIn("outfit styling", system_prompt)
+        self.assertIn("fabric material", system_prompt)
+        self.assertIn("garment color contrast", system_prompt)
+        self.assertIn("visible posture", system_prompt)
+        self.assertIn("hand/finger movement path", system_prompt)
+        self.assertIn("movement amplitude", system_prompt)
+        self.assertIn("200 to 380 Chinese characters", system_prompt)
+        self.assertIn("hairstyle", user_prompt)
+        self.assertIn("makeup or facial expression", user_prompt)
+        self.assertIn("body silhouette", user_prompt)
+        self.assertIn("outfit styling", user_prompt)
+        self.assertIn("fabric material", user_prompt)
+        self.assertIn("color contrast", user_prompt)
+        self.assertIn("visible body posture", user_prompt)
+        self.assertIn("hand/finger path", user_prompt)
+        self.assertIn("movement range", user_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

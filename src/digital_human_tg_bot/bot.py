@@ -799,8 +799,8 @@ def _text_to_image_continue_state_from_payload(input_payload: dict[str, Any]) ->
         "resolution_selected": True,
         "persona_selected": bool(params["persona_available"]),
         "prompt_mode_selected": False,
-        "prompt_mode_label": "",
-        "original_user_request": "",
+        "prompt_mode_label": "Grok 生成",
+        "original_user_request": original_request,
         "last_grok_user_request": "",
         "last_grok_reference_image_path": reference_image,
         "prompt_reference_image_local_path": reference_image,
@@ -2369,8 +2369,24 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         first_step = "請上傳原圖。" if mode == "image_replace" else "請上傳第一張參考圖。"
         await _answer(message,
             f"{title}\n步驟 1/3：{first_step}",
-            reply_markup=_image_edit_keyboard(),
+            reply_markup=_image_task_step_keyboard(back=False),
         )
+
+    def _image_reference_first_step_text(mode: str, *, has_current: bool = False) -> str:
+        title = _image_mode_title(mode)
+        if has_current:
+            label = "原圖" if mode == "image_replace" else "第一張參考圖"
+            return f"{title}\n已記錄目前{label}。可以上傳新圖片替換，或點擊“{KEEP_CURRENT_RESOURCE_BUTTON}”繼續。"
+        first_step = "請上傳原圖。" if mode == "image_replace" else "請上傳第一張參考圖。"
+        return f"{title}\n步驟 1/3：{first_step}"
+
+    def _image_reference_second_step_text(mode: str, *, has_current: bool = False) -> str:
+        title = _image_mode_title(mode)
+        if has_current:
+            label = "要替換成的參考圖" if mode == "image_replace" else "第二張參考圖"
+            return f"{title}\n已記錄目前{label}。可以上傳新圖片替換，或點擊“{KEEP_CURRENT_RESOURCE_BUTTON}”繼續。"
+        second_step = "請上傳要替換成的參考圖。" if mode == "image_replace" else "請上傳第二張參考圖。"
+        return f"{title}\n步驟 2/3：{second_step}"
 
     async def start_single_image_edit_flow(message: Message, state: FSMContext, *, single_input: bool = False) -> None:
         await state.clear()
@@ -2622,11 +2638,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "negative_prompt": "",
             "resolution_selected": False,
             "duration_selected": False,
+            "image_local_path": "",
             "audio_selected": False,
             "audio_local_path": "",
             "prompt_mode_selected": False,
             "prompt_extend_selected": False,
-            "prompt_mode_label": "",
+        "prompt_mode_label": "Grok 生成",
         }
 
     async def _video_i2v_runtime_defaults() -> dict[str, Any]:
@@ -2653,6 +2670,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         params["safety_filter"] = False
         params["resolution_selected"] = bool(params.get("resolution_selected"))
         params["duration_selected"] = bool(params.get("duration_selected"))
+        params["image_local_path"] = str(params.get("image_local_path") or "").strip()
         params["audio_selected"] = bool(params.get("audio_selected"))
         params["audio_local_path"] = str(params.get("audio_local_path") or "").strip()
         params["prompt_mode_selected"] = bool(params.get("prompt_mode_selected"))
@@ -4810,21 +4828,48 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
-        suffix = _image_ext_from_message(message)
+        text = _canonical_button_text(_message_text(message))
         data = await state.get_data()
         mode = str(data.get("image_mode") or "multi_image")
         title = _image_mode_title(mode)
+        if text == "上一步":
+            await start_image_generate_flow(message, state)
+            return
+        has_product_image = _recorded_local_resource(data.get("product_image_local_path"))
+        if text == KEEP_CURRENT_RESOURCE_BUTTON and has_product_image:
+            await state.set_state(ProductionWorkflowForm.image_waiting_for_model_image)
+            second_text = _image_reference_second_step_text(
+                mode,
+                has_current=_recorded_local_resource(data.get("model_image_local_path")),
+            )
+            await _answer(
+                message,
+                second_text.replace(
+                    f"{title}\n",
+                    f"{title}\n已沿用目前{'原圖' if mode == 'image_replace' else '第一張參考圖'}。\n",
+                    1,
+                ),
+                reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("model_image_local_path"))),
+            )
+            return
+        suffix = _image_ext_from_message(message)
         if suffix is None:
-            first_step = "請上傳原圖。" if mode == "image_replace" else "請上傳第一張參考圖。"
-            await _answer(message, f"{title}\n步驟 1/3：{first_step}", reply_markup=_image_edit_keyboard())
+            await _answer(
+                message,
+                _image_reference_first_step_text(mode, has_current=has_product_image),
+                reply_markup=_image_task_step_keyboard(back=False, keep_current=has_product_image),
+            )
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix=f"tg_{mode}")))
         target = work_dir / f"primary{suffix}"
         await _download_message_media(message, target)
         await state.update_data(work_dir=str(work_dir), product_image_local_path=str(target.resolve()))
         await state.set_state(ProductionWorkflowForm.image_waiting_for_model_image)
-        second_step = "請上傳要替換成的參考圖。" if mode == "image_replace" else "請上傳第二張參考圖。"
-        await _answer(message, f"{title}\n步驟 2/3：{second_step}", reply_markup=_image_edit_keyboard())
+        await _answer(
+            message,
+            _image_reference_second_step_text(mode, has_current=_recorded_local_resource(data.get("model_image_local_path"))),
+            reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("model_image_local_path"))),
+        )
 
     @router.message(ProductionWorkflowForm.image_waiting_for_model_image)
     async def on_image_second_reference(message: Message, state: FSMContext) -> None:
@@ -4834,20 +4879,37 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         if not await ensure_authorized(message):
             return
-        suffix = _image_ext_from_message(message)
+        text = _canonical_button_text(_message_text(message))
         data = await state.get_data()
         mode = str(data.get("image_mode") or "multi_image")
         title = _image_mode_title(mode)
+        if text == "上一步":
+            await state.set_state(ProductionWorkflowForm.image_waiting_for_product_image)
+            await _answer(
+                message,
+                _image_reference_first_step_text(mode, has_current=_recorded_local_resource(data.get("product_image_local_path"))),
+                reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("product_image_local_path"))),
+            )
+            return
+        has_model_image = _recorded_local_resource(data.get("model_image_local_path"))
+        if text == KEEP_CURRENT_RESOURCE_BUTTON and has_model_image:
+            await state.set_state(ProductionWorkflowForm.image_waiting_for_prompt)
+            await _answer(message, f"{title}\n已沿用目前{'要替換成的參考圖' if mode == 'image_replace' else '第二張參考圖'}。\n步驟 3/3：請輸入這次圖片生成需求。", reply_markup=_image_task_step_keyboard())
+            return
+        suffix = _image_ext_from_message(message)
         if suffix is None:
-            second_step = "請上傳要替換成的參考圖。" if mode == "image_replace" else "請上傳第二張參考圖。"
-            await _answer(message, f"{title}\n步驟 2/3：{second_step}", reply_markup=_image_edit_keyboard())
+            await _answer(
+                message,
+                _image_reference_second_step_text(mode, has_current=has_model_image),
+                reply_markup=_image_task_step_keyboard(keep_current=has_model_image),
+            )
             return
         work_dir = Path(str(data.get("work_dir") or service.create_job_dir(prefix=f"tg_{mode}")))
         target = work_dir / f"secondary{suffix}"
         await _download_message_media(message, target)
         await state.update_data(work_dir=str(work_dir), model_image_local_path=str(target.resolve()))
         await state.set_state(ProductionWorkflowForm.image_waiting_for_prompt)
-        await _answer(message, f"{title}\n步驟 3/3：請輸入這次圖片生成需求。", reply_markup=_image_edit_keyboard())
+        await _answer(message, f"{title}\n已更新{'要替換成的參考圖' if mode == 'image_replace' else '第二張參考圖'}。\n步驟 3/3：請輸入這次圖片生成需求。", reply_markup=_image_task_step_keyboard())
 
     @router.message(ProductionWorkflowForm.image_waiting_for_prompt)
     async def on_image_reference_prompt(message: Message, state: FSMContext) -> None:
@@ -4861,8 +4923,17 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         data = await state.get_data()
         mode = str(data.get("image_mode") or "multi_image")
         title = _image_mode_title(mode)
+        text = _canonical_button_text(prompt)
+        if text == "上一步":
+            await state.set_state(ProductionWorkflowForm.image_waiting_for_model_image)
+            await _answer(
+                message,
+                _image_reference_second_step_text(mode, has_current=_recorded_local_resource(data.get("model_image_local_path"))),
+                reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("model_image_local_path"))),
+            )
+            return
         if not prompt:
-            await _answer(message, f"{title}\n步驟 3/3：請直接輸入這次圖片生成需求。", reply_markup=_image_edit_keyboard())
+            await _answer(message, f"{title}\n步驟 3/3：請直接輸入這次圖片生成需求。", reply_markup=_image_task_step_keyboard())
             return
         params = {
             "product_image_local_path": str(data.get("product_image_local_path") or ""),
