@@ -1231,9 +1231,9 @@ def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) 
         return None
     return {
         "keyboard": [
-            [{"text": "重新生成图片"}],
-            [{"text": "继续生成图片"}],
-            [{"text": "返回主菜单"}],
+            [{"text": "重新生成圖片"}],
+            [{"text": "繼續生成圖片"}],
+            [{"text": "返回主選單"}],
         ],
         "resize_keyboard": True,
     }
@@ -4169,15 +4169,15 @@ def _execute_remote_comfy_gateway_body(
 
 
 REMOTE_COMFY_TASK_LABELS = {
-    "text_to_image": "文字生成图片",
-    "image_generate": "图片生成",
-    "replace_model": "替换模特",
-    "create_audio": "生成音频",
-    "create_video": "生成视频",
-    "video_i2v": "图生视频",
-    "single_image_edit": "单图编辑",
-    "get_nano_banana": "图片编辑",
-    "face_swap": "人物换脸",
+    "text_to_image": "文字生成圖片",
+    "image_generate": "圖片生成",
+    "replace_model": "替換模特",
+    "create_audio": "生成音頻",
+    "create_video": "生成視頻",
+    "video_i2v": "圖生視頻",
+    "single_image_edit": "單圖編輯",
+    "get_nano_banana": "圖片編輯",
+    "face_swap": "人物換臉",
 }
 
 
@@ -13290,6 +13290,61 @@ def create_app() -> FastAPI:
             if len(tasks) >= limit:
                 break
         return {"ok": True, "tasks": tasks}
+
+    @app.get("/api/internal/tg/status")
+    def api_internal_tg_status(request: Request):
+        _require_internal_tg_request(request)
+        try:
+            chat_id = int(str(request.query_params.get("chat_id") or "0").strip() or "0")
+        except Exception:
+            chat_id = 0
+        if chat_id <= 0:
+            raise HTTPException(status_code=400, detail="chat_id 必须为正整数")
+        counts = {"queued": 0, "running": 0, "success": 0, "failed": 0, "cancelled": 0}
+        latest: dict[str, Any] | None = None
+        active: dict[str, Any] | None = None
+        with db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, type, status, input_json, error, created_at, updated_at
+                FROM tasks
+                ORDER BY updated_at DESC, created_at DESC
+                """
+            ).fetchall()
+        for row in rows:
+            input_payload = _json_loads(row["input_json"], {})
+            if _get_tg_chat_id_from_payload(input_payload) != chat_id:
+                continue
+            status = str(row["status"] or "").strip().lower() or "unknown"
+            if status not in counts:
+                counts[status] = 0
+            counts[status] += 1
+            item = {
+                "id": row["id"],
+                "type": row["type"],
+                "status": status,
+                "status_label": _internal_tg_task_status_label(status),
+                "error": _format_optional_user_visible_task_error(row["error"]),
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+                "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
+            }
+            if latest is None:
+                latest = item
+            if active is None and status in {"queued", "running"}:
+                active = item
+        return {
+            "ok": True,
+            "chat_id": chat_id,
+            "counts": counts,
+            "queued_count": counts.get("queued", 0),
+            "running_count": counts.get("running", 0),
+            "success_count": counts.get("success", 0),
+            "failed_count": counts.get("failed", 0),
+            "cancelled_count": counts.get("cancelled", 0),
+            "active_task": active,
+            "latest_task": latest,
+        }
 
     @app.post("/api/internal/tg/tasks/cancel_latest")
     def api_internal_tg_cancel_latest(request: Request):

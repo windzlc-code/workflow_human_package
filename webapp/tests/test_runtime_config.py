@@ -726,9 +726,9 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertIn("keyboard", markup)
         self.assertNotIn("inline_keyboard", markup)
-        self.assertEqual(markup["keyboard"][0][0]["text"], "重新生成图片")
-        self.assertEqual(markup["keyboard"][1][0]["text"], "继续生成图片")
-        self.assertEqual(markup["keyboard"][2][0]["text"], "返回主菜单")
+        self.assertEqual(markup["keyboard"][0][0]["text"], "重新生成圖片")
+        self.assertEqual(markup["keyboard"][1][0]["text"], "繼續生成圖片")
+        self.assertEqual(markup["keyboard"][2][0]["text"], "返回主選單")
 
     def test_user_visible_task_error_shortens_insufficient_balance_json(self):
         raw_error = (

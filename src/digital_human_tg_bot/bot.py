@@ -92,6 +92,9 @@ RERUN_BUTTON = "重跑最近任務"
 STOP_BUTTON = "強制停止目前任務"
 
 BUTTON_ALIASES = {
+    "重新生成图片": TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON,
+    "繼續生成圖片": TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON,
+    "继续生成图片": TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON,
     "数字人视频生成": DIGITAL_HUMAN_VIDEO_BUTTON,
     "數字人視頻生成": DIGITAL_HUMAN_VIDEO_BUTTON,
     "写实带货视频": DIGITAL_HUMAN_REALISTIC_BUTTON,
@@ -795,9 +798,9 @@ def _text_to_image_continue_state_from_payload(input_payload: dict[str, Any]) ->
         "ratio_selected": True,
         "resolution_selected": True,
         "persona_selected": bool(params["persona_available"]),
-        "prompt_mode_selected": True,
-        "prompt_mode_label": "Grok 生成",
-        "original_user_request": original_request,
+        "prompt_mode_selected": False,
+        "prompt_mode_label": "",
+        "original_user_request": "",
         "last_grok_user_request": "",
         "last_grok_reference_image_path": reference_image,
         "prompt_reference_image_local_path": reference_image,
@@ -1832,6 +1835,29 @@ async def _fetch_internal_webapp_tg_tasks(*, chat_id: int, limit: int = 5) -> li
     return [item for item in tasks if isinstance(item, dict)] if isinstance(tasks, list) else []
 
 
+async def _fetch_internal_webapp_tg_status(*, chat_id: int) -> dict[str, Any]:
+    headers: dict[str, str] = {}
+    token = str(os.getenv("TG_INTERNAL_API_TOKEN") or "").strip()
+    if token:
+        headers["x-tg-internal-token"] = token
+    url = f"{_internal_webapp_base_url()}/api/internal/tg/status"
+    async with ClientSession() as session:
+        async with session.get(
+            url,
+            params={"chat_id": int(chat_id)},
+            headers=headers,
+            timeout=20,
+        ) as response:
+            body = await response.text()
+            if response.status >= 400:
+                raise RuntimeError(f"後臺 TG 狀態查詢失敗 HTTP {response.status}: {body[:500]}")
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"後臺 TG 狀態查詢返回非 JSON: {body[:300]}") from exc
+    return data if isinstance(data, dict) else {}
+
+
 async def _cancel_latest_internal_webapp_tg_task(*, chat_id: int) -> dict[str, Any]:
     headers: dict[str, str] = {}
     token = str(os.getenv("TG_INTERNAL_API_TOKEN") or "").strip()
@@ -1922,6 +1948,36 @@ def _format_internal_webapp_tg_tasks(tasks: list[dict[str, Any]]) -> str:
             progress += f"（{'，'.join(queue_parts)}）"
         suffix = f"，{error}" if status == "failed" and error else (download or progress)
         lines.append(f"- {item.get('type')}: {label}{suffix}（{item.get('id')}）")
+    return "\n".join(lines)
+
+
+def _format_internal_webapp_tg_status(status: dict[str, Any], *, chat_id: int) -> str:
+    counts = status.get("counts") if isinstance(status.get("counts"), dict) else {}
+    active = status.get("active_task") if isinstance(status.get("active_task"), dict) else None
+    latest = status.get("latest_task") if isinstance(status.get("latest_task"), dict) else None
+    lines = [
+        "後臺生成工作臺狀態",
+        f"等待中任務: {int(counts.get('queued') or 0)}",
+        f"進行中任務: {int(counts.get('running') or 0)}",
+        f"已完成任務: {int(counts.get('success') or 0)}",
+        f"失敗任務: {int(counts.get('failed') or 0)}",
+    ]
+    if active:
+        lines.append(f"目前占用: {active.get('type') or 'unknown'} / {active.get('id') or '-'}")
+        event = active.get("latest_event") if isinstance(active.get("latest_event"), dict) else {}
+        event_message = str(event.get("message") or "").strip()
+        if event_message:
+            lines.append(f"當前進度: {event_message}")
+    else:
+        lines.append("目前占用: 無，工作臺可立即使用")
+    if latest:
+        lines.extend(
+            [
+                f"最近任務: {latest.get('id') or '-'}",
+                f"最近狀態: {latest.get('status_label') or latest.get('status') or '-'}",
+            ]
+        )
+    lines.append(f"你的 Chat ID: {chat_id}")
     return "\n".join(lines)
 
 
@@ -2261,14 +2317,17 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
 
     async def answer_status(message: Message) -> None:
         parts: list[str] = []
+        chat_id = int(message.chat.id)
         try:
-            tasks = await _fetch_internal_webapp_tg_tasks(chat_id=int(message.chat.id), limit=5)
+            tasks = await _fetch_internal_webapp_tg_tasks(chat_id=chat_id, limit=5)
             parts.append(_format_internal_webapp_tg_tasks(tasks))
         except Exception as exc:
             parts.append(f"後臺生成任務：查詢失敗（{_format_tg_user_error(exc)}）")
-        legacy_status = service.get_status_text(chat_id=int(message.chat.id))
-        if legacy_status:
-            parts.append(legacy_status)
+        try:
+            webapp_status = await _fetch_internal_webapp_tg_status(chat_id=chat_id)
+            parts.append(_format_internal_webapp_tg_status(webapp_status, chat_id=chat_id))
+        except Exception as exc:
+            parts.append(f"後臺生成工作臺狀態：查詢失敗（{_format_tg_user_error(exc)}）")
         await _answer(message, "\n\n".join(parts), reply_markup=_menu_keyboard())
 
     async def start_image_generate_flow(message: Message, state: FSMContext) -> None:
@@ -3356,21 +3415,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         restored = _text_to_image_continue_state_from_payload(input_payload)
         await state.clear()
         await state.update_data(**restored)
-        if str(restored.get("final_prompt_text") or "").strip():
-            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
-            status_message = await _send_transient_status(message, "繼續生成圖片：正在載入上次參數和提示詞...")
-            try:
-                await _show_text_to_image_prompt_review(
-                    message,
-                    state,
-                    prompt_text=str(restored.get("final_prompt_text") or ""),
-                    selected_model=str(restored.get("selected_model") or ""),
-                )
-            finally:
-                await _delete_message_silently(status_message)
-            return
-        await _answer(message, "繼續生成圖片：已載入上次參數，請重新輸入圖片需求。")
-        await _show_text_to_image_prompt_entry(message, state)
+        await _answer(message, "繼續生成圖片：已載入上次參數，請重新選擇提示詞方式。")
+        await _show_text_to_image_prompt_mode(message, state)
 
     async def _latest_image_edit_task(chat_id: int) -> dict[str, Any]:
         tasks = await _fetch_internal_webapp_tg_tasks(chat_id=int(chat_id), limit=20)
@@ -3657,23 +3703,9 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             restored = _text_to_image_continue_state_from_payload(input_payload)
             await state.clear()
             await state.update_data(**restored)
-            if str(restored.get("final_prompt_text") or "").strip():
-                await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_revision)
-                status_message = await _send_transient_status(callback.message, "繼續生成圖片：正在載入上次參數和提示詞...")
-                try:
-                    await _show_text_to_image_prompt_review(
-                        callback.message,
-                        state,
-                        prompt_text=str(restored.get("final_prompt_text") or ""),
-                        selected_model=str(restored.get("selected_model") or ""),
-                    )
-                finally:
-                    await _delete_message_silently(status_message)
-                await callback.answer("已載入上次提示詞")
-                return
-            await _answer(callback.message, "繼續生成圖片：已載入上次參數，請重新輸入圖片需求。")
-            await _show_text_to_image_prompt_entry(callback.message, state)
-            await callback.answer("請輸入圖片需求")
+            await _answer(callback.message, "繼續生成圖片：已載入上次參數，請重新選擇提示詞方式。")
+            await _show_text_to_image_prompt_mode(callback.message, state)
+            await callback.answer("請選擇提示詞方式")
             return
         params, runtime_changed = await _refresh_text_to_image_runtime_state(state)
         if runtime_changed:
@@ -5714,6 +5746,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         await start_text_to_image_flow(message, state)
 
     @router.message(F.text == TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON)
+    @router.message(F.text == "重新生成图片")
     async def on_text_to_image_reroll_image_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
@@ -5723,6 +5756,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await _answer(message, f"重新生成圖片失敗：{_format_tg_user_error(exc)}", reply_markup=_menu_keyboard())
 
     @router.message(F.text == TEXT_TO_IMAGE_CONTINUE_IMAGE_BUTTON)
+    @router.message(F.text == "繼續生成圖片")
+    @router.message(F.text == "继续生成图片")
     async def on_text_to_image_continue_image_button(message: Message, state: FSMContext) -> None:
         if not await ensure_authorized(message):
             return
