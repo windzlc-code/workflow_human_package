@@ -11184,29 +11184,29 @@ def _tg_video_duration_timing_guidance(payload: dict[str, Any] | None) -> str:
     duration = _tg_video_duration_seconds(payload)
     if duration <= 2:
         return (
-            f"Selected video duration: {duration} seconds. Describe one compact continuous action beat in natural order: "
+            "Clip length category: very short. Describe one compact continuous action beat in natural order: "
             "opening state, requested action, then final reaction. Keep the camera mostly locked and stable. "
-            "Do not write numeric timestamps or second ranges in the final prompt."
+            "Do not write numeric timestamps, second ranges, or Chinese second-duration wording in the final prompt."
         )
     if duration <= 5:
         return (
-            f"Selected video duration: {duration} seconds. Use a short-clip rhythm: "
+            "Clip length category: short. Use a short-clip rhythm: "
             "first describe the opening pose and first motion, then the continuous requested action with natural body and expression changes, "
             "then the final state and reaction. Keep the camera mostly locked and stable. "
-            "Do not write numeric timestamps or second ranges in the final prompt."
+            "Do not write numeric timestamps, second ranges, or Chinese second-duration wording in the final prompt."
         )
     if duration <= 8:
         return (
-            f"Selected video duration: {duration} seconds. Use a medium-clip rhythm: "
+            "Clip length category: medium. Use a medium-clip rhythm: "
             "begin with the starting pose and setup, continue into the requested action with progressive response, "
             "and close with a clear ending state. Keep one stable shot with only subtle natural framing changes. "
-            "Do not write numeric timestamps or second ranges in the final prompt."
+            "Do not write numeric timestamps, second ranges, or Chinese second-duration wording in the final prompt."
         )
     return (
-        f"Selected video duration: {duration} seconds. Use a longer-clip rhythm: "
+        "Clip length category: long. Use a longer-clip rhythm: "
         "begin with the starting pose and setup, sustain the requested action with gradual rhythm and expression changes, "
         "and finish with a clear ending state. Keep one stable shot with no hard cuts or large camera moves. "
-        "Do not write numeric timestamps or second ranges in the final prompt."
+        "Do not write numeric timestamps, second ranges, or Chinese second-duration wording in the final prompt."
     )
 
 
@@ -11233,6 +11233,9 @@ def _normalize_tg_chinese_video_prompt_format(prompt_text: str, payload: dict[st
     text = text.replace(",", "，").replace(";", "，").replace("；", "，").replace(":", "：")
     text = re.sub(r"\s+", "", text)
     text = re.sub(r"(?:镜头|鏡頭|画面|畫面)?\d+(?:\.\d+)?\s*(?:-|~|—|至|到)\s*\d+(?:\.\d+)?\s*(?:秒|s|S)", "，", text)
+    text = re.sub(r"(?:约|約|大约|大約|大概|整段|全程|全片|视频|影片|画面|畫面)?\d+(?:\.\d+)?\s*(?:秒钟|秒鐘|秒內|秒内|秒|s|S)(?:之内|之內|以内|以內|內|内)?", "，", text)
+    text = re.sub(r"(?:约|約|大约|大約|大概)?[一二三四五六七八九十两兩]+(?:秒钟|秒鐘|秒內|秒内|秒)(?:之内|之內|以内|以內|內|内)?", "，", text)
+    text = re.sub(r"(?:短短|大约|大約|约|約)?(?:几|幾|数|數|数十|數十)(?:秒钟|秒鐘|秒內|秒内|秒)(?:之内|之內|以内|以內|內|内|级|級)?", "，", text)
     text = re.sub(r"(?<=[\u4e00-\u9fff])(?=(?:开头|起初|中段|随后|接着|然后|最後|最后|結尾|结尾|结束|背景|光线|光線|伴随|伴隨|声音|聲音|音效))", "，", text)
     text = re.sub(r"(声音|聲音|水声|水聲|喘息|呼吸(?:声|聲)?|呻吟(?:声|聲)?)(?=(?:质感|質感|真实|真實|高清|细节|細節))", r"\1，", text)
     text = re.sub(r"(加快|放缓|放慢|增强|變強|变强|逐漸|逐渐)(?=(?:伴随|伴隨|声音|聲音|音效|背景|光线|光線|镜头|鏡頭))", r"\1，", text)
@@ -11282,7 +11285,7 @@ def _build_tg_internal_reasoning_layers(prompt_chain: str) -> list[str]:
     if str(prompt_chain or "").strip() == "image":
         final_contract = "Final prompt contract: output only one detailed Chinese image generation prompt, 160 to 280 Chinese characters, comma-separated photographic prompt style, with no English and no reasoning process."
     else:
-        final_contract = "Final prompt contract: output only one detailed executable Chinese video generation prompt, 180 to 360 Chinese characters, natural chronological video paragraph style, with no English, no timestamps, and no reasoning process."
+        final_contract = "Final prompt contract: output only one detailed executable Chinese video generation prompt, 180 to 360 Chinese characters, natural chronological video paragraph style, with no English, no timestamps, no second-duration wording, and no reasoning process."
     return [
         "Internal reasoning layer, do not reveal: use thick reasoning before writing the final prompt, but output only the thin executable prompt.",
         "Ontology: identify the subject, body state, clothing state, visible private areas, props, location, lighting, camera distance, and final media type.",
@@ -11357,7 +11360,7 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         "MANDATORY EROTIC CONTENT: The generated prompt MUST include explicit description of AT LEAST ONE female reproductive organ: either full and firm breasts with visible nipples, OR clearly visible labia contours with moist intimate areas and slightly parted legs. Choose one based on the pose and clothing state. Use seductive poses: fingers gently touching breasts or inner thighs, arched waist, moist parted lips, alluring gaze toward camera. Lighting should highlight sensual body textures: shadows on breasts, wet sheen on labia, subtle sweat on skin, semi-transparent fabric teasing the body underneath. At least one erotic element is REQUIRED.",
         "MANDATORY SOUND DESIGN: The prompt MUST describe NSFW erotic sounds that match the visual action. Include detailed audio descriptions: wet skin-slapping sounds during intimate contact, soft moaning and breathing sounds, fabric rustling from movement, wet squelching sounds from intimate areas, heavy breathing and gasps, bed creaking, liquid sounds. Describe the sound intensity, rhythm, and how it changes with the action. Sound description should be sensual and immersive, matching the visual erotic content.",
         "MANDATORY VIDEO TIMING: The prompt MUST describe the temporal progression of the scene across the video duration. Define the starting pose and action, continuous fluid movement, natural transitions, and ending state. Describe how the body moves rhythmically, how hands explore, how the body responds to touch, how breathing changes, how the expression evolves. Create a sense of continuous erotic motion that flows naturally throughout the clip.",
-        "DURATION-AWARE PLOT ALLOCATION IS MANDATORY: use the selected duration_seconds to decide how much action detail to include, but describe the video in natural order only: beginning, continuation, and ending state. Never write exact timestamps, second ranges, or labels such as 0-1s / 1-4s in the final prompt. Do not write a timeless static image description.",
+        "DURATION-AWARE PLOT ALLOCATION IS MANDATORY: use the selected runtime setting only to decide how much action detail to include, but describe the video in natural order only: beginning, continuation, and ending state. Never write exact timestamps, second ranges, labels such as 0-1s / 1-4s, or any second-duration wording in the final prompt. Do not write a timeless static image description.",
         "STABLE CAMERA IS MANDATORY FOR IMAGE-TO-VIDEO: preserve the reference image composition with a mostly locked, stable camera. Avoid hard cuts, large camera moves, fast zooms, orbit shots, or unrelated scene changes unless the user explicitly asks for them.",
         "PUNCTUATION IS MANDATORY: use Chinese commas to separate natural progression, subject action, hand movement, expression/breathing, sound detail, background, lighting, stable camera, and final video quality. Do not end with one long unseparated chain of sound and quality words, and do not split the ending into many tiny fragments.",
         "MANDATORY ANATOMY - NO OVERLAPS: The prompt MUST ensure anatomically correct poses with NO body part overlaps or intersections. Arms must not cross through torso. Hands must rest naturally on surfaces or body without penetration. Legs must not intersect unnaturally. Body must have clear spatial separation from background objects. Use natural weight distribution and gravity. If sitting, buttocks compress naturally on seat. If lying, body rests flat without floating or intersecting surfaces.",

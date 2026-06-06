@@ -1852,10 +1852,12 @@ class RuntimeConfigStoreTests(unittest.TestCase):
     def test_tg_video_duration_guidance_uses_selected_seconds(self):
         guidance = server._tg_video_duration_timing_guidance({"duration_seconds": 8})
 
-        self.assertIn("Selected video duration: 8 seconds", guidance)
+        self.assertIn("Clip length category: medium", guidance)
         self.assertIn("begin", guidance)
         self.assertIn("continue", guidance)
         self.assertIn("ending state", guidance)
+        self.assertNotIn("8 seconds", guidance)
+        self.assertNotIn("秒", guidance)
         self.assertNotIn("0-2s", guidance)
         self.assertNotIn("2-6s", guidance)
         self.assertNotIn("6-8s", guidance)
@@ -1883,8 +1885,24 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertNotIn("0-1\u79d2", prompt)
         self.assertNotIn("1-4\u79d2", prompt)
         self.assertNotIn("4-5\u79d2", prompt)
+        self.assertNotIn("\u79d2", prompt)
         self.assertIn("\u955c\u5934\u57fa\u672c\u4fdd\u6301\u7a33\u5b9a", prompt)
         self.assertNotIn("\u9ad8\u6e05\u6d41\u7545\u89c6\u9891\uff0c\u8d28\u611f", prompt)
+
+    def test_tg_video_prompt_normalizer_removes_single_duration_terms(self):
+        prompt = server._normalize_tg_chinese_video_prompt_format(
+            "\u753b\u9762\u5f00\u59cb\u65f6\u5979\u5750\u5728\u5e8a\u8fb9\uff0c"
+            "5\u79d2\u5185\u52a8\u4f5c\u6d41\u7545\u5c55\u5f00\uff0c\u7ea6\u4e94\u79d2\u7ed3\u675f\uff0c"
+            "\u77ed\u77ed\u51e0\u79d2\u5185\u8868\u60c5\u53d8\u5316\uff0c"
+            "\u6700\u540e\u955c\u5934\u4fdd\u6301\u7a33\u5b9a\uff0c\u753b\u9762\u8d28\u611f\u7ec6\u817b",
+            {"duration_seconds": 5},
+        )
+
+        self.assertNotIn("5\u79d2\u5185", prompt)
+        self.assertNotIn("\u7ea6\u4e94\u79d2", prompt)
+        self.assertNotIn("\u51e0\u79d2", prompt)
+        self.assertNotIn("\u79d2", prompt)
+        self.assertIn("\u52a8\u4f5c\u6d41\u7545\u5c55\u5f00", prompt)
 
     def test_tg_video_prompt_normalizer_keeps_camera_phrases_natural(self):
         prompt = server._normalize_tg_chinese_video_prompt_format(
@@ -1930,6 +1948,7 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIn("hand/finger movement path", system_prompt)
         self.assertIn("movement amplitude", system_prompt)
         self.assertIn("200 to 380 Chinese characters", system_prompt)
+        self.assertIn("no second-duration wording", system_prompt)
         self.assertIn("hairstyle", user_prompt)
         self.assertIn("makeup or facial expression", user_prompt)
         self.assertIn("body silhouette", user_prompt)
