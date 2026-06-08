@@ -123,3 +123,75 @@ def test_ui_converter_exports_rgthree_power_lora_widgets():
     assert prompt["198"]["inputs"]["lora_1"]["strength"] == 0.8
     assert prompt["198"]["inputs"]["lora_2"]["on"] is False
     assert not [item for item in warnings if "198:Power Lora Loader" in item]
+
+
+def test_ui_converter_resolves_firered_frontend_uuid_nodes_and_prunes_unused_nodes():
+    workflow = {
+        "nodes": [
+            {
+                "id": 23,
+                "type": "CLIPLoader",
+                "outputs": [{"type": "CLIP"}],
+            },
+            {
+                "id": 24,
+                "type": "VAELoader",
+                "outputs": [{"type": "VAE"}],
+            },
+            {
+                "id": 66,
+                "type": "CR Prompt Text",
+                "outputs": [{"type": "STRING"}],
+                "widgets_values": ["换衣服"],
+            },
+            {
+                "id": 69,
+                "type": "21448e4e-c19c-4be4-8b62-b4b760ae4387",
+                "inputs": [
+                    {"name": "clip", "link": 1},
+                    {"name": "vae", "link": 2},
+                    {"name": "prompt", "link": 3},
+                ],
+                "widgets_values": [None],
+            },
+            {
+                "id": 99,
+                "type": "b534a3d6-4dcf-4177-8fd8-cb602fd299e7",
+                "widgets_values": ["unused frontend node"],
+            },
+            {
+                "id": 21,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "link": 4}],
+            },
+        ],
+        "links": [
+            [1, 23, 0, 69, 0, "CLIP"],
+            [2, 24, 0, 69, 1, "VAE"],
+            [3, 66, 0, 69, 2, "STRING"],
+            [4, 69, 0, 21, 0, "IMAGE"],
+        ],
+    }
+    object_info = {
+        "CLIPLoader": {"input": {"required": {}, "optional": {}}},
+        "VAELoader": {"input": {"required": {}, "optional": {}}},
+        "CR Prompt Text": {"input": {"required": {"prompt": ("STRING",)}, "optional": {}}},
+        "TextEncodeQwenImageEditPlusAdvance_lrzjason": {
+            "input": {
+                "required": {
+                    "clip": ("CLIP",),
+                    "vae": ("VAE",),
+                    "prompt": ("STRING",),
+                },
+                "optional": {},
+            }
+        },
+        "SaveImage": {"input": {"required": {"images": ("IMAGE",)}, "optional": {}}},
+    }
+
+    prompt, warnings = comfy_gateway_v2._ui_workflow_to_api_prompt(workflow, object_info)
+
+    assert prompt["69"]["class_type"] == "TextEncodeQwenImageEditPlusAdvance_lrzjason"
+    assert prompt["69"]["inputs"]["clip"] == ["23", 0]
+    assert "99" not in prompt
+    assert any("pruned 1 node" in item for item in warnings)

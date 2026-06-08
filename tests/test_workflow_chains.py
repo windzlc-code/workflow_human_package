@@ -93,6 +93,45 @@ def test_build_workflow_meta_describes_comfy_image_chain():
     assert meta["workflow_step_count"] == 1
 
 
+def test_build_workflow_meta_describes_comfy_image_edit_mapping_without_closed_model_pollution():
+    meta = server._build_workflow_meta(
+        task_id="task-edit",
+        task_type="get_nano_banana",
+        input_payload={
+            "comfy_workflow_source": "remote",
+            "remote_comfy_workflow_mappings": {"get_nano_banana": "__converted__/firered_api.json"},
+        },
+        output_payload={},
+        runninghub_task_id="",
+    )
+
+    assert meta["workflow_name"] == "图片编辑"
+    assert meta["workflow_ids"] == ["__converted__/firered_api.json"]
+    assert meta["workflow_id"] == "__converted__/firered_api.json"
+    assert meta["workflow_chain_summary"] == "ComfyUI 图片编辑链 1 步"
+    assert meta["workflow_step_count"] == 1
+    assert "闭源" not in meta["workflow_name"]
+    assert "gemini-3-pro-image-preview" not in meta["workflow_id"]
+
+
+def test_build_workflow_meta_prefers_image_edit_output_workflow_path():
+    meta = server._build_workflow_meta(
+        task_id="task-edit-output",
+        task_type="get_nano_banana",
+        input_payload={
+            "comfy_workflow_source": "remote",
+            "remote_comfy_workflow_mappings": {"get_nano_banana": "__converted__/old.api.json"},
+        },
+        output_payload={"remote_comfy_workflow_path": "firered_api.json"},
+        runninghub_task_id="",
+    )
+
+    assert meta["workflow_name"] == "图片编辑"
+    assert meta["workflow_ids"] == ["firered_api.json"]
+    assert meta["workflow_chain_summary"] == "ComfyUI 图片编辑链 1 步"
+    assert "gemini-3-pro-image-preview" not in meta["workflow_id"]
+
+
 def test_normalize_runtime_config_splits_gemini_and_gpt_candidates():
     runtime = server._normalize_runtime_config(
         {
@@ -255,6 +294,162 @@ def test_tg_prompt_enhancement_generates_image_prompt_without_production_request
     assert calls == ["gemini-3-flash-preview"]
     assert payload["prompt"] == "精修商品图，真实电商摄影，无文字水印"
     assert payload["tg_llm_prompt_selected_model"] == "gemini-3-flash-preview"
+
+
+def test_tg_image_edit_prompt_rules_require_figure_roles():
+    system_prompt, prompt_chain = server._build_tg_prompt_system_prompt("get_nano_banana", "image editing")
+
+    assert prompt_chain == "image"
+    assert "MUST include 图1 and 图2" in system_prompt
+    assert "do not explain that 图1 is the main image or 图2 is the reference image" in system_prompt
+    assert "older natural image-editing style" in system_prompt
+    assert "将图1脸部和头发替换为图2的脸部与双马尾发型" in system_prompt
+    assert "保持原姿势、身体、裸露状态、卧室、背景、光线与构图不变" in system_prompt
+    assert "自然融合，无瑕疵，真实纹理" in system_prompt
+    assert "never use a raw command phrase as the visual object" in system_prompt
+    assert "Do not collapse the prompt into a rigid category-only sentence like 只有服装改变" in system_prompt
+    assert "Do not output generic prefixes such as 只替换用户要求的部分" in system_prompt
+    assert "only replace the user-requested area" in system_prompt
+    assert "图1作为主图" not in system_prompt
+
+
+def test_tg_image_edit_prompt_normalizes_two_image_roles(monkeypatch):
+    class DummyDb:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(server, "db", lambda: DummyDb())
+    monkeypatch.setattr(
+        server,
+        "_get_runtime_config",
+        lambda _conn: {
+            "llm_base_url": "http://llm.local",
+            "llm_api_key_gemini": "gemini-key",
+            "llm_default_model_gemini": "grok-test",
+        },
+    )
+
+    def _fake_request(**kwargs):
+        return {
+            "ok": True,
+            "raw_text": "將第一張圖片中女子換上粉色短款針織上衣與白色百褶短裙，保留原有坐姿、櫻花背景、雙馬尾髮型、面部特徵、燈光與構圖，自然貼合無變形",
+        }
+
+    monkeypatch.setattr(server.get_gemini, "request_gemini3_pro_raw_text", _fake_request)
+
+    payload = server._enhance_tg_payload_with_llm_prompt(
+        "get_nano_banana",
+        {
+            "prompt": "換衣服",
+            "prompt_text": "換衣服",
+            "message": "換衣服",
+            "tg_use_llm_prompt": True,
+            "tg_user_instruction": "User image editing request: 換衣服",
+            "tg_original_user_request": "換衣服",
+            "input_image_local_path": "data/main.jpg",
+            "reference_image_local_path": "data/ref.jpg",
+        },
+    )
+
+    final_prompt = payload["prompt"]
+    assert final_prompt == "将图1人物身上的服装换成图2人物的服装，保持图1人物的五官、发型、脸型、姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+    assert "服装" in final_prompt
+    assert "粉色" not in final_prompt
+    assert "针织" not in final_prompt
+    assert "百褶" not in final_prompt
+    assert "只有服装改变" not in final_prompt
+    assert "只替换用户要求的部分" not in final_prompt
+    assert "将图1作为图1" not in final_prompt
+    assert "图1作为主图" not in final_prompt
+    assert "图2作为参考" not in final_prompt
+    assert "將" not in final_prompt
+    assert "換" not in final_prompt
+    assert "無" not in final_prompt
+    assert "雙" not in final_prompt
+    assert "第一張圖片" not in final_prompt
+    assert payload["prompt_text"] == final_prompt
+    assert payload["message"] == final_prompt
+
+
+def test_tg_image_edit_finalize_keeps_roles_for_custom_prompt():
+    final_prompt = server._finalize_tg_image_generation_prompt_constraints(
+        "get_nano_banana",
+        {"tg_original_user_request": "换衣服"},
+        "把主图人物换成参考图的服装，其他保持不变",
+    )
+
+    assert final_prompt == "把图1人物换成图2的服装，其他保持不变"
+    assert "图1" in final_prompt
+    assert "图2" in final_prompt
+    assert "图1作为主图" not in final_prompt
+    assert "图2作为参考" not in final_prompt
+    assert "参考图" not in final_prompt
+
+
+def test_tg_image_edit_prompt_format_supports_other_categories():
+    hair_prompt = server._ensure_tg_image_edit_image_roles("换发型", "换发型", "get_nano_banana")
+
+    assert hair_prompt == "将图1人物的发型换成图2人物的发型，保持图1人物的五官、脸型、姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+    assert "发型不变" not in hair_prompt
+
+
+def test_tg_image_edit_prompt_keeps_clothing_word_for_simplified_and_traditional_requests():
+    expected = "将图1人物身上的服装换成图2人物的服装，保持图1人物的五官、发型、脸型、姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+
+    assert server._ensure_tg_image_edit_image_roles("换衣服", "换衣服", "get_nano_banana") == expected
+    assert server._ensure_tg_image_edit_image_roles("換衣服", "換衣服", "get_nano_banana") == expected
+
+
+def test_tg_image_edit_prompt_keeps_outfit_word_for_outfit_requests():
+    expected = "将图1人物的穿搭换成图2人物的穿搭，保持图1人物的五官、发型、脸型、姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+
+    assert server._ensure_tg_image_edit_image_roles("换衣服", "换穿搭", "get_nano_banana") == expected
+    assert server._ensure_tg_image_edit_image_roles("换服装", "换搭配", "get_nano_banana") == expected
+
+
+def test_tg_image_edit_prompt_preserves_natural_grok_prompt_with_figure_roles():
+    raw_prompt = (
+        "将图1脸部和头发替换为图2的脸部与双马尾发型，保持原姿势、身体、裸露状态、"
+        "卧室、背景、光线与构图不变，自然融合，无瑕疵，真实纹理"
+    )
+
+    assert server._ensure_tg_image_edit_image_roles(raw_prompt, "换脸，换头发", "get_nano_banana") == raw_prompt
+
+
+def test_tg_image_edit_prompt_formats_face_and_hair_like_old_version():
+    expected = "将图1人物的脸部和头发换成图2人物的脸部和头发，保持图1人物的姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+
+    assert server._ensure_tg_image_edit_image_roles("换脸，换头发", "换脸，换头发", "get_nano_banana") == expected
+
+
+def test_tg_image_edit_prompt_repairs_mechanical_command_noun_output():
+    bad_prompt = (
+        "将图1人物的换衣服替换为图2的换衣服，保持图1五官、发型、脸型、姿势、身体、"
+        "构图、背景、光线和材质关系不变，自然融合，无瑕疵，真实纹理"
+    )
+    expected = "将图1人物身上的服装换成图2人物的服装，保持图1人物的五官、发型、脸型、姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+
+    assert server._ensure_tg_image_edit_image_roles(bad_prompt, "换衣服", "get_nano_banana") == expected
+
+
+def test_tg_image_edit_prompt_handles_no_clothing_request_as_state_not_clothing():
+    expected = "将图1人物的服装状态调整为图2人物的未穿衣物状态，保持图1人物的五官、发型、脸型、姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+
+    assert server._ensure_tg_image_edit_image_roles("没穿衣服", "没穿衣服", "get_nano_banana") == expected
+    assert server._ensure_tg_image_edit_image_roles("裸體", "裸體", "get_nano_banana") == expected
+
+
+def test_tg_image_edit_prompt_uses_grok_detected_no_clothing_reference_state():
+    prompt = (
+        "将图1人物身上的服装换成图2人物的未穿衣物状态，保持图1人物五官、发型、"
+        "脸型、姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+    )
+    expected = "将图1人物的服装状态调整为图2人物的未穿衣物状态，保持图1人物的五官、发型、脸型、姿势、身体、构图、背景和光线不变，自然融合，质感真实"
+
+    assert server._ensure_tg_image_edit_image_roles(prompt, "换衣服", "get_nano_banana") == expected
 
 
 def test_tg_text_to_image_prompt_uses_automatic_script_person_contract_and_dedupes(monkeypatch):

@@ -25,12 +25,19 @@ WORKFLOW_ROOTS = [
     ("user", (COMFY_ROOT / "user" / "default" / "workflows").resolve()),
     ("api", (PORTABLE_ROOT / "api_workflows").resolve()),
 ]
-CONVERTER_VERSION = "2026-05-28.1"
+CONVERTER_VERSION = "2026-06-08.1"
 CONVERTED_ROOT = WORKFLOW_ROOTS[1][1] / "__converted__"
 CONVERT_MANIFEST_PATH = CONVERTED_ROOT / "manifest.json"
 CUSTOM_NODES_ROOT = (COMFY_ROOT / "custom_nodes").resolve()
 INPUT_ROOT = (COMFY_ROOT / "input").resolve()
 FRONTEND_ONLY_CLASS_TYPES = {"Note", "MarkdownNote", "Fast Bypasser (rgthree)"}
+UUID_CLASS_TYPE_ALIASES = {
+    # ComfyUI frontend subgraph/proxy node ids used by FireRed image-edit workflows.
+    # The frontend submits these as the concrete lrzjason node type to /prompt.
+    "21448e4e-c19c-4be4-8b62-b4b760ae4387": "TextEncodeQwenImageEditPlusAdvance_lrzjason",
+    "8bd4310c-a285-466b-b1d3-ffc7ed9c6241": "TextEncodeQwenImageEditPlusAdvance_lrzjason",
+}
+OUTPUT_CLASS_TYPES = {"SaveImage", "PreviewImage", "Image Comparer (rgthree)"}
 
 
 def _json_bytes(data: Any) -> bytes:
@@ -544,6 +551,9 @@ def _prepend_prompt_text(addition: str, existing: str) -> str:
 def _normalize_ui_node_class_type(node: dict[str, Any], class_type: str, object_info: dict[str, Any]) -> str:
     if class_type in object_info:
         return class_type
+    alias = UUID_CLASS_TYPE_ALIASES.get(class_type)
+    if alias and alias in object_info:
+        return alias
     properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
     proxy_widgets = properties.get("proxyWidgets")
     has_text_proxy = any(
@@ -561,6 +571,46 @@ def _normalize_ui_node_class_type(node: dict[str, Any], class_type: str, object_
     if has_text_proxy and has_clip_input and has_conditioning_output and "CLIPTextEncode" in object_info:
         return "CLIPTextEncode"
     return class_type
+
+
+def _linked_node_ids(value: Any) -> set[str]:
+    linked: set[str] = set()
+    if isinstance(value, list):
+        if len(value) == 2 and isinstance(value[1], int):
+            linked.add(str(value[0]))
+        else:
+            for item in value:
+                linked.update(_linked_node_ids(item))
+    elif isinstance(value, dict):
+        for item in value.values():
+            linked.update(_linked_node_ids(item))
+    return linked
+
+
+def _prune_api_prompt_to_output_ancestors(prompt: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    output_ids = [
+        node_id
+        for node_id, node in prompt.items()
+        if isinstance(node, dict) and str(node.get("class_type") or "") in OUTPUT_CLASS_TYPES
+    ]
+    if not output_ids:
+        return prompt, 0
+    keep: set[str] = set()
+    stack = list(output_ids)
+    while stack:
+        node_id = stack.pop()
+        if node_id in keep or node_id not in prompt:
+            continue
+        keep.add(node_id)
+        node = prompt.get(node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else {}
+        for linked_node_id in _linked_node_ids(inputs):
+            if linked_node_id in prompt and linked_node_id not in keep:
+                stack.append(linked_node_id)
+    if not keep:
+        return prompt, 0
+    pruned = {node_id: node for node_id, node in prompt.items() if node_id in keep}
+    return pruned, len(prompt) - len(pruned)
 
 
 def _ui_link_origins(data: dict[str, Any]) -> dict[int, list[Any]]:
@@ -669,6 +719,9 @@ def _ui_workflow_to_api_prompt(data: dict[str, Any], object_info: dict[str, Any]
 
     if not prompt:
         raise ValueError("no runnable nodes found in UI workflow")
+    prompt, pruned_count = _prune_api_prompt_to_output_ancestors(prompt)
+    if pruned_count:
+        warnings.append(f"pruned {pruned_count} node(s) not connected to output")
     return prompt, warnings
 
 

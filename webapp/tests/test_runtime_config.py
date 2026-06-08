@@ -1058,6 +1058,76 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(result["latest"]["status"], "success")
         self.assertIn("目前狀態為已完成", result["message"])
 
+    def test_internal_tg_tasks_include_workflow_meta(self):
+        get_tasks = self._route_endpoint("/api/internal/tg/tasks", "GET")
+        workflow_path = "__converted__/轉化TG機器人/firered图像编辑.api.json"
+        old_workflow_path = "__converted__/old.api.json"
+        server._write_runtime_config_file(
+            {
+                "remote_comfy_workflow_mappings": {"get_nano_banana": workflow_path},
+            }
+        )
+        server._create_task_record(
+            "task_edit_workflow",
+            1,
+            "get_nano_banana",
+            {
+                "tg_chat_id": 8100401093,
+                "remote_comfy_workflow_mappings": {"get_nano_banana": old_workflow_path},
+            },
+        )
+
+        class Request:
+            query_params = {"chat_id": "8100401093", "limit": "5"}
+            headers = {}
+            client = type("Client", (), {"host": "127.0.0.1"})()
+
+        result = get_tasks(Request())
+
+        task = result["tasks"][0]
+        self.assertEqual(task["id"], "task_edit_workflow")
+        self.assertEqual(task["workflow_name"], "图片编辑")
+        self.assertEqual(task["workflow_ids"], [old_workflow_path])
+        self.assertEqual(task["current_workflow_name"], "圖片編輯")
+        self.assertEqual(task["current_workflow_ids"], [workflow_path])
+
+    def test_internal_tg_status_includes_active_workflow_meta(self):
+        get_status = self._route_endpoint("/api/internal/tg/status", "GET")
+        workflow_path = "__converted__/轉化TG機器人/firered图像编辑.api.json"
+        old_workflow_path = "__converted__/old.api.json"
+        server._write_runtime_config_file(
+            {
+                "remote_comfy_workflow_mappings": {"get_nano_banana": workflow_path},
+            }
+        )
+        server._create_task_record(
+            "task_active_workflow",
+            1,
+            "get_nano_banana",
+            {
+                "tg_chat_id": 8100401093,
+                "remote_comfy_workflow_mappings": {"get_nano_banana": old_workflow_path},
+            },
+        )
+        with db_module.db() as conn:
+            conn.execute(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                ("running", server._now_ts() + 20, "task_active_workflow"),
+            )
+
+        class Request:
+            query_params = {"chat_id": "8100401093"}
+            headers = {}
+            client = type("Client", (), {"host": "127.0.0.1"})()
+
+        result = get_status(Request())
+
+        self.assertEqual(result["active_task"]["id"], "task_active_workflow")
+        self.assertEqual(result["active_task"]["workflow_name"], "图片编辑")
+        self.assertEqual(result["active_task"]["workflow_ids"], [old_workflow_path])
+        self.assertEqual(result["active_task"]["current_workflow_name"], "圖片編輯")
+        self.assertEqual(result["active_task"]["current_workflow_ids"], [workflow_path])
+
     def test_cancelled_queued_webapp_task_is_not_started_by_worker(self):
         server._create_task_record("task_cancelled_before_start", 1, "text_to_image", {"tg_chat_id": 8100401093})
         server._cancel_task_record_for_user(

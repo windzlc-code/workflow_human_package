@@ -233,6 +233,7 @@ class ProductionWorkflowForm(StatesGroup):
     image_waiting_for_prompt = State()
     image_edit_waiting_for_image = State()
     image_edit_waiting_for_reference_image = State()
+    image_edit_waiting_for_prompt_mode = State()
     image_edit_waiting_for_prompt = State()
     image_edit_waiting_for_confirm = State()
     face_swap_waiting_for_target_image = State()
@@ -332,6 +333,17 @@ def _image_edit_prompt_failure_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="重新生成提示詞")],
             [KeyboardButton(text="輸入自定義提示詞提交")],
+            [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _image_edit_prompt_mode_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="讓 Grok 生成提示詞")],
+            [KeyboardButton(text="輸入自定義提示詞")],
             [KeyboardButton(text="上一步"), KeyboardButton(text=MAIN_MENU_BUTTON)],
         ],
         resize_keyboard=True,
@@ -1948,7 +1960,47 @@ def _format_internal_webapp_tg_tasks(tasks: list[dict[str, Any]]) -> str:
             progress += f"（{'，'.join(queue_parts)}）"
         suffix = f"，{error}" if status == "failed" and error else (download or progress)
         lines.append(f"- {item.get('type')}: {label}{suffix}（{item.get('id')}）")
+        workflow_line = _format_internal_webapp_tg_workflow_line(item)
+        if workflow_line:
+            lines.append(f"  {workflow_line}")
     return "\n".join(lines)
+
+
+def _clean_internal_webapp_tg_workflow_id(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    text = text.removeprefix("__converted__/")
+    if text.lower().endswith(".api.json"):
+        text = text[:-9]
+    elif text.lower().endswith(".json"):
+        text = text[:-5]
+    return text
+
+
+def _format_internal_webapp_tg_workflow_line(item: dict[str, Any]) -> str:
+    workflow_name = str(item.get("current_workflow_name") or item.get("workflow_name") or "").strip()
+    raw_ids = item.get("current_workflow_ids")
+    if not isinstance(raw_ids, list):
+        raw_ids = item.get("workflow_ids")
+    workflow_ids: list[str] = []
+    if isinstance(raw_ids, list):
+        workflow_ids = [_clean_internal_webapp_tg_workflow_id(value) for value in raw_ids]
+    if not workflow_ids:
+        workflow_id_value = item.get("current_workflow_id") or item.get("workflow_id")
+        workflow_ids = [
+            _clean_internal_webapp_tg_workflow_id(value)
+            for value in str(workflow_id_value or "").split(",")
+        ]
+    workflow_ids = [value for value in workflow_ids if value]
+    workflow_chain = " > ".join(workflow_ids)
+    if workflow_name and workflow_chain:
+        return f"工作流：{workflow_name} / {workflow_chain}"
+    if workflow_name:
+        return f"工作流：{workflow_name}"
+    if workflow_chain:
+        return f"工作流：{workflow_chain}"
+    return ""
 
 
 def _format_internal_webapp_tg_status(status: dict[str, Any], *, chat_id: int) -> str:
@@ -1964,6 +2016,9 @@ def _format_internal_webapp_tg_status(status: dict[str, Any], *, chat_id: int) -
     ]
     if active:
         lines.append(f"目前占用: {active.get('type') or 'unknown'} / {active.get('id') or '-'}")
+        workflow_line = _format_internal_webapp_tg_workflow_line(active)
+        if workflow_line:
+            lines.append(workflow_line)
         event = active.get("latest_event") if isinstance(active.get("latest_event"), dict) else {}
         event_message = str(event.get("message") or "").strip()
         if event_message:
@@ -2414,6 +2469,46 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "single_image_edit" if single_input else "get_nano_banana",
         )
 
+    async def _show_image_edit_prompt_mode(message: Message, state: FSMContext, *, prefix: str = "") -> None:
+        data = await state.get_data()
+        _, title, total_steps, _ = _image_edit_flow_meta(data)
+        step = total_steps - 1
+        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt_mode)
+        await _answer(
+            message,
+            (
+                f"{prefix}\n" if prefix else ""
+            )
+            + f"{title}\n步驟 {step}/{total_steps}：請選擇提示詞方式。\n\n"
+            "可以讓 Grok 根據你的要求生成圖片編輯提示詞，也可以直接輸入自定義最終提示詞。",
+            reply_markup=_image_edit_prompt_mode_keyboard(),
+        )
+
+    async def _show_image_edit_prompt_entry(
+        message: Message,
+        state: FSMContext,
+        *,
+        custom_prompt: bool = False,
+    ) -> None:
+        data = await state.get_data()
+        _, title, total_steps, _ = _image_edit_flow_meta(data)
+        if custom_prompt:
+            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_confirm)
+            await state.update_data(image_edit_waiting_for_custom_prompt=True, image_edit_waiting_for_adjustment=False)
+            await _answer(
+                message,
+                f"{title}\n步驟 {total_steps}/{total_steps}：請輸入自定義最終圖片編輯提示詞。下一條消息會跳過 Grok，直接提交編輯任務。",
+                reply_markup=_image_task_step_keyboard(),
+            )
+            return
+        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
+        await state.update_data(image_edit_waiting_for_custom_prompt=False, image_edit_waiting_for_adjustment=False)
+        await _answer(
+            message,
+            f"{title}\n步驟 {total_steps}/{total_steps}：請輸入這次圖片編輯要求，Grok 會先生成提示詞供你確認。",
+            reply_markup=_image_task_step_keyboard(),
+        )
+
     def _clear_image_edit_prompt_fields() -> dict[str, Any]:
         return {
             "image_edit_prompt": "",
@@ -2444,7 +2539,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         _, title, total_steps, task_type = _image_edit_flow_meta(data)
         request_text = str(user_request or "").strip()
         if not request_text:
-            await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請直接輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, f"{title}\n步驟 {total_steps}/{total_steps}：請輸入這次圖片編輯要求，Grok 會先生成提示詞供你確認。", reply_markup=_image_task_step_keyboard())
             return
         await state.update_data(
             image_edit_user_request=request_text,
@@ -3524,7 +3619,6 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if not result_image or not Path(result_image).exists():
             raise RuntimeError("最近的圖片編輯任務缺少可用結果圖。")
         await state.clear()
-        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
         await state.update_data(
             work_dir=str(service.create_job_dir(prefix="tg_image_edit_continue")),
             image_edit_mode="single",
@@ -3533,11 +3627,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             continued_from_task_id=str(task.get("id") or "").strip(),
             **_clear_image_edit_prompt_fields(),
         )
-        await _answer(
-            message,
-            "繼續編輯結果圖\n已把最近生成的圖片設為新原圖。\n步驟 2/3：請輸入下一次圖片編輯要求。",
-            reply_markup=_image_task_step_keyboard(),
-        )
+        await _show_image_edit_prompt_mode(message, state, prefix="繼續編輯結果圖\n已把最近生成的圖片設為新原圖。")
 
     def _face_swap_resubmit_payload(input_payload: dict[str, Any], *, seedvr_upscale: bool = False) -> dict[str, Any]:
         target_image = str(input_payload.get("target_image_local_path") or input_payload.get("image_local_path") or "").strip()
@@ -4971,8 +5061,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if text == KEEP_CURRENT_RESOURCE_BUTTON and has_input_image:
             if single_input:
                 await state.update_data(reference_image_local_path=str(data.get("reference_image_local_path") or data.get("input_image_local_path") or ""))
-                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-                await _answer(message, "單圖編輯\n已沿用當前原圖。\n步驟 2/3：請輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+                await _show_image_edit_prompt_mode(message, state, prefix="已沿用當前原圖。")
                 return
             await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
             await _answer(message,
@@ -5000,8 +5089,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         if single_input:
             update_payload["reference_image_local_path"] = str(target.resolve())
             await state.update_data(**update_payload)
-            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await _answer(message, "單圖編輯\n已更新原圖。\n步驟 2/3：請輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+            await _show_image_edit_prompt_mode(message, state, prefix="已更新原圖。")
             return
         await state.update_data(**update_payload)
         await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
@@ -5031,8 +5119,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         data = await state.get_data()
         has_reference_image = _recorded_local_resource(data.get("reference_image_local_path"))
         if text == KEEP_CURRENT_RESOURCE_BUTTON and has_reference_image:
-            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await _answer(message, "圖片編輯\n已沿用當前參考圖。\n步驟 3/4：請輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+            await _show_image_edit_prompt_mode(message, state, prefix="已沿用當前參考圖。")
             return
         if suffix is None:
             if has_reference_image:
@@ -5051,8 +5138,53 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             reference_image_local_path=str(target.resolve()),
             **_clear_image_edit_prompt_fields(),
         )
-        await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-        await _answer(message, "圖片編輯\n已更新參考圖。\n步驟 3/4：請輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+        await _show_image_edit_prompt_mode(message, state, prefix="已更新參考圖。")
+
+    @router.message(ProductionWorkflowForm.image_edit_waiting_for_prompt_mode)
+    async def on_image_edit_prompt_mode(message: Message, state: FSMContext) -> None:
+        if await handle_entry_keyword(message, state):
+            return
+        if await handle_stop_request(message, state):
+            return
+        if not await ensure_authorized(message):
+            return
+        data = await state.get_data()
+        single_input, title, total_steps, _ = _image_edit_flow_meta(data)
+        text = _canonical_button_text(_message_text(message))
+        if text == "上一步":
+            await state.update_data(**_clear_image_edit_prompt_fields())
+            if single_input:
+                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
+                await _answer(
+                    message,
+                    "單圖編輯\n步驟 1/3：如需替換原圖，請上傳新圖片；否則點擊“沿用目前資源”。",
+                    reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("input_image_local_path"))),
+                )
+            else:
+                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
+                await _answer(
+                    message,
+                    "圖片編輯\n步驟 2/4：如需替換參考圖，請上傳新圖片；否則點擊“沿用目前資源”。",
+                    reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("reference_image_local_path"))),
+                )
+            return
+        if text == MAIN_MENU_BUTTON:
+            await state.clear()
+            await _answer(message, "已返回主選單。", reply_markup=_menu_keyboard())
+            return
+        if text == "讓 Grok 生成提示詞":
+            await state.update_data(image_edit_prompt_mode_label="Grok 生成")
+            await _show_image_edit_prompt_entry(message, state, custom_prompt=False)
+            return
+        if text in {"輸入自定義提示詞", "輸入自定義提示詞提交"}:
+            await state.update_data(image_edit_prompt_mode_label="自定義提示詞")
+            await _show_image_edit_prompt_entry(message, state, custom_prompt=True)
+            return
+        await _answer(
+            message,
+            f"{title}\n步驟 {total_steps - 1}/{total_steps}：請先選擇提示詞方式。",
+            reply_markup=_image_edit_prompt_mode_keyboard(),
+        )
 
     @router.message(ProductionWorkflowForm.image_edit_waiting_for_prompt)
     async def on_image_edit_prompt(message: Message, state: FSMContext) -> None:
@@ -5067,22 +5199,11 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
             await state.update_data(**_clear_image_edit_prompt_fields())
-            if single_input:
-                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_image)
-                await _answer(message,
-                    "單圖編輯\n步驟 1/3：如需替換原圖，請上傳新圖片；否則點擊“沿用目前資源”。",
-                    reply_markup=_image_task_step_keyboard(back=False, keep_current=_recorded_local_resource(data.get("input_image_local_path"))),
-                )
-            else:
-                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_reference_image)
-                await _answer(message,
-                    "圖片編輯\n步驟 2/4：如需替換參考圖，請上傳新圖片；否則點擊“沿用目前資源”。",
-                    reply_markup=_image_task_step_keyboard(keep_current=_recorded_local_resource(data.get("reference_image_local_path"))),
-                )
+            await _show_image_edit_prompt_mode(message, state)
             return
         prompt = _message_text(message)
         if not prompt:
-            await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請直接輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+            await _answer(message, f"{title}\n步驟 {total_steps}/{total_steps}：請輸入這次圖片編輯要求，Grok 會先生成提示詞供你確認。", reply_markup=_image_task_step_keyboard())
             return
         try:
             await _preview_image_edit_prompt(message, state, prompt)
@@ -5115,22 +5236,21 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         text = _canonical_button_text(_message_text(message))
         if text == "上一步":
             await state.update_data(**_clear_image_edit_prompt_fields())
-            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請重新輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+            await _show_image_edit_prompt_mode(message, state)
             return
         if text == MAIN_MENU_BUTTON:
             await state.clear()
             await _answer(message, "已返回主選單。", reply_markup=_menu_keyboard())
             return
         if text == "輸入自定義提示詞提交":
-            await state.update_data(image_edit_waiting_for_custom_prompt=True, image_edit_waiting_for_adjustment=False)
-            await _answer(message, "請輸入自定義最終圖片編輯提示詞。下一條消息會跳過 Grok，直接提交編輯任務。", reply_markup=_image_task_step_keyboard())
+            await state.update_data(image_edit_prompt_mode_label="自定義提示詞")
+            await _show_image_edit_prompt_entry(message, state, custom_prompt=True)
             return
         if text == "重新生成提示詞":
             original_request = str(data.get("image_edit_user_request") or data.get("image_edit_prompt") or "").strip()
             if not original_request:
-                await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-                await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請重新輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+                await state.update_data(image_edit_prompt_mode_label="Grok 生成")
+                await _show_image_edit_prompt_entry(message, state, custom_prompt=False)
                 return
             try:
                 await _preview_image_edit_prompt(message, state, original_request)
@@ -5190,8 +5310,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         prompt = str(data.get("image_edit_generated_prompt") or data.get("image_edit_prompt") or "").strip()
         if not prompt:
-            await state.set_state(ProductionWorkflowForm.image_edit_waiting_for_prompt)
-            await _answer(message, f"{title}\n步驟 {total_steps - 1}/{total_steps}：請重新輸入這次圖片編輯要求。", reply_markup=_image_task_step_keyboard())
+            await state.update_data(image_edit_prompt_mode_label="Grok 生成")
+            await _show_image_edit_prompt_entry(message, state, custom_prompt=False)
             return
         await _submit_image_edit_from_state(message, state, prompt)
 

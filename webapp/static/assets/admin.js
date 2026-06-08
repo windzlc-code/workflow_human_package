@@ -495,6 +495,7 @@ const REMOTE_COMFY_TASKS = [
   ["get_nano_banana", "图片编辑"],
   ["face_swap", "人物换脸"],
 ];
+const TASK_TYPE_LABELS = Object.fromEntries(REMOTE_COMFY_TASKS);
 const ADMIN_PAGES = new Set(["overview", "users", "tasks", "pricing", "runtime", "account"]);
 const ADMIN_PAGE_ALIASES = {
   secOverview: "overview",
@@ -767,12 +768,17 @@ function buildExecutionTraceHtml(groups) {
 function workflowCell(t) {
   const workflowName = oneLine(t.workflow_name || t.type || "-");
   const workflowId = oneLine(t.workflow_id || "-");
-  const taskType = oneLine(t.type || "-");
+  const taskType = taskTypeLabel(t.type);
   return `
     <div><strong>${workflowName}</strong></div>
     <div class="small">生成类型：${taskType}</div>
     <div class="small">内部流程编号：${workflowId}</div>
   `;
+}
+
+function taskTypeLabel(taskType) {
+  const key = String(taskType || "").trim();
+  return TASK_TYPE_LABELS[key] || key || "-";
 }
 
 function taskActionOptions(task) {
@@ -799,7 +805,7 @@ function buildTaskDetailText(data) {
   const lines = [
     `生成编号：${data.id || "-"}`,
     `客户ID：${data.user_id || "-"}`,
-    `生成类型：${data.type || "-"}`,
+    `生成类型：${taskTypeLabel(data.type)}`,
     `内部流程：${data.workflow_name || "-"}`,
     `内部流程编号：${data.workflow_id || "-"}`,
     `链路摘要：${data.workflow_chain_summary || "-"}`,
@@ -841,7 +847,7 @@ function buildTaskLogsText(payload) {
   const analysisSummary = oneLine(task.analysis_summary || "");
   const lines = [
     `生成编号：${task.id || "-"}`,
-    `生成类型：${task.type || "-"}`,
+    `生成类型：${taskTypeLabel(task.type)}`,
     `内部流程：${task.workflow_name || "-"}`,
     `内部流程编号：${task.workflow_id || "-"}`,
     `供应商记录编号：${task.runninghub_task_id || "-"}`,
@@ -916,7 +922,7 @@ function buildTaskDetailHtml(data) {
       <div class="inspect-grid">
         ${inspectItem("生成编号", data.id)}
         ${inspectItem("客户ID", data.user_id)}
-        ${inspectItem("生成类型", data.type)}
+        ${inspectItem("生成类型", taskTypeLabel(data.type))}
         ${inspectItem("内部流程", data.workflow_name)}
         ${inspectItem("内部流程编号", data.workflow_id)}
         ${inspectItem("链路摘要", data.workflow_chain_summary)}
@@ -992,7 +998,7 @@ function buildTaskLogsHtml(payload) {
     <div class="inspect-stack">
       <div class="inspect-grid">
         ${inspectItem("生成编号", task.id)}
-        ${inspectItem("生成类型", task.type)}
+        ${inspectItem("生成类型", taskTypeLabel(task.type))}
         ${inspectItem("内部流程", task.workflow_name)}
         ${inspectItemHtml("状态", statusPill(task.status))}
         ${inspectItem("内部流程编号", task.workflow_id)}
@@ -1129,7 +1135,7 @@ function taskActionButtons(task) {
 function renderTaskCard(task) {
   const status = String(task.status || "").trim() || "unknown";
   const workflowName = oneLine(task.workflow_name || task.type || "-");
-  const taskType = oneLine(task.type || "-");
+  const taskType = taskTypeLabel(task.type);
   const workflowId = oneLine(task.workflow_id || "-");
   const workflowChainSummary = oneLine(task.workflow_chain_summary || "");
   const userName = oneLine(task.username || task.user_id || "-");

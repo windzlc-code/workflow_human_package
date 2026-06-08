@@ -6,6 +6,42 @@ from src.digital_human_tg_bot import bot
 
 
 class TextToImageStatusTextTests(unittest.TestCase):
+    def test_internal_webapp_task_list_shows_workflow_name(self) -> None:
+        text = bot._format_internal_webapp_tg_tasks(
+            [
+                {
+                    "id": "task_1",
+                    "type": "get_nano_banana",
+                    "status": "running",
+                    "workflow_name": "圖片編輯",
+                    "workflow_ids": ["__converted__/old.api.json"],
+                    "current_workflow_name": "圖片編輯",
+                    "current_workflow_ids": ["__converted__/轉化TG機器人/firered图像编辑.api.json"],
+                }
+            ]
+        )
+
+        self.assertIn("工作流：圖片編輯 / 轉化TG機器人/firered图像编辑", text)
+
+    def test_internal_webapp_status_shows_active_workflow_name(self) -> None:
+        text = bot._format_internal_webapp_tg_status(
+            {
+                "counts": {"queued": 0, "running": 1, "success": 0, "failed": 0},
+                "active_task": {
+                    "id": "task_1",
+                    "type": "get_nano_banana",
+                    "workflow_name": "圖片編輯",
+                    "workflow_ids": ["__converted__/old.api.json"],
+                    "current_workflow_name": "圖片編輯",
+                    "current_workflow_ids": ["__converted__/轉化TG機器人/firered图像编辑.api.json"],
+                },
+            },
+            chat_id=8100401093,
+        )
+
+        self.assertIn("目前占用: get_nano_banana / task_1", text)
+        self.assertIn("工作流：圖片編輯 / 轉化TG機器人/firered图像编辑", text)
+
     def test_status_text_omits_unselected_placeholders(self) -> None:
         text = bot._text_to_image_status_text(
             step="1/4 請選擇圖像比例",
@@ -112,6 +148,30 @@ class TextToImageStatusTextTests(unittest.TestCase):
         labels = [label for row in rows for label in row]
         self.assertNotIn("提交單圖編輯任務", labels)
         self.assertNotIn("提交圖片編輯任務", labels)
+
+    def test_image_edit_prompt_mode_keyboard_requires_choice_before_prompt_entry(self) -> None:
+        markup = bot._image_edit_prompt_mode_keyboard()
+
+        self.assertIsInstance(markup, ReplyKeyboardMarkup)
+        rows = [[button.text for button in row] for row in markup.keyboard]
+        self.assertEqual(
+            rows,
+            [
+                ["讓 Grok 生成提示詞"],
+                ["輸入自定義提示詞"],
+                ["上一步", bot.MAIN_MENU_BUTTON],
+            ],
+        )
+        self.assertTrue(hasattr(bot.ProductionWorkflowForm, "image_edit_waiting_for_prompt_mode"))
+
+    def test_image_edit_flow_does_not_prompt_for_request_immediately_after_assets(self) -> None:
+        source = bot.Path(bot.__file__).read_text(encoding="utf-8")
+
+        self.assertNotIn("步驟 3/4：請輸入這次圖片編輯要求", source)
+        self.assertNotIn("步驟 2/3：請輸入這次圖片編輯要求", source)
+        self.assertIn("image_edit_waiting_for_prompt_mode", source)
+        self.assertIn("請選擇提示詞方式", source)
+        self.assertIn("請輸入這次圖片編輯要求，Grok 會先生成提示詞供你確認", source)
 
     def test_face_swap_prompt_keyboard_offers_natural_swap_button(self) -> None:
         markup = bot._face_swap_prompt_keyboard()

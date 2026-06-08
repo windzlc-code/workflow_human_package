@@ -2439,7 +2439,7 @@ def _task_type_label(task_type: Any) -> str:
         "replace_model": "视频模特替换",
         "replace_product": "视频商品替换",
         "replace_productANDmodel": "联合替换商品和模特",
-        "get_nano_banana": "闭源图片模型",
+        "get_nano_banana": "图片编辑",
         "get_gemini": "Gemini 分析",
         "batch_create_video": "批量创建视频",
         "batch_replace_model": "批量视频模特替换",
@@ -2659,6 +2659,8 @@ def _build_workflow_chain_summary(*, task_type: str, payload: dict[str, Any], wo
         if closed_steps and total_steps:
             return (f"图像编辑链 {total_steps} 步（闭源模型 {closed_steps} + RunningHub {total_steps - closed_steps}）", total_steps)
         return (f"图像编辑链 {total_steps} 步", total_steps) if total_steps else ("", 0)
+    if task_type in {"get_nano_banana", "single_image_edit"}:
+        return (f"ComfyUI 图片编辑链 {total_steps} 步", total_steps) if total_steps else ("", 0)
     return (f"{total_steps} 步" if total_steps > 0 else "", total_steps)
 
 
@@ -2715,8 +2717,19 @@ def _build_workflow_meta(*, task_id: str, task_type: str, input_payload: Any, ou
         )
         if workflow_ids:
             workflow_name = "联合替换商品和模特"
-    elif task_type == "get_nano_banana":
-        workflow_ids = _normalize_workflow_ids(["gemini-3-pro-image-preview"])
+    elif task_type in {"get_nano_banana", "single_image_edit"}:
+        workflow_path = str(
+            output.get("remote_comfy_workflow_path")
+            or payload.get("remote_comfy_workflow_path")
+            or payload.get("local_comfy_workflow_path")
+            or _remote_comfy_workflow_mapping(payload, task_type)
+            or ""
+        ).strip()
+        workflow_ids = _normalize_workflow_ids(
+            [
+                workflow_path,
+            ]
+        )
     elif task_type == "image_generate":
         provider = str(payload.get("image_generate_provider") or payload.get("image_generate_mode_default") or "closed_model_api").strip() or "closed_model_api"
         model_name = str(payload.get("image_generate_model") or payload.get("image_model_default_model") or "").strip()
@@ -4214,6 +4227,19 @@ def _remote_comfy_workflow_mapping(payload: dict[str, Any], task_type: str) -> s
             if text:
                 return text
     return ""
+
+
+def _current_runtime_workflow_mapping_meta(task_type: Any, runtime: dict[str, Any] | None) -> dict[str, Any]:
+    typ = str(task_type or "").strip()
+    source = _comfy_workflow_source(runtime if isinstance(runtime, dict) else {})
+    workflow_path = _remote_comfy_workflow_mapping(runtime if isinstance(runtime, dict) else {}, typ)
+    workflow_ids = _normalize_workflow_ids([workflow_path])
+    return {
+        "current_workflow_name": REMOTE_COMFY_TASK_LABELS.get(typ) or _task_type_label(typ),
+        "current_workflow_id": ", ".join(workflow_ids),
+        "current_workflow_ids": workflow_ids,
+        "current_workflow_source": source,
+    }
 
 
 def _remote_comfy_image_input_bindings(payload: dict[str, Any], task_type: str) -> Any:
@@ -9194,10 +9220,176 @@ def _build_tg_image_edit_fallback_prompt(original_request: str, task_type: str) 
             f"{request_text}，保持目標圖姿態、服裝、背景、光線和鏡頭角度，只替換臉部身份，"
             "五官融合自然，膚色和陰影一致，邊緣乾淨，無變形，無水印"
         )
+    if str(task_type or "").strip() == "get_nano_banana":
+        return _format_tg_image_edit_prompt(request_text, request_text)
     return (
         f"{request_text}，保留原圖主體、構圖、背景、光線和材質關係，編輯區域過渡自然，"
         "細節清晰，邊緣乾淨，無變形，無水印"
     )
+
+
+def _tg_image_edit_target_label(original_request: str, prompt_text: str) -> str:
+    request_text = _clean_tg_prompt_request(original_request)
+    prompt_body = _strip_prompt_response_wrappers(prompt_text)
+    no_clothing_pattern = r"全裸|裸体|裸體|裸身|赤裸|没穿衣|沒穿衣|没有穿衣|沒有穿衣|不穿衣|不着衣|不著衣|未穿衣|无衣|無衣|无衣物|無衣物|无服装|無服裝|没有服装|沒有服裝|没服装|沒服裝|不添加衣服|不要衣服|no\s+clothes|nude|naked"
+    if re.search(no_clothing_pattern, request_text) or re.search(no_clothing_pattern, prompt_body, re.IGNORECASE):
+        return "未穿衣物状态"
+    target_rules: tuple[tuple[str, str], ...] = (
+        (r"(换脸|換臉|脸部|臉部|面部|五官|头部|頭部).*(换发型|換髮型|换头发|換頭髮|头发|頭髮|发型|髮型)|(换发型|換髮型|换头发|換頭髮|头发|頭髮|发型|髮型).*(换脸|換臉|脸部|臉部|面部|五官|头部|頭部)", "脸部和头发"),
+        (r"换脸|換臉|脸部|臉部|面部|五官|头部|頭部", "脸部"),
+        (r"穿搭|搭配|造型", "穿搭"),
+        (r"衣|服|裙|裤|褲|上衣|下装|下裝|外套|开衫|開衫|针织|針織|百褶|制服|校服|换装|換裝", "衣服"),
+        (r"发型|髮型|头发|頭髮|刘海|瀏海|双马尾|雙馬尾|马尾|馬尾|长发|長髮|短发|短髮", "发型"),
+        (r"背景|场景|場景|环境|環境|樱花|櫻花|卧室|臥室|室内|室內|户外|戶外", "背景"),
+        (r"姿势|姿態|姿态|坐姿|站姿|动作|動作|手势|手勢", "姿势"),
+        (r"表情|神情|眼神|笑容", "表情"),
+        (r"光线|光線|灯光|燈光|光影|色调|色調", "光线"),
+        (r"构图|構圖|角度|镜头|鏡頭|画面|畫面", "构图"),
+    )
+    for text in (request_text, prompt_body):
+        for pattern, label in target_rules:
+            if re.search(pattern, text):
+                return label
+    return "用户要求修改的内容"
+
+
+def _format_tg_image_edit_prompt(target: str, original_request: str = "") -> str:
+    label = str(target or "").strip() or "用户要求修改的内容"
+    request = _clean_tg_prompt_request(original_request)
+    if label == "穿搭":
+        edit_clause = "将图1人物的穿搭换成图2人物的穿搭"
+    elif label == "未穿衣物状态":
+        edit_clause = "将图1人物的服装状态调整为图2人物的未穿衣物状态"
+    elif label == "衣服":
+        edit_clause = "将图1人物身上的服装换成图2人物的服装"
+    elif label == "脸部和头发":
+        edit_clause = "将图1人物的脸部和头发换成图2人物的脸部和头发"
+    elif label == "脸部":
+        edit_clause = "将图1人物的脸部换成图2人物的脸部"
+    elif label == "发型":
+        edit_clause = "将图1人物的发型换成图2人物的发型"
+    elif label == "背景":
+        edit_clause = "将图1背景换成图2背景"
+    elif label == "用户要求修改的内容" and request:
+        edit_clause = f"按照{request}编辑图1，参考图2对应的视觉内容"
+    else:
+        edit_clause = f"将图1人物的{label}换成图2人物的{label}"
+    preservation_items = ["姿势", "身体", "构图", "背景", "光线"]
+    if label not in {"脸部", "脸部和头发"}:
+        preservation_items = ["五官", "发型", "脸型", *preservation_items]
+    remove_by_label = {
+        "脸部和头发": set(),
+        "脸部": set(),
+        "未穿衣物状态": set(),
+        "发型": {"发型"},
+        "背景": {"背景"},
+        "姿势": {"姿势"},
+        "表情": set(),
+        "光线": {"光线"},
+        "构图": {"构图"},
+    }
+    removed = remove_by_label.get(label, set())
+    preserved = [item for item in preservation_items if item not in removed]
+    if len(preserved) > 1:
+        preservation_text = "、".join(preserved[:-1]) + "和" + preserved[-1]
+    else:
+        preservation_text = preserved[0] if preserved else "主体"
+    return (
+        f"{edit_clause}，保持图1人物的{preservation_text}不变，"
+        "自然融合，质感真实"
+    )
+
+
+def _tg_image_edit_prompt_needs_reformat(prompt_text: str, original_request: str) -> bool:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    request = _clean_tg_prompt_request(original_request)
+    if not text:
+        return True
+    bad_patterns = (
+        r"人物的(?:换|換)",
+        r"图[12]的(?:换|換)",
+        r"(?:换|換)(?:衣服|服装|服裝|穿搭|搭配|发型|髮型|头发|頭髮)(?:替换|替換|换成|換成)",
+        r"(?:替换|替換|换成|換成)图2的(?:换|換)",
+        r"服装(?:替换|替換|换成|換成).*(?:未穿衣物|没穿衣|沒有穿衣|裸体|裸體|裸身)",
+        r"衣服(?:替换|替換|换成|換成).*(?:未穿衣物|没穿衣|沒有穿衣|裸体|裸體|裸身)",
+        r"材质关系不变|材質關係不變|关系不变|關係不變",
+    )
+    if any(re.search(pattern, text) for pattern in bad_patterns):
+        return True
+    if request and len(request) <= 12 and re.search(r"换|換|替换|替換", request):
+        escaped = re.escape(request)
+        if re.search(rf"的\s*{escaped}\s*(?:替换|替換|换成|換成|换|換)", text):
+            return True
+    return False
+
+
+def _ensure_tg_image_edit_image_roles(prompt_text: str, original_request: str, task_type: str) -> str:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    typ = str(task_type or "").strip()
+    if typ != "get_nano_banana":
+        return text
+    request_text = _clean_tg_prompt_request(original_request)
+    if not text:
+        return _build_tg_image_edit_fallback_prompt(request_text, typ)
+
+    replacements = {
+        "第一張圖片": "图1",
+        "第一张图片": "图1",
+        "第一張圖": "图1",
+        "第一张图": "图1",
+        "第一張": "图1",
+        "第一张": "图1",
+        "原圖": "图1",
+        "原图": "图1",
+        "主圖": "图1",
+        "主图": "图1",
+        "第二張圖片": "图2",
+        "第二张图片": "图2",
+        "第二張圖": "图2",
+        "第二张图": "图2",
+        "第二張": "图2",
+        "第二张": "图2",
+        "參考圖": "图2",
+        "参考图": "图2",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    text = re.sub(r"(圖1|图1)", "图1", text)
+    text = re.sub(r"(圖2|图2)", "图2", text)
+    for source, target in {
+        "將": "将",
+        "換": "换",
+        "與": "与",
+        "雙": "双",
+        "馬": "马",
+        "無": "无",
+        "針織": "针织",
+        "百褶": "百褶",
+        "櫻花": "樱花",
+        "燈光": "灯光",
+        "構圖": "构图",
+        "髮型": "发型",
+        "特徵": "特征",
+        "貼合": "贴合",
+        "變形": "变形",
+    }.items():
+        text = text.replace(source, target)
+    text = re.sub(r"^(?:将|將)?\s*图1\s*(?:作为|作為)?\s*主图\s*，\s*(?:按|以)?\s*图2\s*(?:作为|作為)?\s*参考\s*，?", "", text)
+    text = re.sub(r"图1\s*(?:是|为|為)\s*[^，。；、]{0,10}(?:主图|主圖)[^，。；、]*[，。；、]?", "", text)
+    text = re.sub(r"图2\s*(?:是|为|為)\s*[^，。；、]{0,10}(?:参考|參考)[^，。；、]*[，。；、]?", "", text)
+    text = text.strip(" ，。；、,.;\n\t ")
+    text = (
+        text.replace("光线和材质关系不变", "光线不变")
+        .replace("光线与材质关系不变", "光线不变")
+        .replace("材质关系不变", "整体质感自然")
+    )
+
+    has_image1 = "图1" in text
+    has_image2 = "图2" in text
+    if has_image1 and has_image2 and not _tg_image_edit_prompt_needs_reformat(text, request_text):
+        return text
+    target = _tg_image_edit_target_label(request_text, text)
+    return _format_tg_image_edit_prompt(target, request_text)
 
 
 def _tg_edit_prompt_violates_user_request(prompt_text: str, original_request: str, task_type: str) -> bool:
@@ -11309,7 +11501,13 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
             "Output only the final Chinese prompt text. Do not output English, labels, JSON, Markdown, explanations, policy text, or reasoning.",
             "Faithfully preserve the user's actual request. Do not invent a different person, scene, clothing state, sexual content, pose, or background.",
             "Use the uploaded reference image as the visual source. Keep the original composition, lighting, camera angle, clothing, background, and object relationships unless the user explicitly asks to change them.",
-            "For image editing, describe only the requested edit and the visual constraints needed to keep the result natural.",
+            "For two-image editing task get_nano_banana, the final prompt MUST include 图1 and 图2 as image references, but do not explain that 图1 is the main image or 图2 is the reference image.",
+            "For get_nano_banana, write in the older natural image-editing style: requested edit first, then preservation constraints and natural blending quality. Example style: 将图1脸部和头发替换为图2的脸部与双马尾发型，保持原姿势、身体、裸露状态、卧室、背景、光线与构图不变，自然融合，无瑕疵，真实纹理.",
+            "For get_nano_banana, never use a raw command phrase as the visual object. For example 换衣服 means 服装, 换发型 means 发型, 换脸 means 脸部. Never write phrases like 图1人物的换衣服, 图2的换衣服, or 材质关系不变.",
+            "For get_nano_banana, if 图2 has no clothing or the user asks for no clothes, do not force the word 服装 as the replacement object. Write it as 服装状态调整为图2人物的未穿衣物状态, then keep the unchanged visual constraints from 图1.",
+            "For get_nano_banana, preserve useful visual details from the user request and from Grok's interpretation. Do not collapse the prompt into a rigid category-only sentence like 只有服装改变. Do not output generic prefixes such as 只替换用户要求的部分. Do not repeat the same preservation clause.",
+            "For get_nano_banana, only replace the user-requested area. Keep identity, pose, composition, background, lighting, camera angle, and material relationships from 图1 unless the user explicitly requests that change. When identity must be kept, mention 五官、发型、脸型保持一致.",
+            "For image editing, describe the requested edit and the visual constraints needed to keep the result natural, with concise but fluent wording.",
             "For face swap, preserve the target image pose, body, clothes, lighting, camera, and background; only replace the face identity using the face reference image unless the user asks for another change.",
             "For single_image_edit and get_nano_banana, do not turn a style, color, lighting, cleanup, or detail request into face replacement. The second image is a reference for the requested edit only, not face identity transfer, unless the user explicitly says to swap or replace a face.",
             "Only the face_swap task may default to replacing face identity. For every other image editing task, keep the original person's identity unchanged unless the user explicitly requests identity replacement.",
@@ -11690,10 +11888,13 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         rewritten = _normalize_tg_chinese_image_prompt_format(rewritten)
         rewritten = re.sub(r"([和与及跟同])，", r"\1", rewritten)
         rewritten = re.sub(r"^把，", "", rewritten).strip()
+        rewritten = _ensure_tg_image_edit_image_roles(rewritten, original_request or user_request, typ)
         if _tg_edit_prompt_violates_user_request(rewritten, original_request or user_request, typ):
             rewritten = _build_tg_image_edit_fallback_prompt(original_request or user_request, typ)
+            rewritten = _ensure_tg_image_edit_image_roles(rewritten, original_request or user_request, typ)
         if not rewritten or not _looks_like_chinese_image_prompt(rewritten):
             rewritten = _build_tg_image_edit_fallback_prompt(original_request or user_request, typ)
+            rewritten = _ensure_tg_image_edit_image_roles(rewritten, original_request or user_request, typ)
         final_prompt = rewritten
     elif prompt_chain == "image":
         forbidden_hits = _find_tg_image_forbidden_person_fields(rewritten)
@@ -11838,6 +12039,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     enhanced["tg_llm_forbidden_person_field_hits"] = forbidden_hits if prompt_chain == "image" else []
     enhanced["prompt_text"] = final_prompt
     enhanced["prompt"] = final_prompt
+    enhanced["message"] = final_prompt
     if typ in {"replace_model", "replace_product", "replace_productANDmodel"}:
         enhanced["style_hint"] = final_prompt
     return enhanced
@@ -12723,6 +12925,15 @@ def _ensure_internal_tg_payload_english_prompt(task_type: str, payload: dict[str
 def _finalize_tg_image_generation_prompt_constraints(task_type: str, payload: dict[str, Any], prompt_text: str) -> str:
     typ = str(task_type or "").strip()
     final_prompt = _force_tg_image_chinese_prompt(prompt_text)
+    if typ == "get_nano_banana":
+        original_request = str(
+            (payload or {}).get("tg_original_prompt")
+            or (payload or {}).get("tg_original_user_request")
+            or (payload or {}).get("tg_user_instruction")
+            or final_prompt
+            or ""
+        ).strip()
+        return _ensure_tg_image_edit_image_roles(final_prompt, original_request, typ)
     if typ in {"text_to_image", "image_generate"}:
         original_request = str(
             (payload or {}).get("tg_original_prompt")
@@ -13368,6 +13579,7 @@ def create_app() -> FastAPI:
         limit = min(max(_to_int(request.query_params.get("limit"), 5), 1), 20)
         tasks: list[dict[str, Any]] = []
         with db() as conn:
+            runtime = _get_runtime_config(conn)
             rows = conn.execute(
                 """
                 SELECT id, type, status, input_json, output_json, error, runninghub_task_id, cost_cents, created_at, updated_at
@@ -13381,25 +13593,33 @@ def create_app() -> FastAPI:
             if _get_tg_chat_id_from_payload(input_payload) != chat_id:
                 continue
             output_payload = _json_loads(row["output_json"], {})
+            workflow_meta = _build_workflow_meta(
+                task_id=str(row["id"] or ""),
+                task_type=str(row["type"] or ""),
+                input_payload=input_payload,
+                output_payload=output_payload,
+                runninghub_task_id=row["runninghub_task_id"],
+            )
             batch_summary = _extract_batch_summary(_format_display_error_fields(output_payload))
             if str(batch_summary.get("first_error") or "").strip():
                 batch_summary["first_error"] = _format_user_visible_task_error(str(batch_summary.get("first_error") or ""))
-            tasks.append(
-                {
-                    "id": row["id"],
-                    "type": row["type"],
-                    "status": row["status"],
-                    "error": _format_optional_user_visible_task_error(row["error"]),
-                    "runninghub_task_id": row["runninghub_task_id"],
-                    "cost_cents": int(row["cost_cents"] or 0),
-                    "created_at": int(row["created_at"] or 0),
-                    "updated_at": int(row["updated_at"] or 0),
-                    "has_download": _task_has_download_file(output_payload),
-                    "download_path": _extract_download_path(output_payload),
-                    "batch_summary": batch_summary,
-                    "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
-                }
-            )
+            item = {
+                "id": row["id"],
+                "type": row["type"],
+                "status": row["status"],
+                "error": _format_optional_user_visible_task_error(row["error"]),
+                "runninghub_task_id": row["runninghub_task_id"],
+                "cost_cents": int(row["cost_cents"] or 0),
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+                "has_download": _task_has_download_file(output_payload),
+                "download_path": _extract_download_path(output_payload),
+                "batch_summary": batch_summary,
+                "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
+            }
+            item.update(workflow_meta)
+            item.update(_current_runtime_workflow_mapping_meta(row["type"], runtime))
+            tasks.append(item)
             if len(tasks) >= limit:
                 break
         return {"ok": True, "tasks": tasks}
@@ -13417,9 +13637,10 @@ def create_app() -> FastAPI:
         latest: dict[str, Any] | None = None
         active: dict[str, Any] | None = None
         with db() as conn:
+            runtime = _get_runtime_config(conn)
             rows = conn.execute(
                 """
-                SELECT id, type, status, input_json, error, created_at, updated_at
+                SELECT id, type, status, input_json, output_json, error, runninghub_task_id, created_at, updated_at
                 FROM tasks
                 ORDER BY updated_at DESC, created_at DESC
                 """
@@ -13428,6 +13649,14 @@ def create_app() -> FastAPI:
             input_payload = _json_loads(row["input_json"], {})
             if _get_tg_chat_id_from_payload(input_payload) != chat_id:
                 continue
+            output_payload = _json_loads(row["output_json"], {})
+            workflow_meta = _build_workflow_meta(
+                task_id=str(row["id"] or ""),
+                task_type=str(row["type"] or ""),
+                input_payload=input_payload,
+                output_payload=output_payload,
+                runninghub_task_id=row["runninghub_task_id"],
+            )
             status = str(row["status"] or "").strip().lower() or "unknown"
             if status not in counts:
                 counts[status] = 0
@@ -13442,6 +13671,8 @@ def create_app() -> FastAPI:
                 "updated_at": int(row["updated_at"] or 0),
                 "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
             }
+            item.update(workflow_meta)
+            item.update(_current_runtime_workflow_mapping_meta(row["type"], runtime))
             if latest is None:
                 latest = item
             if active is None and status in {"queued", "running"}:
