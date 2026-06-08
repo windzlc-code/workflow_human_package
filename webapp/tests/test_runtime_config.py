@@ -1926,12 +1926,25 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIn("begin", guidance)
         self.assertIn("continue", guidance)
         self.assertIn("ending state", guidance)
+        self.assertIn("about three natural action beats", guidance)
         self.assertNotIn("8 seconds", guidance)
         self.assertNotIn("秒", guidance)
         self.assertNotIn("0-2s", guidance)
         self.assertNotIn("2-6s", guidance)
         self.assertNotIn("6-8s", guidance)
         self.assertIn("stable", guidance)
+
+    def test_tg_video_duration_guidance_limits_short_clip_action_density(self):
+        two_second_guidance = server._tg_video_duration_timing_guidance({"duration_seconds": 2})
+        five_second_guidance = server._tg_video_duration_timing_guidance({"duration_seconds": 5})
+        long_guidance = server._tg_video_duration_timing_guidance({"duration_seconds": 15})
+
+        self.assertIn("one simple requested motion", two_second_guidance)
+        self.assertIn("avoid adding extra plot beats", two_second_guidance)
+        self.assertIn("at most two action beats", five_second_guidance)
+        self.assertIn("do not add scene changes or secondary actions", five_second_guidance)
+        self.assertIn("four or more slow connected action beats", long_guidance)
+        self.assertIn("without hard cuts", long_guidance)
 
     def test_tg_video_prompt_normalizer_splits_long_tail_and_stabilizes_camera(self):
         prompt = server._normalize_tg_chinese_video_prompt_format(

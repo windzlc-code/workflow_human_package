@@ -11377,27 +11377,31 @@ def _tg_video_duration_timing_guidance(payload: dict[str, Any] | None) -> str:
     if duration <= 2:
         return (
             "Clip length category: very short. Describe one compact continuous action beat in natural order: "
-            "opening state, requested action, then final reaction. Keep the camera mostly locked and stable. "
+            "opening state, one simple requested motion, then final reaction. Use only one action focus and avoid adding extra plot beats, "
+            "because a very short clip cannot complete multiple movements. Keep the camera mostly locked and stable. "
             "Do not write numeric timestamps, second ranges, or Chinese second-duration wording in the final prompt."
         )
     if duration <= 5:
         return (
             "Clip length category: short. Use a short-clip rhythm: "
-            "first describe the opening pose and first motion, then the continuous requested action with natural body and expression changes, "
-            "then the final state and reaction. Keep the camera mostly locked and stable. "
+            "first describe the opening pose and first motion, then one continuous requested action with natural body, expression, and sound changes, "
+            "then the final state and reaction. Use at most two action beats, do not add scene changes or secondary actions. "
+            "Keep the camera mostly locked and stable. "
             "Do not write numeric timestamps, second ranges, or Chinese second-duration wording in the final prompt."
         )
     if duration <= 8:
         return (
             "Clip length category: medium. Use a medium-clip rhythm: "
             "begin with the starting pose and setup, continue into the requested action with progressive response, "
-            "and close with a clear ending state. Keep one stable shot with only subtle natural framing changes. "
+            "and close with a clear ending state. Use about three natural action beats: start, continuation, and settling reaction. "
+            "Keep one stable shot with only subtle natural framing changes. "
             "Do not write numeric timestamps, second ranges, or Chinese second-duration wording in the final prompt."
         )
     return (
         "Clip length category: long. Use a longer-clip rhythm: "
         "begin with the starting pose and setup, sustain the requested action with gradual rhythm and expression changes, "
-        "and finish with a clear ending state. Keep one stable shot with no hard cuts or large camera moves. "
+        "and finish with a clear ending state. You may use four or more slow connected action beats, but keep them in one continuous stable shot "
+        "without hard cuts, unrelated secondary scenes, or large camera moves. "
         "Do not write numeric timestamps, second ranges, or Chinese second-duration wording in the final prompt."
     )
 
