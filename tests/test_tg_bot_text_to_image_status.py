@@ -131,6 +131,13 @@ class TextToImageStatusTextTests(unittest.TestCase):
         self.assertNotIn("使用這個提示詞生成", labels)
         self.assertNotIn("繼續讓 Grok 調整", labels)
 
+    def test_video_i2v_payload_instructs_grok_to_use_uploaded_image_as_first_frame(self) -> None:
+        source = bot.Path(bot.__file__).read_text(encoding="utf-8")
+
+        self.assertIn("Treat the reference image as the first frame and opening state", source)
+        self.assertIn("preserve its subject, pose, composition, scene, lighting, clothing/body state, and camera framing", source)
+        self.assertIn('"tg_original_user_request": prompt', source)
+
     def test_image_edit_prompt_review_keyboard_uses_static_traditional_text(self) -> None:
         markup = bot._image_edit_prompt_review_keyboard()
 

@@ -2972,7 +2972,12 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "prompt_extend": False,
             "safety_filter": False,
             "tg_use_llm_prompt": bool(params["use_grok"]),
-            "tg_user_instruction": f"User image-to-video request: {prompt}",
+            "tg_user_instruction": (
+                "User image-to-video request: "
+                f"{prompt}. Treat the reference image as the first frame and opening state; "
+                "preserve its subject, pose, composition, scene, lighting, clothing/body state, and camera framing while animating the requested process."
+            ),
+            "tg_original_user_request": prompt,
         }
         if str(params.get("audio_local_path") or "").strip():
             payload["audio_local_path"] = str(params["audio_local_path"]).strip()

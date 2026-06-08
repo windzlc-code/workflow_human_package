@@ -2016,9 +2016,27 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIn("garment color contrast", system_prompt)
         self.assertIn("visible posture", system_prompt)
         self.assertIn("hand/finger movement path", system_prompt)
-        self.assertIn("movement amplitude", system_prompt)
-        self.assertIn("200 to 380 Chinese characters", system_prompt)
+        self.assertIn("controlled movement range", system_prompt)
+        self.assertIn("Avoid aggressive sound wording", system_prompt)
+        self.assertIn("动作缓慢连贯", system_prompt)
+        self.assertIn("IMAGE-TO-VIDEO FIRST FRAME IS MANDATORY", system_prompt)
+        self.assertIn("reference image is the first frame", system_prompt)
+        self.assertIn("以参考图作为开始画面", system_prompt)
+        self.assertIn("ENDING POSITIVE QUALITY CLAUSE IS MANDATORY", system_prompt)
+        self.assertIn("260 to 520 Chinese characters", system_prompt)
         self.assertIn("no second-duration wording", system_prompt)
+        self.assertIn("reference image is the FIRST FRAME", user_prompt)
+        self.assertIn("say 参考图, not 用户上传的图片", user_prompt)
+        self.assertIn("continuous, gradual process", user_prompt)
+        self.assertIn("Describe sound as part of the process", user_prompt)
+        self.assertIn("soft delicate breathing must be emphasized", user_prompt)
+        self.assertIn("interwoven between action beats", user_prompt)
+        self.assertIn("exposed body-part contact sounds", user_prompt)
+        self.assertIn("light moist contact sounds", user_prompt)
+        self.assertIn("subtle body-fluid friction sounds", user_prompt)
+        self.assertIn("黏滑", user_prompt)
+        self.assertIn("Keep background ambience weak and secondary", user_prompt)
+        self.assertIn("End with positive visual quality constraints", user_prompt)
         self.assertIn("hairstyle", user_prompt)
         self.assertIn("makeup or facial expression", user_prompt)
         self.assertIn("body silhouette", user_prompt)
@@ -2027,7 +2045,39 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertIn("color contrast", user_prompt)
         self.assertIn("visible body posture", user_prompt)
         self.assertIn("hand/finger path", user_prompt)
-        self.assertIn("movement range", user_prompt)
+        self.assertIn("controlled movement range", user_prompt)
+
+    def test_tg_video_i2v_constraints_complete_short_prompt(self):
+        prompt = server._ensure_tg_video_i2v_prompt_constraints(
+            "画面开始时人物坐在床边，随后按用户要求缓慢移动，最后表情放松",
+            {"type": "video_i2v", "image_local_path": "data/input.jpg", "duration_seconds": 5},
+        )
+
+        self.assertIn("以参考图作为开始画面", prompt)
+        self.assertNotIn("用户上传", prompt)
+        self.assertIn("人物、姿势、构图、场景、光线和主体连续性", prompt)
+        self.assertIn("缓慢移动", prompt)
+        self.assertIn("轻缓细腻的呼吸声", prompt)
+        self.assertIn("呼吸变得更贴近更轻柔", prompt)
+        self.assertIn("暴露部位轻柔接触产生的湿润细响", prompt)
+        self.assertIn("体液带来的细密黏滑摩擦声", prompt)
+        self.assertIn("柔和轻响", prompt)
+        self.assertIn("呼吸声穿插在每个动作停顿之间", prompt)
+        self.assertIn("最后逐渐放缓并恢复平稳", prompt)
+        self.assertIn("背景氛围声保持很弱", prompt)
+        self.assertIn("画面清晰稳定", prompt)
+        self.assertIn("动作连贯流畅", prompt)
+        self.assertIn("主体一致", prompt)
+        self.assertIn("身体结构稳定", prompt)
+
+    def test_tg_video_i2v_constraints_rewrite_user_uploaded_wording(self):
+        prompt = server._ensure_tg_video_i2v_prompt_constraints(
+            "以用户上传的图片作为开始画面，画面开始时人物缓慢移动，随后动作轻柔延续，最后镜头稳定",
+            {"type": "video_i2v", "image_local_path": "data/input.jpg", "duration_seconds": 5},
+        )
+
+        self.assertIn("以参考图作为开始画面", prompt)
+        self.assertNotIn("用户上传", prompt)
 
 
 if __name__ == "__main__":
