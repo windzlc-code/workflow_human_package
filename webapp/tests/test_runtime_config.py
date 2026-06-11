@@ -1701,13 +1701,13 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(check["queue_load"], 4)
         self.assertEqual(check["remote_queue_over_limit"], True)
 
-    def test_person_t2i_generates_three_per_attempt_and_returns_six_to_telegram(self):
+    def test_person_t2i_generates_four_per_attempt_and_returns_four_to_telegram(self):
         workflow = "__converted__/person_t2i.api.json"
 
-        self.assertEqual(server._remote_comfy_default_batch_size("text_to_image", workflow), 3)
+        self.assertEqual(server._remote_comfy_default_batch_size("text_to_image", workflow), 4)
         self.assertEqual(
-            server._text_to_image_qa_target_count({}, batch_size=3, workflow_path=workflow),
-            6,
+            server._text_to_image_qa_target_count({}, batch_size=4, workflow_path=workflow),
+            4,
         )
 
     def test_text_to_image_auto_qa_rejects_hand_limb_audit_extra_hands(self):

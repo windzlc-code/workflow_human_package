@@ -4704,6 +4704,8 @@ def _apply_persona_body_profile_to_payload(task_type: str, payload: dict[str, An
     if typ not in {"text_to_image", "image_generate"}:
         return payload
     source = dict(payload or {})
+    if _tg_payload_has_confirmed_prompt(source):
+        return source
     if not _to_bool(source.get("persona_enabled"), False):
         return source
     profile = _persona_body_profile_for_payload(source)
@@ -9551,6 +9553,50 @@ def _tg_image_aspect_ratio_pose_guidance(payload: dict[str, Any] | None) -> str:
     elif ratio == "1:1":
         orientation = "square"
 
+    if _tg_payload_is_non_r18_free_image(source):
+        request_text = " ".join(
+            str(source.get(key) or "")
+            for key in (
+                "tg_original_user_request",
+                "tg_user_instruction",
+                "prompt_text",
+                "prompt",
+                "message",
+                "tg_generation_context",
+            )
+        )
+        mentions_private_scene = bool(re.search(r"床|床邊|床边|臥室|卧室|bed|bedroom", request_text, re.IGNORECASE))
+        if ratio == "9:16" or orientation == "portrait":
+            detail = (
+                "For free non-R18 content, use a public-safe vertical composition: standing, seated, leaning by a doorway, "
+                "counter, desk, street corner, cafe, classroom, office, shopfront, travel spot, or the concrete scene from the tweet. "
+                "Keep clothing intact and natural. Do not introduce unrelated private-room resting poses, lingerie focus, opened clothing, or paid-content posing "
+                "unless the user/tweet explicitly asks for that scene."
+            )
+        elif ratio == "16:9" or ratio in {"3:2", "4:3"} or orientation == "landscape":
+            detail = (
+                "For free non-R18 landscape content, choose a public-safe scene-driven composition: street storefront, breakfast shop, cafe table, "
+                "classroom, office desk, travel background, sofa/living room only when the tweet supports it, or another normal public/social setting. "
+                "Use seated, standing, walking, leaning by a counter/table, or holding a prop according to the tweet. "
+            )
+            if not mentions_private_scene:
+                detail += "Do not change the scene into an unrelated private indoor resting pose or paid-content posing. "
+            detail += "Preserve the tweet's concrete object/location first, then adapt camera distance to the selected ratio."
+        elif ratio == "1:1" or orientation == "square":
+            detail = (
+                "For free non-R18 square content, use a centered public-safe half-body or three-quarter composition that keeps the tweet's real scene, "
+                "main clothing, prop, and action visible. Do not default to an unrelated private indoor resting scene unless explicitly requested."
+            )
+        else:
+            detail = (
+                "For free non-R18 content, select a public-safe pose and scene from the tweet first, then adapt it to the aspect ratio. "
+                "Do not replace a public scene with an unrelated private indoor resting scene."
+            )
+        return (
+            f"Aspect-ratio composition rule: current ratio {ratio or 'unspecified'}, resolution {width or '-'} x {height or '-'}. "
+            f"{detail} The aspect ratio may adjust framing only; it must not override the user's scene, prop, clothing, or free-content safety."
+        )
+
     if ratio == "9:16":
         detail = "手机长竖图优先选择站立、跪坐、倚靠门框或床边的纵向动作，身体重心沿画面竖向展开，头部完整入镜并保留头顶留白，手部靠近衣物边缘或道具，避免横向平躺和过宽场景。"
     elif ratio in {"2:3", "3:4"} or orientation == "portrait":
@@ -11375,6 +11421,31 @@ def _tg_payload_is_non_r18_free_image(payload: dict[str, Any] | None) -> bool:
     return context.startswith("generated-post image candidates")
 
 
+def _tg_paid_content_time_slot(payload: dict[str, Any] | None) -> str:
+    source = payload if isinstance(payload, dict) else {}
+    context = source.get("r18_paid_post_context") if isinstance(source.get("r18_paid_post_context"), dict) else {}
+    slot = str(context.get("contentTimeSlot") or context.get("timeSlot") or source.get("contentTimeSlot") or "").strip().lower()
+    return slot if slot in {"morning", "night"} else ""
+
+
+def _ensure_tg_paid_time_slot_visual_anchor(prompt_text: str, payload: dict[str, Any] | None) -> str:
+    text = _strip_prompt_response_wrappers(prompt_text)
+    slot = _tg_paid_content_time_slot(payload)
+    if not text or slot not in {"morning", "night"}:
+        return text
+
+    if slot == "morning":
+        if re.search(r"清晨|早晨|晨光|上午|白天|日间|窗边自然光|明亮自然光|自然光线从窗边", text):
+            return text
+        return _normalize_tg_chinese_image_prompt_format(f"{text}，清晨卧室氛围，窗边柔和自然光照入，明亮干净的早安画面")
+
+    text = re.sub(r"自然光线从窗边(?:洒入|照入|照射)", "暖色床头灯低照度照明", text)
+    text = re.sub(r"自然光照明|明亮自然光|柔和自然光|窗边自然光|晨光|早晨|清晨|上午|白天|日间", "暖色床头灯低照度照明", text)
+    if re.search(r"夜晚|深夜|夜间|床头灯|台灯|低照度|暖色灯光|昏暗卧室|夜色", text):
+        return _normalize_tg_chinese_image_prompt_format(text)
+    return _normalize_tg_chinese_image_prompt_format(f"{text}，夜晚卧室背景，暖色床头灯低照度照明，深色阴影突出深夜私密氛围")
+
+
 def _ensure_tg_image_user_request_anchors(prompt_text: str, original_request: str, payload: dict[str, Any] | None) -> str:
     text = _strip_prompt_response_wrappers(prompt_text)
     request = _strip_prompt_response_wrappers(original_request)
@@ -12774,6 +12845,17 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 "Output only the final Chinese image prompt body. Do not include English, person names, persona names, or LoRA file names.",
             ]
         )
+    generation_context = str(enhanced.get("tg_generation_context") or "").strip()
+    if generation_context and prompt_chain == "image" and not edit_image_task:
+        llm_user_input = "\n".join(
+            [
+                llm_user_input,
+                "",
+                "Workflow visual context that must be visible in the final image prompt:",
+                generation_context,
+                "If this context includes a paid group morning or night time slot, the final Chinese prompt must contain concrete visible lighting and scene clues for that exact time period.",
+            ]
+        )
     action_decomposition = (
         _tg_image_action_decomposition_for_llm(semantic_request)
         if prompt_chain == "image" and not edit_image_task
@@ -13034,6 +13116,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         final_prompt = _ensure_tg_image_user_request_anchors(final_prompt, preserved_request, enhanced)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
         final_prompt = _canonicalize_tg_image_nine_segment_prompt(final_prompt, enhanced, preserved_request)
+        final_prompt = _ensure_tg_paid_time_slot_visual_anchor(final_prompt, enhanced)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
         enhanced = _set_tg_generation_prompt(enhanced, final_prompt)
         rewritten = final_prompt
@@ -13044,6 +13127,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             final_prompt = _ensure_tg_image_user_request_anchors(final_prompt, preserved_request, enhanced)
             final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
             final_prompt = _canonicalize_tg_image_nine_segment_prompt(final_prompt, enhanced, preserved_request)
+            final_prompt = _ensure_tg_paid_time_slot_visual_anchor(final_prompt, enhanced)
             final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
             enhanced = _set_tg_generation_prompt(enhanced, final_prompt)
             rewritten = final_prompt
@@ -13055,6 +13139,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 fallback_prompt = _ensure_tg_image_user_request_anchors(fallback_prompt, preserved_request, enhanced)
                 fallback_prompt = _normalize_tg_chinese_image_prompt_format(fallback_prompt)
                 fallback_prompt = _canonicalize_tg_image_nine_segment_prompt(fallback_prompt, enhanced, preserved_request)
+                fallback_prompt = _ensure_tg_paid_time_slot_visual_anchor(fallback_prompt, enhanced)
                 fallback_prompt = _normalize_tg_chinese_image_prompt_format(fallback_prompt)
                 enhanced = _set_tg_generation_prompt(enhanced, fallback_prompt)
                 rewritten = fallback_prompt
@@ -13893,9 +13978,9 @@ _TG_CHINESE_IMAGE_PROMPT_TASK_TYPES = {
     "commerce_video",
 }
 
-PERSON_T2I_DEFAULT_BATCH_SIZE = 3
-PERSON_T2I_TELEGRAM_RETURN_COUNT = 6
-PERSON_T2I_AUTO_QA_MAX_ATTEMPTS = 6
+PERSON_T2I_DEFAULT_BATCH_SIZE = 4
+PERSON_T2I_TELEGRAM_RETURN_COUNT = 4
+PERSON_T2I_AUTO_QA_MAX_ATTEMPTS = 4
 
 
 def _remote_comfy_default_batch_size(task_type: str, workflow_path: str) -> int:
@@ -13933,6 +14018,15 @@ def _primary_tg_generation_prompt(payload: dict[str, Any]) -> str:
             if value:
                 return value
     return ""
+
+
+def _tg_payload_has_confirmed_prompt(payload: dict[str, Any]) -> bool:
+    source = payload if isinstance(payload, dict) else {}
+    return (
+        _to_bool(source.get("tg_prompt_confirmed"), False)
+        and not _to_bool(source.get("tg_use_llm_prompt"), False)
+        and bool(str(source.get("tg_submitted_prompt") or "").strip())
+    )
 
 
 def _set_tg_generation_prompt(payload: dict[str, Any], prompt_text: str) -> dict[str, Any]:
@@ -13980,13 +14074,16 @@ def _finalize_tg_image_generation_prompt_constraints(task_type: str, payload: di
             or final_prompt
             or ""
         ).strip()
+        non_r18_free = _tg_payload_is_non_r18_free_image(payload)
         final_prompt = _ensure_tg_image_clothing_anchor(final_prompt, original_request, payload)
-        final_prompt = _ensure_tg_image_explicit_private_part(final_prompt, original_request)
-        final_prompt = _ensure_tg_image_persona_exposure_features(final_prompt, payload)
+        if not non_r18_free:
+            final_prompt = _ensure_tg_image_explicit_private_part(final_prompt, original_request)
+            final_prompt = _ensure_tg_image_persona_exposure_features(final_prompt, payload)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
         final_prompt = _ensure_tg_image_user_request_anchors(final_prompt, original_request, payload)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
         final_prompt = _canonicalize_tg_image_nine_segment_prompt(final_prompt, payload, original_request)
+        final_prompt = _ensure_tg_paid_time_slot_visual_anchor(final_prompt, payload)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
     return final_prompt
 
@@ -13996,6 +14093,12 @@ def _ensure_internal_tg_payload_chinese_prompt(task_type: str, payload: dict[str
     if typ not in _TG_CHINESE_IMAGE_PROMPT_TASK_TYPES:
         return payload
     ensured = dict(payload or {})
+    if _tg_payload_has_confirmed_prompt(ensured):
+        submitted_prompt = str(ensured.get("tg_submitted_prompt") or "").strip()
+        ensured = _set_tg_generation_prompt(ensured, submitted_prompt)
+        ensured["tg_prompt_confirmed"] = True
+        ensured["tg_use_llm_prompt"] = False
+        return ensured
     prompt_text = _primary_tg_generation_prompt(ensured)
     if not prompt_text:
         return ensured

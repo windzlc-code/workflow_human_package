@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { addSummariesToMemory, deletePersonaMemoryEntry, getPersonaMemory } from "@/lib/persona-memory";
+import { addSummariesToMemory, deletePersonaMemoryEntry, getPersonaMemory, MAX_PERSONA_MEMORY_ENTRIES, replacePersonaMemoryEntries } from "@/lib/persona-memory";
 import { addPostToMemory, buildMemoryOutline, buildMemoryThumbnail, deleteMemoryEntry, getMemoryEntries, normalizeMemorySummaryForStorage } from "@/lib/persona-memory-v2";
 
 describe("persona memory deletion", () => {
@@ -27,6 +27,22 @@ describe("persona memory deletion", () => {
 
     expect(deleted).toBe(true);
     expect(getPersonaMemory("persona-2").entries.map((entry) => entry.summary)).toEqual(["保留的記憶"]);
+  });
+
+  it("keeps only the newest 100 memory entries", async () => {
+    const entries = Array.from({ length: MAX_PERSONA_MEMORY_ENTRIES + 5 }, (_item, index) => ({
+      id: `memory-${index}`,
+      date: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
+      summary: `memory summary ${index}`,
+    }));
+
+    await replacePersonaMemoryEntries("persona-trim-limit", entries);
+
+    const stored = getPersonaMemory("persona-trim-limit").entries;
+    expect(stored).toHaveLength(MAX_PERSONA_MEMORY_ENTRIES);
+    expect(stored.map((entry) => entry.id)).not.toContain("memory-0");
+    expect(stored.map((entry) => entry.id)).not.toContain("memory-4");
+    expect(stored.map((entry) => entry.id)).toContain(`memory-${MAX_PERSONA_MEMORY_ENTRIES + 4}`);
   });
 
   it("extracts key tweet points instead of only keeping the opening line", () => {

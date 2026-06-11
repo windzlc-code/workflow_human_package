@@ -16,6 +16,8 @@ export interface PersonaMemory {
   entries: PersonaMemoryEntry[];
 }
 
+export const MAX_PERSONA_MEMORY_ENTRIES = 100;
+
 const nodeMemory = new Map<string, PersonaMemoryEntry[]>();
 let nodeMemoryLoaded = false;
 
@@ -99,6 +101,24 @@ function normalizeEntries(value: unknown): PersonaMemoryEntry[] {
   return [];
 }
 
+function entryRecencyScore(entry: PersonaMemoryEntry, index: number): number {
+  const time = new Date(entry.date).getTime();
+  return Number.isFinite(time) ? time : index;
+}
+
+function keepRecentEntries(entries: PersonaMemoryEntry[]): PersonaMemoryEntry[] {
+  const normalized = normalizeEntries(entries);
+  if (normalized.length <= MAX_PERSONA_MEMORY_ENTRIES) return normalized;
+  const keepIndexes = new Set(
+    normalized
+      .map((entry, index) => ({ index, score: entryRecencyScore(entry, index) }))
+      .sort((a, b) => b.score - a.score || b.index - a.index)
+      .slice(0, MAX_PERSONA_MEMORY_ENTRIES)
+      .map((item) => item.index),
+  );
+  return normalized.filter((_entry, index) => keepIndexes.has(index));
+}
+
 function readEntries(personaId: string): PersonaMemoryEntry[] {
   if (!canUseLocalStorage()) {
     return [...(nodeMemory.get(personaId) || [])];
@@ -112,11 +132,12 @@ function readEntries(personaId: string): PersonaMemoryEntry[] {
 }
 
 function writeEntries(personaId: string, entries: PersonaMemoryEntry[]) {
+  const nextEntries = keepRecentEntries(entries);
   if (!canUseLocalStorage()) {
-    nodeMemory.set(personaId, [...entries]);
+    nodeMemory.set(personaId, nextEntries);
     return;
   }
-  window.localStorage.setItem(memoryKey(personaId), JSON.stringify({ personaId, entries }));
+  window.localStorage.setItem(memoryKey(personaId), JSON.stringify({ personaId, entries: nextEntries }));
 }
 
 async function readEntriesAsync(personaId: string): Promise<PersonaMemoryEntry[]> {
@@ -134,7 +155,7 @@ async function writeEntriesAsync(personaId: string, entries: PersonaMemoryEntry[
     writeEntries(personaId, entries);
     return;
   }
-  nodeMemory.set(personaId, [...entries]);
+  nodeMemory.set(personaId, keepRecentEntries(entries));
   await writeNodeMemoryFile(Object.fromEntries(nodeMemory.entries()));
 }
 
