@@ -75,6 +75,7 @@ DEFAULT_PRICING: dict[str, Any] = {
 }
 
 DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
+    "telegram_bot_token": "",
     "remote_comfy_gateway_url": "",
     "remote_comfy_gateway_token": "",
     "remote_comfy_workflow_mappings": {"face_swap": "__converted__/flux_人物换脸工作流.api.json"},
@@ -608,7 +609,10 @@ def _tg_member_payload(row: sqlite3.Row) -> dict[str, Any]:
 
 def _load_tg_settings_payload() -> dict[str, Any]:
     env_values = _tg_env_values()
-    token = str(env_values.get("TG_BOT_TOKEN") or "").strip()
+    runtime_token = _runtime_config_tg_bot_token()
+    file_token = _read_secret_text_file(str(_tool_r18_bot_token_file()))
+    env_token = str(env_values.get("TG_BOT_TOKEN") or "").strip()
+    token = str(runtime_token or file_token or env_token or "").strip()
     members: list[dict[str, Any]] = []
     conn = _connect_tg_workbench_db()
     try:
@@ -627,6 +631,8 @@ def _load_tg_settings_payload() -> dict[str, Any]:
         "db_exists": TG_WORKBENCH_DB_PATH.exists(),
         "bot_token_configured": bool(token),
         "bot_token_masked": _mask_secret(token) if token else "",
+        "bot_token_source": "runtime" if runtime_token else ("file" if file_token else ("env" if env_token else "")),
+        "bot_token_file": str(_tool_r18_bot_token_file()),
         "allowed_chat_ids_env": _tg_seed_chat_ids(env_values),
         "trusted_users": members,
     }
@@ -1201,43 +1207,117 @@ def _telegram_file_method(path: Path) -> str:
     return "sendDocument"
 
 
+def _tool_r18_runtime_dir() -> Path:
+    return Path(
+        os.getenv(
+            "TOOL_R18_RUNTIME_DIR",
+            str(ROOT_DIR / "tool_r18" / ".runtime" / "automatic-script"),
+        )
+    ).resolve()
+
+
+def _tool_r18_local_bot_env_path() -> Path:
+    return Path(
+        os.getenv(
+            "TOOL_R18_LOCAL_BOT_ENV_PATH",
+            str(ROOT_DIR / "tool_r18" / ".runtime" / "local-bot.env"),
+        )
+    ).resolve()
+
+
+def _tool_r18_bot_token_file() -> Path:
+    return Path(os.getenv("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", str(_tool_r18_runtime_dir() / "telegram_bot_token.txt"))).resolve()
+
+
+def _runtime_config_tg_bot_token() -> str:
+    try:
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+        return str(runtime.get("telegram_bot_token") or "").strip()
+    except Exception:
+        return ""
+
+
 def _tg_bot_token() -> str:
-    return str(os.getenv("TG_BOT_TOKEN") or _read_dotenv_values().get("TG_BOT_TOKEN") or "").strip()
+    return str(
+        _runtime_config_tg_bot_token()
+        or _read_secret_text_file(str(_tool_r18_bot_token_file()))
+        or os.getenv("TG_BOT_TOKEN")
+        or _read_dotenv_values().get("TG_BOT_TOKEN")
+        or ""
+    ).strip()
+
+
+def _read_secret_text_file(path_text: str) -> str:
+    path_text = str(path_text or "").strip()
+    if not path_text:
+        return ""
+    try:
+        path = Path(path_text).expanduser()
+        if path.exists() and path.is_file():
+            return path.read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def _tg_source_bot_from_payload(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("tg_source_bot", "tg_origin_bot", "telegram_bot_source"):
+        value = str(payload.get(key) or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def _tg_bot_token_for_payload(payload: dict[str, Any]) -> str:
+    source_bot = _tg_source_bot_from_payload(payload)
+    if source_bot in {"automatic_script", "automatic-script", "automatic", "auto_tweet", "auto-tweet"}:
+        token = str(os.getenv("TG_AUTOMATIC_BOT_TOKEN") or os.getenv("AUTOMATIC_TELEGRAM_BOT_TOKEN") or "").strip()
+        if token:
+            return token
+        token_file = str(
+            os.getenv("TG_AUTOMATIC_BOT_TOKEN_FILE")
+            or os.getenv("AUTOMATIC_TELEGRAM_BOT_TOKEN_FILE")
+            or "/app/tool_r18/.runtime/automatic-script/telegram_bot_token.txt"
+        ).strip()
+        token = _read_secret_text_file(token_file)
+        if token:
+            return token
+        return _read_secret_text_file("/app/tool_r18/.runtime/automatic-script/telegram_bot_token.txt.bak-tool-r18-20260609000101")
+    return _tg_bot_token()
 
 
 def _send_telegram_reply_markup_for_finished_task(task_id: str, task_type: str) -> dict[str, Any] | None:
     typ = str(task_type or "").strip()
     if typ == "face_swap":
         return {
-            "keyboard": [
-                [{"text": "增加解析度 2 倍"}],
-                [{"text": "重新生成人物換臉"}],
-                [{"text": "人物換臉"}, {"text": "圖片編輯"}],
-                [{"text": "返回主選單"}],
+            "inline_keyboard": [
+                [{"text": "\u589e\u52a0\u89e3\u6790\u5ea6 2 \u500d", "callback_data": "toolr18_task_r18_face_swap_upscale"}],
+                [{"text": "\u91cd\u65b0\u751f\u6210\u4eba\u7269\u63db\u81c9", "callback_data": "toolr18_task_r18_face_swap_rerun"}],
+                [{"text": "\u4eba\u7269\u63db\u81c9", "callback_data": "toolr18_task_face_swap"}, {"text": "\u5716\u7247\u7de8\u8f2f", "callback_data": "toolr18_task_get_nano_banana"}],
+                [{"text": "\u8fd4\u56de\u4e3b\u9078\u55ae", "callback_data": "toolr18_entry"}],
             ],
-            "resize_keyboard": True,
         }
     if typ in {"single_image_edit", "get_nano_banana"}:
         return {
-            "keyboard": [
-                [{"text": "繼續編輯結果圖"}],
-                [{"text": "重新生成圖片編輯"}],
-                [{"text": "單圖編輯"}, {"text": "圖片編輯"}],
-                [{"text": "返回主選單"}],
+            "inline_keyboard": [
+                [{"text": "\u7e7c\u7e8c\u7de8\u8f2f\u7d50\u679c\u5716", "callback_data": "toolr18_task_r18_image_edit_continue"}],
+                [{"text": "\u91cd\u65b0\u751f\u6210\u5716\u7247\u7de8\u8f2f", "callback_data": "toolr18_task_r18_image_edit_rerun"}],
+                [{"text": "\u55ae\u5716\u7de8\u8f2f", "callback_data": "toolr18_task_single_image_edit"}, {"text": "\u5716\u7247\u7de8\u8f2f", "callback_data": "toolr18_task_get_nano_banana"}],
+                [{"text": "\u8fd4\u56de\u4e3b\u9078\u55ae", "callback_data": "toolr18_entry"}],
             ],
-            "resize_keyboard": True,
         }
     if typ != "text_to_image":
         return None
     return {
-        "keyboard": [
-            [{"text": "重新生成圖片"}],
-            [{"text": "繼續生成圖片"}],
-            [{"text": "返回主選單"}],
+        "inline_keyboard": [
+            [{"text": "\u91cd\u65b0\u751f\u6210\u5716\u7247", "callback_data": "toolr18_task_r18_text_to_image_reroll"}],
+            [{"text": "\u7e7c\u7e8c\u751f\u6210\u5716\u7247", "callback_data": "toolr18_task_r18_text_to_image_continue"}],
+            [{"text": "\u8fd4\u56de\u4e3b\u9078\u55ae", "callback_data": "toolr18_entry"}],
         ],
-        "resize_keyboard": True,
     }
-
 
 def _text_to_image_qa_notice(output_data: dict[str, Any]) -> str:
     if not isinstance(output_data, dict):
@@ -1260,8 +1340,8 @@ def _text_to_image_qa_notice(output_data: dict[str, Any]) -> str:
     return f"自动 QA：已筛选 {rejected} 轮候选图，第 {attempts} 轮通过。"
 
 
-def _send_telegram_message(chat_id: int, text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
-    token = _tg_bot_token()
+def _send_telegram_message(chat_id: int, text: str, *, reply_markup: dict[str, Any] | None = None, bot_token: str = "") -> bool:
+    token = str(bot_token or _tg_bot_token()).strip()
     if not token or int(chat_id or 0) <= 0:
         return False
     try:
@@ -1278,8 +1358,8 @@ def _send_telegram_message(chat_id: int, text: str, *, reply_markup: dict[str, A
         return False
 
 
-def _send_telegram_file(chat_id: int, file_path: str, *, caption: str, reply_markup: dict[str, Any] | None = None) -> bool:
-    token = _tg_bot_token()
+def _send_telegram_file(chat_id: int, file_path: str, *, caption: str, reply_markup: dict[str, Any] | None = None, bot_token: str = "") -> bool:
+    token = str(bot_token or _tg_bot_token()).strip()
     path = Path(str(file_path or "")).expanduser()
     if not token or int(chat_id or 0) <= 0 or not path.exists() or not path.is_file():
         return False
@@ -1330,6 +1410,9 @@ def _notify_tg_task_finished(
     chat_id = _get_tg_chat_id_from_payload(payload)
     if chat_id is None:
         return
+    if _to_bool(payload.get("tg_suppress_auto_notify"), False):
+        return
+    bot_token = _tg_bot_token_for_payload(payload)
     download_path = _extract_download_path(output_data if isinstance(output_data, dict) else {})
     public_base = str(os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
     task_url = f"{public_base}/index.html#app-tasks" if public_base else ""
@@ -1369,43 +1452,71 @@ def _notify_tg_task_finished(
             ]
             if part
         )
+        action_text = "\n".join(
+            part
+            for part in [
+                "\u751f\u6210\u7d50\u679c\u5df2\u56de\u50b3\u3002",
+                f"\u5de5\u4f5c\u6d41: {task_type}",
+                f"\u4efb\u52d9\u7de8\u865f: {task_id}",
+                "\u8acb\u4f7f\u7528\u4e0b\u65b9\u6309\u9215\u7e7c\u7e8c\u64cd\u4f5c\u3002" if reply_markup else "",
+            ]
+            if part
+        )
         if len(download_paths) > 1:
             sent_count = 0
             for index, path in enumerate(download_paths, start=1):
                 item_caption = caption if index == 1 else "\n".join(
                     [
-                        "後臺生成任務已完成。",
-                        f"工作流: {task_type}",
-                        f"任務編號: {task_id}",
-                        f"第 {index}/{len(download_paths)} 張",
+                        "\u5f8c\u81fa\u751f\u6210\u4efb\u52d9\u5df2\u5b8c\u6210\u3002",
+                        f"\u5de5\u4f5c\u6d41: {task_type}",
+                        f"\u4efb\u52d9\u7de8\u865f: {task_id}",
+                        f"\u7b2c {index}/{len(download_paths)} \u5f35",
                     ]
                 )
-                item_markup = reply_markup if index == len(download_paths) else None
-                if _send_telegram_file(chat_id, path, caption=item_caption, reply_markup=item_markup):
+                if _send_telegram_file(chat_id, path, caption=item_caption, bot_token=bot_token):
                     sent_count += 1
             if sent_count == len(download_paths):
+                if reply_markup:
+                    _send_telegram_message(chat_id, action_text, reply_markup=reply_markup, bot_token=bot_token)
                 return
-        if download_path and _send_telegram_file(chat_id, download_path, caption=caption, reply_markup=reply_markup):
+        if download_path and _send_telegram_file(chat_id, download_path, caption=caption, bot_token=bot_token):
+            if reply_markup:
+                _send_telegram_message(chat_id, action_text, reply_markup=reply_markup, bot_token=bot_token)
             return
         parts = [caption]
         if task_url and not (is_text_to_image and _to_bool(qa.get("insufficient_count"), False)):
             parts.append(f"工作臺: {task_url}")
         if download_path:
             parts.append(f"結果文件: {download_path}")
-        _send_telegram_message(chat_id, "\n".join(parts), reply_markup=reply_markup)
+        _send_telegram_message(chat_id, "\n".join(parts), reply_markup=reply_markup, bot_token=bot_token)
         return
 
+    request_text = str(
+        payload.get("tg_original_user_request")
+        or payload.get("tg_user_instruction")
+        or payload.get("message")
+        or ""
+    ).strip()
+    if len(request_text) > 180:
+        request_text = request_text[:180] + "..."
+    rerun_from = str(payload.get("tg_rerun_from_task_id") or "").strip()
+    unknown_error = "\u672a\u77e5\u932f\u8aa4"
+    formatted_error = _format_user_visible_task_error(
+        str(error or output_data.get("error") or output_data.get("message") or unknown_error).strip()
+    )
     message = "\n".join(
         part
         for part in [
-            "後臺生成任務失敗。",
-            f"工作流: {task_type}",
-            f"任務編號: {task_id}",
-            f"原因: {_format_user_visible_task_error(str(error or output_data.get('error') or output_data.get('message') or '未知錯誤').strip())}",
+            "\u5f8c\u81fa\u751f\u6210\u4efb\u52d9\u5931\u6557\u3002",
+            f"\u5de5\u4f5c\u6d41: {task_type}",
+            f"\u4efb\u52d9\u7de8\u865f: {task_id}",
+            f"\u9700\u6c42: {request_text}" if request_text else "",
+            f"\u91cd\u63d0\u4f86\u6e90: {rerun_from}" if rerun_from else "",
+            f"\u539f\u56e0: {formatted_error}",
         ]
         if part
     )
-    _send_telegram_message(chat_id, message)
+    _send_telegram_message(chat_id, message, bot_token=bot_token)
 
 
 def _format_user_visible_task_error(error: str) -> str:
@@ -2120,6 +2231,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     for k in list(merged.keys()):
         if k in current:
             merged[k] = current.get(k)
+    merged["telegram_bot_token"] = str(merged.get("telegram_bot_token") or "").strip()
     merged["create_video_app_id"] = str(merged.get("create_video_app_id") or merged.get("video_app_id") or "").strip()
     merged["video_app_id"] = str(merged.get("video_app_id") or merged.get("create_video_app_id") or "").strip()
     merged["create_audio_app_id"] = str(merged.get("create_audio_app_id") or "").strip()
@@ -2304,6 +2416,34 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["cleanup_time"] = str(merged.get("cleanup_time") or "03:30").strip() or "03:30"
     merged["cleanup_retention_days"] = max(_to_int(merged.get("cleanup_retention_days"), 7), 1)
     return merged
+
+
+def _write_tool_r18_bot_token_files(token: str) -> None:
+    value = str(token or "").strip()
+    if not value:
+        return
+    token_file = _tool_r18_bot_token_file()
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(value + "\n", encoding="utf-8")
+    try:
+        local_env = _tool_r18_local_bot_env_path()
+        local_env.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        if local_env.exists():
+            lines = local_env.read_text(encoding="utf-8", errors="ignore").splitlines()
+        replaced = False
+        next_lines: list[str] = []
+        for line in lines:
+            if line.strip().startswith("TELEGRAM_BOT_TOKEN="):
+                next_lines.append(f"TELEGRAM_BOT_TOKEN={value}")
+                replaced = True
+            else:
+                next_lines.append(line)
+        if not replaced:
+            next_lines.append(f"TELEGRAM_BOT_TOKEN={value}")
+        local_env.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to update local bot env token file: %s", exc)
 
 
 def _runtime_comfy_gpu_max_concurrency() -> int:
@@ -3015,6 +3155,8 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
         "llm_default_model_gemini",
         "llm_default_model_gpt",
         "llm_model_priority_order",
+        "text_to_image_auto_qa_enabled",
+        "text_to_image_auto_qa_max_attempts",
         "persona_body_profiles",
         "mulerouter_api_name",
         "mulerouter_api_key",
@@ -5364,6 +5506,8 @@ def _analyze_generated_person_image_quality(
             "只根据可见画面质量、提示词符合度、人物结构完整性和交付可用性判断。",
             "如果图像没有清晰人物，或者主体不是人物，也应按提示词符合度和画面语义判断是否拦截。",
             "必须只返回 JSON，不要输出解释性正文。",
+            "Strict face visibility rule: when the prompt requires head, face, gaze, expression, or looking at camera, the face itself must be fully visible from forehead to chin: visible forehead/upper face, both eyes, nose, mouth, chin, and the main facial oval must be inside the frame and not hidden by crop. Do not fail for hair/top-of-head margin alone, but fail if the forehead or upper face is cropped, or if facial features are partially cut off.",
+            "R18 clothing-boundary rule: standalone exposed local rendering imperfections are not enough, and normal coherent garment openings/cutouts around exposed areas should pass. Reject only severe clothing geometry failures: fabric clearly clips into/intersects/fuses with the body, garment pieces pass through exposed areas, disconnected floating fabric, pasted/misaligned local details caused by transparent fabric, or body/clothing boundaries that are visibly broken. Light or ambiguous edge blending should pass.",
             "JSON schema:",
             "{",
             '  "summary": "中文一句话总结",',
@@ -5385,6 +5529,9 @@ def _analyze_generated_person_image_quality(
             '  "textOrWatermarkVisible": false,',
             '  "headVisible": true,',
             '  "headCroppedOrMissing": false,',
+            '  "faceIncompleteOrCropped": false,',
+            '  "exposedRegionArtifactVisible": false,',
+            '  "clothingBodyFusionVisible": false,',
             '  "deliverableReady": false,',
             '  "issues": ["中文问题1"],',
             '  "fixPriorities": ["中文重试重点1"]',
@@ -5402,6 +5549,8 @@ def _analyze_generated_person_image_quality(
             "本次提示词要求头部/脸部/眼神/表情可见：是。若候选图没有完整头部，或头部/脸部/眼神/表情被裁切、缺失、遮挡到无法判断，请将 headVisible 设为 false，headCroppedOrMissing 设为 true，deliverableReady 设为 false。"
             if requires_visible_head
             else "本次提示词没有明确要求头部/脸部/眼神/表情可见：否。无需仅因普通构图裁切头部而拦截，但仍需按主体和画面语义判断。",
+            "Strictly inspect face visibility: pass only when the forehead/upper face, both eyes, nose, mouth, chin, and main face oval are visible. Reject if the frame cuts through the forehead or face, if only part of the face is visible, or if gaze/expression cannot be judged. Do not reject merely because hair/top-of-head margin is tight while the forehead and full face are visible.",
+            "Strictly inspect clothing/body boundaries: normal coherent garment openings/cutouts should pass. Reject only clear severe failures: clothing clips into, intersects, or fuses with the body/exposed region; fabric pieces pass through exposed details; disconnected floating fabric; transparent fabric creates pasted/misaligned local details; or the body/clothing boundary is visibly broken. Light or ambiguous edge blending is not enough.",
         ]
     )
     try:
@@ -5440,6 +5589,12 @@ def _analyze_generated_person_image_quality(
             "requires_visible_head": requires_visible_head,
             "head_visible": (parsed.get("headVisible") is True) if requires_visible_head else parsed.get("headVisible") is not False,
             "head_cropped_or_missing": parsed.get("headCroppedOrMissing") is True,
+            "face_incomplete_or_cropped": (
+                parsed.get("faceIncompleteOrCropped") is True
+                or (requires_visible_head and _detect_top_edge_face_crop_without_valid_face(str(path)))
+            ),
+            "exposed_region_artifact_visible": parsed.get("exposedRegionArtifactVisible") is True,
+            "clothing_body_fusion_visible": parsed.get("clothingBodyFusionVisible") is True,
             "deliverable_ready": parsed.get("deliverableReady") is True,
             "issues": _parse_qa_string_list(parsed.get("issues"), 6),
             "fix_priorities": _parse_qa_string_list(parsed.get("fixPriorities"), 4),
@@ -5447,7 +5602,15 @@ def _analyze_generated_person_image_quality(
         reject = _should_reject_generated_person_image(report)
         if not reject:
             review_futures: dict[str, Any] = {}
-            with ThreadPoolExecutor(max_workers=3) as executor:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                if requires_visible_head:
+                    review_futures["face"] = executor.submit(
+                        _analyze_generated_person_face_framing_quality,
+                        image_path=str(path),
+                        prompt_text=prompt_text,
+                        payload=payload,
+                        attempt=attempt,
+                    )
                 review_futures["body"] = executor.submit(
                     _analyze_generated_person_body_shape_quality,
                     image_path=str(path),
@@ -5470,10 +5633,14 @@ def _analyze_generated_person_image_quality(
                     payload=payload,
                     attempt=attempt,
                 )
+                face_audit = review_futures["face"].result() if "face" in review_futures else None
                 body_audit = review_futures["body"].result()
                 clothing_audit = review_futures["clothing"].result() if "clothing" in review_futures else None
                 audit = review_futures["hand"].result()
 
+            _merge_generated_person_face_framing_audit(report, face_audit)
+            reject = _should_reject_generated_person_image(report)
+        if not reject:
             _merge_generated_person_body_shape_audit(report, body_audit)
             reject = _should_reject_generated_person_image(report)
         if not reject:
@@ -5494,6 +5661,170 @@ def _analyze_generated_person_image_quality(
             "issues": ["图像自动 QA 未完成，不能确认候选图可交付。"],
         }
 
+
+
+
+def _detect_top_edge_face_crop_without_valid_face(image_path: str) -> bool:
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return False
+    try:
+        img = cv2.imread(str(image_path))
+        if img is None:
+            return False
+        h, w = img.shape[:2]
+        if h <= 0 or w <= 0:
+            return False
+        ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+        y_chan, cr_chan, cb_chan = cv2.split(ycrcb)
+        skin = ((cr_chan >= 133) & (cr_chan <= 178) & (cb_chan >= 70) & (cb_chan <= 135) & (y_chan >= 55))
+        x1, x2 = int(w * 0.18), int(w * 0.82)
+        top_h = max(6, int(h * 0.018))
+        upper_h = max(40, int(h * 0.16))
+        top_skin_ratio = float(skin[:top_h, x1:x2].mean())
+        upper_skin_ratio = float(skin[:upper_h, x1:x2].mean())
+        if not (top_skin_ratio >= 0.25 and upper_skin_ratio >= 0.18):
+            return False
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        cascades = []
+        for filename in ("haarcascade_frontalface_default.xml", "haarcascade_profileface.xml"):
+            try:
+                classifier = cv2.CascadeClassifier(cv2.data.haarcascades + filename)
+                if not classifier.empty():
+                    cascades.append(classifier)
+            except Exception:
+                pass
+        valid_faces: list[tuple[int, int, int, int]] = []
+        min_face = max(80, int(min(h, w) * 0.08))
+        for classifier in cascades:
+            for (x, y, fw, fh) in classifier.detectMultiScale(gray, 1.08, 4, minSize=(min_face, min_face)):
+                if y < h * 0.55 and fh >= min_face and fw >= min_face:
+                    valid_faces.append((int(x), int(y), int(fw), int(fh)))
+            flipped = cv2.flip(gray, 1)
+            for (x, y, fw, fh) in classifier.detectMultiScale(flipped, 1.08, 4, minSize=(min_face, min_face)):
+                x = w - x - fw
+                if y < h * 0.55 and fh >= min_face and fw >= min_face:
+                    valid_faces.append((int(x), int(y), int(fw), int(fh)))
+        return not bool(valid_faces)
+    except Exception:
+        return False
+
+def _analyze_generated_person_face_framing_quality(
+    *,
+    image_path: str,
+    prompt_text: str,
+    payload: dict[str, Any],
+    attempt: int,
+) -> dict[str, Any]:
+    path = Path(str(image_path or "")).expanduser()
+    if not path.exists() or not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+        return {"inspected": False, "qa_unavailable": True, "summary": "No image file available for face framing QA."}
+    system_prompt = "\n".join(
+        [
+            "You are a strict face-framing QA reviewer for generated person images.",
+            "Only judge whether the face is completely visible in the frame. Do not judge clothing, body shape, style, or subject matter.",
+            "Pass only if the visible main face includes the forehead/upper face, both eyes, nose, mouth, chin, and the main facial oval. Hair/top-of-head may be tight or cropped, but the forehead and all facial features must be visible.",
+            "Fail if the frame cuts through the forehead or face, if eyes are missing/cropped, if only the lower face is visible, if the face is partly outside the image, or if gaze/expression cannot be judged because facial features are cropped.",
+            "Return strict JSON only. Put issues in Chinese.",
+            "JSON schema:",
+            "{",
+            '  "summary": "???????",',
+            '  "faceVisible": false,',
+            '  "fullFaceVisible": false,',
+            '  "foreheadVisible": false,',
+            '  "bothEyesVisible": false,',
+            '  "noseVisible": false,',
+            '  "mouthVisible": false,',
+            '  "chinVisible": false,',
+            '  "faceCroppedOrMissing": false,',
+            '  "confidence": 0,',
+            '  "issues": ["????1"]',
+            "}",
+        ]
+    )
+    user_input = "\n".join(
+        [
+            f"Generation prompt: {str(prompt_text or '').strip()}",
+            f"Candidate round: {max(int(attempt), 1)}.",
+            "Inspect only the main face. The acceptance standard is forehead-to-chin full face visibility, not just any detectable face-like area.",
+            "If forehead/upper face, eyes, nose, mouth, or chin are cropped or outside the frame, mark faceCroppedOrMissing=true and fullFaceVisible=false.",
+        ]
+    )
+    try:
+        result, selected, attempts = _request_llm_json_with_fallback(
+            source=payload,
+            user_input=user_input,
+            system_prompt=system_prompt,
+            image_paths=[str(path)],
+            retry_count=1,
+            request_label="face framing QA",
+        )
+        parsed = result.get("parsed") if isinstance(result, dict) else None
+        if not isinstance(parsed, dict):
+            raise RuntimeError("face framing QA did not return a JSON object")
+        return {
+            "inspected": True,
+            "selected_model": str(selected.get("model") or "").strip() if isinstance(selected, dict) else "",
+            "attempts": attempts,
+            "summary": str(parsed.get("summary") or "???? QA ?????").strip(),
+            "face_visible": parsed.get("faceVisible") is True,
+            "full_face_visible": parsed.get("fullFaceVisible") is True,
+            "forehead_visible": parsed.get("foreheadVisible") is True,
+            "both_eyes_visible": parsed.get("bothEyesVisible") is True,
+            "nose_visible": parsed.get("noseVisible") is True,
+            "mouth_visible": parsed.get("mouthVisible") is True,
+            "chin_visible": parsed.get("chinVisible") is True,
+            "face_cropped_or_missing": parsed.get("faceCroppedOrMissing") is True,
+            "confidence": _qa_score(parsed.get("confidence"), 75),
+            "issues": _parse_qa_string_list(parsed.get("issues"), 6),
+        }
+    except Exception as exc:
+        return {
+            "inspected": False,
+            "qa_unavailable": True,
+            "summary": "???? QA ?????????????",
+            "error": str(exc),
+            "issues": ["???? QA ???????????????"],
+        }
+
+
+def _merge_generated_person_face_framing_audit(report: dict[str, Any], audit: dict[str, Any] | None) -> None:
+    if not isinstance(report, dict) or not isinstance(audit, dict):
+        return
+    report["face_framing_audit"] = audit
+    if not _to_bool(audit.get("inspected"), False):
+        if _to_bool(audit.get("qa_unavailable"), False):
+            report["qa_unavailable"] = True
+            issues = _parse_qa_string_list(report.get("issues"), 6)
+            issues.extend(_parse_qa_string_list(audit.get("issues"), 3))
+            report["issues"] = _parse_qa_string_list(issues, 6)
+        return
+    confidence = _to_int(audit.get("confidence"), 75)
+    missing = (
+        _to_bool(audit.get("face_cropped_or_missing"), False)
+        or not _to_bool(audit.get("face_visible"), False)
+        or not _to_bool(audit.get("full_face_visible"), False)
+        or not _to_bool(audit.get("forehead_visible"), False)
+        or not _to_bool(audit.get("both_eyes_visible"), False)
+        or not _to_bool(audit.get("nose_visible"), False)
+        or not _to_bool(audit.get("mouth_visible"), False)
+        or not _to_bool(audit.get("chin_visible"), False)
+    )
+    if not missing or confidence < 70:
+        return
+    report["head_visible"] = False
+    report["head_cropped_or_missing"] = True
+    report["face_incomplete_or_cropped"] = True
+    report["deliverable_ready"] = False
+    issues = _parse_qa_string_list(report.get("issues"), 6)
+    audit_issues = _parse_qa_string_list(audit.get("issues"), 6)
+    if audit_issues:
+        issues.extend(audit_issues)
+    else:
+        issues.append(str(audit.get("summary") or "??????????????????").strip())
+    report["issues"] = _parse_qa_string_list(issues, 6)
 
 def _analyze_generated_person_body_shape_quality(
     *,
@@ -5518,6 +5849,7 @@ def _analyze_generated_person_body_shape_quality(
             "額外檢查上半身前側輪廓：若出現誇張球形、硬邊貼圖感、比例過大、左右結構明顯失衡、與軀幹連接不自然、像局部被放大或覆蓋到身體上的錯誤造型，必須將 upperTorsoContourAnomaly 設為 true，並視為不可交付。",
             "正常透視、寬鬆衣物、自然姿勢、鏡頭壓縮或健康自然曲線不應被誤判；只有明顯不符合交付要求時才攔截。",
             "必須只返回 JSON，不要輸出解釋性正文。",
+            "Exposed local detail rule: standalone exposed local rendering imperfections should not fail this body-shape audit. Mark exposedRegionAnatomyArtifact only when the issue is tied to clothing/body clipping, intersection, fusion, or impossible garment boundary.",
             "JSON schema:",
             "{",
             '  "summary": "中文一句話總結",',
@@ -5525,6 +5857,7 @@ def _analyze_generated_person_body_shape_quality(
             '  "bodyShapeTooFull": false,',
             '  "bodyShapeBulkyOrObese": false,',
             '  "upperTorsoContourAnomaly": false,',
+            '  "exposedRegionAnatomyArtifact": false,',
             '  "bodySilhouetteScore": 0,',
             '  "confidence": 0,',
             '  "issues": ["中文問題1"]',
@@ -5538,6 +5871,7 @@ def _analyze_generated_person_body_shape_quality(
             f"當前為第 {max(int(attempt), 1)} 輪候選圖，通過第一輪通用 QA，現在進行身形視覺複審。",
             "請觀察主體人物的整體輪廓、肩腰比例、腰腹厚度、四肢體量和衣物下的身形輪廓。若身形明顯過於豐滿、厚重、臃腫或肥胖，請標記為不可交付。",
             "請特別檢查上半身前側輪廓是否出現錯誤造型：誇張球形、硬邊貼圖感、局部尺寸過大、左右不平衡、與軀幹銜接不自然、比例明顯偏離人設體型參考。若存在，upperTorsoContourAnomaly 必須為 true。",
+            "Also inspect exposed local detail rendering only when it interacts with clothing/body boundaries: fabric clipping, intersection, fusion, impossible garment edge, or clothing passing through exposed regions may set exposedRegionAnatomyArtifact=true.",
         ]
     )
     try:
@@ -5561,6 +5895,7 @@ def _analyze_generated_person_body_shape_quality(
             "body_shape_too_full": parsed.get("bodyShapeTooFull") is True,
             "body_shape_bulky_or_obese": parsed.get("bodyShapeBulkyOrObese") is True,
             "upper_torso_contour_anomaly": parsed.get("upperTorsoContourAnomaly") is True,
+            "exposed_region_anatomy_artifact": parsed.get("exposedRegionAnatomyArtifact") is True,
             "body_silhouette_score": _qa_score(parsed.get("bodySilhouetteScore"), 85),
             "confidence": _qa_score(parsed.get("confidence"), 75),
             "issues": _parse_qa_string_list(parsed.get("issues"), 6),
@@ -5589,11 +5924,11 @@ def _analyze_generated_person_clothing_quality(
         return {"inspected": False, "summary": "No image file available for clothing QA."}
     system_prompt = "\n".join(
         [
-            "You are a strict clothing and clothing-color QA reviewer for generated person images.",
-            "Only compare visible clothing against the generation prompt. Do not judge aesthetics, body shape, pose style, or subject matter.",
-            "Check three things: garment type, main garment color, and requested clothing state such as open shirt, raised skirt, lowered waistband, intact uniform, jacket, dress, pants, or underwear.",
+            "You are a strict clothing, clothing-color, and clothing-geometry QA reviewer for generated person images.",
+            "Only compare visible clothing against the generation prompt and visible clothing/body boundary quality. Do not judge aesthetics, body shape, pose style, or subject matter.",
+            "Check garment type, main garment color, requested clothing state, and whether the clothing is physically coherent on the body without clipping, fusion, impossible openings, floating fabric, or pasted/translucent boundary artifacts.",
             "Be tolerant of shadows, highlights, folds, transparency, small trim colors, and minor lighting shifts. Do not fail a candidate for tiny color-temperature differences.",
-            "Fail only when the requested garment type is clearly absent or replaced, the main requested garment color is clearly wrong, or the requested clothing state is clearly contradicted.",
+            "Fail when the requested garment type is clearly absent or replaced, the main requested garment color is clearly wrong, the requested clothing state is clearly contradicted, or the garment clearly and severely clips into/fuses with the body or exposed regions. Normal coherent openings/cutouts are acceptable; only broken boundaries, fabric passing through body, floating/disconnected fabric, or transparent-fabric pasted/misaligned local details should fail.",
             "If clothing is mostly hidden and cannot be reliably judged, mark clothingRequirementVisible as false and do not mark mismatch.",
             "Return JSON only. Put user-facing issues in Chinese.",
             "JSON schema:",
@@ -5607,6 +5942,9 @@ def _analyze_generated_person_clothing_quality(
             '  "garmentMismatchVisible": false,',
             '  "colorMismatchVisible": false,',
             '  "clothingStateMismatchVisible": false,',
+            '  "clothingClippingOrFusionVisible": false,',
+            '  "impossibleClothingStructureVisible": false,',
+            '  "exposedRegionClothingConflictVisible": false,',
             '  "clothingMatchScore": 0,',
             '  "colorMatchScore": 0,',
             '  "confidence": 0,',
@@ -5620,6 +5958,7 @@ def _analyze_generated_person_clothing_quality(
             f"Candidate round: {max(int(attempt), 1)}.",
             "Extract the clothing and color requirements from the prompt, then compare them to the visible candidate image.",
             "If the prompt says white shirt and black skirt, a red dress or blue jacket is a visible mismatch. If the prompt requests an open shirt or raised skirt, a fully closed or different garment state is a state mismatch.",
+            "Fail candidates only when fabric edges pass through the body, clothing and exposed body details are clearly fused into one broken texture, fabric is floating/disconnected, garment openings are physically incoherent, or translucent garments create clearly pasted/misaligned local details. Do not fail normal coherent garment openings or mild edge blending.",
             "If the candidate preserves the garment type and main color but lighting makes it warmer/cooler, pass it.",
         ]
     )
@@ -5648,6 +5987,9 @@ def _analyze_generated_person_clothing_quality(
             "garment_mismatch_visible": parsed.get("garmentMismatchVisible") is True,
             "color_mismatch_visible": parsed.get("colorMismatchVisible") is True,
             "clothing_state_mismatch_visible": parsed.get("clothingStateMismatchVisible") is True,
+            "clothing_clipping_or_fusion_visible": parsed.get("clothingClippingOrFusionVisible") is True,
+            "impossible_clothing_structure_visible": parsed.get("impossibleClothingStructureVisible") is True,
+            "exposed_region_clothing_conflict_visible": parsed.get("exposedRegionClothingConflictVisible") is True,
             "clothing_match_score": _qa_score(parsed.get("clothingMatchScore"), 85),
             "color_match_score": _qa_score(parsed.get("colorMatchScore"), 85),
             "confidence": _qa_score(parsed.get("confidence"), 75),
@@ -5761,10 +6103,17 @@ def _merge_generated_person_body_shape_audit(report: dict[str, Any], audit: dict
     too_full = _to_bool(audit.get("body_shape_too_full"), False)
     bulky_or_obese = _to_bool(audit.get("body_shape_bulky_or_obese"), False)
     upper_torso_anomaly = _to_bool(audit.get("upper_torso_contour_anomaly"), False)
+    exposed_region_artifact = _to_bool(audit.get("exposed_region_anatomy_artifact"), False)
+    upper_torso_failure = upper_torso_anomaly and confidence >= 85 and (silhouette_score <= 45 or too_full or bulky_or_obese)
+    exposed_region_failure = False
+    # Prominent requested R18 curves are not enough to fail QA by themselves.
+    # Reject clear upper-body contour artifacts, heavy/bulky body drift, or very low silhouette quality.
     extreme_body_shape = (
-        silhouette_score < 30
-        or (silhouette_score < 40 and confidence >= 90 and (too_full or bulky_or_obese or upper_torso_anomaly))
-        or (silhouette_score < 55 and confidence >= 95 and bulky_or_obese and upper_torso_anomaly)
+        upper_torso_failure
+        or exposed_region_failure
+        or silhouette_score < 25
+        or (silhouette_score < 35 and confidence >= 90 and (too_full or bulky_or_obese))
+        or (silhouette_score < 45 and confidence >= 95 and bulky_or_obese)
     )
     if not extreme_body_shape:
         report["body_silhouette_score"] = min(_to_int(report.get("body_silhouette_score"), 85), silhouette_score)
@@ -5775,6 +6124,9 @@ def _merge_generated_person_body_shape_audit(report: dict[str, Any], audit: dict
         report["body_shape_bulky_or_obese"] = True
     if upper_torso_anomaly:
         report["upper_torso_contour_anomaly"] = True
+        report["body_part_scale_anomaly"] = True
+    if exposed_region_artifact:
+        report["exposed_region_artifact_visible"] = True
         report["body_part_scale_anomaly"] = True
     report["body_silhouette_score"] = min(_to_int(report.get("body_silhouette_score"), 85), silhouette_score)
     report["prompt_mismatch_visible"] = True
@@ -5803,8 +6155,13 @@ def _merge_generated_person_clothing_audit(report: dict[str, Any], audit: dict[s
     garment_mismatch = _to_bool(audit.get("garment_mismatch_visible"), False)
     color_mismatch = _to_bool(audit.get("color_mismatch_visible"), False)
     state_mismatch = _to_bool(audit.get("clothing_state_mismatch_visible"), False)
+    clipping_or_fusion = _to_bool(audit.get("clothing_clipping_or_fusion_visible"), False)
+    impossible_structure = _to_bool(audit.get("impossible_clothing_structure_visible"), False)
+    exposed_region_conflict = _to_bool(audit.get("exposed_region_clothing_conflict_visible"), False)
+    clothing_artifact = clipping_or_fusion or impossible_structure or exposed_region_conflict
     rejectable = (
-        (garment_mismatch and clothing_score < 75 and confidence >= 70)
+        (clothing_artifact and confidence >= 85)
+        or (garment_mismatch and clothing_score < 75 and confidence >= 70)
         or (state_mismatch and clothing_score < 75 and confidence >= 70)
         or (color_mismatch and color_score < 70 and confidence >= 75)
         or (clothing_score < 55 and confidence >= 70)
@@ -5820,6 +6177,12 @@ def _merge_generated_person_clothing_audit(report: dict[str, Any], audit: dict[s
         report["clothing_color_mismatch_visible"] = True
     if state_mismatch:
         report["clothing_state_mismatch_visible"] = True
+    if clipping_or_fusion:
+        report["clothing_clipping_or_fusion_visible"] = True
+    if impossible_structure:
+        report["impossible_clothing_structure_visible"] = True
+    if exposed_region_conflict:
+        report["exposed_region_clothing_conflict_visible"] = True
     report["prompt_mismatch_visible"] = True
     report["prompt_match_score"] = min(_to_int(report.get("prompt_match_score"), 75), clothing_score, color_score)
     report["deliverable_ready"] = False
@@ -5896,13 +6259,14 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
             audit_too_full = _to_bool(body_audit.get("body_shape_too_full"), False)
             audit_bulky_or_obese = _to_bool(body_audit.get("body_shape_bulky_or_obese"), False)
             audit_upper_torso_anomaly = _to_bool(body_audit.get("upper_torso_contour_anomaly"), False)
-            if audit_silhouette < 30:
+            audit_exposed_region_artifact = _to_bool(body_audit.get("exposed_region_anatomy_artifact"), False)
+            if audit_upper_torso_anomaly and audit_confidence >= 95 and (audit_silhouette <= 25 or audit_bulky_or_obese or audit_exposed_region_artifact):
                 return True
-            if audit_silhouette < 40 and audit_confidence >= 90 and (
-                audit_too_full or audit_bulky_or_obese or audit_upper_torso_anomaly
-            ):
+            if audit_silhouette < 25:
                 return True
-            if audit_silhouette < 55 and audit_confidence >= 95 and audit_bulky_or_obese and audit_upper_torso_anomaly:
+            if audit_silhouette < 35 and audit_confidence >= 90 and (audit_too_full or audit_bulky_or_obese):
+                return True
+            if audit_silhouette < 45 and audit_confidence >= 95 and audit_bulky_or_obese:
                 return True
     clothing_audit = report.get("clothing_audit") if isinstance(report.get("clothing_audit"), dict) else {}
     if clothing_audit and _to_bool(clothing_audit.get("inspected"), False) and _to_bool(clothing_audit.get("clothing_requirement_visible"), False):
@@ -5913,6 +6277,12 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
             return True
         if _to_bool(clothing_audit.get("clothing_state_mismatch_visible"), False) and clothing_score < 75 and clothing_confidence >= 70:
             return True
+        if clothing_confidence >= 85 and (
+            _to_bool(clothing_audit.get("clothing_clipping_or_fusion_visible"), False)
+            or _to_bool(clothing_audit.get("impossible_clothing_structure_visible"), False)
+            or _to_bool(clothing_audit.get("exposed_region_clothing_conflict_visible"), False)
+        ):
+            return True
         if _to_bool(clothing_audit.get("color_mismatch_visible"), False) and color_score < 70 and clothing_confidence >= 75:
             return True
         if clothing_score < 55 and clothing_confidence >= 70:
@@ -5921,6 +6291,16 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
             return True
     audit = report.get("hand_limb_audit") if isinstance(report.get("hand_limb_audit"), dict) else {}
     if audit and not _to_bool(audit.get("inspected"), False):
+        if (
+            _to_bool(audit.get("qa_unavailable"), False)
+            and _to_bool(report.get("deliverable_ready"), False)
+            and _to_int(report.get("anatomy_score"), 75) >= 85
+            and not _to_bool(report.get("limb_or_body_broken"), False)
+            and not _to_bool(report.get("extra_or_missing_limbs"), False)
+            and not _to_bool(report.get("limb_overlap_or_fusion"), False)
+            and not _to_bool(report.get("pose_geometry_broken"), False)
+        ):
+            return False
         return _to_bool(audit.get("qa_unavailable"), False)
     if audit:
         if _to_int(audit.get("visible_hand_count"), 0) > 2 or _to_int(audit.get("visible_arm_count"), 0) > 2:
@@ -5939,26 +6319,42 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         return True
     if _to_bool(report.get("clothing_mismatch_visible"), False):
         return True
+    if _to_bool(report.get("clothing_body_fusion_visible"), False):
+        return True
+    if _to_bool(report.get("face_incomplete_or_cropped"), False):
+        return True
     body_silhouette_score = _to_int(report.get("body_silhouette_score"), 85)
     body_shape_flagged = (
         _to_bool(report.get("body_shape_too_full"), False)
         or _to_bool(report.get("body_shape_bulky_or_obese"), False)
-        or _to_bool(report.get("upper_torso_contour_anomaly"), False)
-        or _to_bool(report.get("body_part_scale_anomaly"), False)
     )
-    if body_silhouette_score < 30:
+    if body_silhouette_score < 25:
         return True
-    if body_silhouette_score < 40 and body_shape_flagged:
+    if body_silhouette_score < 35 and body_shape_flagged:
         return True
     for key in (
         "extra_or_missing_limbs",
         "limb_overlap_or_fusion",
-        "hand_anomaly_visible",
         "pose_geometry_broken",
     ):
         if _to_bool(report.get(key), False):
             return True
+    if _to_bool(report.get("hand_anomaly_visible"), False):
+        issue_text = "；".join(_parse_qa_string_list(report.get("issues"), 6))
+        if not (
+            _to_bool(report.get("deliverable_ready"), False)
+            and _to_int(report.get("anatomy_score"), 75) >= 85
+            and re.search(r"轻微|輕微|minor|slight|自然|姿态|姿態", issue_text, flags=re.IGNORECASE)
+        ):
+            return True
     if _to_bool(report.get("prompt_mismatch_visible"), False):
+        issue_text = "；".join(_parse_qa_string_list(report.get("issues"), 6))
+        if (
+            _to_bool(report.get("deliverable_ready"), False)
+            and _to_int(report.get("prompt_match_score"), 75) >= 80
+            and re.search(r"略有差异|略有差異|轻微|輕微|minor|slight|色差|颜色|顏色", issue_text, flags=re.IGNORECASE)
+        ):
+            return False
         return True
     if _to_bool(report.get("meaningless_or_collapsed"), False):
         return True
@@ -6057,7 +6453,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
             message = f"{message}（自动 QA 第 {attempt} 轮，目标 {qa_target_count} 张）"
         elif auto_qa_enabled and max_attempts > 1:
             message = f"{message}（自动 QA 第 {attempt}/{max_attempts} 轮）"
-        _emit_stage(payload, stage="remote_comfy", status="running", message=message, data={"qa_attempt": attempt, "seed": attempt_seed})
+        _emit_stage(payload, stage="remote_comfy", status="running", message=message, data={"qa_attempt": attempt, "seed": attempt_seed, "batch_size": batch_size, "qa_missing_count": max(qa_target_count - len(qa_passed_image_paths), 0) if batch_qa_enabled else None})
         result = _run_remote_comfy_gateway_test(
             gateway_url=gateway_url,
             token=token,
@@ -6135,6 +6531,10 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
                         "passed_count": len(qa_passed_image_paths),
                         "rejected_count": len(qa_reports) - len(qa_passed_image_paths),
                         "attempt_passed_count": len(attempt_passed_image_paths),
+                        "candidate_image_paths": candidate_image_paths,
+                        "attempt_passed_image_paths": attempt_passed_image_paths,
+                        "passed_image_paths": qa_passed_image_paths,
+                        "attempt_reports": _sanitize_payload(qa_reports[-len(candidate_image_paths):]) if candidate_image_paths else [],
                     },
                 )
                 break
@@ -6151,6 +6551,10 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
                         "passed_count": len(qa_passed_image_paths),
                         "rejected_count": len(qa_reports) - len(qa_passed_image_paths),
                         "attempt_passed_count": len(attempt_passed_image_paths),
+                        "candidate_image_paths": candidate_image_paths,
+                        "attempt_passed_image_paths": attempt_passed_image_paths,
+                        "passed_image_paths": qa_passed_image_paths,
+                        "attempt_reports": _sanitize_payload(qa_reports[-len(candidate_image_paths):]) if candidate_image_paths else [],
                     },
                 )
                 if max_attempts > 0 and attempt >= max_attempts:
@@ -9847,18 +10251,103 @@ _TG_PERSON_IMAGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _TG_CLOTHING_COLOR_PATTERN = re.compile(
-    r"黑色|白色|灰色|深灰|浅灰|淺灰|米白|米色|红色|紅色|蓝色|藍色|绿色|綠色|黄色|黃色|粉色|紫色|棕色|咖啡色|"
-    r"卡其|奶油色|藏青|深色|浅色|淺色|银色|銀色|金色|酒红|酒紅|墨绿|墨綠|天蓝|天藍|color|colour|black|white|gray|grey|red|blue|green|yellow|pink|purple|brown|beige",
+    r"黑色|白色|灰色|深灰|浅灰|淺灰|米白|米色|肉色|裸色|肤色|膚色|透明|半透明|红色|紅色|蓝色|藍色|绿色|綠色|黄色|黃色|粉色|紫色|棕色|咖啡色|"
+    r"卡其|奶油色|藏青|深色|浅色|淺色|银色|銀色|金色|酒红|酒紅|墨绿|墨綠|天蓝|天藍|color|colour|black|white|gray|grey|red|blue|green|yellow|pink|purple|brown|beige|nude|skin[- ]?tone|transparent|translucent",
     re.IGNORECASE,
 )
 _TG_CLOTHING_STRUCTURE_PATTERN = re.compile(
     r"上衣|下装|下裝|衬衫|襯衫|恤|短袖|长袖|長袖|背心|吊带|吊帶|外套|夹克|夾克|西装|西裝|制服|连衣裙|連衣裙|"
-    r"吊带裙|吊帶裙|睡裙|浴袍|睡袍|长袍|長袍|内衣|內衣|胸衣|半裙|短裙|长裙|長裙|裤|褲|短裤|短褲|长裤|長褲|"
+    r"吊带裙|吊帶裙|睡裙|浴袍|睡袍|长袍|長袍|内衣|內衣|胸衣|半裙|短裙|长裙|長裙|裤|褲|短裤|短褲|长裤|長褲|瑜伽裤|瑜伽褲|围裙|圍裙|"
     r"领口|領口|低开领|低開領|袖口|腰线|腰線|腰头|腰頭|裙摆|裙擺|裤腰|褲腰|"
     r"纽扣|鈕扣|扣子|拉链|拉鏈|衣摆|衣擺|肩带|肩帶|衣领|衣領|shirt|skirt|dress|pants|trousers|jacket|sleeve|collar|waistline|hem",
     re.IGNORECASE,
 )
 
+_TG_EXPLICIT_SWIMWEAR_PATTERN = re.compile(
+    r"比基尼|泳装|泳裝|泳衣|泳裤|泳褲|泳裙|bikini|swimsuit|swimwear",
+    re.IGNORECASE,
+)
+_TG_SWIMWEAR_SCENE_PATTERN = re.compile(
+    r"泳池|游泳池|海边|海邊|海滩|海灘|沙滩|沙灘|海岸|水边|水邊|pool|beach|seaside",
+    re.IGNORECASE,
+)
+
+
+def _tg_request_has_swimwear_intent(request_text: str) -> bool:
+    return bool(_TG_EXPLICIT_SWIMWEAR_PATTERN.search(str(request_text or "")))
+
+
+def _tg_request_explicit_swimwear_clothing(request_text: str) -> str:
+    text = str(request_text or "")
+    if not _TG_EXPLICIT_SWIMWEAR_PATTERN.search(text):
+        return ""
+    color_match = re.search(
+        r"黑色|白色|灰色|深灰色|浅灰色|淺灰色|米白色|米色|肉色|裸色|肤色|膚色|透明|半透明|红色|紅色|蓝色|藍色|深蓝色|深藍色|浅蓝色|淺藍色|绿色|綠色|黄色|黃色|粉色|浅粉色|淺粉色|紫色|棕色|咖啡色|奶油色|酒红色|酒紅色|墨绿色|墨綠色|blue|black|white|pink|red|purple|green|nude|skin[- ]?tone|transparent|translucent",
+        text,
+        re.IGNORECASE,
+    )
+    color = color_match.group(0) if color_match else "蓝白色"
+    if re.search(r"比基尼|bikini", text, re.IGNORECASE):
+        return f"{color}比基尼泳装"
+    return f"{color}泳装"
+
+
+
+
+_TG_GENERAL_CLOTHING_ITEM_PATTERN = re.compile(
+    r"(?:\u9ed1\u8272|\u767d\u8272|\u7070\u8272|\u6df1\u7070\u8272|\u6d45\u7070\u8272|\u6dfa\u7070\u8272|\u7c73\u767d\u8272|\u7c73\u8272|\u8089\u8272|\u88f8\u8272|\u80a4\u8272|\u819a\u8272|\u900f\u660e|\u534a\u900f\u660e|\u7ea2\u8272|\u7d05\u8272|\u84dd\u8272|\u85cd\u8272|\u6df1\u84dd\u8272|\u6df1\u85cd\u8272|\u6d45\u84dd\u8272|\u6dfa\u85cd\u8272|\u7eff\u8272|\u7da0\u8272|\u9ec4\u8272|\u9ec3\u8272|\u7c89\u8272|\u6d45\u7c89\u8272|\u6dfa\u7c89\u8272|\u7d2b\u8272|\u68d5\u8272|\u5496\u5561\u8272|\u5976\u6cb9\u8272|\u9152\u7ea2\u8272|\u9152\u7d05\u8272|\u58a8\u7eff\u8272|\u58a8\u7da0\u8272|\u91d1\u8272|\u94f6\u8272|\u9280\u8272|blue|black|white|pink|red|purple|green)?(?:\u6bd4\u57fa\u5c3c|\u6cf3\u88c5|\u6cf3\u88dd|\u6cf3\u8863|\u6cf3\u88e4|\u6cf3\u8932|\u6cf3\u88d9|\u65d7\u888d|\u6f22\u670d|\u6c49\u670d|\u548c\u670d|\u793c\u670d|\u79ae\u670d|\u8fde\u8863\u88d9|\u9023\u8863\u88d9|\u540a\u5e26\u88d9|\u540a\u5e36\u88d9|\u7761\u88d9|\u5236\u670d|\u886c\u886b|\u896f\u886b|T\u6064|\u80cc\u5fc3|\u540a\u5e26|\u540a\u5e36|\u4e0a\u8863|\u5916\u5957|\u76ae\u8863|\u5939\u514b|\u593e\u514b|\u897f\u88c5|\u897f\u88dd|\u77ed\u88d9|\u957f\u88d9|\u9577\u88d9|\u534a\u88d9|\u56f4\u88d9|\u570d\u88d9|\u88e4\u5b50|\u8932\u5b50|\u77ed\u88e4|\u77ed\u8932|\u957f\u88e4|\u9577\u8932|\u725b\u4ed4\u88e4|\u725b\u4ed4\u8932|\u745c\u4f3d\u88e4|\u745c\u4f3d\u8932|\u8fd0\u52a8\u670d|\u904b\u52d5\u670d|\u745c\u4f3d\u670d|\u5185\u8863|\u5167\u8863|\u80f8\u8863|\u6d74\u888d|\u7761\u888d|\u5f00\u886b|\u958b\u886b|\u4e1d\u889c|\u7d72\u896a|\u9ad8\u8ddf\u978b|bikini|swimsuit|swimwear|dress|shirt|skirt|uniform|jacket|pants|leggings|apron)(?:[^\uff0c\u3002\uff01\uff1f!?\uff1b\u3001]{0,12})?",
+    re.IGNORECASE,
+)
+_TG_GENERAL_SCENE_PATTERN = re.compile(
+    r"\u8d5b\u535a\u670b\u514b\u8857\u5934|\u8cfd\u535a\u670b\u514b\u8857\u982d|\u9713\u8679\u8857\u5934|\u9713\u8679\u8857\u982d|\u96e8\u591c\u8857\u5934|\u96e8\u591c\u8857\u982d|\u57ce\u5e02\u8857\u5934|\u57ce\u5e02\u8857\u982d|\u6d77\u8fb9|\u6d77\u908a|\u6d77\u6ee9|\u6d77\u7058|\u6c99\u6ee9|\u6c99\u7058|\u6cf3\u6c60|\u6e38\u6cf3\u6c60|\u8857\u5934|\u8857\u982d|\u57ce\u5e02|\u5546\u573a|\u5546\u5834|\u9152\u5e97|\u65c5\u9986|\u65c5\u9928|\u53a8\u623f|\u5eda\u623f|\u9910\u5385|\u9910\u5ef3|\u9633\u53f0|\u967d\u53f0|\u5929\u53f0|\u82b1\u56ed|\u82b1\u5712|\u68ee\u6797|\u516c\u56ed|\u516c\u5712|\u821e\u53f0|\u9152\u5427|\u5496\u5561\u5385|\u5496\u5561\u5ef3|\u7535\u68af|\u96fb\u68af|\u8f66\u53a2|\u8eca\u5ec2|\u673a\u8231|\u6a5f\u8259|\u529e\u516c\u5ba4|\u8fa6\u516c\u5ba4|\u6559\u5ba4|\u6d74\u5ba4|\u5ba2\u5385|\u5ba2\u5ef3|\u5367\u5ba4|\u81e5\u5ba4|\u5e8a\u8fb9|\u5e8a\u908a|\u5e8a|pool|beach|street|hotel|kitchen|stage|office|classroom|bedroom",
+    re.IGNORECASE,
+)
+
+
+def _tg_request_explicit_clothing_clause(request_text: str) -> str:
+    swimwear = _tg_request_explicit_swimwear_clothing(request_text)
+    if swimwear:
+        return swimwear
+    text = _tg_latest_adjustment_segment(request_text)
+    if not text:
+        return ""
+    if re.search(r"\u5168\u88f8|\u88f8\u4f53|\u88f8\u9ad4|\u88f8\u8eab|\u8d64\u88f8|\u4e0d\u7a7f\u8863|\u4e0d\u8457\u8863|\u4e0d\u7740\u8863|\u7121\u8863|\u65e0\u8863|\u6ca1\u6709\u7a7f\u8863|\u6c92\u6709\u7a7f\u8863|\u4e0d\u6dfb\u52a0\u8863\u670d|\u4e0d\u8981\u8863\u670d|no\\s+clothes|nude|naked", text, re.IGNORECASE):
+        return "\u672a\u7a7f\u8863\u7269"
+    parsed_clothing = _tg_request_explicit_clothing_from_request(text)
+    if parsed_clothing:
+        return parsed_clothing
+    for raw in re.split(r"[\uff0c\u3002\uff01\uff1f!?\uff1b\u3001,]+", text):
+        clause = raw.strip(" \uff0c\u3002\uff01\uff1f!?\uff1b\u3001,")
+        match = _TG_GENERAL_CLOTHING_ITEM_PATTERN.search(clause)
+        if not clause or (not _tg_request_has_explicit_clothing(clause) and not match):
+            continue
+        if match:
+            return _tg_clean_clothing_requirement_text(match.group(0))
+        if len(clause) <= 24:
+            fallback_clause = re.sub(r"^(\u7a7f\u7740|\u7a7f\u8457|\u670d\u88c5|\u670d\u88dd|\u8863\u670d|\u8863\u7740|\u8863\u8457)[:\uff1a]?", "", clause).strip(" \uff0c\u3002\uff01\uff1f!?\uff1b\u3001,")
+            return _tg_clean_clothing_requirement_text(fallback_clause)
+    return ""
+
+
+def _tg_request_explicit_scene_phrase(request_text: str) -> str:
+    text = _strip_prompt_response_wrappers(request_text)
+    if not text:
+        return ""
+    match = _TG_GENERAL_SCENE_PATTERN.search(text)
+    if not match:
+        return ""
+    scene = match.group(0).strip(" \uff0c\u3002\uff01\uff1f!?\uff1b\u3001,")
+    if re.search(r"\u5e8a\u8fb9|\u5e8a\u908a", scene):
+        return "\u5750\u5728\u5e8a\u8fb9"
+    if re.search(r"\u5e8a|\u5367\u5ba4|\u81e5\u5ba4|bedroom", scene, re.IGNORECASE):
+        return "\u5750\u5728\u5e8a\u8fb9"
+    if re.search(r"\u6cf3\u6c60|\u6e38\u6cf3\u6c60|pool", scene, re.IGNORECASE):
+        return "\u7ad9\u5728\u6cf3\u6c60\u8fb9"
+    if re.search(r"\u6d77\u8fb9|\u6d77\u908a|\u6d77\u6ee9|\u6d77\u7058|\u6c99\u6ee9|\u6c99\u7058|beach", scene, re.IGNORECASE):
+        return "\u7ad9\u5728\u6d77\u8fb9"
+    if re.search(r"\u8857\u5934|\u8857\u982d|street", scene, re.IGNORECASE):
+        return f"\u7ad9\u5728{scene}"
+    return f"\u7ad9\u5728{scene}"
 
 def _tg_prompt_needs_person_clothing_anchor(original_request: str, prompt_text: str, payload: dict[str, Any] | None) -> bool:
     source = payload if isinstance(payload, dict) else {}
@@ -9867,6 +10356,91 @@ def _tg_prompt_needs_person_clothing_anchor(original_request: str, prompt_text: 
         return True
     text = f"{original_request or ''} {prompt_text or ''}"
     return bool(_TG_PERSON_IMAGE_PATTERN.search(text))
+
+
+
+_TG_REQUEST_STYLE_MODIFIER_PATTERN = re.compile(
+    r"诱惑|誘惑|性感|温柔|溫柔|甜美|冷艳|冷豔|可爱|可愛|清纯|清純|优雅|優雅|高冷|俏皮|辣妹|风格|風格|感觉|感覺",
+    re.IGNORECASE,
+)
+_TG_CLOTHING_REQUEST_COLOR_PATTERN = re.compile(
+    r"黑色|白色|灰色|深灰色|浅灰色|淺灰色|米白色|米色|肉色|裸色|肤色|膚色|透明|半透明|红色|紅色|蓝色|藍色|深蓝色|深藍色|浅蓝色|淺藍色|绿色|綠色|黄色|黃色|粉色|浅粉色|淺粉色|紫色|棕色|咖啡色|奶油色|酒红色|酒紅色|墨绿色|墨綠色|blue|black|white|pink|red|purple|green|nude|skin[- ]?tone|transparent|translucent",
+    re.IGNORECASE,
+)
+
+
+def _tg_request_color_for_clothing_term(request_text: str, term_pattern: str, default_color: str) -> str:
+    text = str(request_text or "")
+    if re.search(r"黑丝|黑絲", text):
+        return "黑色"
+    if re.search(r"白丝|白絲", text):
+        return "白色"
+    if re.search(r"肉丝|肉絲", text):
+        return "肉色"
+    if re.search(r"肉色|裸色|肤色|膚色|skin[- ]?tone|nude", text, re.IGNORECASE):
+        return "肉色"
+    match = re.search(term_pattern, text, re.IGNORECASE)
+    if not match:
+        return default_color
+    window = text[max(0, match.start() - 8) : min(len(text), match.end() + 8)]
+    color_pattern = _TG_CLOTHING_REQUEST_COLOR_PATTERN.pattern
+    before = re.search(rf"({color_pattern})(?:的)?[^，。！？!?;；]{{0,4}}(?:{term_pattern})", window, re.IGNORECASE)
+    if before:
+        return before.group(1)
+    after = re.search(rf"(?:{term_pattern})[^，。！？!?;；]{{0,4}}({color_pattern})", window, re.IGNORECASE)
+    if after:
+        return after.group(1)
+    return default_color
+
+
+def _tg_request_explicit_clothing_from_request(request_text: str) -> str:
+    text = _tg_latest_adjustment_segment(request_text)
+    swimwear = _tg_request_explicit_swimwear_clothing(text)
+    if swimwear:
+        return swimwear
+    source = _TG_REQUEST_STYLE_MODIFIER_PATTERN.sub("", text)
+    parts: list[str] = []
+
+    def add(label: str) -> None:
+        cleaned = str(label or "").strip(" ，。；、")
+        if not cleaned:
+            return
+        key = re.sub(r"[，。；、,;\s]", "", cleaned)
+        if key and not any(key == re.sub(r"[，。；、,;\s]", "", item) for item in parts):
+            parts.append(cleaned)
+
+    clothing_specs = [
+        (r"草裙", "绿色", "草裙"),
+        (r"旗袍", "红色", "旗袍"),
+        (r"皮衣", "黑色", "皮衣"),
+        (r"皮裙", "黑色", "皮裙"),
+        (r"连衣裙|連衣裙", "白色", "连衣裙"),
+        (r"女仆装|女僕裝", "黑白色", "女仆装"),
+        (r"和服", "浅粉色", "和服"),
+        (r"汉服|漢服", "浅蓝色", "汉服"),
+        (r"校服", "白色和深蓝色", "校服"),
+        (r"护士服|護士服|护士制服|護士制服", "白色", "护士服"),
+        (r"空乘制服|空姐制服|空服制服", "深蓝色", "空乘制服"),
+        (r"制服", "深蓝色", "制服"),
+        (r"衬衫|襯衫", "白色", "衬衫"),
+        (r"吊带裙|吊帶裙", "浅粉色", "吊带裙"),
+        (r"睡裙", "浅粉色", "睡裙"),
+        (r"短裙", "黑色", "短裙"),
+        (r"长裙|長裙", "白色", "长裙"),
+        (r"围裙|圍裙", "白色", "围裙"),
+        (r"牛仔裤", "蓝色", "牛仔裤"),
+        (r"瑜伽裤|瑜伽褲|leggings", "黑色", "瑜伽裤"),
+        (r"皮裤", "黑色", "皮裤"),
+        (r"内衣|內衣", "黑色", "内衣"),
+        (r"丝袜|絲襪|黑丝|白丝|肉丝|黑絲|白絲|肉絲", "黑色", "丝袜"),
+        (r"高跟鞋", "黑色", "高跟鞋"),
+        (r"长靴|長靴|靴子", "黑色", "长靴"),
+    ]
+    for pattern, default_color, noun in clothing_specs:
+        if re.search(pattern, source, re.IGNORECASE):
+            color = _tg_request_color_for_clothing_term(source, pattern, default_color)
+            add(f"{color}{noun}")
+    return "和".join(parts[:5])
 
 
 def _tg_image_prompt_has_clothing_color(prompt_text: str) -> bool:
@@ -9898,7 +10472,7 @@ def _ensure_tg_image_clothing_anchor(prompt_text: str, original_request: str, pa
     if not _tg_image_prompt_has_clothing_color(text):
         additions.append("米白色和深灰色")
     if not _tg_image_prompt_has_clothing_structure(text):
-        additions.append("简洁上衣与直筒下装，领口、袖口、腰线清楚")
+        additions.append("简洁上衣与直筒下装款式")
     if not additions:
         return text
     clothing_anchor = "".join(additions)
@@ -10040,6 +10614,7 @@ def _tg_request_clause_matching(request_text: str, pattern: str) -> str:
 
 def _tg_request_pose_scene(request_text: str, nonce: str = "") -> str:
     text = _strip_prompt_response_wrappers(request_text)
+    general_scene = _tg_request_explicit_scene_phrase(text)
     clause = _tg_request_clause_matching(
         text,
         r"站|坐|躺|跪|靠|倚|趴|蹲|俯身|前倾|侧身|横坐|斜坐|半身|全身|床|沙发|椅|教室|卧室|客厅|浴室|办公室|车厢|舞台",
@@ -10051,6 +10626,16 @@ def _tg_request_pose_scene(request_text: str, nonce: str = "") -> str:
         )
         if match:
             return match.group(0).strip(" ，。！？!?；、")
+    if _tg_request_has_swimwear_intent(text) and not re.search(r"床|卧室|臥室", text):
+        scene_clause = _tg_request_clause_matching(
+            text,
+            r"泳池|游泳池|海边|海邊|海滩|海灘|沙滩|沙灘|海岸|水边|水邊|pool|beach|seaside",
+        )
+        if scene_clause:
+            if re.search(r"泳池|游泳池|pool", scene_clause, re.IGNORECASE):
+                return _tg_pick_prompt_variant(text, ["站在泳池边", "坐在泳池边", "倚在泳池扶手旁"], nonce)
+            return _tg_pick_prompt_variant(text, ["站在海边浅水区", "坐在沙滩躺椅边", "站在海岸边"], nonce)
+        return _tg_pick_prompt_variant(text, ["站在泳池边", "坐在泳池边", "站在海边浅水区", "坐在沙滩躺椅边"], nonce)
     if re.search(r"床|卧室|臥室", text):
         return _tg_pick_prompt_variant(
             text,
@@ -10441,16 +11026,22 @@ def _tg_finalize_static_image_prompt_text(text: str) -> str:
     final = re.sub(r"脸部(?:清晰可见|完整入镜|无遮挡|可见)|脸部没有遮挡|脸部不遮挡|脸部完整露出|头部完整入镜|完整入镜|面部清晰可见", "", final)
     final = re.sub(r"用户指定动作|用户指定区域|用户指定动作区域|用户要求的手指动作|用户要求的触碰动作|用户指定的手部动作|用户要求的手部动作|用戶指定動作|用戶指定區域", "手部动作清楚", final)
     final = re.sub(r"[，、]{2,}", "，", final)
+    final = re.sub(r"(\u800c\u53f3\u624b[^\uFF0C\u3002\uFF1B\u3001]{1,30})\1", r"\1", final)
+    final = re.sub(r"(\u5979\u7684\u5de6\u624b[^\uFF0C\u3002\uFF1B\u3001]{1,50}\u800c\u53f3\u624b[^\uFF0C\u3002\uFF1B\u3001]{1,50})\1", r"\1", final)
     final = re.sub(r"\s+", "", final)
     return final.strip(" ，。；、")
 
 
 def _tg_clothing_family_label(clothing_text: str) -> str:
     text = str(clothing_text or "")
+    if _tg_request_has_swimwear_intent(text):
+        return "swimwear"
     if re.search(r"空乘|空姐|空服|制服", text):
         return "uniform"
     if re.search(r"护士|護理|护理", text):
         return "nurse"
+    if re.search(r"围裙|圍裙", text):
+        return "apron"
     if re.search(r"睡裙|吊带裙|吊帶裙|连衣裙|連衣裙|裙装|裙裝", text):
         return "dress"
     if re.search(r"浴袍|睡袍|袍", text):
@@ -10463,6 +11054,8 @@ def _tg_clothing_family_label(clothing_text: str) -> str:
         return "shirt"
     if re.search(r"短裙|窄裙|包臀|裙", text):
         return "skirt"
+    if re.search(r"瑜伽裤|瑜伽褲|裤|褲|leggings", text, re.IGNORECASE):
+        return "pants"
     if re.search(r"T恤|上衣", text, re.IGNORECASE):
         return "top"
     return "other"
@@ -10488,6 +11081,9 @@ def _tg_request_default_clothing(
     recent_families: list[str] | None = None,
 ) -> str:
     text = f"{request_text} {subject_text}"
+    explicit_swimwear = _tg_request_explicit_swimwear_clothing(text)
+    if explicit_swimwear:
+        return explicit_swimwear
     if re.search(r"空姐|乘务|乘務|空服|飞机|飛機|机舱|機艙", text):
         return _tg_pick_clothing_variant(
             text,
@@ -10604,14 +11200,14 @@ def _tg_request_has_explicit_clothing(request_text: str) -> bool:
     text = str(request_text or "")
     return bool(
         re.search(
-            r"穿着|穿著|服装|服裝|衣服|衣着|衣著|衬衫|襯衫|制服|短裙|长裙|長裙|裙|裤|褲|内衣|內衣|睡裙|吊带|吊帶|浴袍|开衫|開衫|外套|上衣|下装|下裝|丝袜|絲襪|高跟鞋",
+            r"穿着|穿著|服装|服裝|衣服|衣着|衣著|衬衫|襯衫|制服|短裙|长裙|長裙|裙|围裙|圍裙|裤|褲|瑜伽裤|瑜伽褲|内衣|內衣|睡裙|吊带|吊帶|浴袍|开衫|開衫|外套|上衣|下装|下裝|丝袜|絲襪|高跟鞋",
             text,
         )
     )
 
 
 _TG_CONCRETE_CLOTHING_COLOR_PATTERN = re.compile(
-    r"黑色|白色|灰色|深灰色|浅灰色|淺灰色|米白色|米色|红色|紅色|蓝色|藍色|深蓝色|深藍色|浅蓝色|淺藍色|海军蓝|海軍藍|绿色|綠色|黄色|黃色|粉色|浅粉色|淺粉色|紫色|棕色|咖啡色|卡其色|奶油色|藏青色|银色|銀色|金色|酒红色|酒紅色|墨绿色|墨綠色|天蓝色|天藍色",
+    r"黑色|白色|灰色|深灰色|浅灰色|淺灰色|米白色|米色|肉色|裸色|肤色|膚色|透明|半透明|红色|紅色|蓝色|藍色|深蓝色|深藍色|浅蓝色|淺藍色|海军蓝|海軍藍|绿色|綠色|黄色|黃色|粉色|浅粉色|淺粉色|紫色|棕色|咖啡色|卡其色|奶油色|藏青色|银色|銀色|金色|酒红色|酒紅色|墨绿色|墨綠色|天蓝色|天藍色",
     re.IGNORECASE,
 )
 
@@ -10716,6 +11312,10 @@ def _tg_strip_clothing_state_from_base(text: str) -> str:
 
 def _tg_default_lower_clothing_state_for_text(clothing_text: str) -> str:
     text = str(clothing_text or "")
+    if _tg_request_has_swimwear_intent(text):
+        return ""
+    if re.search(r"丝袜|絲襪|高跟鞋|靴", text) and not re.search(r"草裙|短裙|长裙|長裙|裙|围裙|圍裙|裤|褲|瑜伽裤|瑜伽褲|下装|下裝|裤腰|褲腰|内裤|內褲|底裤|底褲", text):
+        return ""
     if re.search(r"T恤|长上衣|長上衣|长款上衣|長款上衣|针织长上衣|針織長上衣|浴袍|睡袍|袍|宽松上衣|寬鬆上衣", text, re.IGNORECASE):
         return "衣摆向上掀起"
     if re.search(r"内裤|內褲|底裤|底褲", text):
@@ -10731,6 +11331,10 @@ def _tg_default_lower_clothing_state_for_text(clothing_text: str) -> str:
 
 def _tg_default_upper_clothing_state_for_text(clothing_text: str) -> str:
     text = str(clothing_text or "")
+    if _tg_request_has_swimwear_intent(text):
+        return ""
+    if not re.search(r"衬衫|襯衫|上衣|制服|衣襟|前襟|领口|領口|胸衣|内衣|內衣|吊带|吊帶|睡裙|吊带裙|吊帶裙|T恤|长上衣|長上衣|针织长上衣|針織長上衣|宽松上衣|寬鬆上衣|皮衣|女仆装|女僕裝|和服|汉服|漢服", text, re.IGNORECASE) and re.search(r"草裙|裙|裤|褲|丝袜|絲襪|高跟鞋|靴", text):
+        return ""
     if re.search(r"吊带|吊帶|背心|睡裙|吊带裙|吊帶裙", text):
         return "肩带自然滑落"
     if re.search(r"T恤|长上衣|長上衣|针织长上衣|針織長上衣|宽松上衣|寬鬆上衣|上衣", text, re.IGNORECASE):
@@ -10757,6 +11361,20 @@ def _insert_unique_tg_clause(clauses: list[str], index: int, value: str) -> None
     clauses.insert(index, cleaned)
 
 
+def _tg_payload_is_non_r18_free_image(payload: dict[str, Any] | None) -> bool:
+    source = payload if isinstance(payload, dict) else {}
+    profile = str(source.get("tg_prompt_safety_profile") or source.get("tg_content_branch") or "").strip().lower()
+    if profile in {"nonr18", "non_r18", "free", "free_group", "nonr18_free"}:
+        return True
+    if _to_bool(source.get("tg_no_r18_exposure"), False):
+        return True
+    task_source = str(source.get("source") or "").strip().lower()
+    if task_source == "telegram-generated-post-image-candidates":
+        return True
+    context = str(source.get("tg_generation_context") or "").strip().lower()
+    return context.startswith("generated-post image candidates")
+
+
 def _ensure_tg_image_user_request_anchors(prompt_text: str, original_request: str, payload: dict[str, Any] | None) -> str:
     text = _strip_prompt_response_wrappers(prompt_text)
     request = _strip_prompt_response_wrappers(original_request)
@@ -10764,8 +11382,10 @@ def _ensure_tg_image_user_request_anchors(prompt_text: str, original_request: st
         return text
     random_nonce = str(payload.get("_tg_prompt_random_nonce") or "") if isinstance(payload, dict) else ""
     needs_lower = _tg_request_should_probably_include_lower_exposure(request, random_nonce)
-    needs_upper = True
-    needs_manual_lower_action = _tg_request_has_manual_lower_action(request)
+    non_r18_free = _tg_payload_is_non_r18_free_image(payload)
+    needs_upper = not non_r18_free
+    needs_lower = needs_lower and not non_r18_free
+    needs_manual_lower_action = _tg_request_has_manual_lower_action(request) and not non_r18_free
     if not needs_upper and not needs_lower and not needs_manual_lower_action:
         return text
 
@@ -11016,28 +11636,179 @@ def _tg_build_subject_segment(anchor: str, subject: str, pose_scene: str) -> str
     return f"一名{anchor}的{subject}{pose_scene}"
 
 
+def _tg_normalize_requirement_garment_label(value: Any) -> str:
+    text = _tg_clean_clothing_requirement_text(value)
+    if not text:
+        return ""
+    text = re.sub("(?i)\\bjk(?=(?:\u88d9|\u5236\u670d|\u670d|$))", "JK", text)
+    text = text.replace("\uff4a\uff4b", "JK").replace("\uff2a\uff2b", "JK")
+    return text.strip(" \uFF0C\u3002\uFF1B\u3001")
+
+
+def _tg_split_requirement_clothing_state(value: Any) -> tuple[str, list[str]]:
+    state = _tg_clean_requirement_analysis_text(value, 48)
+    if not state:
+        return "", []
+    inline_parts: list[str] = []
+    detail_parts: list[str] = []
+    for raw in re.split("[\uFF0C\u3001,;/\uFF1B]+", state):
+        part = raw.strip(" \uFF0C\u3002\uFF1B\u3001")
+        if not part:
+            continue
+        if re.search("\u7834\u6d1e|\u7834\u635f|\u7834\u640d|\u6495\u88c2|\u88c2\u53e3|\u5f00\u53e3|\u958b\u53e3|\u955c\u7a7a|\u93e4\u7a7a|\u78e8\u635f|\u78e8\u640d", part):
+            detail_parts.append(part)
+        elif re.search("\u900f\u660e|\u534a\u900f\u660e|\u8584\u900f|\u900f\u89c6|\u900f\u8996|\u7d27\u8eab|\u7dca\u8eab|\u4fee\u8eab|\u8d34\u8eab|\u8cbc\u8eab", part):
+            inline_parts.append(part)
+        else:
+            detail_parts.append(part)
+    inline_text = "".join(dict.fromkeys(inline_parts))
+    unique_details = list(dict.fromkeys(detail_parts))
+    return inline_text, unique_details
+
+
+def _tg_infer_requirement_clothing_structure(garment: str, color: str = "", material: str = "", state: str = "") -> str:
+    text = f"{garment} {color} {material} {state}"
+    if not str(garment or "").strip():
+        return ""
+    patterns: list[tuple[str, str]] = [
+        ("JK\\s*\u88d9|\u5236\u670d\u88d9|\u767e\u8936\u88d9|\u683c\u88d9", "\u767e\u8936\u6821\u670d\u77ed\u88d9\u6b3e\u5f0f"),
+        ("\u745c\u4f3d\u88e4|\u745c\u4f3d\u8932|\u6253\u5e95\u88e4|\u6253\u5e95\u8932|leggings", "\u8d34\u8eab\u5f39\u529b\u88e4\u578b"),
+        ("\u4e1d\u889c|\u7d72\u896a|\u957f\u889c|\u9577\u896a|stocking", "\u8d34\u817f\u8584\u900f\u889c\u6b3e"),
+        ("\u56f4\u88d9|\u570d\u88d9", "\u7cfb\u5e26\u56f4\u88f9\u6b3e\u5f0f"),
+        ("\u8349\u88d9", "\u6d41\u82cf\u77ed\u88d9\u6b3e\u5f0f"),
+        ("\u65d7\u888d", "\u7acb\u9886\u659c\u895f\u4fee\u8eab\u6b3e\u5f0f"),
+        ("\u8fde\u8863\u88d9|\u9023\u8863\u88d9|\u540a\u5e26\u88d9|\u540a\u5e36\u88d9|\u7761\u88d9", "\u4e00\u4f53\u5f0f\u88d9\u88c5\u6b3e\u5f0f"),
+        ("\u665a\u793c\u670d|\u665a\u79ae\u670d|\u793c\u670d|\u79ae\u670d", "\u4fee\u8eab\u957f\u88d9\u793c\u670d\u6b3e\u5f0f"),
+        ("\u77ed\u88d9|\u7a84\u88d9|\u5305\u81c0\u88d9|\u88d9", "\u77ed\u88d9\u6b3e\u5f0f"),
+        ("\u886c\u886b|\u896f\u886b|\u886b", "\u6709\u8863\u9886\u548c\u524d\u895f\u7684\u886c\u886b\u6b3e\u5f0f"),
+        ("\u5236\u670d|\u5916\u5957|\u5939\u514b|\u593e\u514b|\u897f\u88c5|\u897f\u88dd", "\u4fee\u8eab\u4e0a\u88c5\u6b3e\u5f0f"),
+        ("\u6cf3\u8863|\u6cf3\u88dd|\u6bd4\u57fa\u5c3c|bikini", "\u5206\u4f53\u6cf3\u88c5\u6b3e\u5f0f"),
+        ("\u5185\u8863|\u5167\u8863|bra|lingerie", "\u8d34\u8eab\u5185\u8863\u6b3e\u5f0f"),
+        ("T\\s*\u6064|\u4e0a\u8863|\u80cc\u5fc3|\u540a\u5e26|\u540a\u5e36", "\u8d34\u8eab\u4e0a\u8863\u6b3e\u5f0f"),
+        ("\u88e4|\u8932", "\u8d34\u8eab\u88e4\u88c5\u6b3e\u5f0f"),
+    ]
+    for pattern, detail in patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return detail
+    return "\u6b3e\u5f0f\u6e05\u695a"
+
+def _tg_requirement_clothing_structure_detail(garment: str, structure: Any, *, color: str = "", material: str = "", state: str = "") -> str:
+    garment = _tg_normalize_requirement_garment_label(garment)
+    if not garment:
+        return ""
+    detail = _tg_clean_requirement_analysis_text(structure, 64)
+    if detail and not re.search("[\u4e00-\u9fff]", detail):
+        detail = ""
+    if detail:
+        detail = re.split(r"[\uFF0C\u3002\uFF1B\u3001,;]", detail, maxsplit=1)[0].strip()
+        detail = re.sub(r"(\u8f6e\u5ed3|\u8f2a\u5ed3|\u7ed3\u6784|\u7d50\u69cb|\u526a\u88c1)", "\u6b3e\u5f0f", detail)
+        detail = re.sub(r"(\u7ebf\u6761|\u7dda\u689d|\u8fb9\u7f18|\u908a\u7de3)[^\uFF0C\u3002\uFF1B\u3001,;]{0,12}(\u6e05\u695a|\u53ef\u89c1|\u53ef\u898b)", "", detail)
+        detail = re.sub(r"(\u6e05\u695a|\u6e05\u6670|\u81ea\u7136\u53ef\u89c1|\u81ea\u7136\u53ef\u898b)$", "", detail).strip(" \uFF0C\u3002\uFF1B\u3001")
+    if not detail:
+        detail = _tg_infer_requirement_clothing_structure(garment, color, material, state)
+    if not detail:
+        return ""
+    detail = re.sub("^(\u7ed3\u6784|\u7d50\u69cb|\u6b3e\u5f0f|\u6837\u5f0f|\u6a23\u5f0f|\u7248\u578b|\u526a\u88c1)[:\uff1a]?", "", detail).strip(" \uFF0C\u3002\uFF1B\u3001")
+    if garment not in detail:
+        detail = f"{garment}\u4e3a{detail}"
+    return _tg_clean_requirement_analysis_text(detail, 48)
+
+
+def _tg_requirement_analysis_clothing_visual_parts(analysis: dict[str, Any] | None) -> tuple[str, list[str]]:
+    if not isinstance(analysis, dict):
+        return "", []
+    items = analysis.get("clothing_items")
+    if not isinstance(items, list) or not items:
+        return "", []
+    base_items: list[str] = []
+    detail_clauses: list[str] = []
+
+    def add_base(value: str) -> None:
+        cleaned = _tg_normalize_requirement_garment_label(value)
+        if not cleaned:
+            return
+        key = re.sub("[\uFF0C\u3002\uFF1B\u3001,;\\s]", "", cleaned).lower()
+        if key and not any(key == re.sub("[\uFF0C\u3002\uFF1B\u3001,;\\s]", "", item).lower() for item in base_items):
+            base_items.append(cleaned)
+
+    def add_detail(garment: str, detail: str) -> None:
+        garment = _tg_normalize_requirement_garment_label(garment)
+        detail = _tg_clean_requirement_analysis_text(detail, 48)
+        if not detail:
+            return
+        if garment and garment not in detail:
+            if re.search("\u7834\u6d1e|\u7834\u635f|\u7834\u640d|\u6495\u88c2|\u88c2\u53e3|\u5f00\u53e3|\u958b\u53e3|\u955c\u7a7a|\u93e4\u7a7a|\u78e8\u635f|\u78e8\u640d", detail):
+                if re.search("\u5e26\u6709|\u5e36\u6709|\u7ec6\u8282|\u7d30\u7bc0", detail):
+                    detail = f"{garment}{detail}"
+                else:
+                    detail = f"{garment}\u5e26\u6709{detail}\u7ec6\u8282"
+            else:
+                detail = f"{garment}{detail}"
+        detail = _tg_clean_requirement_analysis_text(detail, 64)
+        key = re.sub("[\uFF0C\u3002\uFF1B\u3001,;\\s]", "", detail).lower()
+        if key and not any(key == re.sub("[\uFF0C\u3002\uFF1B\u3001,;\\s]", "", item).lower() for item in detail_clauses):
+            detail_clauses.append(detail)
+
+    for item in items[:6]:
+        if isinstance(item, dict):
+            garment = _tg_normalize_requirement_garment_label(item.get("garment") or item.get("name") or item.get("type"))
+            if not garment:
+                continue
+            color = _tg_clean_requirement_analysis_text(item.get("color"), 16)
+            material = _tg_clean_requirement_analysis_text(item.get("material"), 20)
+            if material and (material in garment or garment in material):
+                material = ""
+            if color and garment.startswith(color):
+                color = ""
+            raw_state = item.get("state")
+            inline_state, detail_states = _tg_split_requirement_clothing_state(raw_state)
+            descriptor = "".join(part for part in (color, material, inline_state, garment) if part)
+            add_base(descriptor or garment)
+            structure_detail = _tg_requirement_clothing_structure_detail(garment, item.get("structure") or item.get("style") or item.get("detail"), color=color, material=material, state=str(raw_state or ""))
+            if structure_detail:
+                add_detail(garment, structure_detail)
+            for state in detail_states:
+                add_detail(garment, state)
+        else:
+            add_base(str(item or ""))
+    return "\u548c".join(base_items[:5]), detail_clauses[:5]
+
 def _tg_prompt_clothing_clause(
     clauses: list[str],
     original_request: str = "",
     subject_text: str = "",
     random_nonce: str = "",
     recent_clothing_families: list[str] | None = None,
+    requirement_analysis: dict[str, Any] | None = None,
 ) -> str:
     text = "，".join(clauses)
+    analysis_clothing, analysis_clothing_details = _tg_requirement_analysis_clothing_visual_parts(requirement_analysis)
+    if not analysis_clothing:
+        analysis_clothing = _tg_requirement_analysis_clothing_clause(requirement_analysis)
+    request_clothing = analysis_clothing or _tg_request_explicit_clothing_clause(original_request)
+    if request_clothing == "\u672a\u7a7f\u8863\u7269":
+        return request_clothing
     if re.search(r"全裸|裸体|裸身|不穿衣|不着衣|未穿衣|无衣物遮体|無衣物遮體", text):
         return "未穿衣物"
     clothing_base = _first_tg_clause_matching(
         clauses,
         r"穿着|穿著|衬衫|襯衫|制服|短裙|长裙|長裙|裙|内衣|內衣|睡裙|吊带|吊帶|浴袍",
     )
-    clothing = clothing_base
+    if (
+        request_clothing
+        and clothing_base
+        and _tg_clothing_has_concrete_color(clothing_base)
+        and not _tg_clothing_has_concrete_color(request_clothing)
+    ):
+        request_clothing = clothing_base
+    clothing = request_clothing or clothing_base
     if clothing and re.search(r"性器官|阴部|陰部|阴唇|陰唇|乳房|乳头|乳頭", clothing):
         clothing = re.sub(r"[^，。；、]*(?:性器官|阴部|陰部|阴唇|陰唇|乳房|乳头|乳頭)[^，。；、]*", "", clothing)
     clothing = re.sub(r"^穿着", "", clothing)
     clothing = re.sub(r"^穿著", "", clothing)
     clothing = re.sub(r"(她的左手|而右手|她的身体|她的头|背景|光线|浅景深).*$", "", clothing).strip(" ，。；、")
     clothing = re.sub(r"^(服装|服裝|衣服|衣着|衣著)(?:状态|狀態)?[:：]?", "", clothing).strip()
-    request_has_clothing = _tg_request_has_explicit_clothing(original_request)
+    request_has_clothing = _tg_request_has_explicit_clothing(original_request) or bool(request_clothing)
     randomized_clothing = False
     if clothing and random_nonce and not request_has_clothing:
         clothing = _tg_request_default_clothing(original_request, subject_text, random_nonce, recent_clothing_families)
@@ -11048,7 +11819,7 @@ def _tg_prompt_clothing_clause(
     lower_state = ""
     if re.search(r"衬衫|襯衫|上衣|制服|衣襟|前襟|领口|領口|胸衣|内衣|內衣|吊带|吊帶", clothing):
         upper_state = _tg_normalize_upper_clothing_state(clothing)
-    if re.search(r"短裙|长裙|長裙|裙|裤|褲|下装|下裝|裤腰|褲腰|裙摆|裙襬|内裤|內褲|底裤|底褲", clothing):
+    if re.search(r"短裙|长裙|長裙|裙|围裙|圍裙|裤|褲|瑜伽裤|瑜伽褲|下装|下裝|裤腰|褲腰|裙摆|裙襬|内裤|內褲|底裤|底褲", clothing):
         if re.search(r"上掀|掀起|上撩|撩起|上拉|拉起|上移", clothing):
             lower_state = _tg_default_lower_clothing_state_for_text(clothing)
         elif re.search(r"下拉|褪下|脱下|脫下", clothing):
@@ -11062,6 +11833,10 @@ def _tg_prompt_clothing_clause(
         base = _tg_request_default_clothing(original_request, subject_text, random_nonce, recent_clothing_families)
     base = _tg_ensure_concrete_clothing_color(base, f"{original_request}|{subject_text}|{random_nonce}")
     parts = [f"穿着{base}"]
+    for detail_clause in analysis_clothing_details:
+        cleaned_detail = str(detail_clause or "").strip(" \uFF0C\u3002\uFF1B\u3001")
+        if cleaned_detail and cleaned_detail not in parts:
+            parts.append(cleaned_detail)
     upper_state_clause = _first_tg_clause_matching(clauses, r"上衣前襟完全敞开|前襟敞开|前襟敞開|领口下滑|領口下滑|肩带滑落|肩帶滑落|胸口敞开|胸口敞開|半透明|薄透|透视|透視")
     lower_state_allowed = _tg_request_should_probably_include_lower_exposure(original_request, random_nonce) or _tg_request_has_explicit_lower_clothing_state(original_request)
     lower_state_clause = (
@@ -11139,6 +11914,10 @@ def _tg_prompt_head_clause(clauses: list[str], original_request: str = "", rando
 
 
 def _tg_prompt_background_clause(clauses: list[str], pose_scene: str) -> str:
+    if re.search(r"泳池|游泳池|pool", pose_scene, re.IGNORECASE):
+        return "背景是泳池边环境"
+    if re.search(r"海边|海邊|海滩|海灘|沙滩|沙灘|海岸|beach|seaside", pose_scene, re.IGNORECASE):
+        return "背景是海边度假环境"
     background = _first_tg_clause_matching(clauses, r"^背景|^场景|^場景")
     if not background:
         background_candidates = [
@@ -11181,6 +11960,8 @@ def _tg_prompt_quality_clause(clauses: list[str]) -> str:
 
 def _tg_clothing_implies_breast_exposure(clothing_clause: str) -> bool:
     text = str(clothing_clause or "")
+    if _tg_request_has_swimwear_intent(text):
+        return True
     has_upper = bool(re.search(r"衬衫|襯衫|上衣|制服|衣襟|前襟|领口|領口|胸衣|内衣|內衣|吊带|吊帶", text))
     has_open = bool(re.search(r"全部敞开|全部敞開|完全敞开|完全敞開|大敞|敞开|敞開|解开|解開|拉开|拉開|半开|半開", text))
     return has_upper and has_open
@@ -11188,7 +11969,7 @@ def _tg_clothing_implies_breast_exposure(clothing_clause: str) -> bool:
 
 def _tg_clothing_implies_genital_exposure(clothing_clause: str) -> bool:
     text = str(clothing_clause or "")
-    has_lower = bool(re.search(r"短裙|长裙|長裙|裙|裤|褲|下装|下裝|裤腰|褲腰|裙摆|裙襬|衣摆|衣擺|下摆|下擺|内裤|內褲|底裤|底褲|浴袍|睡袍|T恤|长上衣|長上衣", text, re.IGNORECASE))
+    has_lower = bool(re.search(r"短裙|长裙|長裙|裙|围裙|圍裙|裤|褲|瑜伽裤|瑜伽褲|下装|下裝|裤腰|褲腰|裙摆|裙襬|衣摆|衣擺|下摆|下擺|内裤|內褲|底裤|底褲|浴袍|睡袍|T恤|长上衣|長上衣", text, re.IGNORECASE))
     has_open = bool(re.search(r"短裙向上掀起|裙摆向上掀起|裙擺向上掀起|衣摆向上掀起|衣擺向上掀起|下摆向上掀起|下擺向上掀起|下装向下拉开|裤腰向下拉开|内裤边缘自然拉开|内裤拉开|上掀|掀起|上撩|撩起|上拉|拉起|上移|下拉|褪下|脱下|脫下", text))
     return has_lower and has_open
 
@@ -11244,6 +12025,8 @@ def _tg_prompt_exposure_clause(
     clothing_clause: str = "",
     original_request: str = "",
 ) -> str:
+    if _tg_payload_is_non_r18_free_image(payload):
+        return ""
     exposure_parts: list[str] = []
     request_text = _strip_prompt_response_wrappers(original_request)
     random_nonce = str(payload.get("_tg_prompt_random_nonce") or "") if isinstance(payload, dict) else ""
@@ -11320,13 +12103,17 @@ def _canonicalize_tg_image_nine_segment_prompt(
             segment_1 = _tg_build_subject_segment(anchor, subject, pose_scene)
     else:
         segment_1 = _tg_build_subject_segment(anchor, subject, pose_scene)
-    segment_2 = _tg_prompt_clothing_clause(clauses, original_request, text, random_nonce, recent_clothing_families)
+    segment_2 = _tg_prompt_clothing_clause(clauses, original_request, text, random_nonce, recent_clothing_families, _tg_requirement_analysis_from_payload(payload))
+    non_r18_free = _tg_payload_is_non_r18_free_image(payload)
     segment_3 = _tg_prompt_exposure_clause(clauses, payload, segment_2, original_request)
-    if not segment_3:
+    if non_r18_free:
+        segment_3 = "服装贴合场景并保持完整自然"
+    elif not segment_3:
         if not _tg_clothing_implies_breast_exposure(segment_2):
             segment_2 = f"{segment_2}，上衣前襟自然敞开"
         segment_3 = _tg_prompt_exposure_clause(clauses, payload, segment_2, original_request)
-    segment_2 = _tg_ensure_clothing_state_matches_exposure(segment_2, segment_3)
+    if not non_r18_free:
+        segment_2 = _tg_ensure_clothing_state_matches_exposure(segment_2, segment_3)
     left_right_clauses = _tg_prompt_matching_clauses(clauses, r"她的左手|左手|而右手|右手", max_items=2)
     left_right = _tg_join_unique_prompt_clauses(left_right_clauses, max_items=2)
     request_hand_action = _tg_request_hand_action(original_request, random_nonce)
@@ -11552,7 +12339,7 @@ def _build_tg_internal_reasoning_layers(prompt_chain: str) -> list[str]:
     ]
 
 
-def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str, str]:
+def _build_tg_prompt_system_prompt(task_type: str, task_label: str, *, non_r18_free: bool = False) -> tuple[str, str]:
     typ = str(task_type or "").strip()
     prompt_chain = "image" if typ in _TG_IMAGE_PROMPT_TYPES else "video"
     if typ in {"single_image_edit", "get_nano_banana", "face_swap"}:
@@ -11578,27 +12365,52 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str) -> tuple[str
         ]
         return "\n".join(edit_rules), "image"
     internal_reasoning_layers = _build_tg_internal_reasoning_layers(prompt_chain)
+    if non_r18_free:
+        image_segment_rule = (
+            "CRITICAL FORMAT RULE - NATURAL ORDERED SEGMENTS: The prompt MUST be one continuous natural Chinese sentence, using Chinese commas (，) to connect the clauses. "
+            "Use at least these 9 ordered content blocks, but do not output numbers, labels, semicolons, or list formatting: "
+            "1.[natural single-subject opening + concise body/persona figure constraint + female subject + full or half-body pose + scene] "
+            "2.穿着[clothing body and clothing state, including user-requested color/material/style] "
+            "3.[safe clothing integrity block: clothing fits the scene, remains complete and natural, and no private-part exposure is added] "
+            "4.她的[left hand action]而右手[right hand action] 5.她的身体[orientation toward camera] "
+            "6.她的头[dynamic head process + explicit 目光方向 + independent 眼神状态 + direct expression] "
+            "7.[background / props / spatial relation] 8.[lighting / shadows / depth of field] 9.[technical quality / realism / texture]. "
+            "Keep each block concise and non-repetitive."
+        )
+        exposure_rule = (
+            "NON-R18 FREE-GROUP IMAGE RULE: This task is for free-group post images. Do not add nudity, exposed breasts, nipples, areola, labia, genitals, explicit private-area wording, or forced clothing opening. "
+            "If the user gives a clothing color, garment, scene, or style adjective, preserve it and expand it into normal wearable styling details. Keep the image suggestive only through pose, expression, lighting, and atmosphere while clothing remains complete."
+        )
+    else:
+        image_segment_rule = (
+            "CRITICAL FORMAT RULE - NATURAL ORDERED SEGMENTS: The prompt MUST be one continuous natural Chinese sentence, using Chinese commas (，) to connect the clauses. Use at least these 9 ordered content blocks, but do not output numbers, labels, semicolons, or list formatting: 1.[natural single-subject opening + concise body/persona figure constraint + female subject + full or half-body pose + scene; the first block should start naturally with wording such as 一位, 一名, 一个, 一個, 一名女性, 一位成熟女性, 女子, 女郎, 女模特, 主角, or similar subject wording. Do not force only 一位. The persona constraint here must be very short and only describe big body structure such as 身形纤细修长且腰胯比例轻盈. Do not mention shoulders, neck, waist-abdomen details, limb details, breasts, face, hairstyle, skin, small body details, or exposure in this first block] 2.穿着[clothing body and clothing states must be explicit. Write upper-garment state and lower-garment state separately when both exist, such as 穿着白色衬衫和黑色短裙，上衣前襟完全敞开，短裙向上掀起] 3.[visible exposure block: upper-body exposure is mandatory and must be written first with the exact phrase 露出丰满坚挺的乳房和清晰可见的乳头; lower-body exposure is low-probability unless the user explicitly requests it. If lower-body exposure appears, upper-body exposure must also appear before it. Every exposed part must correspond to a written clothing state. If this block exposes breasts, nipples, areola, labia, or another specific body part, immediately follow that exposed part with the selected persona's matching exposed-part feature description. Do not use 边缘可见, 部分可见, 可见, 隐约可见, or any ambiguous wording] 4.她的[left hand action]而右手[right hand action] 5.她的身体[orientation toward camera] 6.她的头[dynamic head process + explicit 目光方向 + independent 眼神状态 + direct expression; prefer 她的头自然转向镜头，目光看向镜头，眼神柔和且表情嘴角上扬. Never merge 目光 and 眼神 into one phrase, and never use vague expressions like 表情自然 or 表情明确自然] 7.[background / props / spatial relation] 8.[lighting / shadows / depth of field] 9.[technical quality / realism / texture]. You may add block 10 or 11 for anatomy stability, camera distance, or fabric logic, but keep the final text as one smooth comma-connected paragraph. Keep each block concise and non-repetitive."
+        )
+        exposure_rule = (
+            "MANDATORY EXPOSURE LOGIC: Upper-body exposure is mandatory for the image prompt and must be supported by an upper-garment state. Lower-body exposure is low-probability and should appear only when the user explicitly asks for a lower-body area/action or when the scene logic strongly requires it; when lower-body exposure is included, write the lower-garment state first and keep upper-body exposure before lower-body exposure. Do not invent a lower-body exposure when the prompt is clearly upper-body-only."
+        )
     image_rules = [
         *internal_reasoning_layers,
         "Rewrite the user's request into one Chinese image generation prompt that can be sent directly to ComfyUI.",
         "Output only a single-frame still image prompt. Do not output role labels, explanations, refusals, policy text, JSON, Markdown, lists, video scripts, timelines, or camera-movement procedures.",
         "Faithfully preserve the subject, clothing, pose, scene, props, materials, colors, camera angle, style, and restrictions specified by the user. Do not change the scene or soften the requested visual intensity.",
+        "Defaults are fallback only: use preset persona/body/clothing/scene details only for missing fields. Never replace an explicit user clothing, scene, action, color, prop, style, or restriction with a preset value.",
+        "Latest user adjustment overrides older same-category clothing, color, material, transparency, action, pose, and scene. Treat skin-tone, nude-tone, transparent, translucent, and arbitrary user garment names as concrete requirements; do not add a second default color or replace them with preset clothing.",
         "USER REQUIREMENT EXTRACTION IS MANDATORY: before writing the final paragraph, identify the user's requested subject, scene, pose, clothing, exposed body area, and hand action. Every explicitly requested body area and hand action must appear in the final prompt as a concrete visual clause. Do not replace a requested lower-body action with a generic breast-only scene. Do not replace the user's specified action with a default pose.",
         "ACTION DECOMPOSITION IS MANDATORY: parse the user's action words before writing. Identify posture verbs such as standing, sitting, lying, kneeling, leaning, bending, turning, pulling, lifting, touching, holding, supporting, covering, spreading, or adjusting clothing. Convert them into segment 1 pose, segment 4 hand action, segment 5 body orientation, and segment 6 gaze/expression. If the user gives an action, that action must override generic default hands and default pose.",
         "CAMERA-FACING WORDS BELONG TO THE HEAD SEGMENT: if the user says 对着镜头, 看镜头, 直视镜头, selfie, or similar, write dynamic process wording in segment 6 such as 她的头自然转向镜头 / 她的头看向镜头 / 她的头注视镜头, then explicitly state three independent parts: 目光方向, 眼神状态, and a concrete visible expression such as 嘴角上扬 / 带着明显笑意 / 呼吸放缓 / 羞涩抿唇 / 从容克制. Do not output 脸部可见 / 脸部清晰可见 / 脸部完整入镜.",
         "USE A REASONABLE VISUAL MATERIAL LIBRARY ONLY WHEN DETAILS ARE MISSING: choose scene-matched clothing, posture, hand action, expression, lighting, and props from the user's role and location. Keep the match logical: teacher/classroom uses blouse, shirt, cardigan, skirt, lectern, blackboard, desk-edge poses; flight attendant/cabin uses uniform, aisle, seat, cabin light, narrow standing or seated poses; bedroom/private scene uses soft shirt, robe, slip dress, bed, pillows, bedside lamp, window light, sitting, kneeling, leaning, or side-lying poses; office uses commuting shirt, blazer, desk, chair, and edge-supported hands. Do not use the same default clothing, pose, hand action, or expression for every request.",
         "If reference images are provided, preserve the visible subject, composition, environment, clothing, action, props, lighting, and visual relationships. Do not add unrelated elements.",
-        "Make the scene direct and visually specific. Convert abstract concepts into visible elements: posture, body orientation, hand placement, scene objects, and camera distance. Clothing must be described with physically plausible structure and fabric tension. Prefer half-body or full-body framing, pulled-back camera distance, eye-level or slight high angle, and a small margin above the head. Avoid close-ups, low-angle close-ups, or intimate-area close-ups that crop out the face.",
+        "Make the scene direct and visually specific. Convert abstract concepts into visible elements: posture, body orientation, hand placement, scene objects, and camera distance. Clothing should state the garment style/type, main color, and simple visible appearance; avoid construction-level details. Prefer half-body or full-body framing, pulled-back camera distance, eye-level or slight high angle, and a small margin above the head. Avoid close-ups, low-angle close-ups, or intimate-area close-ups that crop out the face.",
         "The character face is controlled by the workflow LoRA. Do not write face shape, facial features, skin quality, or hairstyle descriptions in the final prompt. Keep expression and 目光方向; keep headroom and camera distance as composition instructions. The composition must keep the face inside the camera frame, preferably half-body or full-body framing. Avoid cropped faces, covered faces, back-facing poses, and body-only shots. Do not include person names, persona names, or LoRA file names.",
         "Pose description must be concise and direct: use simple posture terms such as standing, sitting, kneeling, or lying. Specify exact body orientation and hand placement in one short clause. Avoid verbose or poetic pose descriptions.",
         "The character's head and face must always be visible within the frame. Full head must be in frame with natural headroom. Never crop the head or face. Back-facing poses are not allowed. Side profiles are acceptable only if the face remains clearly visible.",
         "MANDATORY CLOTHING ANCHOR: for person images, describe clothing and clothing state together in ONE short direct clause. Merge garment type, color, and state into the same phrase, such as 穿着前襟敞开的白色衬衫和黑色短裙. Do not write clothing first and then a separate clothing-state clause. Do not leave clothing as vague words like beautiful outfit, sexy outfit, fashion style, or clothing state only.",
         "If the user explicitly requests no clothing, nude body, or unclothed appearance, do not add garment colors or garment structures. In that case describe the no-clothing state directly and keep the body-shape anchor separate from clothing.",
-        "Keep clothing logic physically plausible. Use intact garments with normal seams, gravity, and fabric tension. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings. If the user explicitly asks for damaged clothing, the damage must still follow fabric tension and pulling direction.",
-        "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple, physically plausible, and merged with the garment in one direct clause; do not repeat garment structure details across the prompt.",
-        "Keep the final prompt compact and reusable: persona body positive constraints, body posture, hand placement, body orientation, one clear clothing color, one simple clothing structure, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
-        "CRITICAL FORMAT RULE - NATURAL ORDERED SEGMENTS: The prompt MUST be one continuous natural Chinese sentence, using Chinese commas (，) to connect the clauses. Use at least these 9 ordered content blocks, but do not output numbers, labels, semicolons, or list formatting: 1.[natural single-subject opening + concise body/persona figure constraint + female subject + full or half-body pose + scene; the first block should start naturally with wording such as 一位, 一名, 一个, 一個, 一名女性, 一位成熟女性, 女子, 女郎, 女模特, 主角, or similar subject wording. Do not force only 一位. The persona constraint here must be very short and only describe big body structure such as 身形纤细修长且腰胯比例轻盈. Do not mention shoulders, neck, waist-abdomen details, limb details, breasts, face, hairstyle, skin, small body details, or exposure in this first block] 2.穿着[clothing body and clothing states must be explicit. Write upper-garment state and lower-garment state separately when both exist, such as 穿着白色衬衫和黑色短裙，上衣前襟完全敞开，短裙向上掀起] 3.[visible exposure block: upper-body exposure is mandatory and must be written first with the exact phrase 露出丰满坚挺的乳房和清晰可见的乳头; lower-body exposure is low-probability unless the user explicitly requests it. If lower-body exposure appears, upper-body exposure must also appear before it. Every exposed part must correspond to a written clothing state. If this block exposes breasts, nipples, areola, labia, or another specific body part, immediately follow that exposed part with the selected persona's matching exposed-part feature description. Do not use 边缘可见, 部分可见, 可见, 隐约可见, or any ambiguous wording] 4.她的[left hand action]而右手[right hand action] 5.她的身体[orientation toward camera] 6.她的头[dynamic head process + explicit 目光方向 + independent 眼神状态 + direct expression; prefer 她的头自然转向镜头，目光看向镜头，眼神柔和且表情嘴角上扬. Never merge 目光 and 眼神 into one phrase, and never use vague expressions like 表情自然 or 表情明确自然] 7.[background / props / spatial relation] 8.[lighting / shadows / depth of field] 9.[technical quality / realism / texture]. You may add block 10 or 11 for anatomy stability, camera distance, or fabric logic, but keep the final text as one smooth comma-connected paragraph. Keep each block concise and non-repetitive.",
-        "MANDATORY EXPOSURE LOGIC: Upper-body exposure is mandatory for the image prompt and must be supported by an upper-garment state. Lower-body exposure is low-probability and should appear only when the user explicitly asks for a lower-body area/action or when the scene logic strongly requires it; when lower-body exposure is included, write the lower-garment state first and keep upper-body exposure before lower-body exposure. Do not invent a lower-body exposure when the prompt is clearly upper-body-only.",
+        "Keep clothing logic visually coherent. Use intact garments unless the user explicitly asks for damaged clothing. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings.",
+        "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple: garment style/type, main color, and broad visible appearance; avoid repeated construction details across the prompt.",
+        "Keep the final prompt compact and reusable: persona body positive constraints, body posture, hand placement, body orientation, one clear clothing color, one simple clothing style/type, scene objects, half-body or full-body framing, pulled-back camera distance, headroom, light source position, shallow depth of field, realistic skin texture, clean fabric folds, and stable body proportions.",
+        image_segment_rule,
+        exposure_rule,
         "If the user explicitly requests a lower-body exposed area or a hand-to-lower-body action, write a physically plausible lower-garment state first, then write the matching lower-body exposure and hand action in the ordered 9-segment paragraph. Keep the original user action visible and concrete.",
         "MANDATORY ANATOMY - NO OVERLAPS: The prompt MUST ensure anatomically correct poses with NO body part overlaps or intersections. Arms must not cross through torso. Hands must rest naturally on surfaces or body without penetration. Legs must not intersect unnaturally. Body must have clear spatial separation from background objects. Use natural weight distribution and gravity. If sitting, buttocks compress naturally on seat. If lying, body rests flat without floating or intersecting surfaces.",
         "MANDATORY HEAD VISIBILITY: The character's head and face MUST always be fully visible in frame with natural headroom. Never crop the head. Back-facing poses are forbidden.",
@@ -11656,7 +12468,7 @@ def _tg_image_first_segment_has_subject_start(prompt_text: str) -> bool:
     return bool(_TG_IMAGE_SUBJECT_START_RE.match(first))
 
 
-def _validate_tg_image_structured_prompt(final_prompt: str) -> None:
+def _validate_tg_image_structured_prompt(final_prompt: str, *, require_erotic: bool = True) -> None:
     text = _strip_prompt_response_wrappers(final_prompt)
     if not text:
         raise RuntimeError("Grok final image prompt is empty; blocked before submission.")
@@ -11667,7 +12479,6 @@ def _validate_tg_image_structured_prompt(final_prompt: str) -> None:
         raise RuntimeError("Grok final image prompt first segment must begin with a natural subject opening; blocked before submission.")
     required_groups: list[tuple[str, tuple[str, ...]]] = [
         ("clothing", ("穿着", "穿著", "服装", "服裝", "上衣", "衬衫", "襯衫", "裙", "睡裙", "制服", "内衣", "內衣", "裸")),
-        ("erotic exposure", ("乳沟", "乳溝", "乳房", "乳头", "乳頭", "胸部", "阴部", "陰部", "阴唇", "陰唇", "私处", "私處", "私密", "性器官", "大腿内侧", "大腿內側")),
         ("left hand action", ("她的左手", "左手")),
         ("right hand action", ("而右手", "右手")),
         ("body orientation", ("她的身体", "她的身體", "身体朝向", "身體朝向", "身体", "身體", "朝向镜头", "朝向鏡頭")),
@@ -11676,6 +12487,11 @@ def _validate_tg_image_structured_prompt(final_prompt: str) -> None:
         ("lighting", ("光线", "光線", "灯光", "燈光", "侧光", "側光", "柔光", "自然光", "阴影", "陰影", "浅景深", "淺景深")),
         ("technical quality", ("写实", "寫實", "摄影", "攝影", "真实", "真實", "质感", "質感", "纹理", "紋理", "高细节", "高細節", "8K", "电影", "電影")),
     ]
+    if require_erotic:
+        required_groups.insert(
+            1,
+            ("erotic exposure", ("乳沟", "乳溝", "乳房", "乳头", "乳頭", "胸部", "阴部", "陰部", "阴唇", "陰唇", "私处", "私處", "私密", "性器官", "大腿内侧", "大腿內側")),
+        )
     missing = [name for name, terms in required_groups if not any(term in text for term in terms)]
     if missing:
         raise RuntimeError(
@@ -11698,6 +12514,17 @@ def _ensure_tg_image_subject_prefix(prompt_text: str) -> str:
     return f"一名{first}{rest}"
 
 
+def _tg_latest_adjustment_segment(value: Any) -> str:
+    text = _clean_tg_prompt_request(value)
+    if not text:
+        return ""
+    matches = list(re.finditer(r"(?:Revision request|最新调整要求|最新調整要求|调整要求|調整要求|修改要求|更改要求|换成|換成|改成|改为|改為)[:：]?\s*", text, re.IGNORECASE))
+    if not matches:
+        return text
+    latest = text[matches[-1].end():].strip(" ，。；、\n\t")
+    return latest or text
+
+
 def _tg_prompt_semantic_request(original_request: str, user_request: str) -> str:
     original = _clean_tg_prompt_request(original_request)
     current = _clean_tg_prompt_request(user_request)
@@ -11705,13 +12532,131 @@ def _tg_prompt_semantic_request(original_request: str, user_request: str) -> str
         return current
     if not current or current == original:
         return original
-    revision_match = re.search(r"(?is)Revision request:\s*(.+?)(?:\n|$)", current)
+    revision_match = re.search(r"(?is)(?:Revision request|最新调整要求|最新調整要求|调整要求|調整要求|修改要求|更改要求)[:：]\s*(.+)$", current)
     if revision_match:
         revision = _clean_tg_prompt_request(revision_match.group(1))
-        return f"{original}\n调整要求：{revision}" if revision else original
+        return f"{original}\n最新调整要求（覆盖旧的同类服装、颜色、材质、动作和场景）：{revision}" if revision else original
+    latest = _tg_latest_adjustment_segment(current)
+    if latest and latest != current:
+        return f"{original}\n最新调整要求（覆盖旧的同类服装、颜色、材质、动作和场景）：{latest}"
     if original in current:
         return current
-    return f"{original}\n补充要求：{current}"
+    return f"{original}\n补充要求?{current}"
+
+
+
+
+
+
+def _tg_requirement_strip_chars() -> str:
+    return " \uFF0C\u3002\uFF1B\u3001,:\uFF1A"
+
+
+def _tg_clean_requirement_analysis_text(value: Any, max_len: int = 80) -> str:
+    strip_chars = _tg_requirement_strip_chars()
+    text = str(value or "").strip(strip_chars)
+    text = _strip_prompt_response_wrappers(text)
+    text = re.sub(r"[\r\n\t]+", " ", text).strip(strip_chars)
+    if len(text) > max_len:
+        text = text[:max_len].strip(strip_chars)
+    return text
+
+
+def _tg_clean_clothing_requirement_text(value: Any) -> str:
+    strip_chars = _tg_requirement_strip_chars()
+    text = _tg_clean_requirement_analysis_text(value, 80)
+    if not text:
+        return ""
+    text = re.sub(
+        r"^(?:\u7a7f\u7740|\u7a7f\u8457|\u670d\u88c5|\u670d\u88dd|\u8863\u670d|\u8863\u7740|\u8863\u8457|garment|clothing|outfit)[:\uFF1A]?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip(strip_chars)
+    text = _TG_REQUEST_STYLE_MODIFIER_PATTERN.sub("", text).strip(strip_chars)
+    text = re.sub(r"(?:\u98ce\u683c|\u98a8\u683c|\u611f\u89c9|\u611f\u89ba|\u6c1b\u56f4|\u6c1b\u570d|\u6c14\u8d28|\u6c23\u8cea|\u6548\u679c|\u60c5\u7eea|\u60c5\u7dd2)$", "", text).strip(strip_chars)
+    return text
+
+
+def _tg_requirement_analysis_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = payload if isinstance(payload, dict) else {}
+    value = source.get("tg_llm_requirement_analysis") or source.get("_tg_llm_requirement_analysis")
+    return value if isinstance(value, dict) else {}
+
+
+def _tg_requirement_analysis_clothing_clause(analysis: dict[str, Any] | None) -> str:
+    if not isinstance(analysis, dict):
+        return ""
+    parts: list[str] = []
+
+    def add(value: Any) -> None:
+        cleaned = _tg_clean_clothing_requirement_text(value)
+        if not cleaned:
+            return
+        key = re.sub(r"[\uFF0C\u3002\uFF1B\u3001,;\s]", "", cleaned)
+        if key and not any(key == re.sub(r"[\uFF0C\u3002\uFF1B\u3001,;\s]", "", item) for item in parts):
+            parts.append(cleaned)
+
+    items = analysis.get("clothing_items")
+    if isinstance(items, list):
+        for item in items[:6]:
+            if isinstance(item, dict):
+                color = _tg_clean_requirement_analysis_text(item.get("color"), 16)
+                material = _tg_clean_requirement_analysis_text(item.get("material"), 20)
+                garment = _tg_clean_clothing_requirement_text(item.get("garment") or item.get("name") or item.get("type"))
+                if material and garment and material in garment:
+                    material = ""
+                if color and garment and garment.startswith(color):
+                    color = ""
+                state = _tg_clean_requirement_analysis_text(item.get("state"), 32)
+                base = "".join(part for part in (color, material, garment) if part)
+                if state and state not in base and not _TG_REQUEST_STYLE_MODIFIER_PATTERN.search(state):
+                    base = f"{base}{state}" if base else state
+                add(base)
+            else:
+                add(item)
+    for key in ("clothing", "outfit", "garment", "clothing_phrase"):
+        if len(parts) >= 5:
+            break
+        value = analysis.get(key)
+        if isinstance(value, list):
+            for item in value[:5]:
+                add(item)
+        else:
+            add(value)
+    return "\u548c".join(parts[:5])
+
+
+def _tg_format_requirement_analysis_for_prompt(analysis: dict[str, Any]) -> str:
+    if not isinstance(analysis, dict) or not analysis:
+        return ""
+    allowed: dict[str, Any] = {}
+    for key in ("subject", "scene", "pose", "clothing_items", "style_modifiers", "hand_actions", "body_orientation", "gaze_expression", "props", "restrictions", "brief_intent"):
+        value = analysis.get(key)
+        if value not in (None, "", [], {}):
+            allowed[key] = value
+    if not allowed:
+        return ""
+    return json.dumps(allowed, ensure_ascii=False, separators=(",", ":"))
+
+
+def _tg_analyze_user_visual_request_with_llm(source: dict[str, Any], *, user_request: str, task_label: str, image_paths: list[str] | None = None) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    system_prompt = "\n".join([
+        "You are a visual requirement parser for an image-generation workflow. Return strict JSON only: no Markdown, no explanations, no labels, no final prompt.",
+        "Split the user's original request into executable visual fields. Separate garment names, color/material/state, style adjectives, scene, pose, and hand actions.",
+        "Do not rely on a fixed material library. If the user gives any arbitrary clothing or accessory name, identify it semantically and preserve it as the garment.",
+        "clothing_items must be an array of objects with garment, color, material, state, structure. garment must contain only the clothing/accessory noun. Do not merge style adjectives such as seduction/sexy/gentle/cold/cute/pure/elegant into garment.",
+        "For each clothing item, infer one short Simplified Chinese style/type/appearance phrase in structure. Describe the garment style logically, not the user\'s raw words. Keep it concrete and brief, e.g. JK skirt => \u767e\u8936\u6821\u670d\u77ed\u88d9\u6b3e\u5f0f, yoga pants => \u8d34\u8eab\u5f39\u529b\u88e4\u578b, stockings => \u8d34\u817f\u8584\u900f\u889c\u6b3e.",
+        "Example: \u56f4\u88d9\u8bf1\u60d1 => clothing_items[0].garment=\u56f4\u88d9, structure=\u7cfb\u5e26\u56f4\u88f9\u6b3e\u5f0f, style_modifiers=[\u8bf1\u60d1]. Example: \u8349\u88d9\u4e1d\u889c\u8bf1\u60d1 => clothing_items garments are \u8349\u88d9 and \u4e1d\u889c, structure gives a short style/type phrase for each item, style_modifiers=[\u8bf1\u60d1].",
+        "If color, material, scene, or pose is not explicitly given, use empty string or empty array. The structure field may contain a brief style/type phrase inferred from the garment noun, but do not invent unrelated garments.",
+        "Output JSON schema: {subject:string, scene:string, pose:string, clothing_items:[{garment:string,color:string,material:string,state:string,structure:string}], style_modifiers:string[], hand_actions:string[], body_orientation:string, gaze_expression:string, props:string[], restrictions:string[], brief_intent:string}.",
+    ])
+    user_input = "\n".join([f"Task type: {task_label}", f"User request: {user_request}", "Return only JSON."])
+    result, selected, attempts = _request_llm_json_with_fallback(source=source, user_input=user_input, system_prompt=system_prompt, parameters="", image_paths=image_paths or None, allow_builtin=False, retry_count=1, request_label="Telegram Grok user requirement analysis")
+    parsed = result.get("parsed") if isinstance(result, dict) else None
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Grok user requirement analysis did not return a JSON object")
+    return parsed, selected, attempts
 
 
 def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -11765,6 +12710,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
     semantic_request = _tg_prompt_semantic_request(original_request, user_request)
     if typ in {"text_to_image", "image_generate"}:
         enhanced["_tg_prompt_random_nonce"] = uuid.uuid4().hex
+    non_r18_free_image = typ in {"text_to_image", "image_generate"} and _tg_payload_is_non_r18_free_image(enhanced)
 
     task_labels = {
         "text_to_image": "text-to-image",
@@ -11777,7 +12723,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         "replace_productANDmodel": "video model and product replacement",
         "video_i2v": "image-to-video",
     }
-    system_prompt, prompt_chain = _build_tg_prompt_system_prompt(typ, task_labels.get(typ, typ))
+    system_prompt, prompt_chain = _build_tg_prompt_system_prompt(typ, task_labels.get(typ, typ), non_r18_free=non_r18_free_image)
     edit_image_task = typ in {"single_image_edit", "get_nano_banana", "face_swap"}
     persona_face_brief = _tg_image_persona_face_brief(enhanced) if prompt_chain == "image" and not edit_image_task else ""
     persona_body_profile = _persona_body_profile_for_payload(enhanced) if prompt_chain == "image" and typ in {"text_to_image", "image_generate"} and _to_bool(enhanced.get("persona_enabled"), False) else {}
@@ -11858,8 +12804,34 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             image_hint_paths.append(image_path)
     attempts: list[dict[str, Any]] = []
     selected: dict[str, Any] = {}
+    requirement_analysis: dict[str, Any] = {}
+    if prompt_chain == "image" and not edit_image_task:
+        try:
+            requirement_analysis, analysis_selected, analysis_attempts = _tg_analyze_user_visual_request_with_llm(
+                enhanced,
+                user_request=semantic_request or original_request or user_request,
+                task_label=task_labels.get(typ, typ),
+                image_paths=image_hint_paths or None,
+            )
+            enhanced["tg_llm_requirement_analysis"] = requirement_analysis
+            enhanced["_tg_llm_requirement_analysis"] = requirement_analysis
+            attempts.extend([{**attempt, "stage": "requirement_analysis"} for attempt in analysis_attempts])
+            analysis_guidance = _tg_format_requirement_analysis_for_prompt(requirement_analysis)
+            if analysis_guidance:
+                llm_user_input = "\n".join(
+                    [
+                        llm_user_input,
+                        "",
+                        "Parsed user requirement JSON, authoritative for preserving the user request:",
+                        analysis_guidance,
+                        "Use the parsed clothing_items as garment/color/state requirements. They override any preset clothing library and any older same-category clothing/color if this is an adjustment. Use style_modifiers only for mood and visual tone; never merge style words into clothing names. If user gave an unknown garment, preserve that garment as-is and describe it visually instead of replacing it with a preset garment. Never add an extra default color when the user already provided a color, material, transparency, skin-tone/nude-tone, or other garment descriptor.",
+                    ]
+                )
+        except Exception as exc:
+            logger.warning("Telegram Grok user requirement analysis failed: %s", exc)
+            attempts.append({"attempt": 1, "provider": "grok", "model": "", "ok": False, "stage": "requirement_analysis", "error": str(exc)})
     try:
-        llm_result, selected, attempts = _request_llm_text_with_fallback(
+        llm_result, selected, rewrite_attempts = _request_llm_text_with_fallback(
             source=enhanced,
             user_input=llm_user_input,
             system_prompt=system_prompt,
@@ -11870,6 +12842,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             single_model=True,
             request_label=f"Telegram Grok {prompt_chain} 提示词改写",
         )
+        attempts.extend(rewrite_attempts)
         rewritten = _strip_prompt_response_wrappers(llm_result.get("raw_text") if isinstance(llm_result, dict) else "")
     except Exception as exc:
         if not edit_image_task:
@@ -12045,16 +13018,18 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
 
     if prompt_chain == "image" and typ in {"text_to_image", "image_generate"}:
         final_prompt = _ensure_tg_image_clothing_anchor(final_prompt, preserved_request, enhanced)
-        final_prompt = _ensure_tg_image_explicit_private_part(final_prompt, preserved_request)
-        final_prompt = _ensure_tg_image_persona_exposure_features(final_prompt, enhanced)
+        if not non_r18_free_image:
+            final_prompt = _ensure_tg_image_explicit_private_part(final_prompt, preserved_request)
+            final_prompt = _ensure_tg_image_persona_exposure_features(final_prompt, enhanced)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
         final_prompt = _ensure_tg_image_user_request_anchors(final_prompt, preserved_request, enhanced)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
         enhanced = _apply_persona_body_profile_to_payload(typ, {**enhanced, "prompt": final_prompt, "prompt_text": final_prompt, "message": final_prompt})
         final_prompt = _remote_comfy_prompt_from_payload(typ, enhanced)
         final_prompt = _ensure_tg_image_subject_prefix(final_prompt)
-        final_prompt = _ensure_tg_image_explicit_private_part(final_prompt, preserved_request)
-        final_prompt = _ensure_tg_image_persona_exposure_features(final_prompt, enhanced)
+        if not non_r18_free_image:
+            final_prompt = _ensure_tg_image_explicit_private_part(final_prompt, preserved_request)
+            final_prompt = _ensure_tg_image_persona_exposure_features(final_prompt, enhanced)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
         final_prompt = _ensure_tg_image_user_request_anchors(final_prompt, preserved_request, enhanced)
         final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
@@ -12064,7 +13039,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         rewritten = final_prompt
 
         try:
-            _validate_tg_image_structured_prompt(final_prompt)
+            _validate_tg_image_structured_prompt(final_prompt, require_erotic=not non_r18_free_image)
         except RuntimeError as validation_error:
             final_prompt = _ensure_tg_image_user_request_anchors(final_prompt, preserved_request, enhanced)
             final_prompt = _normalize_tg_chinese_image_prompt_format(final_prompt)
@@ -12073,7 +13048,7 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
             enhanced = _set_tg_generation_prompt(enhanced, final_prompt)
             rewritten = final_prompt
             try:
-                _validate_tg_image_structured_prompt(final_prompt)
+                _validate_tg_image_structured_prompt(final_prompt, require_erotic=not non_r18_free_image)
             except RuntimeError:
                 fallback_prompt = _build_tg_image_fallback_prompt(preserved_request, enhanced)
                 fallback_prompt = _ensure_tg_image_clothing_anchor(fallback_prompt, preserved_request, enhanced)
@@ -12085,11 +13060,11 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 rewritten = fallback_prompt
                 final_prompt = fallback_prompt
                 try:
-                    _validate_tg_image_structured_prompt(final_prompt)
+                    _validate_tg_image_structured_prompt(final_prompt, require_erotic=not non_r18_free_image)
                 except RuntimeError:
                     raise validation_error
 
-        if not any(x in final_prompt for x in ["乳沟", "乳房", "乳头", "胸部", "阴部", "阴唇", "私密", "大腿内侧"]):
+        if not non_r18_free_image and not any(x in final_prompt for x in ["乳沟", "乳房", "乳头", "胸部", "阴部", "阴唇", "私密", "大腿内侧"]):
             raise RuntimeError("Grok final image prompt missing required erotic content (breasts or labia); blocked before submission.")
 
     enhanced["tg_original_prompt"] = preserved_request
@@ -13117,6 +14092,7 @@ class PricingPayload(BaseModel):
 
 
 class RuntimeConfigPayload(BaseModel):
+    telegram_bot_token: str = ""
     comfy_workflow_source: str = "remote"
     remote_comfy_gateway_url: str = ""
     remote_comfy_gateway_token: str = ""
@@ -13258,6 +14234,7 @@ class InternalTgAgentSubmitPayload(BaseModel):
     message: str
     tg_chat_id: int
     files: list[InternalTgAgentFilePayload] = Field(default_factory=list)
+    tg_source_bot: str = ""
     use_ai_copy: bool = True
     duration_seconds: int = 15
 
@@ -13618,6 +14595,8 @@ def create_app() -> FastAPI:
         planned_payload = dict(planned_payload or {})
         planned_payload["message"] = text
         planned_payload["tg_chat_id"] = int(payload.tg_chat_id)
+        if str(payload.tg_source_bot or "").strip():
+            planned_payload["tg_source_bot"] = str(payload.tg_source_bot or "").strip()
         planned_payload["source"] = "telegram_agent"
         planned_payload.setdefault("tg_use_llm_prompt", True)
         planned_payload.setdefault("tg_user_instruction", text)
@@ -13833,6 +14812,7 @@ def create_app() -> FastAPI:
                 "input": _sanitize_payload(input_payload),
                 "has_download": _task_has_download_file(output_payload),
                 "download_path": _extract_download_path(output_payload),
+                "image_paths": _extract_existing_file_paths(output_payload.get("image_paths")) if isinstance(output_payload.get("image_paths"), list) else [],
                 "batch_summary": batch_summary,
                 "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
             },
@@ -14864,6 +15844,9 @@ def create_app() -> FastAPI:
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         explicit_data = payload.model_dump(exclude_unset=True)
+        new_telegram_bot_token = str(explicit_data.get("telegram_bot_token") or "").strip()
+        if "telegram_bot_token" in explicit_data and not new_telegram_bot_token:
+            explicit_data.pop("telegram_bot_token", None)
         merged = dict(DEFAULT_RUNTIME_CONFIG)
         if isinstance(current_runtime, dict):
             merged.update(current_runtime)
@@ -14890,6 +15873,8 @@ def create_app() -> FastAPI:
             merged = _normalize_runtime_config(merged)
             with _RUNTIME_CONFIG_LOCK:
                 _write_runtime_config_file(merged)
+            if new_telegram_bot_token:
+                _write_tool_r18_bot_token_files(new_telegram_bot_token)
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"ok": True, "runtime_config": merged}

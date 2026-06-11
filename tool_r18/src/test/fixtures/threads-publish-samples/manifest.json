@@ -1,0 +1,1902 @@
+{
+  "version": 1,
+  "updatedAt": "2026-05-25T19:45:02.634Z",
+  "samples": [
+    {
+      "id": "threads-image-composer-blocked-page-1779576540929",
+      "scenario": "composer-blocked-page",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-blocked-page/threads-image-composer-blocked-page-1779576540929.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T02:41:30.818Z",
+      "screenshot": "samples/threads-image-composer-blocked-page-1779576540929-screenshot.jpg",
+      "xml": "samples/threads-image-composer-blocked-page-1779576540929-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-blocked-page-1779599539443",
+      "scenario": "composer-blocked-page",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-blocked-page/threads-image-composer-blocked-page-1779599539443.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:00.879Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-blocked-page-1779599539443-screenshot.jpg",
+      "xml": "samples/threads-image-composer-blocked-page-1779599539443-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779575162034",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_PROFILE_PAGE",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779575162034.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T02:41:31.120Z",
+      "screenshot": "samples/threads-image-composer-controls-missing-1779575162034-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779575162034-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779575502678",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "post_action_sheet",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779575502678.json",
+      "assertions": [
+        {
+          "detector": "post_action_sheet",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T02:41:31.085Z",
+      "screenshot": "samples/threads-image-composer-controls-missing-1779575502678-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779575502678-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779575926098",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779575926098.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T02:41:30.981Z",
+      "screenshot": "samples/threads-image-composer-controls-missing-1779575926098-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779575926098-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779576135175",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_PROFILE_PAGE",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779576135175.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T02:41:30.906Z",
+      "screenshot": "samples/threads-image-composer-controls-missing-1779576135175-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779576135175-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779608263418",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779608263418.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:00.673Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779608263418-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779608263418-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779640193203",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779640193203.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.937Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779640193203-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779640193203-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779640587447",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779640587447.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.907Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779640587447-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779640587447-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779640985170",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779640985170.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.870Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779640985170-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779640985170-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779641290670",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779641290670.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.827Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779641290670-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779641290670-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779647070619",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779647070619.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.561Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779647070619-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779647070619-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779650054448",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779650054448.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.412Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779650054448-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779650054448-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779654498175",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_PROFILE_PAGE",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779654498175.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.355Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779654498175-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779654498175-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779654989981",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_PROFILE_PAGE",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779654989981.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.318Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779654989981-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779654989981-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779697460562",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "unknown",
+      "reason": "UNKNOWN|",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779697460562.json",
+      "assertions": [
+        {
+          "detector": "search_overlay",
+          "expected": true
+        },
+        {
+          "detector": "composer",
+          "expected": false
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.915Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779697460562-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779697460562-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779698586268",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "unknown",
+      "reason": "LOCAL_THREADS_SEARCH_OVERLAY",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779698586268.json",
+      "assertions": [
+        {
+          "detector": "search_overlay",
+          "expected": true
+        },
+        {
+          "detector": "composer",
+          "expected": false
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.847Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779698586268-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779698586268-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-controls-missing-1779698626581",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "image",
+      "page": "unknown",
+      "reason": "LOCAL_THREADS_SEARCH_OVERLAY",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-controls-missing/threads-image-composer-controls-missing-1779698626581.json",
+      "assertions": [
+        {
+          "detector": "search_overlay",
+          "expected": true
+        },
+        {
+          "detector": "composer",
+          "expected": false
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.793Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-controls-missing-1779698626581-screenshot.jpg",
+      "xml": "samples/threads-image-composer-controls-missing-1779698626581-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-focus-outside-app-1779621616539",
+      "scenario": "composer-focus-outside-app",
+      "mediaKind": "image",
+      "page": "android_camera",
+      "reason": "LOCAL_ANDROID_CAMERA",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-focus-outside-app/threads-image-composer-focus-outside-app-1779621616539.json",
+      "assertions": [
+        {
+          "detector": "android_camera",
+          "expected": "LOCAL_ANDROID_CAMERA"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.752Z",
+      "screenshot": "samples/threads-image-composer-focus-outside-app-1779621616539-screenshot.jpg",
+      "xml": "samples/threads-image-composer-focus-outside-app-1779621616539-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-focus-outside-app-1779621865202",
+      "scenario": "composer-focus-outside-app",
+      "mediaKind": "image",
+      "page": "android_camera",
+      "reason": "LOCAL_ANDROID_CAMERA",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-focus-outside-app/threads-image-composer-focus-outside-app-1779621865202.json",
+      "assertions": [
+        {
+          "detector": "android_camera",
+          "expected": "LOCAL_ANDROID_CAMERA"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.749Z",
+      "screenshot": "samples/threads-image-composer-focus-outside-app-1779621865202-screenshot.jpg",
+      "xml": "samples/threads-image-composer-focus-outside-app-1779621865202-ui.xml"
+    },
+    {
+      "id": "threads-image-composer-focus-outside-app-1779621880623",
+      "scenario": "composer-focus-outside-app",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-composer-focus-outside-app/threads-image-composer-focus-outside-app-1779621880623.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.745Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-composer-focus-outside-app-1779621880623-screenshot.jpg",
+      "xml": "samples/threads-image-composer-focus-outside-app-1779621880623-ui.xml"
+    },
+    {
+      "id": "threads-image-gallery-fallback-opened-media-viewer-1779726857521",
+      "scenario": "gallery-fallback-opened-media-viewer",
+      "mediaKind": "image",
+      "page": "fullscreen_media_viewer",
+      "reason": "fallback gallery taps repeatedly opened Threads fullscreen media viewer",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-gallery-fallback-opened-media-viewer/threads-image-gallery-fallback-opened-media-viewer-1779726857521.json",
+      "assertions": [
+        {
+          "detector": "fullscreen_media_viewer",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.594Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-gallery-fallback-opened-media-viewer-1779726857521-screenshot.jpg",
+      "xml": "samples/threads-image-gallery-fallback-opened-media-viewer-1779726857521-ui.xml"
+    },
+    {
+      "id": "threads-image-gallery-media-selection-missing-1779623238392",
+      "scenario": "gallery-media-selection-missing",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-gallery-media-selection-missing/threads-image-gallery-media-selection-missing-1779623238392.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.586Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-gallery-media-selection-missing-1779623238392-screenshot.jpg",
+      "xml": "samples/threads-image-gallery-media-selection-missing-1779623238392-ui.xml"
+    },
+    {
+      "id": "threads-image-gallery-media-selection-missing-1779623993845",
+      "scenario": "gallery-media-selection-missing",
+      "mediaKind": "image",
+      "page": "android_camera",
+      "reason": "LOCAL_ANDROID_CAMERA",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-gallery-media-selection-missing/threads-image-gallery-media-selection-missing-1779623993845.json",
+      "assertions": [
+        {
+          "detector": "android_camera",
+          "expected": "LOCAL_ANDROID_CAMERA"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.499Z",
+      "screenshot": "samples/threads-image-gallery-media-selection-missing-1779623993845-screenshot.jpg",
+      "xml": "samples/threads-image-gallery-media-selection-missing-1779623993845-ui.xml"
+    },
+    {
+      "id": "threads-image-gallery-media-selection-missing-1779624516985",
+      "scenario": "gallery-media-selection-missing",
+      "mediaKind": "image",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-gallery-media-selection-missing/threads-image-gallery-media-selection-missing-1779624516985.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.490Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-gallery-media-selection-missing-1779624516985-screenshot.jpg",
+      "xml": "samples/threads-image-gallery-media-selection-missing-1779624516985-ui.xml"
+    },
+    {
+      "id": "threads-image-gallery-selected-count-invalid-1779648561201",
+      "scenario": "gallery-selected-count-invalid",
+      "mediaKind": "image",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-gallery-selected-count-invalid/threads-image-gallery-selected-count-invalid-1779648561201.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.475Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-gallery-selected-count-invalid-1779648561201-screenshot.jpg",
+      "xml": "samples/threads-image-gallery-selected-count-invalid-1779648561201-ui.xml"
+    },
+    {
+      "id": "threads-image-gallery-selected-count-invalid-1779727185494",
+      "scenario": "gallery-selected-count-invalid",
+      "mediaKind": "image",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-gallery-selected-count-invalid/threads-image-gallery-selected-count-invalid-1779727185494.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.535Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-gallery-selected-count-invalid-1779727185494-screenshot.jpg",
+      "xml": "samples/threads-image-gallery-selected-count-invalid-1779727185494-ui.xml"
+    },
+    {
+      "id": "threads-image-gallery-stale-selection-not-cleared-1779647223713",
+      "scenario": "gallery-stale-selection-not-cleared",
+      "mediaKind": "image",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-gallery-stale-selection-not-cleared/threads-image-gallery-stale-selection-not-cleared-1779647223713.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.511Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-gallery-stale-selection-not-cleared-1779647223713-screenshot.jpg",
+      "xml": "samples/threads-image-gallery-stale-selection-not-cleared-1779647223713-ui.xml"
+    },
+    {
+      "id": "threads-image-inline-open-gallery-unexpected-1779575701818",
+      "scenario": "inline-open-gallery-unexpected",
+      "mediaKind": "image",
+      "page": "reply_composer",
+      "reason": "LOCAL_REPLY_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-inline-open-gallery-unexpected/threads-image-inline-open-gallery-unexpected-1779575701818.json",
+      "assertions": [
+        {
+          "detector": "reply_composer",
+          "expected": "LOCAL_REPLY_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T02:41:31.039Z",
+      "screenshot": "samples/threads-image-inline-open-gallery-unexpected-1779575701818-screenshot.jpg",
+      "xml": "samples/threads-image-inline-open-gallery-unexpected-1779575701818-ui.xml"
+    },
+    {
+      "id": "threads-image-open-composer-1779593524496",
+      "scenario": "open-composer",
+      "mediaKind": "image",
+      "page": "fullscreen_media_viewer",
+      "reason": "LOCAL_FULLSCREEN_MEDIA_VIEWER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-open-composer/threads-image-open-composer-1779593524496.json",
+      "assertions": [
+        {
+          "detector": "fullscreen_media_viewer",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:02.323Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-open-composer-1779593524496-screenshot.jpg",
+      "xml": "samples/threads-image-open-composer-1779593524496-ui.xml"
+    },
+    {
+      "id": "threads-image-open-composer-1779596388472",
+      "scenario": "open-composer",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-open-composer/threads-image-open-composer-1779596388472.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:01.713Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-open-composer-1779596388472-screenshot.jpg",
+      "xml": "samples/threads-image-open-composer-1779596388472-ui.xml"
+    },
+    {
+      "id": "threads-image-open-composer-1779597625927",
+      "scenario": "open-composer",
+      "mediaKind": "image",
+      "page": "fullscreen_media_viewer",
+      "reason": "LOCAL_FULLSCREEN_MEDIA_VIEWER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-open-composer/threads-image-open-composer-1779597625927.json",
+      "assertions": [
+        {
+          "detector": "fullscreen_media_viewer",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:01.421Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-open-composer-1779597625927-screenshot.jpg",
+      "xml": "samples/threads-image-open-composer-1779597625927-ui.xml"
+    },
+    {
+      "id": "threads-image-open-composer-1779599168035",
+      "scenario": "open-composer",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-open-composer/threads-image-open-composer-1779599168035.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:00.952Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-open-composer-1779599168035-screenshot.jpg",
+      "xml": "samples/threads-image-open-composer-1779599168035-ui.xml"
+    },
+    {
+      "id": "threads-image-open-composer-retry-1779597296230",
+      "scenario": "open-composer-retry",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-open-composer-retry/threads-image-open-composer-retry-1779597296230.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:01.570Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-open-composer-retry-1779597296230-screenshot.jpg",
+      "xml": "samples/threads-image-open-composer-retry-1779597296230-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779600024540",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779600024540.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:00.789Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779600024540-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779600024540-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779600425722",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779600425722.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:00.744Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779600425722-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779600425722-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779611562977",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779611562977.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:00.596Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779611562977-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779611562977-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779612259937",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779612259937.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:00.527Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779612259937-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779612259937-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779614489034",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779614489034.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:00.473Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779614489034-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779614489034-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779616298874",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779616298874.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.950Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779616298874-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779616298874-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779625411936",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779625411936.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.374Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779625411936-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779625411936-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779625834470",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_REPLY_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779625834470.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.304Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779625834470-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779625834470-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779626328719",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_REPLY_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779626328719.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.248Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779626328719-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779626328719-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779628963426",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779628963426.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:58.875Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779628963426-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779628963426-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779629829269",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779629829269.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:58.816Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779629829269-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779629829269-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779631251221",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779631251221.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:58.450Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779631251221-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779631251221-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779633805488",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779633805488.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:58.170Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779633805488-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779633805488-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-button-no-effect-1779649170673",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-button-no-effect/threads-image-publish-button-no-effect-1779649170673.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.444Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-button-no-effect-1779649170673-screenshot.jpg",
+      "xml": "samples/threads-image-publish-button-no-effect-1779649170673-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779552339357",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "Unexpected end of JSON input",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779552339357.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T02:41:31.228Z",
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779552339357-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779552339357-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779576314904",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "reply_composer",
+      "reason": "LOCAL_REPLY_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779576314904.json",
+      "assertions": [
+        {
+          "detector": "reply_composer",
+          "expected": "LOCAL_REPLY_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T02:41:30.874Z",
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779576314904-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779576314904-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779586360323",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779586360323.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T09:24:02.428Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779586360323-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779586360323-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779591591673",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "side_drawer",
+      "reason": "未能切回 Threads 首页推荐流：LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779591591673.json",
+      "assertions": [
+        {
+          "detector": "side_drawer",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:02.388Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779591591673-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779591591673-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779594664494",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "Threads 誤入回覆頁：LOCAL_REPLY_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779594664494.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:02.147Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779594664494-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779594664494-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779595326862",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "side_drawer",
+      "reason": "未能切回 Threads 首页推荐流：LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779595326862.json",
+      "assertions": [
+        {
+          "detector": "side_drawer",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:01.939Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779595326862-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779595326862-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779596778286",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "side_drawer",
+      "reason": "未能确认 Threads 首页推荐流：LOCAL_ANDROID_LAUNCHER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779596778286.json",
+      "assertions": [
+        {
+          "detector": "side_drawer",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:01.634Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779596778286-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779596778286-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779598180970",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "side_drawer",
+      "reason": "未能切回 Threads 首页推荐流：LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779598180970.json",
+      "assertions": [
+        {
+          "detector": "side_drawer",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:01.333Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779598180970-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779598180970-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779598502390",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779598502390.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:01.248Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779598502390-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779598502390-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779626823996",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779626823996.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.179Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779626823996-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779626823996-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779628132273",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779628132273.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.045Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779628132273-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779628132273-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779630591135",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779630591135.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:58.744Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779630591135-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779630591135-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779631911794",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "發布校驗失敗：發布後仍停留在新串文輸入頁",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779631911794.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:58.234Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779631911794-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779631911794-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779634396324",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779634396324.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:57.991Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779634396324-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779634396324-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779634997772",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779634997772.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:57.840Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779634997772-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779634997772-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779635291905",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779635291905.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:57.796Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779635291905-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779635291905-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779635574855",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779635574855.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:57.696Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779635574855-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779635574855-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779635827304",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779635827304.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:57.616Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779635827304-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779635827304-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779644347175",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "__THREADS_PROFILE_CAPTURE_FAILED__未能進入 Threads 個人主頁｜debug=.runtime/automatic-script",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779644347175.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.728Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779644347175-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779644347175-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779645955155",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "Threads 個人頁目前停在阻斷頁：檢測到 Threads 阻斷頁，疑似真人驗證或安全驗證，請先在雲機完成設定或驗證後再重試",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779645955155.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.605Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779645955155-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779645955155-ui.xml"
+    },
+    {
+      "id": "threads-image-publish-top-level-failure-1779730718917",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "image",
+      "page": "profile_page",
+      "reason": "__THREADS_BLOCKED__檢測到 Threads 阻斷頁，需要人工確認當前帳號狀態｜debug=.runtime/automatic-script",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779730718917.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.503Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-image-publish-top-level-failure-1779730718917-screenshot.jpg",
+      "xml": "samples/threads-image-publish-top-level-failure-1779730718917-ui.xml"
+    },
+    {
+      "id": "threads-manual-recapture-test1-1779691218268",
+      "scenario": "manual-recapture-test1",
+      "mediaKind": "media",
+      "page": "profile_page",
+      "reason": "LOCAL_PROFILE_PAGE",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/manual-recapture-test1/threads-manual-recapture-test1-1779691218268.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.949Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-manual-recapture-test1-1779691218268-screenshot.jpg",
+      "xml": "samples/threads-manual-recapture-test1-1779691218268-ui.xml"
+    },
+    {
+      "id": "threads-media-clear-draft-open-composer-1779641921473",
+      "scenario": "clear-draft-open-composer",
+      "mediaKind": "media",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-media-clear-draft-open-composer/threads-media-clear-draft-open-composer-1779641921473.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.776Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-media-clear-draft-open-composer-1779641921473-screenshot.jpg",
+      "xml": "samples/threads-media-clear-draft-open-composer-1779641921473-ui.xml"
+    },
+    {
+      "id": "threads-media-gallery-confirm-stuck-1779624979039",
+      "scenario": "gallery-confirm-stuck",
+      "mediaKind": "media",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-media-gallery-confirm-stuck/threads-media-gallery-confirm-stuck-1779624979039.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.427Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-media-gallery-confirm-stuck-1779624979039-screenshot.jpg",
+      "xml": "samples/threads-media-gallery-confirm-stuck-1779624979039-ui.xml"
+    },
+    {
+      "id": "threads-media-preflight-focus-outside-app-1779624147996",
+      "scenario": "preflight-focus-outside-app",
+      "mediaKind": "media",
+      "page": "android_camera",
+      "reason": "LOCAL_ANDROID_CAMERA",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-media-preflight-focus-outside-app/threads-media-preflight-focus-outside-app-1779624147996.json",
+      "assertions": [
+        {
+          "detector": "android_camera",
+          "expected": "LOCAL_ANDROID_CAMERA"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:59.495Z",
+      "screenshot": "samples/threads-media-preflight-focus-outside-app-1779624147996-screenshot.jpg",
+      "xml": "samples/threads-media-preflight-focus-outside-app-1779624147996-ui.xml"
+    },
+    {
+      "id": "threads-text-composer-controls-missing-1779678641434",
+      "scenario": "composer-controls-missing",
+      "mediaKind": "text",
+      "page": "profile_page",
+      "reason": "LOCAL_PROFILE_PAGE",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-composer-controls-missing/threads-text-composer-controls-missing-1779678641434.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.274Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-composer-controls-missing-1779678641434-screenshot.jpg",
+      "xml": "samples/threads-text-composer-controls-missing-1779678641434-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-button-no-effect-1779700307818",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "text",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-button-no-effect/threads-text-publish-button-no-effect-1779700307818.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.644Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-button-no-effect-1779700307818-screenshot.jpg",
+      "xml": "samples/threads-text-publish-button-no-effect-1779700307818-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-top-level-failure-1779588798377",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "text",
+      "page": "profile_page",
+      "reason": "__THREADS_PROFILE_CAPTURE_FAILED__未能進入 Threads 個人主頁｜debug=.runtime/automatic-script",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-top-level-failure/threads-text-publish-top-level-failure-1779588798377.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T09:24:02.202Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-top-level-failure-1779588798377-screenshot.jpg",
+      "xml": "samples/threads-text-publish-top-level-failure-1779588798377-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-top-level-failure-1779589179349",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "text",
+      "page": "profile_page",
+      "reason": "__THREADS_PROFILE_CAPTURE_FAILED__未能進入 Threads 個人主頁｜debug=.runtime/automatic-script",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-top-level-failure/threads-text-publish-top-level-failure-1779589179349.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T09:24:02.162Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-top-level-failure-1779589179349-screenshot.jpg",
+      "xml": "samples/threads-text-publish-top-level-failure-1779589179349-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-top-level-failure-1779589520861",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "text",
+      "page": "profile_page",
+      "reason": "發布校驗失敗：發布後仍停留在新串文輸入頁",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-top-level-failure/threads-text-publish-top-level-failure-1779589520861.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T09:24:02.129Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-top-level-failure-1779589520861-screenshot.jpg",
+      "xml": "samples/threads-text-publish-top-level-failure-1779589520861-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-top-level-failure-1779589908623",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "text",
+      "page": "profile_page",
+      "reason": "發布校驗失敗：發布後仍停留在新串文輸入頁",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-top-level-failure/threads-text-publish-top-level-failure-1779589908623.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:02.631Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-top-level-failure-1779589908623-screenshot.jpg",
+      "xml": "samples/threads-text-publish-top-level-failure-1779589908623-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-top-level-failure-1779590222778",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "text",
+      "page": "profile_page",
+      "reason": "發布校驗失敗：發布後仍停留在新串文輸入頁",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-top-level-failure/threads-text-publish-top-level-failure-1779590222778.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:02.576Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-top-level-failure-1779590222778-screenshot.jpg",
+      "xml": "samples/threads-text-publish-top-level-failure-1779590222778-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-top-level-failure-1779590536623",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "text",
+      "page": "profile_page",
+      "reason": "發布校驗失敗：發布後仍停留在新串文輸入頁",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-top-level-failure/threads-text-publish-top-level-failure-1779590536623.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:02.504Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-top-level-failure-1779590536623-screenshot.jpg",
+      "xml": "samples/threads-text-publish-top-level-failure-1779590536623-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-top-level-failure-1779590806998",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "text",
+      "page": "profile_page",
+      "reason": "發布校驗失敗：發布後仍停留在新串文輸入頁",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-top-level-failure/threads-text-publish-top-level-failure-1779590806998.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:02.455Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-top-level-failure-1779590806998-screenshot.jpg",
+      "xml": "samples/threads-text-publish-top-level-failure-1779590806998-ui.xml"
+    },
+    {
+      "id": "threads-text-publish-top-level-failure-1779700006865",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "text",
+      "page": "home_feed",
+      "reason": "LOCAL_HOME_FEED",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-text-publish-top-level-failure/threads-text-publish-top-level-failure-1779700006865.json",
+      "assertions": [
+        {
+          "detector": "home_feed",
+          "expected": "LOCAL_HOME_FEED"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.722Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-text-publish-top-level-failure-1779700006865-screenshot.jpg",
+      "xml": "samples/threads-text-publish-top-level-failure-1779700006865-ui.xml"
+    },
+    {
+      "id": "threads-video-composer-blocked-page-1779594492842",
+      "scenario": "composer-blocked-page",
+      "mediaKind": "video",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-composer-blocked-page/threads-video-composer-blocked-page-1779594492842.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:45:02.230Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-composer-blocked-page-1779594492842-screenshot.jpg",
+      "xml": "samples/threads-video-composer-blocked-page-1779594492842-ui.xml"
+    },
+    {
+      "id": "threads-video-gallery-selected-count-invalid-1779680426571",
+      "scenario": "gallery-selected-count-invalid",
+      "mediaKind": "video",
+      "page": "gallery_picker",
+      "reason": "LOCAL_GALLERY_PICKER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-gallery-selected-count-invalid/threads-video-gallery-selected-count-invalid-1779680426571.json",
+      "assertions": [
+        {
+          "detector": "gallery_picker",
+          "expected": "LOCAL_GALLERY_PICKER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.236Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-gallery-selected-count-invalid-1779680426571-screenshot.jpg",
+      "xml": "samples/threads-video-gallery-selected-count-invalid-1779680426571-ui.xml"
+    },
+    {
+      "id": "threads-video-publish-button-no-effect-1779680981793",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "video",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-publish-button-no-effect/threads-video-publish-button-no-effect-1779680981793.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.200Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-publish-button-no-effect-1779680981793-screenshot.jpg",
+      "xml": "samples/threads-video-publish-button-no-effect-1779680981793-ui.xml"
+    },
+    {
+      "id": "threads-video-publish-button-no-effect-1779681568187",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "video",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-publish-button-no-effect/threads-video-publish-button-no-effect-1779681568187.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.167Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-publish-button-no-effect-1779681568187-screenshot.jpg",
+      "xml": "samples/threads-video-publish-button-no-effect-1779681568187-ui.xml"
+    },
+    {
+      "id": "threads-video-publish-button-no-effect-1779682160051",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "video",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-publish-button-no-effect/threads-video-publish-button-no-effect-1779682160051.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.127Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-publish-button-no-effect-1779682160051-screenshot.jpg",
+      "xml": "samples/threads-video-publish-button-no-effect-1779682160051-ui.xml"
+    },
+    {
+      "id": "threads-video-publish-button-no-effect-1779682902640",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "video",
+      "page": "profile_page",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-publish-button-no-effect/threads-video-publish-button-no-effect-1779682902640.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.092Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-publish-button-no-effect-1779682902640-screenshot.jpg",
+      "xml": "samples/threads-video-publish-button-no-effect-1779682902640-ui.xml"
+    },
+    {
+      "id": "threads-video-publish-button-no-effect-1779683470554",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "video",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-publish-button-no-effect/threads-video-publish-button-no-effect-1779683470554.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.048Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-publish-button-no-effect-1779683470554-screenshot.jpg",
+      "xml": "samples/threads-video-publish-button-no-effect-1779683470554-ui.xml"
+    },
+    {
+      "id": "threads-video-publish-button-no-effect-1779683876474",
+      "scenario": "publish-button-no-effect",
+      "mediaKind": "video",
+      "page": "compose_editor",
+      "reason": "LOCAL_COMPOSER",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-publish-button-no-effect/threads-video-publish-button-no-effect-1779683876474.json",
+      "assertions": [
+        {
+          "detector": "composer",
+          "expected": "LOCAL_COMPOSER"
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:56.005Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-publish-button-no-effect-1779683876474-screenshot.jpg",
+      "xml": "samples/threads-video-publish-button-no-effect-1779683876474-ui.xml"
+    },
+    {
+      "id": "threads-video-publish-top-level-failure-1779734746247",
+      "scenario": "publish-top-level-failure",
+      "mediaKind": "video",
+      "page": "profile_page",
+      "reason": "Threads 分享入口未進入 App，目前畫面：topResumedActivity=ActivityRecord{903c1a3 u0 com.android.mxLauncher3/com.android.launcher3.Launcher} t6}",
+      "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-video-publish-top-level-failure/threads-video-publish-top-level-failure-1779734746247.json",
+      "assertions": [
+        {
+          "detector": "profile_page",
+          "expected": true
+        }
+      ],
+      "promotedAt": "2026-05-25T19:44:55.462Z",
+      "screenshotSize": {
+        "width": 720,
+        "height": 1600
+      },
+      "screenshot": "samples/threads-video-publish-top-level-failure-1779734746247-screenshot.jpg",
+      "xml": "samples/threads-video-publish-top-level-failure-1779734746247-ui.xml"
+    }
+  ]
+}

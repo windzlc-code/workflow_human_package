@@ -90,6 +90,11 @@ WORKBENCH_BUTTON = "工作臺網址"
 SET_SCRIPT_BUTTON = "設定預設文案"
 RERUN_BUTTON = "重跑最近任務"
 STOP_BUTTON = "強制停止目前任務"
+TOOL_R18_PERSONA_BUTTON = '👤 æ\x88\x91ç\x9a\x84äººè¨\xad'
+TOOL_R18_STATUS_BUTTON = '📊 æ\x8e\x92ç¨\x8bç\x8b\x80æ\x85\x8b'
+TOOL_R18_SCHEDULE_BUTTON = '⏰ å®\x9aæ\x99\x82ä»»å\x8b\x99'
+TOOL_R18_CLOUD_BUTTON = '📱 é\x9b²æ©\x9fç®¡ç\x90\x86'
+TOOL_R18_STOP_BUTTON = '🛑 å¼·å\x88¶ä¸\xadæ\xad¢ç\x9b®å\x89\x8dä»»å\x8b\x99'
 
 BUTTON_ALIASES = {
     "重新生成图片": TEXT_TO_IMAGE_REROLL_IMAGE_BUTTON,
@@ -172,6 +177,21 @@ BUTTON_ALIASES = {
     "强制停止当前任务": STOP_BUTTON,
     "強制停止目前任務": STOP_BUTTON,
     "強制停止當前任務": STOP_BUTTON,
+    '📱 é\x9b²æ©\x9fç®¡ç\x90\x86': WORKBENCH_BUTTON,
+    '????': WORKBENCH_BUTTON,
+    '????': WORKBENCH_BUTTON,
+    '⏰ å®\x9aæ\x99\x82ä»»å\x8b\x99': WORKBENCH_BUTTON,
+    '????': WORKBENCH_BUTTON,
+    '????': WORKBENCH_BUTTON,
+    '👤 æ\x88\x91ç\x9a\x84äººè¨\xad': IMAGE_WORKFLOW_BUTTON,
+    '????': IMAGE_WORKFLOW_BUTTON,
+    '????': IMAGE_WORKFLOW_BUTTON,
+    '🛑 å¼·å\x88¶ä¸\xadæ\xad¢ç\x9b®å\x89\x8dä»»å\x8b\x99': STOP_BUTTON,
+    '????????': STOP_BUTTON,
+    '????????': STOP_BUTTON,
+    '📊 æ\x8e\x92ç¨\x8bç\x8b\x80æ\x85\x8b': STATUS_BUTTON,
+    '????': STATUS_BUTTON,
+    '????': STATUS_BUTTON,
 }
 
 
@@ -288,8 +308,9 @@ def _build_bot(config: AppConfig) -> Bot:
 def _menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=IMAGE_WORKFLOW_BUTTON), KeyboardButton(text=VIDEO_EDIT_BUTTON)],
-            [KeyboardButton(text=STATUS_BUTTON), KeyboardButton(text=STOP_BUTTON)],
+            [KeyboardButton(text=TOOL_R18_PERSONA_BUTTON), KeyboardButton(text=TOOL_R18_STATUS_BUTTON)],
+            [KeyboardButton(text=TOOL_R18_SCHEDULE_BUTTON), KeyboardButton(text=TOOL_R18_CLOUD_BUTTON)],
+            [KeyboardButton(text=TOOL_R18_STOP_BUTTON)],
         ],
         resize_keyboard=True,
     )
@@ -6016,6 +6037,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await start_image_reference_flow(message, state, mode="image_replace")
 
+    @router.message(F.text == TOOL_R18_PERSONA_BUTTON)
     @router.message(F.text == IMAGE_WORKFLOW_BUTTON)
     @router.message(F.text == "圖像編輯")
     @router.message(F.text == LEGACY_IMAGE_WORKFLOW_BUTTON)
@@ -6092,6 +6114,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await _answer(message, _workflow_config_text(service, selected_button=_message_text(message)), reply_markup=_menu_keyboard())
 
+    @router.message(F.text == TOOL_R18_STATUS_BUTTON)
     @router.message(F.text == STATUS_BUTTON)
     @router.message(F.text == "查看工作臺狀態")
     @router.message(F.text == "查看工作臺狀態")
@@ -6100,6 +6123,8 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             return
         await answer_status(message)
 
+    @router.message(F.text == TOOL_R18_SCHEDULE_BUTTON)
+    @router.message(F.text == TOOL_R18_CLOUD_BUTTON)
     @router.message(F.text == WORKBENCH_BUTTON)
     @router.message(F.text == "工作臺網址")
     async def on_workbench_button(message: Message) -> None:
@@ -6133,6 +6158,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         request = service.clone_task_request(latest_task.id)
         await enqueue_request(message, request, source="telegram-rerun", is_default_assets=request.publish_to_default_paths)
 
+    @router.message(F.text == TOOL_R18_STOP_BUTTON)
     @router.message(F.text == STOP_BUTTON)
     @router.message(F.text == "強制停止目前任務")
     @router.message(F.text == "強制停止目前任務")

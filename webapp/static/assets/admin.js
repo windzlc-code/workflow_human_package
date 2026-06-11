@@ -18,6 +18,7 @@ const ADMIN_PAGE_LABELS = {
 };
 
 const SENSITIVE_RUNTIME_INPUT_IDS = [
+  "rtTelegramBotToken",
   "rtLlmApiKeyGpt",
   "rtRemoteComfyGatewayToken",
   "rtLocalComfyGatewayToken",
@@ -1591,6 +1592,7 @@ function runtimeFormToPayload() {
   const llmGrokModels = stringifyModelList(adminState.llmGptModels);
   const llmPriorityModels = stringifyModelList(adminState.llmPriorityModels);
   return {
+    telegram_bot_token: el("rtTelegramBotToken") ? el("rtTelegramBotToken").value.trim() : "",
     comfy_workflow_source: el("rtComfyWorkflowSource").value || "remote",
     remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
     remote_comfy_gateway_token: el("rtRemoteComfyGatewayToken").value.trim(),
@@ -1635,6 +1637,7 @@ function runtimeFormToPayload() {
 
 function fillRuntimeForm(data) {
   const v = data || {};
+  if (el("rtTelegramBotToken")) el("rtTelegramBotToken").value = "";
   el("rtRemoteComfyGatewayUrl").value = v.remote_comfy_gateway_url || "";
   el("rtRemoteComfyGatewayToken").value = v.remote_comfy_gateway_token || "";
   el("rtComfyGpuQueueEnabled").checked = Boolean(v.comfy_gpu_queue_enabled);
@@ -1695,6 +1698,7 @@ async function saveRuntime() {
   });
   const cfg = runtimeConfigResponseToConfig(resp);
   if (cfg) fillRuntimeForm(cfg);
+  await loadTgSettings().catch(() => undefined);
   clearModelDraft();
   return cfg;
 }
@@ -1768,6 +1772,10 @@ function renderTgSettings(data) {
   const rows = Array.isArray(settings.trusted_users) ? settings.trusted_users : [];
   adminState.tgTrustedUsers = rows;
   setText("tgBotTokenStatus", settings.bot_token_configured ? (settings.bot_token_masked || "已配置") : "未配置");
+  const sourceMap = { runtime: "运行配置", file: "本地文件", env: "环境变量" };
+  setText("tgBotTokenSource", settings.bot_token_configured
+    ? `当前来源：${sourceMap[settings.bot_token_source] || settings.bot_token_source || "已配置"}；输入新 Token 并保存运行配置后会立即生效。`
+    : "当前未配置；输入 Bot Token 并保存运行配置后会立即生效。");
   setText("tgTrustedUserCount", rows.length);
   setText("tgBotDbPath", settings.db_path || "-");
   const envIds = Array.isArray(settings.allowed_chat_ids_env) ? settings.allowed_chat_ids_env : [];

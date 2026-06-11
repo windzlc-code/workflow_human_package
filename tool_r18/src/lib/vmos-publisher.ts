@@ -1,0 +1,21844 @@
+/**
+ * Instagram / Threads 自動發文流程
+ * 透過 VMOSCloud asyncCmd (ADB) 控制雲機 UI 完成發文
+ *
+ * 關鍵約束（已實測驗證）：
+ * - 只有 asyncCmd 介面可用，其他介面均返回 500
+ * - 採用 fire-and-forget 模型：傳送命令 → 固定等待 → 繼續下一步
+ * - 實測雲機解析度：720x1600 / 360dpi
+ * - 文字輸入用 base64 編碼避免 shell 轉義問題
+ *
+ * 實測座標（720x1600 / 360dpi）：
+ * - Threads 主頁 "+" 新建按鈕：約 (360, 1510)，在底部導航列中央
+ * - 文字輸入框：(415, 262)
+ * - 發布按鈕（ADB Keyboard 開啟時）：(634, 1179)
+ */
+
+import { callGemini, extractText, getGeminiEndpoint, getInlineData } from "./gemini-client";
+import { compressImage } from "./image-compress";
+import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "./media-utils";
+import { publishTelegramGroupPost } from "./telegram-group-publisher";
+import { registerThreadsPublishSample } from "./threads-sample-registry";
+import {
+  type VmosConfig,
+  execAdb,
+  getPadInfo,
+  listPads,
+  screenshot,
+  simulateClick,
+  simulateSwipe,
+  inputText,
+  uploadFileByUrl,
+  waitTask,
+} from "./vmos-client";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import sharp from "sharp";
+
+export type Platform = "threads" | "telegram";
+
+export interface PublishTask {
+  padCode: string;
+  platform: Platform;
+  /** 貼文文案（不要包含 # 開頭的 hashtag，會觸發彈窗遮擋發布按鈕） */
+  caption: string;
+  /**
+   * 媒體檔案的公網 URL 或 data URL（圖片或影片）
+   */
+  mediaUrl?: string;
+  /** 兼容旧队列字段；VMOS Telegram 群组发布会使用云机当前打开的群组页面 */
+  telegramChatId?: string | number;
+  /** ACP 的 Instagram 無圖 fallback：先渲染成文字卡圖片再發布 */
+  generatedCaptionCard?: boolean;
+}
+
+export interface PublishProgress {
+  step: string;
+  done: boolean;
+  error?: string;
+  warning?: string;
+}
+
+export interface PublishResult {
+  state: "verified" | "warning";
+  detail: string;
+  screenshotUrl?: string;
+}
+
+export interface PublishCancellationToken {
+  isCancelled?: () => boolean;
+  throwIfCancelled?: () => void;
+}
+
+export interface PublishRunOptions {
+  cancellationToken?: PublishCancellationToken;
+}
+
+type PublishVisionStatus = "PUBLISHED" | "STILL_COMPOSING" | "BLOCKED" | "UNKNOWN";
+
+function isPublishCancellationMessage(message: string): boolean {
+  return /强制中止|已中止|已取消|操作取消|用户取消|user cancelled/i.test(message);
+}
+
+interface PublishVerificationResult {
+  state: "verified" | "warning";
+  detail: string;
+  screenshotUrl?: string;
+}
+
+type InstagramImageFlowState =
+  | "selection_page"
+  | "editor"
+  | "share_page"
+  | "publishing_home"
+  | "unknown";
+
+type InstagramAcpReelFlowState =
+  | "draft_dialog"
+  | "reel_camera"
+  | "reel_gallery"
+  | "editor"
+  | "effects_drawer"
+  | "share_page"
+  | "reels_browse"
+  | "instagram_home"
+  | "system_settings"
+  | "unknown";
+
+type InstagramStoryTextFlowState =
+  | "camera_tools"
+  | "text_editor"
+  | "share_screen"
+  | "settings"
+  | "unknown";
+
+export function shouldUseInstagramAcpFeedDirectPath(
+  padCode: string,
+  mediaUrl?: string,
+  generatedCaptionCard?: boolean,
+): boolean {
+  return isAcpPad(padCode) && Boolean(mediaUrl) && !generatedCaptionCard && !isVideoMediaUrl(mediaUrl);
+}
+
+function escapeSvgText(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function wrapCaptionCardLines(text: string, maxChars = 18, maxLines = 9): string[] {
+  const normalized = text.replace(/\r/g, "\n").split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const lines: string[] = [];
+  for (const rawLine of normalized.length ? normalized : [text]) {
+    let current = "";
+    for (const ch of Array.from(rawLine)) {
+      current += ch;
+      const weightedLength = Array.from(current).reduce((sum, item) => sum + (/[\u4e00-\u9fff]/.test(item) ? 1 : 0.55), 0);
+      if (weightedLength >= maxChars) {
+        lines.push(current.trim());
+        current = "";
+        if (lines.length >= maxLines) break;
+      }
+    }
+    if (lines.length >= maxLines) break;
+    if (current.trim()) lines.push(current.trim());
+    if (lines.length >= maxLines) break;
+  }
+  return lines.length ? lines : ["Instagram"];
+}
+
+const INSTAGRAM_TEXT_CARD_FONT_FAMILY = [
+  "'Noto Sans CJK SC'",
+  "'Noto Sans CJK TC'",
+  "'Noto Sans SC'",
+  "'Noto Sans TC'",
+  "'Microsoft YaHei'",
+  "'Microsoft JhengHei'",
+  "SimHei",
+  "Arial",
+  "sans-serif",
+].join(", ");
+
+export async function buildInstagramTextCardDataUrl(caption: string): Promise<string> {
+  const lines = wrapCaptionCardLines(caption);
+  const lineHeight = lines.length > 6 ? 58 : 68;
+  const startY = Math.round(480 - ((lines.length - 1) * lineHeight) / 2);
+  const textNodes = lines
+    .map((line, index) => `<text x="480" y="${startY + index * lineHeight}" text-anchor="middle" font-family="${INSTAGRAM_TEXT_CARD_FONT_FAMILY}" font-size="${lines.length > 6 ? 40 : 48}" font-weight="700" fill="#ffffff">${escapeSvgText(line)}</text>`)
+    .join("\n");
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+    <svg xmlns="http://www.w3.org/2000/svg" width="960" height="960" viewBox="0 0 960 960">
+      <defs>
+        <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+          <stop offset="0" stop-color="#0f766e"/>
+          <stop offset="0.52" stop-color="#2563eb"/>
+          <stop offset="1" stop-color="#f97316"/>
+        </linearGradient>
+      </defs>
+      <rect width="960" height="960" fill="url(#bg)"/>
+      <rect x="84" y="178" width="792" height="604" rx="34" fill="rgba(0,0,0,0.36)"/>
+      ${textNodes}
+      <text x="480" y="830" text-anchor="middle" font-family="Arial, sans-serif" font-size="30" fill="rgba(255,255,255,0.76)">Instagram text post</text>
+    </svg>
+  `;
+  const png = await sharp(Buffer.from(svg, "utf8")).png().toBuffer();
+  return `data:image/png;base64,${png.toString("base64")}`;
+}
+
+export async function buildRednoteTextCardDataUrl(caption: string): Promise<string> {
+  const lines = wrapCaptionCardLines(caption, 17, 8);
+  const lineHeight = lines.length > 6 ? 64 : 74;
+  const startY = Math.round(620 - ((lines.length - 1) * lineHeight) / 2);
+  const textNodes = lines
+    .map((line, index) => `<text x="540" y="${startY + index * lineHeight}" text-anchor="middle" font-family="${INSTAGRAM_TEXT_CARD_FONT_FAMILY}" font-size="${lines.length > 6 ? 42 : 50}" font-weight="700" fill="#242424">${escapeSvgText(line)}</text>`)
+    .join("\n");
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+    <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1440" viewBox="0 0 1080 1440">
+      <defs>
+        <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+          <stop offset="0" stop-color="#f8fafc"/>
+          <stop offset="0.55" stop-color="#eef2ff"/>
+          <stop offset="1" stop-color="#fff1f2"/>
+        </linearGradient>
+      </defs>
+      <rect width="1080" height="1440" fill="url(#bg)"/>
+      <rect x="82" y="168" width="916" height="968" rx="38" fill="#ffffff" opacity="0.88"/>
+      <circle cx="180" cy="260" r="34" fill="#ff2442"/>
+      <text x="236" y="273" font-family="${INSTAGRAM_TEXT_CARD_FONT_FAMILY}" font-size="36" font-weight="700" fill="#242424">AI 工作流观察</text>
+      ${textNodes}
+      <text x="540" y="1248" text-anchor="middle" font-family="${INSTAGRAM_TEXT_CARD_FONT_FAMILY}" font-size="32" fill="#666666">工具越聪明，越需要清晰的问题和判断</text>
+    </svg>
+  `;
+  const png = await sharp(Buffer.from(svg, "utf8")).png().toBuffer();
+  return `data:image/png;base64,${png.toString("base64")}`;
+}
+
+const PUBLISH_VERIFY_MODEL = "gemini-3-flash-preview";
+const FIXED_VMOS_SCREEN = { width: 720, height: 1600 };
+const BASE_SCREEN = FIXED_VMOS_SCREEN;
+const THREADS_TALL_REFERENCE_SCREEN = FIXED_VMOS_SCREEN;
+const THREADS_COMPOSER_TEXT_INPUT_POINT = { x: 238, y: 334 };
+const THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE = { ...THREADS_COMPOSER_TEXT_INPUT_POINT, absolute: true };
+const screenSizeCache = new Map<string, { width: number; height: number }>();
+const permissionGrantCache = new Set<string>();
+const ACP_THREADS_FAST_PAD_CODE = "ACP250322677KIRJ";
+const ACP_THREADS_ALT_PAD_CODES = new Set([ACP_THREADS_FAST_PAD_CODE, "ACP250801768QX47", "ACP250430WZA6JZL"]);
+const INSTAGRAM_FEED_GRID_DIFF_THRESHOLD = 6;
+const INSTAGRAM_FEED_REFERENCE_IMAGE_DIFF_THRESHOLD = 22;
+const INSTAGRAM_PROFILE_COUNT_DIFF_THRESHOLD = 4;
+const INSTAGRAM_LATEST_POST_IMAGE_DIFF_THRESHOLD = 10;
+const INSTAGRAM_REELS_PROFILE_COUNT_DIFF_THRESHOLD = 0.05;
+const INSTAGRAM_REELS_PROFILE_GRID_SOFT_DIFF_THRESHOLD = 0.8;
+const THREADS_PROFILE_DIFF_THRESHOLD = 6;
+const THREADS_PROFILE_REFERENCE_IMAGE_DIFF_THRESHOLD = 14;
+const THREADS_PROFILE_REFERENCE_IMAGE_CROP_DIFF_THRESHOLD = 12;
+const THREADS_VIDEO_TAB_DIFF_THRESHOLD = 1.0;
+const THREADS_TEXT_QUICK_DIFF_THRESHOLD = 1.0;
+const THREADS_LOCAL_VERIFY_DELAYS_MS = [2500, 7000];
+const THREADS_VIDEO_TAB_VERIFY_DELAYS_MS = [2500, 7000, 12000];
+const THREADS_TEXT_PROFILE_RETRY_DELAYS_MS = [2500, 6000];
+const THREADS_IMAGE_PROFILE_RETRY_DELAYS_MS = [5000, 12000];
+const THREADS_VIDEO_PROFILE_RETRY_DELAYS_MS = [8000, 15000, 30000];
+const THREADS_PROFILE_VERIFY_TIMEOUT_MS = 30000;
+const THREADS_TEXT_TOAST_SETTLE_DELAY_MS = 1200;
+const execFileAsync = promisify(execFile);
+
+export function getThreadsLauncherIconFallbackPoints(width = BASE_SCREEN.width, height = BASE_SCREEN.height) {
+  const scale = width / BASE_SCREEN.width;
+  return [
+    { x: Math.round(444 * scale), y: Math.round(348 * scale) },
+    { x: Math.round(444 * scale), y: Math.round(330 * scale) },
+    { x: Math.round(444 * scale), y: Math.round(365 * scale) },
+    { x: Math.round(445 * scale), y: Math.round(386 * scale) },
+    { x: Math.round(444 * scale), y: Math.round(430 * scale) },
+    { x: Math.round(360 * scale), y: Math.round(348 * scale) },
+    { x: Math.round(276 * scale), y: Math.round(348 * scale) },
+    { x: Math.round(276 * scale), y: Math.round(330 * scale) },
+    { x: Math.round(276 * scale), y: Math.round(365 * scale) },
+    { x: Math.round(278 * scale), y: Math.round(386 * scale) },
+  ];
+}
+
+export function getThreadsLauncherIconTapCandidates(
+  screenshotSize: { width: number; height: number },
+  screenSize: { width: number; height: number },
+): Array<{ x: number; y: number }> {
+  const seen = new Set<string>();
+  const candidates: Array<{ x: number; y: number }> = [];
+  const add = (x: number, y: number) => {
+    const point = {
+      x: Math.max(0, Math.min(screenSize.width - 1, Math.round(x))),
+      y: Math.max(0, Math.min(screenSize.height - 1, Math.round(y))),
+    };
+    const key = `${point.x},${point.y}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidates.push(point);
+    }
+  };
+
+  const scaleX = screenSize.width / FIXED_VMOS_SCREEN.width;
+  const scaleY = screenSize.height / FIXED_VMOS_SCREEN.height;
+  for (const point of getThreadsLauncherIconFallbackPoints()) {
+    add(point.x * scaleX, point.y * scaleY);
+  }
+  return candidates;
+}
+
+export function buildThreadsPublishSampleLabel(input: {
+  platform?: Platform;
+  mediaKind?: "text" | "image" | "video" | "media";
+  scenario: string;
+  timestamp?: number;
+}): string {
+  const parts = [
+    input.platform || "threads",
+    input.mediaKind || "media",
+    input.scenario,
+    String(input.timestamp ?? Date.now()),
+  ];
+  return parts
+    .join("-")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 160);
+}
+
+function saveThreadsScreenshotSnapshot(
+  url: string,
+  label: string,
+  outputDir = path.join(process.cwd(), ".runtime", "automatic-script", "debug-shots"),
+): string | null {
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+    if (url.startsWith("data:")) {
+      const parsedData = parseDataUrlMedia(url);
+      if (!parsedData) return null;
+      const ext = getMediaExtension(url);
+      const filename = `threads-${label}-${Date.now()}.${ext}`;
+      const targetPath = path.join(outputDir, filename);
+      fs.writeFileSync(targetPath, Buffer.from(parsedData.base64, "base64"));
+      return targetPath;
+    }
+    if (!/^https?:/i.test(url)) return null;
+    const parsed = new URL(url);
+    const sourcePath = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+    if (!fs.existsSync(sourcePath)) return url;
+    const ext = path.extname(sourcePath) || ".png";
+    const filename = `threads-${label}-${Date.now()}${ext}`;
+    const targetPath = path.join(outputDir, filename);
+    fs.copyFileSync(sourcePath, targetPath);
+    return targetPath;
+  } catch {
+    return url;
+  }
+}
+
+function saveThreadsDebugScreenshot(url: string, label: string): string | null {
+  return saveThreadsScreenshotSnapshot(url, label);
+}
+
+function formatThreadsDebugTargets(urls: Array<unknown>): string {
+  return urls
+    .filter((url): url is string => typeof url === "string" && Boolean(url.trim()))
+    .map((url, index) => saveThreadsDebugScreenshot(url, `debug-${index + 1}`) || url)
+    .join(",");
+}
+
+async function captureThreadsPublishSample(
+  config: VmosConfig,
+  padCode: string,
+  input: {
+    scenario: string;
+    mediaKind?: "text" | "image" | "video" | "media";
+    step?: string;
+    reason?: string;
+    page?: ThreadsPageState;
+    screenshotUrl?: string;
+    expectedPages?: ThreadsPageState[];
+  },
+): Promise<string | null> {
+  const timestamp = Date.now();
+  const label = buildThreadsPublishSampleLabel({
+    platform: "threads",
+    mediaKind: input.mediaKind,
+    scenario: input.scenario,
+    timestamp,
+  });
+  const outputDir = path.join(
+    process.cwd(),
+    ".runtime",
+    "automatic-script",
+    "publish-samples",
+    "threads",
+    buildThreadsPublishSampleLabel({
+      platform: "threads",
+      mediaKind: input.mediaKind,
+      scenario: input.scenario,
+      timestamp: 0,
+    }).replace(/-0$/, ""),
+  );
+
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+    const [focus, uiXml] = await Promise.all([
+      getAndroidCurrentFocus(config, padCode).catch((error) => `focus_error:${error instanceof Error ? error.message : String(error)}`),
+      dumpUiXml(config, padCode).catch((error) => `ui_xml_error:${error instanceof Error ? error.message : String(error)}`),
+    ]);
+    const screenshotUrl = input.screenshotUrl
+      ? await freezeScreenshotUrl(input.screenshotUrl).catch(() => input.screenshotUrl)
+      : await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    const screenshotPath = screenshotUrl
+      ? saveThreadsScreenshotSnapshot(screenshotUrl, label, outputDir)
+      : null;
+    const screenshotSize = screenshotUrl
+      ? await getImageDimensions(screenshotUrl).catch(() => null)
+      : null;
+    const xmlPath = path.join(outputDir, `${label}.xml`);
+    fs.writeFileSync(xmlPath, uiXml || "", "utf8");
+    const jsonPath = path.join(outputDir, `${label}.json`);
+    fs.writeFileSync(jsonPath, JSON.stringify({
+      id: label,
+      platform: "threads",
+      padCode,
+      scenario: input.scenario,
+      mediaKind: input.mediaKind || "media",
+      step: input.step,
+      reason: input.reason,
+      page: input.page,
+      expectedPages: input.expectedPages,
+      focus: normalizeSingleLine(focus),
+      observedStateKey: `${input.page || "unknown"}|${normalizeSingleLine(input.reason || "")}|${normalizeSingleLine(focus)}`,
+      screenshotSize,
+      snapshot: {
+        page: input.page || "unknown",
+        reason: input.reason || "",
+        focus: normalizeSingleLine(focus),
+        hasUiXml: Boolean(uiXml),
+        screenshotPath,
+        screenshotSize,
+        xmlPath,
+      },
+      screenshotPath,
+      xmlPath,
+      createdAt: new Date(timestamp).toISOString(),
+    }, null, 2), "utf8");
+    registerThreadsPublishSample(jsonPath, JSON.parse(fs.readFileSync(jsonPath, "utf8")));
+    return jsonPath;
+  } catch {
+    return null;
+  }
+}
+
+function appendSamplePath(message: string, samplePath: string | null): string {
+  return samplePath ? `${message}｜sample=${samplePath}` : message;
+}
+
+function buildThreadsBlockedError(reason: string, screenshotUrl?: string | null): string {
+  const savedPath = screenshotUrl ? saveThreadsDebugScreenshot(screenshotUrl, "blocked") : null;
+  const debugTarget = savedPath || screenshotUrl || "";
+  return `__THREADS_BLOCKED__${reason}${debugTarget ? `｜debug=${debugTarget}` : ""}`;
+}
+
+function looksLikeThreadsLoginChooser(reason?: string | null): boolean {
+  return /(login|required|登入|登录|帳號|账号|账户|其他账户|其他帳戶|instagram)/i.test(reason || "");
+}
+
+const THREADS_TEXT_TOAST_LATE_DELAY_MS = 1800;
+const INSTAGRAM_PACKAGE = "com.instagram.android";
+const THREADS_PACKAGE = "com.instagram.barcelona";
+const REDNOTE_PACKAGE = "com.xingin.xhs";
+const TELEGRAM_PACKAGE = "org.telegram.messenger";
+const REDNOTE_SHARE_ACTIVITY = `${REDNOTE_PACKAGE}/.routers.RouterPageActivity`;
+const GOOGLE_PLAY_PACKAGE = "com.android.vending";
+const THREADS_SHARE_HANDLER = `${THREADS_PACKAGE}/.handleractivity.BarcelonaShareHandlerActivity`;
+const MEDIA_PERMISSIONS = [
+  "android.permission.READ_MEDIA_IMAGES",
+  "android.permission.READ_MEDIA_VIDEO",
+  "android.permission.READ_EXTERNAL_STORAGE",
+  "android.permission.WRITE_EXTERNAL_STORAGE",
+];
+const CAMERA_MEDIA_PERMISSIONS = [
+  "android.permission.CAMERA",
+  "android.permission.RECORD_AUDIO",
+  ...MEDIA_PERMISSIONS,
+];
+const INSTAGRAM_PROFILE_PERMISSIONS = [
+  ...MEDIA_PERMISSIONS,
+  "android.permission.READ_CONTACTS",
+  "android.permission.WRITE_CONTACTS",
+  "android.permission.GET_ACCOUNTS",
+];
+
+// ─── 工具函式 ────────────────────────────────────────────────────────────────
+
+function delay(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function parseDataUrlImage(dataUrl: string): { mimeType: string; base64: string } | null {
+  const parsed = parseDataUrlMedia(dataUrl);
+  if (!parsed || !parsed.mimeType.startsWith("image/")) return null;
+  return parsed;
+}
+
+function hasImageReferenceMedia(mediaUrl?: string): boolean {
+  return Boolean(mediaUrl) && !isVideoMediaUrl(mediaUrl);
+}
+
+function getDeviceMediaLabel(mediaUrl: string): "圖片" | "影片" {
+  return isVideoMediaUrl(mediaUrl) ? "影片" : "圖片";
+}
+
+function createTimeoutSignal(timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const timer = globalThis.setTimeout(() => controller.abort(new Error(`timeout:${timeoutMs}`)), timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => globalThis.clearTimeout(timer),
+  };
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = globalThis.setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) globalThis.clearTimeout(timer);
+  }
+}
+
+async function callPublishVerifier(
+  contents: any[],
+  generationConfig: Record<string, any> = { maxOutputTokens: 120, temperature: 0 },
+  timeoutMs = 12_000,
+) {
+  const request = createTimeoutSignal(timeoutMs);
+  try {
+    return await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      contents,
+      generationConfig,
+      request.signal,
+    );
+  } finally {
+    request.cleanup();
+  }
+}
+
+function rethrowThreadsTerminalError(error: unknown): void {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (msg.startsWith("__THREADS_BLOCKED__") || msg.startsWith("__THREADS_STILL_COMPOSING__")) {
+    throw error instanceof Error ? error : new Error(msg);
+  }
+}
+
+function isPublishVerifierAuthError(message: string): boolean {
+  return /401|unauthorized|invalid token|invalid api key|無效的令牌|无效的令牌|API key/i.test(message);
+}
+
+function inferMediaExtension(mediaUrl: string): string {
+  return getMediaExtension(mediaUrl);
+}
+
+const REMOTE_IMAGE_COMPRESS_THRESHOLD_BYTES = 256 * 1024;
+const STAGED_IMAGE_TARGET_BYTES = 96 * 1024;
+const STAGED_VIDEO_TRANSCODE_THRESHOLD_BYTES = positiveEnvInt("VMOS_VIDEO_TRANSCODE_THRESHOLD_BYTES", 5 * 1024 * 1024);
+const STAGED_VIDEO_TRANSCODE_TARGET_BITRATE = process.env.VMOS_VIDEO_TRANSCODE_BITRATE || "320k";
+const STAGED_VIDEO_TRANSCODE_AUDIO_BITRATE = process.env.VMOS_VIDEO_TRANSCODE_AUDIO_BITRATE || "48k";
+function positiveEnvInt(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+const FAST_IMAGE_BASE64_CHUNK_SIZE = positiveEnvInt("VMOS_IMAGE_BASE64_CHUNK_SIZE", 10000);
+const FAST_IMAGE_BASE64_CHUNKS_PER_COMMAND = positiveEnvInt("VMOS_IMAGE_BASE64_CHUNKS_PER_COMMAND", 1);
+const FAST_VIDEO_BASE64_CHUNK_SIZE = positiveEnvInt("VMOS_VIDEO_BASE64_CHUNK_SIZE", 4000);
+const FAST_VIDEO_BASE64_CHUNKS_PER_COMMAND = positiveEnvInt("VMOS_VIDEO_BASE64_CHUNKS_PER_COMMAND", 1);
+const DEVICE_MEDIA_STAGING_CACHE_FILE = path.join(
+  process.cwd(),
+  ".runtime",
+  "automatic-script",
+  "device-media-staging-cache.json",
+);
+
+type DeviceMediaStagingCacheEntry = {
+  key: string;
+  padCode: string;
+  mediaHash: string;
+  mediaKind: "image" | "video";
+  remotePath: string;
+  updatedAt: string;
+};
+
+function hashString(value: string, length = 24): string {
+  return crypto.createHash("sha256").update(value).digest("hex").slice(0, length);
+}
+
+function getDeviceMediaStagingKey(padCode: string, mediaUrl: string): string {
+  return `${padCode}:${isVideoMediaUrl(mediaUrl) ? "video" : "image"}:${hashString(mediaUrl, 32)}`;
+}
+
+function buildStableDeviceMediaRemotePath(prefix: string, mediaUrl: string): string {
+  const ext = inferMediaExtension(mediaUrl);
+  const mediaHash = hashString(mediaUrl, 20);
+  return `/sdcard/Download/${prefix}_${mediaHash}.${ext}`;
+}
+
+function readDeviceMediaStagingCache(): Record<string, DeviceMediaStagingCacheEntry> {
+  try {
+    if (!fs.existsSync(DEVICE_MEDIA_STAGING_CACHE_FILE)) return {};
+    const raw = JSON.parse(fs.readFileSync(DEVICE_MEDIA_STAGING_CACHE_FILE, "utf8"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDeviceMediaStagingCache(cache: Record<string, DeviceMediaStagingCacheEntry>) {
+  try {
+    fs.mkdirSync(path.dirname(DEVICE_MEDIA_STAGING_CACHE_FILE), { recursive: true });
+    const entries = Object.entries(cache)
+      .sort((a, b) => String(b[1]?.updatedAt || "").localeCompare(String(a[1]?.updatedAt || "")))
+      .slice(0, 300);
+    fs.writeFileSync(
+      DEVICE_MEDIA_STAGING_CACHE_FILE,
+      JSON.stringify(Object.fromEntries(entries), null, 2),
+      "utf8",
+    );
+  } catch {
+    // Cache misses are acceptable; publishing can still stage the media normally.
+  }
+}
+
+async function getReusableStagedMediaPath(
+  config: VmosConfig,
+  padCode: string,
+  mediaUrl: string,
+  fallbackRemotePath?: string,
+): Promise<string | null> {
+  const cache = readDeviceMediaStagingCache();
+  const entry = cache[getDeviceMediaStagingKey(padCode, mediaUrl)];
+  const remotePath = entry?.remotePath || fallbackRemotePath;
+  if (!remotePath) return null;
+  const isVideoMedia = isVideoMediaUrl(mediaUrl);
+  try {
+    const exists = await execAdbForText(
+      config,
+      padCode,
+      `[ -s ${shellSingleQuote(remotePath)} ] && echo EXISTS || echo MISSING`,
+      8000,
+      500,
+    );
+    if (!/EXISTS/.test(exists)) {
+      if (entry?.key) {
+        delete cache[entry.key];
+        writeDeviceMediaStagingCache(cache);
+      }
+      return null;
+    }
+
+    const indexed = await waitForMediaIndexed(config, padCode, remotePath, isVideoMedia, 5000);
+    if (!indexed) {
+      await execAdbForText(
+        config,
+        padCode,
+        `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://${remotePath}`,
+        8000,
+        500,
+      ).catch(() => "");
+      if (!await waitForMediaIndexed(config, padCode, remotePath, isVideoMedia, 8000)) {
+        return null;
+      }
+    }
+
+    rememberStagedMediaPath(padCode, mediaUrl, remotePath);
+    return remotePath;
+  } catch {
+    return null;
+  }
+}
+
+function rememberStagedMediaPath(
+  padCode: string,
+  mediaUrl: string,
+  remotePath: string,
+) {
+  const key = getDeviceMediaStagingKey(padCode, mediaUrl);
+  const cache = readDeviceMediaStagingCache();
+  cache[key] = {
+    key,
+    padCode,
+    mediaHash: hashString(mediaUrl, 32),
+    mediaKind: isVideoMediaUrl(mediaUrl) ? "video" : "image",
+    remotePath,
+    updatedAt: new Date().toISOString(),
+  };
+  writeDeviceMediaStagingCache(cache);
+}
+
+async function getRemoteImageContentLength(url: string): Promise<number | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const resp = await fetch(url, { method: "HEAD", signal: controller.signal });
+    if (!resp.ok) return undefined;
+    const contentType = resp.headers.get("content-type") || "";
+    if (contentType && !/^image\//i.test(contentType)) return undefined;
+    const raw = resp.headers.get("content-length");
+    const size = raw ? Number(raw) : NaN;
+    return Number.isFinite(size) && size > 0 ? size : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function maybeCompressRemoteImageForStaging(
+  mediaUrl: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<string> {
+  if (!/^https?:\/\//i.test(mediaUrl) || isVideoMediaUrl(mediaUrl)) return mediaUrl;
+  const contentLength = await getRemoteImageContentLength(mediaUrl);
+  if (!contentLength || contentLength <= REMOTE_IMAGE_COMPRESS_THRESHOLD_BYTES) return mediaUrl;
+
+  try {
+    onProgress?.({ step: "遠端圖片較大，正在壓縮後再寫入雲機...", done: false });
+    const inline = await getInlineData(mediaUrl);
+    if (!inline?.mimeType || !/^image\//i.test(inline.mimeType)) return mediaUrl;
+    const sourceBytes = Buffer.byteLength(inline.data, "base64");
+    if (sourceBytes <= REMOTE_IMAGE_COMPRESS_THRESHOLD_BYTES) return mediaUrl;
+    const compressed = await compressImage(`data:${inline.mimeType};base64,${inline.data}`, {
+      targetBytes: STAGED_IMAGE_TARGET_BYTES,
+      maxDim: 960,
+      minQuality: 0.24,
+    });
+    const compressedParsed = parseDataUrlMedia(compressed);
+    const compressedBytes = compressedParsed ? Buffer.byteLength(compressedParsed.base64, "base64") : Infinity;
+    return compressedParsed && compressedBytes < sourceBytes ? compressed : mediaUrl;
+  } catch {
+    return mediaUrl;
+  }
+}
+
+async function maybeTranscodeVideoDataUrlForStaging(
+  mediaUrl: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<string> {
+  if (!mediaUrl.startsWith("data:video/")) return mediaUrl;
+  const parsed = parseDataUrlMedia(mediaUrl);
+  if (!parsed) return mediaUrl;
+  const sourceBytes = Buffer.byteLength(parsed.base64, "base64");
+  if (sourceBytes <= STAGED_VIDEO_TRANSCODE_THRESHOLD_BYTES) return mediaUrl;
+
+  const mediaHash = hashString(mediaUrl, 24);
+  const workDir = path.join(process.cwd(), ".runtime", "automatic-script", "video-staging");
+  const inputPath = path.join(workDir, `${mediaHash}.${inferMediaExtension(mediaUrl) || "mp4"}`);
+  const outputVariant = `${STAGED_VIDEO_TRANSCODE_TARGET_BITRATE}-${STAGED_VIDEO_TRANSCODE_AUDIO_BITRATE}`.replace(/[^A-Za-z0-9_-]+/g, "_");
+  const outputPath = path.join(workDir, `${mediaHash}.${outputVariant}.mp4`);
+
+  try {
+    fs.mkdirSync(workDir, { recursive: true });
+    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size <= 0) {
+      onProgress?.({
+        step: `影片較大（${Math.round(sourceBytes / 1024 / 1024)}MB），正在轉成較快上傳版本...`,
+        done: false,
+      });
+      if (!fs.existsSync(inputPath)) {
+        fs.writeFileSync(inputPath, Buffer.from(parsed.base64, "base64"));
+      }
+      await execFileAsync("ffmpeg", [
+        "-y",
+        "-i",
+        inputPath,
+        "-vf",
+        "scale='min(540,iw)':-2",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-b:v",
+        STAGED_VIDEO_TRANSCODE_TARGET_BITRATE,
+        "-maxrate",
+        "520k",
+        "-bufsize",
+        "1040k",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        STAGED_VIDEO_TRANSCODE_AUDIO_BITRATE,
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ], {
+        timeout: 180_000,
+        windowsHide: true,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+    }
+
+    const output = fs.readFileSync(outputPath);
+    if (output.length > 0 && output.length < sourceBytes) {
+      onProgress?.({
+        step: `影片已壓縮至 ${Math.max(1, Math.round(output.length / 1024 / 1024))}MB，準備寫入雲機...`,
+        done: false,
+      });
+      return `data:video/mp4;base64,${output.toString("base64")}`;
+    }
+  } catch (error) {
+    onProgress?.({
+      step: `影片轉碼加速不可用，改用原始影片寫入：${error instanceof Error ? error.message.slice(0, 80) : String(error).slice(0, 80)}`,
+      done: false,
+    });
+  }
+
+  return mediaUrl;
+}
+
+function platformKeepsInlineMedia(platform: Platform): boolean {
+  return platform === "instagram" || platform === "threads";
+}
+
+function shouldUseAcpThreadsFastTextPath(padCode: string, mediaUrl?: string): boolean {
+  return padCode === ACP_THREADS_FAST_PAD_CODE && !mediaUrl;
+}
+
+export function shouldUseThreadsShareIntentPath(padCode: string, mediaUrl?: string): boolean {
+  void padCode;
+  // 所有云机的 Threads 图片/视频统一走系统分享入口，避开应用内图库
+  // 在不同账号语言、键盘态和工具栏布局下的坐标漂移。
+  return Boolean(mediaUrl);
+}
+
+function isAcpPad(padCode: string): boolean {
+  return ACP_THREADS_ALT_PAD_CODES.has(padCode);
+}
+
+function encodeBase64Utf8(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function shellDecodedTextArg(text: string): string {
+  return `"$(printf %s ${shellSingleQuote(encodeBase64Utf8(text))} | base64 -d)"`;
+}
+
+function shellDoubleQuote(value: string): string {
+  return `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
+}
+
+function getThreadsShareMimeType(mediaUrl?: string): string {
+  if (!mediaUrl) return "text/plain";
+  if (isVideoMediaUrl(mediaUrl)) return "video/mp4";
+  const ext = getMediaExtension(mediaUrl);
+  if (ext === "png") return "image/png";
+  if (ext === "webp") return "image/webp";
+  return "image/jpeg";
+}
+
+function getTelegramShareMimeType(mediaUrl?: string): string {
+  return getThreadsShareMimeType(mediaUrl);
+}
+
+export function buildThreadsShareIntentCommand(input: {
+  caption?: string;
+  contentUri?: string;
+  mimeType?: string;
+}): string {
+  const mimeType = input.mimeType || (input.contentUri ? "image/jpeg" : "text/plain");
+  const args = [
+    `am force-stop ${THREADS_PACKAGE}`,
+    "sleep 1",
+    [
+      "am start -W",
+      "-a android.intent.action.SEND",
+      `-t ${shellSingleQuote(mimeType)}`,
+      `-n ${THREADS_SHARE_HANDLER}`,
+      input.contentUri ? "--grant-read-uri-permission" : "",
+      input.contentUri ? `--eu android.intent.extra.STREAM ${shellSingleQuote(input.contentUri)}` : "",
+      input.caption ? `--es android.intent.extra.TEXT ${shellDecodedTextArg(input.caption)}` : "",
+      "2>&1",
+    ].filter(Boolean).join(" "),
+  ];
+  return args.join("; ");
+}
+
+function getXmlAttr(node: string, name: string): string {
+  const match = node.match(new RegExp(`${name}="([^"]*)"`));
+  return match?.[1] ?? "";
+}
+
+function decodeXmlAttr(value: string): string {
+  return value
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function parseBoundsCenter(bounds: string): { x: number; y: number } | null {
+  const match = bounds.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+  if (!match) return null;
+  const [, left, top, right, bottom] = match.map(Number);
+  if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) return null;
+  return {
+    x: Math.round((left + right) / 2),
+    y: Math.round((top + bottom) / 2),
+  };
+}
+
+function parseBoundsRect(bounds: string): { left: number; top: number; right: number; bottom: number; width: number; height: number } | null {
+  const match = bounds.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+  if (!match) return null;
+  const [, left, top, right, bottom] = match.map(Number);
+  if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) return null;
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+function findAndroidPermissionDialogButtonTarget(
+  uiXml: string,
+  preference: "allow" | "deny" = "deny",
+): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+
+  for (const node of nodes) {
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center || !text) continue;
+
+    let score = 0;
+    if (preference === "deny") {
+      if (/^(不允許|不允许|Deny|Don['’]?t allow|拒絕|拒绝)$/i.test(text)) score += 20;
+      if (/不允許|不允许|Deny|Don['’]?t allow|拒絕|拒绝/i.test(text)) score += 10;
+    } else {
+      if (/使用應用程式時|使用应用程序时|使用应用程式时|While using/i.test(text)) score += 20;
+      if (/僅允許這一次|仅允许这一次|Only this time/i.test(text)) score += 8;
+      if (/允許|允许|Allow/i.test(text)) score += 6;
+    }
+    if (/android\.widget\.Button|Button/i.test(getXmlAttr(node, "class"))) score += 3;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 3;
+    if (center.x >= 80 && center.x <= 640 && center.y >= 520 && center.y <= 1250) score += 2;
+    if (score >= 10) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || b.y - a.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+const THREADS_ACCOUNT_TEXT_DENYLIST = new Set([
+  "about",
+  "activity",
+  "back",
+  "block",
+  "cancel",
+  "chrome",
+  "close",
+  "comment",
+  "continue",
+  "create",
+  "delete",
+  "done",
+  "edit",
+  "explore",
+  "follow",
+  "following",
+  "followers",
+  "google",
+  "help",
+  "home",
+  "instagram",
+  "like",
+  "login",
+  "logout",
+  "menu",
+  "messages",
+  "more",
+  "next",
+  "notifications",
+  "ok",
+  "privacy",
+  "profile",
+  "reels",
+  "report",
+  "save",
+  "search",
+  "settings",
+  "share",
+  "sign",
+  "skip",
+  "terms",
+  "threads",
+  "unfollow",
+  "watch",
+  "主页",
+  "主頁",
+  "个人主页",
+  "個人主頁",
+  "搜索",
+  "搜尋",
+  "通知",
+  "设置",
+  "設定",
+  "关注",
+  "追蹤",
+  "粉丝",
+  "粉絲",
+  "编辑主页",
+  "編輯個人檔案",
+]);
+
+function normalizeThreadsProfileUsername(raw: string): string | null {
+  const text = raw.trim().replace(/\s+/g, " ");
+  if (!text || text.length > 80) return null;
+  const exact = text.match(/^@?([A-Za-z0-9._]{3,30})$/);
+  const embedded = exact ? exact : text.match(/(?:^|\s)@([A-Za-z0-9._]{3,30})(?:\s|$)/);
+  const username = embedded?.[1]?.trim();
+  if (!username) return null;
+  const lower = username.toLowerCase();
+  if (/^\d+$/.test(username)) return null;
+  if (username.startsWith(".") || username.endsWith(".") || username.includes("..")) return null;
+  if (THREADS_ACCOUNT_TEXT_DENYLIST.has(lower)) return null;
+  return username;
+}
+
+function hasThreadsProfileUiCue(uiXml: string): boolean {
+  const texts = (uiXml.match(/<node\b[^>]*>/g) ?? [])
+    .flatMap((node) => [
+      decodeXmlAttr(getXmlAttr(node, "text")),
+      decodeXmlAttr(getXmlAttr(node, "content-desc")),
+    ])
+    .map((text) => text.trim())
+    .filter(Boolean);
+  const joined = texts.join("\n");
+  const hasProfileAction = /編輯個人檔案|编辑个人资料|编辑主页|Edit profile|分享個人檔案|分享个人资料|Share profile/i.test(joined);
+  const hasProfileTabs = /(^|\n)(串文|Threads|回覆|回复|Replies|轉發|转发|Reposts)(\n|$)/i.test(joined);
+  const hasStats = /粉絲|粉丝|followers|following|追蹤中|关注中/i.test(joined);
+  return hasProfileAction || (hasProfileTabs && hasStats);
+}
+
+export function extractThreadsProfileUsernameFromUiXml(uiXml: string): string | null {
+  if (!hasThreadsProfileUiCue(uiXml)) return null;
+
+  const candidates: Array<{ username: string; score: number }> = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const bounds = getXmlAttr(node, "bounds");
+    const center = parseBoundsCenter(bounds);
+    const rawValues = [
+      decodeXmlAttr(getXmlAttr(node, "text")),
+      decodeXmlAttr(getXmlAttr(node, "content-desc")),
+    ];
+
+    for (const raw of rawValues) {
+      const username = normalizeThreadsProfileUsername(raw);
+      if (!username) continue;
+
+      let score = 0;
+      if (raw.trim().startsWith("@")) score += 20;
+      if (center) {
+        if (center.y <= 520) score += 8;
+        if (center.y <= 320) score += 4;
+        if (center.x >= 60 && center.x <= 660) score += 2;
+      }
+      candidates.push({ username, score });
+    }
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || a.username.length - b.username.length)[0];
+  return best?.username ?? null;
+}
+
+export function findThreadsComposerInputTarget(uiXml: string): { x: number; y: number } | null {
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`;
+    const bounds = getXmlAttr(node, "bounds");
+    const center = parseBoundsCenter(bounds);
+    if (!center) continue;
+    if (/Search|搜尋|搜索|搜尋 Threads|搜索 Threads/i.test(text)) continue;
+    if (center.y < 180) continue;
+
+    let score = 0;
+    if (className.includes("EditText")) score += 6;
+    if (/有什麼新鮮事|有什么新鲜事|What's new|What’s new|新增到串文|Add to thread/i.test(text)) score += 4;
+    if (center.y >= 180 && center.y <= 520) score += 2;
+    if (center.x >= 80 && center.x <= 650) score += 1;
+    if (score >= 6) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+function detectThreadsTopicSearchOverlayFromUiXml(uiXml: string): boolean {
+  const text = normalizeSingleLine(uiXml);
+  if (!text) return false;
+  return /搜尋主題|搜索主题|搜尋話題|搜索话题|Search topics?|Search topic/i.test(text);
+}
+
+export function findThreadsComposerPublishButtonTarget(uiXml: string): { x: number; y: number } | null {
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    const text = `${getXmlAttr(node, "text")} ${getXmlAttr(node, "content-desc")}`.trim();
+    const bounds = getXmlAttr(node, "bounds");
+    const center = parseBoundsCenter(bounds);
+    if (!center) continue;
+
+    let score = 0;
+    if (/^(發布|发布|發佈|Post|Share)$/i.test(text)) score += 10;
+    if (/(發布|发布|發佈|Post|Share)/i.test(text)) score += 4;
+    if (className.includes("Button")) score += 2;
+    if (className.includes("TextView")) score += 1;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 2;
+    if (center.x >= 500) score += 2;
+    if (center.y >= 700) score += 2;
+    if (/新增到串文|Add to thread|替代文字|Alt text|檢視|查看|View/i.test(text)) score -= 8;
+    if (score >= 10) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || b.y - a.y || b.x - a.x)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+export function findThreadsBottomSearchTabTarget(uiXml: string): { x: number; y: number } | null {
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const bounds = getXmlAttr(node, "bounds");
+    const center = parseBoundsCenter(bounds);
+    if (!center) continue;
+
+    let score = 0;
+    if (/^(Search|搜尋|搜索|Explore|探索)$/i.test(text)) score += 10;
+    if (/(Search|搜尋|搜索|Explore|探索)/i.test(text)) score += 4;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 2;
+    if (/Button|ImageView|TextView|FrameLayout|ViewGroup/i.test(className)) score += 1;
+    if (center.y >= 900) score += 3;
+    if (center.x >= 90 && center.x <= 330) score += 2;
+    if (/Home|首頁|主页|主頁|Post|Create|Activity|Profile|個人|个人/i.test(text)) score -= 10;
+    if (score >= 10) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || b.y - a.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+export function findThreadsSearchInputTarget(uiXml: string): { x: number; y: number } | null {
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const bounds = getXmlAttr(node, "bounds");
+    const center = parseBoundsCenter(bounds);
+    if (!center) continue;
+
+    let score = 0;
+    if (className.includes("EditText")) score += 8;
+    if (/(Search|搜尋|搜索|搜尋 Threads|搜索 Threads)/i.test(text)) score += 6;
+    if (center.y >= 45 && center.y <= 220) score += 3;
+    if (center.x >= 90 && center.x <= 650) score += 2;
+    if (/有什麼新鮮事|What's new|新增到串文|Add to thread/i.test(text)) score -= 12;
+    if (score >= 10) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+export function findThreadsProfileVideoTabTarget(uiXml: string): { x: number; y: number } | null {
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    const text = `${getXmlAttr(node, "text")} ${getXmlAttr(node, "content-desc")}`.trim();
+    const bounds = getXmlAttr(node, "bounds");
+    const center = parseBoundsCenter(bounds);
+    if (!center) continue;
+
+    let score = 0;
+    if (/影音內容|影音内容|影片|视频|Video|Media|Reels/i.test(text)) score += 10;
+    if (className.includes("TextView") || className.includes("Button")) score += 2;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 1;
+    if (center.y >= 120 && center.y <= 420) score += 3;
+    if (center.x >= 250 && center.x <= 620) score += 2;
+    if (/發布|发布|發佈|Post|Share|新增|有什麼新鮮事|What's new/i.test(text)) score -= 8;
+    if (score >= 10) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || a.y - b.y || a.x - b.x)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+export function findThreadsHomeFeedActionTargetsFromUiXml(uiXml: string): { like?: { x: number; y: number }; comment?: { x: number; y: number } } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const actionCandidates: Array<{ x: number; y: number; score: number; kind: "like" | "comment" }> = [];
+
+  for (const node of nodes) {
+    const text = `${getXmlAttr(node, "text")} ${getXmlAttr(node, "content-desc")}`.trim();
+    const className = getXmlAttr(node, "class");
+    const bounds = getXmlAttr(node, "bounds");
+    const center = parseBoundsCenter(bounds);
+    if (!center) continue;
+
+    let likeScore = 0;
+    let commentScore = 0;
+
+    if (/(like|赞|讚|喜歡|喜欢|愛心|爱心)/i.test(text)) likeScore += 8;
+    if (/(reply|comment|回覆|回复|留言|評論|评论)/i.test(text)) commentScore += 8;
+    if (className.includes("ImageView") || className.includes("Button")) {
+      likeScore += 2;
+      commentScore += 2;
+    }
+    if (/true/i.test(getXmlAttr(node, "clickable"))) {
+      likeScore += 2;
+      commentScore += 2;
+    }
+    if (center.y >= 420 && center.y <= 1180) {
+      likeScore += 3;
+      commentScore += 3;
+    }
+    if (center.x >= 40 && center.x <= 680) {
+      likeScore += 1;
+      commentScore += 1;
+    }
+    if (center.y >= 1180) {
+      likeScore -= 8;
+      commentScore -= 8;
+    }
+    if (/(home|search|activity|profile|建立|create|post|share|發佈|发布)/i.test(text)) {
+      likeScore -= 6;
+      commentScore -= 6;
+    }
+
+    if (likeScore >= 10) actionCandidates.push({ x: center.x, y: center.y, score: likeScore, kind: "like" });
+    if (commentScore >= 10) actionCandidates.push({ x: center.x, y: center.y, score: commentScore, kind: "comment" });
+  }
+
+  const like = actionCandidates
+    .filter((item) => item.kind === "like")
+    .sort((a, b) => b.score - a.score || b.y - a.y || a.x - b.x)[0];
+  const comment = actionCandidates
+    .filter((item) => item.kind === "comment")
+    .sort((a, b) => b.score - a.score || b.y - a.y || a.x - b.x)[0];
+
+  if (!like && !comment) return null;
+  return {
+    like: like ? { x: like.x, y: like.y } : undefined,
+    comment: comment ? { x: comment.x, y: comment.y } : undefined,
+  };
+}
+
+export function findThreadsReplyComposerInputTarget(uiXml: string): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    const resourceId = getXmlAttr(node, "resource-id");
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center) continue;
+
+    let score = 0;
+    if (className.includes("EditText")) score += 10;
+    if (/new_thread_screen_composer|composer/i.test(resourceId)) score += 8;
+    if (/回复|回覆|Reply|新增回覆|添加回复/i.test(text)) score += 4;
+    if (/permalink_inline_composer|reply|composer/i.test(resourceId)) score += 4;
+    if (center.y >= 520 && center.y <= 1185) score += 4;
+    if (center.y >= 1320 && center.y <= 1585) score += 6;
+    if (center.x >= 90 && center.x <= 690) score += 2;
+    if (score >= 12) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || b.y - a.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+export function findThreadsReplySendButtonTarget(uiXml: string): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+
+  for (const node of nodes) {
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const className = getXmlAttr(node, "class");
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center) continue;
+
+    let score = 0;
+    if (/^(发布|發布|發佈|Post|Reply|回复|回覆)$/i.test(text)) score += 12;
+    if (/(发布|發布|發佈|Post|Reply)/i.test(text)) score += 5;
+    if (className.includes("Button") || className.includes("TextView")) score += 2;
+    if (center.x >= 520 && center.x <= 710) score += 5;
+    if (center.y >= 760 && center.y <= 1220) score += 4;
+    if (center.y >= 1320 && center.y <= 1585) score += 4;
+    if (/rowan|回复.*\.\.\.|回覆.*\.\.\./i.test(text)) score -= 10;
+    if (score >= 12) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || b.x - a.x || b.y - a.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+export function hasThreadsReplyComposerText(uiXml: string, comment: string): boolean {
+  const target = normalizeSingleLine(comment).slice(0, 40);
+  if (!target) return false;
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  return nodes.some((node) => {
+    const className = getXmlAttr(node, "class");
+    const resourceId = getXmlAttr(node, "resource-id");
+    if (!className.includes("EditText") && !/composer/i.test(resourceId)) return false;
+    const text = normalizeSingleLine(decodeXmlAttr(getXmlAttr(node, "text")));
+    if (!text) return false;
+    return text.includes(target) || target.includes(text);
+  });
+}
+
+function hasThreadsComposerCaptionText(uiXml: string, caption: string): boolean {
+  const target = normalizeSingleLine(caption).slice(0, 40);
+  if (!target) return false;
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  return nodes.some((node) => {
+    const className = getXmlAttr(node, "class");
+    const resourceId = getXmlAttr(node, "resource-id");
+    if (!className.includes("EditText") && !/composer|text/i.test(resourceId)) return false;
+    const text = normalizeSingleLine(decodeXmlAttr(getXmlAttr(node, "text")));
+    if (!text) return false;
+    if (/有什麼新鮮事|有什么新鲜事|What's new|What’s new|新增到串文|Add to thread/i.test(text)) return false;
+    return text.includes(target) || target.includes(text);
+  });
+}
+
+function hasThreadsPostedCommentText(uiXml: string, comment: string): boolean {
+  const target = normalizeSingleLine(comment).slice(0, 40);
+  if (!target) return false;
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  return nodes.some((node) => {
+    const className = getXmlAttr(node, "class");
+    if (className.includes("EditText")) return false;
+    const text = normalizeSingleLine(decodeXmlAttr(getXmlAttr(node, "text")));
+    if (!text) return false;
+    return text.includes(target) || target.includes(text);
+  });
+}
+
+export function looksLikeThreadsReplyComposerUiXml(uiXml: string): boolean {
+  if (!uiXml) return false;
+  const line = normalizeSingleLine(uiXml);
+  if (!/(回复|回覆|Reply|新增回覆|添加回复|permalink_inline_composer)/i.test(line)) return false;
+  return Boolean(findThreadsReplyComposerInputTarget(uiXml));
+}
+
+export function detectThreadsWarmupCommentPostedCueFromUiXml(uiXml: string): boolean {
+  const line = normalizeSingleLine(uiXml);
+  return /已发布|已發佈|已發佈|Posted|Your reply was posted|回覆已送出|回复已发布/i.test(line);
+}
+
+function hasReadableUiXml(uiXml: string): boolean {
+  return /<node\b/.test(uiXml);
+}
+
+function looksLikeThreadsProfileUiXml(uiXml: string): boolean {
+  const line = normalizeSingleLine(uiXml);
+  if (!line) return false;
+  return /串文.*(?:回复|回覆).*(?:影音内容|影音內容).*(?:转发|轉發)|(?:关注|追蹤).*提及|[\d,.万萬]+位粉丝|followers/i.test(line);
+}
+
+export async function detectThreadsProfilePageLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const darkRatio = (x1: number, y1: number, x2: number, y2: number) => {
+    const left = Math.max(0, Math.min(width - 1, Math.round(width * x1)));
+    const top = Math.max(0, Math.min(height - 1, Math.round(height * y1)));
+    const right = Math.max(left + 1, Math.min(width, Math.round(width * x2)));
+    const bottom = Math.max(top + 1, Math.min(height, Math.round(height * y2)));
+    let dark = 0;
+    let total = 0;
+    for (let y = top; y < bottom; y += 1) {
+      for (let x = left; x < right; x += 1) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 80) continue;
+        const value = (data[index] + data[index + 1] + data[index + 2]) / 3;
+        total += 1;
+        if (value < 120) dark += 1;
+      }
+    }
+    return total ? dark / total : 0;
+  };
+  const regionRatio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.min(width - 1, Math.round(width * x1)));
+    const top = Math.max(0, Math.min(height - 1, Math.round(height * y1)));
+    const right = Math.max(left + 1, Math.min(width, Math.round(width * x2)));
+    const bottom = Math.max(top + 1, Math.min(height, Math.round(height * y2)));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y < bottom; y += 2) {
+      for (let x = left; x < right; x += 2) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 80) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+
+  const backArrow = darkRatio(0.045, 0.055, 0.12, 0.115);
+  const homeLogo = darkRatio(0.43, 0.045, 0.57, 0.13);
+  const followButton = darkRatio(0.68, 0.055, 0.96, 0.13);
+  const profileTabs = darkRatio(0.03, 0.40, 0.96, 0.51);
+  const midFollowButtons = darkRatio(0.04, 0.17, 0.96, 0.32);
+  const lowerProfileTabs = darkRatio(0.03, 0.68, 0.96, 0.78);
+  const topRightActions = darkRatio(0.78, 0.055, 0.97, 0.13);
+  const profileHeader = darkRatio(0.18, 0.12, 0.92, 0.28);
+  const ownProfileButtons = darkRatio(0.04, 0.35, 0.96, 0.43);
+  const bottomProfileTab = darkRatio(0.78, 0.91, 0.96, 0.99);
+  const nameArea = darkRatio(0.04, 0.1, 0.45, 0.24);
+  const publicProfileBody = darkRatio(0.04, 0.14, 0.75, 0.42);
+  const publicProfileStats = darkRatio(0.04, 0.42, 0.88, 0.50);
+  const publicProfileButtons = darkRatio(0.04, 0.50, 0.96, 0.60);
+  const suggestedForYouTitle = darkRatio(0.04, 0.60, 0.70, 0.68);
+  const editProfileButtons = darkRatio(0.04, 0.28, 0.96, 0.36);
+  const composerPublishPill = darkRatio(0.78, 0.91, 0.985, 0.985);
+  const largeComposerMedia = darkRatio(0.12, 0.18, 0.96, 0.68);
+  const keyboardComposerPublishPill = darkRatio(0.78, 0.45, 0.985, 0.61);
+  const keyboardComposerToolbar = darkRatio(0.02, 0.48, 0.98, 0.63);
+  const threadTitle = darkRatio(0.13, 0.055, 0.38, 0.13);
+  const bottomReplyPill = regionRatio(0.03, 0.91, 0.97, 0.985, (r, g, b, a) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return a > 220 && avg > 205 && avg < 248 && spread < 30;
+  });
+  const bottomReplyActions = darkRatio(0.63, 0.91, 0.98, 0.985);
+  if (bottomReplyPill > 0.55 && threadTitle > 0.025) {
+    return false;
+  }
+  if (composerPublishPill > 0.22 && largeComposerMedia > 0.18 && lowerProfileTabs < 0.01) {
+    return false;
+  }
+  if (
+    keyboardComposerPublishPill > 0.18
+    && keyboardComposerToolbar > 0.08
+    && largeComposerMedia > 0.18
+    && lowerProfileTabs < 0.05
+    && bottomProfileTab < 0.025
+  ) {
+    return false;
+  }
+  const publicProfileLike = backArrow > 0.025
+    && homeLogo < 0.085
+    && topRightActions > 0.035
+    && publicProfileBody > 0.07
+    && (profileTabs > 0.018 || lowerProfileTabs > 0.04)
+    && (publicProfileButtons > 0.012 || editProfileButtons > 0.045)
+    && (suggestedForYouTitle > 0.035 || midFollowButtons > 0.075);
+  if (publicProfileLike) return true;
+  return backArrow > 0.025 && homeLogo < 0.035 && (
+    (followButton > 0.018 && profileTabs > 0.012)
+    || (midFollowButtons > 0.055 && lowerProfileTabs > 0.012)
+    || (
+      topRightActions > 0.018
+      && profileHeader > 0.035
+      && (ownProfileButtons > 0.015 || lowerProfileTabs > 0.02 || profileTabs > 0.006)
+    )
+    || (
+      topRightActions > 0.04
+      && nameArea > 0.035
+      && bottomProfileTab > 0.03
+      && editProfileButtons > 0.015
+    )
+    || (
+      topRightActions > 0.028
+      && publicProfileBody > 0.045
+      && publicProfileButtons > 0.018
+      && (publicProfileStats > 0.01 || suggestedForYouTitle > 0.018)
+    )
+  );
+}
+
+async function detectThreadsPhoneVerificationLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const regionRatio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.min(width - 1, Math.round(width * x1)));
+    const top = Math.max(0, Math.min(height - 1, Math.round(height * y1)));
+    const right = Math.max(left + 1, Math.min(width, Math.round(width * x2)));
+    const bottom = Math.max(top + 1, Math.min(height, Math.round(height * y2)));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y < bottom; y += 2) {
+      for (let x = left; x < right; x += 2) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 80) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+
+  const isWhite = (r: number, g: number, b: number) => r > 238 && g > 238 && b > 238;
+  const isDark = (r: number, g: number, b: number) => (r + g + b) / 3 < 55;
+  const isLightGray = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return avg > 175 && avg < 238 && spread < 24;
+  };
+
+  const pageWhite = regionRatio(0, 0.08, 1, 0.84, (r, g, b) => isWhite(r, g, b));
+  const bottomBlackButton = regionRatio(0.04, 0.90, 0.96, 0.965, (r, g, b) => isDark(r, g, b));
+  const inputBorderGray = regionRatio(0.04, 0.25, 0.96, 0.34, (r, g, b) => isLightGray(r, g, b));
+  const centerTextDark = regionRatio(0.08, 0.12, 0.92, 0.24, (r, g, b) => isDark(r, g, b));
+  return pageWhite > 0.82 && bottomBlackButton > 0.55 && inputBorderGray > 0.025 && centerTextDark > 0.006;
+}
+
+async function detectAndroidLauncherLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * x1));
+    const right = Math.min(width - 1, Math.ceil(width * x2));
+    const top = Math.max(0, Math.floor(height * y1));
+    const bottom = Math.min(height - 1, Math.ceil(height * y2));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 4) {
+      for (let x = left; x <= right; x += 4) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 160) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isLauncherBlue = (r: number, g: number, b: number) => b > 145 && g > 130 && r > 90 && b > r + 25;
+  const isDockLight = (r: number, g: number, b: number) => b > 190 && g > 180 && r > 165;
+  const isDarkIcon = (r: number, g: number, b: number) => (r + g + b) / 3 < 80;
+  const blueBackground = ratio(0, 0.18, 1, 0.84, (r, g, b) => isLauncherBlue(r, g, b));
+  const bottomDock = ratio(0.02, 0.86, 0.98, 0.98, (r, g, b) => isDockLight(r, g, b));
+  const iconRows = ratio(0.04, 0.04, 0.96, 0.36, (r, g, b) => isDarkIcon(r, g, b));
+  return blueBackground > 0.42 && bottomDock > 0.52 && iconRows > 0.014;
+}
+
+async function isThreadsScreenVisibleLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  if (await detectThreadsHomeFeedLocally(screenshotUrl).catch(() => null)) return true;
+  if (await detectThreadsProfilePageLocally(screenshotUrl).catch(() => false)) return true;
+  if (await detectThreadsComposerLocally(screenshotUrl).catch(() => null)) return true;
+  if (await detectThreadsReplyComposerLocally(screenshotUrl).catch(() => null)) return true;
+  if (await detectThreadsGalleryPickerLocally(screenshotUrl).catch(() => null)) return true;
+  if (await detectThreadsFullscreenMediaViewerLocally(screenshotUrl).catch(() => false)) return true;
+  return false;
+}
+
+async function detectThreadsProfilePopupMenuVisually(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const scan = (x1: number, y1: number, x2: number, y2: number) => {
+    let white = 0;
+    let dark = 0;
+    let total = 0;
+    const left = Math.round(width * x1);
+    const right = Math.round(width * x2);
+    const top = Math.round(height * y1);
+    const bottom = Math.round(height * y2);
+    for (let y = top; y < bottom; y += 3) {
+      for (let x = left; x < right; x += 3) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 100) continue;
+        const value = (data[index] + data[index + 1] + data[index + 2]) / 3;
+        total += 1;
+        if (value > 235) white += 1;
+        if (value < 90) dark += 1;
+      }
+    }
+    return total ? { whiteRatio: white / total, darkRatio: dark / total } : { whiteRatio: 0, darkRatio: 0 };
+  };
+  const regions = [
+    scan(0.015, 0.30, 0.42, 0.50),
+    scan(0.015, 0.68, 0.42, 0.91),
+  ];
+  const looksLikePopupCard = regions.some((region) => region.whiteRatio > 0.58 && region.darkRatio > 0.018);
+  if (!looksLikePopupCard || !getGeminiEndpoint().apiKey) return false;
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return false;
+  const request = createTimeoutSignal(7000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判断这张 Threads 截图左下或中下位置是否打开了头像操作弹层菜单。
+如果看到类似“访问主页/Visit profile”和“关注/Follow”的白色浮层菜单，回答 YES。
+如果只是普通首页信息流帖子、图片、正文或互动栏，没有浮层菜单，回答 NO。
+只回答 YES 或 NO。`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 },
+      request.signal,
+    );
+    return /\bYES\b|访问主页|訪問主頁|Visit profile|关注|Follow/i.test(normalizeSingleLine(extractText(raw)));
+  } catch {
+    return false;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function detectThreadsPublishedToastLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const left = Math.max(0, Math.round(width * 0.12));
+  const right = Math.min(width, Math.round(width * 0.88));
+  const top = Math.max(0, Math.round(height * 0.84));
+  const bottom = Math.min(height, Math.round(height * 0.91));
+  let dark = 0;
+  let white = 0;
+  let total = 0;
+  for (let y = top; y < bottom; y += 2) {
+    for (let x = left; x < right; x += 2) {
+      const index = (y * width + x) * 4;
+      const a = data[index + 3];
+      if (a < 100) continue;
+      const value = (data[index] + data[index + 1] + data[index + 2]) / 3;
+      total += 1;
+      if (value < 90) dark += 1;
+      if (value > 210) white += 1;
+    }
+  }
+  if (!total) return false;
+  const darkRatio = dark / total;
+  const whiteRatio = white / total;
+  return darkRatio > 0.65 && whiteRatio < 0.30;
+}
+
+async function detectThreadsBottomNavigationLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const left = 0;
+  const right = width;
+  const top = Math.max(0, Math.round(height * 0.91));
+  const bottom = Math.min(height, Math.round(height * 0.995));
+  let darkish = 0;
+  let total = 0;
+  for (let y = top; y < bottom; y += 2) {
+    for (let x = left; x < right; x += 2) {
+      const index = (y * width + x) * 4;
+      const a = data[index + 3];
+      if (a < 100) continue;
+      const value = (data[index] + data[index + 1] + data[index + 2]) / 3;
+      total += 1;
+      if (value < 160) darkish += 1;
+    }
+  }
+  return total > 0 && darkish / total > 0.14;
+}
+
+export async function detectThreadsHomeFeedLocally(screenshotUrl: string | undefined): Promise<string | null> {
+  if (!screenshotUrl) return null;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return null;
+  const { data, width, height } = pixels;
+  const darkRatio = (x1: number, y1: number, x2: number, y2: number, threshold = 130) => {
+    const left = Math.max(0, Math.min(width - 1, Math.round(width * x1)));
+    const top = Math.max(0, Math.min(height - 1, Math.round(height * y1)));
+    const right = Math.max(left + 1, Math.min(width, Math.round(width * x2)));
+    const bottom = Math.max(top + 1, Math.min(height, Math.round(height * y2)));
+    let dark = 0;
+    let total = 0;
+    for (let y = top; y < bottom; y += 1) {
+      for (let x = left; x < right; x += 1) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 80) continue;
+        const value = (data[index] + data[index + 1] + data[index + 2]) / 3;
+        total += 1;
+        if (value < threshold) dark += 1;
+      }
+    }
+    return total ? dark / total : 0;
+  };
+
+  if (await detectThreadsProfilePageLocally(screenshotUrl)) return null;
+  if (await detectThreadsComposerLocally(screenshotUrl)) return null;
+  if (await detectThreadsFullscreenMediaViewerLocally(screenshotUrl)) return null;
+  if (await detectThreadsShareSheetLocally(screenshotUrl)) return null;
+  if (await detectThreadsSideDrawerLocally(screenshotUrl)) return null;
+  const topLogo = darkRatio(0.43, 0.045, 0.57, 0.13, 120);
+  const homeTab = darkRatio(0.08, 0.82, 0.18, 0.91, 140);
+  const bottomHomeWide = darkRatio(0.04, 0.88, 0.18, 0.98, 160);
+  const centerPlus = darkRatio(0.40, 0.90, 0.60, 0.99, 190);
+  const feedActions = darkRatio(0.12, 0.42, 0.66, 0.56, 150)
+    + darkRatio(0.12, 0.70, 0.66, 0.84, 150);
+  const quickPostRow = darkRatio(0.04, 0.12, 0.95, 0.23, 180);
+  if (
+    topLogo > 0.045
+    && (homeTab > 0.03 || bottomHomeWide > 0.09)
+    && centerPlus > 0.015
+    && (feedActions > 0.025 || quickPostRow > 0.015)
+  ) {
+    return "LOCAL_HOME_FEED";
+  }
+  if (
+    (homeTab > 0.12 || bottomHomeWide > 0.12)
+    && centerPlus > 0.08
+    && feedActions > 0.12
+  ) {
+    return "LOCAL_HOME_FEED";
+  }
+  return null;
+}
+
+async function detectThreadsWarmupCommentPostedVisually(
+  screenshotUrl: string | undefined,
+  comment: string,
+): Promise<boolean> {
+  if (!screenshotUrl || !getGeminiEndpoint().apiKey) return false;
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return false;
+
+  const request = createTimeoutSignal(10000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `这张 Threads 截图里是否有一条已发布回复/评论包含「${comment.slice(0, 60)}」？
+只有当它出现在帖子/回复列表里时回答 true；如果只是还在底部输入框、草稿框、键盘上方输入栏里，回答 false。
+只回答 true 或 false。`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 300, temperature: 0 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw)).toLowerCase();
+    if (/\btrue\b|是|已发布|已發佈/.test(text)) return true;
+    if (/\bfalse\b|否|未发布|未發佈/.test(text)) return false;
+    const jsonText = text.match(/\{[\s\S]*?\}/)?.[0];
+    if (!jsonText) return false;
+    const parsed = JSON.parse(jsonText);
+    return parsed?.posted === true;
+  } catch {
+    return false;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function detectThreadsWarmupCommentTypedVisually(
+  screenshotUrl: string | undefined,
+  comment: string,
+): Promise<boolean> {
+  if (!screenshotUrl || !getGeminiEndpoint().apiKey) return false;
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return false;
+
+  const request = createTimeoutSignal(8000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `这张 Threads 截图里，底部回复输入框或键盘上方输入栏是否已经输入了「${comment.slice(0, 60)}」或重复包含这段文字？
+只有当文字还在输入框/草稿框里时回答 true；如果没有输入、在帖子正文里、或已经发布到回复列表里，回答 false。
+只回答 true 或 false。`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 40, temperature: 0 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw)).toLowerCase();
+    if (/\btrue\b|是|已输入|已輸入/.test(text)) return true;
+    if (/\bfalse\b|否|未输入|未輸入/.test(text)) return false;
+    return false;
+  } catch {
+    return false;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function detectAndroidKeyboardVisibleLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const left = Math.floor(width * 0.02);
+  const right = Math.floor(width * 0.98);
+  const top = Math.floor(height * 0.64);
+  const bottom = Math.floor(height * 0.98);
+  let total = 0;
+  let bright = 0;
+  let dark = 0;
+  for (let y = top; y < bottom; y += 4) {
+    for (let x = left; x < right; x += 4) {
+      const index = (y * width + x) * 4;
+      const a = data[index + 3];
+      if (a < 90) continue;
+      const value = (data[index] + data[index + 1] + data[index + 2]) / 3;
+      total++;
+      if (value > 205) bright++;
+      if (value < 95) dark++;
+    }
+  }
+  if (!total) return false;
+  return bright / total > 0.34 && dark / total > 0.018;
+}
+
+async function detectAcpReplyInputHasDraftLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  if (!(await detectAndroidKeyboardVisibleLocally(screenshotUrl).catch(() => false))) return false;
+  const { data, width, height } = pixels;
+  const left = Math.max(0, Math.floor(width * 0.05));
+  const right = Math.min(width - 1, Math.floor(width * 0.76));
+  const top = Math.max(0, Math.floor(height * 0.56));
+  const bottom = Math.min(height - 1, Math.floor(height * 0.69));
+  let dark = 0;
+  let total = 0;
+  for (let y = top; y <= bottom; y += 2) {
+    for (let x = left; x <= right; x += 2) {
+      const index = (y * width + x) * 4;
+      const a = data[index + 3];
+      if (a < 120) continue;
+      const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+      total += 1;
+      if (avg < 92) dark += 1;
+    }
+  }
+  if (total < 200) return false;
+  return dark >= 95 && dark / total >= 0.018;
+}
+
+export async function detectThreadsPostSuccessToastLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const left = Math.floor(width * 0.04);
+  const right = Math.floor(width * 0.96);
+  const top = Math.floor(height * 0.78);
+  const bottom = Math.floor(height * 0.93);
+  let dark = 0;
+  let light = 0;
+  let minX = right;
+  let maxX = left;
+  let minY = bottom;
+  let maxY = top;
+  for (let y = top; y <= bottom; y += 2) {
+    for (let x = left; x <= right; x += 2) {
+      const index = (y * width + x) * 4;
+      if (data[index + 3] < 120) continue;
+      const value = (data[index] + data[index + 1] + data[index + 2]) / 3;
+      if (value < 70) {
+        dark += 1;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      }
+      if (value > 205) light += 1;
+    }
+  }
+  if (!dark) return false;
+  const boxWidth = maxX - minX + 1;
+  const boxHeight = maxY - minY + 1;
+  const sampledBoxArea = Math.max(1, Math.ceil(boxWidth / 2) * Math.ceil(boxHeight / 2));
+  const darkFill = dark / sampledBoxArea;
+  const centered = (minX + maxX) / 2 > width * 0.28 && (minX + maxX) / 2 < width * 0.72;
+  const toastLikeBar = boxWidth >= width * 0.35
+    && boxWidth <= width * 0.95
+    && boxHeight >= height * 0.025
+    && boxHeight <= height * 0.12
+    && darkFill > 0.42
+    && centered;
+  return toastLikeBar && light > dark * 0.015;
+}
+
+async function detectThreadsExternalWebViewLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (value: number, r: number, g: number, b: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * x1));
+    const right = Math.min(width - 1, Math.ceil(width * x2));
+    const top = Math.max(0, Math.floor(height * y1));
+    const bottom = Math.min(height - 1, Math.ceil(height * y2));
+    let total = 0;
+    let matched = 0;
+    const step = Math.max(2, Math.floor(Math.min(width, height) / 180));
+    for (let y = top; y <= bottom; y += step) {
+      for (let x = left; x <= right; x += step) {
+        const index = (y * width + x) * 4;
+        if (data[index + 3] < 120) continue;
+        const r = data[index];
+        const g = data[index + 1];
+        const b = data[index + 2];
+        const value = (r + g + b) / 3;
+        total++;
+        if (predicate(value, r, g, b)) matched++;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const whiteBody = ratio(0.02, 0.14, 0.98, 0.92, (value) => value > 242);
+  const whiteTop = ratio(0.02, 0.035, 0.98, 0.13, (value) => value > 218);
+  const darkTopText = ratio(0.12, 0.045, 0.70, 0.12, (value) => value < 90);
+  const darkClose = ratio(0.035, 0.045, 0.11, 0.12, (value) => value < 90);
+  const bottomActionDark = ratio(0.05, 0.88, 0.70, 0.99, (value) => value < 90);
+  return whiteBody > 0.88
+    && whiteTop > 0.62
+    && darkTopText > 0.018
+    && darkClose > 0.025
+    && bottomActionDark < 0.02;
+}
+
+export async function findAcpReplySendButtonPointFromScreenshot(
+  screenshotUrl: string | undefined,
+): Promise<{ x: number; y: number } | null> {
+  if (!screenshotUrl) return null;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return null;
+  const { data, width, height } = pixels;
+
+  const scanBand = (yMinRatio: number, yMaxRatio: number) => {
+    const left = Math.floor(width * 0.82);
+    const right = Math.floor(width * 0.985);
+    const top = Math.floor(height * yMinRatio);
+    const bottom = Math.floor(height * yMaxRatio);
+    let count = 0;
+    let minX = right;
+    let maxX = left;
+    let minY = bottom;
+    let maxY = top;
+    let sumX = 0;
+    let sumY = 0;
+    for (let y = top; y <= bottom; y += 1) {
+      for (let x = left; x <= right; x += 1) {
+        const index = (y * width + x) * 4;
+        if (data[index + 3] < 120) continue;
+        const r = data[index];
+        const g = data[index + 1];
+        const b = data[index + 2];
+        if (r > 50 || g > 50 || b > 50) continue;
+        count += 1;
+        sumX += x;
+        sumY += y;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      }
+    }
+    if (count < 250) return null;
+    const boxWidth = maxX - minX + 1;
+    const boxHeight = maxY - minY + 1;
+    if (boxWidth < width * 0.045 || boxHeight < height * 0.035) return null;
+    if (boxWidth > width * 0.20 || boxHeight > height * 0.16) return null;
+    const aspect = boxWidth / Math.max(1, boxHeight);
+    if (aspect < 0.55 || aspect > 1.85) return null;
+    const fill = count / Math.max(1, boxWidth * boxHeight);
+    if (fill < 0.24) return null;
+    return {
+      x: Math.round(sumX / count),
+      y: Math.round(sumY / count),
+    };
+  };
+
+  return scanBand(0.42, 0.64)
+    ?? scanBand(0.58, 0.72)
+    ?? scanBand(0.78, 0.91)
+    ?? scanBand(0.90, 0.985);
+}
+
+async function detectThreadsWarmupLikeConfirmedVisually(
+  screenshotUrl: string | undefined,
+  point?: { x: number; y: number },
+): Promise<boolean> {
+  if (screenshotUrl && point) {
+    const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+    if (pixels) {
+      const { data, width, height } = pixels;
+      const left = Math.max(0, Math.round(point.x - width * 0.055));
+      const right = Math.min(width - 1, Math.round(point.x + width * 0.075));
+      const top = Math.max(0, Math.round(point.y - height * 0.04));
+      const bottom = Math.min(height - 1, Math.round(point.y + height * 0.04));
+      let red = 0;
+      let total = 0;
+      for (let y = top; y <= bottom; y += 1) {
+        for (let x = left; x <= right; x += 1) {
+          const index = (y * width + x) * 4;
+          const r = data[index];
+          const g = data[index + 1];
+          const b = data[index + 2];
+          const a = data[index + 3];
+          if (a < 80) continue;
+          total += 1;
+          if (r > 190 && g < 120 && b < 150 && r > g * 1.45 && r > b * 1.35) red += 1;
+        }
+      }
+      if (total > 0 && red / total > 0.0035) return true;
+    }
+  }
+  if (!screenshotUrl || !getGeminiEndpoint().apiKey) return false;
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return false;
+
+  const request = createTimeoutSignal(10000);
+  try {
+    const pointHint = point
+      ? `参考坐标：(${Math.round(point.x)}, ${Math.round(point.y)})。`
+      : "";
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判断这张 Threads 截图里目标帖子是否已经被点赞。
+${pointHint}
+只有当目标帖子互动栏里的爱心已经变成红色、填色、或明显是已点赞状态时回答 YES。
+如果爱心仍是空心轮廓、坐标落在图片/正文/股票图表/头像/底部导航上，或无法确认同一帖子已点赞，回答 NO。
+只回答 YES 或 NO。`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw)).toUpperCase();
+    if (/\bYES\b|已点赞|已點讚|紅色|红色|填色/.test(text)) return true;
+    return false;
+  } catch {
+    return false;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function detectThreadsWarmupLikeCountChanged(
+  beforeScreenshotUrl: string | undefined,
+  afterScreenshotUrl: string | undefined,
+  point: { x: number; y: number },
+): Promise<boolean> {
+  if (!beforeScreenshotUrl || !afterScreenshotUrl) return false;
+  const [before, after] = await Promise.all([
+    getImagePixelData(beforeScreenshotUrl).catch(() => null),
+    getImagePixelData(afterScreenshotUrl).catch(() => null),
+  ]);
+  if (!before || !after || before.width !== after.width || before.height !== after.height) return false;
+  const width = before.width;
+  const height = before.height;
+  const left = Math.max(0, Math.round(point.x + width * 0.025));
+  const right = Math.min(width - 1, Math.round(point.x + width * 0.13));
+  const top = Math.max(0, Math.round(point.y - height * 0.025));
+  const bottom = Math.min(height - 1, Math.round(point.y + height * 0.028));
+  let changed = 0;
+  let total = 0;
+  for (let y = top; y <= bottom; y += 1) {
+    for (let x = left; x <= right; x += 1) {
+      const index = (y * width + x) * 4;
+      const beforeAlpha = before.data[index + 3];
+      const afterAlpha = after.data[index + 3];
+      if (beforeAlpha < 80 && afterAlpha < 80) continue;
+      const dr = Math.abs(before.data[index] - after.data[index]);
+      const dg = Math.abs(before.data[index + 1] - after.data[index + 1]);
+      const db = Math.abs(before.data[index + 2] - after.data[index + 2]);
+      total += 1;
+      if (dr + dg + db > 70) changed += 1;
+    }
+  }
+  return total > 0 && changed >= 18 && changed / total > 0.006;
+}
+
+async function detectThreadsProfilePageVisually(screenshotUrl: string | undefined): Promise<boolean> {
+  if (await detectThreadsProfilePageLocally(screenshotUrl)) return true;
+  if (!screenshotUrl || !getGeminiEndpoint().apiKey) return false;
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return false;
+
+  const request = createTimeoutSignal(8000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判断这张 Threads 截图是不是某个账号的个人主页/Profile 页面。
+如果能看到个人头像、用户名、关注按钮、粉丝数、个人简介、以及“串文/回复/影音内容/转发”等标签，回答 YES。
+如果是首页推荐流帖子列表，回答 NO。
+只回答 YES 或 NO。`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw)).toUpperCase();
+    return /\bYES\b|个人主页|個人主頁|PROFILE/.test(text);
+  } catch {
+    return false;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function verifyThreadsWarmupActionTargetVisually(
+  screenshotUrl: string | undefined,
+  point: { x: number; y: number } | undefined,
+  kind: "like" | "comment",
+): Promise<boolean> {
+  if (!screenshotUrl || !point || !getGeminiEndpoint().apiKey) return Boolean(point);
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return false;
+
+  const request = createTimeoutSignal(8000);
+  const targetText = kind === "like"
+    ? "空心爱心/未点赞按钮"
+    : "评论/回复气泡按钮";
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判断坐标 (${Math.round(point.x)}, ${Math.round(point.y)}) 是否正好落在 Threads 首页推荐流某条别人帖子互动栏里的${targetText}上。
+只有当该点在帖子正文/图片下方的横向互动栏图标上时回答 YES。
+如果该点落在头像、用户名、正文、图片/股票图表、个人主页、底部导航、菜单、发帖按钮、或只露出一半的下一条帖子上，回答 NO。
+只回答 YES 或 NO。`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw)).toUpperCase();
+    return /\bYES\b/.test(text);
+  } catch {
+    return false;
+  } finally {
+    request.cleanup();
+  }
+}
+
+export function detectThreadsBlockedScreenFromUiXml(uiXml: string): string | null {
+  const line = normalizeSingleLine(uiXml);
+  if (!line) return "Threads 畫面結構不可讀";
+
+  if (/null root node returned by UiTestAutomationBridge|No such file or directory|無法開啟|无法打开/i.test(line)) {
+    return "Threads 畫面結構不可讀，疑似停在登入頁、系統彈窗或圖形阻斷頁";
+  }
+
+  if (
+    /使用\s*Instagram\s*帳號登入|使用\s*Instagram\s*账号登录|建立\s*Instagram\s*帳號|建立\s*Instagram\s*账号|登入\s*Instagram|登录\s*Instagram|Continue with Instagram|Log in with Instagram|Sign up with Instagram/i.test(line)
+  ) {
+    return "Threads 需要使用 Instagram 帳號登入";
+  }
+
+  if (
+    /用戶名稱、電子郵件地址或手機號碼|用户名、电子邮件地址或手机号码|電子郵件地址或手機號碼|电子邮件地址或手机号码|密碼|密码|登入|登录|Forgot password|Log in/i.test(line)
+    && /Instagram|Meta|密碼|密码|登入|登录|Log in/i.test(line)
+  ) {
+    return "Instagram 登入頁，Threads 帳號狀態不可用";
+  }
+
+  if (looksLikeThreadsProfileUiXml(line)) {
+    return null;
+  }
+
+  if (isThreadsBlockedReason(line)) {
+    return line.slice(0, 220);
+  }
+
+  return null;
+}
+
+export function getLocalVisualVerificationSupport(): { supported: boolean; reason?: string } {
+  const electronApi = typeof window !== "undefined" ? (window as any).electronAPI : undefined;
+  const hasElectronImageProxy = Boolean(electronApi?.image?.proxy);
+  if (hasElectronImageProxy) {
+    return { supported: true };
+  }
+
+  const isNodeRuntime = typeof process !== "undefined" && Boolean(process.versions?.node);
+  if (isNodeRuntime) {
+    return { supported: true };
+  }
+
+  return {
+    supported: false,
+    reason: "目前是瀏覽器非 Electron 執行態，VMOS 截圖可能受跨域限制，無法自動驗證貼文",
+  };
+}
+
+async function loadImage(url: string): Promise<HTMLImageElement> {
+  const inline = url.startsWith("http") ? await getInlineData(url) : null;
+  const objectUrl = inline
+    ? `data:${inline.mimeType};base64,${inline.data}`
+    : url;
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      if (objectUrl.startsWith("blob:")) URL.revokeObjectURL(objectUrl);
+      resolve(img);
+    };
+    img.onerror = () => {
+      if (objectUrl.startsWith("blob:")) URL.revokeObjectURL(objectUrl);
+      reject(new Error(`Failed to load image: ${url}`));
+    };
+    img.src = objectUrl;
+  });
+}
+
+async function freezeScreenshotUrl(url: string): Promise<string> {
+  const inline = await getInlineData(url);
+  if (!inline) return url;
+  return `data:${inline.mimeType};base64,${inline.data}`;
+}
+
+async function getImageDimensions(url: string): Promise<{ width: number; height: number } | null> {
+  try {
+    const inline = await getInlineData(url);
+    if (inline) {
+      const sharp = (await import("sharp")).default;
+      const metadata = await sharp(Buffer.from(inline.data, "base64")).metadata();
+      if (metadata.width && metadata.height) return { width: metadata.width, height: metadata.height };
+    }
+  } catch {}
+
+  try {
+    const img = await loadImage(url);
+    const width = img.naturalWidth || img.width;
+    const height = img.naturalHeight || img.height;
+    return width && height ? { width, height } : null;
+  } catch {
+    return null;
+  }
+}
+
+function isUsableScreenshotSize(size?: { width?: number; height?: number } | null): size is { width: number; height: number } {
+  return Boolean(size?.width && size?.height && size.width >= 100 && size.height >= 100);
+}
+
+function isFixedVmosScreenshotSize(size?: { width?: number; height?: number } | null): size is { width: number; height: number } {
+  return Boolean(
+    size
+    && size.width === FIXED_VMOS_SCREEN.width
+    && size.height === FIXED_VMOS_SCREEN.height,
+  );
+}
+
+const imagePixelDataCache = new Map<string, { data: Buffer; width: number; height: number }>();
+
+function getImageCacheKey(url: string) {
+  return url.startsWith("data:")
+    ? `${url.slice(0, 96)}:${url.length}:${url.slice(-32)}`
+    : url;
+}
+
+async function getImagePixelData(url: string): Promise<{ data: Buffer; width: number; height: number } | null> {
+  try {
+    const cacheKey = getImageCacheKey(url);
+    const cached = imagePixelDataCache.get(cacheKey);
+    if (cached) return cached;
+    const inline = await getInlineData(url);
+    if (!inline) return null;
+    const sharp = (await import("sharp")).default;
+    const { data, info } = await sharp(Buffer.from(inline.data, "base64"))
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (!info.width || !info.height) return null;
+    const result = { data, width: info.width, height: info.height };
+    imagePixelDataCache.set(cacheKey, result);
+    while (imagePixelDataCache.size > 12) {
+      const firstKey = imagePixelDataCache.keys().next().value;
+      if (!firstKey) break;
+      imagePixelDataCache.delete(firstKey);
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+interface ImageRegionStats {
+  brightness: number;
+  blueRatio: number;
+  whiteRatio: number;
+  darkRatio: number;
+}
+
+function sampleImageRegionStats(
+  pixels: { data: Buffer; width: number; height: number },
+  rect: { x: number; y: number; width: number; height: number },
+  reference = FIXED_VMOS_SCREEN,
+  thresholds: { whiteMin?: number; darkMax?: number } = {},
+): ImageRegionStats {
+  const whiteMin = thresholds.whiteMin ?? 220;
+  const darkMax = thresholds.darkMax ?? 65;
+  const sx = pixels.width / reference.width;
+  const sy = pixels.height / reference.height;
+  const rx = Math.max(0, Math.min(pixels.width - 1, Math.round(rect.x * sx)));
+  const ry = Math.max(0, Math.min(pixels.height - 1, Math.round(rect.y * sy)));
+  const rw = Math.max(1, Math.min(pixels.width - rx, Math.round(rect.width * sx)));
+  const rh = Math.max(1, Math.min(pixels.height - ry, Math.round(rect.height * sy)));
+  let brightness = 0;
+  let bluePixels = 0;
+  let whitePixels = 0;
+  let darkPixels = 0;
+  let count = 0;
+  for (let y = ry; y < ry + rh; y += 1) {
+    for (let x = rx; x < rx + rw; x += 1) {
+      const i = ((y * pixels.width) + x) * 4;
+      const r = pixels.data[i];
+      const g = pixels.data[i + 1];
+      const b = pixels.data[i + 2];
+      const a = pixels.data[i + 3];
+      if (a < 20) continue;
+      const v = (r + g + b) / 3;
+      brightness += v;
+      if (b > 140 && g > 90 && r < 140 && b > r + 45) bluePixels += 1;
+      if (r > whiteMin && g > whiteMin && b > whiteMin) whitePixels += 1;
+      if (v < darkMax) darkPixels += 1;
+      count += 1;
+    }
+  }
+  const denom = Math.max(count, 1);
+  return {
+    brightness: brightness / denom,
+    blueRatio: bluePixels / denom,
+    whiteRatio: whitePixels / denom,
+    darkRatio: darkPixels / denom,
+  };
+}
+
+export async function detectThreadsPrivateReplyPromptLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl);
+  if (!pixels) return false;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.min(pixels.width - 1, Math.round(pixels.width * x1)));
+    const top = Math.max(0, Math.min(pixels.height - 1, Math.round(pixels.height * y1)));
+    const right = Math.max(left + 1, Math.min(pixels.width, Math.round(pixels.width * x2)));
+    const bottom = Math.max(top + 1, Math.min(pixels.height, Math.round(pixels.height * y2)));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y < bottom; y += 2) {
+      for (let x = left; x < right; x += 2) {
+        const i = ((y * pixels.width) + x) * 4;
+        total += 1;
+        if (predicate(pixels.data[i], pixels.data[i + 1], pixels.data[i + 2])) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const white = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    return avg > 238 && Math.max(r, g, b) - Math.min(r, g, b) < 24;
+  };
+  const dimmed = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    return avg > 95 && avg < 210 && Math.max(r, g, b) - Math.min(r, g, b) < 28;
+  };
+  const dark = (r: number, g: number, b: number) => (r + g + b) / 3 < 85;
+  const gray = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    return avg > 110 && avg < 225 && Math.max(r, g, b) - Math.min(r, g, b) < 35;
+  };
+  const lightGray = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    return avg > 215 && avg < 250 && Math.max(r, g, b) - Math.min(r, g, b) < 28;
+  };
+  return (
+    ratio(0.04, 0.02, 0.96, 0.34, dimmed) > 0.35
+    && ratio(0.03, 0.39, 0.97, 0.96, white) > 0.70
+    && ratio(0.08, 0.60, 0.92, 0.70, dark) > 0.10
+    && ratio(0.10, 0.71, 0.90, 0.78, gray) > 0.12
+    && ratio(0.08, 0.83, 0.92, 0.91, lightGray) > 0.30
+  );
+}
+
+async function cropImageToInlineData(
+  url: string,
+  crop: { x: number; y: number; width: number; height: number },
+  outputWidth = 360
+): Promise<{ mimeType: string; data: string } | null> {
+  try {
+    const img = await loadImage(url);
+    const outputHeight = Math.max(1, Math.round((crop.height / crop.width) * outputWidth));
+    const canvas = document.createElement("canvas");
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    ctx.drawImage(
+      img,
+      crop.x,
+      crop.y,
+      crop.width,
+      crop.height,
+      0,
+      0,
+      outputWidth,
+      outputHeight
+    );
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+    const parsed = parseDataUrlImage(dataUrl);
+    return parsed ? { mimeType: parsed.mimeType, data: parsed.base64 } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cropBottomRegionToInlineData(
+  url: string,
+  topRatio = 0.7,
+): Promise<{ mimeType: string; data: string } | null> {
+  try {
+    const img = await loadImage(url);
+    const cropY = Math.max(0, Math.floor(img.height * topRatio));
+    return cropImageToInlineData(url, {
+      x: 0,
+      y: cropY,
+      width: img.width,
+      height: Math.max(1, img.height - cropY),
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function cropUpperRegionToInlineData(
+  url: string,
+  startRatio = 0.2,
+  endRatio = 0.42,
+): Promise<{ mimeType: string; data: string } | null> {
+  try {
+    const img = await loadImage(url);
+    const cropY = Math.max(0, Math.floor(img.height * startRatio));
+    const cropEnd = Math.max(cropY + 1, Math.floor(img.height * endRatio));
+    return cropImageToInlineData(url, {
+      x: 0,
+      y: cropY,
+      width: img.width,
+      height: Math.max(1, cropEnd - cropY),
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function cropMiddleLowerRegionToInlineData(
+  url: string,
+  startRatio = 0.34,
+  endRatio = 0.86,
+): Promise<{ mimeType: string; data: string } | null> {
+  try {
+    const img = await loadImage(url);
+    const cropY = Math.max(0, Math.floor(img.height * startRatio));
+    const cropEnd = Math.max(cropY + 1, Math.floor(img.height * endRatio));
+    return cropImageToInlineData(url, {
+      x: 0,
+      y: cropY,
+      width: img.width,
+      height: Math.max(1, cropEnd - cropY),
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function detectThreadsFeedActionRowLocally(
+  screenshotUrl: string,
+): Promise<{ like?: { x: number; y: number }; comment?: { x: number; y: number }; debugRaw?: string } | null> {
+  try {
+    const pixels = await getImagePixelData(screenshotUrl);
+    if (!pixels) return null;
+    const { data, width, height } = pixels;
+    const visited = new Uint8Array(width * height);
+    const startY = Math.max(0, Math.floor(height * 0.15));
+    const endY = Math.min(height - 1, Math.floor(height * 0.86));
+    const startX = Math.max(0, Math.floor(width * 0.04));
+    const endX = Math.min(width - 1, Math.floor(width * 0.68));
+
+    const brightnessAt = (x: number, y: number) => {
+      const px = Math.max(0, Math.min(width - 1, Math.round(x)));
+      const py = Math.max(0, Math.min(height - 1, Math.round(y)));
+      const index = (py * width + px) * 4;
+      return (data[index] + data[index + 1] + data[index + 2]) / 3;
+    };
+    const lightRegionRatio = (centerY: number, leftRatio: number, rightRatio: number) => {
+      const left = Math.max(0, Math.floor(width * leftRatio));
+      const right = Math.min(width - 1, Math.floor(width * rightRatio));
+      const top = Math.max(0, Math.round(centerY - 18));
+      const bottom = Math.min(height - 1, Math.round(centerY + 18));
+      let light = 0;
+      let total = 0;
+      for (let y = top; y <= bottom; y += 3) {
+        for (let x = left; x <= right; x += 3) {
+          const index = (y * width + x) * 4;
+          const a = data[index + 3];
+          if (a < 100) continue;
+          const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+          total += 1;
+          if (avg > 205) light += 1;
+        }
+      }
+      return total ? light / total : 0;
+    };
+    const lightStripRatio = (centerY: number) => lightRegionRatio(centerY, 0.08, 0.66);
+    const hasLikeCountText = (centerY: number) => {
+      const left = Math.max(0, Math.floor(width * 0.22));
+      const right = Math.min(width - 1, Math.floor(width * 0.32));
+      const top = Math.max(0, Math.round(centerY - 18));
+      const bottom = Math.min(height - 1, Math.round(centerY + 18));
+      let dark = 0;
+      for (let y = top; y <= bottom; y += 2) {
+        for (let x = left; x <= right; x += 2) {
+          const index = (y * width + x) * 4;
+          const a = data[index + 3];
+          if (a < 100) continue;
+          const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+          if (avg < 150) dark += 1;
+        }
+      }
+      return dark >= 10;
+    };
+    const isActionGlyphPixel = (index: number) => {
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const a = data[index + 3];
+      if (a < 80) return false;
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const value = (r + g + b) / 3;
+      return value < 105 && (max - min < 52 || value < 58);
+    };
+
+    const components: Array<{
+      x: number;
+      y: number;
+      minX: number;
+      minY: number;
+      maxX: number;
+      maxY: number;
+      count: number;
+      width: number;
+      height: number;
+      score: number;
+      belowBrightness: number;
+      aboveBrightness: number;
+      leftBrightness: number;
+      rightBrightness: number;
+    }> = [];
+
+    for (let y = startY; y <= endY; y += 1) {
+      for (let x = startX; x <= endX; x += 1) {
+        const start = y * width + x;
+        if (visited[start]) continue;
+        visited[start] = 1;
+        if (!isActionGlyphPixel(start * 4)) continue;
+
+        const queue = [start];
+        let cursor = 0;
+        let count = 0;
+        let minX = x;
+        let minY = y;
+        let maxX = x;
+        let maxY = y;
+
+        while (cursor < queue.length) {
+          const current = queue[cursor++];
+          const cy = Math.floor(current / width);
+          const cx = current % width;
+          count += 1;
+          minX = Math.min(minX, cx);
+          minY = Math.min(minY, cy);
+          maxX = Math.max(maxX, cx);
+          maxY = Math.max(maxY, cy);
+
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx < startX || nx > endX || ny < startY || ny > endY) continue;
+              const next = ny * width + nx;
+              if (visited[next]) continue;
+              visited[next] = 1;
+              if (isActionGlyphPixel(next * 4)) queue.push(next);
+            }
+          }
+        }
+
+        const boxWidth = maxX - minX + 1;
+        const boxHeight = maxY - minY + 1;
+        const centerX = Math.round((minX + maxX) / 2);
+        const centerY = Math.round((minY + maxY) / 2);
+        const area = boxWidth * boxHeight;
+        const density = count / Math.max(area, 1);
+        const ratio = boxWidth / Math.max(boxHeight, 1);
+        const belowBrightness = brightnessAt(centerX, Math.min(height - 1, maxY + Math.max(18, Math.round(height * 0.018))));
+        const aboveBrightness = brightnessAt(centerX, Math.max(0, minY - Math.max(18, Math.round(height * 0.018))));
+        const leftBrightness = brightnessAt(Math.max(0, minX - 10), centerY);
+        const rightBrightness = brightnessAt(Math.min(width - 1, maxX + 10), centerY);
+
+        if (count < 16 || count > 900) continue;
+        if (boxWidth < 7 || boxWidth > Math.max(58, width * 0.09)) continue;
+        if (boxHeight < 7 || boxHeight > Math.max(58, height * 0.055)) continue;
+        if (ratio < 0.22 || ratio > 4.6) continue;
+        if (density < 0.12) continue;
+        if (centerY > height * 0.86) continue;
+        if (centerX < width * 0.08 || centerX > width * 0.62) continue;
+
+        let score = 0;
+        if (centerY >= height * 0.24 && centerY <= height * 0.86) score += 5;
+        if (centerX >= width * 0.10 && centerX <= width * 0.40) score += 4;
+        if (boxWidth >= 12 && boxWidth <= 38 && boxHeight >= 10 && boxHeight <= 34) score += 4;
+        if (density >= 0.16 && density <= 0.72) score += 2;
+        if (belowBrightness > 110) score += 6;
+        if (aboveBrightness > 110) score += 6;
+        if (aboveBrightness < 80 && belowBrightness < 100) score -= 12;
+        if (Math.abs(leftBrightness - rightBrightness) < 65) score += 1;
+        if (centerY < height * 0.22) score -= 12;
+        if (centerY >= height * 0.86) score -= 10;
+        if (boxWidth < 10 || boxHeight < 10) score -= 3;
+        if (boxHeight > boxWidth * 2.2) score -= 4;
+
+        components.push({
+          x: centerX,
+          y: centerY,
+          minX,
+          minY,
+          maxX,
+          maxY,
+          count,
+          width: boxWidth,
+          height: boxHeight,
+          score,
+          belowBrightness,
+          aboveBrightness,
+          leftBrightness,
+          rightBrightness,
+        });
+      }
+    }
+
+    type RowCandidate = {
+      y: number;
+      icons: typeof components;
+      score: number;
+      textPenalty: number;
+      brightBelow: number;
+      brightAbove: number;
+      lightRatio: number;
+    };
+
+    const rows: RowCandidate[] = [];
+    const sortedComponents = components.sort((a, b) => a.y - b.y || a.x - b.x);
+    for (const seed of sortedComponents) {
+      const rowBand = Math.max(18, Math.round(height * 0.018));
+      const rowIcons = sortedComponents
+        .filter((item) => Math.abs(item.y - seed.y) <= rowBand)
+        .filter((item) => item.x >= width * 0.09 && item.x <= width * 0.58)
+        .sort((a, b) => a.x - b.x);
+
+      const deduped: typeof components = [];
+      for (const icon of rowIcons) {
+        const previous = deduped[deduped.length - 1];
+        if (previous && Math.abs(previous.x - icon.x) < Math.max(14, width * 0.025)) {
+          if (icon.score > previous.score || icon.count > previous.count) deduped[deduped.length - 1] = icon;
+        } else {
+          deduped.push(icon);
+        }
+      }
+
+      if (deduped.length < 2) continue;
+      const actionIcons = deduped.filter((item) => item.width >= 20 && item.height >= 20);
+      if (actionIcons.length < 3) continue;
+      const first = actionIcons[0];
+      const second = actionIcons.find((icon) => (
+        icon.x > first.x + width * 0.11
+        && icon.x < first.x + width * 0.24
+      ));
+      if (!second) continue;
+      const third = actionIcons.find((icon) => (
+        icon.x > second.x + width * 0.10
+        && icon.x >= width * 0.50
+        && icon.x <= width * 0.63
+      ));
+      if (!third) continue;
+      const spacing = second.x - first.x;
+      if (first.y < height * 0.15 || first.y > height * 0.86) continue;
+      if (spacing < width * 0.09 || spacing > width * 0.22) continue;
+      if (first.x < width * 0.14 || first.x > width * 0.25) continue;
+      if (second.x < width * 0.28 || second.x > width * 0.43) continue;
+      const widths = actionIcons.slice(0, 4).map((item) => item.width);
+      const heights = actionIcons.slice(0, 4).map((item) => item.height);
+      const widthSpread = Math.max(...widths) - Math.min(...widths);
+      const heightSpread = Math.max(...heights) - Math.min(...heights);
+      const brightBelow = deduped.slice(0, 3).reduce((total, item) => total + item.belowBrightness, 0) / Math.max(Math.min(deduped.length, 3), 1);
+      const brightAbove = deduped.slice(0, 3).reduce((total, item) => total + item.aboveBrightness, 0) / Math.max(Math.min(deduped.length, 3), 1);
+      const textPenalty = deduped.slice(0, 4).reduce((total, item) => {
+        let penalty = 0;
+        if (item.width <= 16 && item.height >= 18) penalty += 4;
+        if (item.width <= 12 && item.height >= 20) penalty += 5;
+        if (item.height > item.width * 1.9) penalty += 4;
+        return total + penalty;
+      }, 0);
+
+      const rowY = Math.round(deduped.reduce((total, item) => total + item.y, 0) / deduped.length);
+      const lightRatio = lightStripRatio(rowY);
+      if (lightRatio < 0.88) continue;
+      if (lightRegionRatio(rowY, 0.22, 0.32) < 0.86 || lightRegionRatio(rowY, 0.39, 0.48) < 0.86) continue;
+      if (!hasLikeCountText(rowY)) continue;
+
+      let score = deduped.slice(0, 4).reduce((total, item) => total + item.score, 0);
+      score += deduped.length >= 3 ? 5 : 0;
+      score += first.x >= width * 0.08 && first.x <= width * 0.24 ? 5 : 0;
+      score += first.y >= height * 0.15 && first.y <= height * 0.86 ? 10 : 0;
+      score += spacing >= width * 0.055 && spacing <= width * 0.16 ? 4 : 0;
+      score += widthSpread <= 12 ? 4 : 0;
+      score += heightSpread <= 12 ? 3 : 0;
+      score += brightBelow > 120 ? 10 : brightBelow > 95 ? 4 : -6;
+      score += brightAbove > 120 ? 10 : brightAbove > 95 ? 4 : -12;
+      score += lightRatio * 60;
+      if (third) {
+        const spacing2 = third.x - second.x;
+        if (spacing2 >= width * 0.035 && spacing2 <= width * 0.22) score += 2;
+      }
+      score -= textPenalty;
+      if (first.y < height * 0.22) score -= 14;
+      if (first.y >= height * 0.86) score -= 18;
+
+      rows.push({
+        y: rowY,
+        icons: deduped,
+        score,
+        textPenalty,
+        brightBelow,
+        brightAbove,
+        lightRatio,
+      });
+    }
+
+    const best = rows
+      .filter((row) => row.score >= 18)
+      .sort((a, b) => b.score - a.score || a.y - b.y)[0];
+    if (!best) return null;
+
+    const likeIcon = best.icons[0];
+    const commentIcon = best.icons.find((icon) => (
+      icon.x > likeIcon.x + width * 0.09
+      && icon.x < likeIcon.x + width * 0.2
+      && Math.abs(icon.y - likeIcon.y) < Math.max(26, height * 0.025)
+    )) ?? best.icons[1];
+
+    const like = { x: likeIcon.x, y: likeIcon.y };
+    const comment = commentIcon ? { x: commentIcon.x, y: commentIcon.y } : undefined;
+    const preview = best.icons.slice(0, 5).map((icon) => `${icon.x},${icon.y},${icon.width}x${icon.height},b${Math.round(icon.belowBrightness)},a${Math.round(icon.aboveBrightness)}`).join(";");
+    return {
+      like,
+      comment,
+      debugRaw: `local_row_score=${best.score};penalty=${best.textPenalty};light=${best.lightRatio.toFixed(2)};brightBelow=${Math.round(best.brightBelow)};brightAbove=${Math.round(best.brightAbove)};icons=${preview}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function detectThreadsFeedActionRowByExpectedColumns(
+  screenshotUrl: string,
+): Promise<{
+  like?: { x: number; y: number };
+  comment?: { x: number; y: number };
+  alternateLikes?: Array<{ x: number; y: number }>;
+  alternateComments?: Array<{ x: number; y: number }>;
+  engagementScore?: number;
+  debugRaw?: string;
+} | null> {
+  try {
+    const pixels = await getImagePixelData(screenshotUrl);
+    if (!pixels) return null;
+    const { data, width, height } = pixels;
+    const visited = new Uint8Array(width * height);
+    const startX = Math.max(0, Math.floor(width * 0.08));
+    const endX = Math.min(width - 1, Math.floor(width * 0.66));
+    const startY = Math.max(0, Math.floor(height * 0.15));
+    const endY = Math.min(height - 1, Math.floor(height * 0.86));
+
+    const isDarkGlyphPixel = (index: number) => {
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const a = data[index + 3];
+      if (a < 90) return false;
+      const avg = (r + g + b) / 3;
+      const spread = Math.max(r, g, b) - Math.min(r, g, b);
+      return avg < 125 && (spread < 62 || avg < 70);
+    };
+
+    const lightStripRatio = (centerY: number) => {
+      const left = Math.max(0, Math.floor(width * 0.08));
+      const right = Math.min(width - 1, Math.floor(width * 0.66));
+      const top = Math.max(0, Math.round(centerY - 18));
+      const bottom = Math.min(height - 1, Math.round(centerY + 18));
+      let light = 0;
+      let total = 0;
+      for (let y = top; y <= bottom; y += 3) {
+        for (let x = left; x <= right; x += 3) {
+          const index = (y * width + x) * 4;
+          const a = data[index + 3];
+          if (a < 100) continue;
+          const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+          total += 1;
+          if (avg > 205) light += 1;
+        }
+      }
+      return total ? light / total : 0;
+    };
+    const hasLikeCountText = (centerY: number) => {
+      const left = Math.max(0, Math.floor(width * 0.22));
+      const right = Math.min(width - 1, Math.floor(width * 0.32));
+      const top = Math.max(0, Math.round(centerY - 18));
+      const bottom = Math.min(height - 1, Math.round(centerY + 18));
+      let dark = 0;
+      for (let y = top; y <= bottom; y += 2) {
+        for (let x = left; x <= right; x += 2) {
+          const index = (y * width + x) * 4;
+          const a = data[index + 3];
+          if (a < 100) continue;
+          const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+          if (avg < 150) dark += 1;
+        }
+      }
+      return dark >= 10;
+    };
+    const countDarkPixels = (centerY: number, leftRatio: number, rightRatio: number) => {
+      const left = Math.max(0, Math.floor(width * leftRatio));
+      const right = Math.min(width - 1, Math.floor(width * rightRatio));
+      const top = Math.max(0, Math.round(centerY - 18));
+      const bottom = Math.min(height - 1, Math.round(centerY + 18));
+      let dark = 0;
+      for (let y = top; y <= bottom; y += 2) {
+        for (let x = left; x <= right; x += 2) {
+          const index = (y * width + x) * 4;
+          const a = data[index + 3];
+          if (a < 100) continue;
+          const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+          if (avg < 150) dark += 1;
+        }
+      }
+      return dark;
+    };
+    const estimateEngagementScore = (centerY: number) => {
+      const likeDigits = countDarkPixels(centerY, 0.22, 0.32);
+      const commentDigits = countDarkPixels(centerY, 0.39, 0.48);
+      return likeDigits * 2 + commentDigits * 2;
+    };
+
+    const components: Array<{ x: number; y: number; width: number; height: number; count: number }> = [];
+    for (let y = startY; y <= endY; y += 1) {
+      for (let x = startX; x <= endX; x += 1) {
+        const start = y * width + x;
+        if (visited[start]) continue;
+        visited[start] = 1;
+        if (!isDarkGlyphPixel(start * 4)) continue;
+
+        const queue = [start];
+        let cursor = 0;
+        let count = 0;
+        let minX = x;
+        let maxX = x;
+        let minY = y;
+        let maxY = y;
+
+        while (cursor < queue.length) {
+          const current = queue[cursor++];
+          const cy = Math.floor(current / width);
+          const cx = current % width;
+          count += 1;
+          minX = Math.min(minX, cx);
+          maxX = Math.max(maxX, cx);
+          minY = Math.min(minY, cy);
+          maxY = Math.max(maxY, cy);
+
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx < startX || nx > endX || ny < startY || ny > endY) continue;
+              const next = ny * width + nx;
+              if (visited[next]) continue;
+              visited[next] = 1;
+              if (isDarkGlyphPixel(next * 4)) queue.push(next);
+            }
+          }
+        }
+
+        const boxWidth = maxX - minX + 1;
+        const boxHeight = maxY - minY + 1;
+        const area = boxWidth * boxHeight;
+        const density = count / Math.max(area, 1);
+        if (count < 22 || count > 900) continue;
+        if (boxWidth < 12 || boxWidth > Math.max(54, width * 0.08)) continue;
+        if (boxHeight < 12 || boxHeight > Math.max(54, height * 0.05)) continue;
+        if (density < 0.10) continue;
+        components.push({
+          x: Math.round((minX + maxX) / 2),
+          y: Math.round((minY + maxY) / 2),
+          width: boxWidth,
+          height: boxHeight,
+          count,
+        });
+      }
+    }
+
+    const expected = {
+      like: width * 0.19,
+      comment: width * 0.36,
+      repost: width * 0.51,
+      share: width * 0.63,
+    };
+    const xTolerance = width * 0.045;
+    const yTolerance = Math.max(20, height * 0.018);
+    const candidates = components
+      .filter((item) => Math.abs(item.x - expected.like) <= xTolerance)
+      .map((likeIcon) => {
+        const sameRow = components.filter((item) => Math.abs(item.y - likeIcon.y) <= yTolerance);
+        const comment = sameRow.find((item) => Math.abs(item.x - expected.comment) <= xTolerance);
+        const repost = sameRow.find((item) => Math.abs(item.x - expected.repost) <= xTolerance);
+        const share = sameRow.find((item) => Math.abs(item.x - expected.share) <= xTolerance);
+        if (!comment || (!repost && !share)) return null;
+        const rowY = Math.round([likeIcon, comment, repost, share].filter(Boolean).reduce((sum, item) => sum + item!.y, 0) / [likeIcon, comment, repost, share].filter(Boolean).length);
+        const lightRatio = lightStripRatio(rowY);
+        if (lightRatio < 0.90) return null;
+        const likeCountLightRatio = lightRegionRatio(rowY, 0.22, 0.32);
+        const commentCountLightRatio = lightRegionRatio(rowY, 0.39, 0.48);
+        if (likeCountLightRatio < 0.88 || commentCountLightRatio < 0.88) return null;
+        if (!hasLikeCountText(rowY)) return null;
+        const closeScore = Math.max(0, 80 - Math.abs(likeIcon.x - expected.like))
+          + Math.max(0, 70 - Math.abs(comment.x - expected.comment))
+          + (repost ? Math.max(0, 55 - Math.abs(repost.x - expected.repost)) : 0)
+          + (share ? Math.max(0, 55 - Math.abs(share.x - expected.share)) : 0);
+        const sizeScore = [likeIcon, comment, repost, share]
+          .filter(Boolean)
+          .reduce((sum, item) => sum + Math.min(60, item!.count / 4), 0);
+        const engagementScore = estimateEngagementScore(rowY);
+        const score = closeScore + sizeScore + lightRatio * 80 + Math.min(180, engagementScore * 3) - rowY / height * 12;
+        return { likeIcon, comment, repost, share, rowY, lightRatio, engagementScore, score };
+      })
+      .filter(Boolean) as Array<{
+        likeIcon: { x: number; y: number; width: number; height: number; count: number };
+        comment: { x: number; y: number; width: number; height: number; count: number };
+        repost?: { x: number; y: number; width: number; height: number; count: number };
+        share?: { x: number; y: number; width: number; height: number; count: number };
+        rowY: number;
+        lightRatio: number;
+        engagementScore: number;
+        score: number;
+      }>;
+
+    const sortedCandidates = candidates.sort((a, b) => b.engagementScore - a.engagementScore || b.score - a.score || a.rowY - b.rowY);
+    const best = sortedCandidates[0];
+    if (!best || best.score < 150) return null;
+    const alternates = sortedCandidates
+      .filter((item) => item !== best && item.score >= 150)
+      .slice(0, 4);
+    const parts = [best.likeIcon, best.comment, best.repost, best.share]
+      .filter(Boolean)
+      .map((item) => `${item!.x},${item!.y},${item!.width}x${item!.height},c${item!.count}`)
+      .join(";");
+    return {
+      like: { x: best.likeIcon.x, y: best.likeIcon.y },
+      comment: { x: best.comment.x, y: best.comment.y },
+      alternateLikes: alternates.map((item) => ({ x: item.likeIcon.x, y: item.likeIcon.y })),
+      alternateComments: alternates.map((item) => ({ x: item.comment.x, y: item.comment.y })),
+      engagementScore: best.engagementScore,
+      debugRaw: `column_row_score=${Math.round(best.score)};engagement=${best.engagementScore};rowY=${best.rowY};light=${best.lightRatio.toFixed(2)};icons=${parts}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function isLikelyWarmupActionRowAtPoint(
+  screenshotUrl: string,
+  point: { x: number; y: number },
+): Promise<boolean> {
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  if (point.y < height * 0.22 || point.y > height * 0.86) return false;
+
+  const rowStats = (() => {
+    const left = Math.max(0, Math.floor(width * 0.08));
+    const right = Math.min(width - 1, Math.floor(width * 0.66));
+    const top = Math.max(0, Math.round(point.y - 18));
+    const bottom = Math.min(height - 1, Math.round(point.y + 18));
+    let light = 0;
+    let dark = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 3) {
+      for (let x = left; x <= right; x += 3) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 100) continue;
+        const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+        total += 1;
+        if (avg > 205) light += 1;
+        if (avg < 145) dark += 1;
+      }
+    }
+    return {
+      lightRatio: total ? light / total : 0,
+      darkRatio: total ? dark / total : 0,
+    };
+  })();
+  if (rowStats.lightRatio < 0.46) return false;
+  if (rowStats.darkRatio > 0.18) return false;
+
+  let likeCountDark = 0;
+  const countLeft = Math.max(0, Math.floor(width * 0.22));
+  const countRight = Math.min(width - 1, Math.floor(width * 0.32));
+  const countTop = Math.max(0, Math.round(point.y - 18));
+  const countBottom = Math.min(height - 1, Math.round(point.y + 18));
+  for (let y = countTop; y <= countBottom; y += 2) {
+    for (let x = countLeft; x <= countRight; x += 2) {
+      const index = (y * width + x) * 4;
+      const a = data[index + 3];
+      if (a < 100) continue;
+      const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+      if (avg < 150) likeCountDark += 1;
+    }
+  }
+  if (likeCountDark < 10) return false;
+
+  const iconDarkPixels = (centerX: number) => {
+    const left = Math.max(0, Math.round(centerX - 24));
+    const right = Math.min(width - 1, Math.round(centerX + 24));
+    const top = Math.max(0, Math.round(point.y - 24));
+    const bottom = Math.min(height - 1, Math.round(point.y + 24));
+    let dark = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 100) continue;
+        const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+        total += 1;
+        if (avg < 145) dark += 1;
+      }
+    }
+    return { dark, total };
+  };
+  const likeIcon = iconDarkPixels(width * 0.19);
+  const commentIcon = iconDarkPixels(width * 0.34);
+  return likeIcon.dark >= 14 && commentIcon.dark >= 10;
+}
+
+async function estimateThreadsFeedActionRowByGeometry(
+  screenshotUrl: string,
+): Promise<{ like?: { x: number; y: number }; comment?: { x: number; y: number }; debugRaw?: string } | null> {
+  try {
+    const pixels = await getImagePixelData(screenshotUrl);
+    if (!pixels) return null;
+    const { data, width, height } = pixels;
+    const visited = new Uint8Array(width * height);
+    const startX = Math.max(0, Math.floor(width * 0.07));
+    const endX = Math.min(width - 1, Math.floor(width * 0.64));
+    const startY = Math.max(0, Math.floor(height * 0.15));
+    const endY = Math.min(height - 1, Math.floor(height * 0.86));
+
+    const isDarkUiPixel = (index: number) => {
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const a = data[index + 3];
+      if (a < 120) return false;
+      const value = (r + g + b) / 3;
+      const spread = Math.max(r, g, b) - Math.min(r, g, b);
+      return value < 145 && (spread < 72 || value < 82);
+    };
+    const lightRegionRatio = (centerY: number, leftRatio: number, rightRatio: number) => {
+      const left = Math.max(0, Math.floor(width * leftRatio));
+      const right = Math.min(width - 1, Math.floor(width * rightRatio));
+      const top = Math.max(0, Math.round(centerY - 18));
+      const bottom = Math.min(height - 1, Math.round(centerY + 18));
+      let light = 0;
+      let total = 0;
+      for (let y = top; y <= bottom; y += 3) {
+        for (let x = left; x <= right; x += 3) {
+          const index = (y * width + x) * 4;
+          const a = data[index + 3];
+          if (a < 100) continue;
+          const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+          total += 1;
+          if (avg > 205) light += 1;
+        }
+      }
+      return total ? light / total : 0;
+    };
+    const lightStripRatio = (centerY: number) => lightRegionRatio(centerY, 0.08, 0.66);
+    const hasLikeCountText = (centerY: number) => {
+      const left = Math.max(0, Math.floor(width * 0.22));
+      const right = Math.min(width - 1, Math.floor(width * 0.32));
+      const top = Math.max(0, Math.round(centerY - 18));
+      const bottom = Math.min(height - 1, Math.round(centerY + 18));
+      let dark = 0;
+      for (let y = top; y <= bottom; y += 2) {
+        for (let x = left; x <= right; x += 2) {
+          const index = (y * width + x) * 4;
+          const a = data[index + 3];
+          if (a < 100) continue;
+          const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+          if (avg < 150) dark += 1;
+        }
+      }
+      return dark >= 10;
+    };
+
+    const components: Array<{
+      x: number;
+      y: number;
+      minX: number;
+      maxX: number;
+      minY: number;
+      maxY: number;
+      width: number;
+      height: number;
+      count: number;
+      score: number;
+    }> = [];
+
+    for (let y = startY; y <= endY; y += 1) {
+      for (let x = startX; x <= endX; x += 1) {
+        const start = y * width + x;
+        if (visited[start]) continue;
+        visited[start] = 1;
+        if (!isDarkUiPixel(start * 4)) continue;
+
+        const queue = [start];
+        let cursor = 0;
+        let count = 0;
+        let minX = x;
+        let maxX = x;
+        let minY = y;
+        let maxY = y;
+
+        while (cursor < queue.length) {
+          const current = queue[cursor++];
+          const cy = Math.floor(current / width);
+          const cx = current % width;
+          count += 1;
+          minX = Math.min(minX, cx);
+          maxX = Math.max(maxX, cx);
+          minY = Math.min(minY, cy);
+          maxY = Math.max(maxY, cy);
+
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx < startX || nx > endX || ny < startY || ny > endY) continue;
+              const next = ny * width + nx;
+              if (visited[next]) continue;
+              visited[next] = 1;
+              if (isDarkUiPixel(next * 4)) queue.push(next);
+            }
+          }
+        }
+
+        const boxWidth = maxX - minX + 1;
+        const boxHeight = maxY - minY + 1;
+        const area = boxWidth * boxHeight;
+        const density = count / Math.max(area, 1);
+        if (count < 8 || count > 1600) continue;
+        if (boxWidth < 4 || boxWidth > width * 0.12) continue;
+        if (boxHeight < 4 || boxHeight > height * 0.065) continue;
+        if (density < 0.08) continue;
+        if (boxHeight > boxWidth * 4.5) continue;
+
+        const centerX = Math.round((minX + maxX) / 2);
+        const centerY = Math.round((minY + maxY) / 2);
+        const targetIconSize = Math.abs(boxWidth - width * 0.035) + Math.abs(boxHeight - height * 0.022);
+        components.push({
+          x: centerX,
+          y: centerY,
+          minX,
+          maxX,
+          minY,
+          maxY,
+          width: boxWidth,
+          height: boxHeight,
+          count,
+          score: count + Math.max(0, 80 - targetIconSize),
+        });
+      }
+    }
+
+    const pickIcon = (items: typeof components, targetRatio: number) => {
+      const targetX = width * targetRatio;
+      return items
+        .map((item) => ({
+          item,
+          score: item.score - Math.abs(item.x - targetX) * 1.2 + (item.width >= 10 && item.height >= 10 ? 45 : 0),
+        }))
+        .sort((a, b) => b.score - a.score)[0]?.item;
+    };
+
+    type Row = { y: number; components: typeof components; score: number; lightRatio: number; like?: typeof components[number]; comment?: typeof components[number] };
+    const rows: Row[] = [];
+    const sorted = components.sort((a, b) => a.y - b.y || a.x - b.x);
+    const rowBand = Math.max(24, Math.round(height * 0.024));
+    for (const seed of sorted) {
+      const rowComponents = sorted
+        .filter((item) => Math.abs(item.y - seed.y) <= rowBand)
+        .filter((item) => item.x >= width * 0.09 && item.x <= width * 0.62)
+        .sort((a, b) => a.x - b.x);
+      if (rowComponents.length < 2) continue;
+
+      const likeCandidates = rowComponents.filter((item) => item.x >= width * 0.11 && item.x <= width * 0.28);
+      const commentCandidates = rowComponents.filter((item) => item.x >= width * 0.25 && item.x <= width * 0.43);
+      const like = pickIcon(likeCandidates, 0.19);
+      const comment = pickIcon(commentCandidates, 0.34);
+      if (!like && !comment) continue;
+
+      const rowY = Math.round(rowComponents.reduce((total, item) => total + item.y, 0) / rowComponents.length);
+      const lightRatio = lightStripRatio(rowY);
+      if (lightRatio < 0.88) continue;
+      if (lightRegionRatio(rowY, 0.22, 0.32) < 0.86 || lightRegionRatio(rowY, 0.39, 0.48) < 0.86) continue;
+      if (!hasLikeCountText(rowY)) continue;
+      const spacing = like && comment ? comment.x - like.x : width * 0.145;
+      const totalDark = rowComponents.reduce((total, item) => total + item.count, 0);
+      let score = 0;
+      if (rowY >= height * 0.15 && rowY <= height * 0.86) score += 24;
+      if (like) score += 18;
+      if (comment) score += 18;
+      if (spacing >= width * 0.08 && spacing <= width * 0.22) score += 16;
+      if (totalDark >= 35 && totalDark <= 2200) score += 10;
+      if (rowComponents.length >= 3 && rowComponents.length <= 12) score += 8;
+      score += lightRatio * 50;
+      if (rowY < height * 0.15 || rowY > height * 0.86) score -= 28;
+      if (totalDark > 3000) score -= 18;
+
+      rows.push({ y: rowY, components: rowComponents, score, lightRatio, like, comment });
+    }
+
+    const best = rows
+      .filter((row) => row.score >= 34)
+      .sort((a, b) => b.score - a.score || a.y - b.y)[0];
+    if (!best) return null;
+
+    const like = (best.like || best.comment)
+      ? { x: (best.like || best.comment)!.x, y: (best.like || best.comment)!.y }
+      : undefined;
+    const comment = (best.comment || best.like)
+      ? { x: (best.comment || best.like)!.x, y: (best.comment || best.like)!.y }
+      : undefined;
+
+    const preview = best.components.slice(0, 8).map((item) => `${item.x},${item.y},${item.width}x${item.height},c${item.count}`).join(";");
+    return {
+      like,
+      comment,
+      debugRaw: `geometry_row_score=${Math.round(best.score)};rowY=${best.y};light=${best.lightRatio.toFixed(2)};components=${preview}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function detectThreadsAuthScreenVisually(
+  screenshotInput: { mimeType: string; data: string } | null,
+): Promise<string | null> {
+  if (!screenshotInput) return null;
+
+  try {
+    const img = await loadImage(`data:${screenshotInput.mimeType};base64,${screenshotInput.data}`);
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx || !canvas.width || !canvas.height) return null;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const sampleRegion = (
+      xRatio: number,
+      yRatio: number,
+      widthRatio: number,
+      heightRatio: number,
+      predicate: (r: number, g: number, b: number, a: number) => boolean,
+    ) => {
+      const x = Math.max(0, Math.round(canvas.width * xRatio));
+      const y = Math.max(0, Math.round(canvas.height * yRatio));
+      const width = Math.max(1, Math.min(canvas.width - x, Math.round(canvas.width * widthRatio)));
+      const height = Math.max(1, Math.min(canvas.height - y, Math.round(canvas.height * heightRatio)));
+      const { data } = ctx.getImageData(x, y, width, height);
+      let matched = 0;
+      const total = width * height;
+      for (let i = 0; i < data.length; i += 4) {
+        if (predicate(data[i], data[i + 1], data[i + 2], data[i + 3])) matched += 1;
+      }
+      return total > 0 ? matched / total : 0;
+    };
+
+    const upperDarkRatio = sampleRegion(0, 0.08, 1, 0.62, (r, g, b, a) => a > 220 && (r + g + b) / 3 < 55);
+    const bottomWhiteRatio = sampleRegion(0, 0.74, 1, 0.22, (r, g, b, a) => a > 220 && r > 235 && g > 235 && b > 235);
+    const instagramBlueRatio = sampleRegion(0.02, 0.54, 0.96, 0.22, (r, g, b, a) => a > 220 && r < 50 && g >= 80 && g <= 170 && b > 180);
+    const mostlyWhiteRatio = sampleRegion(0, 0.08, 1, 0.86, (r, g, b, a) => a > 220 && r > 242 && g > 242 && b > 242);
+
+    if (instagramBlueRatio > 0.035 && mostlyWhiteRatio > 0.72) {
+      return "Instagram 登入頁，Threads 帳號狀態不可用";
+    }
+
+    if (upperDarkRatio > 0.18 && bottomWhiteRatio > 0.72) {
+      return "Threads 需要使用 Instagram 帳號登入";
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function locateThreadsComposerPublishButton(
+  url: string,
+): Promise<{ x: number; y: number } | null> {
+  try {
+    const pixels = await getImagePixelData(url);
+    if (!pixels || !isUsableScreenshotSize(pixels)) return null;
+    const { data, width: imgWidth, height: imgHeight } = pixels;
+    const search = {
+      x: Math.floor(imgWidth * 0.52),
+      y: Math.floor(imgHeight * 0.42),
+      width: Math.floor(imgWidth * 0.46),
+      height: Math.floor(imgHeight * 0.56),
+    };
+    const width = search.width;
+    const height = search.height;
+    const visited = new Uint8Array(width * height);
+    const isDark = (index: number) => {
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const a = data[index + 3];
+      return a > 220 && (r + g + b) / 3 < 70;
+    };
+
+    let best:
+      | { count: number; minX: number; minY: number; maxX: number; maxY: number }
+      | null = null;
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const start = y * width + x;
+        if (visited[start]) continue;
+        visited[start] = 1;
+        const sourceX = search.x + x;
+        const sourceY = search.y + y;
+        const offset = (sourceY * imgWidth + sourceX) * 4;
+        if (!isDark(offset)) continue;
+
+        const queue = [start];
+        let index = 0;
+        let count = 0;
+        let minX = x;
+        let minY = y;
+        let maxX = x;
+        let maxY = y;
+
+        while (index < queue.length) {
+          const current = queue[index++];
+          const cy = Math.floor(current / width);
+          const cx = current % width;
+          count += 1;
+          minX = Math.min(minX, cx);
+          minY = Math.min(minY, cy);
+          maxX = Math.max(maxX, cx);
+          maxY = Math.max(maxY, cy);
+
+          const neighbors = [
+            current - 1,
+            current + 1,
+            current - width,
+            current + width,
+          ];
+          for (const next of neighbors) {
+            if (next < 0 || next >= width * height) continue;
+            const ny = Math.floor(next / width);
+            const nx = next % width;
+            if (Math.abs(nx - cx) + Math.abs(ny - cy) !== 1) continue;
+            if (visited[next]) continue;
+            visited[next] = 1;
+            const sourceNextX = search.x + nx;
+            const sourceNextY = search.y + ny;
+            if (isDark((sourceNextY * imgWidth + sourceNextX) * 4)) queue.push(next);
+          }
+        }
+
+        const boxWidth = maxX - minX + 1;
+        const boxHeight = maxY - minY + 1;
+        const ratio = boxWidth / Math.max(boxHeight, 1);
+        if (
+          count < 1500
+          || count > 22000
+          || boxWidth < 90
+          || boxWidth > 190
+          || boxHeight < 45
+          || boxHeight > 115
+          || ratio < 1.1
+          || ratio > 3.8
+        ) {
+          continue;
+        }
+
+        if (!best || count > best.count) {
+          best = { count, minX, minY, maxX, maxY };
+        }
+      }
+    }
+
+    if (!best) return null;
+    return {
+      x: search.x + Math.round((best.minX + best.maxX) / 2),
+      y: search.y + Math.round((best.minY + best.maxY) / 2),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function detectThreadsComposerLocally(screenshotUrl: string | undefined): Promise<string | null> {
+  if (!screenshotUrl) return null;
+  if (await detectThreadsSideDrawerLocally(screenshotUrl).catch(() => false)) return null;
+  const galleryReason = await detectThreadsGalleryPickerLocally(screenshotUrl).catch(() => null);
+  if (galleryReason) return null;
+  if (await detectThreadsSearchOverlayLocally(screenshotUrl).catch(() => false)) return null;
+  if (await detectThreadsPublishedToastLocally(screenshotUrl)) return null;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return null;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) {
+          count += 1;
+        }
+      }
+    }
+    return count;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 80;
+  const isControlGray = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    return a > 220 && avg > 120 && avg < 235 && Math.max(r, g, b) - Math.min(r, g, b) < 36;
+  };
+  const closeX = countRegion(0.045, 0.06, 0.12, 0.12, isDark);
+  const titleText = countRegion(0.15, 0.055, 0.48, 0.13, isDark);
+  const publishArea = countRegion(0.76, 0.78, 0.98, 0.91, (r, g, b, a) => isDark(r, g, b, a) || isControlGray(r, g, b, a));
+  const keyboardOpenPublishArea = countRegion(0.76, 0.55, 0.98, 0.70, (r, g, b, a) => isDark(r, g, b, a) || isControlGray(r, g, b, a));
+  const optionArea = countRegion(0.02, 0.78, 0.45, 0.92, isControlGray);
+  const keyboardOpenOptionArea = countRegion(0.02, 0.55, 0.45, 0.70, isControlGray);
+  const inputHintArea = countRegion(0.13, 0.13, 0.68, 0.21, (r, g, b, a) => isDark(r, g, b, a) || isControlGray(r, g, b, a));
+  const toolIconArea = countRegion(0.12, 0.18, 0.55, 0.27, isControlGray);
+  const bottomPublishArea = countRegion(0.78, 0.88, 0.98, 0.99, (r, g, b, a) => isDark(r, g, b, a) || isControlGray(r, g, b, a));
+  const profileTabStripArea = countRegion(0.03, 0.68, 0.96, 0.78, isDark);
+  const centeredThreadsLogo = countRegion(0.43, 0.045, 0.57, 0.13, isDark);
+  const bottomHomeNav = countRegion(0.04, 0.88, 0.18, 0.98, (r, g, b, a) => isDark(r, g, b, a) || isControlGray(r, g, b, a));
+  const bottomCreateNav = countRegion(0.40, 0.90, 0.60, 0.99, (r, g, b, a) => isDark(r, g, b, a) || isControlGray(r, g, b, a));
+  const feedActionArea = countRegion(0.12, 0.42, 0.66, 0.56, isDark)
+    + countRegion(0.12, 0.70, 0.66, 0.84, isDark);
+
+  if (
+    centeredThreadsLogo >= 450
+    && bottomHomeNav >= 450
+    && (bottomCreateNav >= 120 || feedActionArea >= 2400)
+  ) {
+    return null;
+  }
+
+  if (profileTabStripArea >= 1800 && keyboardOpenPublishArea < 2500) {
+    return null;
+  }
+
+  if (closeX >= 12 && titleText >= 70 && bottomPublishArea >= 300) {
+    return "LOCAL_COMPOSER";
+  }
+
+  if (
+    !galleryReason
+    &&
+    closeX >= 12
+    && titleText >= 500
+    && (
+      (optionArea >= 35 && (publishArea >= 90 || optionArea >= 70))
+      || (keyboardOpenOptionArea >= 25 && keyboardOpenPublishArea >= 120)
+      || (inputHintArea >= 220 && toolIconArea >= 120)
+    )
+  ) {
+    return "LOCAL_COMPOSER";
+  }
+  if (await detectThreadsProfilePageLocally(screenshotUrl).catch(() => false)) return null;
+  return null;
+}
+
+export async function detectThreadsSearchOverlayLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) count += 1;
+      }
+    }
+    return count;
+  };
+  const isWhite = (r: number, g: number, b: number, a: number) => a > 220 && r > 245 && g > 245 && b > 245;
+  const isPillGray = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return a > 220 && avg > 214 && avg < 246 && spread < 24;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 95;
+  const isSearchGlyph = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return a > 220 && avg > 90 && avg < 195 && spread < 38;
+  };
+  const searchPill = countRegion(0.04, 0.075, 0.96, 0.145, isPillGray);
+  const searchTextOrIcon = countRegion(0.07, 0.088, 0.92, 0.14, (r, g, b, a) => isDark(r, g, b, a) || isSearchGlyph(r, g, b, a));
+  const emptyWhiteBody = countRegion(0.04, 0.18, 0.96, 0.86, isWhite);
+  const emptyWhiteBodyAboveKeyboard = countRegion(0.04, 0.18, 0.96, 0.58, isWhite);
+  const keyboardLikeLowerPanel = countRegion(0.02, 0.60, 0.98, 0.99, (r, g, b, a) => {
+    const avg = (r + g + b) / 3;
+    return a > 220 && avg > 150 && avg < 245;
+  });
+  const composerTitleArea = countRegion(0.14, 0.055, 0.46, 0.13, isDark);
+  const fullHeightSearchOverlay = emptyWhiteBody >= 38000;
+  const keyboardSearchOverlay = emptyWhiteBodyAboveKeyboard >= 21000 && keyboardLikeLowerPanel >= 9500;
+  return searchPill >= 5200
+    && searchTextOrIcon >= 90
+    && (fullHeightSearchOverlay || keyboardSearchOverlay)
+    && composerTitleArea < 1400;
+}
+
+export async function detectThreadsReplyComposerLocally(screenshotUrl: string | undefined): Promise<string | null> {
+  if (!screenshotUrl) return null;
+  if (await detectThreadsSideDrawerLocally(screenshotUrl).catch(() => false)) return null;
+  if (await detectThreadsProfilePageLocally(screenshotUrl).catch(() => false)) return null;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return null;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) {
+          count += 1;
+        }
+      }
+    }
+    return count;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 85;
+  const isPillGray = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return a > 220 && avg > 205 && avg < 248 && spread < 30;
+  };
+  const isWhite = (r: number, g: number, b: number, a: number) => a > 220 && r > 245 && g > 245 && b > 245;
+  const bottomReplyPill = countRegion(0.03, 0.92, 0.96, 0.985, isPillGray);
+  const bottomIcons = countRegion(0.67, 0.92, 0.96, 0.985, isDark);
+  const bottomPublishButton = countRegion(0.78, 0.91, 0.98, 0.985, isDark);
+  const bottomWhiteBand = countRegion(0, 0.89, 1, 1, isWhite);
+  const topBackOrTitle = countRegion(0.04, 0.035, 0.42, 0.10, isDark);
+  const closeX = countRegion(0.045, 0.06, 0.12, 0.12, isDark);
+  const titleLeft = countRegion(0.15, 0.055, 0.25, 0.13, isDark);
+  const titleTail = countRegion(0.35, 0.055, 0.48, 0.13, isDark);
+  const feedActionRow = countRegion(0.02, 0.55, 0.72, 0.72, isDark);
+  const upperFeedActionRow = countRegion(0.02, 0.35, 0.72, 0.58, isDark);
+  const highFeedActionRow = countRegion(0.02, 0.18, 0.72, 0.36, isDark);
+
+  // Full-page Threads reply editor. It visually resembles the new-thread editor,
+  // but the top title is the short two-character "回覆/回复" instead of "新串文",
+  // and it shows the original post context above the reply draft.
+  if (
+    closeX >= 12
+    && titleLeft >= 120
+    && titleTail < 30
+    && bottomPublishButton >= 500
+    && (
+      highFeedActionRow >= 70
+      || upperFeedActionRow >= 70
+      || feedActionRow >= 70
+      || bottomWhiteBand >= 3000
+    )
+  ) {
+    return "LOCAL_REPLY_COMPOSER";
+  }
+
+  if (bottomPublishButton >= 500) {
+    return null;
+  }
+
+  if (
+    bottomReplyPill >= 700
+    && topBackOrTitle >= 70
+    && (
+      bottomIcons >= 20
+      || bottomWhiteBand >= 2600
+      || feedActionRow >= 80
+      || upperFeedActionRow >= 80
+      || highFeedActionRow >= 80
+    )
+  ) {
+    return "LOCAL_REPLY_COMPOSER";
+  }
+
+  if (
+    bottomReplyPill >= 700
+    && bottomIcons >= 50
+    && topBackOrTitle >= 70
+    && (
+      bottomWhiteBand >= 3200
+      || feedActionRow >= 80
+      || upperFeedActionRow >= 80
+      || highFeedActionRow >= 80
+    )
+  ) {
+    return "LOCAL_REPLY_COMPOSER";
+  }
+  return null;
+}
+
+export async function detectThreadsSideDrawerLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const boundaryRatio = (xRatio: number) => {
+    let boundaryDark = 0;
+    let boundaryTotal = 0;
+    const boundaryX = Math.round(width * xRatio);
+    for (let y = Math.round(height * 0.05); y < Math.round(height * 0.96); y += 3) {
+      for (let dx = -2; dx <= 2; dx += 1) {
+        const x = Math.max(0, Math.min(width - 1, boundaryX + dx));
+        const index = (y * width + x) * 4;
+        const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+        if (data[index + 3] > 220) {
+          boundaryTotal += 1;
+          if (avg < 235) boundaryDark += 1;
+        }
+      }
+    }
+    return boundaryTotal ? boundaryDark / boundaryTotal : 0;
+  };
+  let rightNonWhite = 0;
+  let rightTotal = 0;
+  for (let y = Math.round(height * 0.08); y < Math.round(height * 0.94); y += 4) {
+    for (let x = Math.round(width * 0.85); x < Math.round(width * 0.99); x += 4) {
+      const index = (y * width + x) * 4;
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      if (data[index + 3] < 180) continue;
+      rightTotal += 1;
+      if (!(r > 244 && g > 244 && b > 244)) rightNonWhite += 1;
+    }
+  }
+  const classicSideDrawer = rightTotal > 0
+    && Math.max(boundaryRatio(0.72), boundaryRatio(0.82)) > 0.10
+    && rightNonWhite / rightTotal > 0.18;
+
+  const ratio = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 4) {
+      for (let x = left; x <= right; x += 4) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 180) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isWhite = (r: number, g: number, b: number) => r > 238 && g > 238 && b > 238;
+  const isDark = (r: number, g: number, b: number) => (r + g + b) / 3 < 90;
+  const isLightCard = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return avg > 205 && avg < 250 && spread < 35;
+  };
+  const leftPanelWhite = ratio(0, 0.12, 0.74, 0.90, (r, g, b) => isWhite(r, g, b));
+  const rightEdgeContent = ratio(0.82, 0.08, 0.99, 0.94, (r, g, b) => !isWhite(r, g, b));
+  const leftTitleDark = ratio(0.05, 0.07, 0.38, 0.18, (r, g, b) => isDark(r, g, b));
+  const activityCards = ratio(0.04, 0.20, 0.72, 0.72, (r, g, b) => isLightCard(r, g, b));
+  const bottomNotWhite = ratio(0, 0.70, 1, 0.99, (r, g, b) => !isWhite(r, g, b));
+  if (bottomNotWhite > 0.20) return false;
+  if (classicSideDrawer && leftPanelWhite > 0.78) return true;
+
+  return leftPanelWhite > 0.90
+    && rightEdgeContent > 0.07
+    && rightEdgeContent < 0.45
+    && leftTitleDark > 0.035
+    && activityCards > 0.015;
+}
+
+export async function detectThreadsInAppBrowserLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let total = 0;
+    let matched = 0;
+    for (let y = top; y <= bottom; y += 3) {
+      for (let x = left; x <= right; x += 3) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 180) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isWhite = (r: number, g: number, b: number) => r > 238 && g > 238 && b > 238;
+  const isDark = (r: number, g: number, b: number) => (r + g + b) / 3 < 70;
+  const isTopBarGray = (r: number, g: number, b: number) => {
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return spread < 14 && r > 105 && r < 225;
+  };
+  const topBarWhite = ratio(0.0, 0.0, 1.0, 0.10, (r, g, b) => isWhite(r, g, b));
+  const bodyMostlyWhite = ratio(0.0, 0.12, 1.0, 0.98, (r, g, b) => isWhite(r, g, b));
+  const leftTopDarkIcon = ratio(0.02, 0.03, 0.16, 0.12, (r, g, b) => isDark(r, g, b));
+  const rightTopDarkIcon = ratio(0.82, 0.03, 0.98, 0.12, (r, g, b) => isDark(r, g, b));
+  const topBarGray = ratio(0.0, 0.0, 1.0, 0.10, (r, g, b) => isTopBarGray(r, g, b));
+  return topBarWhite > 0.55
+    && bodyMostlyWhite > 0.86
+    && topBarGray > 0.16
+    && leftTopDarkIcon > 0.02
+    && rightTopDarkIcon > 0.02;
+}
+
+export async function detectThreadsShareSheetLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let total = 0;
+    let matched = 0;
+    for (let y = top; y <= bottom; y += 4) {
+      for (let x = left; x <= right; x += 4) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 180) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isWhite = (r: number, g: number, b: number) => r > 238 && g > 238 && b > 238;
+  const isDim = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    return avg > 120 && avg < 230;
+  };
+  const isLightGray = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return avg > 215 && avg < 248 && spread < 26;
+  };
+  const dimmedFeed = ratio(0, 0.0, 1, 0.58, (r, g, b) => isDim(r, g, b));
+  const bottomWhitePanel = ratio(0, 0.58, 1, 1, (r, g, b) => isWhite(r, g, b));
+  const searchPill = ratio(0.04, 0.62, 0.96, 0.72, (r, g, b) => isLightGray(r, g, b));
+  const shareOptionsBand = ratio(0.02, 0.84, 0.98, 0.98, (r, g, b) => isLightGray(r, g, b));
+  return dimmedFeed > 0.55
+    && bottomWhitePanel > 0.72
+    && searchPill > 0.20
+    && shareOptionsBand > 0.20;
+}
+
+export async function detectThreadsFullscreenMediaViewerLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 3) {
+      for (let x = left; x <= right; x += 3) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 180) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isBlack = (r: number, g: number, b: number) => (r + g + b) / 3 < 22;
+  const isNonBlack = (r: number, g: number, b: number) => (r + g + b) / 3 > 45;
+  const topBlack = ratio(0, 0, 1, 0.16, (r, g, b) => isBlack(r, g, b));
+  const bottomBlack = ratio(0, 0.84, 1, 1, (r, g, b) => isBlack(r, g, b));
+  const centerContent = ratio(0.02, 0.20, 0.98, 0.78, (r, g, b) => isNonBlack(r, g, b));
+  const centerBlack = ratio(0.02, 0.20, 0.98, 0.78, (r, g, b) => isBlack(r, g, b));
+  const bottomUiDark = ratio(0.04, 0.82, 0.96, 0.98, (r, g, b) => !isBlack(r, g, b));
+  return (
+    topBlack > 0.82 && bottomBlack > 0.82 && centerContent > 0.45 && bottomUiDark < 0.08
+  ) || (
+    topBlack > 0.62 && bottomBlack > 0.62 && centerBlack > 0.38
+  );
+}
+
+export async function detectThreadsGalleryPickerLocally(screenshotUrl: string | undefined): Promise<string | null> {
+  if (!screenshotUrl) return null;
+  if (await detectThreadsPostActionSheetLocally(screenshotUrl)) return null;
+  if (await detectThreadsFullscreenMediaViewerLocally(screenshotUrl)) return null;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return null;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) {
+          count += 1;
+        }
+      }
+    }
+    return count;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 90;
+  const isMutedControl = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    return a > 220 && avg >= 90 && avg < 225 && Math.max(r, g, b) - Math.min(r, g, b) < 45;
+  };
+  const isKeyboardWhite = (r: number, g: number, b: number, a: number) => a > 220 && r > 230 && g > 230 && b > 230;
+  const isMediaPixel = (r: number, g: number, b: number, a: number) => {
+    if (a <= 220) return false;
+    const avg = (r + g + b) / 3;
+    return avg < 235 && (avg < 210 || Math.max(r, g, b) - Math.min(r, g, b) > 22);
+  };
+
+  const titleArea = countRegion(0.04, 0.045, 0.42, 0.13, isDark);
+  const albumArea = countRegion(0.02, 0.12, 0.22, 0.18, isDark);
+  const doneArea = countRegion(0.78, 0.045, 0.98, 0.13, (r, g, b, a) => isDark(r, g, b, a) || isMutedControl(r, g, b, a));
+  const gridMedia = countRegion(0.0, 0.135, 1.0, 0.88, isMediaPixel);
+  const keyboardWhiteArea = countRegion(0.0, 0.70, 1.0, 0.99, isKeyboardWhite);
+
+  if (keyboardWhiteArea >= 30_000) {
+    return null;
+  }
+
+  if (titleArea >= 40 && albumArea >= 12 && doneArea >= 20 && gridMedia >= 3500) {
+    return "LOCAL_GALLERY_PICKER";
+  }
+  return null;
+}
+
+export async function detectThreadsPostActionSheetLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 3) {
+      for (let x = left; x <= right; x += 3) {
+        total += 1;
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) {
+          count += 1;
+        }
+      }
+    }
+    return { count, total, ratio: total > 0 ? count / total : 0 };
+  };
+  const isBright = (r: number, g: number, b: number, a: number) => (
+    a > 220 && r > 228 && g > 228 && b > 228
+  );
+  const isDimmed = (r: number, g: number, b: number, a: number) => {
+    if (a <= 220) return false;
+    const avg = (r + g + b) / 3;
+    return avg >= 105 && avg <= 225 && Math.max(r, g, b) - Math.min(r, g, b) < 38;
+  };
+  const isHandleDark = (r: number, g: number, b: number, a: number) => (
+    a > 220 && r < 150 && g < 150 && b < 150 && Math.max(r, g, b) - Math.min(r, g, b) < 50
+  );
+
+  const lowerSheet = countRegion(0.04, 0.48, 0.96, 0.98, isBright);
+  const upperDim = countRegion(0.02, 0.06, 0.98, 0.42, isDimmed);
+  const handleHigh = countRegion(0.42, 0.455, 0.58, 0.495, isHandleDark);
+  const handleLow = countRegion(0.42, 0.515, 0.58, 0.56, isHandleDark);
+  const hasDragHandle = (handleHigh.count + handleLow.count) >= 10;
+  const composerClose = countRegion(0.045, 0.055, 0.12, 0.13, isHandleDark);
+  const composerTitle = countRegion(0.15, 0.05, 0.48, 0.135, isHandleDark);
+  const composerPublish = countRegion(0.78, 0.88, 0.98, 0.99, isHandleDark);
+  if (composerClose.count >= 8 && composerTitle.count >= 40 && composerPublish.count >= 90) {
+    return false;
+  }
+  return lowerSheet.ratio > 0.42 && upperDim.ratio > 0.18 && (hasDragHandle || lowerSheet.ratio > 0.52);
+}
+
+async function locateThreadsGalleryVideoThumbnail(
+  screenshotUrl: string,
+): Promise<{ x: number; y: number } | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const screenInline = await getInlineData(screenshotUrl);
+  const image = await loadImage(screenshotUrl).catch(() => null);
+  if (!screenInline || !image) return null;
+
+  const request = createTimeoutSignal(10000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在幫我定位 Threads / Android 圖庫選圖頁中的「可點擊影片縮圖」。
+
+目前截圖尺寸是 ${image.width}x${image.height}。
+
+任務只有一個：
+找出目前畫面中，最應該點擊來選取剛下載影片的那個縮圖中心點。
+
+要求：
+- 只回傳下半部或中下部縮圖網格中的可點擊影片縮圖，不要回傳頂部大預覽、相機入口、返回鍵、完成按鈕或分頁標籤。
+- 優先選擇最新的一個影片縮圖，通常在第一排靠前位置。
+- 如果縮圖右下角能看到時長，例如 0:05、0:12，優先選那種真正的影片縮圖。
+- 如果這不是圖庫縮圖列表，或找不到可點的影片縮圖，就輸出 NOT_FOUND。
+
+只輸出一行，格式固定為：
+TAP|x|y|原因
+或
+NOT_FOUND|原因`,
+          },
+          { text: "目前 Threads 圖庫截圖" },
+          { inlineData: screenInline },
+        ],
+      }],
+      { maxOutputTokens: 50, temperature: 0 },
+      request.signal,
+    );
+
+    const line = normalizeSingleLine(extractText(raw));
+    const match = line.match(/^TAP\|(\d+)\|(\d+)\|?/i);
+    if (!match) return null;
+    const x = Number(match[1]);
+    const y = Number(match[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (x < 0 || y < 0 || x > image.width || y > image.height) return null;
+    return { x, y };
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function selectThreadsGalleryVideoWithFallback(
+  config: VmosConfig,
+  padCode: string,
+  useAcpAbsoluteTap = false,
+): Promise<boolean> {
+  const tryTap = async (x: number, y: number) => {
+    if (useAcpAbsoluteTap) {
+      await tapViaAdbAbsolute(config, padCode, x, y, 1600);
+    } else {
+      await tapAbsolute(config, padCode, x, y, 1600);
+    }
+  };
+
+  const shotUrl = await screenshot(config, padCode);
+  const detected = await locateThreadsGalleryVideoThumbnail(shotUrl);
+  const isCameraEntryPoint = (point: { x: number; y: number }) => point.x < 245 && point.y >= 190 && point.y <= 470;
+  const candidates = [
+    ...(detected && !isCameraEntryPoint(detected) ? [detected] : []),
+    { x: 360, y: 335 },
+    { x: 500, y: 335 },
+    { x: 360, y: 430 },
+    { x: 500, y: 430 },
+    { x: 360, y: 600 },
+  ].filter((point, index, all) => (
+    !isCameraEntryPoint(point)
+    && all.findIndex((other) => Math.abs(other.x - point.x) < 18 && Math.abs(other.y - point.y) < 18) === index
+  ));
+
+  for (const point of candidates) {
+    const selectorPoint = getThreadsGallerySelectionTogglePoint(point);
+    await tryTap(selectorPoint.x, selectorPoint.y);
+    const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    if (focus && !focus.includes(THREADS_PACKAGE)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1600);
+      continue;
+    }
+    const afterTapShot = await freezeScreenshotUrl(await screenshot(config, padCode));
+    if (await detectThreadsFullscreenMediaViewerLocally(afterTapShot).catch(() => false)) {
+      await closeThreadsMediaViewerLayer(config, padCode).catch(() => null);
+      await delay(900);
+      continue;
+    }
+    const selectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+    if (selectedMarkers.length > 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function locateThreadsGalleryReferenceImage(
+  screenshotUrl: string,
+  mediaUrl: string,
+): Promise<{ x: number; y: number } | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey || !hasImageReferenceMedia(mediaUrl)) return null;
+
+  const [screenInline, referenceInline] = await Promise.all([
+    getInlineData(screenshotUrl),
+    getInlineData(mediaUrl),
+  ]);
+  const image = await loadImage(screenshotUrl).catch(() => null);
+  if (!screenInline || !referenceInline || !image) return null;
+
+  const request = createTimeoutSignal(10000);
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在幫我定位 Threads / Android 圖庫選圖頁中的目標縮圖。
+
+目前截圖尺寸是 ${image.width}x${image.height}。
+
+任務只有一個：
+找出圖1畫面裡，與圖2參考圖片相同或最明顯對應的那張「可點擊縮圖」中心點。
+
+要求：
+- 如果畫面上方有大預覽圖，請不要回傳大預覽區；只回傳底部或中下部縮圖列表/九宮格裡真正可點擊的縮圖中心點。
+- 優先選擇最新、最接近圖2外觀的縮圖。
+- 如果這不是圖庫頁，或畫面裡沒有找到對應縮圖，就輸出 NOT_FOUND。
+
+只輸出一行，格式固定為：
+TAP|x|y|原因
+或
+NOT_FOUND|原因`,
+          },
+          { text: "圖1：目前 Threads 圖庫截圖" },
+          { inlineData: screenInline },
+          { text: "圖2：本次要發布的參考圖片" },
+          { inlineData: referenceInline },
+        ],
+      }],
+      { maxOutputTokens: 50, temperature: 0 },
+      request.signal,
+    );
+
+    const line = normalizeSingleLine(extractText(raw));
+    const match = line.match(/^TAP\|(\d+)\|(\d+)\|?/i);
+    if (!match) return null;
+    const x = Number(match[1]);
+    const y = Number(match[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (x < 0 || y < 0 || x > image.width || y > image.height) return null;
+    return { x, y };
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function locateThreadsGallerySelectedMarkers(
+  screenshotUrl: string,
+): Promise<Array<{ x: number; y: number }>> {
+  try {
+    const pixels = await getImagePixelData(screenshotUrl);
+    if (!pixels) return [];
+    const { data, width, height } = pixels;
+    const visited = new Uint8Array(width * height);
+    const startY = Math.floor(height * 0.13);
+    const endY = Math.floor(height * 0.98);
+
+    const isSelectionBlue = (pixelIndex: number) => {
+      const r = data[pixelIndex];
+      const g = data[pixelIndex + 1];
+      const b = data[pixelIndex + 2];
+      const a = data[pixelIndex + 3];
+      return a > 180 && r <= 95 && g >= 95 && g <= 205 && b >= 165 && b > g + 25 && b > r + 80;
+    };
+
+    const markers: Array<{ x: number; y: number; count: number }> = [];
+
+    for (let y = startY; y < endY; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const start = y * width + x;
+        if (visited[start]) continue;
+        visited[start] = 1;
+        if (!isSelectionBlue(start * 4)) continue;
+
+        const queue = [start];
+        let cursor = 0;
+        let count = 0;
+        let minX = x;
+        let minY = y;
+        let maxX = x;
+        let maxY = y;
+
+        while (cursor < queue.length) {
+          const current = queue[cursor++];
+          const cy = Math.floor(current / width);
+          const cx = current % width;
+          count += 1;
+          minX = Math.min(minX, cx);
+          minY = Math.min(minY, cy);
+          maxX = Math.max(maxX, cx);
+          maxY = Math.max(maxY, cy);
+
+          for (const next of [current - 1, current + 1, current - width, current + width]) {
+            if (next < 0 || next >= width * height || visited[next]) continue;
+            const ny = Math.floor(next / width);
+            const nx = next % width;
+            if (Math.abs(nx - cx) + Math.abs(ny - cy) !== 1) continue;
+            visited[next] = 1;
+            if (isSelectionBlue(next * 4)) queue.push(next);
+          }
+        }
+
+        const boxWidth = maxX - minX + 1;
+        const boxHeight = maxY - minY + 1;
+        const ratio = boxWidth / Math.max(boxHeight, 1);
+        if (count < 700 || count > 2200 || boxWidth < 30 || boxWidth > 54 || boxHeight < 34 || boxHeight > 54) {
+          continue;
+        }
+        if (ratio < 0.72 || ratio > 1.45) continue;
+        const centerX = Math.round((minX + maxX) / 2);
+        const centerY = Math.round((minY + maxY) / 2);
+        const columnWidth = width / 3;
+        const xInColumn = centerX % columnWidth;
+        if (xInColumn < columnWidth * 0.70 || xInColumn > columnWidth * 0.98 || centerY <= height * 0.15) {
+          continue;
+        }
+
+        markers.push({
+          x: centerX,
+          y: centerY,
+          count,
+        });
+      }
+    }
+
+    return markers
+      .sort((a, b) => b.count - a.count)
+      .filter((marker, index, all) => {
+        const duplicate = all.slice(0, index).some((other) => (
+          Math.abs(other.x - marker.x) < 22 && Math.abs(other.y - marker.y) < 22
+        ));
+        return !duplicate;
+      })
+      .map(({ x, y }) => ({ x, y }));
+  } catch {
+    return [];
+  }
+}
+
+export function chooseThreadsGalleryMarkerToKeep(
+  markers: Array<{ x: number; y: number }>,
+  preferredPoint?: { x: number; y: number } | null,
+): { x: number; y: number } | null {
+  if (markers.length === 0) return null;
+  if (preferredPoint) {
+    return [...markers].sort((a, b) => {
+      const da = Math.hypot(a.x - preferredPoint.x, a.y - preferredPoint.y);
+      const db = Math.hypot(b.x - preferredPoint.x, b.y - preferredPoint.y);
+      return da - db;
+    })[0]!;
+  }
+  // Threads/Android galleries order newest media first, left-to-right and then
+  // top-to-bottom. When several duplicate recent uploads are visible, keep the
+  // marker nearest the newest thumbnail instead of trying to clear everything.
+  return [...markers].sort((a, b) => a.y - b.y || a.x - b.x)[0]!;
+}
+
+function getThreadsGallerySelectionTogglePoint(point: { x: number; y: number }): { x: number; y: number } {
+  const columnWidth = FIXED_VMOS_SCREEN.width / 3;
+  const column = Math.min(2, Math.max(0, Math.floor(point.x / columnWidth)));
+  const columnRight = (column + 1) * columnWidth;
+  return {
+    x: Math.round(columnRight - 30),
+    y: Math.max(170, Math.round(point.y - 78)),
+  };
+}
+
+async function reduceThreadsGallerySelectionToOne(
+  config: VmosConfig,
+  padCode: string,
+  onProgress: (p: PublishProgress) => void,
+  preferredPoint?: { x: number; y: number } | null,
+): Promise<number> {
+  let remaining = 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const shotUrl = await screenshot(config, padCode);
+    const selectedMarkers = await locateThreadsGallerySelectedMarkers(shotUrl);
+    remaining = selectedMarkers.length;
+    if (remaining <= 1) return remaining;
+
+    const keep = chooseThreadsGalleryMarkerToKeep(selectedMarkers, preferredPoint);
+    if (!keep) return remaining;
+    onProgress({
+      step: `圖庫多選（${selectedMarkers.length} 個），保留最新一張...`,
+      done: false,
+    });
+
+    const markersToClear = selectedMarkers
+      .filter((marker) => Math.abs(marker.x - keep.x) >= 22 || Math.abs(marker.y - keep.y) >= 22)
+      .sort((a, b) => b.y - a.y || b.x - a.x);
+    for (const marker of markersToClear) {
+      await tapScreenshotPointViaAdb(config, padCode, shotUrl, {
+        x: Math.max(24, marker.x - 78),
+        y: marker.y + 78,
+      }, 220);
+    }
+    await delay(700);
+  }
+
+  const finalShotUrl = await screenshot(config, padCode);
+  remaining = (await locateThreadsGallerySelectedMarkers(finalShotUrl)).length;
+  return remaining;
+}
+
+async function getThreadsGallerySelectedMarkers(
+  config: VmosConfig,
+  padCode: string,
+): Promise<Array<{ x: number; y: number }>> {
+  const shotUrl = await screenshot(config, padCode);
+  return locateThreadsGallerySelectedMarkers(shotUrl);
+}
+
+async function confirmThreadsGallerySelection(
+  config: VmosConfig,
+  padCode: string,
+  onProgress: (p: PublishProgress) => void,
+  useAcpAbsoluteTap = false,
+  settleWaitMs = 2500,
+) {
+  const tapDone = async (x: number, y: number, waitMs: number) => {
+    if (useAcpAbsoluteTap) {
+      await tapViaAdbReferencePoint(config, padCode, { x, y }, waitMs);
+    } else {
+      await tap(config, padCode, x, y, waitMs);
+    }
+  };
+
+  const donePoints = useAcpAbsoluteTap
+    ? [{ x: 662, y: 98 }, { x: 620, y: 98 }, { x: 653, y: 81 }]
+    : [{ x: 653, y: 81 }, { x: 620, y: 81 }];
+
+  for (let attempt = 0; attempt < donePoints.length; attempt += 1) {
+    const point = donePoints[attempt];
+    const currentState = await withTimeout(
+      runThreadsObservedStep(config, padCode, {
+        step: "確認選圖完成鍵",
+        action: () => tapDone(point.x, point.y, 2200),
+        verify: async () => waitForThreadsPageSettled(config, padCode, {
+          timeoutMs: 2600,
+          intervalMs: 650,
+          stableSamples: 2,
+        }).catch(() => null),
+      }),
+      9000,
+      "確認選圖完成鍵等待超時",
+    ).catch((error) => {
+      onProgress({
+        step: `確認選圖完成鍵等待超時，重試完成鍵（第 ${attempt + 1}/${donePoints.length} 次）...`,
+        done: false,
+      });
+      return null;
+    });
+    if (currentState?.page === "compose_editor") {
+      await delay(settleWaitMs);
+      return;
+    }
+    if (currentState?.reason === "LOCAL_ANDROID_CAMERA") {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      onProgress({
+        step: `確認選圖誤入相機，已返回圖庫並重試（第 ${attempt + 1}/${donePoints.length} 次）...`,
+        done: false,
+      });
+      await delay(1200);
+      continue;
+    }
+    if (currentState?.page !== "gallery_picker") {
+      const currentShotUrl = currentState?.screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode));
+      const uiXml = await withTimeout(
+        dumpUiXml(config, padCode),
+        8000,
+        "讀取圖庫確認後 UI 結構超時",
+      ).catch(() => "");
+      if (detectThreadsDraftSaveDialogFromUiXml(uiXml)
+        || await detectThreadsDraftSaveDialogLocally(currentShotUrl).catch(() => false)) {
+        const afterDismiss = await dismissThreadsDraftSaveDialog(config, padCode, currentShotUrl).catch(() => null);
+        if (afterDismiss?.page === "compose_editor") {
+          await delay(settleWaitMs);
+          return;
+        }
+        if (attempt < donePoints.length - 1) {
+          onProgress({
+            step: `確認選圖後出現草稿彈窗，已取消並重試（第 ${attempt + 1}/${donePoints.length} 次）...`,
+            done: false,
+          });
+          await delay(1200);
+          continue;
+        }
+      }
+      if (await detectThreadsFullscreenMediaViewerLocally(currentShotUrl)) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        if (attempt < donePoints.length - 1) {
+          onProgress({
+            step: `確認選圖誤入圖片查看器，已返回並重試完成鍵（第 ${attempt + 1}/${donePoints.length} 次）...`,
+            done: false,
+          });
+          await delay(1200);
+          continue;
+        }
+        const afterBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        if (afterBack?.page === "compose_editor") {
+          await delay(settleWaitMs);
+          return;
+        }
+        const rechecked = await recheckExpectedThreadsPageBeforeFailure(
+          config,
+          padCode,
+          afterBack || { page: "media_viewer", reason: "fullscreen media viewer after gallery confirm", screenshotUrl: currentShotUrl },
+          ["compose_editor"],
+          "確認選圖後返回編輯頁",
+        );
+        if (rechecked) {
+          await delay(settleWaitMs);
+          return;
+        }
+        const samplePath = await captureThreadsPublishSample(config, padCode, {
+          scenario: "gallery-confirm-opened-media-viewer",
+          step: "確認選圖",
+          reason: "gallery selection opened Threads fullscreen media viewer instead of returning to composer",
+          page: afterBack?.page || "home_feed",
+          screenshotUrl: afterBack?.screenshotUrl || currentShotUrl,
+          expectedPages: ["compose_editor"],
+        });
+        throw new Error(appendSamplePath("確認選圖時誤入 Threads 圖片查看器，多次恢復後仍未回到編輯頁", samplePath));
+      }
+      if (currentState?.page === "home_feed") {
+        onProgress({
+          step: `確認選圖後未回到編輯頁，重新打開圖庫（第 ${attempt + 1}/${donePoints.length} 次）...`,
+          done: false,
+        });
+        await delay(1200);
+        continue;
+      }
+      await delay(settleWaitMs);
+      return;
+    }
+    const selectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+    if (selectedMarkers.length === 0) {
+      onProgress({
+        step: `確認選圖後仍停在圖庫，且未偵測到有效選取，重試完成鍵（第 ${attempt + 1}/${donePoints.length} 次）...`,
+        done: false,
+      });
+      await delay(900);
+      continue;
+    }
+    onProgress({
+      step: `確認選圖未離開圖庫，重試完成鍵（第 ${attempt + 1}/${donePoints.length} 次）...`,
+      done: false,
+    });
+  }
+
+  const finalState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  const rechecked = await recheckExpectedThreadsPageBeforeFailure(
+    config,
+    padCode,
+    finalState || { page: "gallery_picker", reason: "selected markers still visible after done taps" },
+    ["compose_editor"],
+    "確認選圖完成鍵",
+  );
+  if (rechecked) {
+    await delay(settleWaitMs);
+    return;
+  }
+  const samplePath = await captureThreadsPublishSample(config, padCode, {
+    scenario: "gallery-confirm-stuck",
+    step: "確認選圖",
+    reason: "selected markers still visible after done taps",
+    page: finalState?.page || "gallery_picker",
+    screenshotUrl: finalState?.screenshotUrl,
+    expectedPages: ["compose_editor"],
+  });
+  throw new Error(appendSamplePath("確認選圖後仍停在 Threads 圖庫，請檢查雲機圖庫選取狀態", samplePath));
+}
+
+function parseScreenSizeFromLayout(layout?: string): { width: number; height: number } | null {
+  const match = layout?.match(/(\d+)x(\d+)/);
+  if (!match) return null;
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+function parseScreenSizeFromScreenshotUrl(url: string): { width: number; height: number } | null {
+  try {
+    const parsed = new URL(url);
+    const width = Number(parsed.searchParams.get("width"));
+    const height = Number(parsed.searchParams.get("height"));
+    return width > 0 && height > 0 ? { width, height } : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseScreenSizeFromWmSize(output?: string): { width: number; height: number } | null {
+  const match = output?.match(/Override size:\s*(\d+)x(\d+)/i)
+    ?? output?.match(/Physical size:\s*(\d+)x(\d+)/i)
+    ?? output?.match(/\b(\d+)x(\d+)\b/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+function parsePhysicalScreenSizeFromWmSize(output?: string): { width: number; height: number } | null {
+  const match = output?.match(/Physical size:\s*(\d+)x(\d+)/i);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+function normalizeVmosScreenSize(size: { width: number; height: number } | null): { width: number; height: number } | null {
+  return size;
+}
+
+async function getScreenSize(
+  config: VmosConfig,
+  padCode: string
+): Promise<{ width: number; height: number }> {
+  const cached = screenSizeCache.get(padCode);
+  if (cached) return cached;
+
+  const fromAdb = await execAdbForText(config, padCode, "wm size", 15000, 500)
+    .then(parseScreenSizeFromWmSize)
+    .then(normalizeVmosScreenSize)
+    .catch(() => null);
+  if (fromAdb) {
+    screenSizeCache.set(padCode, fromAdb);
+    return fromAdb;
+  }
+
+  const fromScreenshot = await screenshot(config, padCode)
+    .then(parseScreenSizeFromScreenshotUrl)
+    .then(normalizeVmosScreenSize)
+    .catch(() => null);
+  if (fromScreenshot) {
+    screenSizeCache.set(padCode, fromScreenshot);
+    return fromScreenshot;
+  }
+
+  const fromInfo = await getPadInfo(config, padCode)
+    .then((info) => parseScreenSizeFromLayout(info.screenLayoutCode))
+    .then(normalizeVmosScreenSize)
+    .catch(() => null);
+  if (fromInfo) {
+    screenSizeCache.set(padCode, fromInfo);
+    return fromInfo;
+  }
+
+  screenSizeCache.set(padCode, BASE_SCREEN);
+  return BASE_SCREEN;
+}
+
+async function getPhysicalTapScreenSize(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ width: number; height: number }> {
+  const fromAdb = await execAdbForText(config, padCode, "wm size", 15_000, 500)
+    .then(parsePhysicalScreenSizeFromWmSize)
+    .catch(() => null);
+  if (fromAdb) return fromAdb;
+  const fromScreenshot = await screenshot(config, padCode)
+    .then(parseScreenSizeFromScreenshotUrl)
+    .catch(() => null);
+  return fromScreenshot || getScreenSize(config, padCode);
+}
+
+async function scaleUiXmlPointToPhysicalTap(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+): Promise<{ x: number; y: number }> {
+  void config;
+  void padCode;
+  return point;
+}
+
+async function scaleScreenshotPointToAdbTap(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+): Promise<{ x: number; y: number }> {
+  const screenshotSize = await getPhysicalTapScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
+  const adbSize = await getScreenSize(config, padCode).catch(() => screenshotSize);
+  return scalePointFromReferenceScreen(adbSize, point, screenshotSize);
+}
+
+async function scaleReferencePointToPhysicalTap(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+  reference: { width: number; height: number } = FIXED_VMOS_SCREEN,
+): Promise<{ x: number; y: number }> {
+  const tapSize = await getScreenSize(config, padCode).catch(() => reference);
+  return scalePointFromReferenceScreen(tapSize, point, reference);
+}
+
+function scalePoint(screen: { width: number; height: number }, x: number, y: number) {
+  const scaleX = screen.width / FIXED_VMOS_SCREEN.width;
+  const scaleY = screen.height / FIXED_VMOS_SCREEN.height;
+  return {
+    x: Math.round(x * scaleX),
+    y: Math.round(y * scaleY),
+  };
+}
+
+export function scalePointFromReferenceScreen(
+  screen: { width: number; height: number },
+  point: { x: number; y: number },
+  reference: { width: number; height: number } = THREADS_TALL_REFERENCE_SCREEN,
+) {
+  const scaleX = screen.width / reference.width;
+  const scaleY = screen.height / reference.height;
+  return {
+    x: Math.max(0, Math.min(screen.width - 1, Math.round(point.x * scaleX))),
+    y: Math.max(0, Math.min(screen.height - 1, Math.round(point.y * scaleY))),
+  };
+}
+
+async function captureInstagramProfileGridScreenshot(
+  config: VmosConfig,
+  padCode: string
+): Promise<string> {
+  if (isAcpPad(padCode)) {
+    await tapViaAdbReferencePoint(config, padCode, { x: 655, y: 1420 }, 3200, FIXED_VMOS_SCREEN);
+    await execAdbAndWait(config, padCode, "input swipe 360 1150 360 610 350; sleep 1", 30000);
+  } else {
+    await tap(config, padCode, 670, 1517, 3200);
+    await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1440, endX: 360, endY: 760 });
+  }
+  await delay(2500);
+  return freezeScreenshotUrl(await screenshot(config, padCode));
+}
+
+async function captureInstagramProfileTopScreenshot(
+  config: VmosConfig,
+  padCode: string
+): Promise<string> {
+  if (isAcpPad(padCode)) {
+    await tapViaAdbReferencePoint(config, padCode, { x: 655, y: 1420 }, 3200, FIXED_VMOS_SCREEN);
+  } else {
+    await tap(config, padCode, 670, 1517, 3200);
+  }
+  return freezeScreenshotUrl(await screenshot(config, padCode));
+}
+
+async function captureInstagramProfileReelsScreenshot(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string> {
+  if (isAcpPad(padCode)) {
+    await tapViaAdbReferencePoint(config, padCode, { x: 655, y: 1505 }, 3600, FIXED_VMOS_SCREEN);
+    await tapViaAdbReferencePoint(config, padCode, { x: 360, y: 720 }, 3200, FIXED_VMOS_SCREEN);
+    await delay(5000);
+    return freezeScreenshotUrl(await screenshot(config, padCode));
+  }
+
+  await tap(config, padCode, 670, 1517, 3200);
+  await tap(config, padCode, 360, 520, 2600);
+  await delay(2200);
+  return freezeScreenshotUrl(await screenshot(config, padCode));
+}
+
+async function captureInstagramLatestReelDetailScreenshot(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<string> {
+  onProgress?.({ step: "打開最新 Reel 詳情截圖...", done: false });
+  const candidates = isAcpPad(padCode)
+    ? [{ x: 360, y: 1125 }, { x: 600, y: 1125 }, { x: 120, y: 1125 }, { x: 360, y: 1025 }]
+    : [{ x: 120, y: 900 }, { x: 360, y: 900 }];
+  const tryOpenFromVisibleGrid = async (): Promise<string> => {
+    if (isAcpPad(padCode)) {
+      return "";
+    }
+    const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    const currentState = await classifyInstagramAcpReelFlowState(currentUrl).catch(() => "unknown" as const);
+    if (currentState === "instagram_home"
+      || currentState === "share_page"
+      || currentState === "editor"
+      || currentState === "effects_drawer"
+      || currentState === "reels_browse") {
+      return "";
+    }
+    for (const point of candidates) {
+      if (isAcpPad(padCode)) {
+        await tapViaAdbReferencePoint(config, padCode, point, 4200, FIXED_VMOS_SCREEN);
+      } else {
+        await tap(config, padCode, point.x, point.y, 4200);
+      }
+      const detailUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+      if (await detectInstagramAcpPublishedReelViewerLocally(detailUrl).catch(() => false)) {
+        return detailUrl;
+      }
+      const detailState = await classifyInstagramAcpReelFlowState(detailUrl).catch(() => "unknown" as const);
+      if (detailState !== "unknown") {
+        await execAdb(config, padCode, "input keyevent KEYCODE_BACK").catch(() => undefined);
+        await delay(1800);
+      }
+    }
+    return "";
+  };
+
+  const visibleGridDetailUrl = await tryOpenFromVisibleGrid().catch(() => "");
+  if (visibleGridDetailUrl) {
+    return visibleGridDetailUrl;
+  }
+
+  await ensureInstagramHomeForPublish(config, padCode, onProgress);
+
+  const gridUrl = await captureInstagramProfileReelsScreenshot(config, padCode);
+  const gridState = await classifyInstagramAcpReelFlowState(gridUrl).catch(() => "unknown" as const);
+  if (gridState === "instagram_home" || gridState === "share_page" || gridState === "editor" || gridState === "effects_drawer") {
+    throw new Error(`未能打開個人 Reels 分頁（state=${gridState}）`);
+  }
+
+  let lastUrl = gridUrl;
+  for (const point of candidates) {
+    if (isAcpPad(padCode)) {
+      await tapViaAdbReferencePoint(config, padCode, point, 4200, FIXED_VMOS_SCREEN);
+    } else {
+      await tap(config, padCode, point.x, point.y, 4200);
+    }
+    const detailUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    lastUrl = detailUrl;
+    if (await detectInstagramAcpPublishedReelViewerLocally(detailUrl).catch(() => false)) {
+      return detailUrl;
+    }
+    const detailState = await classifyInstagramAcpReelFlowState(detailUrl).catch(() => "unknown" as const);
+    if (detailState !== "unknown") {
+      await execAdb(config, padCode, "input keyevent KEYCODE_BACK").catch(() => undefined);
+      await delay(1800);
+    }
+  }
+  throw new Error(`未能打開已發布 Reel 詳情頁，最後截圖不是可用發布證據`);
+}
+
+async function captureInstagramLatestReelDetailScreenshotWithRetries(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+  retryDelaysMs = [0, 9000, 18000],
+): Promise<string> {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    if (retryDelaysMs[attempt] > 0) {
+      onProgress?.({
+        step: `等待 Reel 同步後重試打開詳情（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+        done: false,
+      });
+      await delay(retryDelaysMs[attempt]);
+    }
+    try {
+      return await captureInstagramLatestReelDetailScreenshot(config, padCode, onProgress);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      await relaunchInstagram(config, padCode, 4200).catch(() => undefined);
+    }
+  }
+  throw lastError ?? new Error("未能打開已發布 Reel 詳情頁");
+}
+
+async function captureInstagramLatestPostScreenshot(
+  config: VmosConfig,
+  padCode: string
+): Promise<string> {
+  const looksLikePostDetail = async (url: string) => {
+    const pixels = await getImagePixelData(url);
+    if (!pixels) return false;
+    const header = sampleImageRegionStats(pixels, { x: 0, y: 70, width: 720, height: 110 });
+    const media = sampleImageRegionStats(pixels, { x: 0, y: 185, width: 720, height: 1020 });
+    const actionRow = sampleImageRegionStats(pixels, { x: 0, y: 1400, width: 720, height: 120 });
+    const gridTabs = sampleImageRegionStats(pixels, { x: 0, y: 100, width: 720, height: 100 });
+    const mostlyMediaDetail = header.whiteRatio > 0.58
+      && actionRow.darkRatio > 0.012
+      && (media.whiteRatio < 0.52 || media.darkRatio > 0.10 || media.blueRatio > 0.08);
+    const stillProfileGrid = gridTabs.darkRatio > 0.045
+      && media.whiteRatio > 0.48
+      && actionRow.darkRatio > 0.025;
+    return mostlyMediaDetail && !stillProfileGrid;
+  };
+
+  const openFromProfileGrid = async (points: Array<{ x: number; y: number }>) => {
+    let lastUrl = "";
+    for (const point of points) {
+      if (isAcpPad(padCode)) {
+        await tapViaAdbReferencePoint(config, padCode, point, 4200, FIXED_VMOS_SCREEN);
+      } else {
+        await tap(config, padCode, point.x, point.y, 4200);
+      }
+      const detailUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+      lastUrl = detailUrl;
+      if (await looksLikePostDetail(detailUrl).catch(() => false)) {
+        return detailUrl;
+      }
+      if (isAcpPad(padCode)) {
+        await execAdb(config, padCode, "input keyevent KEYCODE_BACK").catch(() => undefined);
+      } else {
+        await tap(config, padCode, 48, 95, 1800).catch(() => undefined);
+      }
+      await delay(1800);
+    }
+    return lastUrl;
+  };
+
+  if (isAcpPad(padCode)) {
+    await tapViaAdbReferencePoint(config, padCode, { x: 655, y: 1420 }, 3200, FIXED_VMOS_SCREEN);
+    await execAdbAndWait(config, padCode, "input swipe 360 1150 360 610 350; sleep 1", 30000);
+    await delay(1800);
+    const opened = await openFromProfileGrid([
+      { x: 600, y: 330 },
+      { x: 120, y: 330 },
+      { x: 360, y: 330 },
+      { x: 600, y: 760 },
+      { x: 120, y: 760 },
+      { x: 360, y: 760 },
+    ]);
+    if (opened && await looksLikePostDetail(opened).catch(() => false)) return opened;
+  } else {
+    await tap(config, padCode, 670, 1517, 3200);
+    await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1400, endX: 360, endY: 760 });
+    await delay(1800);
+    const opened = await openFromProfileGrid([
+      { x: 600, y: 330 },
+      { x: 120, y: 330 },
+      { x: 360, y: 330 },
+      { x: 600, y: 760 },
+      { x: 120, y: 760 },
+      { x: 360, y: 760 },
+    ]);
+    if (opened && await looksLikePostDetail(opened).catch(() => false)) return opened;
+  }
+  return freezeScreenshotUrl(await screenshot(config, padCode));
+}
+
+async function verifyInstagramLatestFeedPost(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  mediaUrl: string,
+  onProgress?: (p: PublishProgress) => void,
+  retryDelaysMs = [15000, 30000],
+): Promise<PublishVerificationResult> {
+  if (!hasImageReferenceMedia(mediaUrl)) {
+    const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    return {
+      state: "warning",
+      detail: "已點選發布，待人工確認（Instagram 最新貼文圖像校驗僅支援圖片）",
+      screenshotUrl: currentUrl,
+    };
+  }
+
+  const referenceShot = await getInlineData(mediaUrl);
+  if (!referenceShot) {
+    const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    return {
+      state: "warning",
+      detail: "已點選發布，待人工確認（無法取得 Instagram 參考圖片）",
+      screenshotUrl: currentUrl,
+    };
+  }
+
+  const verificationCues = extractThreadsVerificationCues(caption);
+  let lastReason = "最新貼文詳情未命中目標圖片或文案線索";
+
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    onProgress?.({
+      step: `等待 Instagram 最新貼文落地（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    await delay(retryDelaysMs[attempt]);
+    await relaunchInstagram(config, padCode, 5000);
+    const latestPostUrl = await captureInstagramLatestPostScreenshot(config, padCode);
+    const latestPostShot = await getInlineData(latestPostUrl);
+    if (!latestPostShot) continue;
+
+    try {
+      const diffScore = await getInstagramLatestPostImageDiffScore(mediaUrl, latestPostUrl);
+      if (diffScore <= INSTAGRAM_LATEST_POST_IMAGE_DIFF_THRESHOLD) {
+        return {
+          state: "verified",
+          detail: `發布完成 ✓（已校驗：最新貼文詳情圖片已匹配，diff=${diffScore.toFixed(1)}）`,
+          screenshotUrl: latestPostUrl,
+        };
+      }
+      lastReason = `最新貼文詳情圖片未匹配（diff=${diffScore.toFixed(1)}）`;
+    } catch {
+      // Fall through to AI check below.
+    }
+
+    const prompt = `你在校驗 Instagram 個人主頁裡最新開啟的貼文，是否就是剛發布的目標貼文。
+圖1是最新貼文詳情頁截圖，圖2是原始參考圖片。
+
+目標文案開頭：
+${summarizeCaption(caption)}
+
+識別線索：
+${verificationCues.map((cue, index) => `${index + 1}. ${cue}`).join("\n")}
+
+請只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+判定規則：
+- YES：圖1裡明確是目前帳號自己剛發出的貼文，且主圖與圖2明顯相同；如果還能看到目標文案開頭或識別線索，更應判定為 YES。
+- NO：圖片不匹配，或不是該帳號的最新貼文，或無法確認。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+    try {
+      const raw = await callGemini(
+        PUBLISH_VERIFY_MODEL,
+        [{
+          role: "user",
+          parts: [
+            { text: prompt },
+            { text: "圖1：最新貼文詳情頁截圖" },
+            { inlineData: latestPostShot },
+            { text: "圖2：原始參考圖片" },
+            { inlineData: referenceShot },
+          ],
+        }],
+        { maxOutputTokens: 120, temperature: 0 }
+      );
+      const line = normalizeSingleLine(extractText(raw));
+      if (/^YES\b/i.test(line)) {
+        const reason = line.includes("|") ? line.split("|").slice(1).join("|").trim() : "";
+        return {
+          state: "verified",
+          detail: reason
+            ? `發布完成 ✓（已校驗：${reason}）`
+            : "發布完成 ✓（已校驗：最新貼文詳情與目標一致）",
+          screenshotUrl: latestPostUrl,
+        };
+      }
+      lastReason = line.includes("|")
+        ? line.split("|").slice(1).join("|").trim()
+        : lastReason;
+    } catch {
+      // Keep the current best reason and continue retrying.
+    }
+  }
+
+  return {
+    state: "warning",
+    detail: `已點選發布，待人工確認（${lastReason}）`,
+  };
+}
+
+async function getProfileGridDiffScore(beforeUrl: string, afterUrl: string): Promise<number> {
+  const [beforeImage, afterImage] = await Promise.all([loadImage(beforeUrl), loadImage(afterUrl)]);
+  const width = 64;
+  const height = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas context unavailable");
+
+  const extract = (img: HTMLImageElement) => {
+    ctx.clearRect(0, 0, width, height);
+    const cropY = img.height * 0.72;
+    const cropHeight = img.height - cropY;
+    ctx.drawImage(img, 0, cropY, img.width, cropHeight, 0, 0, width, height);
+    return ctx.getImageData(0, 0, width, height).data;
+  };
+
+  const beforeData = extract(beforeImage);
+  const afterData = extract(afterImage);
+  let total = 0;
+  for (let i = 0; i < beforeData.length; i += 4) {
+    total += Math.abs(beforeData[i] - afterData[i]);
+    total += Math.abs(beforeData[i + 1] - afterData[i + 1]);
+    total += Math.abs(beforeData[i + 2] - afterData[i + 2]);
+  }
+  return total / (width * height * 3);
+}
+
+async function getRegionDiffScore(
+  beforeUrl: string,
+  afterUrl: string,
+  crop: { x: number; y: number; width: number; height: number }
+): Promise<number> {
+  const nodeDiff = await getRegionDiffScoreWithSharp(beforeUrl, afterUrl, crop);
+  if (nodeDiff !== null) return nodeDiff;
+
+  const [beforeImage, afterImage] = await Promise.all([loadImage(beforeUrl), loadImage(afterUrl)]);
+  const width = 64;
+  const height = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas context unavailable");
+
+  const extract = (img: HTMLImageElement) => {
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, width, height);
+    return ctx.getImageData(0, 0, width, height).data;
+  };
+
+  const beforeData = extract(beforeImage);
+  const afterData = extract(afterImage);
+  let total = 0;
+  for (let i = 0; i < beforeData.length; i += 4) {
+    total += Math.abs(beforeData[i] - afterData[i]);
+    total += Math.abs(beforeData[i + 1] - afterData[i + 1]);
+    total += Math.abs(beforeData[i + 2] - afterData[i + 2]);
+  }
+  return total / (width * height * 3);
+}
+
+async function getRegionDiffScoreWithSharp(
+  beforeUrl: string,
+  afterUrl: string,
+  crop: { x: number; y: number; width: number; height: number }
+): Promise<number | null> {
+  try {
+    const [beforeImage, afterImage] = await Promise.all([
+      getImagePixelData(beforeUrl),
+      getImagePixelData(afterUrl),
+    ]);
+    if (!beforeImage || !afterImage) return null;
+
+    const width = 64;
+    const height = 64;
+    const [beforeData, afterData] = await Promise.all([
+      extractRegionPixelsWithSharp(beforeUrl, beforeImage, crop, width, height),
+      extractRegionPixelsWithSharp(afterUrl, afterImage, crop, width, height),
+    ]);
+    if (!beforeData || !afterData) return null;
+
+    let total = 0;
+    const len = Math.min(beforeData.length, afterData.length);
+    for (let i = 0; i < len; i += 4) {
+      total += Math.abs(beforeData[i] - afterData[i]);
+      total += Math.abs(beforeData[i + 1] - afterData[i + 1]);
+      total += Math.abs(beforeData[i + 2] - afterData[i + 2]);
+    }
+    return total / (width * height * 3);
+  } catch {
+    return null;
+  }
+}
+
+async function extractRegionPixelsWithSharp(
+  url: string,
+  image: { width: number; height: number },
+  crop: { x: number; y: number; width: number; height: number },
+  outputWidth: number,
+  outputHeight: number,
+): Promise<Buffer | null> {
+  const inline = await getInlineData(url);
+  if (!inline) return null;
+  const sharp = (await import("sharp")).default;
+  const left = Math.max(0, Math.min(image.width - 1, Math.round(crop.x)));
+  const top = Math.max(0, Math.min(image.height - 1, Math.round(crop.y)));
+  const right = Math.max(left + 1, Math.min(image.width, Math.round(crop.x + crop.width)));
+  const bottom = Math.max(top + 1, Math.min(image.height, Math.round(crop.y + crop.height)));
+
+  const { data } = await sharp(Buffer.from(inline.data, "base64"))
+    .extract({
+      left,
+      top,
+      width: right - left,
+      height: bottom - top,
+    })
+    .resize(outputWidth, outputHeight, { fit: "fill" })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  return data;
+}
+
+async function getInstagramLatestPostImageDiffScore(
+  referenceUrl: string,
+  postDetailUrl: string
+): Promise<number> {
+  const [referenceImage, postImage] = await Promise.all([
+    loadImage(referenceUrl),
+    loadImage(postDetailUrl),
+  ]);
+  const width = 64;
+  const height = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas context unavailable");
+
+  const drawReference = () => {
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(referenceImage, 0, 0, referenceImage.width, referenceImage.height, 0, 0, width, height);
+    return ctx.getImageData(0, 0, width, height).data;
+  };
+
+  const drawPost = () => {
+    ctx.clearRect(0, 0, width, height);
+    const crop = {
+      x: 0,
+      y: 230,
+      width: postImage.width,
+      height: Math.min(postImage.width, Math.max(1, postImage.height - 230)),
+    };
+    ctx.drawImage(postImage, crop.x, crop.y, crop.width, crop.height, 0, 0, width, height);
+    return ctx.getImageData(0, 0, width, height).data;
+  };
+
+  const referenceData = drawReference();
+  const postData = drawPost();
+  let total = 0;
+  for (let i = 0; i < referenceData.length; i += 4) {
+    total += Math.abs(referenceData[i] - postData[i]);
+    total += Math.abs(referenceData[i + 1] - postData[i + 1]);
+    total += Math.abs(referenceData[i + 2] - postData[i + 2]);
+  }
+  return total / (width * height * 3);
+}
+
+async function resizeRawCropForReferenceMatch(
+  image: { data: Buffer; width: number; height: number },
+  crop: { x: number; y: number; width: number; height: number },
+  outputSize = 32,
+): Promise<Buffer | null> {
+  try {
+    const sharp = (await import("sharp")).default;
+    const left = Math.max(0, Math.min(image.width - 1, Math.round(crop.x)));
+    const top = Math.max(0, Math.min(image.height - 1, Math.round(crop.y)));
+    const right = Math.max(left + 1, Math.min(image.width, Math.round(crop.x + crop.width)));
+    const bottom = Math.max(top + 1, Math.min(image.height, Math.round(crop.y + crop.height)));
+    const { data } = await sharp(image.data, {
+      raw: { width: image.width, height: image.height, channels: 4 },
+    })
+      .extract({ left, top, width: right - left, height: bottom - top })
+      .resize(outputSize, outputSize, { fit: "fill" })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function getThreadsProfileReferenceImageQuickMatchWithSharp(
+  referenceUrl: string,
+  screenshotUrl: string,
+): Promise<{ diff: number; x: number; y: number; width: number; height: number; mode?: string } | null> {
+  const [referenceImage, screenImage] = await Promise.all([
+    getImagePixelData(referenceUrl),
+    getImagePixelData(screenshotUrl),
+  ]);
+  if (!referenceImage || !screenImage) return null;
+
+  const sampleSize = 32;
+  const referenceCache = new Map<string, Buffer>();
+  const referenceAspect = referenceImage.height / Math.max(referenceImage.width, 1);
+  const getReferenceData = async (
+    targetAspect: number,
+    mode: "full" | "top" | "center" | "bottom",
+  ) => {
+    const cacheKey = `${mode}:${targetAspect.toFixed(3)}`;
+    const cached = referenceCache.get(cacheKey);
+    if (cached) return cached;
+
+    let crop = { x: 0, y: 0, width: referenceImage.width, height: referenceImage.height };
+    if (mode !== "full" && targetAspect < referenceAspect - 0.03) {
+      const height = Math.max(1, Math.min(referenceImage.height, Math.round(referenceImage.width * targetAspect)));
+      const y = mode === "top"
+        ? 0
+        : mode === "bottom"
+          ? referenceImage.height - height
+          : Math.round((referenceImage.height - height) / 2);
+      crop = { x: 0, y, width: referenceImage.width, height };
+    }
+
+    const data = await resizeRawCropForReferenceMatch(referenceImage, crop, sampleSize);
+    if (data) referenceCache.set(cacheKey, data);
+    return data;
+  };
+
+  let best = {
+    diff: Number.POSITIVE_INFINITY,
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+    mode: "full",
+  };
+  const widths = Array.from(new Set([
+    Math.round(screenImage.width * 0.78),
+    Math.round(screenImage.width * 0.8),
+    Math.round(screenImage.width * 0.82),
+    560,
+    576,
+    580,
+    600,
+  ].filter((width) => width > 0 && width <= screenImage.width)));
+  const aspects = Array.from(new Set([referenceAspect, 0.71, 0.72, 0.75, 0.8].map((value) => Number(value.toFixed(2)))));
+  const xValues = [100, 105, 110, 113, 115, 120, 80, 60, Math.round(screenImage.width * 0.16)];
+  const yValues = [235, 240, 241, 245, 220, 260, 280, 320, 360, 400, 460, 520, 580, 640, 700];
+  const modes: Array<"bottom" | "center" | "full" | "top"> = ["bottom", "center", "full", "top"];
+
+  for (const width of widths) {
+    for (const aspect of aspects) {
+      const height = Math.round(width * aspect);
+      for (const x of xValues) {
+        for (const y of yValues) {
+          const screenData = await resizeRawCropForReferenceMatch(screenImage, { x, y, width, height }, sampleSize);
+          if (!screenData) continue;
+          for (const mode of modes) {
+            const referenceData = await getReferenceData(height / Math.max(width, 1), mode);
+            if (!referenceData) continue;
+            let total = 0;
+            for (let index = 0; index < referenceData.length; index += 4) {
+              total += Math.abs(referenceData[index] - screenData[index]);
+              total += Math.abs(referenceData[index + 1] - screenData[index + 1]);
+              total += Math.abs(referenceData[index + 2] - screenData[index + 2]);
+            }
+            const diff = total / (sampleSize * sampleSize * 3);
+            if (diff < best.diff) {
+              best = { diff, x, y, width, height, mode };
+              if (isThreadsProfileReferenceImageMatch(best)) return best;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return best.diff === Number.POSITIVE_INFINITY ? null : best;
+}
+
+async function getThreadsProfileReferenceImageBestMatch(
+  referenceUrl: string,
+  screenshotUrl: string,
+): Promise<{ diff: number; x: number; y: number; width: number; height: number; mode?: string }> {
+  const quickSharpMatch = await getThreadsProfileReferenceImageQuickMatchWithSharp(referenceUrl, screenshotUrl);
+  if (quickSharpMatch && isThreadsProfileReferenceImageMatch(quickSharpMatch)) {
+    return quickSharpMatch;
+  }
+
+  const [referenceImage, screenImage] = await Promise.all([
+    loadImage(referenceUrl),
+    loadImage(screenshotUrl),
+  ]);
+  const sampleSize = 32;
+  const canvas = document.createElement("canvas");
+  canvas.width = sampleSize;
+  canvas.height = sampleSize;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas context unavailable");
+
+  const drawCrop = (
+    image: HTMLImageElement,
+    crop: { x: number; y: number; width: number; height: number },
+  ) => {
+    ctx.clearRect(0, 0, sampleSize, sampleSize);
+    ctx.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, sampleSize, sampleSize);
+    return ctx.getImageData(0, 0, sampleSize, sampleSize).data;
+  };
+
+  const referenceCache = new Map<string, Uint8ClampedArray>();
+  const getReferenceData = (targetAspect: number, mode: "full" | "top" | "center" | "bottom" | "left" | "right") => {
+    const cacheKey = `${mode}:${targetAspect.toFixed(3)}`;
+    const cached = referenceCache.get(cacheKey);
+    if (cached) return cached;
+
+    let crop = {
+      x: 0,
+      y: 0,
+      width: referenceImage.width,
+      height: referenceImage.height,
+    };
+    const referenceAspect = referenceImage.height / Math.max(referenceImage.width, 1);
+    if (mode !== "full" && Math.abs(targetAspect - referenceAspect) > 0.03) {
+      if (targetAspect < referenceAspect) {
+        const height = Math.max(1, Math.min(referenceImage.height, Math.round(referenceImage.width * targetAspect)));
+        const y = mode === "top"
+          ? 0
+          : mode === "bottom"
+            ? referenceImage.height - height
+            : Math.round((referenceImage.height - height) / 2);
+        crop = { x: 0, y, width: referenceImage.width, height };
+      } else {
+        const width = Math.max(1, Math.min(referenceImage.width, Math.round(referenceImage.height / targetAspect)));
+        const x = mode === "left"
+          ? 0
+          : mode === "right"
+            ? referenceImage.width - width
+            : Math.round((referenceImage.width - width) / 2);
+        crop = { x, y: 0, width, height: referenceImage.height };
+      }
+    }
+
+    const data = drawCrop(referenceImage, crop);
+    referenceCache.set(cacheKey, data);
+    return data;
+  };
+
+  const referenceAspect = referenceImage.height / Math.max(referenceImage.width, 1);
+  const aspectCandidates = Array.from(new Set([
+    referenceAspect,
+    0.68,
+    0.71,
+    0.72,
+    0.75,
+    0.8,
+    0.9,
+    1,
+  ].map((value) => Math.max(0.35, Math.min(1.6, Number(value.toFixed(2)))))));
+  const minWidth = Math.max(420, Math.round(screenImage.width * 0.58));
+  const maxWidth = Math.min(640, screenImage.width - 40);
+  let best = {
+    diff: Number.POSITIVE_INFINITY,
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+    mode: "full",
+  };
+  const compareCandidate = (
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    modes: Array<"full" | "top" | "center" | "bottom" | "left" | "right">,
+  ) => {
+    if (width <= 0 || height <= 0 || x < 0 || y < 0 || x + width > screenImage.width || y + height > screenImage.height) {
+      return;
+    }
+    const aspect = height / Math.max(width, 1);
+    const cropData = drawCrop(screenImage, { x, y, width, height });
+    for (const mode of modes) {
+      const referenceData = getReferenceData(aspect, mode);
+      let total = 0;
+      for (let index = 0; index < referenceData.length; index += 4) {
+        total += Math.abs(referenceData[index] - cropData[index]);
+        total += Math.abs(referenceData[index + 1] - cropData[index + 1]);
+        total += Math.abs(referenceData[index + 2] - cropData[index + 2]);
+      }
+      const diff = total / (sampleSize * sampleSize * 3);
+      if (diff < best.diff) {
+        best = { diff, x, y, width, height, mode };
+      }
+    }
+  };
+
+  const quickWidths = Array.from(new Set([
+    Math.round(screenImage.width * 0.78),
+    Math.round(screenImage.width * 0.82),
+    Math.round(screenImage.width * 0.86),
+    Math.round(screenImage.width * 0.9),
+    560,
+    576,
+    580,
+    600,
+    620,
+  ].filter((width) => width >= minWidth && width <= maxWidth)));
+  const quickYValues = [200, 220, 235, 240, 241, 245, 260, 280, 320, 360, 400, 460, 520, 580, 640, 700, 760, 820];
+  const quickModes: Array<"full" | "top" | "center" | "bottom" | "left" | "right"> = ["full", "top", "center", "bottom"];
+  for (const width of quickWidths) {
+    for (const aspect of aspectCandidates) {
+      const height = Math.round(width * aspect);
+      const xValues = Array.from(new Set([
+        20,
+        40,
+        60,
+        80,
+        100,
+        105,
+        110,
+        113,
+        115,
+        120,
+        Math.round((screenImage.width - width) / 2),
+      ]));
+      for (const x of xValues) {
+        for (const y of quickYValues) {
+          compareCandidate(x, y, width, height, quickModes);
+          if (isThreadsProfileReferenceImageMatch(best)) return best;
+        }
+      }
+    }
+  }
+
+  for (const aspect of [referenceAspect]) {
+    const referenceModes: Array<"full" | "top" | "center" | "bottom" | "left" | "right"> = ["full"];
+    for (let width = minWidth; width <= maxWidth; width += 20) {
+      const height = Math.round(width * aspect);
+      if (height <= 0 || height > screenImage.height - 40) continue;
+      const maxX = screenImage.width - width - 20;
+      const maxY = Math.min(screenImage.height - height - 20, 1150);
+      for (let x = 20; x <= maxX; x += 20) {
+        for (let y = 120; y <= maxY; y += 20) {
+          const cropData = drawCrop(screenImage, { x, y, width, height });
+          for (const mode of referenceModes) {
+            const referenceData = getReferenceData(aspect, mode);
+            let total = 0;
+            for (let index = 0; index < referenceData.length; index += 4) {
+              total += Math.abs(referenceData[index] - cropData[index]);
+              total += Math.abs(referenceData[index + 1] - cropData[index + 1]);
+              total += Math.abs(referenceData[index + 2] - cropData[index + 2]);
+            }
+            const diff = total / (sampleSize * sampleSize * 3);
+            if (diff < best.diff) {
+              best = { diff, x, y, width, height, mode };
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return best;
+}
+
+function isThreadsProfileReferenceImageMatch(match: { diff: number; mode?: string }): boolean {
+  return match.diff <= (
+    match.mode && match.mode !== "full"
+      ? THREADS_PROFILE_REFERENCE_IMAGE_CROP_DIFF_THRESHOLD
+      : THREADS_PROFILE_REFERENCE_IMAGE_DIFF_THRESHOLD
+  );
+}
+
+export async function getThreadsProfileReferenceImageBestMatchForTest(
+  referenceUrl: string,
+  screenshotUrl: string,
+): Promise<{ diff: number; x: number; y: number; width: number; height: number; mode?: string; matched: boolean }> {
+  const match = await getThreadsProfileReferenceImageBestMatch(referenceUrl, screenshotUrl);
+  return { ...match, matched: isThreadsProfileReferenceImageMatch(match) };
+}
+
+async function verifyInstagramPublishLocally(
+  config: VmosConfig,
+  padCode: string,
+  beforeGridUrl: string,
+  beforeTopUrl?: string,
+  settleDelayMs = 25000
+): Promise<PublishVerificationResult> {
+  const support = getLocalVisualVerificationSupport();
+  if (!support.supported) {
+    await delay(8000);
+    const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    return {
+      state: "warning",
+      detail: `已點選發布，待人工確認（${support.reason}）`,
+      screenshotUrl: currentUrl,
+    };
+  }
+  if (settleDelayMs > 0) {
+    await delay(settleDelayMs);
+  }
+  if (isAcpPad(padCode)) {
+    const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    if (currentUrl) {
+      const currentState = await classifyInstagramAcpReelFlowState(currentUrl).catch(() => "unknown" as const);
+      if (currentState === "share_page"
+        || currentState === "editor"
+        || currentState === "effects_drawer"
+        || currentState === "draft_dialog"
+        || currentState === "reel_camera"
+        || currentState === "reel_gallery") {
+        throw new Error(`發布後仍停留在 Instagram 發布流程（state=${currentState}）`);
+      }
+    }
+  }
+  const afterTopUrl = await captureInstagramProfileTopScreenshot(config, padCode);
+  const afterGridUrl = await captureInstagramProfileGridScreenshot(config, padCode);
+  if (isAcpPad(padCode)) {
+    const afterGridState = await classifyInstagramAcpReelFlowState(afterGridUrl).catch(() => "unknown" as const);
+    if (afterGridState === "share_page"
+      || afterGridState === "editor"
+      || afterGridState === "effects_drawer"
+      || afterGridState === "draft_dialog"
+      || afterGridState === "reel_camera"
+      || afterGridState === "reel_gallery") {
+      throw new Error(`發布校驗截圖仍是 Instagram 發布流程（state=${afterGridState}）`);
+    }
+  }
+  const countDiffScore = beforeTopUrl
+    ? await getRegionDiffScore(beforeTopUrl, afterTopUrl, {
+      x: 180,
+      y: 120,
+      width: 220,
+      height: 180,
+    })
+    : 0;
+  const diffScore = await getRegionDiffScore(beforeGridUrl, afterGridUrl, {
+    x: 0,
+    y: 600,
+    width: 720,
+    height: 680,
+  });
+  if (
+    countDiffScore >= INSTAGRAM_PROFILE_COUNT_DIFF_THRESHOLD
+    || diffScore >= INSTAGRAM_FEED_GRID_DIFF_THRESHOLD
+  ) {
+    const detailUrl = await captureInstagramLatestPostScreenshot(config, padCode).catch(() => afterGridUrl);
+    return {
+      state: "verified",
+      detail: `發布完成 ✓（本機校驗：主頁已變化，countDiff=${countDiffScore.toFixed(1)}, gridDiff=${diffScore.toFixed(1)}）`,
+      screenshotUrl: detailUrl || afterGridUrl,
+    };
+  }
+  throw new Error(`發布後主頁未變化（countDiff=${countDiffScore.toFixed(1)}, gridDiff=${diffScore.toFixed(1)}）`);
+}
+
+async function verifyInstagramPublishLocallyWithRetries(
+  config: VmosConfig,
+  padCode: string,
+  beforeGridUrl: string,
+  beforeTopUrl?: string,
+  onProgress?: (p: PublishProgress) => void,
+  retryDelaysMs = [12000, 30000, 60000],
+): Promise<PublishVerificationResult> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    onProgress?.({
+      step: `等待 Instagram 主頁同步（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    await delay(attempt === 0 ? retryDelaysMs[attempt] : retryDelaysMs[attempt]);
+
+    try {
+      return await verifyInstagramPublishLocally(config, padCode, beforeGridUrl, beforeTopUrl, 0);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  throw lastError ?? new Error("發布後主頁未變化");
+}
+
+async function verifyInstagramReelsPublishLocally(
+  config: VmosConfig,
+  padCode: string,
+  beforeReelsUrl: string,
+  settleDelayMs = 18000,
+): Promise<PublishVerificationResult> {
+  const support = getLocalVisualVerificationSupport();
+  if (!support.supported) {
+    await delay(8000);
+    const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    return {
+      state: "warning",
+      detail: `已點選發布，待人工確認（${support.reason}）`,
+      screenshotUrl: currentUrl,
+    };
+  }
+  if (settleDelayMs > 0) {
+    await delay(settleDelayMs);
+  }
+  if (isAcpPad(padCode)) {
+    const currentDetailUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    if (currentDetailUrl && await detectInstagramAcpPublishedReelViewerLocally(currentDetailUrl).catch(() => false)) {
+      return {
+        state: "verified",
+        detail: "發布完成 ✓（本機校驗：當前頁已是已發布 Reel/影片詳情）",
+        screenshotUrl: currentDetailUrl,
+      };
+    }
+  }
+  const afterReelsUrl = await captureInstagramProfileReelsScreenshot(config, padCode);
+  if (isAcpPad(padCode)) {
+    const afterState = await classifyInstagramAcpReelFlowState(afterReelsUrl);
+    if (afterState === "share_page" || afterState === "editor" || afterState === "effects_drawer") {
+      throw new Error(`發布後仍停留在 Reel 發布流程（state=${afterState}）`);
+    }
+  }
+  const diffScore = await getRegionDiffScore(beforeReelsUrl, afterReelsUrl, {
+    x: 0,
+    y: 620,
+    width: 720,
+    height: 720,
+  });
+  const countDiffScore = await getRegionDiffScore(beforeReelsUrl, afterReelsUrl, {
+    x: 215,
+    y: 190,
+    width: 155,
+    height: 170,
+  });
+  if (
+    diffScore >= INSTAGRAM_FEED_GRID_DIFF_THRESHOLD
+    || countDiffScore >= INSTAGRAM_REELS_PROFILE_COUNT_DIFF_THRESHOLD
+    || (diffScore >= INSTAGRAM_REELS_PROFILE_GRID_SOFT_DIFF_THRESHOLD && countDiffScore >= 0.25)
+  ) {
+    const detailUrl = await captureInstagramLatestReelDetailScreenshot(config, padCode).catch(() => "");
+    if (!detailUrl) {
+      throw new Error(`Reels 分頁有變化但未能打開已發布 Reel 詳情（gridDiff=${diffScore.toFixed(1)}, countDiff=${countDiffScore.toFixed(1)}）`);
+    }
+    return {
+      state: "verified",
+      detail: `發布完成 ✓（本機校驗：Reels 頁已變化，gridDiff=${diffScore.toFixed(1)}, countDiff=${countDiffScore.toFixed(1)}）`,
+      screenshotUrl: detailUrl,
+    };
+  }
+
+  const aiCheck = await verifyInstagramReelsProfileBeforeAfterWithAi(beforeReelsUrl, afterReelsUrl);
+  if (aiCheck) {
+    return aiCheck;
+  }
+
+  throw new Error(`發布後 Reels 頁未變化（gridDiff=${diffScore.toFixed(1)}, countDiff=${countDiffScore.toFixed(1)}）`);
+}
+
+async function verifyInstagramReelsProfileBeforeAfterWithAi(
+  beforeReelsUrl: string,
+  afterReelsUrl: string,
+): Promise<PublishVerificationResult | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const [beforeShot, afterShot] = await Promise.all([
+    getInlineData(beforeReelsUrl),
+    getInlineData(afterReelsUrl),
+  ]);
+  if (!beforeShot || !afterShot) return null;
+
+  const prompt = `你在校驗 Instagram Reel 影片是否真的發布成功。
+圖1是點選分享前，帳號個人主頁的 Reels 分頁基線截圖。
+圖2是點選分享並等待同步後，同一帳號個人主頁的 Reels 分頁截圖。
+
+請只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+判定規則：
+- YES：圖2 相比圖1 明確多出一個已發布的 Reel，例如貼文數增加、Reels 網格新增非「草稿」影片縮圖，或最新 Reel 位置/縮圖發生可判定的新發布變化。
+- NO：圖2 仍停在草稿、編輯、選片、分享頁；或圖2 與圖1 沒有明確新增；或只能看到既有內容，不能確認是新發布。
+- 左上角標有「草稿」的項目不是已發布內容，不可單獨作為 YES。
+
+不要解釋，不要輸出 JSON。`;
+
+  try {
+    const raw = await callPublishVerifier(
+      [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { text: "圖1：發布前 Reels 分頁" },
+          { inlineData: beforeShot },
+          { text: "圖2：發布後 Reels 分頁" },
+          { inlineData: afterShot },
+        ],
+      }],
+      { maxOutputTokens: 120, temperature: 0 },
+      15_000,
+    );
+    const line = normalizeSingleLine(extractText(raw));
+    if (/^YES\b/i.test(line)) {
+      const reason = line.includes("|") ? line.split("|").slice(1).join("|").trim() : "";
+      return {
+        state: "verified",
+        detail: reason
+          ? `發布完成 ✓（已校驗：${reason}）`
+          : "發布完成 ✓（已校驗：Reels 個人頁已新增影片）",
+        screenshotUrl: afterReelsUrl,
+      };
+    }
+  } catch {
+    // Keep local verification deterministic when the model request times out.
+  }
+
+  return null;
+}
+
+async function verifyInstagramReelsPublishLocallyWithRetries(
+  config: VmosConfig,
+  padCode: string,
+  beforeReelsUrl: string,
+  onProgress?: (p: PublishProgress) => void,
+  retryDelaysMs = [12000, 30000, 60000],
+): Promise<PublishVerificationResult> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    onProgress?.({
+      step: `等待 Instagram Reels 同步（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    await delay(retryDelaysMs[attempt]);
+
+    try {
+      return await verifyInstagramReelsPublishLocally(config, padCode, beforeReelsUrl, 0);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      onProgress?.({
+        step: `Reels 本機校驗未命中：${lastError.message}`,
+        done: false,
+      });
+    }
+  }
+
+  throw lastError ?? new Error("發布後 Reels 頁未變化");
+}
+
+async function verifyInstagramStoryPublishLocally(
+  config: VmosConfig,
+  padCode: string,
+  beforeHomeUrl: string,
+  settleDelayMs = 20000,
+): Promise<PublishVerificationResult> {
+  const support = getLocalVisualVerificationSupport();
+  if (!support.supported) {
+    await delay(8000);
+    return {
+      state: "warning",
+      detail: `已點選發布，待人工確認（${support.reason}）`,
+    };
+  }
+  await delay(settleDelayMs);
+  const afterHomeUrl = await screenshot(config, padCode);
+  const storyBubbleDiff = await getRegionDiffScore(beforeHomeUrl, afterHomeUrl, {
+    x: 16,
+    y: 130,
+    width: 190,
+    height: 235,
+  });
+  if (storyBubbleDiff >= 10) {
+    return {
+      state: "verified",
+      detail: `發布完成 ✓（本機校驗：Story 頭像區已變化，diff=${storyBubbleDiff.toFixed(1)}）`,
+      screenshotUrl: afterHomeUrl,
+    };
+  }
+  throw new Error(`發布後 Story 頭像區未變化（diff=${storyBubbleDiff.toFixed(1)}）`);
+}
+
+async function verifyInstagramStoryQuickSuccessToast(
+  config: VmosConfig,
+  padCode: string,
+): Promise<PublishVerificationResult | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const immediateUrl = await screenshot(config, padCode);
+  await delay(1800);
+  const settledUrl = await screenshot(config, padCode);
+  const immediateShot = await getInlineData(immediateUrl);
+  const settledShot = await getInlineData(settledUrl);
+
+  if (!immediateShot || !settledShot) return null;
+  const toastSuccess = await detectExplicitSuccessToast("instagram", [immediateShot, settledShot]);
+  if (!toastSuccess) return null;
+
+  return {
+    state: "verified",
+    detail: "發布完成 ✓（已校驗：檢測到 Instagram Story 成功提示）",
+    screenshotUrl: settledUrl,
+  };
+}
+
+async function captureInstagramOwnStorySequenceShots(
+  config: VmosConfig,
+  padCode: string,
+  maxPages: number,
+  onProgress?: (p: PublishProgress) => void
+): Promise<Array<{ index: number; shot: { mimeType: string; data: string } }>> {
+  const shots: Array<{ index: number; shot: { mimeType: string; data: string } }> = [];
+
+  for (let index = 0; index < maxPages; index += 1) {
+    onProgress?.({
+      step: `檢查自己的 Story 第 ${index + 1}/${maxPages} 張...`,
+      done: false,
+    });
+    const storyUrl = await screenshot(config, padCode);
+    const storyShot = await getInlineData(storyUrl);
+    if (storyShot) {
+      shots.push({ index: index + 1, shot: storyShot });
+    }
+    if (index < maxPages - 1) {
+      await tap(config, padCode, 620, 640, 2000);
+    }
+  }
+
+  return shots;
+}
+
+async function verifyInstagramStoryByOpeningOwnBubble(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  onProgress?: (p: PublishProgress) => void
+): Promise<PublishVerificationResult> {
+  const cues = extractThreadsVerificationCues(caption);
+  const retryDelaysMs = [12000, 25000, 60000];
+  const maxPages = 6;
+  let lastReason = `前 ${maxPages} 張自己的 Story 中未找到目標文案`;
+
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    onProgress?.({
+      step: `等待 Story 同步（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    await delay(retryDelaysMs[attempt]);
+
+    onProgress?.({
+      step: `開啟自己的 Story（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    await relaunchInstagram(config, padCode, 5000);
+    await tap(config, padCode, 96, 258, 3500);
+
+    const shots = await captureInstagramOwnStorySequenceShots(
+      config,
+      padCode,
+      maxPages,
+      onProgress
+    );
+    if (shots.length === 0) {
+      lastReason = "自己的 Story 截圖取得失敗";
+      continue;
+    }
+
+    const prompt = `你在校驗 Instagram 自己的 Story 是否真的發布成功。
+圖1到圖${shots.length}是點選自己頭像圈後，連續開啟的 Story 截圖序列。最新發出的 Story 可能在較後面的幾張裡。
+
+目標文案開頭：
+${summarizeCaption(caption)}
+
+識別線索：
+${cues.map((cue, cueIndex) => `${cueIndex + 1}. ${cue}`).join("\n")}
+
+請只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+判定規則：
+- YES：圖1到圖${shots.length}裡任意一張，明確屬於目前帳號自己剛發出的 Story，且能看到目標文案開頭，或能看到上面的識別線索；文案換行、被狀態列遮擋少量文字，都不影響判定。
+- NO：這些圖裡沒有看到上述線索，或無法確認。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+    try {
+      const raw = await callGemini(
+        PUBLISH_VERIFY_MODEL,
+        [{
+          role: "user",
+          parts: [
+            { text: prompt },
+            ...shots.flatMap(({ index, shot }) => ([
+              { text: `圖${index}：自己的第 ${index} 張 Story 截圖` },
+              { inlineData: shot },
+            ])),
+          ],
+        }],
+        { maxOutputTokens: 120, temperature: 0 }
+      );
+      const line = normalizeSingleLine(extractText(raw));
+      if (/^YES\b/i.test(line)) {
+        const reason = line.includes("|") ? line.split("|").slice(1).join("|").trim() : "";
+        const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+        return {
+          state: "verified",
+          detail: reason
+            ? `發布完成 ✓（已校驗：${reason}）`
+            : "發布完成 ✓（已校驗：自己的 Story 中已出現目標文案）",
+          screenshotUrl: currentUrl,
+        };
+      }
+      lastReason = line.includes("|")
+        ? line.split("|").slice(1).join("|").trim()
+        : lastReason;
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+  return {
+    state: "warning",
+    detail: `已點選發布，待人工確認（${lastReason}）`,
+    screenshotUrl: currentUrl,
+  };
+}
+
+function findXmlTextButtonTarget(uiXml: string, pattern: RegExp): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const text = instagramNodeText(node);
+    if (!text || !pattern.test(text)) continue;
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center) continue;
+    let score = 20;
+    if (/clickable="true"/.test(node)) score += 5;
+    if (/enabled="true"/.test(node)) score += 2;
+    if (center.y > BASE_SCREEN.height * 0.45) score += 3;
+    candidates.push({ ...center, score });
+  }
+  candidates.sort((a, b) => b.score - a.score || b.y - a.y);
+  return candidates[0] ? { x: candidates[0].x, y: candidates[0].y } : null;
+}
+
+async function dismissInstagramStoryFacebookPrompt(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<boolean> {
+  let dismissed = false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    const text = normalizeSingleLine(uiXml);
+    const isAutoSharePrompt = /Share your Instagram stories to Facebook automatically|Instagram.*Facebook.*automatically|自动.*Facebook|自動.*Facebook/i.test(text);
+    const isPausePrompt = /Pause these messages|stop seeing messages about sharing to Facebook|停止看到.*Facebook|暫停.*訊息|暂停.*消息/i.test(text);
+    if (!isAutoSharePrompt && !isPausePrompt) break;
+
+    const target = isPausePrompt
+      ? findXmlTextButtonTarget(uiXml, /No thanks|不用了|不用|不，?謝謝|不，?谢谢/i)
+      : findXmlTextButtonTarget(uiXml, /Not now|稍後|稍后|以后再说|暫時不要|暂时不要/i);
+    onProgress?.({
+      step: isPausePrompt ? "關閉 Facebook 分享提示確認..." : "跳過 Facebook 分享提示...",
+      done: false,
+    });
+    if (target) {
+      await tapViaAdbAbsolute(config, padCode, target.x, target.y, 1800);
+    } else if (isPausePrompt) {
+      await tapViaAdbReferencePoint(config, padCode, { x: 360, y: 1536 }, 1800, FIXED_VMOS_SCREEN);
+    } else {
+      await tapViaAdbReferencePoint(config, padCode, { x: 360, y: 1438 }, 1800, FIXED_VMOS_SCREEN);
+    }
+    dismissed = true;
+  }
+  return dismissed;
+}
+
+async function switchInstagramStoryMode(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<InstagramStoryTextFlowState> {
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const xmlTarget = findXmlTextButtonTarget(uiXml, /^(STORY|Story|限時動態|限时动态)$/i);
+  if (xmlTarget) {
+    await tapViaAdbAbsolute(config, padCode, xmlTarget.x, xmlTarget.y, 3200);
+    const state = await classifyInstagramStoryTextFlowState(config, padCode);
+    if (state === "camera_tools" || state === "text_editor") return state;
+  }
+
+  const candidates = [
+    { x: 210, y: 1385, reason: "reel_mode_story_tab" },
+    { x: 520, y: 1385, reason: "post_mode_story_tab" },
+    { x: 360, y: 1385, reason: "center_story_tab" },
+  ];
+  let lastState: InstagramStoryTextFlowState = "unknown";
+  for (const candidate of candidates) {
+    onProgress?.({ step: `嘗試切換 Story 模式：${candidate.reason}`, done: false });
+    await tapViaAdbReferencePoint(config, padCode, candidate, 3600, FIXED_VMOS_SCREEN);
+    lastState = await classifyInstagramStoryTextFlowState(config, padCode);
+    if (lastState === "camera_tools" || lastState === "text_editor") return lastState;
+    if (lastState === "settings") {
+      await execAdb(config, padCode, "input keyevent KEYCODE_BACK").catch(() => undefined);
+      await delay(1500);
+    }
+  }
+  return lastState;
+}
+
+async function captureThreadsProfileContentScreenshot(
+  config: VmosConfig,
+  padCode: string,
+  options: { skipInitialSwipe?: boolean } = {},
+): Promise<string> {
+  let lastUrl = "";
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (attempt === 1) {
+      await execAdbAndWait(config, padCode, "input keyevent KEYCODE_BACK", 15000).catch(() => undefined);
+      await delay(1200);
+    } else if (attempt > 1) {
+      await relaunchThreads(config, padCode, 4500);
+    }
+
+    const focus = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+    const preProfileShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    if (!focus.includes(THREADS_PACKAGE) && await detectAndroidLauncherLocally(preProfileShotUrl).catch(() => false)) {
+      await relaunchThreads(config, padCode, 4500);
+    } else if (!focus.includes(THREADS_PACKAGE) && !await isThreadsScreenVisibleLocally(preProfileShotUrl).catch(() => false)) {
+      await relaunchThreads(config, padCode, 4500);
+    }
+
+    await tapThreadsProfileTab(config, padCode, 2200);
+    lastUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    if (!await isThreadsProfileScreenshot(config, padCode, lastUrl)) continue;
+
+    if (!options.skipInitialSwipe) {
+      await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1400, endX: 360, endY: 420 });
+      await delay(2000);
+      lastUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    }
+    return lastUrl;
+  }
+
+  throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__未能進入 Threads 個人主頁｜debug=${formatThreadsDebugTargets([lastUrl])}`);
+}
+
+async function tapThreadsProfileTab(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 2200,
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const screenshotUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    const focus = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+    if (!focus.includes(THREADS_PACKAGE) && await detectAndroidLauncherLocally(screenshotUrl).catch(() => false)) {
+      await relaunchThreads(config, padCode, 4500);
+      continue;
+    }
+    if (await detectThreadsProfilePageLocally(screenshotUrl).catch(() => false)) return;
+    if (await detectThreadsHomeFeedLocally(screenshotUrl).catch(() => null)) {
+      await tapViaAdbReferencePoint(config, padCode, { x: 614, y: 1516 }, waitMs);
+      return;
+    }
+    const image = await loadImage(screenshotUrl).catch(() => null);
+    const visualTarget = await locateThreadsButtonByVision(
+      screenshotUrl,
+      "Threads 底部导航栏最右侧的个人主页/Profile 小人图标中心点；只有画面底部明确存在 Home、Search、Post、Activity、Profile 这排导航栏时才返回坐标；如果当前是串文详情页、回复页、编辑页或底部没有导航栏，返回 {\"x\":-1,\"y\":-1}",
+    );
+
+    if (
+      image
+      && visualTarget
+      && visualTarget.x >= image.width * 0.72
+      && visualTarget.y >= image.height * 0.78
+      && visualTarget.y <= image.height * 0.96
+    ) {
+      await tapScreenshotPointViaAdb(config, padCode, screenshotUrl, visualTarget, waitMs);
+      return;
+    }
+
+    if (attempt < 2) {
+      await execAdbAndWait(config, padCode, "input keyevent KEYCODE_BACK", 15000).catch(() => undefined);
+      await delay(1400);
+    }
+  }
+
+  const screen = await getScreenSize(config, padCode);
+  const fallback = scalePointFromReferenceScreen(screen, { x: 614, y: 1516 }, THREADS_TALL_REFERENCE_SCREEN);
+  await tapViaAdbAbsolute(config, padCode, fallback.x, fallback.y, waitMs);
+}
+
+async function isThreadsProfileScreenshot(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl: string,
+): Promise<boolean> {
+  const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  if (focus && !focus.includes(THREADS_PACKAGE)) return false;
+  if (await detectThreadsProfilePageLocally(screenshotUrl)) return true;
+  if (await detectThreadsComposerLocally(screenshotUrl).catch(() => null)) return false;
+  if (await detectThreadsReplyComposerLocally(screenshotUrl).catch(() => null)) return false;
+  if (await detectThreadsGalleryPickerLocally(screenshotUrl).catch(() => null)) return false;
+  if (await detectThreadsFullscreenMediaViewerLocally(screenshotUrl).catch(() => false)) return false;
+  try {
+    const uiXml = await dumpUiXml(config, padCode);
+    if (looksLikeThreadsProfileUiXml(uiXml)) return true;
+  } catch {
+    // Fall through to the visual profile check.
+  }
+  return detectThreadsProfilePageVisually(screenshotUrl);
+}
+
+async function closeThreadsPrivacyAudienceSheetIfPresent(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl?: string,
+): Promise<boolean> {
+  const currentUrl = screenshotUrl ?? await freezeScreenshotUrl(await screenshot(config, padCode));
+  const image = await loadImage(currentUrl).catch(() => null);
+  if (!image) return false;
+
+  const cancelTarget = await locateThreadsButtonByVision(
+    currentUrl,
+    "只有当画面出现 Threads 底部弹层，文字类似「私密主页只能回复自己的粉丝」「公开主页」「私密主页」时，定位弹层底部「取消」按钮中心点；如果没有这个弹层，返回 {\"x\":-1,\"y\":-1}",
+  );
+
+  if (
+    cancelTarget
+    && cancelTarget.x >= image.width * 0.12
+    && cancelTarget.x <= image.width * 0.88
+    && cancelTarget.y >= image.height * 0.74
+    && cancelTarget.y <= image.height * 0.94
+  ) {
+    await tapAbsolute(config, padCode, cancelTarget.x, cancelTarget.y, 1400);
+    return true;
+  }
+
+  return false;
+}
+
+async function tapThreadsProfileVideoTab(
+  config: VmosConfig,
+  padCode: string,
+): Promise<void> {
+  const target = await locateThreadsProfileVideoTabTarget(config, padCode);
+  if (target) {
+    await tapViaAdbAbsolute(config, padCode, target.x, target.y, 1800);
+    return;
+  }
+
+  const screen = await getScreenSize(config, padCode);
+  const fallbackY = screen.height >= 1500 ? 492 : 394;
+  await tapViaAdbAbsolute(config, padCode, 450, fallbackY, 1800);
+}
+
+async function captureThreadsProfileVideoTabScreenshot(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string> {
+  await tapThreadsProfileTab(config, padCode, 2200);
+  await tapThreadsProfileVideoTab(config, padCode);
+  await delay(1800);
+  return freezeScreenshotUrl(await screenshot(config, padCode));
+}
+
+async function captureThreadsProfileVideoTabBaselineForPublish(
+  config: VmosConfig,
+  padCode: string,
+  onProgress: (p: PublishProgress) => void,
+): Promise<string | undefined> {
+  if (!getLocalVisualVerificationSupport().supported) return undefined;
+
+  onProgress({ step: "讀取 Threads 影音頁基線...", done: false });
+  const beforeProfileVideoTabUrl = await captureThreadsProfileVideoTabScreenshot(config, padCode);
+  const beforeProfileVideoTabShot = await getInlineData(beforeProfileVideoTabUrl);
+  const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, beforeProfileVideoTabShot);
+  if (blockedReason) {
+    throw new Error(`Threads 影音頁目前停在阻斷頁：${blockedReason}，請先在雲機完成設定或驗證後再重試`);
+  }
+  return beforeProfileVideoTabUrl;
+}
+
+async function verifyThreadsPublishLocally(
+  config: VmosConfig,
+  padCode: string,
+  beforeProfileUrl: string,
+  onProgress?: (p: PublishProgress) => void,
+  mediaUrl?: string,
+): Promise<PublishVerificationResult> {
+  const support = getLocalVisualVerificationSupport();
+  if (!support.supported) {
+    await delay(5000);
+    return {
+      state: "warning",
+      detail: `已點選發布，待人工確認（${support.reason}）`,
+    };
+  }
+  let bestDiffScore = 0;
+  const verificationDelays = THREADS_LOCAL_VERIFY_DELAYS_MS;
+  for (let attempt = 0; attempt < verificationDelays.length; attempt += 1) {
+    onProgress?.({
+      step: `等待 Threads 主頁同步（第 ${attempt + 1}/${verificationDelays.length} 輪）...`,
+      done: false,
+    });
+    await delay(verificationDelays[attempt]);
+    if (attempt > 0) {
+      onProgress?.({
+        step: `回到 Threads 主頁複查（第 ${attempt + 1}/${verificationDelays.length} 輪）...`,
+        done: false,
+      });
+      await relaunchThreads(config, padCode, 5000);
+    }
+
+    const afterProfileUrl = await captureThreadsProfileContentScreenshot(config, padCode);
+    const afterProfileShot = await getInlineData(afterProfileUrl);
+    const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, afterProfileShot);
+    if (blockedReason) {
+      throw new Error(buildThreadsBlockedError(blockedReason, afterProfileUrl));
+    }
+
+    if (hasImageReferenceMedia(mediaUrl)) {
+      try {
+        const localMatch = await getThreadsProfileReferenceImageBestMatch(mediaUrl!, afterProfileUrl);
+        if (isThreadsProfileReferenceImageMatch(localMatch)) {
+          return {
+            state: "verified",
+            detail: `發布完成 ✓（本機快驗：Threads 主頁已命中參考圖，diff=${localMatch.diff.toFixed(1)}${localMatch.mode ? `, mode=${localMatch.mode}` : ""}）`,
+          };
+        }
+      } catch {
+        // Fall through to content-diff verification below.
+      }
+    }
+
+    const diffScore = await getRegionDiffScore(beforeProfileUrl, afterProfileUrl, {
+      x: 0,
+      y: 420,
+      width: 720,
+      height: 860,
+    });
+    bestDiffScore = Math.max(bestDiffScore, diffScore);
+
+    onProgress?.({
+      step: `Threads 主頁變化 diff=${diffScore.toFixed(1)}（best=${bestDiffScore.toFixed(1)}），繼續查找目標內容...`,
+      done: false,
+    });
+  }
+
+  throw new Error(
+    hasImageReferenceMedia(mediaUrl)
+      ? `發布後 Threads 主頁未命中本次參考圖片（best diff=${bestDiffScore.toFixed(1)}）`
+      : `發布後 Threads 主頁未命中目標內容（best diff=${bestDiffScore.toFixed(1)}）`,
+  );
+}
+
+async function verifyThreadsVideoPublishLocally(
+  config: VmosConfig,
+  padCode: string,
+  beforeProfileVideoTabUrl: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<PublishVerificationResult> {
+  const support = getLocalVisualVerificationSupport();
+  if (!support.supported) {
+    throw new Error(support.reason ?? "目前不支援 Threads 影音頁本機校驗");
+  }
+
+  let bestDiffScore = 0;
+  for (let attempt = 0; attempt < THREADS_VIDEO_TAB_VERIFY_DELAYS_MS.length; attempt += 1) {
+    onProgress?.({
+      step: `等待 Threads 影音頁同步（第 ${attempt + 1}/${THREADS_VIDEO_TAB_VERIFY_DELAYS_MS.length} 輪）...`,
+      done: false,
+    });
+    await delay(THREADS_VIDEO_TAB_VERIFY_DELAYS_MS[attempt]);
+
+    if (attempt > 0) {
+      onProgress?.({
+        step: `回到 Threads 影音頁複查（第 ${attempt + 1}/${THREADS_VIDEO_TAB_VERIFY_DELAYS_MS.length} 輪）...`,
+        done: false,
+      });
+      await relaunchThreads(config, padCode, 5000);
+    }
+
+    const afterProfileVideoTabUrl = await captureThreadsProfileVideoTabScreenshot(config, padCode);
+    const afterProfileVideoTabShot = await getInlineData(afterProfileVideoTabUrl);
+    const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, afterProfileVideoTabShot);
+    if (blockedReason) {
+      throw new Error(`__THREADS_BLOCKED__${blockedReason}`);
+    }
+
+    const diffScore = await getRegionDiffScore(beforeProfileVideoTabUrl, afterProfileVideoTabUrl, {
+      x: 0,
+      y: 300,
+      width: 720,
+      height: 900,
+    });
+    bestDiffScore = Math.max(bestDiffScore, diffScore);
+    onProgress?.({
+      step: `Threads 影音頁 diff=${diffScore.toFixed(1)}（best=${bestDiffScore.toFixed(1)}）`,
+      done: false,
+    });
+
+    if (diffScore >= THREADS_VIDEO_TAB_DIFF_THRESHOLD) {
+      onProgress?.({
+        step: `Threads 影音頁已變化 diff=${diffScore.toFixed(1)}，繼續回主頁確認目標貼文...`,
+        done: false,
+      });
+    }
+  }
+
+  throw new Error(`Threads 影音頁變化不足以作為發布成功證據（best diff=${bestDiffScore.toFixed(1)}）`);
+}
+
+async function verifyThreadsTextPublishQuickly(
+  config: VmosConfig,
+  padCode: string,
+  beforeProfileUrl: string,
+  onProgress?: (p: PublishProgress) => void
+): Promise<PublishVerificationResult> {
+  const support = getLocalVisualVerificationSupport();
+  if (!support.supported) {
+    throw new Error(support.reason ?? "目前不支援 Threads 本機快驗");
+  }
+
+  const retryDelaysMs = [2000, 5000];
+  let bestDiffScore = 0;
+
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    onProgress?.({
+      step: `等待 Threads 快速主頁變化（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    await delay(retryDelaysMs[attempt]);
+    if (attempt > 0) {
+      onProgress?.({
+        step: `回到 Threads 主頁快速複查（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+        done: false,
+      });
+      await relaunchThreads(config, padCode, 5000);
+    }
+
+    const afterProfileUrl = await captureThreadsProfileContentScreenshot(config, padCode);
+    const afterProfileShot = await getInlineData(afterProfileUrl);
+    const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, afterProfileShot);
+    if (blockedReason) {
+      throw new Error(buildThreadsBlockedError(blockedReason, afterProfileUrl));
+    }
+    const diffScore = await getRegionDiffScore(beforeProfileUrl, afterProfileUrl, {
+      x: 0,
+      y: 420,
+      width: 720,
+      height: 560,
+    });
+    bestDiffScore = Math.max(bestDiffScore, diffScore);
+    onProgress?.({
+      step: `Threads 快驗 diff=${diffScore.toFixed(1)}（best=${bestDiffScore.toFixed(1)}）`,
+      done: false,
+    });
+
+    if (diffScore >= THREADS_TEXT_QUICK_DIFF_THRESHOLD) {
+      return {
+        state: "verified",
+        detail: `發布完成 ✓（本機快驗：Threads 主頁貼文區已變化 diff=${diffScore.toFixed(1)}）`,
+        screenshotUrl: afterProfileUrl,
+      };
+    }
+  }
+
+  throw new Error(`Threads 快驗只看到頁面變化，未命中目標文案（best diff=${bestDiffScore.toFixed(1)}）`);
+}
+
+/**
+ * 擬人化點選（simulateClick API）
+ * 最小等待 2100ms，滿足 API 2 秒頻率限制
+ */
+async function tap(
+  config: VmosConfig,
+  padCode: string,
+  x: number,
+  y: number,
+  waitMs = 2100
+) {
+  const screen = await getScreenSize(config, padCode);
+  const point = scalePoint(screen, x, y);
+  await simulateClick(config, padCode, point.x, point.y, screen.width, screen.height);
+  await delay(Math.max(waitMs, 2100));
+}
+
+async function tapAbsolute(
+  config: VmosConfig,
+  padCode: string,
+  x: number,
+  y: number,
+  waitMs = 2100,
+) {
+  const screen = await getScreenSize(config, padCode);
+  await simulateClick(config, padCode, Math.round(x), Math.round(y), screen.width, screen.height);
+  await delay(Math.max(waitMs, 0));
+}
+
+async function tapViaAdb(
+  config: VmosConfig,
+  padCode: string,
+  x: number,
+  y: number,
+  waitMs = 2500
+) {
+  const screen = await getScreenSize(config, padCode);
+  const point = scalePoint(screen, x, y);
+  await execAdbAndWait(config, padCode, `input tap ${point.x} ${point.y}`, 30000);
+  await delay(waitMs);
+}
+
+async function tapViaAdbAbsolute(
+  config: VmosConfig,
+  padCode: string,
+  x: number,
+  y: number,
+  waitMs = 2500,
+) {
+  await execAdbAndWait(config, padCode, `input tap ${Math.round(x)} ${Math.round(y)}`, 30000);
+  await delay(waitMs);
+}
+
+async function tapViaAdbReferencePoint(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+  waitMs = 2500,
+  reference: { width: number; height: number } = THREADS_TALL_REFERENCE_SCREEN,
+) {
+  const screen = await getScreenSize(config, padCode);
+  const scaled = scalePointFromReferenceScreen(screen, point, reference);
+  await tapViaAdbAbsolute(config, padCode, scaled.x, scaled.y, waitMs);
+}
+
+async function tapViaAdbAbsoluteQuick(
+  config: VmosConfig,
+  padCode: string,
+  x: number,
+  y: number,
+  waitMs = 800,
+) {
+  await execAdbForText(config, padCode, `input tap ${Math.round(x)} ${Math.round(y)}`, 6_000, 800);
+  await delay(waitMs);
+}
+
+async function tapThreadsBottomComposeButton(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 2500,
+) {
+  const screen = await getScreenSize(config, padCode);
+  const x = screen.width * 0.5;
+  const y = screen.height * 0.968;
+  console.log(`[threads][tap] bottom compose screen=${screen.width}x${screen.height} point=${Math.round(x)},${Math.round(y)}`);
+  await tapViaAdbAbsolute(config, padCode, x, y, waitMs);
+}
+
+async function tapScreenshotPointViaAdb(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl: string,
+  point: { x: number; y: number },
+  waitMs = 1800,
+) {
+  const [screen, image] = await Promise.all([
+    getScreenSize(config, padCode),
+    getImageDimensions(screenshotUrl).catch(() => null),
+  ]);
+  if (!isUsableScreenshotSize(image)) {
+    const scaled = scalePointFromReferenceScreen(screen, point, FIXED_VMOS_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, scaled.x, scaled.y, waitMs);
+    return;
+  }
+  if (!isFixedVmosScreenshotSize(image)) {
+    console.warn(`[threads][tap] ignored non-720x1600 screenshot coordinate map image=${image.width}x${image.height} screen=${screen.width}x${screen.height}`);
+  }
+
+  // VMOS screenshots are 720x1600, while ADB input on the same cloud phone can
+  // report/use 720x1280. Always project screenshot coordinates into the actual
+  // input surface; otherwise bottom controls such as Threads "Post" are tapped
+  // below the reachable ADB screen.
+  const scale = screen.width / image.width;
+  const scaleY = screen.height / image.height;
+  const x = Math.round(point.x * scale);
+  const y = Math.round(point.y * scaleY);
+  await execAdbAndWait(config, padCode, `input tap ${x} ${y}`, 30000);
+  await delay(Math.max(waitMs, 0));
+}
+
+async function dismissKeyboard(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 1200,
+) {
+  await execAdbAndWait(config, padCode, "input keyevent KEYCODE_BACK", 15000);
+  await delay(waitMs);
+  const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  const image = shotUrl ? await loadImage(shotUrl).catch(() => null) : null;
+  if (image?.width && image?.height && await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false)) {
+    await tapScreenshotPointViaAdb(config, padCode, shotUrl, {
+      x: Math.round(image.width * 0.07),
+      y: Math.round(image.height * 0.68),
+    }, waitMs).catch(() => undefined);
+  }
+}
+
+async function swipe(
+  config: VmosConfig,
+  padCode: string,
+  direction: "LEFT_TO_RIGHT" | "RIGHT_TO_LEFT" | "TOP_TO_BOTTOM" | "BOTTOM_TO_TOP",
+  opts: { startX: number; startY: number; endX: number; endY: number }
+) {
+  const screen = await getScreenSize(config, padCode);
+  const start = scalePoint(screen, opts.startX, opts.startY);
+  const end = scalePoint(screen, opts.endX, opts.endY);
+  await simulateSwipe(config, padCode, direction, {
+    width: screen.width,
+    height: screen.height,
+    startX: start.x,
+    startY: start.y,
+    endX: end.x,
+    endY: end.y,
+  });
+}
+
+/**
+ * 輸入文字（inputText API，支援中文/特殊字元，需先聚焦輸入框）
+ */
+async function typeText(
+  config: VmosConfig,
+  padCode: string,
+  text: string,
+  waitMs = 2000
+) {
+  let usedFallback = false;
+  try {
+    const taskId = await Promise.race([
+      inputText(config, padCode, text),
+      new Promise<never>((_, reject) => {
+        const timer = globalThis.setTimeout(() => {
+          globalThis.clearTimeout(timer);
+          reject(new Error("inputText timeout"));
+        }, 15000);
+      }),
+    ]);
+    const numericTaskId = Number(taskId);
+    if (Number.isFinite(numericTaskId) && numericTaskId > 0) {
+      await waitTask(config, numericTaskId, 30000, 1500);
+    }
+  } catch {
+    usedFallback = true;
+    await execAdbAndWait(
+      config,
+      padCode,
+      `am broadcast -a ADB_INPUT_B64 --es msg ${shellSingleQuote(encodeBase64Utf8(text))}`,
+      20000,
+      1000,
+    );
+  }
+  await delay(usedFallback ? Math.max(waitMs, 2500) : waitMs);
+}
+
+async function typeTextViaAdbBroadcast(
+  config: VmosConfig,
+  padCode: string,
+  text: string,
+  waitMs = 1800,
+  commandTimeoutMs = 20000,
+) {
+  await execAdbForText(
+    config,
+    padCode,
+    `am broadcast -a ADB_INPUT_B64 --es msg ${shellSingleQuote(encodeBase64Utf8(text))}`,
+    commandTimeoutMs,
+    1000,
+  );
+  await delay(waitMs);
+}
+
+async function typeTextViaAndroidInputText(
+  config: VmosConfig,
+  padCode: string,
+  text: string,
+  waitMs = 1200,
+  commandTimeoutMs = 12_000,
+) {
+  await execAdbForText(
+    config,
+    padCode,
+    `input text ${shellSingleQuote(text)}`,
+    commandTimeoutMs,
+    800,
+  );
+  await delay(waitMs);
+}
+
+async function clearFocusedTextInput(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 500,
+) {
+  await execAdbForText(
+    config,
+    padCode,
+    "input keyevent KEYCODE_MOVE_END; for i in $(seq 1 90); do input keyevent KEYCODE_DEL; done",
+    12_000,
+    800,
+  ).catch(() => undefined);
+  await delay(waitMs);
+}
+
+function escapeAndroidInputText(text: string): string {
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/\s+/g, "%s")
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\"')
+    .replace(/[()<>;&|*$`]/g, "");
+}
+
+async function typeAsciiTextViaAndroidInput(
+  config: VmosConfig,
+  padCode: string,
+  text: string,
+  waitMs = 900,
+) {
+  const safeText = escapeAndroidInputText(text.replace(/[^\x20-\x7E]/g, " ").trim());
+  if (!safeText) throw new Error("ACP ASCII 留言为空");
+  await execAdbForText(config, padCode, `input text ${safeText}`, 6_000, 800);
+  await delay(waitMs);
+}
+
+async function typeWarmupCommentText(
+  config: VmosConfig,
+  padCode: string,
+  text: string,
+  waitMs = 900,
+) {
+  if (/[^\x20-\x7E]/.test(text)) {
+    try {
+      await typeText(config, padCode, text, Math.max(waitMs, 1800));
+      return;
+    } catch {
+      await typeTextViaAdbBroadcast(config, padCode, text, Math.max(waitMs, 1800), 14_000);
+      return;
+    }
+  }
+  await typeAsciiTextViaAndroidInput(config, padCode, text, waitMs);
+}
+
+async function waitForThreadsForegroundOrVisible(
+  config: VmosConfig,
+  padCode: string,
+  timeoutMs = 8000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const focus = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+    if (focus.includes(THREADS_PACKAGE)) return true;
+    if (isGooglePlayFocus(focus)) {
+      await execAdbForText(config, padCode, `am force-stop ${GOOGLE_PLAY_PACKAGE}; input keyevent KEYCODE_HOME`, 8000, 500).catch(() => "");
+      await delay(700);
+      continue;
+    }
+    if (focus && focus.includes("com.android.launcher")) {
+      await delay(700);
+      continue;
+    }
+
+    const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    if (await isThreadsScreenVisibleLocally(shotUrl).catch(() => false)) return true;
+    if (await detectAndroidLauncherLocally(shotUrl).catch(() => false)) {
+      await delay(700);
+      continue;
+    }
+    await delay(700);
+  }
+  return false;
+}
+
+async function locateThreadsLauncherIconCenter(
+  screenshotUrl?: string,
+): Promise<{ x: number; y: number; width: number; height: number } | null> {
+  if (!screenshotUrl) return null;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return null;
+  const { data, width, height } = pixels;
+  const minX = Math.round(width * 0.08);
+  const maxX = Math.round(width * 0.82);
+  const minY = Math.round(height * 0.14);
+  const maxY = Math.round(height * 0.34);
+  const visited = new Uint8Array(width * height);
+  const isIconDark = (x: number, y: number) => {
+    if (x < minX || x > maxX || y < minY || y > maxY) return false;
+    const offset = (y * width + x) * 4;
+    const r = data[offset];
+    const g = data[offset + 1];
+    const b = data[offset + 2];
+    const a = data[offset + 3];
+    return a > 210 && r < 42 && g < 42 && b < 42;
+  };
+
+  const components: Array<{ x: number; y: number; width: number; height: number; count: number; score: number }> = [];
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const start = y * width + x;
+      if (visited[start] || !isIconDark(x, y)) continue;
+      const queue = [start];
+      visited[start] = 1;
+      let head = 0;
+      let count = 0;
+      let left = x;
+      let right = x;
+      let top = y;
+      let bottom = y;
+      while (head < queue.length) {
+        const current = queue[head++];
+        const cx = current % width;
+        const cy = Math.floor(current / width);
+        count += 1;
+        left = Math.min(left, cx);
+        right = Math.max(right, cx);
+        top = Math.min(top, cy);
+        bottom = Math.max(bottom, cy);
+        const neighbors = [current - 1, current + 1, current - width, current + width];
+        for (const next of neighbors) {
+          if (next < 0 || next >= visited.length || visited[next]) continue;
+          const nx = next % width;
+          const ny = Math.floor(next / width);
+          if (Math.abs(nx - cx) + Math.abs(ny - cy) !== 1) continue;
+          if (!isIconDark(nx, ny)) continue;
+          visited[next] = 1;
+          queue.push(next);
+        }
+      }
+      const boxWidth = right - left + 1;
+      const boxHeight = bottom - top + 1;
+      const area = boxWidth * boxHeight;
+      const density = count / Math.max(area, 1);
+      if (boxWidth >= 44 && boxWidth <= 120 && boxHeight >= 44 && boxHeight <= 120 && density > 0.38) {
+        components.push({
+          x: Math.round((left + right) / 2),
+          y: Math.round((top + bottom) / 2),
+          width: boxWidth,
+          height: boxHeight,
+          count,
+          score: count * density,
+        });
+      }
+    }
+  }
+
+  return components.sort((a, b) => b.score - a.score)[0] || null;
+}
+
+async function tapThreadsLauncherIconIfVisible(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl?: string,
+): Promise<boolean> {
+  const currentShotUrl = screenshotUrl ?? await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+  if (!await detectAndroidLauncherLocally(currentShotUrl).catch(() => false)) return false;
+  const image = currentShotUrl ? await loadImage(currentShotUrl).catch(() => null) : null;
+  const width = image?.width || BASE_SCREEN.width;
+  const height = image?.height || BASE_SCREEN.height;
+  const screen = await getScreenSize(config, padCode).catch(() => ({ width, height }));
+
+  const visualIcon = await locateThreadsLauncherIconCenter(currentShotUrl).catch(() => null);
+  if (visualIcon) {
+    const point = scalePointFromReferenceScreen(screen, { x: visualIcon.x, y: visualIcon.y }, { width, height });
+    await execAdbForText(
+      config,
+      padCode,
+      `input tap ${Math.round(point.x)} ${Math.round(point.y)}`,
+      8000,
+      500,
+    ).catch(() => "");
+    if (await waitForThreadsForegroundOrVisible(config, padCode, 9000)) return true;
+  }
+
+  for (const point of getThreadsLauncherIconTapCandidates({ width, height }, screen)) {
+    await execAdbForText(
+      config,
+      padCode,
+      `input tap ${Math.round(point.x)} ${Math.round(point.y)}`,
+      8000,
+      500,
+    ).catch(() => "");
+    if (await waitForThreadsForegroundOrVisible(config, padCode, 9000)) return true;
+    await tapAbsolute(config, padCode, point.x, point.y, 1400).catch(() => undefined);
+    if (await waitForThreadsForegroundOrVisible(config, padCode, 9000)) return true;
+  }
+  return false;
+}
+
+async function detectThreadsTagUserPageLocally(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * x1));
+    const top = Math.max(0, Math.floor(height * y1));
+    const right = Math.min(width - 1, Math.ceil(width * x2));
+    const bottom = Math.min(height - 1, Math.ceil(height * y2));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 1) {
+      for (let x = left; x <= right; x += 1) {
+        const offset = (y * width + x) * 4;
+        total += 1;
+        if (predicate(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 95;
+  const isWhite = (r: number, g: number, b: number, a: number) => a > 220 && r > 238 && g > 238 && b > 238;
+  const topWhite = countRegion(0, 0.00, 1, 0.14, isWhite);
+  const titleDark = countRegion(0.12, 0.045, 0.42, 0.09, isDark);
+  const doneDark = countRegion(0.82, 0.045, 0.98, 0.09, isDark);
+  const mediaNotWhite = countRegion(0.04, 0.20, 0.96, 0.62, (r, g, b, a) => a > 220 && !isWhite(r, g, b, a));
+  const lowerMostlyWhite = countRegion(0.04, 0.68, 0.96, 0.96, isWhite);
+  return topWhite > 0.78 && titleDark > 0.04 && doneDark > 0.04 && mediaNotWhite > 0.18 && lowerMostlyWhite > 0.82;
+}
+
+async function detectThreadsInlineReplyBarLocally(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * x1));
+    const top = Math.max(0, Math.floor(height * y1));
+    const right = Math.min(width - 1, Math.ceil(width * x2));
+    const bottom = Math.min(height - 1, Math.ceil(height * y2));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 1) {
+      for (let x = left; x <= right; x += 1) {
+        const offset = (y * width + x) * 4;
+        total += 1;
+        if (predicate(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isLightPill = (r: number, g: number, b: number, a: number) => a > 220 && r >= 224 && g >= 224 && b >= 224 && r <= 252 && g <= 252 && b <= 252;
+  const isDarkIcon = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 95;
+  const bottomPill = ratio(0.03, 0.925, 0.97, 0.985, isLightPill);
+  const leftAvatarOrText = ratio(0.04, 0.925, 0.42, 0.985, isDarkIcon);
+  const rightTools = ratio(0.70, 0.925, 0.97, 0.985, isDarkIcon);
+  const navBarLike = ratio(0.04, 0.88, 0.96, 0.99, isDarkIcon);
+  return bottomPill > 0.42
+    && leftAvatarOrText > 0.012
+    && (rightTools > 0.025 || bottomPill > 0.58)
+    && navBarLike < 0.22;
+}
+
+async function dismissThreadsTagUserPageIfOpen(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<boolean> {
+  const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+  if (!await detectThreadsTagUserPageLocally(shotUrl).catch(() => false)) return false;
+  onProgress?.({ step: "分享入口停在标记用户页，点完成继续...", done: false });
+  const screen = await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
+  await tapViaAdbAbsolute(config, padCode, screen.width * 0.90, screen.height * 0.062, 2200);
+  return true;
+}
+
+/**
+ * 強制冷啟動 Threads，避免複用上一次停留的個人頁/草稿頁。
+ */
+async function relaunchThreads(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 4000
+) {
+  await execAdbAndWait(
+    config,
+    padCode,
+    `am force-stop com.vmos.vmosauto; am force-stop com.android.camera2; am force-stop com.android.camera; am force-stop ${GOOGLE_PLAY_PACKAGE}; am force-stop ${THREADS_PACKAGE}; input keyevent KEYCODE_HOME`,
+    30000,
+    1000,
+  );
+  await delay(1500);
+
+  let launchOutput = await execAdbForText(
+    config,
+    padCode,
+    `am start -S -n ${THREADS_PACKAGE}/.mainactivity.BarcelonaActivity`,
+    15000,
+    1000,
+  ).catch(() => "");
+  await delay(waitMs);
+
+  const directLaunchStarted = /Starting:|Warning: Activity not started|cmp=com\.instagram\.barcelona/i.test(launchOutput)
+    && !/Error:|Exception|not found|does not exist|unable to resolve/i.test(launchOutput);
+  if (directLaunchStarted) {
+    if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+    const launchShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    if (await dismissThreadsSystemCrashDialogIfPossible(config, padCode, launchShotUrl).catch(() => false)) {
+      await delay(1200);
+      if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+    }
+    if (await tapThreadsLauncherIconIfVisible(config, padCode, launchShotUrl)) return;
+  }
+
+  let focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  if (focus.includes(THREADS_PACKAGE)) {
+    return;
+  }
+
+  launchOutput = await execAdbForText(
+    config,
+    padCode,
+    `monkey -p ${THREADS_PACKAGE} -c android.intent.category.LAUNCHER 1`,
+    15000,
+    1000,
+  ).catch(() => "");
+  await delay(waitMs);
+
+  const monkeyStarted = /Events injected|Monkey finished|cmp=com\.instagram\.barcelona/i.test(launchOutput)
+    && !/Error:|Exception|not found|does not exist|unable to resolve/i.test(launchOutput);
+  if (monkeyStarted) {
+    if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+    const launchShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    if (await dismissThreadsSystemCrashDialogIfPossible(config, padCode, launchShotUrl).catch(() => false)) {
+      await delay(1200);
+      if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+    }
+    if (await tapThreadsLauncherIconIfVisible(config, padCode, launchShotUrl)) return;
+  }
+
+  focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  if (focus.includes(THREADS_PACKAGE)) {
+    return;
+  }
+
+  launchOutput = await execAdbForText(
+    config,
+    padCode,
+    `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p ${THREADS_PACKAGE}`,
+    30000,
+    1000,
+  ).catch(() => launchOutput);
+  await delay(waitMs);
+  if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(7000, waitMs))) return;
+  const launchShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+  if (await dismissThreadsSystemCrashDialogIfPossible(config, padCode, launchShotUrl).catch(() => false)) {
+    await delay(1200);
+    if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+  }
+
+  focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  if (focus.includes(THREADS_PACKAGE)) {
+    return;
+  }
+
+  const resolveOutput = await execAdbForText(
+    config,
+    padCode,
+    [
+      `cmd package resolve-activity --brief ${THREADS_PACKAGE}`,
+      `cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${THREADS_PACKAGE}`,
+      `pm dump ${THREADS_PACKAGE} | grep -A 1 'android.intent.action.MAIN:' | head -n 20`,
+    ].join("; "),
+    30000,
+    1000,
+  ).catch(() => "");
+
+  const resolvedActivity = resolveOutput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith(`${THREADS_PACKAGE}/`));
+
+  if (resolvedActivity) {
+    launchOutput = await execAdbForText(
+      config,
+      padCode,
+      `am start -n ${shellSingleQuote(resolvedActivity)}`,
+      30000,
+      1000,
+    ).catch(() => launchOutput);
+    await delay(waitMs);
+    if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+    const resolvedLaunchShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    if (await dismissThreadsSystemCrashDialogIfPossible(config, padCode, resolvedLaunchShotUrl).catch(() => false)) {
+      await delay(1200);
+      if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+    }
+  }
+
+  const finalShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+  if (await tapThreadsLauncherIconIfVisible(config, padCode, finalShotUrl)) return;
+  focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  throw new Error(
+    `Threads 啟動失敗：focus=${focus || "unknown"}｜monkey=${normalizeSingleLine(launchOutput).slice(0, 220) || "empty"}｜resolve=${normalizeSingleLine(resolveOutput).slice(0, 220) || "empty"}`,
+  );
+}
+
+async function closeThreadsComposerLayer(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string }> {
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  const closeX = Math.round(screen.width * 0.07);
+  const closeY = Math.round(screen.height * 0.075);
+  const discardTargets = [
+    { x: Math.round(screen.width * 0.5), y: Math.round(screen.height * 0.755) },
+    { x: Math.round(screen.width * 0.5), y: Math.round(screen.height * 0.82) },
+  ];
+
+  let lastState = await classifyThreadsPageOnDevice(config, padCode);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (lastState.page !== "compose_editor" && lastState.page !== "reply_composer") {
+      return lastState;
+    }
+
+    if (lastState.page === "compose_editor") {
+      onProgress?.({ step: "Threads 停在发文页，关闭未送出草稿...", done: false });
+      await tapViaAdbAbsolute(config, padCode, closeX, closeY, 1000);
+    } else {
+      onProgress?.({ step: "Threads 停在回覆编辑页，返回上一层...", done: false });
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(700);
+    }
+
+    let afterClose = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (afterClose && afterClose.page !== "compose_editor" && afterClose.page !== "reply_composer") {
+      lastState = afterClose;
+      if (lastState.page !== "unknown" || lastState.reason === "LOCAL_ANDROID_LAUNCHER") return lastState;
+    }
+
+    const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    if (focus && !focus.includes(THREADS_PACKAGE)) {
+      lastState = await classifyThreadsPageOnDevice(config, padCode).catch(() => lastState);
+      return lastState;
+    }
+
+    for (const target of discardTargets) {
+      onProgress?.({ step: "确认丢弃 Threads 草稿...", done: false });
+      await tapViaAdbAbsolute(config, padCode, target.x, target.y, 900);
+      afterClose = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (afterClose && afterClose.page !== "compose_editor" && afterClose.page !== "reply_composer") {
+        return afterClose;
+      }
+    }
+
+    lastState = await classifyThreadsPageOnDevice(config, padCode).catch(() => lastState);
+  }
+
+  return lastState;
+}
+
+async function clearThreadsComposerDraft(
+  config: VmosConfig,
+  padCode: string,
+  onProgress: (p: PublishProgress) => void,
+) {
+  onProgress({ step: "清理 Threads 未送出草稿...", done: false });
+  let state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (state?.page !== "home_feed" && state?.page !== "compose_editor") {
+    await relaunchThreads(config, padCode, 3000);
+    state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  }
+  if (state?.page !== "compose_editor") {
+    await tapThreadsBottomComposeButton(config, padCode, 2500);
+    await waitForThreadsExpectedPage(config, padCode, ["compose_editor"], {
+      attempts: 5,
+      delayMs: 1000,
+      sampleScenario: "clear-draft-open-composer",
+      mediaKind: "media",
+      step: "清理草稿時打開新串文",
+    });
+  }
+  const afterClose = await closeThreadsComposerLayer(config, padCode, onProgress);
+  if (afterClose.page !== "home_feed") {
+    await relaunchThreads(config, padCode, 3000);
+  }
+}
+
+async function recoverThreadsLoginRequiredPage(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string } | null> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    onProgress?.({
+      step: `Threads 顯示 Instagram 帳號選擇頁，嘗試點選已登入帳號（第 ${attempt + 1}/2 次）...`,
+      done: false,
+    });
+    let before = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    const dialogDismissTarget = before?.screenshotUrl
+      ? await locateThreadsButtonByVision(
+          before.screenshotUrl,
+          "Threads 畫面中央錯誤彈窗底部的取消/關閉按鈕中心點；如果沒有錯誤彈窗就輸出 NOT_FOUND",
+        ).catch(() => null)
+      : null;
+    if (dialogDismissTarget) {
+      await tapAbsolute(config, padCode, dialogDismissTarget.x, dialogDismissTarget.y, 1200);
+      before = await classifyThreadsPageOnDevice(config, padCode).catch(() => before);
+    }
+
+    const accountPrompt = attempt === 0
+      ? "Threads 登入/歡迎頁中間的第一個白色 Instagram 已登入帳號卡片中心點，卡片內有 Instagram 圖標、帳號名稱和右側箭頭；不要選下面的「使用其他帳戶」"
+      : "Threads 登入/歡迎頁中間偏下的另一個白色 Instagram 已登入帳號卡片中心點，優先選擇不是最上方剛剛失敗的第二個帳號；不要選「使用其他帳戶」";
+    const accountTarget = before?.screenshotUrl
+      ? await locateThreadsButtonByVision(
+          before.screenshotUrl,
+          accountPrompt,
+        ).catch(() => null)
+      : null;
+    if (accountTarget) {
+      await tapAbsolute(config, padCode, accountTarget.x, accountTarget.y, 5500);
+    } else {
+      await tapAbsolute(config, padCode, 360, attempt === 0 ? 805 : 1025, 5500);
+    }
+    const after = await classifyThreadsPageOnDevice(config, padCode);
+    if (after.page === "login_required" || after.page === "challenge" || after.page === "system_dialog") {
+      continue;
+    }
+    const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    if (currentFocus && !currentFocus.includes(THREADS_PACKAGE)) {
+      continue;
+    }
+    const screenshotInput = await getInlineData(after.screenshotUrl).catch(() => null);
+    const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, screenshotInput).catch(() => null);
+    if (!blockedReason) {
+      return after;
+    }
+  }
+  return null;
+}
+
+async function closeThreadsReportSheetIfPresent(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<boolean> {
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const line = normalizeSingleLine(uiXml);
+  if (!/(举报|檢舉|Report)/i.test(line)) return false;
+  onProgress?.({ step: "偵測到 Threads 舉報彈窗，先關閉再繼續校驗...", done: false });
+  await execAdbAndWait(config, padCode, "input keyevent KEYCODE_BACK", 15000).catch(() => undefined);
+  await delay(1600);
+  return true;
+}
+
+async function closeThreadsMediaViewerLayer(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string } | null> {
+  onProgress?.({ step: "Threads 停在全屏媒体查看器，先关闭再继续...", done: false });
+  await tapViaAdbAbsolute(config, padCode, 64, 64, 1400);
+  let afterClose = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (afterClose && afterClose.page !== "media_viewer") return afterClose;
+
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+  await delay(1200);
+  afterClose = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (afterClose && afterClose.page !== "media_viewer") return afterClose;
+
+  await relaunchThreads(config, padCode, 3500);
+  return classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+}
+
+async function routeThreadsPreflightPage(
+  config: VmosConfig,
+  padCode: string,
+  onProgress: (p: PublishProgress) => void,
+): Promise<void> {
+  const current = await classifyThreadsPageOnDevice(config, padCode);
+  const currentShot = await getInlineData(current.screenshotUrl).catch(() => null);
+  const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, currentShot);
+  const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  const focusInsideThreads = currentFocus.includes(THREADS_PACKAGE);
+
+  if (current.page === "home_feed" || current.page === "profile_page" || current.page === "compose_editor") {
+    return;
+  }
+
+  if (current.page === "media_viewer") {
+    const afterClose = await closeThreadsMediaViewerLayer(config, padCode, onProgress);
+    if (afterClose?.page === "home_feed" || afterClose?.page === "profile_page" || afterClose?.page === "compose_editor") {
+      return;
+    }
+    throw new Error(`Threads 全屏媒体查看器未能关闭：${afterClose?.reason || current.reason}`);
+  }
+
+  if (current.page === "reply_composer") {
+    onProgress({ step: "Threads 停在回覆頁，嘗試退回首頁...", done: false });
+    await execAdbAndWait(config, padCode, "input keyevent KEYCODE_BACK", 15000);
+    await delay(1600);
+    const afterBack = await classifyThreadsPageOnDevice(config, padCode);
+    if (afterBack.page === "home_feed" || afterBack.page === "profile_page" || afterBack.page === "compose_editor") {
+      return;
+    }
+    throw new Error(`Threads 目前停在回覆頁，且返回後仍未回到可發布狀態：${afterBack.reason}`);
+  }
+
+  if (current.page === "system_dialog") {
+    onProgress({ step: "Threads 出現系統彈窗，嘗試關閉...", done: false });
+    const dismissed = await dismissThreadsSystemCrashDialogIfPossible(config, padCode, current.screenshotUrl).catch(() => false);
+    if (dismissed) {
+      await delay(1600);
+      const afterDismiss = await classifyThreadsPageOnDevice(config, padCode);
+      if (afterDismiss.page === "home_feed" || afterDismiss.page === "profile_page" || afterDismiss.page === "compose_editor") {
+        return;
+      }
+      const afterFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+      const afterShot = await getInlineData(afterDismiss.screenshotUrl).catch(() => null);
+      const afterBlocked = await detectThreadsBlockedScreenOnDevice(config, padCode, afterShot).catch(() => null);
+      if (afterFocus.includes(THREADS_PACKAGE) && !afterBlocked) {
+        onProgress({ step: `Threads 系統彈窗已關閉，頁面分類不穩定（${afterDismiss.reason}），按正常狀態繼續...`, done: false });
+        return;
+      }
+      const savedPath = saveThreadsDebugScreenshot(afterDismiss.screenshotUrl, "preflight-system-dialog");
+      throw new Error(`Threads 前置系統彈窗已關閉，但仍未回到可發布狀態：${afterDismiss.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
+    }
+
+    await execAdbAndWait(config, padCode, "input keyevent KEYCODE_BACK", 15000);
+    await delay(1600);
+    const afterBack = await classifyThreadsPageOnDevice(config, padCode);
+    if (afterBack.page === "home_feed" || afterBack.page === "profile_page" || afterBack.page === "compose_editor") {
+      return;
+    }
+    const afterFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    const afterShot = await getInlineData(afterBack.screenshotUrl).catch(() => null);
+    const afterBlocked = await detectThreadsBlockedScreenOnDevice(config, padCode, afterShot).catch(() => null);
+    if (afterFocus.includes(THREADS_PACKAGE) && !afterBlocked) {
+      onProgress({ step: `Threads 系統彈窗已關閉，頁面分類不穩定（${afterBack.reason}），按正常狀態繼續...`, done: false });
+      return;
+    }
+    const savedPath = saveThreadsDebugScreenshot(afterBack.screenshotUrl, "preflight-system-dialog");
+    throw new Error(`Threads 前置系統彈窗未解除：${afterBack.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
+  }
+
+  if (current.page === "login_required") {
+    if (current.reason === "LOCAL_PHONE_VERIFICATION_PAGE") {
+      const savedPath = saveThreadsDebugScreenshot(current.screenshotUrl, "preflight-phone-verification");
+      throw new Error(`Threads 目前需要完成手机号验证码登录：${current.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
+    }
+    if (!blockedReason) {
+      onProgress({ step: "Threads classifier 疑似誤判登入頁，按首頁狀態繼續...", done: false });
+      return;
+    }
+    const recovered = await recoverThreadsLoginRequiredPage(config, padCode, onProgress);
+    if (recovered) {
+      onProgress({ step: `Threads 已用現有 Instagram 帳號恢復：${recovered.reason}`, done: false });
+      return;
+    }
+    const savedPath = saveThreadsDebugScreenshot(current.screenshotUrl, "preflight-login");
+    throw new Error(`Threads 目前需要重新登入 Instagram：${current.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
+  }
+
+  if (current.page === "challenge") {
+    const savedPath = saveThreadsDebugScreenshot(current.screenshotUrl, "preflight-challenge");
+    throw new Error(`Threads 目前停在驗證或風控頁：${current.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
+  }
+
+  if (!focusInsideThreads) {
+    const samplePath = await captureThreadsPublishSample(config, padCode, {
+      scenario: "preflight-focus-outside-app",
+      step: "檢查 Threads 頁面狀態",
+      reason: currentFocus || current.reason,
+      page: current.page,
+      screenshotUrl: current.screenshotUrl,
+      expectedPages: ["home_feed", "profile_page", "compose_editor"],
+    });
+    throw new Error(appendSamplePath(`Threads 啟動後未進入 App，目前焦點：${currentFocus || current.reason || "unknown"}`, samplePath));
+  }
+
+  if (!blockedReason) {
+    onProgress({ step: `Threads 前置頁分類不穩定（${current.reason}），但焦點仍在 App 內，按正常狀態繼續...`, done: false });
+    return;
+  }
+
+  if (looksLikeThreadsLoginChooser(`${current.reason} ${blockedReason}`)) {
+    const recovered = await recoverThreadsLoginRequiredPage(config, padCode, onProgress);
+    if (recovered) {
+      onProgress({ step: `Threads 已從帳號選擇頁恢復：${recovered.reason}`, done: false });
+      return;
+    }
+  }
+
+  if (/keeps stopping|has stopped|stopped responding|close app|app info|已停止|停止運作|停止运行|AutoTakeoff/i.test(`${current.reason} ${blockedReason}`)) {
+    onProgress({ step: "Threads 似乎被系統崩潰彈窗阻斷，嘗試關閉後繼續...", done: false });
+    const dismissed = await dismissThreadsSystemCrashDialogIfPossible(config, padCode, current.screenshotUrl).catch(() => false);
+    if (dismissed) {
+      await delay(1500);
+      const recovered = await classifyThreadsPageOnDevice(config, padCode);
+      if (recovered.page === "home_feed" || recovered.page === "profile_page" || recovered.page === "compose_editor") {
+        return;
+      }
+      const recoveredShot = await getInlineData(recovered.screenshotUrl).catch(() => null);
+      const recoveredBlocked = await detectThreadsBlockedScreenOnDevice(config, padCode, recoveredShot).catch(() => null);
+      if (!recoveredBlocked && normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => "")).includes(THREADS_PACKAGE)) {
+        onProgress({ step: `Threads 崩潰彈窗已關閉，頁面分類暫不穩定（${recovered.reason}），按正常狀態繼續...`, done: false });
+        return;
+      }
+    }
+  }
+
+  const samplePath = await captureThreadsPublishSample(config, padCode, {
+    scenario: "preflight-blocked-or-unknown",
+    step: "檢查 Threads 頁面狀態",
+    reason: current.reason || blockedReason || "",
+    page: current.page,
+    screenshotUrl: current.screenshotUrl,
+    expectedPages: ["home_feed", "profile_page", "compose_editor"],
+  });
+  throw new Error(appendSamplePath(buildThreadsBlockedError(`Threads 前置頁狀態未知：${current.reason || blockedReason}`, current.screenshotUrl), samplePath));
+}
+
+async function prepareThreadsPublishContext(
+  config: VmosConfig,
+  padCode: string,
+  needsLocalProfileBaseline: boolean,
+  onProgress: (p: PublishProgress) => void,
+  options: {
+    grantPermissions?: boolean;
+    verifyLaunchState?: boolean;
+    launchWaitMs?: number;
+    clearDraftOnAcp?: boolean;
+  } = {},
+): Promise<string | undefined> {
+  const {
+    grantPermissions = true,
+    verifyLaunchState = true,
+    launchWaitMs = 4000,
+    clearDraftOnAcp = true,
+  } = options;
+
+  if (grantPermissions) {
+    onProgress({ step: "準備媒體許可權...", done: false });
+    await ensurePermissions(config, padCode, THREADS_PACKAGE, CAMERA_MEDIA_PERMISSIONS);
+  }
+
+  onProgress({ step: "啟動 Threads...", done: false });
+  await relaunchThreads(config, padCode, launchWaitMs);
+
+  if (verifyLaunchState) {
+    onProgress({ step: "檢查 Threads 頁面狀態...", done: false });
+    await routeThreadsPreflightPage(config, padCode, onProgress);
+  }
+
+  if (!needsLocalProfileBaseline) {
+    return undefined;
+  }
+
+  onProgress({ step: "讀取個人頁基線...", done: false });
+  const beforeProfileUrl = await captureThreadsProfileContentScreenshot(config, padCode);
+  const beforeProfileShot = await getInlineData(beforeProfileUrl);
+  const profileBlockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, beforeProfileShot);
+  if (profileBlockedReason) {
+    if (isThreadsOnboardingReason(profileBlockedReason)) {
+      onProgress({
+        step: "個人頁仍是新號啟動卡片，改用發布後畫面快驗...",
+        done: false,
+      });
+      onProgress({ step: "回到首頁準備發布...", done: false });
+      await relaunchThreads(config, padCode, 4000);
+      if (clearDraftOnAcp && isAcpPad(padCode)) {
+        await clearThreadsComposerDraft(config, padCode, onProgress);
+      }
+      return undefined;
+    }
+    throw new Error(`Threads 個人頁目前停在阻斷頁：${profileBlockedReason}，請先在雲機完成設定或驗證後再重試`);
+  }
+  onProgress({ step: "回到首頁準備發布...", done: false });
+  await relaunchThreads(config, padCode, 4000);
+  if (clearDraftOnAcp && isAcpPad(padCode)) {
+    await clearThreadsComposerDraft(config, padCode, onProgress);
+  }
+  return beforeProfileUrl;
+}
+
+async function relaunchInstagram(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 5000
+) {
+  await execAdb(config, padCode, `am force-stop ${INSTAGRAM_PACKAGE}`);
+  await delay(1500);
+  await execAdb(
+    config,
+    padCode,
+    `monkey -p ${INSTAGRAM_PACKAGE} -c android.intent.category.LAUNCHER 1`
+  );
+  await delay(waitMs);
+}
+
+async function launchInstagramMainFeed(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 5000,
+) {
+  await execAdbAndWait(
+    config,
+    padCode,
+    `am start -W -a android.intent.action.VIEW -d "instagram://mainfeed" ${INSTAGRAM_PACKAGE}; sleep ${Math.max(1, Math.ceil(waitMs / 1000))}`,
+    Math.max(30000, waitMs + 20000),
+    1000,
+  );
+}
+
+async function ensureInstagramHomeForPublish(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  onProgress?.({ step: "回到 Instagram 首頁...", done: false });
+  if (isAcpPad(padCode)) {
+    await launchInstagramMainFeed(config, padCode, 5000).catch(() => relaunchInstagram(config, padCode, 5000));
+  } else {
+    await relaunchInstagram(config, padCode, 5000);
+  }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    const state = shotUrl ? await classifyInstagramAcpReelFlowState(shotUrl).catch(() => "unknown" as const) : "unknown";
+    if (state === "instagram_home") return;
+
+    const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    if (!focus.includes(INSTAGRAM_PACKAGE)) {
+      await relaunchInstagram(config, padCode, 4000);
+      continue;
+    }
+
+    // Instagram can restore an arbitrary profile/detail page after force-stop.
+    // Back is the safest way out of those secondary pages; if it exits the app,
+    // the next loop relaunches it.
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(1600);
+  }
+
+  if (isAcpPad(padCode)) {
+    await launchInstagramMainFeed(config, padCode, 5000).catch(() => relaunchInstagram(config, padCode, 5000));
+  } else {
+    await relaunchInstagram(config, padCode, 5000);
+  }
+}
+
+async function execAdbAndWait(
+  config: VmosConfig,
+  padCode: string,
+  scriptContent: string,
+  timeoutMs = 60000,
+  intervalMs = 1000,
+) {
+  const taskId = await execAdb(config, padCode, scriptContent);
+  await waitTask(config, taskId, timeoutMs, intervalMs);
+}
+
+async function execAdbForText(
+  config: VmosConfig,
+  padCode: string,
+  scriptContent: string,
+  timeoutMs = 30000,
+  intervalMs = 1000,
+): Promise<string> {
+  const isReadOnlyCommand = /(uiautomator dump|content query|dumpsys|cat\s+\/|grep\b|head\s+-n|ls\b)/i.test(scriptContent);
+  const runOnce = async () => {
+    const taskId = await execAdb(config, padCode, scriptContent);
+    const result = await waitTask(config, taskId, timeoutMs, intervalMs);
+    return result.taskResult ?? result.errorMsg ?? "";
+  };
+  try {
+    return await runOnce();
+  } catch (error: any) {
+    const message = String(error?.message || error || "");
+    if (!isReadOnlyCommand || !/任務超時（\d+s）|任务超时（\d+s）|timeout/i.test(message)) {
+      throw error;
+    }
+    await delay(500);
+    return await runOnce();
+  }
+}
+
+async function dumpUiXml(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string> {
+  return execAdbForText(
+    config,
+    padCode,
+    "rm -f /data/local/tmp/vmos_window.xml; uiautomator dump /data/local/tmp/vmos_window.xml 2>&1; chmod 644 /data/local/tmp/vmos_window.xml 2>/dev/null; if [ -f /data/local/tmp/vmos_window.xml ]; then cat /data/local/tmp/vmos_window.xml | head -c 60000 2>&1; fi",
+    30000,
+    1000,
+  );
+}
+
+async function detectThreadsBlockedScreenOnDevice(
+  config: VmosConfig,
+  padCode: string,
+  screenshotInput?: { mimeType: string; data: string } | null,
+): Promise<string | null> {
+  const focus = await getAndroidCurrentFocus(config, padCode).catch(() => "");
+  const focusLine = normalizeSingleLine(focus);
+  const focusOutsideThreads = Boolean(focusLine) && !focusLine.includes(THREADS_PACKAGE);
+  const screenshotDataUrl = screenshotInput
+    ? `data:${screenshotInput.mimeType};base64,${screenshotInput.data}`
+    : undefined;
+  if (!focusOutsideThreads && await detectThreadsProfilePageLocally(screenshotDataUrl).catch(() => false)) {
+    return null;
+  }
+
+  try {
+    const xmlReason = detectThreadsBlockedScreenFromUiXml(await dumpUiXml(config, padCode));
+    if (xmlReason) {
+      if (/畫面結構不可讀|画面结构不可读/.test(xmlReason)) {
+        if (focusOutsideThreads) {
+          const visualReason = await detectThreadsAuthScreenVisually(screenshotInput ?? null);
+          if (visualReason) return visualReason;
+        }
+        // Threads often returns a null UIAutomator root even on a normal home/profile
+        // page, so do not treat the XML failure itself as a hard blocker while focus
+        // still remains inside com.instagram.barcelona.
+      } else {
+        return xmlReason;
+      }
+    }
+  } catch {
+    // Fall through to screenshot-based verifier below.
+  }
+
+  if (focusOutsideThreads) {
+    const visualReason = await detectThreadsAuthScreenVisually(screenshotInput ?? null);
+    if (visualReason) return visualReason;
+    return detectThreadsBlockedScreen(screenshotInput ?? null);
+  }
+
+  const visualReason = await detectThreadsBlockedScreen(screenshotInput ?? null);
+  if (visualReason && !/^畫面為\s*$|^画面为\s*$/i.test(visualReason.trim())) {
+    return visualReason;
+  }
+
+  return null;
+}
+
+async function locateThreadsComposerInputTarget(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ x: number; y: number } | null> {
+  try {
+    const xml = await dumpUiXml(config, padCode);
+    return findThreadsComposerInputTarget(xml);
+  } catch {
+    return null;
+  }
+}
+
+async function locateThreadsComposerPublishButtonTarget(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ x: number; y: number } | null> {
+  try {
+    const xml = await dumpUiXml(config, padCode);
+    return findThreadsComposerPublishButtonTarget(xml);
+  } catch {
+    return null;
+  }
+}
+
+async function locateThreadsProfileVideoTabTarget(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ x: number; y: number } | null> {
+  try {
+    const xml = await dumpUiXml(config, padCode);
+    return findThreadsProfileVideoTabTarget(xml);
+  } catch {
+    return null;
+  }
+}
+
+async function focusThreadsComposerInput(
+  config: VmosConfig,
+  padCode: string,
+  fallback: { x: number; y: number; absolute?: boolean },
+  waitMs = 900,
+) {
+  const detected = await locateThreadsComposerInputTarget(config, padCode);
+  if (detected) {
+    await tapViaAdbAbsolute(config, padCode, detected.x, detected.y, waitMs);
+    return;
+  }
+  if (fallback.absolute) {
+    await tapViaAdbReferencePoint(config, padCode, fallback, waitMs);
+  } else {
+    await tap(config, padCode, fallback.x, fallback.y, waitMs);
+  }
+}
+
+async function tapThreadsComposerPublishButton(
+  config: VmosConfig,
+  padCode: string,
+  composerShotUrl?: string,
+) {
+  let currentShotUrl = composerShotUrl ? await freezeScreenshotUrl(composerShotUrl).catch(() => composerShotUrl) : await freezeScreenshotUrl(await screenshot(config, padCode));
+  const currentImage = await getImageDimensions(currentShotUrl).catch(() => null);
+  const initialPublishButton = currentShotUrl
+    ? await locateThreadsComposerPublishButton(currentShotUrl).catch(() => null)
+    : null;
+  if (
+    isAcpPad(padCode)
+    && isUsableScreenshotSize(currentImage)
+    && initialPublishButton
+    && initialPublishButton.y >= currentImage.height * 0.82
+  ) {
+    await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, initialPublishButton, 4200);
+    const afterDetectedTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (afterDetectedTap?.page !== "compose_editor" && afterDetectedTap?.page !== "reply_composer") {
+      return;
+    }
+  }
+  if (
+    isUsableScreenshotSize(currentImage)
+    && await detectAndroidKeyboardVisibleLocally(currentShotUrl).catch(() => false)
+  ) {
+    if (isAcpPad(padCode)) {
+      await tapViaAdbReferencePoint(config, padCode, { x: 625, y: 815 }, 2200);
+      const afterFirstTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (afterFirstTap?.page !== "compose_editor" && afterFirstTap?.page !== "reply_composer") {
+        return;
+      }
+      await tapViaAdbReferencePoint(config, padCode, { x: 625, y: 815 }, 4200);
+      return;
+    }
+    const keyboardPublishButton = await locateThreadsComposerPublishButton(currentShotUrl).catch(() => null);
+    if (keyboardPublishButton) {
+      await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, keyboardPublishButton, 4200);
+      return;
+    }
+    await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, {
+      x: Math.round(currentImage.width * 0.07),
+      y: Math.round(currentImage.height * 0.68),
+    }, 1200).catch(() => undefined);
+
+    const afterHideShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => currentShotUrl);
+    if (!await detectAndroidKeyboardVisibleLocally(afterHideShotUrl).catch(() => false)) {
+      currentShotUrl = afterHideShotUrl;
+    } else {
+      await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, {
+        x: Math.round(currentImage.width * 0.885),
+        y: Math.round(currentImage.height * 0.618),
+      }, 1800);
+      await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, {
+      x: Math.round(currentImage.width * 0.885),
+      y: Math.round(currentImage.height * 0.625),
+      }, 4200);
+      return;
+    }
+  }
+
+  if (isAcpPad(padCode)) {
+    await tapViaAdbReferencePoint(config, padCode, { x: 625, y: 1516 }, 4200);
+    const afterBottomTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (afterBottomTap?.page !== "compose_editor" && afterBottomTap?.page !== "reply_composer") {
+      return;
+    }
+  }
+
+  const semanticPublishButton = await locateThreadsComposerPublishButtonTarget(config, padCode);
+  if (semanticPublishButton) {
+    await tapViaAdbReferencePoint(config, padCode, semanticPublishButton, 1800, THREADS_TALL_REFERENCE_SCREEN);
+    return;
+  }
+
+  const shotUrl = currentShotUrl;
+  const detectedPublishButton = initialPublishButton || await locateThreadsComposerPublishButton(shotUrl);
+  if (detectedPublishButton) {
+    await tapScreenshotPointViaAdb(config, padCode, shotUrl, detectedPublishButton, 1800);
+    return;
+  }
+
+  const screen = await getScreenSize(config, padCode).catch(() => ({
+    width: currentImage?.width || BASE_SCREEN.width,
+    height: currentImage?.height || BASE_SCREEN.height,
+  }));
+  const fallbackPoints = [
+    { x: Math.round(screen.width * 0.865), y: Math.round(screen.height * 0.948) },
+    { x: Math.round(screen.width * 0.89), y: Math.round(screen.height * 0.96) },
+    { x: Math.round(screen.width * 0.91), y: Math.round(screen.height * 0.955) },
+  ];
+  for (const point of fallbackPoints) {
+    await tapViaAdbAbsolute(config, padCode, point.x, point.y, 2100);
+  }
+}
+
+async function tapThreadsComposerPublishButtonUntilSubmitted(
+  config: VmosConfig,
+  padCode: string,
+  input: {
+    mediaKind: "text" | "image" | "video";
+    initialShotUrl: string;
+    onProgress?: (progress: PublishProgress) => void;
+    onRecoveredSearchOverlay?: () => Promise<void>;
+  },
+) {
+  let lastState: Awaited<ReturnType<typeof classifyThreadsPageOnDevice>> | null = null;
+  let shotUrl = input.initialShotUrl;
+  const waits = [4200, 5600, 7200, 8800];
+
+  for (let attempt = 0; attempt < waits.length; attempt += 1) {
+    input.onProgress?.({
+      step: attempt === 0 ? "點選發布..." : `仍在編輯頁，重新定位發布按鈕 ${attempt + 1}/${waits.length}...`,
+      done: false,
+    });
+    await tapThreadsComposerPublishButton(config, padCode, shotUrl);
+
+    const deadline = Date.now() + waits[attempt];
+    while (Date.now() < deadline) {
+      await delay(900);
+      const state = await waitForThreadsPageSettled(config, padCode, {
+        timeoutMs: 1800,
+        intervalMs: 450,
+        stableSamples: 2,
+      });
+      lastState = state;
+
+      if (state.page === "system_dialog") {
+        const dismissed = await dismissThreadsSystemCrashDialogIfPossible(config, padCode, state.screenshotUrl).catch(() => false);
+        if (dismissed) {
+          await delay(1100);
+          continue;
+        }
+        throw new Error(buildThreadsBlockedError(state.reason, state.screenshotUrl));
+      }
+
+      if (isThreadsTerminalPage(state.page)) {
+        throw new Error(buildThreadsBlockedError(state.reason, state.screenshotUrl));
+      }
+
+      if (state.reason === "LOCAL_THREADS_SEARCH_OVERLAY"
+        || await detectThreadsSearchOverlayLocally(state.screenshotUrl).catch(() => false)) {
+        input.onProgress?.({ step: "發布前誤入搜尋頁，返回編輯頁重新確認文案...", done: false });
+        const recovered = await recoverThreadsSearchOverlayToComposer(config, padCode).catch(() => null);
+        if (recovered?.page === "compose_editor") {
+          if (input.onRecoveredSearchOverlay) {
+            await input.onRecoveredSearchOverlay();
+          }
+          shotUrl = recovered.screenshotUrl;
+          continue;
+        }
+      }
+
+      if (state.page === "profile_page" || await detectThreadsProfilePageLocally(state.screenshotUrl).catch(() => false)) {
+        return;
+      }
+
+      if (state.page !== "compose_editor" && state.page !== "reply_composer") {
+        return;
+      }
+
+      if (await detectThreadsPublishedToastLocally(state.screenshotUrl).catch(() => false)) {
+        return;
+      }
+
+      shotUrl = state.screenshotUrl;
+    }
+  }
+
+  let finalState: Awaited<ReturnType<typeof classifyThreadsPageOnDevice>> | null = null;
+  const finalDeadline = Date.now() + 18_000;
+  while (Date.now() < finalDeadline) {
+    await delay(1200);
+    finalState = await waitForThreadsPageSettled(config, padCode, {
+      timeoutMs: 2200,
+      intervalMs: 550,
+      stableSamples: 2,
+    }).catch(() => null);
+    if (!finalState) continue;
+    lastState = finalState;
+    if (finalState.page === "system_dialog") {
+      const dismissed = await dismissThreadsSystemCrashDialogIfPossible(config, padCode, finalState.screenshotUrl).catch(() => false);
+      if (dismissed) {
+        await delay(1100);
+        continue;
+      }
+      throw new Error(buildThreadsBlockedError(finalState.reason, finalState.screenshotUrl));
+    }
+    if (isThreadsTerminalPage(finalState.page)) {
+      throw new Error(buildThreadsBlockedError(finalState.reason, finalState.screenshotUrl));
+    }
+    if (finalState.reason === "LOCAL_THREADS_SEARCH_OVERLAY"
+      || await detectThreadsSearchOverlayLocally(finalState.screenshotUrl).catch(() => false)) {
+      input.onProgress?.({ step: "發布後仍在搜尋頁，返回編輯頁重新確認文案...", done: false });
+      const recovered = await recoverThreadsSearchOverlayToComposer(config, padCode).catch(() => null);
+      if (recovered?.page === "compose_editor") {
+        if (input.onRecoveredSearchOverlay) {
+          await input.onRecoveredSearchOverlay();
+        }
+        return tapThreadsComposerPublishButtonUntilSubmitted(config, padCode, {
+          ...input,
+          initialShotUrl: recovered.screenshotUrl,
+        });
+      }
+    }
+    if (finalState.page === "profile_page" || await detectThreadsProfilePageLocally(finalState.screenshotUrl).catch(() => false)) {
+      return;
+    }
+    if (finalState.page !== "compose_editor" && finalState.page !== "reply_composer") {
+      return;
+    }
+    if (await detectThreadsPublishedToastLocally(finalState.screenshotUrl).catch(() => false)) {
+      return;
+    }
+  }
+
+  finalState = finalState || await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (finalState) {
+    if (finalState.page === "system_dialog") {
+      const dismissed = await dismissThreadsSystemCrashDialogIfPossible(config, padCode, finalState.screenshotUrl).catch(() => false);
+      if (dismissed) {
+        return tapThreadsComposerPublishButtonUntilSubmitted(config, padCode, {
+          ...input,
+          initialShotUrl: finalState.screenshotUrl,
+        });
+      }
+      throw new Error(buildThreadsBlockedError(finalState.reason, finalState.screenshotUrl));
+    }
+    if (isThreadsTerminalPage(finalState.page)) {
+      throw new Error(buildThreadsBlockedError(finalState.reason, finalState.screenshotUrl));
+    }
+    if (finalState.page === "profile_page" || await detectThreadsProfilePageLocally(finalState.screenshotUrl).catch(() => false)) {
+      return;
+    }
+    if (finalState.page !== "compose_editor" && finalState.page !== "reply_composer") {
+      return;
+    }
+    if (await detectThreadsPublishedToastLocally(finalState.screenshotUrl).catch(() => false)) {
+      return;
+    }
+  }
+
+  const state = finalState || lastState || await classifyThreadsPageOnDevice(config, padCode);
+  const rechecked = await recheckThreadsPageWithGemini(config, padCode, state, "發布按鈕結果").catch(() => null);
+  if (rechecked) {
+    if (isThreadsTerminalPage(rechecked.page)) {
+      throw new Error(buildThreadsBlockedError(`Threads 發布後 Gemini 复判为账号状态页：${rechecked.reason}`, rechecked.screenshotUrl));
+    }
+    if (rechecked.page === "profile_page" || rechecked.page === "home_feed" || rechecked.page === "unknown") {
+      return;
+    }
+    if (rechecked.page !== "compose_editor" && rechecked.page !== "reply_composer") {
+      return;
+    }
+  }
+  const samplePath = await captureThreadsPublishSample(config, padCode, {
+    scenario: "publish-button-no-effect",
+    mediaKind: input.mediaKind,
+    step: "點選發布",
+    reason: state.reason,
+    page: state.page,
+    screenshotUrl: state.screenshotUrl,
+    expectedPages: ["home_feed", "profile_page", "unknown"],
+  });
+  const debugPath = samplePath ? "" : (saveThreadsDebugScreenshot(state.screenshotUrl, "publish-still-composer") || "");
+  throw new Error(appendSamplePath(
+    `發布後仍停留在輸入頁：${state.reason}${debugPath ? `｜debug=${debugPath}` : ""}`,
+    samplePath,
+  ));
+}
+
+async function assertThreadsComposerReadyForPublish(
+  config: VmosConfig,
+  padCode: string,
+  input: {
+    mediaKind: "text" | "image" | "video";
+    step: string;
+    onRecoveredSearchOverlay?: () => Promise<void>;
+  },
+): Promise<string> {
+  let lastState: Awaited<ReturnType<typeof classifyThreadsPageOnDevice>> | null = null;
+  let lastFocus = "";
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    lastFocus = focus;
+    if (focus && !focus.includes(THREADS_PACKAGE)) {
+      if (isAndroidCameraFocus(focus)) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(1200);
+        continue;
+      }
+      if (attempt < 2) {
+        await relaunchThreads(config, padCode, 2200).catch(() => undefined);
+        await delay(900);
+        continue;
+      }
+      const samplePath = await captureThreadsPublishSample(config, padCode, {
+        scenario: "composer-focus-outside-app",
+        mediaKind: input.mediaKind,
+        step: input.step,
+        reason: focus,
+        expectedPages: ["compose_editor"],
+      });
+      throw new Error(appendSamplePath(`Threads 發布前未停在 App 內，目前焦點：${focus}`, samplePath));
+    }
+
+    const [state, uiXml] = await Promise.all([
+      classifyThreadsPageOnDevice(config, padCode),
+      dumpUiXml(config, padCode).catch(() => ""),
+    ]);
+    lastState = state;
+
+    if (state.reason === "LOCAL_THREADS_SEARCH_OVERLAY"
+      || await detectThreadsSearchOverlayLocally(state.screenshotUrl).catch(() => false)) {
+      const recovered = await recoverThreadsSearchOverlayToComposer(config, padCode).catch(() => null);
+      if (recovered?.page === "compose_editor" && input.onRecoveredSearchOverlay) {
+        await input.onRecoveredSearchOverlay();
+      }
+      await delay(900);
+      continue;
+    }
+
+    if (detectThreadsDraftSaveDialogFromUiXml(uiXml)
+      || await detectThreadsDraftSaveDialogLocally(state.screenshotUrl).catch(() => false)) {
+      const afterDismiss = await dismissThreadsDraftSaveDialog(config, padCode, state.screenshotUrl).catch(() => null);
+      if (afterDismiss?.page === "compose_editor") return afterDismiss.screenshotUrl;
+      lastState = afterDismiss || state;
+      await delay(900);
+      continue;
+    }
+
+    if (state.page === "system_dialog") {
+      const dismissed = await dismissThreadsSystemCrashDialogIfPossible(config, padCode, state.screenshotUrl).catch(() => false);
+      if (dismissed) {
+        await delay(1100);
+        continue;
+      }
+    }
+
+    if (state.page === "login_required" || state.page === "challenge" || state.page === "system_dialog") {
+      const samplePath = await captureThreadsPublishSample(config, padCode, {
+        scenario: "composer-blocked-page",
+        mediaKind: input.mediaKind,
+        step: input.step,
+        reason: state.reason,
+        page: state.page,
+        screenshotUrl: state.screenshotUrl,
+        expectedPages: ["compose_editor"],
+      });
+      throw new Error(appendSamplePath(`Threads 發布前被前置頁阻斷：${state.reason}`, samplePath));
+    }
+
+    const visualPublishButton = state.screenshotUrl
+      ? await locateThreadsComposerPublishButton(state.screenshotUrl).catch(() => null)
+      : null;
+    const hasComposerControl = Boolean(
+      findThreadsComposerPublishButtonTarget(uiXml)
+        || findThreadsComposerInputTarget(uiXml)
+        || visualPublishButton
+        || state.page === "compose_editor",
+    );
+    if (hasComposerControl) {
+      return state.screenshotUrl;
+    }
+
+    if (state.page === "media_viewer") {
+      await closeThreadsMediaViewerLayer(config, padCode).catch(() => null);
+      await delay(1000);
+      continue;
+    }
+
+    if (state.page === "reply_composer") {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1000);
+      continue;
+    }
+
+    if (attempt < 2) {
+      await delay(1200 + attempt * 700);
+      continue;
+    }
+  }
+
+  const rechecked = await recheckExpectedThreadsPageBeforeFailure(
+    config,
+    padCode,
+    lastState,
+    ["compose_editor"],
+    input.step || "發布前控件確認",
+  ).catch((error) => {
+    throw error;
+  });
+  if (rechecked) return rechecked.screenshotUrl;
+  const samplePath = await captureThreadsPublishSample(config, padCode, {
+    scenario: "composer-controls-missing",
+    mediaKind: input.mediaKind,
+    step: input.step,
+    reason: lastState?.reason || lastFocus || "composer controls not found after retries",
+    page: lastState?.page || "unknown",
+    screenshotUrl: lastState?.screenshotUrl,
+    expectedPages: ["compose_editor"],
+  });
+  throw new Error(appendSamplePath(`Threads 發布前未找到新串文輸入/發布控件：${lastState?.page || "unknown"}（${lastState?.reason || lastFocus || "unknown"}）`, samplePath));
+}
+
+async function recoverThreadsSearchOverlayToComposer(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string } | null> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (!state) return null;
+    if (state.page === "compose_editor") return state;
+    const inSearchOverlay = state.reason === "LOCAL_THREADS_SEARCH_OVERLAY"
+      || await detectThreadsSearchOverlayLocally(state.screenshotUrl).catch(() => false);
+    if (!inSearchOverlay) return state;
+
+    if (attempt === 1) {
+      const image = await getImageDimensions(state.screenshotUrl).catch(() => null);
+      const closePoint = image
+        ? { x: Math.round(image.width * 0.90), y: Math.round(image.height * 0.095) }
+        : { x: 648, y: 152 };
+      await tapScreenshotPointViaAdb(config, padCode, state.screenshotUrl, closePoint, 500).catch(() => undefined);
+    }
+
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900 + attempt * 350);
+  }
+  return classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+}
+
+async function recoverThreadsSearchOverlayAfterCaptionInput(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  onProgress: (p: PublishProgress) => void,
+  fallbackInputPoint: { x: number; y: number; absolute?: boolean },
+  waitMs = 3000,
+): Promise<boolean> {
+  let state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  const inSearchOverlay = state?.reason === "LOCAL_THREADS_SEARCH_OVERLAY"
+    || await detectThreadsSearchOverlayLocally(state?.screenshotUrl).catch(() => false);
+  if (!inSearchOverlay) return false;
+
+  onProgress({ step: "文案誤入搜尋框，返回編輯頁重新輸入...", done: false });
+  state = await recoverThreadsSearchOverlayToComposer(config, padCode);
+  if (state?.page === "compose_editor") {
+    await focusThreadsComposerInput(config, padCode, fallbackInputPoint, 900);
+    await typeText(config, padCode, caption, waitMs);
+    return true;
+  }
+  if (state?.page === "media_viewer") {
+    await closeThreadsMediaViewerLayer(config, padCode).catch(() => null);
+    await delay(900);
+  }
+  return false;
+}
+
+async function waitForThreadsComposerCaptionText(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  attempts = 4,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const [uiXml, state] = await Promise.all([
+      dumpUiXml(config, padCode).catch(() => ""),
+      classifyThreadsPageOnDevice(config, padCode).catch(() => null),
+    ]);
+    if (hasThreadsComposerCaptionText(uiXml, caption)) return true;
+    if (state?.page !== "compose_editor") return false;
+    if (state.screenshotUrl && await locateThreadsComposerPublishButton(state.screenshotUrl).catch(() => null)) {
+      // Some Threads builds do not expose the draft text in UIAutomator after
+      // cloud input, but an enabled Post pill is enough proof that text/media is present.
+      return true;
+    }
+    await delay(700 + attempt * 250);
+  }
+  return false;
+}
+
+async function rewriteThreadsComposerCaption(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  fallbackInputPoint: { x: number; y: number; absolute?: boolean },
+  waitMs = 3000,
+) {
+  const inputPoints = [
+    fallbackInputPoint,
+    THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE,
+    { x: 170, y: 455, absolute: true },
+    { x: 220, y: 520, absolute: true },
+  ];
+
+  const recoverOverlayToComposer = async () => {
+    let state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (!state) return null;
+    if (state.page === "compose_editor") return state;
+    if (state.reason === "LOCAL_THREADS_SEARCH_OVERLAY"
+      || await detectThreadsSearchOverlayLocally(state.screenshotUrl).catch(() => false)) {
+      return recoverThreadsSearchOverlayToComposer(config, padCode);
+    }
+    if (!isThreadsTerminalPage(state.page)) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(900 + attempt * 350);
+        state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        if (state?.page === "compose_editor") return state;
+      }
+    }
+    return state;
+  };
+
+  for (const point of inputPoints) {
+    let state = await recoverOverlayToComposer();
+    if (state && state.page !== "compose_editor") continue;
+    await focusThreadsComposerInput(config, padCode, point, 900);
+    state = await recoverOverlayToComposer();
+    if (state && state.page !== "compose_editor") continue;
+    await clearFocusedTextInput(config, padCode, 350);
+    await typeText(config, padCode, caption, Math.max(waitMs, point === fallbackInputPoint ? waitMs : 3500));
+    if (await waitForThreadsComposerCaptionText(config, padCode, caption, 3)) return;
+  }
+
+  if (!await waitForThreadsComposerCaptionText(config, padCode, caption, 4)) {
+    throw new Error("Threads 文案输入未确认，已停止发布以避免点击灰色发布按钮");
+  }
+}
+
+async function queryMediaStoreContentUri(
+  config: VmosConfig,
+  padCode: string,
+  remotePath: string,
+  isVideoMedia: boolean,
+): Promise<string | null> {
+  const realPath = remotePath.replace(/^\/sdcard\//, "/storage/emulated/0/");
+  const escapedPath = realPath.replace(/'/g, "''");
+  const mediaQueries = isVideoMedia
+    ? [
+        {
+          uri: "content://media/external/video/media",
+          contentUriForId: (id: string) => `content://media/external/video/media/${id}`,
+        },
+        {
+          uri: "content://media/external/file",
+          contentUriForId: (id: string) => `content://media/external/file/${id}`,
+        },
+      ]
+    : [
+        {
+          uri: "content://media/external/images/media",
+          contentUriForId: (id: string) => `content://media/external/images/media/${id}`,
+        },
+        {
+          uri: "content://media/external/file",
+          contentUriForId: (id: string) => `content://media/external/file/${id}`,
+        },
+      ];
+
+  for (const query of mediaQueries) {
+    const output = await execAdbForText(
+      config,
+      padCode,
+      `content query --uri ${query.uri} --projection _id:_data --where "_data='${escapedPath}'" 2>/dev/null`,
+      15000,
+      1000,
+    ).catch(() => "");
+    const idMatch = output.match(/_id=(\d+)/);
+    if (idMatch) return query.contentUriForId(idMatch[1]);
+  }
+
+  return null;
+}
+
+async function launchThreadsShareIntent(
+  config: VmosConfig,
+  padCode: string,
+  options: {
+    caption?: string;
+    contentUri?: string;
+    mimeType?: string;
+  },
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  onProgress?.({
+    step: options.contentUri ? "使用系統分享開啟 Threads 媒體編輯頁..." : "使用系統分享開啟 Threads 文字編輯頁...",
+    done: false,
+  });
+  const output = await execAdbForText(
+    config,
+    padCode,
+    buildThreadsShareIntentCommand(options),
+    90000,
+    1200,
+  );
+  if (/Unknown option|Exception occurred|Error:/i.test(output)) {
+    throw new Error(`Threads 分享入口啟動失敗：${normalizeSingleLine(output).slice(0, 260)}`);
+  }
+  await delay(options.contentUri ? 4500 : 3500);
+
+  const currentFocus = await getAndroidCurrentFocus(config, padCode);
+  if (currentFocus && !currentFocus.includes(THREADS_PACKAGE)) {
+    throw new Error(`Threads 分享入口未進入 App，目前畫面：${normalizeSingleLine(currentFocus).slice(0, 220)}`);
+  }
+}
+
+async function getAndroidCurrentFocus(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string> {
+  return execAdbForText(
+    config,
+    padCode,
+    [
+      "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | head -n 6",
+      "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | head -n 6",
+    ].join("; "),
+    20000,
+    1000,
+  ).catch(() => "");
+}
+
+async function getAndroidCurrentFocusQuick(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string> {
+  return execAdbForText(
+    config,
+    padCode,
+    "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | head -n 4",
+    5000,
+    500,
+  ).catch(() => "");
+}
+
+function parseDownloadFileNames(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.includes("/") && !line.startsWith("total "))
+    .map((fileName) => `/sdcard/Download/${fileName}`);
+}
+
+async function listRecentDownloadMediaPaths(
+  config: VmosConfig,
+  padCode: string,
+  isVideoMedia: boolean,
+): Promise<string[]> {
+  const pattern = isVideoMedia
+    ? "\\.(mp4|m4v|mov|webm)$"
+    : "\\.(png|jpg|jpeg|webp)$";
+  const output = await execAdbForText(
+    config,
+    padCode,
+    `ls -t /sdcard/Download 2>/dev/null | grep -Ei ${shellSingleQuote(pattern)} | head -n 40`,
+    20000,
+    1000,
+  ).catch(() => "");
+  return parseDownloadFileNames(output);
+}
+
+async function resolveUploadedDeviceMediaPath(
+  config: VmosConfig,
+  padCode: string,
+  requestedRemotePath: string,
+  isVideoMedia: boolean,
+  beforePaths: string[],
+): Promise<string> {
+  const exactExists = await execAdbForText(
+    config,
+    padCode,
+    `if [ -f ${shellDoubleQuote(requestedRemotePath)} ]; then printf %s ${shellDoubleQuote(requestedRemotePath)}; fi`,
+    15000,
+    1000,
+  ).catch(() => "");
+  if (exactExists.trim() === requestedRemotePath) return requestedRemotePath;
+
+  const beforeSet = new Set(beforePaths);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const afterPaths = await listRecentDownloadMediaPaths(config, padCode, isVideoMedia);
+    const newPath = afterPaths.find((path) => !beforeSet.has(path));
+    if (newPath) return newPath;
+    if (afterPaths[0]) return afterPaths[0];
+    await delay(1200);
+  }
+
+  return requestedRemotePath;
+}
+
+async function waitForMediaIndexed(
+  config: VmosConfig,
+  padCode: string,
+  remotePath: string,
+  isVideo = false,
+  timeoutMs = 20000,
+  beforeVideoMediaId?: number,
+) {
+  const deadline = Date.now() + timeoutMs;
+  const fileName = remotePath.split("/").pop() ?? remotePath;
+  const realPath = remotePath.replace(/^\/sdcard\//, "/storage/emulated/0/");
+  const mediaQueries = isVideo
+    ? [
+        `content query --uri content://media/external/video/media --projection _id:_data --where "_data='${realPath}'"`,
+        `content query --uri content://media/external/video --projection _id:_data --where "_data='${realPath}'"`,
+        `content query --uri content://media/external/file --projection _id:_data | grep -F '${fileName}'`,
+      ]
+    : [
+        `content query --uri content://media/external/images/media --projection _id:_data --where "_data='${realPath}'"`,
+        `content query --uri content://media/external/file --projection _id:_data | grep -F '${fileName}'`,
+      ];
+
+  while (Date.now() < deadline) {
+    for (const query of mediaQueries) {
+      try {
+        const taskId = await execAdb(config, padCode, query);
+        const result = await waitTask(config, taskId, 10000, 1000);
+        const output = result.taskResult ?? result.errorMsg ?? "";
+        if (output.includes(fileName) || output.includes(realPath) || /Row:\s*\d+/i.test(output)) {
+          return true;
+        }
+      } catch {
+        // Media scanner may still be indexing. Keep polling.
+      }
+    }
+    if (isVideo && typeof beforeVideoMediaId === "number") {
+      const latestVideoId = await queryLatestVideoMediaId(config, padCode);
+      if (typeof latestVideoId === "number" && latestVideoId > beforeVideoMediaId) {
+        return true;
+      }
+    }
+    await delay(1500);
+  }
+
+  return false;
+}
+
+async function queryLatestVideoMediaId(
+  config: VmosConfig,
+  padCode: string,
+): Promise<number | undefined> {
+  try {
+    const text = await execAdbForText(
+      config,
+      padCode,
+      `content query --uri content://media/external/video/media --projection _id:_data:date_added --sort 'date_added DESC' 2>/dev/null | head -n 20`,
+      45000,
+      1200,
+    );
+    const matches = Array.from(text.matchAll(/_id=(\d+), _data=.*?\.mp4/gi));
+    if (matches.length === 0) {
+      const fallbackText = await execAdbForText(
+        config,
+        padCode,
+        `content query --uri content://media/external/file --projection _id:_data:date_added --sort 'date_added DESC' 2>/dev/null | grep -i '.mp4' | head -n 20`,
+        45000,
+        1200,
+      );
+      const fallbackMatches = Array.from(fallbackText.matchAll(/_id=(\d+), _data=.*?\.mp4/gi));
+      if (fallbackMatches.length === 0) return undefined;
+      return fallbackMatches.reduce((max, match) => {
+        const value = Number(match[1]);
+        return Number.isFinite(value) ? Math.max(max, value) : max;
+      }, 0);
+    }
+    return matches.reduce((max, match) => {
+      const value = Number(match[1]);
+      return Number.isFinite(value) ? Math.max(max, value) : max;
+    }, 0);
+  } catch {
+    return undefined;
+  }
+}
+
+async function stageMediaOnDevice(
+  config: VmosConfig,
+  padCode: string,
+  mediaUrl: string,
+  remotePath: string,
+  onProgress?: (p: PublishProgress) => void,
+  options: { reuse?: boolean } = {},
+): Promise<string> {
+  const mediaLabel = getDeviceMediaLabel(mediaUrl);
+  const isVideoMedia = isVideoMediaUrl(mediaUrl);
+  if (options.reuse !== false) {
+    const reusableRemotePath = await getReusableStagedMediaPath(config, padCode, mediaUrl, remotePath);
+    if (reusableRemotePath) {
+      onProgress?.({
+        step: `复用已写入云机的${mediaLabel}，跳过重复上传...`,
+        done: false,
+      });
+      return reusableRemotePath;
+    }
+  }
+
+  const stagingMediaUrl = isVideoMedia
+    ? await maybeTranscodeVideoDataUrlForStaging(mediaUrl, onProgress)
+    : await maybeCompressRemoteImageForStaging(mediaUrl, onProgress);
+  if (!stagingMediaUrl.startsWith("data:")) {
+    const beforeVideoMediaId = isVideoMedia ? await queryLatestVideoMediaId(config, padCode) : undefined;
+    const beforeDownloadPaths = await listRecentDownloadMediaPaths(config, padCode, isVideoMedia);
+    onProgress?.({
+      step: `直傳${mediaLabel}到雲機...`,
+      done: false,
+    });
+    const taskId = await uploadFileByUrl(config, padCode, stagingMediaUrl, remotePath);
+    const numericTaskId = Number(taskId);
+    if (Number.isFinite(numericTaskId)) {
+      await waitTask(config, numericTaskId, 90000, 1500);
+    } else {
+      await delay(5000);
+    }
+    const actualRemotePath = await resolveUploadedDeviceMediaPath(
+      config,
+      padCode,
+      remotePath,
+      isVideoMedia,
+      beforeDownloadPaths,
+    );
+    await execAdbAndWait(
+      config,
+      padCode,
+      `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://${actualRemotePath}`
+    );
+    const indexed = await waitForMediaIndexed(
+      config,
+      padCode,
+      actualRemotePath,
+      isVideoMedia,
+      isVideoMedia ? 45000 : 20000,
+      beforeVideoMediaId,
+    );
+    if (isVideoMedia && !indexed) {
+      throw new Error("影片已寫入雲機，但尚未被系統圖庫索引，請稍後重試");
+    }
+    await delay(600);
+    rememberStagedMediaPath(padCode, mediaUrl, actualRemotePath);
+    return actualRemotePath;
+  }
+
+  const parsed = isVideoMedia
+    ? parseDataUrlMedia(stagingMediaUrl)
+    : parseDataUrlMedia(await compressImage(stagingMediaUrl, {
+      targetBytes: STAGED_IMAGE_TARGET_BYTES,
+      maxDim: 960,
+      minQuality: 0.24,
+    }));
+  if (!parsed) {
+    throw new Error(`${mediaLabel} data URL 解析失敗`);
+  }
+
+  const remoteBase64Path = `${remotePath}.b64`;
+
+  await execAdbAndWait(
+    config,
+    padCode,
+    `rm -f ${remotePath} ${remoteBase64Path}; : > ${remoteBase64Path}`
+  );
+
+  const writeBase64Chunks = async (
+    chunkSize: number,
+    chunksPerCommand: number,
+    pollIntervalMs: number,
+    progressEveryPercent = 10,
+  ) => {
+    const totalChunks = Math.ceil(parsed.base64.length / chunkSize);
+    const totalWrites = Math.ceil(totalChunks / chunksPerCommand);
+    let lastReportedPercent = -1;
+    await execAdbAndWait(
+      config,
+      padCode,
+      `rm -f ${remoteBase64Path}; : > ${remoteBase64Path}`,
+    );
+
+    for (let writeIndex = 0; writeIndex < totalWrites; writeIndex += 1) {
+      const percent = Math.floor(((writeIndex + 1) / totalWrites) * 100);
+      const shouldReport = writeIndex === 0
+        || writeIndex === totalWrites - 1
+        || percent - lastReportedPercent >= progressEveryPercent;
+      if (shouldReport) {
+        lastReportedPercent = percent;
+        onProgress?.({
+          step: `寫入${mediaLabel}到雲機（${writeIndex + 1}/${totalWrites}，${percent}%）...`,
+          done: false,
+        });
+      }
+      const startChunk = writeIndex * chunksPerCommand;
+      const chunk = Array.from({ length: chunksPerCommand }, (_, offset) => {
+        const chunkIndex = startChunk + offset;
+        if (chunkIndex >= totalChunks) return "";
+        return parsed.base64.slice(chunkIndex * chunkSize, (chunkIndex + 1) * chunkSize);
+      }).join("");
+      let lastWriteError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await execAdbAndWait(
+            config,
+            padCode,
+            `printf %s '${chunk}' >> ${remoteBase64Path}`,
+            isVideoMedia ? 45000 : 25000,
+            pollIntervalMs,
+          );
+          lastWriteError = undefined;
+          break;
+        } catch (error) {
+          lastWriteError = error;
+          if (attempt < 3) {
+            await delay(isVideoMedia ? 900 : 500);
+          }
+        }
+      }
+      if (lastWriteError) throw lastWriteError;
+    }
+  };
+
+  if (isVideoMedia) {
+    try {
+      await writeBase64Chunks(FAST_VIDEO_BASE64_CHUNK_SIZE, FAST_VIDEO_BASE64_CHUNKS_PER_COMMAND, 450);
+    } catch {
+      onProgress?.({
+        step: `${mediaLabel}快速寫入失敗，正在切換更穩定的分段方式...`,
+        done: false,
+      });
+      await writeBase64Chunks(4000, 1, 550);
+    }
+  } else {
+    try {
+      await writeBase64Chunks(FAST_IMAGE_BASE64_CHUNK_SIZE, FAST_IMAGE_BASE64_CHUNKS_PER_COMMAND, 350);
+    } catch {
+      onProgress?.({
+        step: `${mediaLabel}快速寫入失敗，正在切換更穩定的分段方式...`,
+        done: false,
+      });
+      await writeBase64Chunks(2200, 1, 550);
+    }
+  }
+
+  onProgress?.({
+    step: `解碼${mediaLabel}並寫入圖庫...`,
+    done: false,
+  });
+  await execAdbAndWait(
+    config,
+    padCode,
+    [
+      `base64 -d ${remoteBase64Path} > ${remotePath}`,
+      `rm -f ${remoteBase64Path}`,
+      `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://${remotePath}`,
+    ].join("; "),
+    90000
+  );
+  const indexed = await waitForMediaIndexed(config, padCode, remotePath, isVideoMedia, isVideoMedia ? 45000 : 25000);
+  if (isVideoMedia && !indexed) {
+    throw new Error("影片已寫入雲機，但尚未被系統圖庫索引，請稍後重試");
+  }
+  await delay(800);
+  rememberStagedMediaPath(padCode, mediaUrl, remotePath);
+  return remotePath;
+}
+
+type PendingDeviceMediaStaging = {
+  mediaLabel: "圖片" | "影片";
+  remotePath: string;
+  wait: (step?: string) => Promise<string>;
+};
+
+function startDeviceMediaStaging(
+  config: VmosConfig,
+  padCode: string,
+  mediaUrl: string,
+  remotePath: string,
+  onProgress?: (p: PublishProgress) => void,
+  options: { reuse?: boolean } = {},
+): PendingDeviceMediaStaging {
+  const mediaLabel = getDeviceMediaLabel(mediaUrl);
+  onProgress?.({
+    step: mediaUrl.startsWith("data:")
+      ? `背景寫入${mediaLabel}到裝置...`
+      : `背景下載${mediaLabel}到裝置...`,
+    done: false,
+  });
+  const resultPromise = stageMediaOnDevice(config, padCode, mediaUrl, remotePath, onProgress, options)
+    .then((stagedRemotePath) => ({ ok: true as const, stagedRemotePath }))
+    .catch((error) => ({ ok: false as const, error }));
+
+  return {
+    mediaLabel,
+    remotePath,
+    wait: async (step = `等待${mediaLabel}寫入完成...`) => {
+      onProgress?.({ step, done: false });
+      const result = await resultPromise;
+      if (!result.ok) throw result.error;
+      return result.stagedRemotePath;
+    },
+  };
+}
+
+async function ensurePermissions(
+  config: VmosConfig,
+  padCode: string,
+  packageName: string,
+  permissions: string[]
+) {
+  const cacheKey = `${padCode}::${packageName}`;
+  if (permissionGrantCache.has(cacheKey)) return;
+  for (const permission of permissions) {
+    try {
+      await execAdb(config, padCode, `pm grant ${packageName} ${permission}`);
+      await delay(600);
+    } catch {
+      // Ignore unsupported permission variants across Android versions.
+    }
+  }
+  permissionGrantCache.add(cacheKey);
+}
+
+async function dismissAndroidPermissionDialog(
+  config: VmosConfig,
+  padCode: string,
+  preference: "allow" | "deny" = "deny",
+): Promise<boolean> {
+  const uiXml = await withTimeout(
+    dumpUiXml(config, padCode),
+    2_500,
+    "permission dialog ui dump timeout",
+  ).catch(() => "");
+  if (!/要允許|要允许|允許.*嗎|允许.*吗|Allow .*\\?|Gboard|錄音|录音|權限|权限/i.test(uiXml)) {
+    return false;
+  }
+  const target = findAndroidPermissionDialogButtonTarget(uiXml, preference);
+  if (!target) {
+    if (preference === "deny" && /Gboard|record audio|錄音|录音|RECORD_AUDIO/i.test(uiXml)) {
+      const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+      await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.5), Math.round(screen.height * 0.73), 900);
+      return true;
+    }
+    return false;
+  }
+  await tapViaAdbAbsoluteQuick(config, padCode, target.x, target.y, 900);
+  return true;
+}
+
+async function dismissThreadsSystemCrashDialogIfPossible(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl?: string,
+): Promise<boolean> {
+  const uiXml = await withTimeout(
+    dumpUiXml(config, padCode),
+    2_500,
+    "threads system dialog ui dump timeout",
+  ).catch(() => "");
+  const joined = normalizeSingleLine(uiXml);
+  if (!/keeps stopping|has stopped|stopped responding|close app|app info|已停止|停止運作|停止运行|關閉應用程式|关闭应用程序|关闭应用/i.test(joined)) {
+    if (/android:id\/parentPanel|android:id\/buttonPanel|android:id\/content/i.test(uiXml)) {
+      const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+      await execAdbForText(config, padCode, "am force-stop com.vmos.vmosauto", 8_000, 500).catch(() => "");
+      await delay(500);
+      await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.45), Math.round(screen.height * 0.61), 1200);
+      return true;
+    }
+    return false;
+  }
+
+  if (/AutoTakeoff/i.test(joined)) {
+    await execAdbForText(config, padCode, "am force-stop com.vmos.vmosauto", 8_000, 500).catch(() => "");
+    await delay(700);
+  }
+
+  let target = findThreadsTextTargetFromUiXml(
+    uiXml,
+    [/^Close app$|^關閉應用程式$|^关闭应用程序$|^关闭应用$|^關閉應用$|^關閉$|^关闭$|^Close$/i],
+    { preferTop: false, requireClickable: true },
+  );
+  target ||= findThreadsTextTargetFromUiXml(
+    uiXml,
+    [/^Close app$|^關閉應用程式$|^关闭应用程序$|^关闭应用$|^關閉應用$|^關閉$|^关闭$|^Close$/i],
+    { preferTop: false },
+  );
+
+  void screenshotUrl;
+
+  if (!target || target.y < 650) {
+    const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+    await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.72), Math.round(screen.height * 0.62), 1200);
+    return true;
+  }
+
+  await tapViaAdbAbsoluteQuick(config, padCode, target.x, target.y, 1200);
+  return true;
+}
+
+function normalizeSingleLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function summarizeCaption(caption: string, maxLen = 80): string {
+  const singleLine = normalizeSingleLine(caption);
+  return singleLine.length > maxLen ? `${singleLine.slice(0, maxLen)}...` : singleLine;
+}
+
+function extractThreadsVerificationCues(caption: string): string[] {
+  const lines = caption
+    .split(/\r?\n/)
+    .map((line) => normalizeSingleLine(line))
+    .filter(Boolean);
+
+  const cues = new Set<string>();
+  for (const line of lines.slice(0, 2)) {
+    if (line.length >= 4) {
+      cues.add(line.length > 60 ? line.slice(0, 60) : line);
+    }
+  }
+
+  const tokenMatches = caption.match(/[A-Z0-9][A-Z0-9-]{5,}|\d{6,}/g) ?? [];
+  for (const token of tokenMatches.slice(0, 6)) {
+    cues.add(token);
+  }
+
+  return Array.from(cues).slice(0, 8);
+}
+
+function normalizeThreadsLocalTextCue(text: string): string {
+  return decodeXmlAttr(text)
+    .normalize("NFKC")
+    .replace(/\s+/g, "")
+    .replace(/[，,。.!！?？:：;；"'“”‘’`·、]/g, "")
+    .toLowerCase();
+}
+
+function findThreadsLocalTextCueMatch(uiXml: string, cues: string[]): string | null {
+  if (!uiXml || cues.length === 0) return null;
+  const normalizedXml = normalizeThreadsLocalTextCue(uiXml);
+  for (const cue of cues) {
+    const normalizedCue = normalizeThreadsLocalTextCue(cue);
+    if (normalizedCue.length >= 4 && normalizedXml.includes(normalizedCue)) {
+      return cue;
+    }
+  }
+  return null;
+}
+
+function isThreadsBlockedReason(reason: string): boolean {
+  return /驗證你是真人|验证你是真人|安全驗證|安全验证|請完成安全驗證|请完成安全验证|輸入圖像上的驗證碼|输入图像上的验证码|captcha|security check|verify you are human|登入|login|log in|申訴|申诉|appeal|提出申訴|提出申诉|資料審查|资料审查|再次審查|再次审查|審查你的帳號|审查你的账号|帳號不會對其他.*顯示|账号不会对其他.*显示|無法使用該帳號|无法使用该帐号|無法使用此帳號|无法使用此账号|社群守則|社群守则|永久停用|封禁|停用|停權|停权|帳號異常|账号异常|帳號受限|账号受限|錯誤|error|完成個人檔案|完成个人档案|建立串文|追蹤個人檔案|追踪个人档案|查看個人檔案|查看个人档案|新號啟動卡片|新号启动卡片|onboarding card|complete profile/.test(
+    normalizeSingleLine(reason),
+  );
+}
+
+function isThreadsTransientLaunchReason(reason: string): boolean {
+  return /啟動中|启动中|載入中|载入中|加载中|白屏|logo|圖標|图标|app icon|應用圖示|应用图标|splash/i.test(
+    normalizeSingleLine(reason),
+  );
+}
+
+function isThreadsOnboardingReason(reason: string): boolean {
+  return /完成個人檔案|完成个人档案|建立串文|追蹤個人檔案|追踪个人档案|查看個人檔案|查看个人档案|新號啟動卡片|新号启动卡片|onboarding card|complete profile/.test(
+    normalizeSingleLine(reason),
+  );
+}
+
+export function parsePublishVisionResult(raw: string): { status: PublishVisionStatus; reason: string } {
+  const line = normalizeSingleLine(raw);
+  const upper = line.toUpperCase();
+  const match = upper.match(/(PUBLISHED|STILL_COMPOSING|BLOCKED|UNKNOWN)/);
+  const status = (match?.[1] as PublishVisionStatus | undefined) ?? "UNKNOWN";
+  const reason = line.includes("|") ? line.split("|").slice(1).join("|").trim() : line;
+
+  if (match) {
+    return { status, reason };
+  }
+
+  if (/新串文|新增到串文|Add to thread|回覆|回复|reply|發佈按鈕|发布按钮|發布按鈕|草稿|編輯頁|编辑页/.test(line)) {
+    return { status: "STILL_COMPOSING", reason: line };
+  }
+  if (isThreadsBlockedReason(line) || /suspend|blocked/.test(line)) {
+    return { status: "BLOCKED", reason: line };
+  }
+  return { status: "UNKNOWN", reason: line };
+}
+
+export function hasExplicitSuccessCue(reason: string, platform: Platform): boolean {
+  const line = normalizeSingleLine(reason);
+  if (platform === "threads") {
+    if (hasThreadsPendingPublishCue(line)) return false;
+    return /已發佈|已发布|已發布|已貼出|已传送|已傳送|發布完成|发布完成|發佈完成|成功|posted|sent|看到自己剛發的串文|個人主頁看到|个人主页看到/i.test(line);
+  }
+  if (platform === "twitter") {
+    return /已傳送|your post was sent|tweet sent|推文已傳送|發推成功|posted|看到剛發的推文|成功提示/.test(line);
+  }
+  return /已分享到|分享完成|已分享|限時動態|限時動態|貼文已發布|貼文已發布|story|發布成功|發布成功|你的貼文上線|你的貼文上線|看到剛發出的內容|成功提示/.test(line);
+}
+
+function hasThreadsPendingPublishCue(text: string): boolean {
+  return /發佈中|發布中|发布中|上傳中|上传中|傳送中|传送中|posting|sending|uploading|processing/i.test(text);
+}
+
+export function hasStrongInstagramPublishEvidence(reason: string): boolean {
+  const line = normalizeSingleLine(reason);
+  const postEvidence = /已回到首頁|已回到动态|已回到動態|已離開編輯頁|已离开编辑页|圖片已匹配|图片已匹配|主頁已出現|主页已出现|首頁動態中已出現|首页动态中已出现|貼文已出現在首頁|贴文已出现在首页|同一張圖片|同一张图片|參考圖一致|参考图一致|命中參考圖|命中参考图|首頁第\s*\d+\s*張截圖|首页第\s*\d+\s*张截图|與圖\d相符|与图\d相符|圖片邊緣色塊與參考圖一致|图片边缘色块与参考图一致|包含目標文案|包含目标文案|文案完全匹配|文案完全匹配|文案匹配|文案已匹配|看到了剛發出的內容|看到了刚发出的内容|發佈中提示已消失|发布中提示已消失|限時動態已分享|限时动态已分享|你的內容已出現|你的内容已出现/.test(line);
+  return postEvidence;
+}
+
+async function detectExplicitSuccessToast(
+  platform: Platform,
+  screenshots: Array<{ mimeType: string; data: string }>
+): Promise<boolean> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey || screenshots.length === 0) return false;
+
+  let prompt: string;
+  if (platform === "threads") {
+    prompt = `判斷這些截圖裡是否出現 Threads 發布成功的明確提示。
+標準：只有在任意一張圖裡看到明確成功提示，例如「已發佈 / 已發布 / 已发布 / 已傳送 / posted / sent / your thread was shared」這類成功訊號，或同時看到成功橫幅與「查看 / 檢視 / View」其中之一，才輸出 YES。
+如果畫面仍是新串文輸入頁、回覆頁、添加到串文頁、可看到輸入框、分享新鮮事、新增到串文、Add to thread、發布按鈕、發佈按鈕、发布按钮、草稿、主題、添加主題、圖片上傳列、GIF 按鈕、貼子選項，哪怕有「分享 / Share」字樣也必須輸出 NO。
+只輸出 YES 或 NO。`;
+  } else if (platform === "twitter") {
+    prompt = `判斷這些截圖裡是否出現 Twitter/X 發推成功的明確提示。
+標準：只要任意一張圖裡出現"Your post was sent"或"已傳送"或"推文已傳送"等明確成功提示，就輸出 YES；否則輸出 NO。
+只輸出 YES 或 NO。`;
+  } else {
+    prompt = `判斷這些截圖裡是否出現 Instagram 發文成功的明確提示。
+標準：只要任意一張圖裡出現"已成功發佈/已成功發布/你的貼文上線囉/你的貼文上線了/分享完成/已分享到限時動態/你的限時動態已分享/做得好"等明確成功橫幅，就輸出 YES；否則輸出 NO。
+只輸出 YES 或 NO。`;
+  }
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          ...screenshots.flatMap((shot, index) => [
+            { text: `截圖${index + 1}` },
+            { inlineData: shot },
+          ]),
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 }
+    );
+    const text = normalizeSingleLine(extractText(raw)).toUpperCase();
+    return text.startsWith("YES");
+  } catch {
+    return false;
+  }
+}
+
+async function detectInstagramTopSuccessBanner(screenshotUrl: string): Promise<boolean> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return false;
+  const cropped = await cropUpperRegionToInlineData(screenshotUrl, 0.2, 0.42);
+  if (!cropped) return false;
+  const request = createTimeoutSignal(8000);
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判斷這張 Instagram 截圖上方是否出現「發文成功」的提示橫幅。
+
+只輸出 YES 或 NO。
+
+YES 的條件：
+- 能看到「已成功發佈 / 已成功發布」這類成功字樣，或
+- 能看到「你的貼文上線囉 / 你的貼文上線了 / 做得好」這類成功橫幅語句。
+
+NO 的條件：
+- 沒有這類成功提示，或看不清。`,
+          },
+          { text: "Instagram 上方裁切圖" },
+          { inlineData: cropped },
+        ],
+      }],
+      { maxOutputTokens: 12, temperature: 0 },
+      request.signal,
+    );
+    return normalizeSingleLine(extractText(raw)).toUpperCase().startsWith("YES");
+  } catch {
+    return false;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function detectThreadsBlockedScreen(
+  screenshotInput: { mimeType: string; data: string } | null,
+): Promise<string | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey || !screenshotInput) return null;
+  const request = createTimeoutSignal(8000);
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判斷這張 Threads 畫面是否已經落在阻斷/驗證頁。
+
+只輸出一行，格式固定為：
+BLOCKED|原因
+或
+CLEAR|原因
+
+判定規則：
+- BLOCKED：看到真人驗證、安全驗證、圖形驗證碼、登入要求、申訴、帳號限制、明顯錯誤頁，或任何明確需要人工處理才能繼續的 Threads 阻斷畫面。也包括新號尚未完成個人檔案時出現的啟動卡片，例如「完成個人檔案 / 建立串文 / 追蹤個人檔案 / 查看個人檔案」這類 onboarding 畫面。
+- 如果是新號啟動卡片或個人資料引導，原因必須寫「账号初始化/资料引导页」，不要寫成真人驗證或安全驗證。
+- CLEAR：仍是正常 Threads 畫面，包括首頁、個人頁、發文編輯頁、發布成功提示頁。
+- CLEAR：只看到白底、Threads/系統圖示、App logo、啟動畫面、載入中畫面、短暫空白頁時，也算 CLEAR，因為這只是過渡狀態，不是帳號阻斷。
+
+不要解釋，不要換行，不要輸出 JSON。`,
+          },
+          { text: "截圖1" },
+          { inlineData: screenshotInput },
+        ],
+      }],
+      { maxOutputTokens: 40, temperature: 0 },
+      request.signal,
+    );
+
+    const parsed = parsePublishVisionResult(extractText(raw));
+    if (isThreadsTransientLaunchReason(parsed.reason)) return null;
+    if (parsed.status === "BLOCKED" || isThreadsBlockedReason(parsed.reason)) {
+      const reason = normalizeSingleLine(parsed.reason);
+      if (isThreadsTransientLaunchReason(reason)) return null;
+      if (!reason || reason.toUpperCase() === "BLOCKED") {
+        return "檢測到 Threads 阻斷頁，需要人工確認當前帳號狀態";
+      }
+      return reason;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+type ThreadsPageState =
+  | "home_feed"
+  | "profile_page"
+  | "compose_editor"
+  | "gallery_picker"
+  | "media_viewer"
+  | "reply_composer"
+  | "login_required"
+  | "challenge"
+  | "system_dialog"
+  | "unknown";
+
+interface ThreadsPageSnapshot {
+  page: ThreadsPageState;
+  reason: string;
+  screenshotUrl: string;
+  focus: string;
+  uiXml?: string;
+  capturedAt: number;
+}
+
+function isAndroidCameraFocus(focus: string | undefined | null): boolean {
+  return /com\.android\.camera|camera2|CaptureActivity/i.test(focus || "");
+}
+
+function isGooglePlayFocus(focus: string | undefined | null): boolean {
+  return (focus || "").includes(GOOGLE_PLAY_PACKAGE);
+}
+
+function isThreadsChallengeFocus(focus: string | undefined | null): boolean {
+  return /com\.instagram\.barcelona\/.*(?:challenge|checkpoint|captcha|verification)/i.test(focus || "");
+}
+
+function detectThreadsDraftSaveDialogFromUiXml(uiXml: string): boolean {
+  const line = normalizeSingleLine(uiXml);
+  return /(儲存為草稿|保存为草稿|Save draft|Discard draft|不儲存|不保存|Discard|取消|Cancel)/i.test(line)
+    && /(新串文|新增到串文|Add to thread|發佈|發布|发布)/i.test(line);
+}
+
+async function detectThreadsDraftSaveDialogLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const count = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * x1));
+    const right = Math.min(width - 1, Math.ceil(width * x2));
+    const top = Math.max(0, Math.floor(height * y1));
+    const bottom = Math.min(height - 1, Math.ceil(height * y2));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 3) {
+      for (let x = left; x <= right; x += 3) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 120) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isWhite = (r: number, g: number, b: number) => r > 235 && g > 235 && b > 235;
+  const isDimGray = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    return avg > 65 && avg < 145 && Math.max(r, g, b) - Math.min(r, g, b) < 30;
+  };
+  const dialogWhite = count(0.20, 0.42, 0.80, 0.82, (r, g, b) => isWhite(r, g, b));
+  const dimTop = count(0.05, 0.16, 0.95, 0.36, (r, g, b) => isDimGray(r, g, b));
+  const dimBottom = count(0.05, 0.84, 0.95, 0.98, (r, g, b) => isDimGray(r, g, b));
+  return dialogWhite > 0.42 && dimTop > 0.34 && dimBottom > 0.34;
+}
+
+async function dismissThreadsDraftSaveDialog(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl?: string,
+  option: "cancel" | "discard" = "cancel",
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string } | null> {
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  const image = screenshotUrl ? await getImageDimensions(screenshotUrl).catch(() => null) : null;
+  const yRatio = option === "discard" ? 0.585 : 0.665;
+  const points: Array<{ x: number; y: number }> = [
+    { x: Math.round(screen.width * 0.50), y: Math.round(screen.height * yRatio) },
+  ];
+  if (image) {
+    points.push({
+      x: Math.round(image.width * 0.50),
+      y: Math.round(image.height * yRatio),
+    });
+  }
+  const seen = new Set<string>();
+  for (const point of points) {
+    const key = `${point.x},${point.y}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await tapViaAdbAbsolute(config, padCode, point.x, point.y, 1000);
+    const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (state?.page === "compose_editor") return state;
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (!detectThreadsDraftSaveDialogFromUiXml(uiXml)
+      && !await detectThreadsDraftSaveDialogLocally(state?.screenshotUrl).catch(() => false)) {
+      return state;
+    }
+  }
+  return null;
+}
+
+function detectThreadsGalleryPickerFromUiXml(uiXml: string): string | null {
+  const line = normalizeSingleLine(uiXml);
+  if (!line) return null;
+
+  if (/(相機|拍照|Camera)(.*)(最近|Recents|照片|图片|圖片|所有照片|所有相片|Videos|影片|视频)/i.test(line)) {
+    return "UI XML 顯示相機入口與媒體分頁，符合圖庫選擇頁";
+  }
+
+  if (/(最近|Recents|照片|图片|圖片|所有照片|所有相片|Videos|影片|视频)/i.test(line)
+    && /(完成|Done|下一步|Next)/i.test(line)) {
+    return "UI XML 顯示媒體分組與確認按鈕，符合圖庫選擇頁";
+  }
+
+  if (/(選取|已選|Selected|selected count|多選)/i.test(line)
+    && /(照片|图片|圖片|影片|视频|相片)/i.test(line)) {
+    return "UI XML 顯示媒體選取狀態，符合圖庫選擇頁";
+  }
+
+  return null;
+}
+
+export function detectAndroidCameraFromUiXml(uiXml: string): string | null {
+  const line = normalizeSingleLine(uiXml);
+  if (!line) return null;
+  if (/package="com\.android\.camera2"|resource-id="com\.android\.camera2:|CaptureActivity|camera_app_root|preview_content|shutter_button/i.test(line)) {
+    return "LOCAL_ANDROID_CAMERA";
+  }
+  return null;
+}
+
+function detectThreadsChallengeFromUiXml(uiXml: string): string | null {
+  const line = normalizeSingleLine(uiXml);
+  if (!line) return null;
+  if (/请验证你是真人|請驗證你是真人|输入图片中的验证码|輸入圖片中的驗證碼|验证码|驗證碼|安全查验|安全查驗|human|captcha|security check/i.test(line)) {
+    return "UI XML 显示 Threads 真人验证/验证码页，需要人工完成安全查验";
+  }
+  if (/已於.*提出申訴|已于.*提出申诉|提出申訴|提出申诉|資料審查|资料审查|再次審查|再次审查|審查你的帳號|审查你的账号|帳號不會對其他.*Threads.*顯示|账号不会对其他.*Threads.*显示|無法使用該帳號|无法使用该帐号|社群守則|社群守则|永久停用/i.test(line)) {
+    return "UI XML 显示 Threads 账号申诉/审查页，当前账号不可发布或养号，需要等待审查结果或人工处理";
+  }
+  if (isThreadsBlockedReason(line)) {
+    return line.slice(0, 220);
+  }
+  return null;
+}
+
+async function detectThreadsGalleryPickerVisually(
+  screenshotUrl: string,
+): Promise<string | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const shot = await getInlineData(screenshotUrl);
+  if (!shot) return null;
+
+  const request = createTimeoutSignal(8000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判斷這張手機截圖是否已經進入 Android / Threads 的圖庫選圖頁。
+
+只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+YES 條件：
+- 能看到圖庫/相簿/照片選擇網格。
+- 常見訊號包含：左上角相機入口、上方相簿名稱或「最近 / Recents / Photos / Videos」、大量縮圖格子、右上角完成/下一步/Done。
+- 即使這不是純 Threads 畫面，只要明顯是 Android 媒體選擇器，也輸出 YES。
+
+NO 條件：
+- 仍是 Threads 新串文編輯頁、首頁、回覆頁、登入頁、系統權限彈窗，或看不出是圖庫頁。`,
+          },
+          { text: "目前頁面截圖" },
+          { inlineData: shot },
+        ],
+      }],
+      { maxOutputTokens: 60, temperature: 0 },
+      request.signal,
+    );
+
+    const line = normalizeSingleLine(extractText(raw));
+    const [stateRaw, ...reasonParts] = line.split("|");
+    const state = stateRaw?.trim().toUpperCase();
+    const reason = reasonParts.join("|").trim() || line;
+    return state?.startsWith("YES") ? reason || "視覺判定為圖庫選擇頁" : null;
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function detectThreadsHomeFeedVisually(
+  screenshotUrl: string,
+): Promise<string | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const shot = await getInlineData(screenshotUrl);
+  if (!shot) return null;
+
+  const request = createTimeoutSignal(8000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判斷這張手機截圖是否其實已經是 Threads 首頁推薦流，即使其他分類器沒有認出來。
+
+只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+YES 條件：
+- 明顯是 Threads 首頁動態流。
+- 能看到一條或多條普通帖子內容。
+- 底部是 Threads 導航欄，且不是個人主頁、不是回覆頁、不是新串文編輯頁、不是圖庫頁、不是登入頁。
+- 畫面即使帶圖片或影片，只要仍是首頁 feed，也輸出 YES。
+
+NO 條件：
+- 個人主頁、發文頁、回覆頁、圖庫頁、登入頁、挑戰頁、系統彈窗。
+- 看不清或不能確認。`,
+          },
+          { text: "目前頁面截圖" },
+          { inlineData: shot },
+        ],
+      }],
+      { maxOutputTokens: 60, temperature: 0 },
+      request.signal,
+    );
+
+    const line = normalizeSingleLine(extractText(raw));
+    const [stateRaw, ...reasonParts] = line.split("|");
+    const state = stateRaw?.trim().toUpperCase();
+    const reason = reasonParts.join("|").trim() || line;
+    return state?.startsWith("YES") ? reason || "視覺判定為首頁推薦流" : null;
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+
+async function classifyThreadsPageFromScreenshot(
+  screenshotUrl: string,
+): Promise<{ page: ThreadsPageState; reason: string }> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return { page: "unknown", reason: "Gemini 未設定" };
+
+  const shot = await getInlineData(screenshotUrl);
+  if (!shot) return { page: "unknown", reason: "Threads 截圖取得失敗" };
+
+  const request = createTimeoutSignal(10000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判斷這張 Threads / Instagram 畫面目前屬於哪一種狀態。
+
+只輸出一行，格式固定為：
+STATE|原因
+
+STATE 只能是以下其中之一：
+HOME_FEED
+PROFILE_PAGE
+COMPOSE_EDITOR
+GALLERY_PICKER
+MEDIA_VIEWER
+REPLY_COMPOSER
+LOGIN_REQUIRED
+CHALLENGE
+SYSTEM_DIALOG
+UNKNOWN
+
+判定規則：
+- HOME_FEED：Threads 首頁動態流。
+- PROFILE_PAGE：Threads 個人主頁。
+- COMPOSE_EDITOR：真正的新串文編輯頁，可以輸入內容並發布。
+- GALLERY_PICKER：正在 Threads 圖庫/相簿選擇頁。
+- MEDIA_VIEWER：Threads 全屏圖片/影片查看器，通常左上角有 X，底部是點讚/回覆/轉發/分享，不是首頁。
+- REPLY_COMPOSER：這不是新串文，而是回覆/新增到串文頁；如果看到「回覆」「回复」「新增到串文」「Add to thread」等，優先輸出 REPLY_COMPOSER。
+- LOGIN_REQUIRED：Instagram/Threads 登入頁、切帳號頁、需要用 Instagram 登入的頁面。
+- CHALLENGE：驗證碼、OTP、安全驗證、真人驗證、自拍驗證、帳號異常、封禁、申訴等挑戰頁。
+- SYSTEM_DIALOG：Android 系統權限彈窗、分享選單、系統提示框。
+- UNKNOWN：無法判斷。
+
+不要輸出 JSON，不要換行。`,
+          },
+          { text: "目前頁面截圖" },
+          { inlineData: shot },
+        ],
+      }],
+      { maxOutputTokens: 80, temperature: 0 },
+      request.signal,
+    );
+
+    const line = normalizeSingleLine(extractText(raw));
+    const [stateRaw, ...reasonParts] = line.split("|");
+    const state = stateRaw?.trim().toUpperCase();
+    const reason = reasonParts.join("|").trim() || line;
+
+    if (state?.startsWith("HOME")) {
+      return { page: "home_feed", reason };
+    }
+    if (state?.startsWith("PROFILE")) {
+      return { page: "profile_page", reason };
+    }
+    if (state?.startsWith("COMPOSE") || state === "COM" || state?.startsWith("EDITOR")) {
+      return { page: "compose_editor", reason };
+    }
+    if (state?.startsWith("GALLERY") || state === "GAL") {
+      return { page: "gallery_picker", reason };
+    }
+    if (state?.startsWith("MEDIA") || state?.startsWith("VIEWER") || state?.startsWith("FULLSCREEN")) {
+      return { page: "media_viewer", reason };
+    }
+    if (state?.startsWith("REPLY")) {
+      return { page: "reply_composer", reason };
+    }
+    if (state?.startsWith("LOGIN")) {
+      return { page: "login_required", reason };
+    }
+    if (state?.startsWith("CHALLENGE") || state?.startsWith("CAPTCHA") || state?.startsWith("OTP")) {
+      return { page: "challenge", reason };
+    }
+    if (state?.startsWith("SYSTEM")) {
+      return { page: "system_dialog", reason };
+    }
+
+    switch (state) {
+      case "HOME_FEED":
+        return { page: "home_feed", reason };
+      case "PROFILE_PAGE":
+        return { page: "profile_page", reason };
+      case "COMPOSE_EDITOR":
+        return { page: "compose_editor", reason };
+      case "GALLERY_PICKER":
+        return { page: "gallery_picker", reason };
+      case "MEDIA_VIEWER":
+      case "FULLSCREEN_MEDIA_VIEWER":
+        return { page: "media_viewer", reason };
+      case "REPLY_COMPOSER":
+        return { page: "reply_composer", reason };
+      case "LOGIN_REQUIRED":
+        return { page: "login_required", reason };
+      case "CHALLENGE":
+        return { page: "challenge", reason };
+      case "SYSTEM_DIALOG":
+        return { page: "system_dialog", reason };
+      default:
+        return { page: "unknown", reason };
+    }
+  } catch (error) {
+    return {
+      page: "unknown",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function classifyThreadsPageOnDevice(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string }> {
+  const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  const screenshotUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+
+  if (isAndroidCameraFocus(focus)) {
+    return { page: "unknown", reason: "LOCAL_ANDROID_CAMERA", screenshotUrl };
+  }
+  if (isThreadsChallengeFocus(focus)) {
+    return { page: "challenge", reason: "LOCAL_THREADS_CHALLENGE_ACTIVITY", screenshotUrl };
+  }
+
+  if (await detectThreadsPhoneVerificationLocally(screenshotUrl)) {
+    return { page: "login_required", reason: "LOCAL_PHONE_VERIFICATION_PAGE", screenshotUrl };
+  }
+  if (await detectThreadsInAppBrowserLocally(screenshotUrl)) {
+    return { page: "unknown", reason: "LOCAL_THREADS_INAPP_BROWSER", screenshotUrl };
+  }
+  if (await detectThreadsFullscreenMediaViewerLocally(screenshotUrl)) {
+    return { page: "media_viewer", reason: "LOCAL_FULLSCREEN_MEDIA_VIEWER", screenshotUrl };
+  }
+  const localHomeReason = await detectThreadsHomeFeedLocally(screenshotUrl);
+  const localGalleryReason = await detectThreadsGalleryPickerLocally(screenshotUrl);
+  if (localGalleryReason) {
+    return { page: "gallery_picker", reason: localGalleryReason, screenshotUrl };
+  }
+  if (await detectThreadsSearchOverlayLocally(screenshotUrl).catch(() => false)) {
+    return { page: "unknown", reason: "LOCAL_THREADS_SEARCH_OVERLAY", screenshotUrl };
+  }
+  const localComposerReason = await detectThreadsComposerLocally(screenshotUrl);
+  if (localComposerReason) {
+    return { page: "compose_editor", reason: localComposerReason, screenshotUrl };
+  }
+  if (await detectThreadsProfilePageLocally(screenshotUrl)) {
+    return { page: "profile_page", reason: "LOCAL_PROFILE_PAGE", screenshotUrl };
+  }
+  if (localHomeReason) {
+    return { page: "home_feed", reason: localHomeReason, screenshotUrl };
+  }
+  const localReplyReason = await detectThreadsReplyComposerLocally(screenshotUrl);
+  if (localReplyReason) {
+    return { page: "reply_composer", reason: localReplyReason, screenshotUrl };
+  }
+  if (await detectThreadsShareSheetLocally(screenshotUrl)) {
+    return { page: "unknown", reason: "LOCAL_THREADS_SHARE_SHEET", screenshotUrl };
+  }
+  if (await detectThreadsPostActionSheetLocally(screenshotUrl)) {
+    return { page: "unknown", reason: "LOCAL_THREADS_POST_ACTION_SHEET", screenshotUrl };
+  }
+
+  if (await detectThreadsSideDrawerLocally(screenshotUrl)) {
+    return { page: "unknown", reason: "LOCAL_THREADS_SIDE_DRAWER", screenshotUrl };
+  }
+
+  try {
+    const uiXml = await dumpUiXml(config, padCode);
+    if (detectThreadsTopicSearchOverlayFromUiXml(uiXml)) {
+      return { page: "unknown", reason: "LOCAL_THREADS_SEARCH_OVERLAY", screenshotUrl };
+    }
+    const cameraReason = detectAndroidCameraFromUiXml(uiXml);
+    if (cameraReason) {
+      return { page: "unknown", reason: cameraReason, screenshotUrl };
+    }
+    const xmlChallengeReason = detectThreadsChallengeFromUiXml(uiXml);
+    if (xmlChallengeReason) {
+      return { page: "challenge", reason: xmlChallengeReason, screenshotUrl };
+    }
+    const xmlGalleryReason = detectThreadsGalleryPickerFromUiXml(uiXml);
+    if (xmlGalleryReason) {
+      return { page: "gallery_picker", reason: xmlGalleryReason, screenshotUrl };
+    }
+  } catch {
+    // Ignore XML read failures and fall back to visual heuristic below.
+  }
+
+  if (!focus.includes(THREADS_PACKAGE) && await detectAndroidLauncherLocally(screenshotUrl)) {
+    return { page: "unknown", reason: "LOCAL_ANDROID_LAUNCHER", screenshotUrl };
+  }
+
+  const blockedShot = await getInlineData(screenshotUrl).catch(() => null);
+  const blockedReason = await detectThreadsBlockedScreen(blockedShot).catch(() => null);
+  if (blockedReason) {
+    const page: ThreadsPageState = /登入|登录|手機號碼|手机号码|phone|Log in|Instagram/i.test(blockedReason)
+      ? "login_required"
+      : "challenge";
+    return { page, reason: blockedReason, screenshotUrl };
+  }
+
+  const result = await classifyThreadsPageFromScreenshot(screenshotUrl);
+  if (result.page !== "unknown") {
+    return { ...result, screenshotUrl };
+  }
+
+  const visualGalleryReason = await detectThreadsGalleryPickerVisually(screenshotUrl);
+  if (visualGalleryReason) {
+    return { page: "gallery_picker", reason: visualGalleryReason, screenshotUrl };
+  }
+
+  const visualHomeReason = await detectThreadsHomeFeedVisually(screenshotUrl);
+  if (visualHomeReason) {
+    return { page: "home_feed", reason: visualHomeReason, screenshotUrl };
+  }
+
+  return { ...result, screenshotUrl };
+}
+
+function findThreadsChallengeDismissTargetFromUiXml(uiXml: string): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center || !text) continue;
+    let score = 0;
+    if (/^(Dismiss|關閉|关闭|知道了|我知道了|確定|确定|OK)$/i.test(text)) score += 20;
+    if (/Dismiss|關閉|关闭|知道了|我知道了|確定|确定|OK/i.test(text)) score += 10;
+    if (/android\.widget\.Button|Button/i.test(getXmlAttr(node, "class"))) score += 4;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 4;
+    if (center.y >= 1100) score += 5;
+    if (score >= 12) candidates.push({ ...center, score });
+  }
+  return candidates.sort((a, b) => b.score - a.score || b.y - a.y)[0] || null;
+}
+
+async function dismissThreadsChallengeIfPossible(
+  config: VmosConfig,
+  padCode: string,
+  state?: { page: ThreadsPageState; reason: string; screenshotUrl: string } | null,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string }> {
+  const before = state || await classifyThreadsPageOnDevice(config, padCode);
+  if (before.page !== "challenge") return before;
+
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const target = findThreadsChallengeDismissTargetFromUiXml(uiXml);
+  if (target) {
+    await tapAbsolute(config, padCode, target.x, target.y, 1800);
+  } else {
+    const screen = await getScreenSize(config, padCode).catch(() => ({ width: BASE_SCREEN.width, height: BASE_SCREEN.height }));
+    await tapAbsolute(config, padCode, Math.round(screen.width / 2), Math.max(0, screen.height - 80), 1800);
+  }
+  await delay(1200);
+  return classifyThreadsPageOnDevice(config, padCode);
+}
+
+async function recheckThreadsPageWithGemini(
+  config: VmosConfig,
+  padCode: string,
+  current: { page?: ThreadsPageState; reason?: string; screenshotUrl?: string } | null | undefined,
+  context: string,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string } | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const screenshotUrl = current?.screenshotUrl
+    ? await freezeScreenshotUrl(current.screenshotUrl).catch(() => current.screenshotUrl!)
+    : await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  if (!screenshotUrl) return null;
+
+  const result = await classifyThreadsPageFromScreenshot(screenshotUrl).catch(() => null);
+  if (!result || result.page === "unknown") return null;
+  return {
+    page: result.page,
+    reason: `GEMINI_RECHECK_${context}: ${result.reason || "visual recheck"}`,
+    screenshotUrl,
+  };
+}
+
+async function recheckExpectedThreadsPageBeforeFailure(
+  config: VmosConfig,
+  padCode: string,
+  current: { page?: ThreadsPageState; reason?: string; screenshotUrl?: string } | null | undefined,
+  expectedPages: ThreadsPageState[],
+  context: string,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string } | null> {
+  const rechecked = await recheckThreadsPageWithGemini(config, padCode, current, context);
+  if (!rechecked) return null;
+  if (isThreadsTerminalPage(rechecked.page)) {
+    throw new Error(buildThreadsBlockedError(`Threads ${context} Gemini 复判为账号状态页：${rechecked.reason}`, rechecked.screenshotUrl));
+  }
+  return expectedPages.includes(rechecked.page) ? rechecked : null;
+}
+
+function isThreadsTerminalPage(page: ThreadsPageState): boolean {
+  return page === "login_required" || page === "challenge" || page === "system_dialog";
+}
+
+function assertThreadsSnapshotNotTerminal(snapshot: ThreadsPageSnapshot, context: string): void {
+  if (!isThreadsTerminalPage(snapshot.page)) return;
+  throw new Error(buildThreadsBlockedError(`Threads ${context}：${snapshot.reason}`, snapshot.screenshotUrl));
+}
+
+function threadsSnapshotStableKey(snapshot: ThreadsPageSnapshot): string {
+  const focusPackage = isAndroidCameraFocus(snapshot.focus)
+    ? "camera"
+    : snapshot.focus.includes(THREADS_PACKAGE)
+      ? THREADS_PACKAGE
+      : snapshot.focus.includes(GOOGLE_PLAY_PACKAGE)
+        ? GOOGLE_PLAY_PACKAGE
+        : snapshot.focus.replace(/ActivityRecord\{[^}]+\}/g, "ActivityRecord");
+  return `${snapshot.page}|${snapshot.reason}|${focusPackage}`;
+}
+
+async function captureThreadsPageSnapshot(
+  config: VmosConfig,
+  padCode: string,
+  options: { includeUiXml?: boolean } = {},
+): Promise<ThreadsPageSnapshot> {
+  let state: { page: ThreadsPageState; reason: string; screenshotUrl: string };
+  try {
+    state = await classifyThreadsPageOnDevice(config, padCode);
+  } catch (error: any) {
+    await delay(350);
+    state = await classifyThreadsPageOnDevice(config, padCode).catch(async () => {
+      const fallbackShot = await screenshot(config, padCode)
+        .then((url) => freezeScreenshotUrl(url))
+        .catch(() => "");
+      return {
+        page: "unknown" as ThreadsPageState,
+        reason: normalizeSingleLine(String(error?.message || error || "page snapshot failed")),
+        screenshotUrl: fallbackShot,
+      };
+    });
+  }
+  const [focus, uiXml] = await Promise.all([
+    getAndroidCurrentFocusQuick(config, padCode).catch(() => ""),
+    options.includeUiXml ? dumpUiXml(config, padCode).catch(() => "") : Promise.resolve(undefined),
+  ]);
+  return {
+    page: state.page,
+    reason: state.reason,
+    screenshotUrl: state.screenshotUrl,
+    focus: normalizeSingleLine(focus),
+    uiXml,
+    capturedAt: Date.now(),
+  };
+}
+
+async function waitForThreadsPageSettled(
+  config: VmosConfig,
+  padCode: string,
+  options: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    stableSamples?: number;
+    includeUiXml?: boolean;
+  } = {},
+): Promise<ThreadsPageSnapshot> {
+  const timeoutMs = options.timeoutMs ?? 2600;
+  const intervalMs = options.intervalMs ?? 650;
+  const stableSamples = Math.max(1, options.stableSamples ?? 2);
+  const deadline = Date.now() + timeoutMs;
+  let last: ThreadsPageSnapshot | null = null;
+  let stableCount = 0;
+
+  while (Date.now() <= deadline) {
+    const current = await captureThreadsPageSnapshot(config, padCode, { includeUiXml: options.includeUiXml });
+    if (last && threadsSnapshotStableKey(last) === threadsSnapshotStableKey(current)) {
+      stableCount += 1;
+    } else {
+      stableCount = 1;
+    }
+    last = current;
+    if (stableCount >= stableSamples) return current;
+    await delay(intervalMs);
+  }
+
+  return last || await captureThreadsPageSnapshot(config, padCode, { includeUiXml: options.includeUiXml });
+}
+
+async function runThreadsObservedStep<T>(
+  config: VmosConfig,
+  padCode: string,
+  input: {
+    step: string;
+    action: () => Promise<void>;
+    verify: (before: ThreadsPageSnapshot) => Promise<T>;
+    includeUiXmlBefore?: boolean;
+  },
+): Promise<T> {
+  const before = await waitForThreadsPageSettled(config, padCode, {
+    timeoutMs: 1800,
+    intervalMs: 450,
+    stableSamples: 2,
+    includeUiXml: input.includeUiXmlBefore,
+  });
+  assertThreadsSnapshotNotTerminal(before, `${input.step}前置頁阻斷`);
+  await input.action();
+  return input.verify(before);
+}
+
+async function assertThreadsNoImmediateAccountBlock(
+  config: VmosConfig,
+  padCode: string,
+  context: string,
+): Promise<void> {
+  const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (!state) return;
+  if (isThreadsTerminalPage(state.page)) {
+    throw new Error(buildThreadsBlockedError(`Threads ${context}前置页阻断：${state.reason}`, state.screenshotUrl));
+  }
+}
+
+async function locateThreadsButtonByVision(
+  screenshotUrl: string,
+  targetDescription: string,
+): Promise<{ x: number; y: number } | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const shot = await getInlineData(screenshotUrl);
+  const image = await getImageDimensions(screenshotUrl);
+  if (!shot || !image) return null;
+
+  const request = createTimeoutSignal(10000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `请在这张手机截图中定位目标按钮中心点，并只输出 JSON：{"x":123,"y":456}。
+目标描述：${targetDescription}
+要求：
+- 返回的是整张原图坐标。
+- 不要猜测相邻按钮。
+- 底部导航的 home/search/plus/activity/profile 容易混淆时，只返回最符合描述的那个。
+- 如果找不到，输出 {"x":-1,"y":-1}。`,
+          },
+          { text: `原图尺寸 ${image.width}x${image.height}` },
+          { inlineData: shot },
+        ],
+      }],
+      { maxOutputTokens: 60, temperature: 0 },
+      request.signal,
+    );
+
+    const text = extractText(raw);
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const parsed = JSON.parse(match[0]);
+    const x = Number(parsed?.x);
+    const y = Number(parsed?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) return null;
+    return {
+      x: Math.max(0, Math.min(image.width - 1, Math.round(x))),
+      y: Math.max(0, Math.min(image.height - 1, Math.round(y))),
+    };
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function waitForThreadsExpectedPage(
+  config: VmosConfig,
+  padCode: string,
+  expectedPages: ThreadsPageState[],
+  options: {
+    allowUnknownWhenUnblocked?: boolean;
+    attempts?: number;
+    delayMs?: number;
+    sampleScenario?: string;
+    mediaKind?: "text" | "image" | "video" | "media";
+    step?: string;
+  } = {},
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string }> {
+  const attempts = options.attempts ?? 4;
+  const delayMs = options.delayMs ?? 1200;
+  let lastState: ThreadsPageSnapshot | null = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const after = await waitForThreadsPageSettled(config, padCode, {
+      timeoutMs: Math.max(900, Math.min(2400, delayMs + 600)),
+      intervalMs: Math.max(350, Math.min(800, Math.floor(delayMs / 2))),
+      stableSamples: 2,
+    });
+    lastState = after;
+    const canAcceptPublishedToast = !expectedPages.includes("compose_editor")
+      && !expectedPages.includes("gallery_picker")
+      && (
+        expectedPages.includes("home_feed")
+        || expectedPages.includes("profile_page")
+        || expectedPages.includes("unknown")
+      );
+    if (canAcceptPublishedToast && await detectThreadsPublishedToastLocally(after.screenshotUrl)) {
+      return {
+        page: expectedPages.includes("profile_page") ? "profile_page" : (expectedPages[0] ?? "unknown"),
+        reason: "LOCAL_PUBLISH_SUCCESS_TOAST",
+        screenshotUrl: after.screenshotUrl,
+      };
+    }
+    if (after.page === "reply_composer") {
+      // 在資訊流誤觸帖子後常會進入串文詳情頁，先返回一層再繼續等待。
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      const afterBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (afterBack) {
+        lastState = afterBack;
+        if (expectedPages.includes(afterBack.page)) return afterBack;
+        if (afterBack.page === "unknown" && options.allowUnknownWhenUnblocked) {
+          const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode).catch(() => null);
+          if (!blockedReason) {
+            return {
+              page: expectedPages[0] ?? "unknown",
+              reason: `由回覆頁返回後進入未知頁，但未檢出阻斷：${afterBack.reason}`,
+              screenshotUrl: afterBack.screenshotUrl,
+            };
+          }
+        }
+      }
+      continue;
+    }
+    if (after.page === "login_required") {
+      const screenshotInput = await getInlineData(after.screenshotUrl).catch(() => null);
+      const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, screenshotInput).catch(() => null);
+      if (blockedReason) {
+        const recovered = await recoverThreadsLoginRequiredPage(config, padCode);
+        if (recovered) {
+          if (expectedPages.includes(recovered.page)) return recovered;
+          if (options.allowUnknownWhenUnblocked) {
+            return {
+              page: expectedPages[0] ?? recovered.page,
+              reason: `登入頁已用現有 Instagram 帳號恢復：${recovered.reason}`,
+              screenshotUrl: recovered.screenshotUrl,
+            };
+          }
+          lastState = recovered;
+          continue;
+        }
+        throw new Error(buildThreadsBlockedError(`Threads 前置頁阻斷：${blockedReason}`, after.screenshotUrl));
+      }
+      const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+      if (!currentFocus.includes(THREADS_PACKAGE) && currentFocus) {
+        throw new Error(`Threads 前置頁阻斷：${currentFocus}`);
+      }
+      if (options.allowUnknownWhenUnblocked) {
+        return {
+          page: expectedPages[0] ?? "unknown",
+          reason: `登入頁分類疑似誤判，但未檢出阻斷：${after.reason}`,
+          screenshotUrl: after.screenshotUrl,
+        };
+      }
+    }
+    if (after.page === "challenge" || after.page === "system_dialog") {
+      throw new Error(buildThreadsBlockedError(`Threads 前置頁阻斷：${after.reason}`, after.screenshotUrl));
+    }
+    if (expectedPages.includes(after.page)) {
+      return after;
+    }
+    if (after.page === "unknown" && options.allowUnknownWhenUnblocked) {
+      const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode).catch(() => null);
+      if (!blockedReason) {
+        return { page: expectedPages[0] ?? "unknown", reason: `未知頁面但未檢出阻斷，按成功繼續：${after.reason}`, screenshotUrl: after.screenshotUrl };
+      }
+    }
+    if (attempt < attempts - 1) {
+      await delay(delayMs);
+    }
+  }
+
+  if (!lastState) {
+    const rechecked = await recheckExpectedThreadsPageBeforeFailure(
+      config,
+      padCode,
+      null,
+      expectedPages,
+      options.step || "頁面跳轉",
+    );
+    if (rechecked) return rechecked;
+    const samplePath = await captureThreadsPublishSample(config, padCode, {
+      scenario: options.sampleScenario || "expected-page-missing",
+      mediaKind: options.mediaKind,
+      step: options.step,
+      reason: "no page state",
+      expectedPages,
+    });
+    throw new Error(appendSamplePath(`Threads 頁面跳轉不符預期，目標=${expectedPages.join(",")}, 實際=unknown`, samplePath));
+  }
+  const rechecked = await recheckExpectedThreadsPageBeforeFailure(
+    config,
+    padCode,
+    lastState,
+    expectedPages,
+    options.step || "頁面跳轉",
+  );
+  if (rechecked) return rechecked;
+  const samplePath = await captureThreadsPublishSample(config, padCode, {
+    scenario: options.sampleScenario || "expected-page-mismatch",
+    mediaKind: options.mediaKind,
+    step: options.step,
+    reason: lastState.reason,
+    page: lastState.page,
+    screenshotUrl: lastState.screenshotUrl,
+    expectedPages,
+  });
+  throw new Error(appendSamplePath(`Threads 頁面跳轉不符預期，目標=${expectedPages.join(",")}, 實際=${lastState.page}（${lastState.reason}）`, samplePath));
+}
+
+async function tapAndVerifyThreadsPage(
+  config: VmosConfig,
+  padCode: string,
+  targetDescription: string,
+  expectedPages: ThreadsPageState[],
+  options: {
+    fallbackTap?: { x: number; y: number; absolute?: boolean };
+    fallbackTapFromScreenshotRatio?: { x: number; y: number };
+    waitMs?: number;
+    allowUnknownWhenUnblocked?: boolean;
+    requireBeforePages?: ThreadsPageState[];
+    sampleScenario?: string;
+    mediaKind?: "text" | "image" | "video" | "media";
+    skipVision?: boolean;
+    preTapDelayMs?: number;
+    waitAttempts?: number;
+    waitDelayMs?: number;
+    tapAttempts?: number;
+  } = {},
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string }> {
+  let before = await waitForThreadsPageSettled(config, padCode, { timeoutMs: 1800, intervalMs: 450, stableSamples: 2 });
+  assertThreadsSnapshotNotTerminal(before, `點擊「${targetDescription}」前置頁阻斷`);
+  if (options.requireBeforePages && !options.requireBeforePages.includes(before.page)) {
+    if (before.page === "media_viewer") {
+      await closeThreadsMediaViewerLayer(config, padCode).catch(() => null);
+      before = await waitForThreadsPageSettled(config, padCode, { timeoutMs: 1800, intervalMs: 450, stableSamples: 2 });
+    } else if (before.page === "reply_composer" || before.page === "gallery_picker" || before.reason === "LOCAL_THREADS_SHARE_SHEET" || before.reason === "LOCAL_THREADS_SIDE_DRAWER" || before.reason === "LOCAL_THREADS_POST_ACTION_SHEET") {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      before = await waitForThreadsPageSettled(config, padCode, { timeoutMs: 1800, intervalMs: 450, stableSamples: 2 });
+    } else if (before.page === "unknown" && before.reason === "LOCAL_ANDROID_LAUNCHER") {
+      await relaunchThreads(config, padCode, 4500).catch(() => undefined);
+      before = await waitForThreadsPageSettled(config, padCode, { timeoutMs: 2200, intervalMs: 550, stableSamples: 2 });
+      if (before.page === "unknown" && before.reason === "LOCAL_ANDROID_LAUNCHER") {
+        await tapThreadsLauncherIconIfVisible(config, padCode, before.screenshotUrl).catch(() => false);
+        before = await classifyThreadsPageOnDevice(config, padCode);
+      }
+    }
+  }
+  if (options.requireBeforePages && !options.requireBeforePages.includes(before.page)) {
+    const recheckedBefore = await recheckExpectedThreadsPageBeforeFailure(
+      config,
+      padCode,
+      before,
+      options.requireBeforePages,
+      `點擊「${targetDescription}」前置頁`,
+    );
+    if (recheckedBefore) {
+      before = {
+        ...recheckedBefore,
+        focus: before.focus,
+        uiXml: before.uiXml,
+        capturedAt: Date.now(),
+      };
+    }
+  }
+  if (options.requireBeforePages && !options.requireBeforePages.includes(before.page)) {
+    const samplePath = await captureThreadsPublishSample(config, padCode, {
+      scenario: options.sampleScenario || "tap-start-page-mismatch",
+      mediaKind: options.mediaKind,
+      step: targetDescription,
+      reason: before.reason,
+      page: before.page,
+      screenshotUrl: before.screenshotUrl,
+      expectedPages: options.requireBeforePages,
+    });
+    throw new Error(appendSamplePath(`Threads 點擊前頁面不符合預期，目標=${targetDescription}，需要=${options.requireBeforePages.join(",")}，實際=${before.page}（${before.reason}）`, samplePath));
+  }
+  if (expectedPages.includes(before.page)) {
+    return before;
+  }
+  let lastError: unknown = null;
+  const tapAttempts = Math.max(1, options.tapAttempts ?? 2);
+  for (let tapAttempt = 0; tapAttempt < tapAttempts; tapAttempt += 1) {
+    if (tapAttempt > 0) {
+      await delay(900 + tapAttempt * 500);
+      before = await waitForThreadsPageSettled(config, padCode, { timeoutMs: 1600, intervalMs: 450, stableSamples: 2 }).catch(() => before);
+      if (expectedPages.includes(before.page)) return before;
+      assertThreadsSnapshotNotTerminal(before, `重試點擊「${targetDescription}」前置頁阻斷`);
+      if (before.page === "media_viewer") {
+        await closeThreadsMediaViewerLayer(config, padCode).catch(() => null);
+        before = await waitForThreadsPageSettled(config, padCode, { timeoutMs: 1600, intervalMs: 450, stableSamples: 2 }).catch(() => before);
+      } else if (before.page === "reply_composer" || before.page === "gallery_picker" || before.reason === "LOCAL_THREADS_SHARE_SHEET" || before.reason === "LOCAL_THREADS_SIDE_DRAWER" || before.reason === "LOCAL_THREADS_POST_ACTION_SHEET") {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(1000);
+        before = await waitForThreadsPageSettled(config, padCode, { timeoutMs: 1600, intervalMs: 450, stableSamples: 2 }).catch(() => before);
+      } else if (before.reason === "LOCAL_ANDROID_LAUNCHER") {
+        await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+        before = await waitForThreadsPageSettled(config, padCode, { timeoutMs: 2200, intervalMs: 550, stableSamples: 2 }).catch(() => before);
+        if (before.page === "unknown" && before.reason === "LOCAL_ANDROID_LAUNCHER") {
+          await tapThreadsLauncherIconIfVisible(config, padCode, before.screenshotUrl).catch(() => false);
+          before = await classifyThreadsPageOnDevice(config, padCode).catch(() => before);
+        }
+      }
+      if (options.requireBeforePages && !options.requireBeforePages.includes(before.page)) {
+        lastError = new Error(`Threads 點擊前頁面不符合預期，目標=${targetDescription}，需要=${options.requireBeforePages.join(",")}，實際=${before.page}（${before.reason}）`);
+        continue;
+      }
+    }
+
+    const target = options.skipVision ? null : await locateThreadsButtonByVision(before.screenshotUrl, targetDescription);
+    if (options.preTapDelayMs && options.preTapDelayMs > 0) {
+      await delay(options.preTapDelayMs);
+    }
+
+    if (target) {
+      console.log(`[threads][tap] vision target="${targetDescription}" attempt=${tapAttempt + 1}/${tapAttempts} x=${Math.round(target.x)} y=${Math.round(target.y)} before=${before.page}`);
+      await tapScreenshotPointViaAdb(config, padCode, before.screenshotUrl, target, options.waitMs ?? 2500);
+    } else if (options.fallbackTapFromScreenshotRatio) {
+      const [screen, imageSize] = await Promise.all([
+        getScreenSize(config, padCode),
+        getImageDimensions(before.screenshotUrl),
+      ]);
+      const point = {
+        x: screen.width * options.fallbackTapFromScreenshotRatio.x,
+        y: screen.height * options.fallbackTapFromScreenshotRatio.y,
+      };
+      const imageLabel = imageSize ? ` image=${imageSize.width}x${imageSize.height}` : "";
+      console.log(`[threads][tap] screen ratio target="${targetDescription}" attempt=${tapAttempt + 1}/${tapAttempts} ratio=${options.fallbackTapFromScreenshotRatio.x},${options.fallbackTapFromScreenshotRatio.y} screen=${screen.width}x${screen.height}${imageLabel} point=${Math.round(point.x)},${Math.round(point.y)} before=${before.page}`);
+      await tapViaAdbAbsolute(
+        config,
+        padCode,
+        point.x,
+        point.y,
+        options.waitMs ?? 2500,
+      );
+    } else if (options.fallbackTap) {
+      console.log(`[threads][tap] fallback target="${targetDescription}" attempt=${tapAttempt + 1}/${tapAttempts} x=${Math.round(options.fallbackTap.x)} y=${Math.round(options.fallbackTap.y)} absolute=${Boolean(options.fallbackTap.absolute)} before=${before.page}`);
+      if (options.fallbackTap.absolute) {
+        await tapViaAdbAbsolute(config, padCode, options.fallbackTap.x, options.fallbackTap.y, options.waitMs ?? 2500);
+      } else {
+        await tap(config, padCode, options.fallbackTap.x, options.fallbackTap.y, options.waitMs ?? 2500);
+      }
+    } else {
+      lastError = new Error(`Threads 目標按鈕定位失敗：${targetDescription}`);
+      continue;
+    }
+
+    try {
+      return await waitForThreadsExpectedPage(config, padCode, expectedPages, {
+        allowUnknownWhenUnblocked: options.allowUnknownWhenUnblocked,
+        attempts: options.waitAttempts,
+        delayMs: options.waitDelayMs,
+        sampleScenario: options.sampleScenario || "tap-result-page-mismatch",
+        mediaKind: options.mediaKind,
+        step: `${targetDescription}${tapAttempts > 1 ? `（第 ${tapAttempt + 1}/${tapAttempts} 次）` : ""}`,
+      });
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (/__THREADS_BLOCKED__|前置頁阻斷|手机号|驗證|验证码|challenge|system_dialog|login_required/i.test(message)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`Threads 目標按鈕多次嘗試後仍未生效：${targetDescription}`);
+}
+
+async function ensureThreadsHomeFeed(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  const homeFallbackTap = {
+    x: Math.round(screen.width * 0.10),
+    y: Math.round(screen.height * 0.968),
+    absolute: true,
+  };
+  const profileBackTap = { x: 54, y: 102, absolute: true };
+  const tapTopLeftBack = async (waitMs = 1400) => {
+    await tapViaAdbAbsolute(config, padCode, profileBackTap.x, profileBackTap.y, waitMs);
+  };
+  const isProfileLikeState = async (state: { screenshotUrl?: string } | null | undefined, uiXml?: string) => {
+    if (!state?.screenshotUrl && !uiXml) return false;
+    return Boolean(
+      (uiXml && looksLikeThreadsProfileUiXml(uiXml))
+        || await detectThreadsProfilePageLocally(state?.screenshotUrl)
+        || await detectThreadsProfilePageVisually(state?.screenshotUrl),
+    );
+  };
+  const isConfirmedHome = async (state: { page: ThreadsPageState; screenshotUrl?: string } | null | undefined, uiXml?: string) => (
+    state?.page === "home_feed" && !(await isProfileLikeState(state, uiXml))
+  );
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const current = await classifyThreadsPageOnDevice(config, padCode);
+    const currentUiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (detectThreadsDraftSaveDialogFromUiXml(currentUiXml)
+      || await detectThreadsDraftSaveDialogLocally(current.screenshotUrl).catch(() => false)) {
+      onProgress?.({ step: "Threads 停在草稿提示，先丢弃旧草稿再回首页...", done: false });
+      await dismissThreadsDraftSaveDialog(config, padCode, current.screenshotUrl, "discard").catch(() => null);
+      await delay(1200);
+      continue;
+    }
+    if (await detectThreadsSideDrawerLocally(current.screenshotUrl).catch(() => false)) {
+      onProgress?.({ step: "Threads 侧栏已展开，先关闭侧栏再继续...", done: false });
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      const afterDrawerBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterDrawerBack)) return;
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+      await delay(1000);
+      continue;
+    }
+    if (await detectThreadsPostActionSheetLocally(current.screenshotUrl)) {
+      onProgress?.({ step: "Threads 停在既有串文菜单，先关闭菜单...", done: false });
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      continue;
+    }
+    if (current.reason === "LOCAL_ANDROID_LAUNCHER") {
+      onProgress?.({ step: "Threads 已退到云机桌面，强制重新启动 App...", done: false });
+      await relaunchThreads(config, padCode, 5000);
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+      continue;
+    }
+    if (current.page === "home_feed") {
+      const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+      if (findThreadsReplyComposerInputTarget(uiXml)) {
+          onProgress?.({ step: "Threads 实际停在串文详情页，先返回首页推荐流...", done: false });
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+          await delay(1400);
+          continue;
+        }
+      const looksLikeProfile = await isProfileLikeState(current, uiXml);
+      if (!looksLikeProfile) return;
+      onProgress?.({ step: "Threads 实际停在个人页，切回首页推荐流...", done: false });
+      await tapTopLeftBack(1500);
+      const afterTopLeftBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterTopLeftBack)) return;
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      const afterBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterBack)) return;
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 2400);
+      await delay(1200);
+      continue;
+    }
+
+    const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    if (currentFocus && !currentFocus.includes(THREADS_PACKAGE)) {
+      if (isGooglePlayFocus(currentFocus)) {
+        onProgress?.({ step: "云机停在 Google Play，先关闭后重启 Threads...", done: false });
+        await execAdbForText(config, padCode, `am force-stop ${GOOGLE_PLAY_PACKAGE}; input keyevent KEYCODE_HOME`, 8000, 500).catch(() => "");
+        await delay(1000);
+      }
+      onProgress?.({ step: "Threads 未在前台，重新啟動 App...", done: false });
+      await relaunchThreads(config, padCode, 4500);
+      continue;
+    }
+
+    if (current.page === "reply_composer") {
+      onProgress?.({ step: "Threads 停在回覆頁，先返回上一層...", done: false });
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1500);
+      const afterBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterBack)) return;
+      if (afterBack?.reason === "LOCAL_ANDROID_LAUNCHER") {
+        await relaunchThreads(config, padCode, 5000);
+        await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+      }
+      continue;
+    }
+
+    if (current.page === "media_viewer") {
+      const afterClose = await closeThreadsMediaViewerLayer(config, padCode, onProgress);
+      if (await isConfirmedHome(afterClose)) return;
+      if (afterClose?.page === "profile_page") {
+        await tapTopLeftBack(1500);
+        const afterTopLeftBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        if (await isConfirmedHome(afterTopLeftBack)) return;
+      }
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 2200);
+      const afterHomeTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterHomeTap)) return;
+      continue;
+    }
+
+    if (current.page === "gallery_picker") {
+      const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+      const confirmedGallery = Boolean(detectThreadsGalleryPickerFromUiXml(uiXml));
+      if (confirmedGallery) {
+        onProgress?.({ step: "Threads 停在圖庫/選單層，先返回首頁...", done: false });
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(1400);
+      } else {
+        onProgress?.({ step: "Threads 圖庫判斷不明確，避免直接返回，改點首頁...", done: false });
+        await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+        await delay(1000);
+      }
+      continue;
+    }
+
+    if (current.page === "profile_page") {
+      onProgress?.({ step: "Threads 停在个人主页，切回首页推荐流...", done: false });
+      await tapTopLeftBack(1500);
+      const afterTopLeftBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterTopLeftBack)) return;
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      const afterBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterBack)) return;
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 2400);
+      await delay(1200);
+      const afterHomeTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterHomeTap)) return;
+      continue;
+    }
+
+    if (current.page === "compose_editor") {
+      const afterClose = await closeThreadsComposerLayer(config, padCode, onProgress).catch(() => null);
+      if (await isConfirmedHome(afterClose)) return;
+      if (afterClose?.reason === "LOCAL_ANDROID_LAUNCHER") {
+        await relaunchThreads(config, padCode, 5000);
+        await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+      }
+      continue;
+    }
+
+    if (current.page === "login_required") {
+      if (current.reason === "LOCAL_PHONE_VERIFICATION_PAGE") {
+        throw new Error(`Threads 当前不适合养号：需要完成手机号验证码登录（${current.reason}）`);
+      }
+      const recovered = await recoverThreadsLoginRequiredPage(config, padCode, onProgress);
+      if (recovered?.page === "home_feed") return;
+      if (recovered) continue;
+      throw new Error(`Threads 当前不适合养号：${current.reason}`);
+    }
+
+    if (current.page === "challenge" || current.page === "system_dialog") {
+      throw new Error(`Threads 当前不适合养号：${current.reason}`);
+    }
+
+    if (current.page === "unknown" && current.reason === "LOCAL_ANDROID_LAUNCHER") {
+      onProgress?.({ step: "Threads 已退到云机桌面，重新启动 App...", done: false });
+      await relaunchThreads(config, padCode, 5000);
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+      continue;
+    }
+
+    if (current.page === "unknown" && currentFocus.includes(THREADS_PACKAGE)) {
+      if (current.reason === "LOCAL_THREADS_SHARE_SHEET") {
+        onProgress?.({ step: "Threads 分享面板已展开，先关闭面板...", done: false });
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(1200);
+        continue;
+      }
+      if (current.reason === "LOCAL_THREADS_SIDE_DRAWER") {
+        onProgress?.({ step: "Threads 侧栏已展开，先关闭侧栏...", done: false });
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(1200);
+        continue;
+      }
+      if (current.reason === "LOCAL_THREADS_INAPP_BROWSER") {
+        onProgress?.({ step: "Threads 误入内置网页页，先返回并回首页...", done: false });
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(1200);
+        await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+        continue;
+      }
+      onProgress?.({ step: "Threads 页面未能分类，先退出当前层级再回首页...", done: false });
+      await tapTopLeftBack(1500);
+      const afterTopLeftBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterTopLeftBack)) return;
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1000);
+      const afterBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterBack)) return;
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 2400);
+      await delay(1200);
+      continue;
+    }
+
+    onProgress?.({ step: "尝试切回 Threads 首页推荐流...", done: false });
+    const homeState = await tapAndVerifyThreadsPage(
+      config,
+      padCode,
+      "Threads 底部导航栏最左侧的首页 Home 按钮",
+      ["home_feed"],
+      { fallbackTap: homeFallbackTap, waitMs: 2200 },
+    ).catch(() => null);
+    if (homeState?.page === "home_feed") return;
+
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(1200);
+    const afterBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (await isConfirmedHome(afterBack)) return;
+
+    if (current.page === "unknown" || afterBack?.page === "unknown") {
+      onProgress?.({ step: "Threads 停在未知頁，重啟 App 後再切首頁...", done: false });
+      await relaunchThreads(config, padCode, 4500);
+      const relaunched = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(relaunched)) return;
+      if (relaunched?.page === "login_required") {
+        if (relaunched.reason === "LOCAL_PHONE_VERIFICATION_PAGE") {
+          throw new Error(`Threads 当前不适合养号：需要完成手机号验证码登录（${relaunched.reason}）`);
+        }
+        const recovered = await recoverThreadsLoginRequiredPage(config, padCode, onProgress);
+        if (recovered?.page === "home_feed") return;
+        if (recovered) continue;
+        throw new Error(`Threads 当前不适合养号：${relaunched.reason}`);
+      }
+      if (relaunched?.page === "challenge" || relaunched?.page === "system_dialog") {
+        throw new Error(`Threads 当前不适合养号：${relaunched.reason}`);
+      }
+      const relaunchedHome = await tapAndVerifyThreadsPage(
+        config,
+        padCode,
+        "Threads 底部导航栏最左侧的首页 Home 按钮",
+        ["home_feed"],
+        { fallbackTap: homeFallbackTap, waitMs: 2200 },
+      ).catch(() => null);
+      if (await isConfirmedHome(relaunchedHome)) return;
+    }
+  }
+
+  const finalState = await classifyThreadsPageOnDevice(config, padCode);
+  const finalFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  const finalLocalHomeReason = await detectThreadsHomeFeedLocally(finalState.screenshotUrl).catch(() => null);
+  if (finalLocalHomeReason) {
+    return;
+  }
+  const finalVisualHomeReason = await detectThreadsHomeFeedVisually(finalState.screenshotUrl).catch(() => null);
+  const finalLooksLikeProfile = finalVisualHomeReason ? await isProfileLikeState(finalState).catch(() => false) : false;
+  if (finalVisualHomeReason && !finalLooksLikeProfile) {
+    return;
+  }
+  if (await detectThreadsSideDrawerLocally(finalState.screenshotUrl).catch(() => false)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(1200);
+    await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+    const afterDrawerClose = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (await isConfirmedHome(afterDrawerClose)) return;
+  }
+  if (finalState.page === "home_feed") {
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (await isConfirmedHome(finalState, uiXml)) return;
+  }
+  if (finalState.page === "profile_page") {
+    await tapTopLeftBack(1500);
+    const afterTopLeftBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (await isConfirmedHome(afterTopLeftBack)) return;
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(1200);
+    const afterBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (await isConfirmedHome(afterBack)) return;
+    await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 2400);
+    const afterHome = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (await isConfirmedHome(afterHome)) return;
+    throw new Error(`未能从个人主页切回 Threads 首页推荐流：${afterHome?.reason || finalState.reason}`);
+  }
+  if (finalState.page === "unknown") {
+    if (finalState.reason === "LOCAL_THREADS_SHARE_SHEET") {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      const afterShareSheetClose = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterShareSheetClose)) return;
+    }
+    if (finalState.reason === "LOCAL_THREADS_SIDE_DRAWER") {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+      const afterSideDrawerClose = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterSideDrawerClose)) return;
+    }
+    if (finalState.reason === "LOCAL_ANDROID_LAUNCHER") {
+      await relaunchThreads(config, padCode, 5000).catch(() => undefined);
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+      const afterLauncherRecovery = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterLauncherRecovery)) return;
+      if (afterLauncherRecovery?.page === "profile_page") {
+        await tapTopLeftBack(1500);
+        const afterProfileBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        if (await isConfirmedHome(afterProfileBack)) return;
+      }
+    }
+    if (finalState.reason === "LOCAL_THREADS_INAPP_BROWSER") {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(1200);
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
+      const afterBrowserBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterBrowserBack)) return;
+    }
+    if (finalFocus.includes(THREADS_PACKAGE)) {
+      await tapTopLeftBack(1500);
+      const afterTopLeftBack = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterTopLeftBack)) return;
+      await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 2400);
+      const afterHome = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (await isConfirmedHome(afterHome)) return;
+      if (await detectThreadsHomeFeedLocally(afterHome?.screenshotUrl).catch(() => null)) return;
+      const freshHomeShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+      if (await detectThreadsHomeFeedLocally(freshHomeShotUrl).catch(() => null)) return;
+      throw new Error(`未能确认 Threads 首页推荐流：${afterHome?.reason || finalState.reason}`);
+    }
+    const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode).catch(() => null);
+    throw new Error(`未能确认 Threads 首页推荐流：${blockedReason ?? finalState.reason}`);
+  }
+  throw new Error(`未能切回 Threads 首页推荐流：${finalState.reason}`);
+}
+
+async function ensureThreadsHomeFeedForPublish(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+  options: { deadlineAt?: number; timeoutLabel?: string; throwIfCancelled?: () => void } = {},
+): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    options.throwIfCancelled?.();
+    if (options.deadlineAt && Date.now() > options.deadlineAt) {
+      throw new Error(options.timeoutLabel || "切回 Threads 首页超时");
+    }
+    try {
+      await ensureThreadsHomeFeed(config, padCode, onProgress);
+    } catch (error) {
+      lastError = error;
+    }
+
+    options.throwIfCancelled?.();
+    const state = await waitForThreadsPageSettled(config, padCode, {
+      timeoutMs: 2200,
+      intervalMs: 550,
+      stableSamples: 2,
+    }).catch(() => null);
+    options.throwIfCancelled?.();
+    const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    const shotUrl = state?.screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    const localHomeReason = await detectThreadsHomeFeedLocally(shotUrl).catch(() => null);
+    if (focus.includes(THREADS_PACKAGE) && (state?.page === "home_feed" || localHomeReason)) {
+      if (attempt > 0) onProgress?.({ step: "Threads 首页已稳定，继续发布流程...", done: false });
+      return;
+    }
+
+    if (state?.reason === "LOCAL_ANDROID_LAUNCHER" || !focus.includes(THREADS_PACKAGE)) {
+      onProgress?.({ step: `Threads 发布前不在前台，重新启动 App ${attempt + 1}/3...`, done: false });
+      await relaunchThreads(config, padCode, 5000).catch((error) => {
+        lastError = error;
+      });
+      options.throwIfCancelled?.();
+      await delay(1200);
+      continue;
+    }
+  }
+  if (lastError instanceof Error) throw lastError;
+  throw new Error("发布前未能稳定回到 Threads 首页，请确认云机没有停在桌面或其他应用。");
+}
+
+async function ensureThreadsHomeFeedForPublishBounded(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+  timeoutMs = 35_000,
+  options: { throwIfCancelled?: () => void } = {},
+): Promise<void> {
+  const progressTimer = globalThis.setTimeout(() => {
+    onProgress?.({ step: "切回 Threads 首页仍在等待，正在做最后一次页面确认...", done: false });
+  }, Math.min(12_000, Math.max(1_000, timeoutMs - 1_000)));
+
+  try {
+    await ensureThreadsHomeFeedForPublish(config, padCode, onProgress, {
+      deadlineAt: Date.now() + timeoutMs,
+      timeoutLabel: `切回 Threads 首页超时（${Math.round(timeoutMs / 1000)}s）`,
+      throwIfCancelled: options.throwIfCancelled,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (isPublishCancellationMessage(errorMessage)) throw error;
+    const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    const samplePath = await captureThreadsPublishSample(config, padCode, {
+      scenario: "home-feed-restore-timeout",
+      step: "切回首頁準備發布",
+      reason: errorMessage,
+      page: state?.page || "unknown",
+      screenshotUrl: state?.screenshotUrl,
+      expectedPages: ["home_feed"],
+    });
+    const pageDetail = state ? `${state.page}（${state.reason}）` : "unknown";
+    throw new Error(appendSamplePath(`切回 Threads 首页准备发布超时，当前页面：${pageDetail}`, samplePath));
+  } finally {
+    globalThis.clearTimeout(progressTimer);
+  }
+}
+
+async function detectThreadsBottomPublishToastState(screenshotUrl: string): Promise<ThreadsBottomToastState> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return "none";
+  const cropped = await cropBottomRegionToInlineData(screenshotUrl, 0.7);
+  if (!cropped) return "none";
+  const request = createTimeoutSignal(8000);
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判斷這張 Threads 截圖底部是否出現發布提示條。
+
+只輸出一行，格式固定為以下三種之一：
+SUCCESS
+PENDING
+NONE
+
+SUCCESS 的條件：
+- 能看到「已發佈 / 已发布 / posted」這類成功提示，或
+- 同時看到明確成功提示與「查看 / 檢視 / View」按鈕。
+
+PENDING 的條件：
+- 看到「發布中 / 發佈中 / 上傳中 / 傳送中 / posting / uploading」這類仍在處理中的提示，即使旁邊有「查看 / 檢視 / View」也算 PENDING。
+
+NONE 的條件：
+- 沒有提示條，或看不清。`,
+          },
+          { text: "底部裁切圖" },
+          { inlineData: cropped },
+        ],
+      }],
+      { maxOutputTokens: 10, temperature: 0 },
+      request.signal,
+    );
+
+    const line = normalizeSingleLine(extractText(raw)).toUpperCase();
+    if (line.startsWith("SUCCESS")) return "success";
+    if (line.startsWith("PENDING")) return "pending";
+    return "none";
+  } catch {
+    return "none";
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function detectThreadsBottomSuccessToast(screenshotUrl: string): Promise<boolean> {
+  return (await detectThreadsBottomPublishToastState(screenshotUrl)) === "success";
+}
+
+async function isThreadsComposeLikeScreen(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl: string,
+): Promise<boolean> {
+  if (await detectThreadsPublishedToastLocally(screenshotUrl)) return false;
+  if (await detectThreadsComposerLocally(screenshotUrl)) return true;
+  if (await detectThreadsBottomNavigationLocally(screenshotUrl)) return false;
+  if (await detectThreadsProfilePageLocally(screenshotUrl)) return false;
+
+  const classified = await classifyThreadsPageFromScreenshot(screenshotUrl).catch(() => null);
+  if (classified?.page === "compose_editor" || classified?.page === "reply_composer") {
+    return true;
+  }
+  const deviceState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  return deviceState?.page === "compose_editor" || deviceState?.page === "reply_composer";
+}
+
+async function waitForThreadsVideoPublishProcessing(
+  config: VmosConfig,
+  padCode: string,
+  firstScreenshotUrl: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<PublishVerificationResult | null> {
+  let state = await detectThreadsBottomPublishToastState(firstScreenshotUrl);
+  if (state === "success") {
+    return {
+      state: "verified",
+      detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
+    };
+  }
+  if (state !== "pending") return null;
+
+  const waits = [12000, 20000, 30000, 40000];
+  for (let attempt = 0; attempt < waits.length; attempt += 1) {
+    onProgress?.({
+      step: `Threads 影片仍在發布中，等待處理完成（第 ${attempt + 1}/${waits.length} 輪）...`,
+      done: false,
+    });
+    await delay(waits[attempt]);
+    const url = await freezeScreenshotUrl(await screenshot(config, padCode));
+    state = await detectThreadsBottomPublishToastState(url);
+    if (state === "success") {
+      return {
+        state: "verified",
+        detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
+      };
+    }
+    if (state !== "pending") return null;
+  }
+
+  return null;
+}
+
+async function locateInstagramStoryTapTarget(
+  screenshotUrl: string,
+  target: "text_entry" | "next" | "share",
+): Promise<{ x: number; y: number } | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+  const inline = await getInlineData(screenshotUrl);
+  if (!inline) return null;
+  const image = await loadImage(screenshotUrl).catch(() => null);
+  if (!image) return null;
+  const request = createTimeoutSignal(8000);
+
+  const targetPrompt = target === "text_entry"
+    ? "請找出能進入 Instagram Story 文字編輯模式的可點按鈕，通常是左側的 Aa / 建立 / 创建 / Create 文字工具。"
+    : target === "next"
+      ? "請找出這個頁面右上角能進入下一步/預覽/分享頁的按鈕，例如 Done / 完成 / 下一步。"
+      : "請找出這個頁面中真正用來分享到『限時動態 / 限时动态 / 你的限時動態 / 你的限时动态 / Your story』的大按鈕。優先回傳底部左側 Your story/你的限時動態按鈕；不要選 Close Friends/密友，也不要選右側白色圓形箭頭，除非畫面上沒有 Your story 類按鈕。";
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在幫我定位 Instagram Story 發布流程中的點擊位置。
+
+目前截圖尺寸是 ${image.width}x${image.height}。
+${targetPrompt}
+
+只輸出一行，格式固定為：
+TAP|x|y|原因
+或
+NOT_FOUND|原因
+
+要求：
+- x 與 y 必須是原始截圖像素座標。
+- 請給出最適合點擊的中心點。
+- 如果畫面中沒有這個目標，就輸出 NOT_FOUND。`,
+          },
+          { text: "目前頁面截圖" },
+          { inlineData: inline },
+        ],
+      }],
+      { maxOutputTokens: 40, temperature: 0 },
+      request.signal,
+    );
+    const line = normalizeSingleLine(extractText(raw));
+    const match = line.match(/^TAP\|(\d+)\|(\d+)\|?/i);
+    if (!match) return null;
+    const x = Number(match[1]);
+    const y = Number(match[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (x < 0 || y < 0 || x > image.width || y > image.height) return null;
+    return { x, y };
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function locateInstagramImageFlowTapTarget(
+  screenshotUrl: string,
+  target: "next" | "share" | "post_tab" | "recent_thumbnail" | "restart_new_reel" | "dismiss_rating",
+): Promise<{ x: number; y: number } | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+  const inline = await getInlineData(screenshotUrl);
+  if (!inline) return null;
+  const image = await loadImage(screenshotUrl).catch(() => null);
+  if (!image) return null;
+  const request = createTimeoutSignal(8000);
+
+  const targetPrompt = target === "next"
+    ? "請找出 Instagram 貼文圖片/影片流程中，能從目前頁面進入下一步/編輯/分享頁的主要按鈕。繁中或簡中介面通常會是右上角的「下一步」，或影片編輯頁右下角那顆大型藍色「下一步 / 继续 / 完成」按鈕；不要誤選左上角關閉、工具列、時間軸、音訊或文字按鈕。"
+    : target === "share"
+      ? "請找出這個頁面中真正用來發佈/分享貼文的主要按鈕，通常是底部或右上角的「分享 / 发布 / 發佈 / 發表 / 发帖」。如果畫面還不是最終分享頁，請輸出 NOT_FOUND。"
+      : target === "post_tab"
+        ? "只有當畫面底部能看到 Instagram 建立內容的模式切換列（例如「貼文 / 帖子 / 新帖子 / 限時動態 / 限时动态 / REEL / 直播」），而且目前不是貼文/帖子模式時，才找出切換到貼文/帖子模式的按鈕中心點；如果已經是貼文/帖子模式，或畫面沒有這種切換列，就輸出 NOT_FOUND。"
+        : target === "recent_thumbnail"
+          ? "只有當畫面是 Instagram 相簿/九宮格選圖頁時，請找出最適合選中的『文字卡縮圖』中心點。目標卡片通常是直向、整體很亮，背景是白色或極淡的灰白色，左右兩側各有一條藍色到紫色的豎條，中間是大號黑字或深色字，整體像測試卡片而不是實拍照片。優先選最接近最新時間、且最符合這些特徵的那張；不要選風景、咖啡廳、食物、人物、戶外景點、Reel 封面等真實照片。如果畫面不是選圖頁，或找不到這種卡片，就輸出 NOT_FOUND。"
+          : target === "restart_new_reel"
+            ? "只有當畫面中央出現 Reels 草稿彈窗（例如「Keep editing your draft? / 繼續編輯草稿？/ 继续编辑草稿？」）時，才找出底部那顆「Start new video / 開始建立新影片 / 开始创建新视频」或等價的重新開始按鈕中心點；不要選 Keep editing / 繼續編輯；如果沒有這種彈窗，就輸出 NOT_FOUND。"
+            : "只有當畫面中央出現 Instagram 評分/評價彈窗（例如「評價Instagram / 评价 Instagram」，底部有「稍後再提醒我 / 稍后提醒我 / 不，謝謝 / 不，谢谢 / 不用了」）時，才找出最適合關閉彈窗的按鈕中心點。優先拒絕或不用了，其次稍後提醒；如果沒有這種彈窗，就輸出 NOT_FOUND。";
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在幫我定位 Instagram 圖片貼文流程中的點擊位置。
+
+目前截圖尺寸是 ${image.width}x${image.height}。
+${targetPrompt}
+
+只輸出一行，格式固定為：
+TAP|x|y|原因
+或
+NOT_FOUND|原因
+
+要求：
+- x 與 y 必須是原始截圖像素座標。
+- 請給出最適合點擊的中心點。
+- 如果畫面中沒有這個目標，就輸出 NOT_FOUND。`,
+          },
+          { text: "目前頁面截圖" },
+          { inlineData: inline },
+        ],
+      }],
+      { maxOutputTokens: 40, temperature: 0 },
+      request.signal,
+    );
+    const line = normalizeSingleLine(extractText(raw));
+    const match = line.match(/^TAP\|(\d+)\|(\d+)\|?/i);
+    if (!match) return null;
+    const x = Number(match[1]);
+    const y = Number(match[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (x < 0 || y < 0 || x > image.width || y > image.height) return null;
+    return { x, y };
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function locateAndroidShareSheetTarget(
+  screenshotUrl: string,
+  target: "instagram_feed" | "instagram_reels",
+): Promise<{ x: number; y: number } | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+  const inline = await getInlineData(screenshotUrl);
+  if (!inline) return null;
+  const image = await loadImage(screenshotUrl).catch(() => null);
+  if (!image) return null;
+  const request = createTimeoutSignal(8000);
+
+  const targetPrompt = target === "instagram_feed"
+    ? "請找出 Android 系統分享面板裡『Instagram Feed』那一整列可點擊目標的中心點。只選『Instagram Feed』，不要選 Instagram Messages、Instagram Reels 或底部按鈕。"
+    : "請找出 Android 系統分享面板裡『Instagram Reels』那一整列可點擊目標的中心點。只選『Instagram Reels』，不要選 Feed、Messages 或底部按鈕。";
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在幫我定位 Android 系統分享面板中的應用目標。
+
+目前截圖尺寸是 ${image.width}x${image.height}。
+${targetPrompt}
+
+只輸出一行，格式固定為：
+TAP|x|y|原因
+或
+NOT_FOUND|原因
+
+要求：
+- x 與 y 必須是原始截圖像素座標。
+- 請點在該列文字與圖示中間、最穩定可點的位置。
+- 如果畫面不是 Android 分享面板，就輸出 NOT_FOUND。`,
+          },
+          { text: "目前頁面截圖" },
+          { inlineData: inline },
+        ],
+      }],
+      { maxOutputTokens: 40, temperature: 0 },
+      request.signal,
+    );
+    const line = normalizeSingleLine(extractText(raw));
+    const match = line.match(/^TAP\|(\d+)\|(\d+)\|?/i);
+    if (!match) return null;
+    const x = Number(match[1]);
+    const y = Number(match[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (x < 0 || y < 0 || x > image.width || y > image.height) return null;
+    return { x, y };
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+function findAndroidShareSheetInstagramTargetFromUiXml(
+  uiXml: string,
+  target: "instagram_feed" | "instagram_reels",
+): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  const desired = target === "instagram_feed" ? /(^|\b)(Instagram\s*)?Feed(\b|$)|貼文|帖子|帖文/i : /(^|\b)(Instagram\s*)?Reels?(\b|$)|連續短片|短视频|短影片/i;
+  const rejected = target === "instagram_feed" ? /Messages?|Direct|Reels?|Story|限時動態|限时动态|訊息|消息/i : /Messages?|Direct|Feed|Story|限時動態|限时动态|貼文|帖子|帖文|訊息|消息/i;
+
+  for (const node of nodes) {
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const className = getXmlAttr(node, "class");
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center || !text) continue;
+
+    let score = 0;
+    if (desired.test(text)) score += 20;
+    if (/Instagram/i.test(text)) score += 6;
+    if (/android\.widget\.(TextView|Button|LinearLayout|RelativeLayout)|ViewGroup/i.test(className)) score += 2;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 3;
+    if (center.x >= 60 && center.x <= 650 && center.y >= 350 && center.y <= 1250) score += 3;
+    if (rejected.test(text)) score -= 30;
+    if (/Just once|Always|僅此一次|仅此一次|一律|始終|始终/i.test(text)) score -= 30;
+    if (score >= 14) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+function looksLikeInstagramHomeUiXml(uiXml: string): boolean {
+  const text = normalizeSingleLine(uiXml);
+  if (!text) return false;
+  const hasHomeCue = /Instagram|Your story|你的限時動態|你的限时动态|Suggested for you|為你推薦|为你推荐/i.test(text);
+  const hasPublishFlowCue = /New Reel|新 Reel|新 Reels|撰寫說明|撰写说明|新增說明文字|添加说明文字|發布|发布|下一步|继续|Next|Write a caption|Add caption/i.test(text);
+  return hasHomeCue && !hasPublishFlowCue;
+}
+
+async function confirmAndroidResolverChoiceIfNeeded(
+  config: VmosConfig,
+  padCode: string,
+): Promise<void> {
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const currentFocus = await getAndroidCurrentFocus(config, padCode).catch(() => "");
+  if (!/Just once|Always|僅此一次|仅此一次|一律|始終|始终/i.test(uiXml)
+    && !/ResolverActivity|ChooserActivity|android\/com\.android\.internal\.app/i.test(currentFocus)) {
+    return;
+  }
+  const justOnce = findXmlTextButtonTarget(uiXml, /Just once|僅此一次|仅此一次/i);
+  if (justOnce) {
+    await tapViaAdbAbsolute(config, padCode, justOnce.x, justOnce.y, 2600);
+  } else {
+    await tapViaAdbReferencePoint(config, padCode, { x: 420, y: 1548 }, 2600, FIXED_VMOS_SCREEN);
+  }
+}
+
+async function selectInstagramTargetFromAndroidShareSheet(
+  config: VmosConfig,
+  padCode: string,
+  target: "instagram_feed" | "instagram_reels",
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  onProgress?.({
+    step: target === "instagram_feed" ? "選擇 Instagram Feed..." : "選擇 Instagram Reels...",
+    done: false,
+  });
+
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const xmlTarget = uiXml ? findAndroidShareSheetInstagramTargetFromUiXml(uiXml, target) : null;
+  if (xmlTarget) {
+    await tapViaAdbAbsolute(config, padCode, xmlTarget.x, xmlTarget.y, 3600);
+    await confirmAndroidResolverChoiceIfNeeded(config, padCode);
+    return;
+  }
+
+  const shotUrl = await screenshot(config, padCode);
+  const visualTarget = await locateAndroidShareSheetTarget(shotUrl, target);
+  if (visualTarget) {
+    await tapScreenshotPointViaAdb(config, padCode, shotUrl, visualTarget, 3600);
+    await confirmAndroidResolverChoiceIfNeeded(config, padCode);
+    return;
+  }
+
+  const fallback = target === "instagram_feed"
+    ? { x: 210, y: 950 }
+    : { x: 210, y: 1290 };
+  await tapViaAdbReferencePoint(config, padCode, fallback, 3600, FIXED_VMOS_SCREEN);
+  await confirmAndroidResolverChoiceIfNeeded(config, padCode);
+}
+
+async function detectInstagramSelectionPreviewMatchesReference(
+  screenshotUrl: string,
+  mediaUrl: string,
+): Promise<boolean> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return false;
+
+  const [screenInline, referenceInline] = await Promise.all([
+    getInlineData(screenshotUrl),
+    getInlineData(mediaUrl),
+  ]);
+  if (!screenInline || !referenceInline) return false;
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在判斷 Instagram 選圖頁頂部的大預覽，是否已經是目標卡片。
+
+只輸出 YES 或 NO。
+
+YES 的條件：
+- 圖1是 Instagram 選圖頁；
+- 圖1頂部的大預覽主圖，與圖2的目標卡片是同一張圖，或至少明顯是同一版白底/淺底文字卡。
+
+NO 的條件：
+- 圖1不是選圖頁；
+- 頂部大預覽不是圖2；
+- 或看不清、無法確認。`,
+          },
+          { text: "圖1：Instagram 選圖頁截圖" },
+          { inlineData: screenInline },
+          { text: "圖2：目標卡片" },
+          { inlineData: referenceInline },
+        ],
+      }],
+      { maxOutputTokens: 12, temperature: 0 },
+    );
+    return normalizeSingleLine(extractText(raw)).toUpperCase().startsWith("YES");
+  } catch {
+    return false;
+  }
+}
+
+async function dismissInstagramRatingPrompt(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<boolean> {
+  const shotUrl = await screenshot(config, padCode);
+  const dismissTarget = await locateInstagramImageFlowTapTarget(shotUrl, "dismiss_rating");
+  if (!dismissTarget) {
+    return false;
+  }
+
+  onProgress?.({
+    step: "關閉 Instagram 評分彈窗...",
+    done: false,
+  });
+  if (isAcpPad(padCode)) {
+    await tapScreenshotPointViaAdb(config, padCode, shotUrl, dismissTarget, 1800);
+  } else {
+    await tapAbsolute(config, padCode, dismissTarget.x, dismissTarget.y, 1800);
+  }
+  return true;
+}
+
+async function advanceInstagramGeneratedCaptionCardFlow(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<{ shareTarget?: { x: number; y: number } }> {
+  const useAcpFlowGuard = isAcpPad(padCode);
+  let advancedSteps = 0;
+  const tapGeneratedFlowTarget = async (shotUrl: string, point: { x: number; y: number }, waitMs = 3200) => {
+    if (useAcpFlowGuard) {
+      await tapScreenshotPointViaAdb(config, padCode, shotUrl, point, waitMs);
+      return;
+    }
+    await tapAbsolute(config, padCode, point.x, point.y, waitMs);
+  };
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const shotUrl = await screenshot(config, padCode);
+
+    if (useAcpFlowGuard) {
+      const restartNewReelTarget = await locateInstagramImageFlowTapTarget(shotUrl, "restart_new_reel");
+      if (restartNewReelTarget) {
+        onProgress?.({
+          step: "清理 Reels 草稿彈窗...",
+          done: false,
+        });
+        await tapGeneratedFlowTarget(shotUrl, restartNewReelTarget, 3200);
+        continue;
+      }
+
+      const postTabTarget = await locateInstagramImageFlowTapTarget(shotUrl, "post_tab");
+      if (postTabTarget) {
+        onProgress?.({
+          step: "切換到貼文模式...",
+          done: false,
+        });
+        await tapGeneratedFlowTarget(shotUrl, postTabTarget, 3200);
+        continue;
+      }
+    }
+
+    if (useAcpFlowGuard) {
+      const recentCardTarget = await locateInstagramImageFlowTapTarget(shotUrl, "recent_thumbnail");
+      if (recentCardTarget) {
+        onProgress?.({
+          step: "選擇最新圖文卡片...",
+          done: false,
+        });
+        await tapGeneratedFlowTarget(shotUrl, recentCardTarget, 3200);
+        continue;
+      }
+    }
+
+    if (advancedSteps >= 2) {
+      const shareTarget = await locateInstagramImageFlowTapTarget(shotUrl, "share");
+      if (shareTarget) {
+        return { shareTarget };
+      }
+    }
+
+    const nextTarget = await locateInstagramImageFlowTapTarget(shotUrl, "next");
+    if (nextTarget) {
+      onProgress?.({
+        step: `推進圖片發布流程（第 ${attempt + 1}/4 步）...`,
+        done: false,
+      });
+      await tapGeneratedFlowTarget(shotUrl, nextTarget, 3200);
+      advancedSteps += 1;
+      continue;
+    }
+
+    if (advancedSteps >= 1) {
+      const shareTarget = await locateInstagramImageFlowTapTarget(shotUrl, "share");
+      if (shareTarget) {
+        return { shareTarget };
+      }
+    }
+
+    if (useAcpFlowGuard && attempt < 5) {
+      if (attempt === 1) {
+        onProgress?.({
+          step: "ACP 入口停在 Reel，嘗試切回貼文頁籤...",
+          done: false,
+        });
+        await tapViaAdbReferencePoint(config, padCode, { x: 112, y: 1500 }, 2600, FIXED_VMOS_SCREEN);
+        continue;
+      }
+
+      onProgress?.({
+        step: "等待 Instagram 載入貼文入口...",
+        done: false,
+      });
+      await delay(2200);
+      continue;
+    }
+
+    break;
+  }
+
+  return {};
+}
+
+async function advanceInstagramAcpDirectFeedSharePage(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  onProgress?.({
+    step: "進入新貼文...",
+    done: false,
+  });
+  await tapViaAdbAbsolute(config, padCode, 49, 96, 3500);
+
+  onProgress?.({
+    step: "切換貼文模式...",
+    done: false,
+  });
+  await tapViaAdbAbsolute(config, padCode, 90, 1480, 3000);
+
+  onProgress?.({
+    step: "進入貼文編輯頁...",
+    done: false,
+  });
+  await tapViaAdbAbsolute(config, padCode, 650, 74, 3500);
+
+  onProgress?.({
+    step: "進入分享頁...",
+    done: false,
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await tapViaAdbAbsolute(config, padCode, 600, 1444, 4500);
+    const state = await classifyInstagramAcpReelFlowState(await screenshot(config, padCode)).catch(() => "unknown" as const);
+    if (state === "share_page" || state === "unknown") return;
+    if (state !== "editor" && state !== "effects_drawer") return;
+  }
+}
+
+async function advanceInstagramAcpVideoFeedSharePage(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  const launchReelCamera = async (step: string, waitSeconds = 5) => {
+    onProgress?.({
+      step,
+      done: false,
+    });
+    await execAdbAndWait(
+      config,
+      padCode,
+      `input keyevent 3; sleep 1; am force-stop ${INSTAGRAM_PACKAGE}; sleep 1; am start -W -a android.intent.action.VIEW -d "instagram://reels-camera" ${INSTAGRAM_PACKAGE}; sleep ${waitSeconds}`,
+      90000,
+      1200,
+    );
+  };
+
+  const tapStartNewReel = async (shotUrl: string, attempt: number) => {
+    onProgress?.({
+      step: `清理 Reels 草稿彈窗（第 ${attempt} 次）...`,
+      done: false,
+    });
+    // The lower action is "Start new video / 開始建立新影片"; the upper action
+    // keeps editing the old draft and traps the automation in the same dialog.
+    void shotUrl;
+    const tapped = await tapViaAdbAbsolute(config, padCode, 360, 1310, 3200)
+      .then(() => true)
+      .catch(() => false);
+    if (!tapped) {
+      await tapViaAdbAbsolute(config, padCode, 360, 1328, 3200);
+    }
+  };
+
+  const tapReelCameraRecentThumb = async (waitMs = 3200) => {
+    await tapViaAdbAbsolute(config, padCode, 76, 1428, waitMs);
+    const shotUrl = await screenshot(config, padCode);
+    const state = await classifyInstagramAcpReelFlowState(shotUrl).catch(() => "unknown" as const);
+    if (state === "reel_camera") {
+      await tapViaAdbAbsolute(config, padCode, 118, 1416, waitMs);
+    }
+  };
+
+  const tapReelGridVideoThumb = async (waitMs = 4200) => {
+    const candidates = [
+      { x: 444, y: 764 },
+      { x: 670, y: 764 },
+      { x: 354, y: 470 },
+      { x: 190, y: 472 },
+      { x: 520, y: 472 },
+    ];
+    for (const point of candidates) {
+      await tapViaAdbAbsolute(config, padCode, point.x, point.y, waitMs);
+      const shotUrl = await screenshot(config, padCode);
+      const state = await classifyInstagramAcpReelFlowState(shotUrl).catch(() => "unknown" as const);
+      if (state === "editor" || state === "effects_drawer" || state === "share_page") {
+        return;
+      }
+      if (state !== "reel_gallery") return;
+    }
+  };
+
+  const tapReelEditorNext = async (shotUrl: string, waitMs = 5000) => {
+    const shouldKeepTryingNext = (state: InstagramAcpReelFlowState) =>
+      state === "editor" || state === "effects_drawer" || state === "unknown";
+    const nextButtonCues = await getImagePixelData(shotUrl).then((pixels) => {
+      if (!pixels) return { topBlue: false, bottomBlue: false };
+      const topRight = sampleImageRegionStats(pixels, { x: 570, y: 30, width: 135, height: 125 });
+      const bottomRight = sampleImageRegionStats(pixels, { x: 500, y: 1390, width: 200, height: 135 });
+      return {
+        topBlue: topRight.blueRatio > 0.10,
+        bottomBlue: bottomRight.blueRatio > 0.14,
+      };
+    }).catch(() => ({ topBlue: false, bottomBlue: false }));
+    const nextTarget = await locateInstagramImageFlowTapTarget(shotUrl, "next");
+    if (nextTarget) {
+      await tapScreenshotPointViaAdb(config, padCode, shotUrl, nextTarget, waitMs);
+      const stateAfterTarget = await classifyInstagramAcpReelFlowState(await screenshot(config, padCode)).catch(() => "unknown" as const);
+      if (!shouldKeepTryingNext(stateAfterTarget)) return;
+    }
+    const fallbackPoints = nextButtonCues.topBlue
+      ? [{ x: 650, y: 74 }, { x: 600, y: 1450 }, { x: 620, y: 1450 }, { x: 600, y: 1515 }]
+      : nextButtonCues.bottomBlue
+      ? [{ x: 600, y: 1450 }, { x: 620, y: 1450 }, { x: 600, y: 1515 }]
+      : [{ x: 600, y: 1450 }, { x: 620, y: 1450 }, { x: 600, y: 1515 }];
+    for (const point of fallbackPoints) {
+      await tapViaAdbAbsolute(config, padCode, point.x, point.y, waitMs);
+      const stateAfterFallback = await classifyInstagramAcpReelFlowState(await screenshot(config, padCode)).catch(() => "unknown" as const);
+      if (!shouldKeepTryingNext(stateAfterFallback)) return;
+    }
+  };
+
+  const collapseEffectsDrawer = async () => {
+    onProgress?.({
+      step: "關閉 Reel 特效面板...",
+      done: false,
+    });
+    const screen = await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
+    const from = scalePointFromReferenceScreen(screen, { x: 360, y: 706 }, FIXED_VMOS_SCREEN);
+    const to = scalePointFromReferenceScreen(screen, { x: 360, y: 1460 }, FIXED_VMOS_SCREEN);
+    await execAdbAndWait(config, padCode, `input swipe ${from.x} ${from.y} ${to.x} ${to.y} 350; sleep 1`, 30000);
+    await delay(1200);
+  };
+
+  await launchReelCamera("打開 Instagram Reel 入口...");
+
+  let relaunchAttempted = false;
+  let draftDialogAttempts = 0;
+  let effectsDrawerAttempts = 0;
+  let recentSelectionOpened = false;
+  let videoSelectionAttempted = false;
+  let unknownAfterVideoSelectionNextAttempted = false;
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const shotUrl = await screenshot(config, padCode);
+    const state = await classifyInstagramAcpReelFlowState(shotUrl);
+
+    if (state === "share_page") {
+      return;
+    }
+
+    if (state === "draft_dialog") {
+      draftDialogAttempts += 1;
+      await tapStartNewReel(shotUrl, draftDialogAttempts);
+      continue;
+    }
+
+    if (state === "reels_browse") {
+      if (!relaunchAttempted) {
+        relaunchAttempted = true;
+        await launchReelCamera("Reels 瀏覽流沒有穩定相機入口，重新打開 Reel 相機...", 4);
+      } else {
+        onProgress?.({
+          step: "從 Reels 瀏覽流返回後重試相機入口...",
+          done: false,
+        });
+        await execAdbAndWait(
+          config,
+          padCode,
+          `input keyevent KEYCODE_BACK; sleep 1; am start -W -a android.intent.action.VIEW -d "instagram://reels-camera" ${INSTAGRAM_PACKAGE}; sleep 4`,
+          90000,
+          1200,
+        );
+      }
+      continue;
+    }
+
+    if (state === "instagram_home") {
+      await launchReelCamera("從 Instagram 首頁重新打開 Reel 相機...", 4);
+      continue;
+    }
+
+    if (state === "editor") {
+      onProgress?.({
+        step: "從 Reel 編輯頁進入分享頁...",
+        done: false,
+      });
+      await tapReelEditorNext(shotUrl);
+      continue;
+    }
+
+    if (state === "reel_camera") {
+      onProgress?.({
+        step: "打開最近影片列表...",
+        done: false,
+      });
+      recentSelectionOpened = true;
+      await tapReelCameraRecentThumb(5500);
+      continue;
+    }
+
+    if (state === "reel_gallery") {
+      onProgress?.({
+        step: "選取最新影片...",
+        done: false,
+      });
+      videoSelectionAttempted = true;
+      await tapReelGridVideoThumb(5200);
+      continue;
+    }
+
+    if (state === "effects_drawer") {
+      effectsDrawerAttempts += 1;
+      if (effectsDrawerAttempts <= 2) {
+        await collapseEffectsDrawer();
+      } else {
+        onProgress?.({
+          step: "特效面板仍未關閉，直接嘗試下一步...",
+          done: false,
+        });
+        await tapReelEditorNext(shotUrl);
+      }
+      continue;
+    }
+
+    if (state === "unknown" && !recentSelectionOpened) {
+      await tapViaAdbAbsolute(config, padCode, 360, 1140, 1800).catch(() => undefined);
+      const afterDialogShot = await screenshot(config, padCode);
+      const afterDialogState = await classifyInstagramAcpReelFlowState(afterDialogShot).catch(() => "unknown" as const);
+      if (afterDialogState !== "unknown") {
+        continue;
+      }
+      onProgress?.({
+        step: "Reel 相機狀態未明確，打開最近影片列表...",
+        done: false,
+      });
+      recentSelectionOpened = true;
+      await tapReelCameraRecentThumb(5500);
+      continue;
+    }
+
+    if (state === "unknown" && recentSelectionOpened && !videoSelectionAttempted) {
+      onProgress?.({
+        step: "影片列表狀態未明確，選取最新影片...",
+        done: false,
+      });
+      videoSelectionAttempted = true;
+      await tapReelGridVideoThumb(5200);
+      continue;
+    }
+
+    if (state === "unknown" && videoSelectionAttempted && !unknownAfterVideoSelectionNextAttempted) {
+      onProgress?.({
+        step: "選片後狀態未明確，嘗試進入分享頁...",
+        done: false,
+      });
+      unknownAfterVideoSelectionNextAttempted = true;
+      await tapReelEditorNext(shotUrl);
+      continue;
+    }
+
+    if (state === "unknown" && videoSelectionAttempted && unknownAfterVideoSelectionNextAttempted) {
+      onProgress?.({
+        step: "Reel 分享頁疑似已打開，交給發布提交步驟確認...",
+        done: false,
+      });
+      return;
+    }
+
+    if (!relaunchAttempted && (state === "reels_browse" || state === "instagram_home" || state === "system_settings" || state === "unknown")) {
+      relaunchAttempted = true;
+      await launchReelCamera(`Reel 入口狀態異常（${state}），重新打開...`, 4);
+      continue;
+    }
+  }
+
+  throw new Error("Instagram Reel 影片流程未進入分享頁");
+}
+
+async function launchInstagramVideoIntentShare(
+  config: VmosConfig,
+  padCode: string,
+  contentUri: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  onProgress?.({
+    step: "啟動 Instagram Reels 分享...",
+    done: false,
+  });
+
+  const output = await execAdbForText(
+    config,
+    padCode,
+    `am force-stop ${INSTAGRAM_PACKAGE}; sleep 1; am start -W -n ${INSTAGRAM_PACKAGE}/com.instagram.share.handleractivity.ClipsShareHandlerActivity -a com.instagram.share.ADD_TO_REEL -t video/mp4 --grant-read-uri-permission --eu android.intent.extra.STREAM ${shellSingleQuote(contentUri)} 2>&1`,
+    90000,
+    1200,
+  );
+  if (/Unknown option|Exception occurred|Error:/i.test(output)) {
+    throw new Error(`Instagram Reels 分享入口啟動失敗：${normalizeSingleLine(output).slice(0, 260)}`);
+  }
+  await delay(4500);
+
+  const currentFocus = await getAndroidCurrentFocus(config, padCode);
+  const uiXmlAfterDirect = currentFocus.includes(INSTAGRAM_PACKAGE)
+    ? await dumpUiXml(config, padCode).catch(() => "")
+    : "";
+  const directLandedOnHome = uiXmlAfterDirect ? looksLikeInstagramHomeUiXml(uiXmlAfterDirect) : false;
+  const directShotUrl = currentFocus.includes(INSTAGRAM_PACKAGE)
+    ? await screenshot(config, padCode).catch(() => "")
+    : "";
+  const directState = directShotUrl ? await classifyInstagramAcpReelFlowState(directShotUrl).catch(() => "unknown" as const) : "unknown";
+  const directNeedsShareSheet =
+    !currentFocus.includes(INSTAGRAM_PACKAGE)
+    || directLandedOnHome
+    || directState === "unknown"
+    || directState === "instagram_home"
+    || directState === "reels_browse";
+  if (directNeedsShareSheet) {
+    onProgress?.({
+      step: "Reels 直達入口未命中，改用系統分享面板...",
+      done: false,
+    });
+    const shareOutput = await execAdbForText(
+      config,
+      padCode,
+      [
+        `am force-stop ${INSTAGRAM_PACKAGE}`,
+        "sleep 1",
+        [
+          "am start -W",
+          "-a android.intent.action.SEND",
+          "-t video/mp4",
+          "--grant-read-uri-permission",
+          `--eu android.intent.extra.STREAM ${shellSingleQuote(contentUri)}`,
+          `-p ${INSTAGRAM_PACKAGE}`,
+          "2>&1",
+        ].join(" "),
+      ].join("; "),
+      90000,
+      1200,
+    );
+    if (/Unknown option|Exception occurred|Error:/i.test(shareOutput)) {
+      throw new Error(`Instagram Reels 系統分享入口啟動失敗：${normalizeSingleLine(shareOutput).slice(0, 260)}`);
+    }
+    await delay(4200);
+    await selectInstagramTargetFromAndroidShareSheet(config, padCode, "instagram_reels", onProgress);
+    await delay(4200);
+  }
+}
+
+async function advanceInstagramAcpReelIntentToSharePage(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const shotUrl = await screenshot(config, padCode);
+    const state = await classifyInstagramAcpReelFlowState(shotUrl);
+
+    if (state === "share_page") {
+      return;
+    }
+
+    if (state === "editor" || state === "effects_drawer") {
+      onProgress?.({
+        step: `從 Reel 編輯頁進入分享頁（第 ${attempt + 1}/8 次）...`,
+        done: false,
+      });
+      const nextTarget = await locateInstagramImageFlowTapTarget(shotUrl, "next");
+      if (nextTarget) {
+        await tapScreenshotPointViaAdb(config, padCode, shotUrl, nextTarget, 4200);
+      } else {
+        await tapViaAdbReferencePoint(config, padCode, { x: 620, y: 1518 }, 4200, FIXED_VMOS_SCREEN);
+      }
+      continue;
+    }
+
+    if (state === "draft_dialog") {
+      const restartNewReelTarget = await locateInstagramImageFlowTapTarget(shotUrl, "restart_new_reel");
+      onProgress?.({
+        step: "清理 Reels 草稿彈窗...",
+        done: false,
+      });
+      if (restartNewReelTarget) {
+        await tapScreenshotPointViaAdb(config, padCode, shotUrl, restartNewReelTarget, 3200);
+      } else {
+        await tapViaAdbAbsolute(config, padCode, 360, 1096, 3200);
+      }
+      continue;
+    }
+
+    if (state === "reels_browse" || state === "instagram_home") {
+      throw new Error(`Instagram Reels intent 未進入影片發布流程（state=${state}）`);
+    }
+
+    onProgress?.({
+      step: `等待 Reels 分享頁載入（state=${state}，第 ${attempt + 1}/8 次）...`,
+      done: false,
+    });
+    await delay(2500);
+  }
+
+  throw new Error("Instagram Reel 影片流程未進入分享頁");
+}
+
+async function launchInstagramFeedIntentShare(
+  config: VmosConfig,
+  padCode: string,
+  contentUri: string,
+  mimeType: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  onProgress?.({
+    step: "使用系統分享開啟 Instagram Feed...",
+    done: false,
+  });
+
+  const output = await execAdbForText(
+    config,
+    padCode,
+    [
+      `am force-stop ${INSTAGRAM_PACKAGE}`,
+      "sleep 1",
+      [
+        "am start -W",
+        "-a android.intent.action.SEND",
+        `-t ${shellSingleQuote(mimeType)}`,
+        "--grant-read-uri-permission",
+        `--eu android.intent.extra.STREAM ${shellSingleQuote(contentUri)}`,
+        `-p ${INSTAGRAM_PACKAGE}`,
+        "2>&1",
+      ].join(" "),
+    ].join("; "),
+    90000,
+    1200,
+  );
+  if (/Unknown option|Exception occurred|Error:/i.test(output)) {
+    throw new Error(`Instagram 分享入口啟動失敗：${normalizeSingleLine(output).slice(0, 260)}`);
+  }
+  await delay(4200);
+
+  const currentFocus = await getAndroidCurrentFocus(config, padCode);
+  if (!currentFocus.includes(INSTAGRAM_PACKAGE)) {
+    await selectInstagramTargetFromAndroidShareSheet(config, padCode, "instagram_feed", onProgress);
+    await delay(4200);
+  }
+}
+
+async function ensureInstagramAcpFeedShareSubmitted(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<InstagramImageFlowState> {
+  let state = await classifyInstagramImageFlowState(config, padCode);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (state === "publishing_home") {
+      return state;
+    }
+
+    if (state === "editor") {
+      onProgress?.({
+        step: `仍停留在編輯頁，補進分享頁（第 ${attempt + 1}/3 次）...`,
+        done: false,
+      });
+      const editorShot = await screenshot(config, padCode);
+      const nextTarget = await locateInstagramImageFlowTapTarget(editorShot, "next");
+      if (nextTarget) {
+        await tapScreenshotPointViaAdb(config, padCode, editorShot, nextTarget, 3000);
+      } else {
+        await tapViaAdbReferencePoint(config, padCode, { x: 620, y: 1530 }, 3500, FIXED_VMOS_SCREEN);
+      }
+      state = await classifyInstagramImageFlowState(config, padCode);
+      continue;
+    }
+
+    const shareShot = await screenshot(config, padCode);
+    const shareTarget = await locateInstagramImageFlowTapTarget(shareShot, "share");
+    const shouldRetryShare = state === "share_page" || Boolean(shareTarget);
+    if (!shouldRetryShare) {
+      return state;
+    }
+
+    onProgress?.({
+      step: `確認分享已送出（第 ${attempt + 1}/3 次）...`,
+      done: false,
+    });
+    if (shareTarget) {
+      await tapScreenshotPointViaAdb(config, padCode, shareShot, shareTarget, 4500);
+    } else {
+      await tapViaAdbReferencePoint(config, padCode, { x: 362, y: 1518 }, 4500, FIXED_VMOS_SCREEN);
+    }
+    state = await classifyInstagramImageFlowState(config, padCode);
+  }
+
+  return state;
+}
+
+async function dismissInstagramFeedShareInfoDialog(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<boolean> {
+  const shotUrl = await screenshot(config, padCode).catch(() => "");
+  if (!shotUrl) return false;
+  const pixels = await getImagePixelData(shotUrl).catch(() => null);
+  if (!pixels) return false;
+  const panel = sampleImageRegionStats(pixels, { x: 0, y: 430, width: 720, height: 840 });
+  const button = sampleImageRegionStats(pixels, { x: 35, y: 1290, width: 650, height: 115 });
+  const looksLikeInfoDialog = panel.whiteRatio > 0.55
+    && panel.brightness > 175
+    && button.blueRatio > 0.18;
+  if (!looksLikeInfoDialog) return false;
+  onProgress?.({ step: "關閉分享貼文說明...", done: false });
+  await tapViaAdbReferencePoint(config, padCode, { x: 360, y: 1348 }, 2600, FIXED_VMOS_SCREEN);
+  return true;
+}
+
+async function ensureInstagramAcpReelShareSubmitted(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<InstagramAcpReelFlowState> {
+  let state = await classifyInstagramAcpReelFlowState(await screenshot(config, padCode));
+
+  const clearFirstRunShareSheets = async () => {
+    for (const point of [{ x: 360, y: 1410 }, { x: 360, y: 1378 }]) {
+      const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+      const currentState = shotUrl ? await classifyInstagramAcpReelFlowState(shotUrl).catch(() => "unknown" as const) : "unknown";
+      if (currentState !== "unknown") return currentState;
+      await tapViaAdbAbsolute(config, padCode, point.x, point.y, 6500);
+    }
+    return classifyInstagramAcpReelFlowState(await screenshot(config, padCode)).catch(() => "unknown" as const);
+  };
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (state !== "share_page" && state !== "editor" && state !== "effects_drawer") {
+      return state;
+    }
+
+    if (state === "editor" || state === "effects_drawer") {
+      onProgress?.({
+        step: `仍停留在 Reel 編輯頁，補進分享頁（第 ${attempt + 1}/4 次）...`,
+        done: false,
+      });
+      const editorShot = await screenshot(config, padCode);
+      const nextTarget = await locateInstagramImageFlowTapTarget(editorShot, "next");
+      if (nextTarget) {
+        await tapScreenshotPointViaAdb(config, padCode, editorShot, nextTarget, 3800);
+      } else {
+        await tapViaAdbAbsolute(config, padCode, 600, 1444, 3800);
+      }
+    } else {
+      onProgress?.({
+        step: `確認 Reel 分享已送出（第 ${attempt + 1}/4 次）...`,
+        done: false,
+      });
+      await tapViaAdbAbsolute(config, padCode, 535, 1505, 8000);
+      const afterPrimaryTapState = await classifyInstagramAcpReelFlowState(await screenshot(config, padCode)).catch(() => "unknown" as const);
+      if (afterPrimaryTapState === "unknown") {
+        state = await clearFirstRunShareSheets();
+        if (state !== "share_page" && state !== "editor" && state !== "effects_drawer") {
+          return state;
+        }
+        continue;
+      }
+    }
+
+    const nextShot = await screenshot(config, padCode);
+    state = await classifyInstagramAcpReelFlowState(nextShot);
+  }
+
+  return state;
+}
+
+async function advanceInstagramAcpGeneratedCaptionCardSharePage(
+  config: VmosConfig,
+  padCode: string,
+  mediaUrl: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<void> {
+  onProgress?.({
+    step: "進入新貼文...",
+    done: false,
+  });
+  await tapViaAdbReferencePoint(config, padCode, { x: 49, y: 96 }, 3200, FIXED_VMOS_SCREEN);
+
+  onProgress?.({
+    step: "切換貼文模式...",
+    done: false,
+  });
+  await tapViaAdbReferencePoint(config, padCode, { x: 90, y: 1480 }, 2600, FIXED_VMOS_SCREEN);
+
+  let selectedCard = false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const shotUrl = await screenshot(config, padCode);
+
+    const restartNewReelTarget = await locateInstagramImageFlowTapTarget(shotUrl, "restart_new_reel");
+    if (restartNewReelTarget) {
+      onProgress?.({
+        step: "清理 Reels 草稿彈窗...",
+        done: false,
+      });
+      await tapScreenshotPointViaAdb(
+        config,
+        padCode,
+        shotUrl,
+        restartNewReelTarget,
+        2600,
+      );
+      continue;
+    }
+
+    const postTabTarget = await locateInstagramImageFlowTapTarget(shotUrl, "post_tab");
+    if (postTabTarget) {
+      onProgress?.({
+        step: "再次切回貼文模式...",
+        done: false,
+      });
+      await tapScreenshotPointViaAdb(config, padCode, shotUrl, postTabTarget, 2600);
+      continue;
+    }
+
+    const previewAlreadyMatched = await detectInstagramSelectionPreviewMatchesReference(shotUrl, mediaUrl);
+    if (previewAlreadyMatched) {
+      onProgress?.({
+        step: "已命中目標圖文卡片預覽...",
+        done: false,
+      });
+      selectedCard = true;
+      break;
+    }
+
+    const recentCardTarget = await locateInstagramImageFlowTapTarget(shotUrl, "recent_thumbnail");
+    if (recentCardTarget) {
+      onProgress?.({
+        step: "選擇最新圖文卡片...",
+        done: false,
+      });
+      await tapScreenshotPointViaAdb(config, padCode, shotUrl, recentCardTarget, 3000);
+      selectedCard = true;
+      break;
+    }
+
+    onProgress?.({
+      step: "等待圖文卡片縮圖載入...",
+      done: false,
+    });
+    await delay(1800);
+  }
+
+  if (!selectedCard) {
+    throw new Error("ACP 無圖卡片流程未找到可發布的文字卡縮圖");
+  }
+
+  onProgress?.({
+    step: "進入貼文編輯頁...",
+    done: false,
+  });
+  await tapViaAdbReferencePoint(config, padCode, { x: 650, y: 74 }, 3200, FIXED_VMOS_SCREEN);
+
+  onProgress?.({
+    step: "進入分享頁...",
+    done: false,
+  });
+  await tapViaAdbReferencePoint(config, padCode, { x: 620, y: 1530 }, 4200, FIXED_VMOS_SCREEN);
+}
+
+async function verifyThreadsProfileContainsPost(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  mediaUrl?: string
+): Promise<PublishVerificationResult> {
+  const profileTopUrl = await captureThreadsProfileContentScreenshot(config, padCode, { skipInitialSwipe: true });
+  const profileTopXml = await dumpUiXml(config, padCode).catch(() => "");
+  await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1400, endX: 360, endY: 420 });
+  await delay(1800);
+  const profileMidUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+  const profileMidXml = await dumpUiXml(config, padCode).catch(() => "");
+  await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1400, endX: 360, endY: 420 });
+  await delay(1800);
+  const profileLowUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+  const profileLowXml = await dumpUiXml(config, padCode).catch(() => "");
+
+  const profileTop = await getInlineData(profileTopUrl);
+  const profileMid = await getInlineData(profileMidUrl);
+  const profileLow = await getInlineData(profileLowUrl);
+  const profileMidFocus = await cropImageToInlineData(profileMidUrl, {
+    x: 0,
+    y: 360,
+    width: 720,
+    height: 620,
+  });
+  const referenceShot = hasImageReferenceMedia(mediaUrl) ? await getInlineData(mediaUrl!) : null;
+  const verificationCues = extractThreadsVerificationCues(caption);
+
+  if (!profileTop || !profileMid || !profileLow) {
+    return {
+      state: "warning",
+      detail: "已執行發布，待人工確認（無法取得主頁校驗截圖）",
+    };
+  }
+
+  if (verificationCues.length > 0) {
+    const localCue = findThreadsLocalTextCueMatch(
+      [profileTopXml, profileMidXml, profileLowXml].join("\n"),
+      verificationCues,
+    );
+    if (localCue) {
+      return {
+        state: "verified",
+        detail: `發布完成 ✓（本機校驗：主頁 XML 已命中目標線索「${summarizeCaption(localCue, 40)}」）`,
+        screenshotUrl: profileTopUrl,
+      };
+    }
+  }
+
+  const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, profileTop);
+  if (blockedReason) {
+    if (await closeThreadsReportSheetIfPresent(config, padCode)) {
+      return {
+        state: "warning",
+        detail: `已執行發布，待人工確認（已關閉 Threads 舉報彈窗，需重新複查）｜debug=${formatThreadsDebugTargets([profileTopUrl, profileMidUrl, profileLowUrl])}`,
+      };
+    }
+    throw new Error(buildThreadsBlockedError(blockedReason, profileTopUrl));
+  }
+
+  if (!referenceShot && verificationCues.length > 0 && profileMidFocus) {
+    const quickPrompt = `校驗 Threads 個人主頁裡是否已經出現剛發出的純文字串文。
+只檢查圖1裡是否出現以下任一識別線索：
+${verificationCues.map((cue, index) => `${index + 1}. ${cue}`).join("\n")}
+
+繁體/簡體中文視為等價；如果識別線索是數字、日期、時間戳或英數混合代碼，只要圖中完整出現該字串就算 YES，不需要整句逐字相同。
+
+只輸出一行：
+YES|原因
+或
+NO|原因`;
+
+    try {
+      const quickRaw = await callPublishVerifier(
+        [{
+          role: "user",
+          parts: [
+            { text: quickPrompt },
+            { text: "圖1：個人主頁下滑一次後的截圖" },
+            { inlineData: profileMidFocus },
+          ],
+        }],
+        { maxOutputTokens: 20, temperature: 0 },
+        THREADS_PROFILE_VERIFY_TIMEOUT_MS,
+      );
+      const quickLine = normalizeSingleLine(extractText(quickRaw));
+      if (/^YES\b/i.test(quickLine)) {
+        const reason = quickLine.includes("|") ? quickLine.split("|").slice(1).join("|").trim() : "";
+        return {
+          state: "verified",
+          detail: reason
+            ? `發布完成 ✓（已校驗：${reason}）`
+            : "發布完成 ✓（已校驗：主頁已出現目標線索）",
+        };
+      }
+      if (/^NO\b/i.test(quickLine)) {
+        return {
+          state: "warning",
+          detail: quickLine.includes("|")
+            ? `已執行發布，待人工確認（${quickLine.split("|").slice(1).join("|").trim()}）`
+            : "已執行發布，待人工確認（主頁中未找到目標線索）",
+        };
+      }
+    } catch {
+      // Fall through to broader profile verification below.
+    }
+  }
+
+  if (referenceShot) {
+    try {
+      const localCandidates = [
+        { label: "個人主頁首屏", url: profileTopUrl },
+        { label: "個人主頁下滑一次", url: profileMidUrl },
+        { label: "個人主頁下滑兩次", url: profileLowUrl },
+      ];
+      let bestLocalMatch: { label: string; diff: number; screenshotUrl: string } | undefined;
+      for (const candidate of localCandidates) {
+        const match = await getThreadsProfileReferenceImageBestMatch(mediaUrl!, candidate.url);
+        if (!bestLocalMatch || match.diff < bestLocalMatch.diff) {
+          bestLocalMatch = { label: candidate.label, diff: match.diff, screenshotUrl: candidate.url };
+        }
+        if (isThreadsProfileReferenceImageMatch(match)) {
+          return {
+            state: "verified",
+            detail: `發布完成 ✓（本機校驗：${candidate.label}已命中參考圖，diff=${match.diff.toFixed(1)}${match.mode ? `, mode=${match.mode}` : ""}）`,
+            screenshotUrl: candidate.url,
+          };
+        }
+      }
+      if (bestLocalMatch) {
+        // Continue to AI verification below, but keep the deterministic score in
+        // the progress stream so slow/ambiguous cases are easier to audit.
+        // A changed feed alone is not accepted as success.
+      }
+    } catch {
+      // Fall through to AI image verification below.
+    }
+
+    const imagePrompt = `你在校驗 Threads 是否真的把帶圖串文發到了個人主頁。
+下面三張圖是發文後進入個人主頁得到的連續截圖：圖1是個人主頁首屏最新位置，圖2是下滑一次後，圖3是下滑兩次後。圖4是原始參考圖片。
+
+任務只有一個：
+優先判斷圖1頂部附近最新的一條串文，若不夠明確，再看圖2與圖3，判斷是否有任意一條新串文的配圖與圖4明顯相同。
+
+請只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+判定規則：
+- YES：即使文案被截斷，只要能明確看出圖1頂部最新串文，或圖2/圖3中的任意新串文配圖與圖4相同，就輸出 YES。
+- NO：沒有看到相同配圖，或無法確認。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+    try {
+      const imageRaw = await callPublishVerifier(
+        [{
+          role: "user",
+          parts: [
+            { text: imagePrompt },
+            { text: "圖1：個人主頁首屏截圖（優先檢查這裡的最新串文）" },
+            { inlineData: profileTop },
+            { text: "圖2：個人主頁下滑一次後的截圖" },
+            { inlineData: profileMid },
+            { text: "圖3：個人主頁下滑兩次後的截圖" },
+            { inlineData: profileLow },
+            { text: "圖4：原始參考圖片" },
+            { inlineData: referenceShot },
+          ],
+        }],
+        { maxOutputTokens: 80, temperature: 0 },
+        THREADS_PROFILE_VERIFY_TIMEOUT_MS,
+      );
+      const imageLine = normalizeSingleLine(extractText(imageRaw));
+      if (/^YES\b/i.test(imageLine)) {
+        const reason = imageLine.includes("|") ? imageLine.split("|").slice(1).join("|").trim() : "";
+        return {
+          state: "verified",
+          detail: reason
+            ? `發布完成 ✓（已校驗：${reason}）`
+            : "發布完成 ✓（已校驗：主頁已出現相同配圖）",
+        };
+      }
+    } catch {
+      // Fall through to caption-based profile verification.
+    }
+  }
+
+  if (!referenceShot && verificationCues.length > 0) {
+    const textPrompt = `你在校驗 Threads 是否真的把純文字串文發到了個人主頁。
+圖1-圖3是發文後進入個人主頁並逐步下滑得到的連續截圖。最新串文有可能正好跨在兩張圖的交界處。
+
+請重點檢查這幾個識別線索，任意一個線上程標題或正文裡清晰出現，都算成功：
+${verificationCues.map((cue, index) => `${index + 1}. ${cue}`).join("\n")}
+
+繁體/簡體中文視為等價；如果識別線索是數字、日期、時間戳或英數混合代碼，只要圖中完整出現該字串就算成功，不需要整句逐字相同。
+
+請只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+判定規則：
+- YES：圖1-圖3裡任意一張明確看到了上述任一線索屬於最新發出的那條串文；如果最新串文剛好跨在兩張圖之間，也可以綜合相鄰兩張圖判斷。
+- NO：沒有看到這些線索，或無法確認。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+    try {
+      const textRaw = await callPublishVerifier(
+        [{
+          role: "user",
+          parts: [
+            { text: textPrompt },
+            { text: "圖1：個人主頁頂部截圖" },
+            { inlineData: profileTop },
+            { text: "圖2：個人主頁下滑一次後的截圖" },
+            { inlineData: profileMid },
+            { text: "圖3：個人主頁下滑兩次後的截圖" },
+            { inlineData: profileLow },
+          ],
+        }],
+        { maxOutputTokens: 80, temperature: 0 },
+        THREADS_PROFILE_VERIFY_TIMEOUT_MS,
+      );
+      const textLine = normalizeSingleLine(extractText(textRaw));
+      if (/^YES\b/i.test(textLine)) {
+        const reason = textLine.includes("|") ? textLine.split("|").slice(1).join("|").trim() : "";
+        return {
+          state: "verified",
+          detail: reason
+            ? `發布完成 ✓（已校驗：${reason}）`
+            : "發布完成 ✓（已校驗：主頁已出現目標線索）",
+        };
+      }
+      return {
+        state: "warning",
+        detail: textLine.includes("|")
+          ? `已執行發布，待人工確認（${textLine.split("|").slice(1).join("|").trim()}）｜debug=${formatThreadsDebugTargets([profileTopUrl, profileMidUrl, profileLowUrl])}`
+          : `已執行發布，待人工確認（主頁中未找到目標線索）｜debug=${formatThreadsDebugTargets([profileTopUrl, profileMidUrl, profileLowUrl])}`,
+      };
+    } catch {
+      // Fall through to broader multi-screenshot verification.
+    }
+  }
+
+  const prompt = `你在校驗 Threads 是否真的把新串文發到了個人主頁。
+下面三張圖是發文後進入個人主頁並下滑得到的截圖。
+
+目標文案開頭：
+${summarizeCaption(caption)}
+
+${verificationCues.length > 0 ? `優先關注這些識別線索，任意一個明確出現在新串文標題或正文裡，都可以判定成功：
+${verificationCues.map((cue, index) => `${index + 1}. ${cue}`).join("\n")}
+
+繁體/簡體中文視為等價；如果識別線索是數字、日期、時間戳或英數混合代碼，只要圖中完整出現該字串就算成功，不需要整句逐字相同。` : ""}
+
+請只輸出一行，格式固定為：
+PUBLISHED|原因
+或
+UNKNOWN|原因
+
+判定標準：
+- PUBLISHED：任意一張圖裡明確看到了目標文案開頭，或看到了同一條串文的完整首行文字，或命中了上面的識別線索。${referenceShot ? "如果圖4參考圖與圖1-圖3裡的新串文配圖明顯相同，即使文案被截斷，也判定為 PUBLISHED。" : ""}
+- UNKNOWN：沒有看到目標文案，或無法確認。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+  const raw = await callPublishVerifier(
+    [{
+      role: "user",
+      parts: [
+        { text: prompt },
+        { text: "圖1：個人主頁頂部截圖" },
+        { inlineData: profileTop },
+        { text: "圖2：個人主頁下滑一次後的截圖" },
+        { inlineData: profileMid },
+        { text: "圖3：個人主頁下滑兩次後的截圖" },
+        { inlineData: profileLow },
+        ...(referenceShot ? [{ text: "圖4：原始參考圖片" }, { inlineData: referenceShot }] : []),
+      ],
+    }],
+    { maxOutputTokens: 120, temperature: 0 },
+    THREADS_PROFILE_VERIFY_TIMEOUT_MS,
+  );
+
+  const parsed = parsePublishVisionResult(extractText(raw));
+  if (parsed.status === "PUBLISHED") {
+    return {
+      state: "verified",
+      detail: parsed.reason
+        ? `發布完成 ✓（已校驗：${parsed.reason}）`
+        : "發布完成 ✓（已校驗）",
+    };
+  }
+
+  return {
+    state: "warning",
+    detail: parsed.reason
+      ? `已執行發布，待人工確認（${parsed.reason}）`
+      : "已執行發布，待人工確認（主頁中未找到目標文案）",
+  };
+}
+
+async function verifyThreadsProfileContainsPostWithRetries(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  mediaUrl?: string,
+  onProgress?: (p: PublishProgress) => void
+): Promise<PublishVerificationResult> {
+  const retryDelaysMs = mediaUrl
+    ? isVideoMediaUrl(mediaUrl)
+      ? THREADS_VIDEO_PROFILE_RETRY_DELAYS_MS
+      : THREADS_IMAGE_PROFILE_RETRY_DELAYS_MS
+    : THREADS_TEXT_PROFILE_RETRY_DELAYS_MS;
+  let lastResult: PublishVerificationResult | undefined;
+
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    onProgress?.({
+      step: `等待主頁同步（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    await delay(retryDelaysMs[attempt]);
+
+    onProgress?.({
+      step: `回到主頁複查（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    await relaunchThreads(config, padCode, 5000);
+    onProgress?.({
+      step: `分析 Threads 主頁內容（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
+      done: false,
+    });
+    try {
+      const result = await verifyThreadsProfileContainsPost(config, padCode, caption, mediaUrl);
+      if (result.state === "verified") return result;
+      lastResult = result;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.startsWith("__THREADS_BLOCKED__") || msg.startsWith("__THREADS_STILL_COMPOSING__")) {
+        throw error instanceof Error ? error : new Error(msg);
+      }
+      if (isPublishVerifierAuthError(msg)) {
+        throw new Error(`AI 校驗 API 金鑰無效，且本機主頁校驗未命中：${msg}`);
+      }
+      lastResult = {
+        state: "warning",
+        detail: `已執行發布，待人工確認（本輪主頁校驗未完成：${msg}）`,
+      };
+    }
+  }
+
+  return lastResult ?? {
+    state: "warning",
+    detail: "已執行發布，待人工確認（多輪主頁校驗仍未命中目標內容）",
+  };
+}
+
+async function verifyInstagramProfileContainsReferenceImage(
+  config: VmosConfig,
+  padCode: string,
+  mediaUrl: string,
+  settleDelayMs = 25000,
+): Promise<PublishVerificationResult> {
+  if (!hasImageReferenceMedia(mediaUrl)) {
+    return {
+      state: "warning",
+      detail: "已點選發布，待人工確認（Instagram 圖像主頁校驗僅支援圖片）",
+      screenshotUrl: await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined),
+    };
+  }
+
+  await delay(settleDelayMs);
+  const profileGridUrl = await captureInstagramProfileGridScreenshot(config, padCode);
+
+  const profileGrid = await getInlineData(profileGridUrl);
+  const referenceShot = await getInlineData(mediaUrl);
+
+  if (!profileGrid || !referenceShot) {
+    return {
+      state: "warning",
+      detail: "已點選發布，待人工確認（無法取得 Instagram 主頁校驗截圖）",
+      screenshotUrl: profileGridUrl,
+    };
+  }
+
+  const prompt = `你在校驗 Instagram 帶圖貼文是否真的發到了個人主頁。
+圖1是發布後個人主頁宮格截圖，圖2是原始參考圖片。
+
+任務只有一個：
+判斷圖1裡，是否已經出現了與圖2明顯相同的貼文圖片。
+
+請只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+判定規則：
+- YES：圖1裡，只要能明確看出貼文圖片與圖2相同，就輸出 YES。
+- NO：沒有看到相同圖片，或無法確認。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+  const raw = await callGemini(
+    PUBLISH_VERIFY_MODEL,
+    [{
+      role: "user",
+      parts: [
+        { text: prompt },
+        { text: "圖1：個人主頁宮格截圖" },
+        { inlineData: profileGrid },
+        { text: "圖2：原始參考圖片" },
+        { inlineData: referenceShot },
+      ],
+    }],
+    { maxOutputTokens: 60, temperature: 0 }
+  );
+
+  const line = normalizeSingleLine(extractText(raw));
+  if (/^YES\b/i.test(line)) {
+    const reason = line.includes("|") ? line.split("|").slice(1).join("|").trim() : "";
+    return {
+      state: "verified",
+      detail: reason
+        ? `發布完成 ✓（已校驗：${reason}）`
+        : "發布完成 ✓（已校驗：主頁已出現相同圖片）",
+      screenshotUrl: profileGridUrl,
+    };
+  }
+
+  return {
+    state: "warning",
+    detail: line.includes("|")
+      ? `已點選發布，待人工確認（${line.split("|").slice(1).join("|").trim()}）`
+      : "已點選發布，待人工確認（主頁中未找到相同圖片）",
+    screenshotUrl: profileGridUrl,
+  };
+}
+
+async function verifyInstagramFeedScreenshotsContainReferenceImage(
+  screenshotUrls: string[],
+  mediaUrl: string,
+): Promise<PublishVerificationResult | null> {
+  if (!hasImageReferenceMedia(mediaUrl)) return null;
+  const referenceShot = await getInlineData(mediaUrl);
+  if (!referenceShot) return null;
+
+  for (const [index, screenshotUrl] of screenshotUrls.entries()) {
+    try {
+      const localMatch = await getThreadsProfileReferenceImageBestMatch(mediaUrl, screenshotUrl);
+      if (localMatch.diff <= INSTAGRAM_FEED_REFERENCE_IMAGE_DIFF_THRESHOLD) {
+        return {
+          state: "verified",
+          detail: `發布完成 ✓（本機校驗：首頁第 ${index + 1} 張截圖已命中參考圖，diff=${localMatch.diff.toFixed(1)}）`,
+          screenshotUrl,
+        };
+      }
+    } catch {
+      // Fall through to AI verification below.
+    }
+  }
+
+  const screenshotShots = await Promise.all(
+    screenshotUrls.map(async (url, index) => {
+      const inline = await getInlineData(url);
+      return inline ? { index, inline } : null;
+    }),
+  );
+  const validShots = screenshotShots.filter(Boolean) as Array<{ index: number; inline: { mimeType: string; data: string } }>;
+  if (validShots.length === 0) return null;
+
+  try {
+    const raw = await callPublishVerifier(
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在校驗 Instagram 發布後的首頁/動態流截圖裡，是否已經出現了目標貼文圖片。
+
+請只輸出一行，格式固定為：
+YES|原因
+或
+NO|原因
+
+判定規則：
+- YES：只要任意一張截圖裡，能明確看出首頁或動態流中已經出現與參考圖相同的貼文圖片，就輸出 YES。
+- NO：沒有看到相同圖片，或無法確認。
+
+不要解釋，不要換行，不要輸出 JSON。`,
+          },
+          ...validShots.flatMap((shot) => ([
+            { text: `截圖${shot.index + 1}：發布後首頁/動態流畫面` },
+            { inlineData: shot.inline },
+          ])),
+          { text: "參考圖：目標貼文圖片" },
+          { inlineData: referenceShot },
+        ],
+      }],
+      { maxOutputTokens: 80, temperature: 0 },
+    );
+
+    const line = normalizeSingleLine(extractText(raw));
+    if (!/^YES\b/i.test(line)) return null;
+    const reason = line.includes("|") ? line.split("|").slice(1).join("|").trim() : "";
+    return {
+      state: "verified",
+      detail: reason
+        ? `發布完成 ✓（已校驗：${reason}）`
+        : "發布完成 ✓（已校驗：首頁已出現相同圖片）",
+      screenshotUrl: validShots[0]?.index !== undefined ? screenshotUrls[validShots[0].index] : screenshotUrls[0],
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function verifyInstagramAcpVideoScreenshotsShowPublishedContent(
+  screenshotUrls: string[],
+): Promise<PublishVerificationResult | null> {
+  const shots = await Promise.all(
+    screenshotUrls.map(async (url, index) => {
+      const inline = await getInlineData(url);
+      return inline ? { index, url, inline } : null;
+    }),
+  );
+  const validShots = shots.filter(Boolean) as Array<{ index: number; url: string; inline: { mimeType: string; data: string } }>;
+  if (validShots.length === 0) return null;
+
+  try {
+    const raw = await callPublishVerifier(
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在校驗 Instagram Reel/影片是否真的發布成功。
+
+請只輸出一行，格式固定為：
+YES|截圖序號|原因
+或
+NO|原因
+
+YES 的條件必須同時滿足：
+          - 截圖中正在顯示 Instagram 裡一條已發布 Reel/影片內容本身；
+- 能看到發帖帳號/作者行或 Reel 播放界面，而不是只看到個人主頁縮圖；
+          - 畫面主體是剛發布的影片內容，而不是 Location、Suggested for you、Reels drafts、草稿列表、Learn more、編輯頁、分享頁、首頁推薦流或純個人主頁。
+
+NO 的條件：
+          - 只看到草稿、Drafts、個人主頁網格、Suggested for you、Location、Learn more、發布進度條、編輯器、分享頁、首頁推薦流，或不能確認是已發布 Reel 內容。
+
+不要解釋，不要輸出 JSON。`,
+          },
+          ...validShots.flatMap((shot) => ([
+            { text: `截圖${shot.index + 1}` },
+            { inlineData: shot.inline },
+          ])),
+        ],
+      }],
+      { maxOutputTokens: 100, temperature: 0 },
+    );
+    const line = normalizeSingleLine(extractText(raw));
+    if (!/^YES\b/i.test(line)) return null;
+    const match = line.match(/^YES\|(\d+)\|?(.*)$/i);
+    const oneBased = match ? Number(match[1]) : 1;
+    const selected = Number.isFinite(oneBased)
+      ? validShots.find((shot) => shot.index === oneBased - 1) || validShots[0]
+      : validShots[0];
+    const reason = match?.[2]?.trim() || "";
+    return {
+      state: "verified",
+      detail: reason
+        ? `發布完成 ✓（已校驗：${reason}）`
+        : "發布完成 ✓（已校驗：發布後截圖顯示已發布 Reel 內容）",
+      screenshotUrl: selected.url,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function detectInstagramAcpHomeFeedVideoContentLocally(screenshotUrl: string): Promise<boolean> {
+  try {
+    const img = await loadImage(screenshotUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx || !canvas.width || !canvas.height) return false;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const sx = canvas.width / 720;
+    const sy = canvas.height / 1600;
+    const sample = (x: number, y: number, w: number, h: number) => {
+      const rx = Math.max(0, Math.round(x * sx));
+      const ry = Math.max(0, Math.round(y * sy));
+      const rw = Math.max(1, Math.min(canvas.width - rx, Math.round(w * sx)));
+      const rh = Math.max(1, Math.min(canvas.height - ry, Math.round(h * sy)));
+      const data = ctx.getImageData(rx, ry, rw, rh).data;
+      let brightness = 0;
+      let whitePixels = 0;
+      let darkPixels = 0;
+      let saturatedPixels = 0;
+      const pixels = data.length / 4;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const a = data[i + 3];
+        if (a < 20) continue;
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const v = (r + g + b) / 3;
+        brightness += v;
+        if (r > 225 && g > 225 && b > 225) whitePixels += 1;
+        if (v < 70) darkPixels += 1;
+        if (max - min > 55 && max > 120) saturatedPixels += 1;
+      }
+      return {
+        brightness: brightness / Math.max(pixels, 1),
+        whiteRatio: whitePixels / Math.max(pixels, 1),
+        darkRatio: darkPixels / Math.max(pixels, 1),
+        saturatedRatio: saturatedPixels / Math.max(pixels, 1),
+      };
+    };
+
+    const header = sample(0, 70, 720, 160);
+    const authorRow = sample(0, 560, 720, 135);
+    const mediaTop = sample(0, 710, 720, 260);
+    const mediaMiddle = sample(0, 900, 720, 360);
+    const bottomNav = sample(0, 1340, 720, 180);
+    const profileHeader = sample(0, 250, 720, 520);
+
+    const looksLikeHomeFeed = header.whiteRatio > 0.55 && authorRow.whiteRatio > 0.45 && bottomNav.whiteRatio > 0.55;
+    const hasFullWidthVideo = mediaTop.whiteRatio < 0.18
+      && mediaMiddle.whiteRatio < 0.22
+      && (mediaTop.saturatedRatio > 0.18 || mediaMiddle.saturatedRatio > 0.18 || mediaMiddle.darkRatio > 0.35)
+      && mediaMiddle.brightness > 35;
+    const notProfileOrDrafts = profileHeader.whiteRatio < 0.82 || mediaTop.saturatedRatio > 0.2;
+
+    return looksLikeHomeFeed && hasFullWidthVideo && notProfileOrDrafts;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyInstagramGeneratedCaptionCardPublish(
+  config: VmosConfig,
+  padCode: string,
+  mediaUrl: string,
+  beforeProfileGridUrl?: string,
+  beforeProfileTopUrl?: string,
+): Promise<PublishVerificationResult> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) {
+    const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
+    return {
+      state: "warning",
+      detail: "已執行發布，待人工確認（未設定 Gemini 校驗）",
+      screenshotUrl: currentUrl,
+    };
+  }
+
+  await dismissInstagramRatingPrompt(config, padCode);
+  const immediateUrl = await screenshot(config, padCode);
+  await delay(2500);
+  const midUrl = await screenshot(config, padCode);
+  await delay(3500);
+  const settledUrl = await screenshot(config, padCode);
+  const immediateShot = await getInlineData(immediateUrl);
+  const midShot = await getInlineData(midUrl);
+  const settledShot = await getInlineData(settledUrl);
+
+  if (!immediateShot || !midShot || !settledShot) {
+    return {
+      state: "warning",
+      detail: "已執行發布，待人工確認（發布後截圖取得失敗）",
+      screenshotUrl: settledUrl || midUrl || immediateUrl,
+    };
+  }
+
+  const bannerSuccess = await detectExplicitSuccessToast("instagram", [
+    immediateShot,
+    midShot,
+    settledShot,
+  ]);
+  const topBannerSuccess = await detectInstagramTopSuccessBanner(immediateUrl)
+    || await detectInstagramTopSuccessBanner(midUrl)
+    || await detectInstagramTopSuccessBanner(settledUrl);
+  if (bannerSuccess || topBannerSuccess) {
+    return {
+      state: "verified",
+      detail: "發布完成 ✓（已校驗：檢測到 Instagram 成功發布橫幅）",
+      screenshotUrl: settledUrl,
+    };
+  }
+
+  const latestPostCheck = await verifyInstagramLatestFeedPost(
+    config,
+    padCode,
+    "",
+    mediaUrl,
+    undefined,
+    [5000],
+  );
+  if (latestPostCheck.state === "verified") {
+    return latestPostCheck;
+  }
+
+  const profileCheck = await verifyInstagramProfileContainsReferenceImage(config, padCode, mediaUrl, 6000);
+  if (profileCheck.state === "verified") return profileCheck;
+  return {
+    state: "warning",
+    detail: `已點選發布，待人工確認（未在最新貼文或個人主頁命中目標文字卡）`,
+    screenshotUrl: profileCheck.screenshotUrl || latestPostCheck.screenshotUrl || settledUrl,
+  };
+}
+
+async function verifyThreadsPublish(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  beforeProfileUrl?: string,
+  mediaUrl?: string,
+  beforeProfileVideoTabUrl?: string,
+  onProgress?: (p: PublishProgress) => void
+): Promise<PublishVerificationResult> {
+  const { apiKey } = getGeminiEndpoint();
+  const isVideoMedia = Boolean(mediaUrl) && isVideoMediaUrl(mediaUrl);
+  let immediateUrl: string | undefined;
+  let settledUrl: string | undefined;
+  let lateUrl: string | undefined;
+
+  const captureInlineScreenshot = async (attempts = 3) => {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+      const inlineShot = await getInlineData(shotUrl);
+      if (inlineShot) {
+        return { url: shotUrl, inline: inlineShot };
+      }
+      await delay(1200 * attempt);
+    }
+    return null;
+  };
+
+  if (isVideoMedia && beforeProfileVideoTabUrl) {
+    try {
+      return await verifyThreadsVideoPublishLocally(config, padCode, beforeProfileVideoTabUrl, onProgress);
+    } catch (error) {
+      rethrowThreadsTerminalError(error);
+      if (beforeProfileUrl) {
+        try {
+          onProgress?.({
+            step: "影音頁差異不足，改用 Threads 主頁本機複查影片貼文...",
+            done: false,
+          });
+          return await verifyThreadsPublishLocally(config, padCode, beforeProfileUrl, onProgress, mediaUrl);
+        } catch (profileDiffError) {
+          rethrowThreadsTerminalError(profileDiffError);
+        }
+      }
+      // Continue to toast/profile verification if local checks are inconclusive.
+    }
+  }
+
+  if (!mediaUrl && beforeProfileUrl) {
+    try {
+      return await verifyThreadsTextPublishQuickly(config, padCode, beforeProfileUrl, onProgress);
+    } catch (error) {
+      rethrowThreadsTerminalError(error);
+      // Continue to screenshot/profile verification if local text diff is inconclusive.
+    }
+  }
+
+  if (mediaUrl && !isVideoMedia && beforeProfileUrl) {
+    try {
+      return await verifyThreadsPublishLocally(config, padCode, beforeProfileUrl, onProgress, mediaUrl);
+    } catch (error) {
+      rethrowThreadsTerminalError(error);
+      // Continue to screenshot/profile verification if image matching is inconclusive.
+    }
+  }
+
+  if (!apiKey) {
+    if (isVideoMedia && beforeProfileVideoTabUrl) {
+      try {
+        return await verifyThreadsVideoPublishLocally(config, padCode, beforeProfileVideoTabUrl, onProgress);
+      } catch (error) {
+        rethrowThreadsTerminalError(error);
+        if (beforeProfileUrl) {
+          try {
+            onProgress?.({
+              step: "影音頁差異不足，改用 Threads 主頁本機複查影片貼文...",
+              done: false,
+            });
+            return await verifyThreadsPublishLocally(config, padCode, beforeProfileUrl, onProgress, mediaUrl);
+          } catch (profileDiffError) {
+            rethrowThreadsTerminalError(profileDiffError);
+          }
+        }
+        // Fall through to manual confirmation if local checks cannot verify.
+      }
+    }
+
+    if (beforeProfileUrl && !isVideoMedia) {
+      try {
+        return await verifyThreadsPublishLocally(config, padCode, beforeProfileUrl, onProgress);
+      } catch (error) {
+        rethrowThreadsTerminalError(error);
+        // Fall through to manual confirmation if local diff cannot verify.
+      }
+    }
+    await delay(3000);
+    return {
+      state: "warning",
+      detail: "已執行發布，待人工確認（未設定 Gemini 校驗）",
+    };
+  }
+
+  try {
+    const immediateCapture = await captureInlineScreenshot(3);
+
+    if (!immediateCapture) {
+      return {
+        state: "warning",
+        detail: "已執行發布，待人工確認（發布後截圖取得失敗）",
+      };
+    }
+    immediateUrl = immediateCapture.url;
+    const immediateShot = immediateCapture.inline;
+    const immediateFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    if (!immediateFocus.includes(THREADS_PACKAGE) && await detectAndroidLauncherLocally(immediateUrl).catch(() => false)) {
+      onProgress?.({
+        step: "发布后回到云机桌面，重新打开 Threads 复查结果...",
+        done: false,
+      });
+      await relaunchThreads(config, padCode, 5000).catch(() => undefined);
+      return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+    }
+
+    if (await isThreadsComposeLikeScreen(config, padCode, immediateUrl)) {
+      throw new Error("__THREADS_STILL_COMPOSING__發布後仍停留在新串文輸入頁");
+    }
+
+    const toastSuccess = await detectExplicitSuccessToast("threads", [immediateShot]);
+    const bottomToastSuccess = toastSuccess
+      || await detectThreadsPublishedToastLocally(immediateUrl)
+      || await detectThreadsBottomSuccessToast(immediateUrl);
+    if (bottomToastSuccess) {
+      return {
+        state: "verified",
+        detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
+        screenshotUrl: immediateUrl,
+      };
+    }
+
+    const immediateBlockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, immediateShot);
+    if (immediateBlockedReason) {
+      if (isVideoMedia) {
+        onProgress?.({
+          step: `即時畫面疑似阻斷，改用主頁複查確認影片貼文...`,
+          done: false,
+        });
+      } else {
+        if (await closeThreadsReportSheetIfPresent(config, padCode, onProgress)) {
+          return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+        }
+        const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+        if (currentFocus.includes(THREADS_PACKAGE)) {
+          try {
+            return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+          } catch (profileError) {
+            rethrowThreadsTerminalError(profileError);
+          }
+        }
+        throw new Error(buildThreadsBlockedError(immediateBlockedReason, immediateUrl));
+      }
+    }
+
+    if (isVideoMedia && beforeProfileVideoTabUrl) {
+      try {
+        return await verifyThreadsVideoPublishLocally(config, padCode, beforeProfileVideoTabUrl, onProgress);
+      } catch (error) {
+        rethrowThreadsTerminalError(error);
+        if (beforeProfileUrl) {
+          try {
+            onProgress?.({
+              step: "影音頁差異不足，改用 Threads 主頁本機複查影片貼文...",
+              done: false,
+            });
+            return await verifyThreadsPublishLocally(config, padCode, beforeProfileUrl, onProgress, mediaUrl);
+          } catch (profileDiffError) {
+            rethrowThreadsTerminalError(profileDiffError);
+          }
+        }
+        // Fall through to existing video processing/profile verification.
+      }
+    }
+
+    if (isVideoMedia) {
+      const videoProcessingResult = await waitForThreadsVideoPublishProcessing(
+        config,
+        padCode,
+        immediateUrl,
+        onProgress,
+      );
+      if (videoProcessingResult) return videoProcessingResult;
+    }
+
+    if (!mediaUrl && beforeProfileUrl) {
+      try {
+        return await verifyThreadsTextPublishQuickly(config, padCode, beforeProfileUrl, onProgress);
+      } catch (error) {
+        rethrowThreadsTerminalError(error);
+        // Fall through to profile AI verification below.
+      }
+    }
+
+    if (!mediaUrl && !beforeProfileUrl) {
+      await delay(THREADS_TEXT_TOAST_SETTLE_DELAY_MS);
+      settledUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+      await delay(THREADS_TEXT_TOAST_LATE_DELAY_MS);
+      lateUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+      const settledShot = await getInlineData(settledUrl);
+      const lateShot = await getInlineData(lateUrl);
+
+      if (!settledShot || !lateShot) {
+        return {
+          state: "warning",
+          detail: "已執行發布，待人工確認（發布後補充截圖取得失敗）",
+        };
+      }
+
+      const fullToastSuccess = await detectExplicitSuccessToast("threads", [immediateShot, settledShot, lateShot])
+        || await detectThreadsPublishedToastLocally(immediateUrl)
+        || await detectThreadsPublishedToastLocally(settledUrl)
+        || await detectThreadsPublishedToastLocally(lateUrl)
+        || await detectThreadsBottomSuccessToast(immediateUrl)
+        || await detectThreadsBottomSuccessToast(settledUrl)
+        || await detectThreadsBottomSuccessToast(lateUrl);
+      if (fullToastSuccess) {
+        return {
+          state: "verified",
+          detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
+          screenshotUrl: lateUrl,
+        };
+      }
+
+      const prompt = `你在校驗 Threads 發文是否真的成功。
+圖1是點選"發布"後立即截圖，圖2是幾秒後的穩定狀態，圖3是更晚一點的狀態。
+
+目標文案開頭：
+${summarizeCaption(caption)}
+
+請只輸出一行，格式固定為：
+PUBLISHED|原因
+或
+STILL_COMPOSING|原因
+或
+BLOCKED|原因
+或
+UNKNOWN|原因
+
+判定規則：
+- PUBLISHED：必須看到明確成功訊號，例如"已發布/檢視"提示，或明確看到目標串文已經發出。
+- STILL_COMPOSING：仍停留在"新串文"編輯頁，能看到草稿文字、右下角"發布"按鈕、"新增到串文"、輸入框等。
+- BLOCKED：出現封禁、申訴、登入、報錯彈窗、網路錯誤等明顯失敗訊號。
+- UNKNOWN：已經離開編輯頁但沒有看到明確成功訊號，或截圖不足以明確判斷；如果只是 Threads 內部「私密主页/公开主页/取消」底部彈層，也輸出 UNKNOWN，不要輸出 BLOCKED。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+      const raw = await callPublishVerifier(
+        [{
+          role: "user",
+          parts: [
+            { text: prompt },
+            { text: "圖1：點選發布後的即時截圖" },
+            { inlineData: immediateShot },
+            { text: "圖2：幾秒後的穩定截圖" },
+            { inlineData: settledShot },
+            { text: "圖3：更晚一點的截圖" },
+            { inlineData: lateShot },
+          ],
+        }],
+      );
+
+      const parsed = parsePublishVisionResult(extractText(raw));
+      if (parsed.status === "PUBLISHED" && hasExplicitSuccessCue(parsed.reason, "threads")) {
+        return {
+          state: "verified",
+          detail: parsed.reason
+            ? `發布完成 ✓（已校驗：${parsed.reason}）`
+            : "發布完成 ✓（已校驗：已離開編輯頁並出現成功訊號）",
+          screenshotUrl: lateUrl,
+        };
+      }
+      if (parsed.status === "STILL_COMPOSING") {
+        throw new Error(`__THREADS_STILL_COMPOSING__${parsed.reason || "發布後仍停留在編輯頁"}`);
+      }
+      if (parsed.status === "BLOCKED") {
+        if (await closeThreadsPrivacyAudienceSheetIfPresent(config, padCode, lateUrl)) {
+          return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, undefined, onProgress);
+        }
+        throw new Error(`__THREADS_BLOCKED__${parsed.reason || "檢測到帳號或頁面攔截"}`);
+      }
+      if (await closeThreadsPrivacyAudienceSheetIfPresent(config, padCode, lateUrl)) {
+        return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, undefined, onProgress);
+      }
+      const postAiState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (postAiState && postAiState.page !== "compose_editor" && postAiState.page !== "reply_composer" && postAiState.page !== "login_required" && postAiState.page !== "challenge" && postAiState.page !== "system_dialog") {
+        return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, undefined, onProgress);
+      }
+      return {
+        state: "warning",
+        detail: parsed.reason
+          ? `已執行發布，待人工確認（AI 未能明確判定：${parsed.reason}）`
+          : "已執行發布，待人工確認（AI 未能明確判定）",
+      };
+    }
+
+    if (!mediaUrl) {
+      return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, undefined, onProgress);
+    }
+
+    await delay(2200);
+    settledUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    await delay(2500);
+    lateUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    const settledShot = await getInlineData(settledUrl);
+    const lateShot = await getInlineData(lateUrl);
+
+    if (!settledShot || !lateShot) {
+      return {
+        state: "warning",
+        detail: "已執行發布，待人工確認（發布後補充截圖取得失敗）",
+      };
+    }
+
+    const fullToastSuccess = await detectExplicitSuccessToast("threads", [immediateShot, settledShot, lateShot])
+      || await detectThreadsPublishedToastLocally(immediateUrl)
+      || await detectThreadsPublishedToastLocally(settledUrl)
+      || await detectThreadsPublishedToastLocally(lateUrl)
+      || await detectThreadsBottomSuccessToast(immediateUrl)
+      || await detectThreadsBottomSuccessToast(settledUrl)
+      || await detectThreadsBottomSuccessToast(lateUrl);
+    if (fullToastSuccess) {
+      return {
+        state: "verified",
+        detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
+      };
+    }
+
+    const immediateDebugPath = saveThreadsDebugScreenshot(immediateUrl, "immediate");
+    const settledDebugPath = saveThreadsDebugScreenshot(settledUrl, "settled");
+    const lateDebugPath = saveThreadsDebugScreenshot(lateUrl, "late");
+
+    const prompt = `你在校驗 Threads 發文是否真的成功。
+圖1是點選"發布"後立即截圖，圖2是幾秒後的穩定狀態，圖3是更晚一點的狀態。
+
+目標文案開頭：
+${summarizeCaption(caption)}
+
+請只輸出一行，格式固定為：
+PUBLISHED|原因
+或
+STILL_COMPOSING|原因
+或
+BLOCKED|原因
+或
+UNKNOWN|原因
+
+判定規則：
+- PUBLISHED：必須看到明確成功訊號，例如"已發布/已發布/檢視"提示，或明確看到目標串文已經發出。
+- STILL_COMPOSING：仍停留在"新串文"編輯頁，能看到草稿文字、右下角"發布"按鈕、"新增到串文"、輸入框等。
+- BLOCKED：出現封禁、申訴、登入、報錯彈窗、網路錯誤等明顯失敗訊號。
+- UNKNOWN：已經離開編輯頁但沒有看到明確成功訊號，或截圖不足以明確判斷。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+    if (beforeProfileUrl && !isVideoMedia) {
+      try {
+        return await verifyThreadsPublishLocally(config, padCode, beforeProfileUrl, onProgress, mediaUrl);
+      } catch (error) {
+        rethrowThreadsTerminalError(error);
+        // Fall through to AI / profile content verification below.
+      }
+    }
+
+    const raw = await callPublishVerifier(
+      [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { text: "圖1：點選發布後的即時截圖" },
+          { inlineData: immediateShot },
+          { text: "圖2：幾秒後的穩定截圖" },
+          { inlineData: settledShot },
+          { text: "圖3：更晚一點的截圖" },
+          { inlineData: lateShot },
+        ],
+      }],
+    );
+
+    const parsed = parsePublishVisionResult(extractText(raw));
+    if (parsed.status === "PUBLISHED" && hasExplicitSuccessCue(parsed.reason, "threads")) {
+      return {
+        state: "verified",
+        detail: parsed.reason
+          ? `發布完成 ✓（已校驗：${parsed.reason}）`
+          : "發布完成 ✓（已校驗：已離開編輯頁並出現成功訊號）",
+      };
+    }
+
+    const postAiState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (
+      mediaUrl
+      && postAiState
+      && postAiState.page !== "compose_editor"
+      && postAiState.page !== "reply_composer"
+      && postAiState.page !== "login_required"
+      && postAiState.page !== "challenge"
+      && postAiState.page !== "system_dialog"
+    ) {
+      const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+      if (currentFocus.includes(THREADS_PACKAGE)) {
+        try {
+          return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+        } catch (profileError) {
+          rethrowThreadsTerminalError(profileError);
+          const profileMsg = profileError instanceof Error ? profileError.message : String(profileError);
+          return {
+            state: "warning",
+            detail: parsed.reason
+              ? `已執行發布，待人工確認（已離開編輯頁並回到 Threads 內容頁；${parsed.reason}；主頁複查未完成：${profileMsg}）`
+              : `已執行發布，待人工確認（已離開編輯頁並回到 Threads 內容頁；主頁複查未完成：${profileMsg}）`,
+          };
+        }
+      }
+    }
+
+    if (parsed.status === "STILL_COMPOSING") {
+      throw new Error(`__THREADS_STILL_COMPOSING__${parsed.reason || "發布後仍停留在編輯頁"}`);
+    }
+
+    if (parsed.status === "BLOCKED") {
+      if (await closeThreadsReportSheetIfPresent(config, padCode, onProgress)) {
+        return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+      }
+      throw new Error(buildThreadsBlockedError(parsed.reason || "檢測到帳號或頁面攔截", lateUrl));
+    }
+
+    // If the publish toast exposes a visible "檢視" CTA, use it first. On this
+    // device it reliably jumps into the newly published account context.
+    if (hasExplicitSuccessCue(parsed.reason, "threads")) {
+      await tap(config, padCode, 651, 1364, 2200);
+    }
+
+    return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith("__THREADS_STILL_COMPOSING__")) {
+      const recoveredState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (
+        recoveredState
+        && recoveredState.page !== "compose_editor"
+        && recoveredState.page !== "reply_composer"
+        && recoveredState.page !== "login_required"
+        && recoveredState.page !== "challenge"
+        && recoveredState.page !== "system_dialog"
+      ) {
+        if (recoveredState.page === "profile_page" || recoveredState.page === "home_feed") {
+          try {
+            return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+          } catch (profileError) {
+            rethrowThreadsTerminalError(profileError);
+            const profileMsg = profileError instanceof Error ? profileError.message : String(profileError);
+            return {
+              state: "warning",
+              detail: `已執行發布，待人工確認（發布後已離開編輯頁並回到 Threads；主頁深度複查未完成：${profileMsg}）`,
+              screenshotUrl: recoveredState.screenshotUrl,
+            };
+          }
+        }
+        return {
+          state: "warning",
+          detail: `已執行發布，待人工確認（發布後已離開編輯頁，當前狀態 ${recoveredState.page}）`,
+          screenshotUrl: recoveredState.screenshotUrl,
+        };
+      }
+      throw new Error(`發布校驗失敗：${msg.replace("__THREADS_STILL_COMPOSING__", "")}`);
+    }
+    if (msg.startsWith("__THREADS_BLOCKED__")) {
+      throw new Error(`發布校驗失敗：${msg.replace("__THREADS_BLOCKED__", "")}`);
+    }
+    if (isPublishVerifierAuthError(msg)) {
+      throw new Error(`發布校驗失敗：AI 校驗 API 金鑰無效，且本機校驗未能確認 Threads 已發布：${msg}`);
+    }
+    if (!mediaUrl && /timeout/i.test(msg)) {
+      try {
+        onProgress?.({
+          step: "即時校驗逾時，改用 Threads 主頁複查純文字貼文...",
+          done: false,
+        });
+        return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, undefined, onProgress);
+      } catch (profileError) {
+        const profileMsg = profileError instanceof Error ? profileError.message : String(profileError);
+        if (isPublishVerifierAuthError(profileMsg)) {
+          throw new Error(`發布校驗失敗：AI 校驗 API 金鑰無效，且本機校驗未能確認 Threads 純文字貼文已發布：${profileMsg}`);
+        }
+        return {
+          state: "warning",
+          detail: `已執行發布，待人工確認（主頁複查未完成：${profileMsg}）｜debug=${formatThreadsDebugTargets([immediateUrl, settledUrl, lateUrl])}`,
+        };
+      }
+    }
+    if (isVideoMedia && /timeout/i.test(msg)) {
+      try {
+        onProgress?.({
+          step: "即時校驗逾時，改用 Threads 主頁複查影片貼文...",
+          done: false,
+        });
+        return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+      } catch (profileError) {
+        const profileMsg = profileError instanceof Error ? profileError.message : String(profileError);
+        if (isPublishVerifierAuthError(profileMsg)) {
+          throw new Error(`發布校驗失敗：AI 校驗 API 金鑰無效，且本機校驗未能確認 Threads 影片已發布：${profileMsg}`);
+        }
+        return {
+          state: "warning",
+          detail: `已執行發布，待人工確認（主頁複查未完成：${profileMsg}）｜debug=${formatThreadsDebugTargets([immediateUrl, settledUrl, lateUrl])}`,
+        };
+      }
+    }
+    return {
+      state: "warning",
+      detail: `已執行發布，待人工確認（AI 校驗未完成：${msg}）｜debug=${formatThreadsDebugTargets([immediateUrl, settledUrl, lateUrl])}`,
+    };
+  }
+}
+
+async function classifyInstagramImageFlowState(
+  config: VmosConfig,
+  padCode: string
+): Promise<InstagramImageFlowState> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return "unknown";
+
+  const shotUrl = await screenshot(config, padCode);
+  const shot = await getInlineData(shotUrl);
+  if (!shot) return "unknown";
+
+const prompt = `你在判斷 Instagram 帶圖發布流程目前處於哪個頁面狀態。
+
+只輸出一行，格式固定為以下五個之一：
+SELECTION_PAGE
+EDITOR
+SHARE_PAGE
+PUBLISHING_HOME
+UNKNOWN
+
+判定標準：
+- SELECTION_PAGE：頂部標題是「新貼文 / 新帖子 / 新帖文」，右上角是「下一步」，底部還能看到「最近 / 選擇 / 选择」以及「貼文 / 帖子 / 限時動態 / 限时动态 / REEL」之類的選圖欄。
+- EDITOR：仍停留在內容編輯頁，還能看到藍色「下一步 / 继续 / 完成」或右上前進箭頭；不論是圖片編輯工具（如「音訊 / 音频 / Aa / 疊層 / 图层 / 濾鏡 / 滤镜 / 編輯 / 编辑」），或影片編輯工具（如「新增音訊 / 添加音频 / 新增文字 / 添加文字」、底部時間軸 / 片段軌道 / 0:03 / 0:05、底部工具列、右下大型藍色「下一步」）都算 EDITOR。
+- SHARE_PAGE：進入「新貼文 / 新帖子 / 新帖文」頁面，能看到「新增說明文字 / 添加说明文字 / 撰写说明」或底部大按鈕「分享 / 发布 / 發佈 / 发表」；即使素材是影片，只要已經到可輸入說明並真正分享的頁面，也算 SHARE_PAGE。
+- PUBLISHING_HOME：已經回到 Instagram 首頁或動態流，能看到「請保持開啟 Instagram 以完成發布 / 请保持开启 Instagram 以完成发布」或「正在發布到... / 正在发布到...」或「已成功發布 / 已成功发布」等發布佇列/成功橫幅。
+- UNKNOWN：以上都不滿足。`;
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { text: "目前頁面截圖" },
+          { inlineData: shot },
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 }
+    );
+    const line = normalizeSingleLine(extractText(raw)).toUpperCase();
+    if (line.startsWith("SELECTION_PAGE")) return "selection_page";
+    if (line.startsWith("EDITOR")) return "editor";
+    if (line.startsWith("SHARE_PAGE")) return "share_page";
+    if (line.startsWith("PUBLISHING_HOME")) return "publishing_home";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function classifyInstagramAcpReelFlowState(
+  screenshotUrl: string,
+): Promise<InstagramAcpReelFlowState> {
+  const localState = await detectInstagramAcpReelFlowStateLocally(screenshotUrl);
+  if (localState !== "unknown") {
+    return localState;
+  }
+
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return "unknown";
+
+  const shot = await getInlineData(screenshotUrl);
+  if (!shot) return "unknown";
+  const request = createTimeoutSignal(8000);
+
+  const prompt = `你在判斷 Instagram Reel 影片發布流程目前處於哪個頁面狀態。
+
+只輸出一行，格式固定為以下十個之一：
+DRAFT_DIALOG
+REEL_CAMERA
+REEL_GALLERY
+EDITOR
+EFFECTS_DRAWER
+SHARE_PAGE
+REELS_BROWSE
+INSTAGRAM_HOME
+SYSTEM_SETTINGS
+UNKNOWN
+
+判定標準：
+- DRAFT_DIALOG：畫面中央有「Keep editing your draft? / 繼續編輯草稿？/ 继续编辑草稿？」彈窗，並能看到「Keep editing / 繼續編輯 / 继续编辑」與「Start new video / 開始建立新影片 / 开始创建新视频」這類按鈕。
+- REEL_CAMERA：Reel 相機頁，底部有快門圓環與「REEL」模式，左下角有最近相簿縮圖，沒有中央草稿彈窗。
+- REEL_GALLERY：選影片頁，標題通常是「新 Reel / 新 Reels」，有「最近」與多個影片縮圖格，縮圖右下角有 0:05 等時長。
+- EDITOR：影片已選中，畫面有影片預覽、底部工具列（音樂/音乐、Aa、貼圖/贴纸、特效、麥克風/麦克风、CC 等）且右下角有藍色「下一步 / 继续 / 完成」按鈕。
+- EFFECTS_DRAWER：底部彈出特效/濾鏡抽屜，能看到「選擇特效 / 选择特效 / 無特效 / 无特效 / 美學 / 美学 / 特效」或多個特效卡片，且沒有右下角藍色下一步。
+- SHARE_PAGE：最終分享頁，標題是「新 Reel / 新 Reels」，有「撰寫說明和新增主題標籤 / 撰写说明和添加话题标签」或底部藍色「分享 / 发布 / 發佈」按鈕。
+- REELS_BROWSE：正在瀏覽 Reels 動態流，右側有愛心、留言、分享等互動列。
+- INSTAGRAM_HOME：Instagram 首頁/動態流，頂部有 Instagram 標誌或限時動態列。
+- SYSTEM_SETTINGS：Android 系統設定、鍵盤設定、Gboard 設定或系統確認彈窗，不是 Instagram 發布流程。
+- UNKNOWN：以上都不滿足。
+
+不要解釋，不要輸出 JSON。`;
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { text: "目前頁面截圖" },
+          { inlineData: shot },
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 },
+      request.signal,
+    );
+    const line = normalizeSingleLine(extractText(raw)).toUpperCase();
+    if (line.startsWith("DRAFT_DIALOG")) return "draft_dialog";
+    if (line.startsWith("REEL_CAMERA")) return "reel_camera";
+    if (line.startsWith("REEL_GALLERY")) return "reel_gallery";
+    if (line.startsWith("EDITOR")) return "editor";
+    if (line.startsWith("EFFECTS_DRAWER")) return "effects_drawer";
+    if (line.startsWith("SHARE_PAGE")) return "share_page";
+    if (line.startsWith("REELS_BROWSE")) return "reels_browse";
+    if (line.startsWith("INSTAGRAM_HOME")) return "instagram_home";
+    if (line.startsWith("SYSTEM_SETTINGS")) return "system_settings";
+    return "unknown";
+  } catch {
+    return "unknown";
+  } finally {
+    request.cleanup();
+  }
+}
+
+export async function detectInstagramAcpReelFlowStateLocally(
+  screenshotUrl: string,
+): Promise<InstagramAcpReelFlowState> {
+  try {
+    const pixels = await getImagePixelData(screenshotUrl);
+    if (!pixels) return "unknown";
+    const sample = (x: number, y: number, w: number, h: number) => sampleImageRegionStats(
+      pixels,
+      { x, y, width: w, height: h },
+    );
+
+    const centerCard = sample(116, 344, 488, 914);
+    const draftDialogPanel = sample(65, 170, 590, 1255);
+    const outsideLeft = sample(0, 300, 90, 900);
+    const bottomRightButton = sample(500, 1390, 200, 135);
+    const bottomRightShareButton = sample(370, 1380, 320, 125);
+    const topRightNextButton = sample(570, 30, 135, 125);
+    const topBand = sample(0, 60, 720, 240);
+    const middleBand = sample(0, 320, 720, 780);
+    const bottomBand = sample(0, 1320, 720, 260);
+    const lowerDrawer = sample(0, 690, 720, 850);
+    const upperEditor = sample(0, 80, 720, 620);
+    const rightActionRail = sample(610, 900, 95, 420);
+    const captionArea = sample(0, 1220, 630, 260);
+    const musicSearchBar = sample(35, 625, 470, 105);
+    const musicRows = sample(0, 760, 720, 620);
+    const keyboardBand = sample(0, 1030, 720, 520);
+    const galleryHeader = sample(0, 40, 720, 330);
+    const galleryGrid = sample(0, 370, 720, 900);
+    const homeHeader = sample(0, 55, 720, 175);
+    const homeStoryArea = sample(0, 190, 720, 320);
+    const homeBottomNav = sample(0, 1380, 720, 190);
+    const cameraModeBand = sample(0, 1360, 720, 190);
+    const reelsTitleBand = sample(90, 60, 500, 150);
+    const reelsBottomNav = sample(0, 1360, 720, 200);
+
+    if (homeHeader.whiteRatio > 0.45
+      && homeBottomNav.whiteRatio > 0.45
+      && homeBottomNav.darkRatio > 0.025
+      && homeStoryArea.whiteRatio > 0.18) {
+      return "instagram_home";
+    }
+
+    if (topRightNextButton.blueRatio > 0.12
+      && topBand.darkRatio > 0.18
+      && middleBand.brightness > 35
+      && bottomBand.darkRatio > 0.30) {
+      return "editor";
+    }
+
+    const keyboardOpen = keyboardBand.brightness > 145 && keyboardBand.whiteRatio > 0.32;
+    if (keyboardOpen && topBand.darkRatio > 0.35 && middleBand.darkRatio > 0.35) {
+      return "editor";
+    }
+
+    if (middleBand.brightness > 190 && bottomBand.brightness < 95 && lowerDrawer.brightness < 190) {
+      return "reel_camera";
+    }
+
+    const brightReelsBrowse = middleBand.brightness > 210
+      && reelsTitleBand.whiteRatio > 0.25
+      && rightActionRail.whiteRatio > 0.10
+      && reelsBottomNav.darkRatio > 0.35
+      && captionArea.darkRatio > 0.25;
+    if (brightReelsBrowse) {
+      return "reels_browse";
+    }
+
+    const videoReelsBrowse = topBand.darkRatio > 0.35
+      && captionArea.darkRatio > 0.35
+      && bottomBand.whiteRatio > 0.10
+      && rightActionRail.whiteRatio > 0.03;
+    if (videoReelsBrowse) {
+      return "reels_browse";
+    }
+
+    const darkReelsBrowse = rightActionRail.darkRatio > 0.50
+      && captionArea.darkRatio > 0.45
+      && bottomBand.darkRatio > 0.35
+      && bottomBand.whiteRatio > 0.08
+      && rightActionRail.whiteRatio > 0.018;
+    if (darkReelsBrowse) {
+      return "reels_browse";
+    }
+
+    if (topBand.brightness < 80 && middleBand.brightness > 45 && bottomBand.brightness < 75) {
+      return "reel_gallery";
+    }
+
+    if (galleryHeader.darkRatio > 0.42
+      && galleryGrid.brightness > 35
+      && galleryGrid.darkRatio > 0.16
+      && bottomBand.darkRatio > 0.30
+      && bottomBand.brightness < 125) {
+      return "reel_gallery";
+    }
+
+    if (bottomRightButton.blueRatio > 0.06 && bottomBand.darkRatio > 0.25 && bottomBand.brightness < 155) {
+      return "editor";
+    }
+
+    if (!keyboardOpen
+      && cameraModeBand.darkRatio > 0.35
+      && cameraModeBand.whiteRatio < 0.28
+      && rightActionRail.whiteRatio < 0.08
+      && ((centerCard.brightness > 205 && centerCard.whiteRatio > 0.45 && outsideLeft.brightness < 115)
+        || (draftDialogPanel.brightness > 150 && draftDialogPanel.whiteRatio > 0.32 && outsideLeft.brightness < 130))) {
+      return "draft_dialog";
+    }
+
+    if (bottomRightButton.blueRatio > 0.18 && upperEditor.brightness < 95) {
+      return "editor";
+    }
+
+    if (topRightNextButton.blueRatio > 0.12
+      && topBand.darkRatio > 0.18
+      && middleBand.brightness > 35
+      && bottomBand.darkRatio > 0.30) {
+      return "editor";
+    }
+
+    if (bottomRightButton.blueRatio > 0.18 && bottomBand.darkRatio > 0.25 && bottomBand.brightness < 125) {
+      return "editor";
+    }
+
+    if (bottomRightShareButton.blueRatio > 0.12
+      && topBand.brightness > 185
+      && middleBand.brightness > 120
+      && bottomBand.brightness > 130
+      && bottomBand.darkRatio < 0.20) {
+      return "share_page";
+    }
+
+    if (topBand.darkRatio > 0.45
+      && upperEditor.brightness < 150
+      && lowerDrawer.darkRatio > 0.45
+      && lowerDrawer.whiteRatio > 0.015
+      && musicSearchBar.whiteRatio > 0.02
+      && musicRows.darkRatio > 0.35) {
+      return "effects_drawer";
+    }
+
+    if (bottomRightButton.blueRatio < 0.04 && lowerDrawer.brightness > 175 && upperEditor.brightness < 110) {
+      return "effects_drawer";
+    }
+
+    if (topBand.darkRatio > 0.55
+      && middleBand.brightness > 45
+      && rightActionRail.darkRatio > 0.35
+      && rightActionRail.whiteRatio > 0.012
+      && (captionArea.darkRatio > 0.25 || captionArea.whiteRatio > 0.015)) {
+      return "reels_browse";
+    }
+
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function detectInstagramAcpPublishedReelViewerLocally(screenshotUrl: string): Promise<boolean> {
+  try {
+    const pixels = await getImagePixelData(screenshotUrl);
+    if (!pixels) return false;
+    const sample = (x: number, y: number, w: number, h: number) => sampleImageRegionStats(
+      pixels,
+      { x, y, width: w, height: h },
+      FIXED_VMOS_SCREEN,
+      { whiteMin: 215, darkMax: 55 },
+    );
+
+    const topHeader = sample(0, 40, 720, 150);
+    const videoBand = sample(0, 500, 720, 520);
+    const rightActionRail = sample(610, 900, 95, 420);
+    const captionArea = sample(0, 1220, 630, 260);
+    const lowerDrawer = sample(0, 545, 720, 900);
+    const musicSearchBar = sample(35, 625, 470, 105);
+    const musicRows = sample(0, 760, 720, 620);
+
+    const looksLikeMusicDrawer = topHeader.darkRatio > 0.45
+      && lowerDrawer.darkRatio > 0.45
+      && lowerDrawer.whiteRatio > 0.015
+      && musicSearchBar.whiteRatio > 0.02
+      && musicRows.darkRatio > 0.35;
+    if (looksLikeMusicDrawer) return false;
+
+    const looksLikeReelViewer = topHeader.darkRatio > 0.55
+      && videoBand.brightness > 45
+      && rightActionRail.darkRatio > 0.35
+      && rightActionRail.whiteRatio > 0.012
+      && (captionArea.darkRatio > 0.25 || captionArea.whiteRatio > 0.015);
+    if (looksLikeReelViewer) return true;
+
+    const whitePostHeader = sample(0, 70, 720, 260);
+    const authorRow = sample(0, 250, 720, 150);
+    const postMedia = sample(0, 370, 720, 900);
+    const actionRow = sample(0, 1260, 720, 135);
+    const postCaption = sample(0, 1390, 720, 150);
+    const bottomNav = sample(0, 1425, 720, 150);
+    const reelTopTitle = sample(120, 90, 420, 110);
+    const reelBottomCaption = sample(0, 1190, 620, 170);
+    const reelNav = sample(0, 1360, 720, 140);
+    const brightReelViewer = videoBand.brightness > 210
+      && rightActionRail.whiteRatio > 0.16
+      && reelTopTitle.whiteRatio > 0.18
+      && reelBottomCaption.whiteRatio > 0.20
+      && reelNav.darkRatio > 0.35;
+    if (brightReelViewer) return true;
+
+    const looksLikeVideoPostDetail = whitePostHeader.whiteRatio > 0.52
+      && authorRow.whiteRatio > 0.45
+      && postMedia.whiteRatio < 0.28
+      && postMedia.brightness > 45
+      && actionRow.whiteRatio > 0.42
+      && actionRow.darkRatio > 0.02
+      && postCaption.whiteRatio > 0.42
+      && postCaption.darkRatio > 0.02
+      && bottomNav.darkRatio < 0.10;
+    return looksLikeVideoPostDetail;
+  } catch {
+    return false;
+  }
+}
+
+async function classifyInstagramStoryTextFlowState(
+  config: VmosConfig,
+  padCode: string,
+): Promise<InstagramStoryTextFlowState> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return "unknown";
+
+  const shotUrl = await screenshot(config, padCode);
+  const shot = await getInlineData(shotUrl);
+  if (!shot) return "unknown";
+
+  const prompt = `你在判斷 Instagram 無圖 Story 發布流程目前處於哪個頁面狀態。
+
+只輸出一行，格式固定為以下五個之一：
+CAMERA_TOOLS
+TEXT_EDITOR
+SHARE_SCREEN
+SETTINGS
+UNKNOWN
+
+判定標準：
+- CAMERA_TOOLS：相機/Story 編輯器的工具頁，畫面通常很空、底部有快門圓環或模式列，左側有 Aa / 建立 / 创建 / Create / Boomerang / 版面 等工具，右上角可能有齒輪。
+- TEXT_EDITOR：已進入文字編輯模式，能看到鍵盤、輸入中的大字、文字游標、顏色/颜色/字型/字体工具，或右上角 Done / 完成，通常已經不是快門頁。
+- SHARE_SCREEN：已進入發布前預覽/分享頁，能看到「限時動態 / 限时动态 / 你的限時動態 / 你的限时动态 / Your story / Close Friends / 摯友 / 密友 / 親密好友 / 傳送對象 / 发送对象 / 分享」這類按鈕，或底部右側有白色圓形箭頭送出鈕。即使右上角三點選單已展開，這頁仍然算 SHARE_SCREEN。
+- SETTINGS：相機設定頁，畫面頂部能看到「相機設定 / 相机设置 / 完成」。
+- UNKNOWN：以上都不滿足。`;
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { text: "目前頁面截圖" },
+          { inlineData: shot },
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 },
+    );
+    const line = normalizeSingleLine(extractText(raw)).toUpperCase();
+    if (line.startsWith("CAMERA_TOOLS")) return "camera_tools";
+    if (line.startsWith("TEXT_EDITOR")) return "text_editor";
+    if (line.startsWith("SHARE_SCREEN")) return "share_screen";
+    if (line.startsWith("SETTINGS")) return "settings";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function ensureInstagramStoryTextEditor(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<InstagramStoryTextFlowState> {
+  const useAcpAbsolute = isAcpPad(padCode);
+  let state = await classifyInstagramStoryTextFlowState(config, padCode);
+
+  if (state === "settings") {
+    onProgress?.({ step: "離開相機設定...", done: false });
+    await execAdb(config, padCode, "input keyevent KEYCODE_BACK");
+    await delay(1500);
+    state = await classifyInstagramStoryTextFlowState(config, padCode);
+  }
+
+  if (state === "camera_tools") {
+    onProgress?.({ step: "進入建立模式...", done: false });
+    if (useAcpAbsolute) {
+      await tapViaAdbReferencePoint(config, padCode, { x: 128, y: 663 }, 2200, FIXED_VMOS_SCREEN);
+    } else {
+      await tapViaAdb(config, padCode, 132, 548, 2200);
+    }
+    state = await classifyInstagramStoryTextFlowState(config, padCode);
+  }
+
+  if (state === "camera_tools") {
+    onProgress?.({ step: "再次進入建立模式...", done: false });
+    if (useAcpAbsolute) {
+      await tapViaAdbReferencePoint(config, padCode, { x: 52, y: 663 }, 2200, FIXED_VMOS_SCREEN);
+    } else {
+      await tapViaAdb(config, padCode, 64, 548, 2200);
+    }
+    state = await classifyInstagramStoryTextFlowState(config, padCode);
+  }
+
+  if (state === "camera_tools" || state === "unknown") {
+    onProgress?.({ step: "視覺定位文字入口...", done: false });
+    const shotUrl = await screenshot(config, padCode);
+    const tapPoint = await locateInstagramStoryTapTarget(shotUrl, "text_entry");
+    if (tapPoint) {
+      await tapScreenshotPointViaAdb(config, padCode, shotUrl, tapPoint, 2200);
+      state = await classifyInstagramStoryTextFlowState(config, padCode);
+    }
+  }
+
+  return state;
+}
+
+async function advanceInstagramImageFlowToSharePage(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: PublishProgress) => void
+) {
+  const useAcpAbsolute = isAcpPad(padCode);
+  let state = await classifyInstagramImageFlowState(config, padCode);
+  if (state === "share_page" || state === "publishing_home") {
+    return state;
+  }
+
+  if (state === "selection_page") {
+    onProgress?.({ step: "從選圖頁進入下一步...", done: false });
+    const selectionShot = await screenshot(config, padCode);
+    const selectionNext = await locateInstagramImageFlowTapTarget(selectionShot, "next");
+    if (selectionNext) {
+      if (useAcpAbsolute) {
+        await tapScreenshotPointViaAdb(config, padCode, selectionShot, selectionNext, 3500);
+      } else {
+        await tapAbsolute(config, padCode, selectionNext.x, selectionNext.y, 3500);
+      }
+    } else {
+      if (useAcpAbsolute) {
+        await tapViaAdbReferencePoint(config, padCode, { x: 650, y: 74 }, 5500, FIXED_VMOS_SCREEN);
+      } else {
+        await tap(config, padCode, 650, 65, 5500);
+      }
+    }
+    state = await classifyInstagramImageFlowState(config, padCode);
+    if (state === "share_page" || state === "publishing_home") {
+      return state;
+    }
+  }
+
+  onProgress?.({ step: "從編輯頁進入分享頁...", done: false });
+  const editorShot = await screenshot(config, padCode);
+  const editorNext = await locateInstagramImageFlowTapTarget(editorShot, "next");
+  if (editorNext) {
+    if (useAcpAbsolute) {
+      await tapScreenshotPointViaAdb(config, padCode, editorShot, editorNext, 3500);
+    } else {
+      await tapAbsolute(config, padCode, editorNext.x, editorNext.y, 3500);
+    }
+  } else {
+    if (useAcpAbsolute) {
+      await tapViaAdbReferencePoint(config, padCode, { x: 620, y: 1518 }, 5500, FIXED_VMOS_SCREEN);
+    } else {
+      await tapViaAdb(config, padCode, 680, 1220, 5500);
+    }
+  }
+  state = await classifyInstagramImageFlowState(config, padCode);
+  if (state === "share_page" || state === "publishing_home") {
+    return state;
+  }
+
+  if (state === "editor" || state === "unknown") {
+    onProgress?.({ step: "再次進入分享頁...", done: false });
+    const retryShot = await screenshot(config, padCode);
+    const retryNext = await locateInstagramImageFlowTapTarget(retryShot, "next");
+    if (retryNext) {
+      if (useAcpAbsolute) {
+        await tapScreenshotPointViaAdb(config, padCode, retryShot, retryNext, 3500);
+      } else {
+        await tapAbsolute(config, padCode, retryNext.x, retryNext.y, 3500);
+      }
+    } else {
+      if (useAcpAbsolute) {
+        await tapViaAdbReferencePoint(config, padCode, { x: 620, y: 1518 }, 5500, FIXED_VMOS_SCREEN);
+      } else {
+        await tapViaAdb(config, padCode, 680, 1220, 5500);
+      }
+    }
+    state = await classifyInstagramImageFlowState(config, padCode);
+  }
+
+  return state;
+}
+
+async function verifyInstagramPublish(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  mediaUrl?: string,
+  beforeProfileGridUrl?: string,
+  beforeProfileTopUrl?: string,
+  beforeProfileReelsUrl?: string,
+  onProgress?: (p: PublishProgress) => void
+): Promise<PublishVerificationResult> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) {
+    if (beforeProfileGridUrl) {
+      return verifyInstagramPublishLocallyWithRetries(
+        config,
+        padCode,
+        beforeProfileGridUrl,
+        beforeProfileTopUrl,
+        onProgress,
+        [12000, 30000, 60000],
+      );
+    }
+    await delay(8000);
+    throw new Error("未設定 Gemini 且缺少主頁基線，無法本機校驗 Instagram 發布結果");
+  }
+
+  try {
+    const preferAcpHomeVerification = Boolean(mediaUrl) && isAcpPad(padCode);
+    const hasImageReference = hasImageReferenceMedia(mediaUrl);
+    await dismissInstagramRatingPrompt(config, padCode, onProgress);
+    const immediateUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    await delay(4000);
+    const midUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    await delay(4000);
+    const bannerWindowUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    await delay(7000);
+    const settledUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    const immediateShot = await getInlineData(immediateUrl);
+    const midShot = await getInlineData(midUrl);
+    const bannerWindowShot = await getInlineData(bannerWindowUrl);
+    const settledShot = await getInlineData(settledUrl);
+
+    if (!immediateShot || !midShot || !bannerWindowShot || !settledShot) {
+      return {
+        state: "warning",
+        detail: "已執行發布，待人工確認（發布後截圖取得失敗）",
+      };
+    }
+
+    const referenceShot = hasImageReference ? await getInlineData(mediaUrl!) : null;
+
+    const isAcpVideoPublish = Boolean(mediaUrl)
+      && isVideoMediaUrl(mediaUrl)
+      && isAcpPad(padCode)
+      && Boolean(beforeProfileReelsUrl);
+    if (isAcpVideoPublish) {
+      const settledState = await classifyInstagramAcpReelFlowState(settledUrl);
+      if (settledState === "share_page" || settledState === "editor" || settledState === "effects_drawer") {
+        throw new Error(`發布校驗失敗：仍停留在 Reel 發布流程（state=${settledState}）`);
+      }
+    }
+    if (isAcpVideoPublish) {
+      const reelViewerConfirmed = await Promise.all([
+        immediateUrl,
+        midUrl,
+        bannerWindowUrl,
+        settledUrl,
+      ].map((url) => detectInstagramAcpPublishedReelViewerLocally(url)));
+      const confirmedIndex = reelViewerConfirmed.findIndex(Boolean);
+      if (confirmedIndex >= 0) {
+        const confirmedUrl = [immediateUrl, midUrl, bannerWindowUrl, settledUrl][confirmedIndex] || settledUrl;
+        return {
+          state: "verified",
+          detail: "發布完成 ✓（本機校驗：已進入已發布 Reel 播放頁）",
+          screenshotUrl: confirmedUrl,
+        };
+      }
+    }
+
+    if (mediaUrl) {
+      if (isVideoMediaUrl(mediaUrl) && beforeProfileReelsUrl) {
+        if (isAcpVideoPublish) {
+          let profileChangeMessage = "";
+          try {
+            const profileCheck = await verifyInstagramReelsPublishLocallyWithRetries(
+              config,
+              padCode,
+              beforeProfileReelsUrl,
+              onProgress,
+              [12000, 30000, 60000],
+            );
+            profileChangeMessage = profileCheck.detail;
+          } catch (error) {
+            profileChangeMessage = error instanceof Error ? error.message : String(error);
+          }
+          const forcedDetailUrl = await captureInstagramLatestReelDetailScreenshotWithRetries(
+            config,
+            padCode,
+            onProgress,
+            [0, 12000, 30000, 60000],
+          ).catch(() => "");
+          if (forcedDetailUrl) {
+            const confirmed = await detectInstagramAcpPublishedReelViewerLocally(forcedDetailUrl).catch(() => false);
+            if (confirmed) {
+              return {
+                state: "verified",
+                detail: "發布完成 ✓（本機校驗：已打開已發布 Reel 詳情頁）",
+                screenshotUrl: forcedDetailUrl,
+              };
+            }
+          }
+          throw new Error(`Instagram 影片發布未取得 Reel 詳情證據：${profileChangeMessage || "未能打開已發布 Reel 詳情頁"}`);
+        }
+        try {
+          return await verifyInstagramReelsPublishLocallyWithRetries(
+            config,
+            padCode,
+            beforeProfileReelsUrl,
+            onProgress,
+            [12000, 30000, 60000],
+          );
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          const forcedDetailUrl = await captureInstagramLatestReelDetailScreenshotWithRetries(
+            config,
+            padCode,
+            onProgress,
+            [0, 12000, 30000],
+          ).catch(() => "");
+          if (forcedDetailUrl) {
+            const confirmed = await detectInstagramAcpPublishedReelViewerLocally(forcedDetailUrl).catch(() => false);
+            if (confirmed) {
+              return {
+                state: "verified",
+                detail: "發布完成 ✓（本機校驗：已打開已發布 Reel 詳情頁）",
+                screenshotUrl: forcedDetailUrl,
+              };
+            }
+          }
+          const currentAfterReelsCheckUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+          const videoContentCheck = await verifyInstagramAcpVideoScreenshotsShowPublishedContent([
+            immediateUrl,
+            midUrl,
+            bannerWindowUrl,
+            settledUrl,
+            ...(currentAfterReelsCheckUrl ? [currentAfterReelsCheckUrl] : []),
+          ]);
+          if (videoContentCheck?.state === "verified") return videoContentCheck;
+          throw new Error(`Instagram 影片發布未取得 Reel 詳情證據：${msg}`);
+        }
+      }
+
+      const bannerSuccess = await detectExplicitSuccessToast("instagram", [
+        immediateShot,
+        midShot,
+        bannerWindowShot,
+        settledShot,
+      ]);
+      const topBannerSuccess = await detectInstagramTopSuccessBanner(immediateUrl)
+        || await detectInstagramTopSuccessBanner(midUrl)
+        || await detectInstagramTopSuccessBanner(bannerWindowUrl)
+        || await detectInstagramTopSuccessBanner(settledUrl);
+      if ((bannerSuccess || topBannerSuccess) && !hasImageReference && !isAcpVideoPublish) {
+        return {
+          state: "verified",
+          detail: "發布完成 ✓（已校驗：檢測到 Instagram 成功發布橫幅）",
+          screenshotUrl: settledUrl,
+        };
+      }
+
+      if (hasImageReference) {
+        const latestPostCheck = await verifyInstagramLatestFeedPost(
+          config,
+          padCode,
+          caption,
+          mediaUrl!,
+          onProgress,
+          preferAcpHomeVerification ? [6000] : [8000, 18000],
+        );
+        if (latestPostCheck.state === "verified") {
+          return latestPostCheck;
+        }
+      }
+
+      if (beforeProfileGridUrl && !hasImageReference && !isAcpVideoPublish) {
+        try {
+          return await verifyInstagramPublishLocallyWithRetries(
+            config,
+            padCode,
+            beforeProfileGridUrl,
+            beforeProfileTopUrl,
+            onProgress,
+            preferAcpHomeVerification ? [8000, 18000] : [12000, 30000, 60000],
+          );
+        } catch {
+          // Fall through to image/profile-aware verification below.
+        }
+      }
+
+      if (hasImageReference && !preferAcpHomeVerification) {
+        const profileImageCheck = await verifyInstagramProfileContainsReferenceImage(config, padCode, mediaUrl!);
+        if (profileImageCheck.state === "verified") {
+          return profileImageCheck;
+        }
+      }
+    } else if (beforeProfileGridUrl) {
+      try {
+        return await verifyInstagramPublishLocallyWithRetries(
+          config,
+          padCode,
+          beforeProfileGridUrl,
+          beforeProfileTopUrl,
+          onProgress,
+          [12000, 30000, 60000],
+        );
+      } catch {
+        // Fall through to broader AI verification below.
+      }
+    }
+
+    await delay(15000);
+    const lateUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    const lateShot = await getInlineData(lateUrl);
+    await delay(15000);
+    const extraLateUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    const extraLateShot = await getInlineData(extraLateUrl);
+
+    if (!lateShot || !extraLateShot) {
+      return {
+        state: "warning",
+        detail: "已執行發布，待人工確認（發布後補充截圖取得失敗）",
+        screenshotUrl: extraLateUrl || lateUrl || settledUrl,
+      };
+    }
+
+    await dismissInstagramRatingPrompt(config, padCode, onProgress);
+    const lateBannerSuccess = await detectExplicitSuccessToast("instagram", [
+      lateShot,
+      extraLateShot,
+    ]);
+    const lateTopBannerSuccess = await detectInstagramTopSuccessBanner(lateUrl)
+      || await detectInstagramTopSuccessBanner(extraLateUrl);
+    if ((lateBannerSuccess || lateTopBannerSuccess) && !hasImageReference && !isAcpVideoPublish) {
+      return {
+        state: "verified",
+        detail: "發布完成 ✓（已校驗：檢測到 Instagram 延遲成功發布橫幅）",
+        screenshotUrl: extraLateUrl,
+      };
+    }
+
+    if (isAcpVideoPublish) {
+      const extraLateState = await classifyInstagramAcpReelFlowState(extraLateUrl);
+      if (extraLateState === "share_page" || extraLateState === "editor" || extraLateState === "effects_drawer") {
+        throw new Error(`發布校驗失敗：仍停留在 Reel 發布流程（state=${extraLateState}）`);
+      }
+      const lateReelViewerConfirmed = await Promise.all([
+        lateUrl,
+        extraLateUrl,
+      ].map((url) => detectInstagramAcpPublishedReelViewerLocally(url)));
+      const lateConfirmedIndex = lateReelViewerConfirmed.findIndex(Boolean);
+      if (lateConfirmedIndex >= 0) {
+        const confirmedUrl = [lateUrl, extraLateUrl][lateConfirmedIndex] || extraLateUrl;
+        return {
+          state: "verified",
+          detail: "發布完成 ✓（本機校驗：已進入已發布 Reel 播放頁）",
+          screenshotUrl: confirmedUrl,
+        };
+      }
+    }
+
+    const prompt = `你在校驗 Instagram 發文或 Story 是否真的成功。
+圖1是點選"分享/發布"後的即時截圖，圖2是約 2.5 秒後的截圖，圖3是更穩定的最終截圖，圖4是更晚一點的首頁截圖，圖5是更久之後的首頁截圖。${referenceShot ? "圖6是原始參考圖片。" : ""}
+
+目標文案開頭：
+${summarizeCaption(caption)}
+
+請只輸出一行，格式固定為：
+PUBLISHED|原因
+或
+STILL_COMPOSING|原因
+或
+BLOCKED|原因
+或
+UNKNOWN|原因
+
+判定規則：
+- PUBLISHED：看到明確成功訊號，例如"已分享到限時動態/已分享/分享完成/你的貼文上線囉"等；如果有圖6，則圖1-圖5裡任意一張還能看到與圖6相同的圖片已出現在首頁或個人內容區。
+- STILL_COMPOSING：仍停留在編輯、預覽、分享設定、caption 輸入、選圖等流程頁面。
+- BLOCKED：出現登入頁、許可權頁、錯誤彈窗、網路失敗、跳到了 Threads 或其他 App、明顯不是成功落地頁。
+- UNKNOWN：已經離開編輯流程，但沒有看到明確成功訊號。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+    const raw = await callPublishVerifier(
+      [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { text: "圖1：點選分享後的即時截圖" },
+          { inlineData: immediateShot },
+          { text: "圖2：約 2.5 秒後的截圖" },
+          { inlineData: midShot },
+          { text: "圖3：最終穩定截圖" },
+          { inlineData: settledShot },
+          { text: "圖4：更晚一點的首頁截圖" },
+          { inlineData: lateShot },
+          { text: "圖5：更久之後的首頁截圖" },
+          { inlineData: extraLateShot },
+          ...(referenceShot ? [{ text: "圖6：原始參考圖片" }, { inlineData: referenceShot }] : []),
+        ],
+      }],
+    );
+
+    const parsed = parsePublishVisionResult(extractText(raw));
+    if (parsed.status === "PUBLISHED") {
+      if (hasImageReference || isAcpVideoPublish) {
+        return {
+          state: "warning",
+          detail: parsed.reason
+            ? `已點選發布，待人工確認（未取得可用的貼文詳情截圖：${parsed.reason}）`
+            : "已點選發布，待人工確認（未取得可用的貼文詳情截圖）",
+          screenshotUrl: extraLateUrl,
+        };
+      }
+      if (!hasExplicitSuccessCue(parsed.reason, "instagram") && !hasStrongInstagramPublishEvidence(parsed.reason)) {
+        return {
+          state: "warning",
+          detail: parsed.reason
+            ? `已點選發布，待人工確認（缺少明確成功訊號：${parsed.reason}）`
+            : "已點選發布，待人工確認（缺少明確成功訊號）",
+          screenshotUrl: extraLateUrl,
+        };
+      }
+      return {
+        state: "verified",
+        detail: parsed.reason
+          ? `發布完成 ✓（已校驗：${parsed.reason}）`
+          : "發布完成 ✓（已校驗）",
+        screenshotUrl: extraLateUrl,
+      };
+    }
+
+    if (parsed.status === "STILL_COMPOSING") {
+      throw new Error(parsed.reason || "發布後仍停留在編輯流程");
+    }
+
+    if (parsed.status === "BLOCKED") {
+      throw new Error(parsed.reason || "檢測到登入、跳錯應用或頁面攔截");
+    }
+
+    if (mediaUrl && isAcpPad(padCode) && !isAcpVideoPublish && !hasImageReference) {
+      if (beforeProfileGridUrl) {
+        try {
+          return await verifyInstagramPublishLocallyWithRetries(
+            config,
+            padCode,
+            beforeProfileGridUrl,
+            beforeProfileTopUrl,
+            onProgress,
+            [8000, 18000],
+          );
+        } catch {
+          // Keep falling through to warning. ACP feed profile navigation is flaky,
+          // but a late local diff sometimes still lands and is worth one last try.
+        }
+      }
+    }
+
+    return {
+      state: "warning",
+      detail: parsed.reason
+        ? `已執行發布，待人工確認（AI 未能明確判定：${parsed.reason}）`
+        : "已執行發布，待人工確認（AI 未能明確判定）",
+      screenshotUrl: extraLateUrl,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/編輯流程|登入、跳錯應用或頁面攔截|發布校驗失敗|Reel 發布流程|影片分享未真正送出/.test(msg)) {
+      throw new Error(`發布校驗失敗：${msg}`);
+    }
+    return {
+      state: "warning",
+      detail: `已執行發布，待人工確認（AI 校驗未完成：${msg}）`,
+      screenshotUrl: await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined),
+    };
+  }
+}
+
+// ─── Threads 發文流程 ────────────────────────────────────────────────────────
+//
+// 完整流程（已實測驗證）：
+// 1. 冷啟動 Threads（清空殘留頁面後再啟動）
+// 2. 等待主頁載入（4s）
+// 3. 點選底部中間 "+" 按鈕 (360, 1510)
+// 4. 等待發文介面載入（3s）
+// 5. 點選文字輸入框 (415, 262)
+// 6. 輸入文案（base64 編碼）
+// 7. 等待輸入完成（3s）
+// 8. 點選右下角發布按鈕 (634, 1179)
+// 9. 等待發布完成（5s）
+
+async function publishThreads(
+  config: VmosConfig,
+  task: PublishTask,
+  onProgress: (p: PublishProgress) => void,
+  options: PublishRunOptions = {},
+): Promise<PublishResult> {
+  const { padCode, caption, mediaUrl } = task;
+  const throwIfCancelled = () => options.cancellationToken?.throwIfCancelled?.();
+  throwIfCancelled();
+  const normalizedCaption = `${caption.slice(0, 500).trimEnd()} `;
+  const isVideoMedia = Boolean(mediaUrl) && isVideoMediaUrl(mediaUrl);
+  const publishMediaKind: "text" | "image" | "video" = !mediaUrl ? "text" : isVideoMedia ? "video" : "image";
+  const acpFastTextPath = shouldUseAcpThreadsFastTextPath(padCode, mediaUrl);
+  // Media posts use the Android share surface across all cloud phones. The
+  // in-app gallery picker is sensitive to account UI, keyboard state, and
+  // toolbar coordinates, which makes per-pad success rates diverge.
+  const useShareIntentPath = shouldUseThreadsShareIntentPath(padCode, mediaUrl);
+  const useAcpMediaInlineComposer = false;
+  const hasGeminiVerifier = Boolean(getGeminiEndpoint().apiKey);
+  const needsLocalProfileBaseline = getLocalVisualVerificationSupport().supported
+    && !acpFastTextPath
+    && (Boolean(mediaUrl) || !hasGeminiVerifier);
+  let beforeProfileUrl: string | undefined;
+  let beforeProfileVideoTabUrl: string | undefined;
+
+  if (useShareIntentPath) {
+    if (mediaUrl) {
+      throwIfCancelled();
+      await assertThreadsNoImmediateAccountBlock(config, padCode, "媒体发布");
+    }
+    const pendingMedia = mediaUrl
+      ? startDeviceMediaStaging(
+        config,
+        padCode,
+        mediaUrl,
+        buildStableDeviceMediaRemotePath("threads_share", mediaUrl),
+        onProgress,
+      )
+      : null;
+
+    throwIfCancelled();
+    beforeProfileUrl = await prepareThreadsPublishContext(
+      config,
+      padCode,
+      true,
+      onProgress,
+      {
+        grantPermissions: true,
+        verifyLaunchState: true,
+        launchWaitMs: 3500,
+        clearDraftOnAcp: false,
+      },
+    );
+
+    if (mediaUrl && isVideoMediaUrl(mediaUrl)) {
+      throwIfCancelled();
+      beforeProfileVideoTabUrl = await captureThreadsProfileVideoTabBaselineForPublish(config, padCode, onProgress);
+    }
+
+    if (mediaUrl) {
+      throwIfCancelled();
+      const mediaLabel = getDeviceMediaLabel(mediaUrl);
+      const isVideoMedia = isVideoMediaUrl(mediaUrl);
+      const stagedRemotePath = await pendingMedia!.wait(`等待${mediaLabel}準備完成，準備分享...`);
+      throwIfCancelled();
+
+      const contentUri = await queryMediaStoreContentUri(config, padCode, stagedRemotePath, isVideoMedia);
+      if (!contentUri) {
+        throw new Error(`${mediaLabel}已寫入裝置，但未找到 MediaStore content:// 記錄`);
+      }
+
+      await launchThreadsShareIntent(
+        config,
+        padCode,
+        {
+          contentUri,
+          mimeType: getThreadsShareMimeType(mediaUrl),
+        },
+        onProgress,
+      );
+      await dismissThreadsTagUserPageIfOpen(config, padCode, onProgress);
+
+      onProgress({ step: "輸入文案...", done: false });
+      throwIfCancelled();
+      await rewriteThreadsComposerCaption(
+        config,
+        padCode,
+        normalizedCaption,
+        THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE,
+        2500,
+      );
+      await recoverThreadsSearchOverlayAfterCaptionInput(
+        config,
+        padCode,
+        normalizedCaption,
+        onProgress,
+        THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE,
+        2500,
+      );
+    } else {
+      await launchThreadsShareIntent(
+        config,
+        padCode,
+        {
+          caption: normalizedCaption,
+          mimeType: "text/plain",
+        },
+        onProgress,
+      );
+    }
+
+    throwIfCancelled();
+    const composerShotUrl = await assertThreadsComposerReadyForPublish(config, padCode, {
+      mediaKind: publishMediaKind,
+      step: "分享入口點選發布前",
+      onRecoveredSearchOverlay: async () => {
+        onProgress({ step: "已返回新串文頁，重新寫入文案...", done: false });
+        await rewriteThreadsComposerCaption(
+          config,
+          padCode,
+          normalizedCaption,
+          THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE,
+          2500,
+        );
+      },
+    });
+    await tapThreadsComposerPublishButtonUntilSubmitted(config, padCode, {
+      mediaKind: publishMediaKind,
+      initialShotUrl: composerShotUrl,
+      onProgress,
+      onRecoveredSearchOverlay: async () => {
+        onProgress({ step: "已返回新串文頁，重新寫入文案...", done: false });
+        await rewriteThreadsComposerCaption(
+          config,
+          padCode,
+          normalizedCaption,
+          THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE,
+          2500,
+        );
+      },
+    });
+
+    onProgress({ step: "校驗發布結果...", done: false });
+    throwIfCancelled();
+    const verification = await verifyThreadsPublish(
+      config,
+      padCode,
+      normalizedCaption.trim(),
+      beforeProfileUrl,
+      mediaUrl,
+      beforeProfileVideoTabUrl,
+      onProgress,
+    );
+    onProgress({
+      step: verification.detail,
+      done: true,
+      warning: verification.state === "warning" ? verification.detail : undefined,
+    });
+    return verification;
+  }
+
+  if (mediaUrl) {
+    // ── 模式 A：有圖貼文（已實測驗證 2026-04-21）────────────────────────────
+    // 參考 adbfacebook 的 Threads 模板/比例座標：
+    // - 圖片附加按鈕：(137, 350)
+    // - 圖庫左上角是相機入口，真正的第一張新圖片在中間第一格：(360, 257)
+    // - 圖庫"完成"按鈕：(653, 81)
+    // - 文字輸入框：(415, 262)
+    // - "發布"按鈕：(633, 1180)
+
+    // Step 1: 先快速检查当前画面是否已是账号阻断页；确认没有阻断后再背景准备媒体。
+    throwIfCancelled();
+    await assertThreadsNoImmediateAccountBlock(config, padCode, "媒体发布");
+    const mediaLabel = getDeviceMediaLabel(mediaUrl);
+    const remotePath = buildStableDeviceMediaRemotePath("threads_post", mediaUrl);
+    const pendingMedia = startDeviceMediaStaging(config, padCode, mediaUrl, remotePath, onProgress);
+
+    throwIfCancelled();
+    beforeProfileUrl = await prepareThreadsPublishContext(
+      config,
+      padCode,
+      needsLocalProfileBaseline,
+      onProgress,
+      {
+        grantPermissions: !acpFastTextPath,
+        verifyLaunchState: !acpFastTextPath,
+        launchWaitMs: acpFastTextPath ? 2500 : 4000,
+      },
+    );
+
+    if (isVideoMediaUrl(mediaUrl)) {
+      throwIfCancelled();
+      beforeProfileVideoTabUrl = await captureThreadsProfileVideoTabBaselineForPublish(config, padCode, onProgress);
+      onProgress({ step: "回到首頁準備發布...", done: false });
+      await relaunchThreads(config, padCode, acpFastTextPath ? 2500 : 4000);
+      if (isAcpPad(padCode)) {
+        await clearThreadsComposerDraft(config, padCode, onProgress);
+      }
+    }
+
+    if (useAcpMediaInlineComposer) {
+      onProgress({ step: "切回首頁快速發帖入口...", done: false });
+      await ensureThreadsHomeFeedForPublishBounded(config, padCode, (p) => onProgress(p), 35_000, { throwIfCancelled });
+      // ACP 的 Threads 首頁自帶快速發帖列，點內聯圖片圖標能直接進入正確的新串文帶圖流程，
+      // 比底部 "+" 再進附件圖標的鏈路穩定得多。
+      let afterInlineGalleryTapShot = "";
+      let inlineGalleryAfterOpen = false;
+      let inlineGalleryState: Awaited<ReturnType<typeof classifyThreadsPageOnDevice>> | null = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        onProgress({ step: attempt === 0 ? "開啟圖庫..." : `重新開啟圖庫 ${attempt + 1}/3...`, done: false });
+        if (attempt > 0) {
+          await ensureThreadsHomeFeedForPublishBounded(config, padCode, (p) => onProgress(p), 35_000, { throwIfCancelled });
+          await delay(800);
+        }
+        throwIfCancelled();
+        const point = attempt === 0 ? { x: 126, y: 379 } : attempt === 1 ? { x: 137, y: 350 } : { x: 145, y: 344 };
+        await tapViaAdbReferencePoint(config, padCode, point, 3000);
+        afterInlineGalleryTapShot = await freezeScreenshotUrl(await screenshot(config, padCode));
+        if (await detectThreadsPostActionSheetLocally(afterInlineGalleryTapShot)) {
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+          await delay(1000);
+          inlineGalleryState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+          continue;
+        }
+        if (await detectThreadsFullscreenMediaViewerLocally(afterInlineGalleryTapShot).catch(() => false)) {
+          inlineGalleryState = { page: "media_viewer", reason: "LOCAL_FULLSCREEN_MEDIA_VIEWER", screenshotUrl: afterInlineGalleryTapShot };
+          await closeThreadsMediaViewerLayer(config, padCode, onProgress).catch(() => null);
+          await delay(1000);
+          continue;
+        }
+        inlineGalleryAfterOpen = Boolean(
+          await detectThreadsGalleryPickerLocally(afterInlineGalleryTapShot).catch(() => null)
+            || await detectThreadsGalleryPickerVisually(afterInlineGalleryTapShot).catch(() => null),
+        );
+        if (inlineGalleryAfterOpen) break;
+        inlineGalleryState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        if (inlineGalleryState?.page === "media_viewer") {
+          await closeThreadsMediaViewerLayer(config, padCode).catch(() => null);
+        } else if (inlineGalleryState?.page === "reply_composer" || inlineGalleryState?.reason === "LOCAL_THREADS_SIDE_DRAWER" || inlineGalleryState?.reason === "LOCAL_THREADS_POST_ACTION_SHEET") {
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        }
+      }
+      if (!inlineGalleryAfterOpen) {
+        const samplePath = await captureThreadsPublishSample(config, padCode, {
+          scenario: "inline-open-gallery-unexpected",
+          mediaKind: publishMediaKind,
+          step: "開啟圖庫",
+          reason: inlineGalleryState?.reason || "gallery picker not detected from inline image entry after retries",
+          page: inlineGalleryState?.page || "unknown",
+          screenshotUrl: inlineGalleryState?.screenshotUrl || afterInlineGalleryTapShot,
+          expectedPages: ["gallery_picker"],
+        });
+        throw new Error(appendSamplePath("多次點擊首頁圖片入口後仍未確認進入 Threads 圖庫", samplePath));
+      }
+      await pendingMedia.wait(`已進入圖庫，等待${mediaLabel}寫入完成...`);
+      throwIfCancelled();
+      await delay(900);
+
+      onProgress({ step: hasImageReferenceMedia(mediaUrl) ? "選擇圖片..." : "選擇影片...", done: false });
+      let preferredGalleryPoint: { x: number; y: number } | null = null;
+      const selectAcpGalleryMedia = async (): Promise<boolean> => {
+        let selectedGalleryImage = false;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          if (hasImageReferenceMedia(mediaUrl)) {
+            const galleryShotUrl = await screenshot(config, padCode);
+            const detectedThumbnail = await locateThreadsGalleryReferenceImage(galleryShotUrl, mediaUrl);
+            if (detectedThumbnail) {
+              const selectorPoint = getThreadsGallerySelectionTogglePoint(detectedThumbnail);
+              preferredGalleryPoint = selectorPoint;
+              await tapScreenshotPointViaAdb(config, padCode, galleryShotUrl, selectorPoint, 1800);
+              selectedGalleryImage = true;
+              break;
+            }
+          }
+          if (attempt === 0) {
+            onProgress({ step: "等待圖庫縮圖載入...", done: false });
+            await delay(1200);
+          }
+        }
+        if (!selectedGalleryImage) {
+          const fallbackPoints = isVideoMediaUrl(mediaUrl)
+            ? [{ x: 360, y: 610 }, { x: 180, y: 610 }, { x: 540, y: 610 }, { x: 360, y: 760 }]
+            : [{ x: 360, y: 610 }, { x: 180, y: 610 }, { x: 540, y: 610 }, { x: 360, y: 760 }];
+          for (const point of fallbackPoints) {
+            // Threads gallery top-left is the camera shortcut on several VMOS images.
+            // Prefer center/lower cells so fallback never intentionally opens Android Camera.
+            await tapViaAdbReferencePoint(config, padCode, getThreadsGallerySelectionTogglePoint(point), 1800);
+            const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+            if (isAndroidCameraFocus(focus)) {
+              await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+              await delay(1000);
+              continue;
+            }
+            const afterTapShot = await freezeScreenshotUrl(await screenshot(config, padCode));
+            if (await detectThreadsFullscreenMediaViewerLocally(afterTapShot).catch(() => false)) {
+              await closeThreadsMediaViewerLayer(config, padCode, onProgress).catch(() => null);
+              await delay(900);
+              continue;
+            }
+            selectedGalleryImage = (await getThreadsGallerySelectedMarkers(config, padCode)).length > 0;
+            if (selectedGalleryImage) break;
+          }
+        }
+        return selectedGalleryImage;
+      };
+
+      let selectedGalleryImage = await selectAcpGalleryMedia();
+      let selectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+      if (selectedMarkers.length !== 1) {
+        await reduceThreadsGallerySelectionToOne(config, padCode, onProgress, preferredGalleryPoint);
+        selectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+        if (selectedMarkers.length === 0) {
+          selectedGalleryImage = await selectAcpGalleryMedia();
+          selectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+        }
+      }
+      if (selectedMarkers.length === 0) {
+        const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        const samplePath = await captureThreadsPublishSample(config, padCode, {
+          scenario: "gallery-selected-count-invalid",
+          mediaKind: publishMediaKind,
+          step: "選擇圖片",
+          reason: "no selected media after choosing target thumbnail",
+          page: state?.page || "gallery_picker",
+          screenshotUrl: state?.screenshotUrl,
+          expectedPages: ["gallery_picker"],
+        });
+        throw new Error(appendSamplePath("圖庫中未能選中本次媒體，請確認最新圖片已出現在圖庫中", samplePath));
+      }
+      if (selectedMarkers.length > 1) {
+        const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        const samplePath = await captureThreadsPublishSample(config, padCode, {
+          scenario: "gallery-selected-count-invalid",
+          mediaKind: publishMediaKind,
+          step: "選擇圖片",
+          reason: `multiple selected media remained after reduction: ${selectedMarkers.length}`,
+          page: state?.page || "gallery_picker",
+          screenshotUrl: state?.screenshotUrl,
+          expectedPages: ["gallery_picker"],
+        });
+        throw new Error(appendSamplePath(`圖庫仍選中 ${selectedMarkers.length} 個媒體，已停止以避免一次發布多張圖片`, samplePath));
+      }
+      if (!selectedGalleryImage && (await getThreadsGallerySelectedMarkers(config, padCode)).length === 0) {
+        const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        const samplePath = await captureThreadsPublishSample(config, padCode, {
+          scenario: "gallery-media-selection-missing",
+          mediaKind: publishMediaKind,
+          step: "選擇圖片",
+          reason: state?.reason || "fallback media candidates did not produce a selected marker",
+          page: state?.page || "gallery_picker",
+          screenshotUrl: state?.screenshotUrl,
+          expectedPages: ["gallery_picker"],
+        });
+        throw new Error(appendSamplePath("圖庫中未能選中本次媒體，已避免誤點相機入口", samplePath));
+      }
+
+      onProgress({ step: "確認選圖...", done: false });
+      throwIfCancelled();
+      await confirmThreadsGallerySelection(
+        config,
+        padCode,
+        onProgress,
+        true,
+        isVideoMediaUrl(mediaUrl) ? 6500 : 2800,
+      );
+      await assertThreadsComposerReadyForPublish(config, padCode, {
+        mediaKind: publishMediaKind,
+        step: "確認選圖後返回編輯頁",
+      });
+
+      onProgress({ step: "輸入文案...", done: false });
+      throwIfCancelled();
+      await rewriteThreadsComposerCaption(
+        config,
+        padCode,
+        normalizedCaption,
+        THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE,
+        3000,
+      );
+      await recoverThreadsSearchOverlayAfterCaptionInput(
+        config,
+        padCode,
+        normalizedCaption,
+        onProgress,
+        THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE,
+        3000,
+      );
+    } else {
+      const recoverMediaOpenState = async (state: { page: ThreadsPageState; reason: string; screenshotUrl: string } | null) => {
+        if (!state) return;
+        if (state.page === "media_viewer") {
+          await closeThreadsMediaViewerLayer(config, padCode, onProgress).catch(() => null);
+          return;
+        }
+        if (state.reason === "LOCAL_ANDROID_CAMERA") {
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+          await delay(1200);
+          return;
+        }
+        if (state.page === "reply_composer" || state.page === "gallery_picker" || state.reason === "LOCAL_THREADS_INAPP_BROWSER" || state.reason === "LOCAL_THREADS_SHARE_SHEET" || state.reason === "LOCAL_THREADS_SIDE_DRAWER" || state.reason === "LOCAL_THREADS_POST_ACTION_SHEET") {
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+          await delay(1200);
+          return;
+        }
+        if (state.reason === "LOCAL_ANDROID_LAUNCHER") {
+          await relaunchThreads(config, padCode, 4500).catch(() => undefined);
+        }
+      };
+
+      const openThreadsMediaGallery = async (): Promise<string> => {
+        let lastState: { page: ThreadsPageState; reason: string; screenshotUrl: string } | null = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          onProgress({ step: attempt === 0 ? "準備打開新串文..." : `重新嘗試打開圖庫 ${attempt + 1}/3...`, done: false });
+          lastState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+          if (lastState?.page === "gallery_picker") return lastState.screenshotUrl;
+
+          const alreadyInComposer = lastState?.page === "compose_editor";
+          if (!alreadyInComposer && lastState?.page !== "home_feed") {
+            await recoverMediaOpenState(lastState);
+            await ensureThreadsHomeFeedForPublishBounded(config, padCode, (p) => onProgress(p), 20_000, { throwIfCancelled });
+            lastState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+            if (lastState?.page === "gallery_picker") return lastState.screenshotUrl;
+          }
+          throwIfCancelled();
+          if (!alreadyInComposer) {
+            onProgress({ step: "點選新建貼文...", done: false });
+            await tapAndVerifyThreadsPage(
+              config,
+              padCode,
+              "Threads 底部導航欄中央的加號發帖按鈕，不是首頁、搜尋、動態或個人頁 tab",
+              ["compose_editor", "gallery_picker"],
+              {
+                fallbackTapFromScreenshotRatio: { x: 0.5, y: isAcpPad(padCode) ? 0.945 : 0.935 },
+                waitMs: 3000,
+                preTapDelayMs: attempt === 0 ? 1200 : 1000,
+                waitAttempts: 6,
+                waitDelayMs: 1200,
+                requireBeforePages: ["home_feed", "compose_editor"],
+                sampleScenario: attempt === 0 ? "open-composer" : "open-composer-retry",
+                mediaKind: publishMediaKind,
+                skipVision: true,
+              },
+            );
+          }
+
+          lastState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+          if (lastState?.page === "gallery_picker") return lastState.screenshotUrl;
+          if (lastState?.page !== "compose_editor") {
+            await recoverMediaOpenState(lastState);
+            continue;
+          }
+
+          onProgress({ step: "開啟圖庫...", done: false });
+          const keyboardOpen = await detectAndroidKeyboardVisibleLocally(lastState.screenshotUrl).catch(() => false);
+          const attachPoints = isAcpPad(padCode)
+            ? keyboardOpen
+              ? [{ x: 130, y: 468 }, { x: 128, y: 455 }, { x: 142, y: 470 }]
+              : [{ x: 137, y: 350 }, { x: 126, y: 379 }, { x: 145, y: 344 }]
+            : keyboardOpen
+              ? [{ x: 130, y: 468 }]
+              : [{ x: 137, y: 350 }];
+          const point = attachPoints[Math.min(attempt, attachPoints.length - 1)]!;
+          if (isAcpPad(padCode)) {
+            await tapViaAdbReferencePoint(config, padCode, point, 3200);
+          } else {
+            await tap(config, padCode, point.x, point.y, 3200);
+          }
+          const afterOpenGalleryShot = await freezeScreenshotUrl(await screenshot(config, padCode));
+          if (await detectThreadsPostActionSheetLocally(afterOpenGalleryShot)) {
+            await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+            await delay(1000);
+            continue;
+          }
+          if (await detectThreadsFullscreenMediaViewerLocally(afterOpenGalleryShot).catch(() => false)) {
+            lastState = { page: "media_viewer", reason: "LOCAL_FULLSCREEN_MEDIA_VIEWER", screenshotUrl: afterOpenGalleryShot };
+            await recoverMediaOpenState(lastState);
+            continue;
+          }
+          if (
+            await detectThreadsGalleryPickerLocally(afterOpenGalleryShot).catch(() => null)
+            || await detectThreadsGalleryPickerVisually(afterOpenGalleryShot).catch(() => null)
+          ) {
+            return afterOpenGalleryShot;
+          }
+          lastState = await classifyThreadsPageOnDevice(config, padCode).catch(() => ({
+            page: "unknown" as ThreadsPageState,
+            reason: "classify failed after gallery tap",
+            screenshotUrl: afterOpenGalleryShot,
+          }));
+          await recoverMediaOpenState(lastState);
+        }
+
+        const samplePath = await captureThreadsPublishSample(config, padCode, {
+          scenario: "open-gallery-unexpected",
+          mediaKind: publishMediaKind,
+          step: "開啟圖庫",
+          reason: lastState?.reason || "gallery picker not detected",
+          page: lastState?.page || "unknown",
+          screenshotUrl: lastState?.screenshotUrl,
+          expectedPages: ["gallery_picker"],
+        });
+        throw new Error(appendSamplePath("多次嘗試後仍未能確認進入 Threads 圖庫", samplePath));
+      };
+
+      await openThreadsMediaGallery();
+      throwIfCancelled();
+      await pendingMedia.wait(`已進入圖庫，等待${mediaLabel}寫入完成...`);
+      throwIfCancelled();
+      await delay(900);
+
+      // Step 5: 選擇第一張真實圖片。
+      // APP5/部分 VMOS 的 Threads 圖庫上半屏可能是相機入口或相機預覽，
+      // 固定兜底只能點下半部縮圖網格，避免再次進入 Android Camera。
+      onProgress({ step: hasImageReferenceMedia(mediaUrl) ? "選擇圖片..." : "選擇影片...", done: false });
+      throwIfCancelled();
+      let selectedGalleryImage = false;
+      let preferredGalleryPoint: { x: number; y: number } | null = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (hasImageReferenceMedia(mediaUrl)) {
+          const galleryShotUrl = await screenshot(config, padCode);
+          const detectedThumbnail = await locateThreadsGalleryReferenceImage(galleryShotUrl, mediaUrl);
+          if (detectedThumbnail) {
+            const selectorPoint = getThreadsGallerySelectionTogglePoint(detectedThumbnail);
+            preferredGalleryPoint = selectorPoint;
+            await tapScreenshotPointViaAdb(config, padCode, galleryShotUrl, selectorPoint, 1800);
+            selectedGalleryImage = true;
+            break;
+          }
+        }
+        if (attempt === 0) {
+          onProgress({ step: "等待圖庫縮圖載入...", done: false });
+          await delay(1200);
+        }
+      }
+      if (!selectedGalleryImage) {
+        if (isVideoMediaUrl(mediaUrl)) {
+          selectedGalleryImage = await selectThreadsGalleryVideoWithFallback(
+            config,
+            padCode,
+            isAcpPad(padCode),
+          );
+        }
+      }
+      if (!selectedGalleryImage) {
+        const fallbackPoints = isVideoMediaUrl(mediaUrl)
+          ? [{ x: 360, y: 610 }, { x: 180, y: 610 }, { x: 540, y: 610 }, { x: 360, y: 760 }]
+          : [{ x: 360, y: 610 }, { x: 180, y: 610 }, { x: 540, y: 610 }, { x: 360, y: 760 }];
+        let lastFallbackShotUrl = "";
+        for (let attempt = 0; attempt < fallbackPoints.length && !selectedGalleryImage; attempt += 1) {
+          const point = fallbackPoints[attempt]!;
+          onProgress({ step: attempt === 0 ? "使用兜底位置選擇媒體..." : `兜底選媒體重試 ${attempt + 1}/${fallbackPoints.length}...`, done: false });
+          const selectorPoint = getThreadsGallerySelectionTogglePoint(point);
+          if (isAcpPad(padCode)) {
+            await tapViaAdbReferencePoint(config, padCode, selectorPoint, 1800);
+          } else {
+            await tap(config, padCode, selectorPoint.x, selectorPoint.y, 1800);
+          }
+          const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+          if (isAndroidCameraFocus(focus)) {
+            await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+            await delay(1000);
+            continue;
+          }
+          lastFallbackShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+          if (await detectThreadsFullscreenMediaViewerLocally(lastFallbackShotUrl)) {
+            await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+            await delay(1000);
+            continue;
+          }
+          selectedGalleryImage = (await getThreadsGallerySelectedMarkers(config, padCode)).length > 0;
+        }
+        if (!selectedGalleryImage && lastFallbackShotUrl && await detectThreadsFullscreenMediaViewerLocally(lastFallbackShotUrl).catch(() => false)) {
+          const samplePath = await captureThreadsPublishSample(config, padCode, {
+            scenario: "gallery-fallback-opened-media-viewer",
+            mediaKind: publishMediaKind,
+            step: "選擇圖片",
+            reason: "fallback gallery taps repeatedly opened Threads fullscreen media viewer",
+            page: "media_viewer",
+            screenshotUrl: lastFallbackShotUrl,
+            expectedPages: ["gallery_picker"],
+          });
+          throw new Error(appendSamplePath("選圖兜底多次誤入圖片查看器，已返回但仍未選中媒體", samplePath));
+        }
+        if (!selectedGalleryImage) {
+          const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+          if (state?.page === "gallery_picker") {
+            selectedGalleryImage = true;
+            onProgress({ step: "圖庫仍停留在選圖頁，嘗試直接確認選圖...", done: false });
+          }
+        }
+        if (!selectedGalleryImage) {
+          const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+          const samplePath = await captureThreadsPublishSample(config, padCode, {
+            scenario: "gallery-media-selection-missing",
+            mediaKind: publishMediaKind,
+            step: "選擇圖片",
+            reason: state?.reason || "fallback media candidates did not produce a selected marker",
+            page: state?.page || "gallery_picker",
+            screenshotUrl: state?.screenshotUrl || lastFallbackShotUrl,
+            expectedPages: ["gallery_picker"],
+          });
+          throw new Error(appendSamplePath("圖庫中未能選中本次媒體，已避免誤點相機入口", samplePath));
+        }
+      }
+
+      let finalSelectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+      if (finalSelectedMarkers.length !== 1) {
+        await reduceThreadsGallerySelectionToOne(config, padCode, onProgress, preferredGalleryPoint);
+        finalSelectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+      }
+
+      if (finalSelectedMarkers.length === 0) {
+        selectedGalleryImage = false;
+
+        if (hasImageReferenceMedia(mediaUrl)) {
+          const galleryShotUrl = await screenshot(config, padCode);
+          const detectedThumbnail = await locateThreadsGalleryReferenceImage(galleryShotUrl, mediaUrl);
+          if (detectedThumbnail) {
+            const selectorPoint = getThreadsGallerySelectionTogglePoint(detectedThumbnail);
+            preferredGalleryPoint = selectorPoint;
+            await tapScreenshotPointViaAdb(config, padCode, galleryShotUrl, selectorPoint, 1800);
+            selectedGalleryImage = true;
+          }
+        }
+
+        if (!selectedGalleryImage) {
+          const fallbackPoint = isVideoMediaUrl(mediaUrl) ? { x: 360, y: 610 } : { x: 360, y: 610 };
+          const selectorPoint = getThreadsGallerySelectionTogglePoint(fallbackPoint);
+          if (isAcpPad(padCode)) {
+            await tapViaAdbReferencePoint(config, padCode, selectorPoint, 1800);
+          } else {
+            await tap(config, padCode, selectorPoint.x, selectorPoint.y, 1800);
+          }
+        }
+        finalSelectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+        if (finalSelectedMarkers.length > 1) {
+          await reduceThreadsGallerySelectionToOne(config, padCode, onProgress, preferredGalleryPoint);
+          finalSelectedMarkers = await getThreadsGallerySelectedMarkers(config, padCode);
+        }
+      }
+
+      if (finalSelectedMarkers.length === 0) {
+        const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        const samplePath = await captureThreadsPublishSample(config, padCode, {
+          scenario: "gallery-selected-count-invalid",
+          mediaKind: publishMediaKind,
+          step: "選擇圖片",
+          reason: "no selected media after choosing target thumbnail",
+          page: state?.page || "gallery_picker",
+          screenshotUrl: state?.screenshotUrl,
+          expectedPages: ["gallery_picker"],
+        });
+        throw new Error(appendSamplePath("圖庫中未能選中本次媒體，請確認最新圖片已出現在圖庫中", samplePath));
+      }
+      if (finalSelectedMarkers.length > 1) {
+        const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        const samplePath = await captureThreadsPublishSample(config, padCode, {
+          scenario: "gallery-selected-count-invalid",
+          mediaKind: publishMediaKind,
+          step: "選擇圖片",
+          reason: `multiple selected media remained after reduction: ${finalSelectedMarkers.length}`,
+          page: state?.page || "gallery_picker",
+          screenshotUrl: state?.screenshotUrl,
+          expectedPages: ["gallery_picker"],
+        });
+        throw new Error(appendSamplePath(`圖庫仍選中 ${finalSelectedMarkers.length} 個媒體，已停止以避免一次發布多張圖片`, samplePath));
+      }
+
+      // Step 6: 點選"完成"確認選圖（參考實現校準值）
+      onProgress({ step: "確認選圖...", done: false });
+      throwIfCancelled();
+      await confirmThreadsGallerySelection(
+        config,
+        padCode,
+        onProgress,
+        isAcpPad(padCode),
+        isVideoMediaUrl(mediaUrl) ? 6500 : 2800,
+      );
+      await assertThreadsComposerReadyForPublish(config, padCode, {
+        mediaKind: publishMediaKind,
+        step: "確認選圖後返回編輯頁",
+      });
+
+      // Step 7: 點選文字輸入框並輸入文案
+      onProgress({ step: "輸入文案...", done: false });
+      throwIfCancelled();
+      await rewriteThreadsComposerCaption(
+        config,
+        padCode,
+        normalizedCaption,
+        THREADS_COMPOSER_TEXT_INPUT_POINT,
+        3000,
+      );
+      await recoverThreadsSearchOverlayAfterCaptionInput(
+        config,
+        padCode,
+        normalizedCaption,
+        onProgress,
+        THREADS_COMPOSER_TEXT_INPUT_POINT,
+        3000,
+      );
+    }
+
+    // Step 8: 先從當前帶圖編輯畫面定位右下角黑色「發布」按鈕，再點選。
+    throwIfCancelled();
+    if (isAcpPad(padCode) && mediaUrl) {
+      onProgress({ step: "準備點選發布...", done: false });
+    } else {
+      onProgress({ step: "收起鍵盤，準備點選發布...", done: false });
+      await dismissKeyboard(config, padCode, 900);
+    }
+    const publishCaptionPoint = useAcpMediaInlineComposer
+      ? THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE
+      : THREADS_COMPOSER_TEXT_INPUT_POINT;
+    const composerShotUrl = await assertThreadsComposerReadyForPublish(config, padCode, {
+      mediaKind: publishMediaKind,
+      step: "點選發布前",
+      onRecoveredSearchOverlay: async () => {
+        onProgress({ step: "已返回新串文頁，重新寫入文案...", done: false });
+        await rewriteThreadsComposerCaption(
+          config,
+          padCode,
+          normalizedCaption,
+          publishCaptionPoint,
+          3000,
+        );
+      },
+    });
+    throwIfCancelled();
+    await tapThreadsComposerPublishButtonUntilSubmitted(config, padCode, {
+      mediaKind: publishMediaKind,
+      initialShotUrl: composerShotUrl,
+      onProgress,
+      onRecoveredSearchOverlay: async () => {
+        onProgress({ step: "已返回新串文頁，重新寫入文案...", done: false });
+        await rewriteThreadsComposerCaption(
+          config,
+          padCode,
+          normalizedCaption,
+          publishCaptionPoint,
+          3000,
+        );
+      },
+    });
+
+    onProgress({ step: "校驗發布結果...", done: false });
+    throwIfCancelled();
+    const verification = await verifyThreadsPublish(
+      config,
+      padCode,
+      normalizedCaption.trim(),
+      beforeProfileUrl,
+      mediaUrl,
+      beforeProfileVideoTabUrl,
+      onProgress
+    );
+    onProgress({
+      step: verification.detail,
+      done: true,
+      warning: verification.state === "warning" ? verification.detail : undefined,
+    });
+    return verification;
+  } else {
+    // ── 模式 B：純文字貼文（已實測驗證）────────────────────────────────────
+
+    // Step 1: 冷啟動 Threads
+    throwIfCancelled();
+    beforeProfileUrl = await prepareThreadsPublishContext(
+      config,
+      padCode,
+      needsLocalProfileBaseline,
+      onProgress
+    );
+
+    // Step 2: 點選 "+" 新建貼文按鈕
+    onProgress({ step: "點選新建貼文...", done: false });
+    throwIfCancelled();
+    await tapAndVerifyThreadsPage(
+      config,
+      padCode,
+      "Threads 底部導航欄中央的加號發帖按鈕，不是首頁、搜尋、動態或個人頁 tab",
+      ["compose_editor"],
+      {
+        fallbackTapFromScreenshotRatio: { x: 0.5, y: isAcpPad(padCode) ? 0.922 : 0.935 },
+        waitMs: 3000,
+        preTapDelayMs: 1800,
+        waitAttempts: 8,
+        waitDelayMs: 1600,
+        tapAttempts: 3,
+        requireBeforePages: ["home_feed", "profile_page", "compose_editor"],
+        sampleScenario: "open-text-composer",
+        mediaKind: "text",
+        skipVision: true,
+      },
+    );
+
+    // Step 3/4: 點選正文輸入框並輸入文案。
+    // 固定 720x1600 下舊的 y=262 容易點到「新增主題」，需落在正文區。
+    onProgress({ step: "輸入文案...", done: false });
+    throwIfCancelled();
+    await rewriteThreadsComposerCaption(
+      config,
+      padCode,
+      normalizedCaption,
+      THREADS_COMPOSER_TEXT_INPUT_POINT,
+      3000,
+    );
+    await recoverThreadsSearchOverlayAfterCaptionInput(
+      config,
+      padCode,
+      normalizedCaption,
+      onProgress,
+      THREADS_COMPOSER_TEXT_INPUT_POINT,
+      3000,
+    );
+
+    // Step 5: 先從當前畫面定位右下角黑色「發布」按鈕，再點選。
+    onProgress({ step: "收起鍵盤，準備點選發布...", done: false });
+    throwIfCancelled();
+    await dismissKeyboard(config, padCode, 900);
+    const composerShotUrl = await assertThreadsComposerReadyForPublish(config, padCode, {
+      mediaKind: "text",
+      step: "點選發布前",
+      onRecoveredSearchOverlay: async () => {
+        onProgress({ step: "已返回新串文頁，重新寫入文案...", done: false });
+        await rewriteThreadsComposerCaption(
+          config,
+          padCode,
+          normalizedCaption,
+          THREADS_COMPOSER_TEXT_INPUT_POINT,
+          3000,
+        );
+      },
+    });
+    throwIfCancelled();
+    await tapThreadsComposerPublishButtonUntilSubmitted(config, padCode, {
+      mediaKind: "text",
+      initialShotUrl: composerShotUrl,
+      onProgress,
+      onRecoveredSearchOverlay: async () => {
+        onProgress({ step: "已返回新串文頁，重新寫入文案...", done: false });
+        await rewriteThreadsComposerCaption(
+          config,
+          padCode,
+          normalizedCaption,
+          THREADS_COMPOSER_TEXT_INPUT_POINT,
+          3000,
+        );
+      },
+    });
+
+    onProgress({ step: "校驗發布結果...", done: false });
+    throwIfCancelled();
+    const verification = await verifyThreadsPublish(
+      config,
+      padCode,
+      normalizedCaption.trim(),
+      beforeProfileUrl,
+      undefined,
+      undefined,
+      onProgress,
+    );
+    onProgress({
+      step: verification.detail,
+      done: true,
+      warning: verification.state === "warning" ? verification.detail : undefined,
+    });
+    return verification;
+  }
+}
+
+async function relaunchTwitter(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 5000
+) {
+  await execAdb(config, padCode, "am force-stop com.twitter.android");
+  await delay(1500);
+  await execAdb(
+    config,
+    padCode,
+    "monkey -p com.twitter.android -c android.intent.category.LAUNCHER 1"
+  );
+  await delay(waitMs);
+}
+
+async function verifyTwitterPublish(
+  config: VmosConfig,
+  padCode: string,
+  caption: string
+): Promise<PublishVerificationResult> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) {
+    return {
+      state: "warning",
+      detail: "已執行發布，待人工確認（未設定 Gemini 校驗）",
+    };
+  }
+
+  try {
+    const immediateUrl = await screenshot(config, padCode);
+    await delay(2500);
+    const settledUrl = await screenshot(config, padCode);
+    const immediateShot = await getInlineData(immediateUrl);
+    const settledShot = await getInlineData(settledUrl);
+
+    if (!immediateShot || !settledShot) {
+      return {
+        state: "warning",
+        detail: "已執行發布，待人工確認（發布後截圖取得失敗）",
+      };
+    }
+
+    const toastSuccess = await detectExplicitSuccessToast("twitter", [immediateShot, settledShot]);
+    if (toastSuccess) {
+      return {
+        state: "verified",
+        detail: "發布完成 ✓（已校驗：檢測到 Twitter 發推成功提示）",
+      };
+    }
+
+    const prompt = `你在校驗 Twitter/X 發推是否真的成功。
+圖1是點選"發布/Post"後立即截圖，圖2是幾秒後的穩定狀態。
+
+目標推文開頭：
+${summarizeCaption(caption)}
+
+請只輸出一行，格式固定為：
+PUBLISHED|原因
+或
+STILL_COMPOSING|原因
+或
+BLOCKED|原因
+或
+UNKNOWN|原因
+
+判定規則：
+- PUBLISHED：看到明確成功訊號，例如"Your post was sent"/"已傳送"提示，或已回到首頁時間線且能看到剛發的推文。
+- STILL_COMPOSING：仍停留在推文編輯頁，能看到文字輸入框、字元計數、"Post"按鈕等。
+- BLOCKED：出現登入頁、帳號限制、錯誤彈窗、網路失敗等明顯失敗訊號。
+- UNKNOWN：已經離開編輯頁但沒有看到明確成功訊號。
+
+不要解釋，不要換行，不要輸出 JSON。`;
+
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { text: "圖1：點選發布後的即時截圖" },
+          { inlineData: immediateShot },
+          { text: "圖2：幾秒後的穩定截圖" },
+          { inlineData: settledShot },
+        ],
+      }],
+      { maxOutputTokens: 120, temperature: 0 }
+    );
+
+    const parsed = parsePublishVisionResult(extractText(raw));
+    if (parsed.status === "PUBLISHED" && hasExplicitSuccessCue(parsed.reason, "twitter")) {
+      return {
+        state: "verified",
+        detail: parsed.reason
+          ? `發布完成 ✓（已校驗：${parsed.reason}）`
+          : "發布完成 ✓（已校驗）",
+      };
+    }
+
+    if (parsed.status === "STILL_COMPOSING") {
+      throw new Error(parsed.reason || "發布後仍停留在編輯頁");
+    }
+
+    if (parsed.status === "BLOCKED") {
+      throw new Error(parsed.reason || "檢測到帳號或頁面攔截");
+    }
+
+    return {
+      state: "warning",
+      detail: parsed.reason
+        ? `已執行發布，待人工確認（${parsed.reason}）`
+        : "已執行發布，待人工確認（AI 未能明確判定）",
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/停留在編輯頁|帳號或頁面攔截/.test(msg)) {
+      throw new Error(`發布校驗失敗：${msg}`);
+    }
+    return {
+      state: "warning",
+      detail: `已執行發布，待人工確認（AI 校驗未完成：${msg}）`,
+    };
+  }
+}
+
+function buildRednoteShareIntentCommand(input: {
+  contentUri: string;
+  caption?: string;
+  mimeType?: string;
+}): string {
+  const mimeType = input.mimeType || "image/png";
+  return [
+    `am force-stop ${REDNOTE_PACKAGE}`,
+    "sleep 1",
+    [
+      "am start -W",
+      `-n ${REDNOTE_SHARE_ACTIVITY}`,
+      "-a android.intent.action.SEND",
+      `-t ${shellSingleQuote(mimeType)}`,
+      "--grant-read-uri-permission",
+      `--eu android.intent.extra.STREAM ${shellSingleQuote(input.contentUri)}`,
+      input.caption ? `--es android.intent.extra.TEXT ${shellDecodedTextArg(input.caption)}` : "",
+      "2>&1",
+    ].filter(Boolean).join(" "),
+  ].join("; ");
+}
+
+function findRednoteTargetByText(uiXml: string, patterns: RegExp[]): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const text = normalizeSingleLine([
+      decodeXmlAttr(getXmlAttr(node, "text")),
+      decodeXmlAttr(getXmlAttr(node, "content-desc")),
+      decodeXmlAttr(getXmlAttr(node, "resource-id")),
+    ].filter(Boolean).join(" "));
+    if (!text || !patterns.some((pattern) => pattern.test(text))) continue;
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center) continue;
+    let score = 10;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 4;
+    if (/Button|TextView|EditText/i.test(getXmlAttr(node, "class"))) score += 2;
+    candidates.push({ ...center, score });
+  }
+  const best = candidates.sort((a, b) => b.score - a.score || b.y - a.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+async function tapRednoteTarget(
+  config: VmosConfig,
+  padCode: string,
+  patterns: RegExp[],
+  fallback: { xRatio: number; yRatio: number },
+  waitMs = 1800,
+) {
+  const screen = await getScreenSize(config, padCode).catch(() => ({ width: 1080, height: 2340 }));
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const target = findRednoteTargetByText(uiXml, patterns) || {
+    x: Math.round(screen.width * fallback.xRatio),
+    y: Math.round(screen.height * fallback.yRatio),
+  };
+  await tapViaAdbAbsolute(config, padCode, target.x, target.y, waitMs);
+}
+
+async function launchRednoteShareIntent(
+  config: VmosConfig,
+  padCode: string,
+  contentUri: string,
+  caption: string,
+  mimeType = "image/png",
+  onProgress?: (p: PublishProgress) => void,
+) {
+  onProgress?.({ step: "使用系统分享打开小红书发布入口...", done: false });
+  const output = await execAdbForText(
+    config,
+    padCode,
+    buildRednoteShareIntentCommand({ contentUri, caption, mimeType }),
+    90_000,
+    1200,
+  );
+  if (/Unknown option|Exception occurred|Error:/i.test(output)) {
+    throw new Error(`小红书分享入口启动失败：${normalizeSingleLine(output).slice(0, 260)}`);
+  }
+  await delay(4500);
+  await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+  const focus = await getAndroidCurrentFocus(config, padCode).catch(() => "");
+  if (focus && !focus.includes(REDNOTE_PACKAGE)) {
+    throw new Error(`小红书分享入口未进入 App，目前画面：${normalizeSingleLine(focus).slice(0, 220)}`);
+  }
+}
+
+async function verifyRednotePublish(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+): Promise<PublishVerificationResult> {
+  await delay(3500);
+  const shotUrl = await withTimeout(
+    screenshot(config, padCode),
+    20_000,
+    "rednote verify screenshot timeout",
+  ).catch(() => "");
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const focus = await getAndroidCurrentFocus(config, padCode).catch(() => "");
+  if (/发布成功|發佈成功|Posted|Published|笔记已发布|筆記已發佈/i.test(uiXml)) {
+    return {
+      state: "verified",
+      detail: "发布完成 ✓（已检测到小红书发布成功提示）",
+      screenshotUrl: shotUrl || undefined,
+    };
+  }
+  if (focus.includes(REDNOTE_PACKAGE) && !/发布|Post|Next|下一步|描述|正文|标题|Title/i.test(uiXml)) {
+    return {
+      state: "warning",
+      detail: `已点击发布，待人工确认（未检测到明确成功提示；文案开头：${summarizeCaption(caption, 40)}）`,
+      screenshotUrl: shotUrl || undefined,
+    };
+  }
+  return {
+    state: "warning",
+    detail: `已执行小红书发布流程，待人工确认（未能从当前页面明确判定；文案开头：${summarizeCaption(caption, 40)}）`,
+    screenshotUrl: shotUrl || undefined,
+  };
+}
+
+export async function loginThreadsAccount(
+  config: VmosConfig,
+  padCode: string,
+  credential: ThreadsLoginInput,
+): Promise<ThreadsLoginResult> {
+  const handle = credential.username;
+  const password = credential.password;
+
+  // Step 1: 清除 App 数据，强制重新登录
+  await login_clearAppData(config, padCode);
+  await login_launchThreads(config, padCode);
+
+  // Step 2: 关闭系统 autofill
+  await execAdbForText(config, padCode, "settings put secure autofill_service null", 5000, 500).catch(() => "");
+
+  // Step 3: 识别当前页面（等待 Threads 完全启动，最多 30 秒）
+  let { page, evidence } = { page: "unknown", evidence: "" };
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const classified = await classifyThreadsPage(config, padCode);
+    page = classified.page;
+    evidence = classified.evidence;
+    if (page !== "unknown") break;
+    // 还没识别到，再等 5 秒
+    await delay(5000);
+    // 重新打开 App
+    if (attempt === 2) await login_launchThreads(config, padCode);
+  }
+
+  // 如果是账号选择页，点「使用其他帳號」
+  if (page === "login_account_picker") {
+    const otherPos = await findButtonOnScreen(
+      config,
+      padCode,
+      "Threads 登录页底部的「使用其他帳號 / Use another account / 使用其他账号」灰色文字链接",
+      15000,
+    );
+    if (!otherPos) {
+      return { ok: false, state: "failed", message: `账号选择页找不到「使用其他帳號」链接，evidence: ${evidence}` };
+    }
+    await login_tapAndWait(config, padCode, otherPos.x, otherPos.y, 3000);
+    const classified = await classifyThreadsPage(config, padCode);
+    page = classified.page;
+    evidence = classified.evidence;
+  }
+
+  // Step 4: 填写登录表单
+  if (page === "login_username_form" || page === "login_password_form" || page === "login_account_picker") {
+    // 找用户名输入框
+    const uPos = await findButtonOnScreen(
+      config,
+      padCode,
+      "Instagram 登录表单中的用户名/邮箱/手机号输入框（空白圆角矩形，占位文字含「用戶名稱/Username/Email/Phone」）",
+      20000,
+    );
+    if (!uPos) {
+      return { ok: false, state: "failed", message: `找不到用户名输入框，当前页面: ${page}，evidence: ${evidence}` };
+    }
+
+    // 找密码输入框（可能同页也可能下一步才出现）
+    const pPos = await findButtonOnScreen(
+      config,
+      padCode,
+      "Instagram 登录表单中的密码输入框（空白圆角矩形，占位文字含「密碼/Password」，通常在用户名框下方）",
+      8000,
+    );
+
+    if (uPos && pPos && Math.abs(uPos.y - pPos.y) > 30) {
+      // 组合表单：一次性填两个
+      await login_tapAndWait(config, padCode, uPos.x, uPos.y, 600);
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_CTRL_A", 3000, 500).catch(() => "");
+      await login_inputText(config, padCode, handle);
+
+      await login_tapAndWait(config, padCode, pPos.x, pPos.y, 600);
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_CTRL_A", 3000, 500).catch(() => "");
+      await login_inputText(config, padCode, password);
+
+      await login_dismissKeyboard(config, padCode);
+
+      // 找登录按钮
+      const loginPos = await findButtonOnScreen(
+        config,
+        padCode,
+        "Instagram 登录表单底部的「登录 / Log in / 登入 / Sign in」蓝色填充按钮",
+        15000,
+      );
+      if (!loginPos) {
+        return { ok: false, state: "failed", message: "找不到登录按钮" };
+      }
+      await login_tapAndWait(config, padCode, loginPos.x, loginPos.y, 6000);
+    } else {
+      // wizard 模式：先填用户名，再下一步，再填密码
+      await login_tapAndWait(config, padCode, uPos.x, uPos.y, 600);
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_CTRL_A", 3000, 500).catch(() => "");
+      await login_inputText(config, padCode, handle);
+      // 按回车提交用户名
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_ENTER", 3000, 500).catch(() => "");
+      await delay(3000);
+
+      // 检查是否还在用户名页
+      const afterUsername = await classifyThreadsPage(config, padCode);
+      if (afterUsername.page === "login_username_form") {
+        await login_dismissKeyboard(config, padCode);
+        const nextPos = await findButtonOnScreen(
+          config,
+          padCode,
+          "Instagram 用户名表单底部的「下一步 / Continue / 继续 / Next」按钮",
+          15000,
+        );
+        if (!nextPos) {
+          return { ok: false, state: "failed", message: "用户名表单找不到「下一步」按钮" };
+        }
+        await login_tapAndWait(config, padCode, nextPos.x, nextPos.y, 3000);
+      }
+
+      // 找密码框
+      const pPos2 = await findButtonOnScreen(
+        config,
+        padCode,
+        "Instagram 密码输入框（空白圆角矩形，占位文字含「密碼/Password」）",
+        20000,
+      );
+      if (!pPos2) {
+        return { ok: false, state: "failed", message: "用户名提交后找不到密码输入框" };
+      }
+      await login_tapAndWait(config, padCode, pPos2.x, pPos2.y, 600);
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_CTRL_A", 3000, 500).catch(() => "");
+      await login_inputText(config, padCode, password);
+      await login_dismissKeyboard(config, padCode);
+
+      const loginPos2 = await findButtonOnScreen(
+        config,
+        padCode,
+        "Instagram 密码表单底部的「登录 / Log in / 登入 / Sign in」按钮",
+        15000,
+      );
+      if (!loginPos2) {
+        return { ok: false, state: "failed", message: "密码表单找不到登录按钮" };
+      }
+      await login_tapAndWait(config, padCode, loginPos2.x, loginPos2.y, 6000);
+    }
+  } else {
+    return { ok: false, state: "failed", message: `登录前页面异常: ${page}，evidence: ${evidence}` };
+  }
+
+  // Step 5: 验证登录结果（最多 4 轮）
+  for (let round = 0; round < 4; round++) {
+    const result = await classifyThreadsPage(config, padCode);
+    page = result.page;
+    evidence = result.evidence;
+
+    if (page === "home_feed" || page === "profile_page") {
+      const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+      return { ok: true, state: "logged_in", message: `登录成功，当前页面: ${page}`, screenshotUrl: shotUrl };
+    }
+
+    if (page === "save_login_info") {
+      // 自动点「暫不 / Not now」
+      const notNowPos = await findButtonOnScreen(
+        config,
+        padCode,
+        "「儲存您的登入資料？」提示页中的「暫不 / Not now / 稍後」按钮（灰色或白色边框，不是蓝色的「儲存」）",
+        10000,
+      );
+      if (notNowPos) {
+        await login_tapAndWait(config, padCode, notNowPos.x, notNowPos.y, 2000);
+        continue;
+      }
+    }
+
+    if (page === "system_dialog") {
+      // 自动点「不允许 / Don't allow」
+      const denyPos = await findButtonOnScreen(
+        config,
+        padCode,
+        "Android 系统权限弹窗中的「不允許 / 不允许 / Don't allow / 拒絕 / 稍後 / Not now」按钮",
+        8000,
+      );
+      if (denyPos) {
+        await login_tapAndWait(config, padCode, denyPos.x, denyPos.y, 1500);
+        continue;
+      }
+    }
+
+    if (page === "otp_input") {
+      const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+      return {
+        ok: false,
+        state: "challenge_otp",
+        message: "Threads 要求输入验证码（OTP），请在 TG 回复 6 位验证码",
+        screenshotUrl: shotUrl,
+      };
+    }
+
+    if (page === "login_2fa_device_push" || page === "login_2fa_choice" || page === "challenge_other") {
+      const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+      return {
+        ok: false,
+        state: "challenge_manual",
+        message: `Threads 触发 2FA 验证（${page}），需要手动处理：${evidence}`,
+        screenshotUrl: shotUrl,
+      };
+    }
+
+    if (page === "account_disabled") {
+      return { ok: false, state: "failed", message: `账号已被停用: ${evidence}` };
+    }
+
+    if (page === "login_username_form" || page === "login_password_form") {
+      return { ok: false, state: "failed", message: `登录失败：仍在登录页（密码错误或风控）: ${evidence}` };
+    }
+
+    await delay(2000);
+  }
+
+  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  return {
+    ok: false,
+    state: "failed",
+    message: `登录后 4 轮未稳定，最后页面: ${page}，evidence: ${evidence}`,
+    screenshotUrl: shotUrl,
+  };
+}
+
+// ─── 查询云机账号 ─────────────────────────────────────────────────────────────
+
+export interface PadAccountInfo {
+  padCode: string;
+  platform: "threads";
+  username?: string;
+  email?: string;
+  method: "adb" | "vision" | "failed";
+  error?: string;
+}
+
+export interface ThreadsProfileLinkResult {
+  ok: true;
+  state: "verified" | "submitted";
+  detail: string;
+  screenshotUrl?: string;
+}
+
+export interface ThreadsProfileUpdateResult {
+  ok: true;
+  state: "verified" | "submitted";
+  detail: string;
+  screenshotUrl?: string;
+}
+
+export interface ThreadsProfileSettingsSnapshot {
+  ok: true;
+  name: string;
+  bio: string;
+  screenshotUrl?: string;
+  uiXml?: string;
+}
+
+async function openThreadsProfileForAccountQuery(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ ok: true; profileLikely: boolean; screenshotUrl?: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  await relaunchThreads(config, padCode, 4500);
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
+  await delay(900);
+  await relaunchThreads(config, padCode, 3200);
+  const initialShotUrl = await screenshot(config, padCode).catch(() => undefined);
+  const initialCloseOverlayTarget = initialShotUrl
+    ? await locateThreadsButtonByVision(
+        initialShotUrl,
+        "Threads 全屏图片/视频/帖子查看浮层左上角的关闭 X 或返回箭头中心点；只有画面是全屏媒体查看浮层时才返回坐标，如果是普通首页、个人页或有底部导航栏则输出 NOT_FOUND",
+      ).catch(() => null)
+    : null;
+  if (initialCloseOverlayTarget) {
+    await tapViaAdbAbsolute(config, padCode, initialCloseOverlayTarget.x, initialCloseOverlayTarget.y, 1600);
+    await delay(900);
+    await relaunchThreads(config, padCode, 2600);
+  }
+
+  const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  if (!focus.includes(THREADS_PACKAGE)) {
+    return { ok: false, error: `Threads 未在前台：${focus || "unknown"}` };
+  }
+
+  const before = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+    page: "unknown" as ThreadsPageState,
+    reason: error instanceof Error ? error.message : String(error),
+    screenshotUrl: "",
+  }));
+
+  if (before.page === "system_dialog") {
+    await dismissThreadsSystemCrashDialogIfPossible(config, padCode, before.screenshotUrl).catch(() => false);
+    await delay(1200);
+    const recovered = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+      page: "unknown" as ThreadsPageState,
+      reason: error instanceof Error ? error.message : String(error),
+      screenshotUrl: before.screenshotUrl,
+    }));
+    if (recovered.page === "system_dialog") {
+      return {
+        ok: false,
+        error: `Threads 当前被系统崩溃弹窗阻断：${recovered.reason}`,
+        screenshotUrl: recovered.screenshotUrl,
+      };
+    }
+    if (recovered.page === "login_required" || recovered.page === "challenge") {
+      return {
+        ok: false,
+        error: `Threads 当前不是已登录个人页：${recovered.page} ${recovered.reason || ""}`.trim(),
+        screenshotUrl: recovered.screenshotUrl,
+      };
+    }
+    before.page = recovered.page;
+    before.reason = recovered.reason;
+    before.screenshotUrl = recovered.screenshotUrl;
+  }
+
+  if (before.page === "login_required" || before.page === "challenge") {
+    return {
+      ok: false,
+      error: `Threads 当前不是已登录个人页：${before.page} ${before.reason || ""}`.trim(),
+      screenshotUrl: before.screenshotUrl,
+    };
+  }
+
+  let after = before;
+  for (let attempt = 0; attempt < 3 && after.page !== "profile_page"; attempt += 1) {
+    if (after.page === "system_dialog") {
+      const dismissed = await dismissThreadsSystemCrashDialogIfPossible(config, padCode, after.screenshotUrl).catch(() => false);
+      if (dismissed) {
+        await delay(1200);
+        await relaunchThreads(config, padCode, 3500);
+        after = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+          page: "unknown" as ThreadsPageState,
+          reason: error instanceof Error ? error.message : String(error),
+          screenshotUrl: after.screenshotUrl,
+        }));
+        continue;
+      }
+    }
+
+    if (after.page === "login_required" || after.page === "challenge") {
+      return {
+        ok: false,
+        error: `Threads 当前不是已登录个人页：${after.page} ${after.reason || ""}`.trim(),
+        screenshotUrl: after.screenshotUrl,
+      };
+    }
+
+    if (after.page === "unknown" && after.screenshotUrl) {
+      if (/LOCAL_THREADS_INAPP_BROWSER/i.test(after.reason)) {
+        await dismissThreadsSystemCrashDialogIfPossible(config, padCode, after.screenshotUrl).catch(() => false);
+        await delay(500);
+        const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+        await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.08), Math.round(screen.height * 0.09), 1200).catch(() => undefined);
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
+        await delay(1200);
+        after = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+          page: "unknown" as ThreadsPageState,
+          reason: error instanceof Error ? error.message : String(error),
+          screenshotUrl: after.screenshotUrl,
+        }));
+        continue;
+      }
+      const closeOverlayTarget = await locateThreadsButtonByVision(
+        after.screenshotUrl,
+        "Threads 全屏图片/视频/帖子查看浮层左上角的关闭 X 或返回箭头中心点；只有画面是全屏媒体查看浮层时才返回坐标，如果底部导航栏可见则输出 NOT_FOUND",
+      ).catch(() => null);
+      if (closeOverlayTarget) {
+        await tapViaAdbAbsolute(config, padCode, closeOverlayTarget.x, closeOverlayTarget.y, 1600);
+        await delay(900);
+        after = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+          page: "unknown" as ThreadsPageState,
+          reason: error instanceof Error ? error.message : String(error),
+          screenshotUrl: after.screenshotUrl,
+        }));
+        continue;
+      }
+      if (attempt === 0) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
+        await delay(1200);
+        after = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+          page: "unknown" as ThreadsPageState,
+          reason: error instanceof Error ? error.message : String(error),
+          screenshotUrl: after.screenshotUrl,
+        }));
+        continue;
+      }
+    }
+
+    const profileTarget = after.screenshotUrl
+      ? await locateThreadsButtonByVision(
+          after.screenshotUrl,
+          "Threads 底部导航栏最右侧的个人主页/Profile/人像标签按钮中心点；不要选 Home、Search、Create、Activity、分享或设置",
+        ).catch(() => null)
+      : null;
+    if (profileTarget) {
+      await tapViaAdbAbsolute(config, padCode, profileTarget.x, profileTarget.y, 3200);
+    } else {
+      const screen = await getScreenSize(config, padCode);
+      await tapViaAdbAbsolute(config, padCode, screen.width - 60, screen.height - 80, 3200);
+    }
+    await delay(1200);
+
+    const afterFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    if (!afterFocus.includes(THREADS_PACKAGE)) {
+      await relaunchThreads(config, padCode, 3500);
+      after = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+        page: "unknown" as ThreadsPageState,
+        reason: error instanceof Error ? error.message : String(error),
+        screenshotUrl: after.screenshotUrl,
+      }));
+      continue;
+    }
+
+    after = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+      page: "unknown" as ThreadsPageState,
+      reason: error instanceof Error ? error.message : String(error),
+      screenshotUrl: after.screenshotUrl,
+    }));
+  }
+  if (after.page === "login_required" || after.page === "challenge") {
+    return {
+      ok: false,
+      error: `Threads 当前不是已登录个人页：${after.page} ${after.reason || ""}`.trim(),
+      screenshotUrl: after.screenshotUrl,
+    };
+  }
+  if (after.page !== "profile_page") {
+    return {
+      ok: false,
+      error: `未能确认进入 Threads 个人主页：${after.page} ${after.reason || ""}`.trim(),
+      screenshotUrl: after.screenshotUrl,
+    };
+  }
+
+  const screenshotUrl = after.screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => before.screenshotUrl);
+  return { ok: true, profileLikely: after.page === "profile_page", screenshotUrl };
+}
+
+function findThreadsTextTargetFromUiXml(
+  uiXml: string,
+  patterns: RegExp[],
+  options: { minY?: number; maxY?: number; preferTop?: boolean; requireClickable?: boolean } = {},
+): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    if (!text) continue;
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center) continue;
+    if (options.minY !== undefined && center.y < options.minY) continue;
+    if (options.maxY !== undefined && center.y > options.maxY) continue;
+    if (options.requireClickable && !/true/i.test(getXmlAttr(node, "clickable"))) continue;
+
+    let score = 0;
+    for (const pattern of patterns) {
+      if (pattern.test(text)) score += 20;
+    }
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 4;
+    if (/android\.widget\.(Button|TextView|EditText)|ViewGroup/i.test(getXmlAttr(node, "class"))) score += 2;
+    if (score > 0) candidates.push({ ...center, score });
+  }
+  const best = candidates.sort((a, b) => b.score - a.score || (options.preferTop ? a.y - b.y : b.y - a.y))[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+function findThreadsProfileLinkInputTarget(uiXml: string): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    const resourceId = getXmlAttr(node, "resource-id");
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center) continue;
+    if (/^Add link$|^新增連結$|^新增链接$|^新增連接$|External link icon/i.test(text)) continue;
+    let score = 0;
+    if (/EditText/i.test(className)) score += 10;
+    if (/url|link|連結|链接|網址|网址|website|web/i.test(text)) score += 16;
+    if (/url|link|website/i.test(resourceId)) score += 12;
+    if (/姓名|名称|用戶名稱|用户名|使用者名稱|username|個人簡介|个人简介|bio|gender|性別|性别/i.test(text)) score -= 16;
+    if (center.y >= 180 && center.y <= 1200) score += 2;
+    if (score >= 10) candidates.push({ ...center, score });
+  }
+  const best = candidates.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+function findThreadsProfileAddLinkRowTarget(uiXml: string): { x: number; y: number } | null {
+  const direct = findThreadsTextTargetFromUiXml(
+    uiXml,
+    [/^Add link$|^新增連結$|^新增链接$|^新增連接$/i],
+    { minY: 180, maxY: 900, preferTop: true },
+  );
+  if (direct) return direct;
+
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const rowCandidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center || center.y < 180 || center.y > 900) continue;
+    let score = 0;
+    if (/Add link|新增連結|新增链接|新增連接/i.test(text)) score += 30;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 6;
+    if (/android\.widget\.(TextView|Button)|ViewGroup/i.test(getXmlAttr(node, "class"))) score += 2;
+    if (score > 0) rowCandidates.push({ ...center, score });
+  }
+  const best = rowCandidates.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+type ThreadsProfileEditableField = "name" | "bio";
+
+function getThreadsProfileFieldPatterns(field: ThreadsProfileEditableField): RegExp[] {
+  return field === "name"
+    ? [/^姓名$|^名稱$|^名称$|^Name$/i]
+    : [/^個人簡介$|^个人简介$|^Bio$/i];
+}
+
+export function findThreadsProfileEditableFieldTarget(
+  uiXml: string,
+  field: ThreadsProfileEditableField,
+): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const patterns = getThreadsProfileFieldPatterns(field);
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+
+  for (const node of nodes) {
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const className = getXmlAttr(node, "class");
+    const resourceId = getXmlAttr(node, "resource-id");
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center || center.y < 220 || center.y > 1250) continue;
+    if (/用戶名稱|用户名|使用者名稱|Username/i.test(text) || /user_?name|username/i.test(resourceId)) continue;
+
+    let score = 0;
+    const hasFieldText = patterns.some((pattern) => pattern.test(text));
+    const hasFieldResource = field === "name"
+      ? /name/i.test(resourceId)
+      : /bio|description|about/i.test(resourceId);
+    if (!hasFieldText && !hasFieldResource) continue;
+    if (hasFieldText) score += 28;
+    if (hasFieldResource) score += 10;
+    if (/EditText/i.test(className)) score += 8;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 4;
+    if (/用戶名稱|用户名|使用者名稱|Username|Links?|連結|链接|Gender|性別|性别/i.test(text)) score -= 20;
+    if (score > 0) candidates.push({ ...center, score });
+  }
+
+  const direct = candidates.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+  if (direct) return { x: direct.x, y: direct.y };
+  return null;
+}
+
+function threadsProfileLinkTextPresent(uiXml: string, link: string): boolean {
+  const normalizedXml = normalizeSingleLine(decodeXmlAttr(uiXml));
+  const normalizedLink = normalizeSingleLine(link);
+  return Boolean(normalizedXml && normalizedLink && normalizedXml.includes(normalizedLink));
+}
+
+function normalizeThreadsProfileLinkInput(link: string): string {
+  return normalizeSingleLine(link).replace(/^https?:\/\//i, "");
+}
+
+function threadsProfileLinkAcceptedTextPresent(uiXml: string, link: string): boolean {
+  return threadsProfileLinkTextPresent(uiXml, link)
+    || threadsProfileLinkTextPresent(uiXml, normalizeThreadsProfileLinkInput(link));
+}
+
+export function isThreadsEditProfilePageUiXml(uiXml: string): boolean {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const visibleText = nodes
+    .map((node) => `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim())
+    .filter(Boolean)
+    .join(" ");
+  const normalized = normalizeSingleLine(visibleText || decodeXmlAttr(uiXml));
+  if (!normalized) return false;
+  const hasTitle = /編輯個人檔案|编辑个人档案|編輯個人資料|编辑个人资料|Edit profile/i.test(normalized);
+  const cues = [
+    /姓名|名称|Name/i,
+    /Display name|顯示名稱|显示名称/i,
+    /用戶名稱|用户名|使用者名稱|Username/i,
+    /個人簡介|个人简介|Bio/i,
+    /Interests?|興趣|兴趣/i,
+    /Links?|連結|链接/i,
+    /性別|性别|Gender/i,
+  ].filter((pattern) => pattern.test(normalized)).length;
+  return hasTitle && cues >= 2;
+}
+
+function hasThreadsVisibleTextInUiXml(uiXml: string): boolean {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  return nodes.some((node) => Boolean(normalizeSingleLine(`${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`)));
+}
+
+function detectThreadsProfileEditAccountProtectionUiXml(uiXml: string): string | null {
+  const normalized = normalizeSingleLine(decodeXmlAttr(uiXml));
+  if (!normalized) return null;
+  if (/Add Email|Your email|valid email address|Sign in with Google/i.test(normalized)) {
+    return "Threads 要求先添加邮箱保护账号，无法继续修改账号资料";
+  }
+  if (/Sign in with ease|Choose a login email|Telegram login codes via email|d Sign in with Google|Google/i.test(normalized)) {
+    return "Threads 触发 Google/邮箱账号保护流程，无法继续修改账号资料";
+  }
+  if (/Your phone number|enter your phone number|country code|phone number/i.test(normalized)) {
+    return "Threads 要求先确认手机号，无法继续修改账号资料";
+  }
+  return null;
+}
+
+async function detectThreadsEditProfilePageByVision(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const heuristic = await detectThreadsEditProfilePageByScreenshotHeuristic(screenshotUrl).catch(() => false);
+  if (heuristic) return true;
+  const pageTarget = await locateThreadsButtonByVision(
+    screenshotUrl,
+    "只有当前截图是 Threads 的编辑个人资料主页面时才返回坐标：标题可能是「Edit profile / 編輯個人檔案 / 编辑个人档案 / 編輯個人資料 / 编辑个人资料」，页面内应能看到「Name/姓名」「Username/用戶名稱/用户名」「Bio/個人簡介/个人简介」「Links/連結/链接」等资料字段。若满足，返回页面标题文字中心点；如果是 Edit Username/編輯用戶名稱、链接页面、弹窗、内置浏览器、个人主页或其它页面，输出 NOT_FOUND",
+  ).catch(() => null);
+  return Boolean(pageTarget);
+}
+
+async function detectThreadsEditProfilePageByScreenshotHeuristic(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl || typeof fetch !== "function") return false;
+  const response = await fetch(screenshotUrl);
+  if (!response.ok) return false;
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const sharp = (await import("sharp")).default;
+  const image = sharp(buffer).resize(720, 1600, { fit: "fill" }).removeAlpha();
+  const { data, info } = await image.raw().toBuffer({ resolveWithObject: true });
+  const idx = (x: number, y: number) => (Math.max(0, Math.min(info.height - 1, Math.round(y))) * info.width + Math.max(0, Math.min(info.width - 1, Math.round(x)))) * 3;
+  const avgDarkness = (left: number, top: number, width: number, height: number) => {
+    let total = 0;
+    let dark = 0;
+    for (let y = top; y < top + height; y += 4) {
+      for (let x = left; x < left + width; x += 4) {
+        const i = idx(x, y);
+        const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        total += 1;
+        if (lum < 80) dark += 1;
+      }
+    }
+    return total ? dark / total : 0;
+  };
+  const avgNonWhite = (left: number, top: number, width: number, height: number) => {
+    let total = 0;
+    let nonWhite = 0;
+    for (let y = top; y < top + height; y += 4) {
+      for (let x = left; x < left + width; x += 4) {
+        const i = idx(x, y);
+        const max = Math.max(data[i], data[i + 1], data[i + 2]);
+        const min = Math.min(data[i], data[i + 1], data[i + 2]);
+        total += 1;
+        if (max < 235 || max - min > 25) nonWhite += 1;
+      }
+    }
+    return total ? nonWhite / total : 0;
+  };
+  const topLeftX = avgDarkness(45, 90, 90, 90);
+  const title = avgDarkness(135, 92, 270, 80);
+  const topRightDoneGray = avgNonWhite(600, 90, 95, 85);
+  const profileAvatar = avgNonWhite(535, 210, 130, 130);
+  const editButtonRegion = avgDarkness(70, 490, 260, 95);
+  return topLeftX > 0.02
+    && title > 0.05
+    && topRightDoneGray > 0.06
+    && profileAvatar > 0.2
+    && editButtonRegion < 0.06;
+}
+
+async function locateThreadsEditProfileAvatarFromScreenshot(screenshotUrl?: string): Promise<{ x: number; y: number } | null> {
+  if (!screenshotUrl || typeof fetch !== "function") return null;
+  const response = await fetch(screenshotUrl);
+  if (!response.ok) return null;
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const sharp = (await import("sharp")).default;
+  const { data, info } = await sharp(buffer).resize(720, 1600, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const idx = (x: number, y: number) => (Math.max(0, Math.min(info.height - 1, Math.round(y))) * info.width + Math.max(0, Math.min(info.width - 1, Math.round(x)))) * 3;
+  let best: { x: number; y: number; score: number } | null = null;
+  for (let cy = 190; cy <= 1460; cy += 20) {
+    for (let cx = 555; cx <= 635; cx += 20) {
+      let total = 0;
+      let colorful = 0;
+      let nonWhite = 0;
+      for (let y = cy - 52; y <= cy + 52; y += 6) {
+        for (let x = cx - 52; x <= cx + 52; x += 6) {
+          const i = idx(x, y);
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          total += 1;
+          if (max < 238) nonWhite += 1;
+          if (max - min > 28 && max < 248) colorful += 1;
+        }
+      }
+      const score = total ? (nonWhite / total) + (colorful / total) * 1.6 : 0;
+      if (score > 0.45 && (!best || score > best.score)) best = { x: cx, y: cy, score };
+    }
+  }
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+async function detectThreadsAvatarSelectionReadyByScreenshot(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl || typeof fetch !== "function") return false;
+  const response = await fetch(screenshotUrl);
+  if (!response.ok) return false;
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const sharp = (await import("sharp")).default;
+  const { data, info } = await sharp(buffer).resize(720, 1600, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const idx = (x: number, y: number) => (Math.max(0, Math.min(info.height - 1, Math.round(y))) * info.width + Math.max(0, Math.min(info.width - 1, Math.round(x)))) * 3;
+  let doneTotal = 0;
+  let doneBlue = 0;
+  for (let y = 84; y <= 154; y += 4) {
+    for (let x = 608; x <= 694; x += 4) {
+      const i = idx(x, y);
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      doneTotal += 1;
+      if (b > 135 && g > 95 && r < 130 && b - r > 35) doneBlue += 1;
+    }
+  }
+  let previewTotal = 0;
+  let previewNonWhite = 0;
+  for (let y = 190; y <= 875; y += 8) {
+    for (let x = 30; x <= 690; x += 8) {
+      const i = idx(x, y);
+      const max = Math.max(data[i], data[i + 1], data[i + 2]);
+      previewTotal += 1;
+      if (max < 238) previewNonWhite += 1;
+    }
+  }
+  const doneBlueRatio = doneTotal ? doneBlue / doneTotal : 0;
+  const previewNonWhiteRatio = previewTotal ? previewNonWhite / previewTotal : 0;
+  return doneBlueRatio > 0.015 && previewNonWhiteRatio > 0.12;
+}
+
+async function detectThreadsAvatarSystemCropEditorByScreenshot(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl || typeof fetch !== "function") return false;
+  const response = await fetch(screenshotUrl);
+  if (!response.ok) return false;
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const sharp = (await import("sharp")).default;
+  const { data, info } = await sharp(buffer).resize(720, 1600, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const idx = (x: number, y: number) => (Math.max(0, Math.min(info.height - 1, Math.round(y))) * info.width + Math.max(0, Math.min(info.width - 1, Math.round(x)))) * 3;
+  let darkTotal = 0;
+  let darkPixels = 0;
+  for (let y = 60; y <= 310; y += 8) {
+    for (let x = 0; x < info.width; x += 8) {
+      const i = idx(x, y);
+      const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      darkTotal += 1;
+      if (lum < 45) darkPixels += 1;
+    }
+  }
+  let doneTotal = 0;
+  let doneBlue = 0;
+  for (let y = 1470; y <= 1580; y += 5) {
+    for (let x = 570; x <= 705; x += 5) {
+      const i = idx(x, y);
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      doneTotal += 1;
+      if (b > 150 && g > 105 && r < 90 && b - r > 70) doneBlue += 1;
+    }
+  }
+  return (darkTotal ? darkPixels / darkTotal : 0) > 0.6 && (doneTotal ? doneBlue / doneTotal : 0) > 0.08;
+}
+
+function isThreadsProfileLinksPageUiXml(uiXml: string): boolean {
+  const normalized = normalizeSingleLine(decodeXmlAttr(uiXml));
+  if (!normalized) return false;
+  if (/Copy link|Hide like and share counts|Reply options|Delete/i.test(normalized)) return false;
+  return /^(?=.*(?:Links?|連結|链接))(?=.*(?:Add link|新增連結|新增链接|新增連接|External link icon|URL|網址|网址))/i.test(normalized);
+}
+
+function isThreadsPostOptionsOrThreadDetailUiXml(uiXml: string): boolean {
+  return /Copy link|Hide like and share counts|Reply options|Delete|Thread\s+gazelle|Thread\b/i.test(normalizeSingleLine(decodeXmlAttr(uiXml)));
+}
+
+type ThreadsProfileLinkTargetSource = "xml" | "vision" | "fallback";
+
+async function resolveThreadsProfileLinkTapPoint(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+  source: ThreadsProfileLinkTargetSource,
+): Promise<{ x: number; y: number }> {
+  if (source === "vision") return scaleScreenshotPointToAdbTap(config, padCode, point);
+  return point;
+}
+
+async function openThreadsEditProfilePage(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (progress: PublishProgress) => void,
+): Promise<{ uiXml: string; screenshotUrl?: string }> {
+  onProgress?.({ step: "启动 Threads 并打开个人主页...", done: false });
+  const profile = await openThreadsProfileForAccountQuery(config, padCode);
+  if (!profile.ok) {
+    throw new Error(profile.error || "未能打开 Threads 个人主页");
+  }
+
+  if (profile.profileLikely) {
+    for (let i = 0; i < 3; i += 1) {
+      await execAdbForText(config, padCode, "input swipe 360 560 360 1180 420", 8_000, 500).catch(() => "");
+      await delay(500);
+    }
+  }
+
+  let uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  let editTarget = uiXml
+    ? findThreadsTextTargetFromUiXml(
+        uiXml,
+        [/編輯個人檔案|编辑个人档案|編輯個人資料|编辑个人资料|編輯主页|编辑主页|Edit profile/i],
+        { preferTop: true },
+      )
+    : null;
+  let editTargetSource: ThreadsProfileLinkTargetSource | null = editTarget ? "xml" : null;
+  const profileShotUrl = await screenshot(config, padCode).catch(() => profile.screenshotUrl);
+  const editVisionShotUrl = profileShotUrl || profile.screenshotUrl;
+  if (!editTarget && profile.profileLikely && isAcpPad(padCode)) {
+    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
+    editTarget = await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, FIXED_VMOS_SCREEN);
+    editTargetSource = "fallback";
+  }
+  if (!editTarget && editVisionShotUrl) {
+    editTarget = await locateThreadsButtonByVision(
+      editVisionShotUrl,
+      "Threads 自己个人主页上的「编辑个人档案 / 编辑个人资料 / 编辑主页 / Edit profile」按钮中心点；不要选分享个人档案、关注、返回键或底部导航",
+    ).catch(() => null);
+    if (editTarget) editTargetSource = "vision";
+  }
+  if (!editTarget && profile.profileLikely) {
+    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
+    editTarget = await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, FIXED_VMOS_SCREEN);
+    editTargetSource = "fallback";
+  }
+  if (!editTarget) throw new Error("未找到 Threads 个人主页的编辑按钮");
+
+  onProgress?.({ step: "进入编辑个人资料页面...", done: false });
+  const editTapPoint = await resolveThreadsProfileLinkTapPoint(config, padCode, editTarget, editTargetSource || "fallback");
+  await tapViaAdbAbsolute(config, padCode, editTapPoint.x, editTapPoint.y, 2800);
+  await delay(900);
+  await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+  await delay(700);
+  let editProfileScreenshotUrl: string | undefined;
+  let visuallyOnEditProfile = false;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (isThreadsEditProfilePageUiXml(uiXml)) break;
+    editProfileScreenshotUrl = await screenshot(config, padCode).catch(() => editProfileScreenshotUrl);
+    visuallyOnEditProfile = await detectThreadsEditProfilePageByVision(editProfileScreenshotUrl);
+    if (visuallyOnEditProfile) break;
+    if (/keeps stopping|has stopped|Close app|關閉應用程式|关闭应用程序|已停止|停止運作|停止运行/i.test(uiXml)) {
+      await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+      await delay(1600);
+      continue;
+    }
+    await delay(700);
+  }
+  if (!isThreadsEditProfilePageUiXml(uiXml)) {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await delay(attempt === 0 ? 900 : 1200);
+      uiXml = await dumpUiXml(config, padCode).catch(() => "");
+      if (isThreadsEditProfilePageUiXml(uiXml)) break;
+      editProfileScreenshotUrl = await screenshot(config, padCode).catch(() => editProfileScreenshotUrl);
+      visuallyOnEditProfile = await detectThreadsEditProfilePageByVision(editProfileScreenshotUrl);
+      if (visuallyOnEditProfile) break;
+      const accountProtection = detectThreadsProfileEditAccountProtectionUiXml(uiXml);
+      if (accountProtection) {
+        const currentShot = await screenshot(config, padCode).catch(() => undefined);
+        throw new Error(`${accountProtection}${currentShot ? `，截图：${currentShot}` : ""}`);
+      }
+      if (/keeps stopping|has stopped|Close app|關閉應用程式|关闭应用程序|已停止|停止運作|停止运行/i.test(uiXml)) {
+        await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+      }
+    }
+  }
+  const accountProtection = detectThreadsProfileEditAccountProtectionUiXml(uiXml);
+  if (accountProtection) {
+    const currentShot = await screenshot(config, padCode).catch(() => undefined);
+    throw new Error(`${accountProtection}${currentShot ? `，截图：${currentShot}` : ""}`);
+  }
+  if (!isThreadsEditProfilePageUiXml(uiXml) && !visuallyOnEditProfile) {
+    const currentShot = await screenshot(config, padCode).catch(() => undefined);
+    throw new Error(`未能进入 Threads 编辑个人资料页面${currentShot ? `，截图：${currentShot}` : ""}`);
+  }
+  return { uiXml, screenshotUrl: editProfileScreenshotUrl || await screenshot(config, padCode).catch(() => profileShotUrl) };
+}
+
+function threadsProfileFieldTextPresent(uiXml: string, value: string): boolean {
+  const normalizedXml = normalizeSingleLine(decodeXmlAttr(uiXml));
+  const normalizedValue = normalizeSingleLine(value);
+  if (!normalizedValue) return true;
+  return Boolean(normalizedXml && normalizedValue && normalizedXml.includes(normalizedValue));
+}
+
+function extractThreadsProfileEditableFieldValue(
+  uiXml: string,
+  field: ThreadsProfileEditableField,
+): string {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const target = findThreadsProfileEditableFieldTarget(uiXml, field);
+  if (!target) return "";
+  const placeholders = field === "name"
+    ? [/^姓名$|^名稱$|^名称$|^Name$/i]
+    : [/^個人簡介$|^个人简介$|^Bio$/i];
+  const candidate = nodes
+    .map((node) => {
+      const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+      if (!center || Math.abs(center.x - target.x) > 8 || Math.abs(center.y - target.y) > 8) return null;
+      return normalizeSingleLine(decodeXmlAttr(getXmlAttr(node, "text")));
+    })
+    .find((value): value is string => typeof value === "string");
+  if (!candidate || placeholders.some((pattern) => pattern.test(candidate))) return "";
+  for (const placeholder of placeholders) {
+    const stripped = candidate.replace(placeholder, "").trim();
+    if (stripped !== candidate) return stripped;
+  }
+  return candidate;
+}
+
+function getThreadsProfileFieldFallbackReferencePoint(field: ThreadsProfileEditableField): { x: number; y: number } {
+  return field === "name" ? { x: 286, y: 305 } : { x: 286, y: 765 };
+}
+
+async function saveThreadsEditProfilePage(
+  config: VmosConfig,
+  padCode: string,
+): Promise<void> {
+  const savePatterns = [/^完成$|^Done$|^儲存$|^保存$|^Save$/i];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    const saveTarget = findThreadsTextTargetFromUiXml(uiXml, savePatterns, { maxY: 220, preferTop: true });
+    if (saveTarget) {
+      const tapPoint = await scaleUiXmlPointToPhysicalTap(config, padCode, saveTarget);
+      await tapViaAdbAbsolute(config, padCode, tapPoint.x, tapPoint.y, 2400);
+    } else {
+      if (isAcpPad(padCode)) {
+        await tapViaAdbAbsolute(config, padCode, 642, 118, 2400);
+      } else {
+        const fallback = await scaleReferencePointToPhysicalTap(config, padCode, { x: 642, y: 118 }, FIXED_VMOS_SCREEN);
+        await tapViaAdbAbsolute(config, padCode, fallback.x, fallback.y, 2400);
+      }
+    }
+    await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+    await delay(900);
+    const nextXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (isThreadsEditProfilePageUiXml(nextXml)) continue;
+    const nextShot = await screenshot(config, padCode).catch(() => undefined);
+    if (await detectThreadsEditProfilePageByVision(nextShot)) continue;
+    return;
+  }
+}
+
+async function updateThreadsProfileTextField(
+  config: VmosConfig,
+  padCode: string,
+  field: ThreadsProfileEditableField,
+  value: string,
+  onProgress?: (progress: PublishProgress) => void,
+): Promise<ThreadsProfileUpdateResult> {
+  const targetValue = normalizeSingleLine(value);
+
+  const label = field === "name" ? "名称" : "简介";
+  const opened = await openThreadsEditProfilePage(config, padCode, onProgress);
+  let uiXml = opened.uiXml;
+  let inputTarget = findThreadsProfileEditableFieldTarget(uiXml, field);
+  let inputTargetSource: ThreadsProfileLinkTargetSource | null = inputTarget ? "xml" : null;
+  if (!inputTarget && isAcpPad(padCode)) {
+    inputTarget = await scaleReferencePointToPhysicalTap(config, padCode, getThreadsProfileFieldFallbackReferencePoint(field), FIXED_VMOS_SCREEN);
+    inputTargetSource = "fallback";
+  }
+  if (!inputTarget) {
+    const shotUrl = opened.screenshotUrl || await screenshot(config, padCode).catch(() => undefined);
+    inputTarget = shotUrl
+      ? await locateThreadsButtonByVision(
+          shotUrl,
+          field === "name"
+            ? "Threads 编辑个人资料页面中「姓名 / Name」输入框的中心点；不要选用户名、个人简介、Links、性别、头像或右上 Done"
+            : "Threads 编辑个人资料页面中「个人简介 / Bio」输入框的中心点；不要选姓名、用户名、Links、性别、头像或右上 Done",
+        ).catch(() => null)
+      : null;
+    if (inputTarget) inputTargetSource = "vision";
+  }
+  if (!inputTarget) {
+    inputTarget = await scaleReferencePointToPhysicalTap(config, padCode, getThreadsProfileFieldFallbackReferencePoint(field), FIXED_VMOS_SCREEN);
+    inputTargetSource = "fallback";
+  }
+
+  onProgress?.({ step: `填写 Threads ${label}...`, done: false });
+  const tapPoint = inputTargetSource === "vision"
+    ? await scaleScreenshotPointToAdbTap(config, padCode, inputTarget)
+    : inputTarget;
+  await tapViaAdbAbsolute(config, padCode, tapPoint.x, tapPoint.y, 900);
+  await clearFocusedTextInput(config, padCode, 400);
+  if (targetValue) await typeText(config, padCode, targetValue, 1400);
+
+  uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  if (hasReadableUiXml(uiXml) && !threadsProfileFieldTextPresent(uiXml, targetValue)) {
+    await tapViaAdbAbsolute(config, padCode, tapPoint.x, tapPoint.y, 700);
+    await clearFocusedTextInput(config, padCode, 400);
+    if (targetValue) await typeText(config, padCode, targetValue, 1600);
+  }
+
+  onProgress?.({ step: `保存 Threads ${label}...`, done: false });
+  await saveThreadsEditProfilePage(config, padCode);
+  await delay(1300);
+  const finalXml = await dumpUiXml(config, padCode).catch(() => "");
+  const finalShot = await screenshot(config, padCode).catch(() => undefined);
+  const verified = threadsProfileFieldTextPresent(finalXml, targetValue);
+  onProgress?.({ step: verified ? `Threads ${label}已更新` : `${label}已提交，等待人工确认`, done: true });
+
+  return {
+    ok: true,
+    state: verified ? "verified" : "submitted",
+    detail: verified ? `Threads 个人资料中已看到目标${label}` : `已完成保存动作，但当前截图/XML 未直接确认${label}显示`,
+    screenshotUrl: finalShot,
+  };
+}
+
+export function updateThreadsProfileName(
+  config: VmosConfig,
+  padCode: string,
+  name: string,
+  onProgress?: (progress: PublishProgress) => void,
+): Promise<ThreadsProfileUpdateResult> {
+  return updateThreadsProfileTextField(config, padCode, "name", name, onProgress);
+}
+
+export function updateThreadsProfileBio(
+  config: VmosConfig,
+  padCode: string,
+  bio: string,
+  onProgress?: (progress: PublishProgress) => void,
+): Promise<ThreadsProfileUpdateResult> {
+  return updateThreadsProfileTextField(config, padCode, "bio", bio, onProgress);
+}
+
+export async function queryThreadsProfileSettings(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (progress: PublishProgress) => void,
+): Promise<ThreadsProfileSettingsSnapshot> {
+  const opened = await openThreadsEditProfilePage(config, padCode, onProgress);
+  const uiXml = opened.uiXml;
+  return {
+    ok: true,
+    name: extractThreadsProfileEditableFieldValue(uiXml, "name"),
+    bio: extractThreadsProfileEditableFieldValue(uiXml, "bio"),
+    screenshotUrl: opened.screenshotUrl,
+    uiXml,
+  };
+}
+
+function findThreadsProfileAvatarEditTarget(uiXml: string): { x: number; y: number } | null {
+  return findThreadsTextTargetFromUiXml(
+    uiXml,
+    [
+      /更換大頭貼照|更换头像|更換頭像|更换大头贴照|更換個人照片|更换个人照片/i,
+      /Change profile (photo|picture)|Edit profile (photo|picture)|New profile picture/i,
+    ],
+    { minY: 150, maxY: 460, preferTop: true },
+  );
+}
+
+function findThreadsProfileAvatarPickerTarget(uiXml: string): { x: number; y: number } | null {
+  return findThreadsTextTargetFromUiXml(
+    uiXml,
+    [
+      /新大頭貼照|新头像|新增大頭貼照|新增头像|從相簿選擇|从相册选择|從圖庫選擇|从图库选择|選擇相片|选择照片|選擇大頭貼/i,
+      /Choose from library|Select from gallery|Upload photo|New profile picture/i,
+    ],
+    { minY: 240, maxY: 1300, preferTop: true },
+  );
+}
+
+async function tapThreadsProfileAvatarSaveOrNext(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 1800,
+): Promise<boolean> {
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  let target = findThreadsTextTargetFromUiXml(
+    uiXml,
+    [/^完成$|^Done$|^下一步$|^Next$|^儲存$|^保存$|^Save$|^套用$|^Apply$/i],
+    { maxY: 260, preferTop: true },
+  );
+  target ||= findThreadsTextTargetFromUiXml(
+    uiXml,
+    [/^完成$|^Done$|^下一步$|^Next$|^儲存$|^保存$|^Save$|^套用$|^Apply$/i],
+    { minY: 1300, preferTop: false },
+  );
+  if (target) {
+    const tapPoint = await scaleUiXmlPointToPhysicalTap(config, padCode, target);
+    await tapViaAdbAbsolute(config, padCode, tapPoint.x, tapPoint.y, waitMs);
+    return true;
+  }
+  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  if (await detectThreadsAvatarSystemCropEditorByScreenshot(shotUrl).catch(() => false)) {
+    const fallback = await scaleReferencePointToPhysicalTap(config, padCode, { x: 638, y: 1532 }, FIXED_VMOS_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, fallback.x, fallback.y, waitMs);
+    return true;
+  }
+  const fallback = await scaleReferencePointToPhysicalTap(config, padCode, { x: 640, y: 145 }, FIXED_VMOS_SCREEN);
+  await tapViaAdbAbsolute(config, padCode, fallback.x, fallback.y, waitMs);
+  return true;
+}
+
+export async function updateThreadsProfileAvatar(
+  config: VmosConfig,
+  padCode: string,
+  imageUrl: string,
+  onProgress?: (progress: PublishProgress) => void,
+): Promise<ThreadsProfileUpdateResult> {
+  const targetImageUrl = normalizeSingleLine(imageUrl);
+  if (!targetImageUrl) throw new Error("头像图片不能为空");
+  if (isVideoMediaUrl(targetImageUrl)) throw new Error("头像只支持图片，不支持视频");
+
+  const remotePath = `/sdcard/Download/threads-profile-avatar-${Date.now()}.jpg`;
+  const staging = startDeviceMediaStaging(config, padCode, targetImageUrl, remotePath, onProgress, { reuse: false });
+  const opened = await openThreadsEditProfilePage(config, padCode, onProgress);
+  await staging.wait("等待头像图片写入云机图库...");
+
+  let uiXml = opened.uiXml;
+  let avatarTarget = findThreadsProfileAvatarEditTarget(uiXml);
+  let avatarTargetSource: ThreadsProfileLinkTargetSource | null = avatarTarget ? "xml" : null;
+  if (!avatarTarget && isAcpPad(padCode)) {
+    const shotUrl = opened.screenshotUrl || await screenshot(config, padCode).catch(() => undefined);
+    avatarTarget = await locateThreadsEditProfileAvatarFromScreenshot(shotUrl).catch(() => null);
+    avatarTargetSource = avatarTarget ? "fallback" : null;
+  }
+  if (!avatarTarget) {
+    const shotUrl = opened.screenshotUrl || await screenshot(config, padCode).catch(() => undefined);
+    avatarTarget = shotUrl
+      ? await locateThreadsButtonByVision(
+          shotUrl,
+          "Threads 编辑个人资料页面顶部头像区域或「更换大头贴照 / Change profile photo」按钮中心点；不要选姓名、用户名、个人简介、Links、性别或右上 Done",
+        ).catch(() => null)
+      : null;
+    if (avatarTarget) avatarTargetSource = "vision";
+  }
+  if (!avatarTarget) {
+    avatarTarget = await scaleReferencePointToPhysicalTap(
+      config,
+      padCode,
+      isAcpPad(padCode) ? { x: 595, y: 270 } : { x: 360, y: 318 },
+      FIXED_VMOS_SCREEN,
+    );
+    avatarTargetSource = "fallback";
+  }
+
+  onProgress?.({ step: "打开 Threads 头像设置...", done: false });
+  const avatarTapPoint = avatarTargetSource === "vision"
+    ? await scaleScreenshotPointToAdbTap(config, padCode, avatarTarget)
+    : avatarTarget;
+  await tapViaAdbAbsolute(config, padCode, avatarTapPoint.x, avatarTapPoint.y, 1800);
+  await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+  await delay(900);
+
+  uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const pickerTarget = findThreadsProfileAvatarPickerTarget(uiXml);
+  if (pickerTarget) {
+    const pickerTap = await scaleUiXmlPointToPhysicalTap(config, padCode, pickerTarget);
+    await tapViaAdbAbsolute(config, padCode, pickerTap.x, pickerTap.y, 2200);
+    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+    await delay(900);
+  } else if (isAcpPad(padCode)) {
+    const pickerTap = await scaleReferencePointToPhysicalTap(config, padCode, { x: 170, y: 1280 }, FIXED_VMOS_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, pickerTap.x, pickerTap.y, 2200);
+    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+    await delay(900);
+  }
+
+  onProgress?.({ step: "选择新的头像图片...", done: false });
+  let selected = false;
+  for (let attempt = 0; attempt < 6 && !selected; attempt += 1) {
+    const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+    const selectionReady = await detectThreadsAvatarSelectionReadyByScreenshot(shotUrl).catch(() => false);
+    const refPoint = shotUrl ? await locateThreadsGalleryReferenceImage(shotUrl, targetImageUrl).catch(() => null) : null;
+    const tapPoint = refPoint
+      || (selectionReady && isAcpPad(padCode)
+        ? { x: 90 + (attempt % 4) * 180, y: 990 + Math.floor(attempt / 4) * 180 }
+        : { x: 120 + attempt * 170, y: attempt < 2 ? 330 : 520 });
+    await tapViaAdbAbsolute(config, padCode, tapPoint.x, tapPoint.y, 1800);
+    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+    await delay(1000);
+    const nextXml = normalizeSingleLine(await dumpUiXml(config, padCode).catch(() => ""));
+    if (/裁切|裁剪|Crop|完成|Done|下一步|Next|儲存|保存|Save|編輯個人檔案|编辑个人档案|Edit profile/i.test(nextXml)) {
+      selected = true;
+      break;
+    }
+    selected = await detectThreadsAvatarSelectionReadyByScreenshot(
+      await screenshot(config, padCode).catch(() => undefined),
+    ).catch(() => false);
+  }
+  if (!selected) throw new Error("未能在图库中选择新的头像图片");
+
+  onProgress?.({ step: "确认头像裁剪与保存...", done: false });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const ui = await dumpUiXml(config, padCode).catch(() => "");
+    if (isThreadsEditProfilePageUiXml(ui)) break;
+    await tapThreadsProfileAvatarSaveOrNext(config, padCode, 2200).catch(() => undefined);
+    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+    await delay(1100);
+  }
+
+  await saveThreadsEditProfilePage(config, padCode);
+  await delay(1600);
+  const finalShot = await screenshot(config, padCode).catch(() => undefined);
+  onProgress?.({ step: "Threads 头像已提交", done: true });
+
+  return {
+    ok: true,
+    state: "submitted",
+    detail: "已完成头像选择与保存动作，请以截图确认头像是否已刷新",
+    screenshotUrl: finalShot,
+  };
+}
+
+export async function updateThreadsProfileLink(
+  config: VmosConfig,
+  padCode: string,
+  link: string,
+  onProgress?: (progress: PublishProgress) => void,
+): Promise<ThreadsProfileLinkResult> {
+  const targetLink = normalizeSingleLine(link);
+  if (!targetLink) throw new Error("链接不能为空");
+
+  onProgress?.({ step: "启动 Threads 并打开个人主页...", done: false });
+  const profile = await openThreadsProfileForAccountQuery(config, padCode);
+  if (!profile.ok) {
+    throw new Error(profile.error || "未能打开 Threads 个人主页");
+  }
+
+  if (profile.profileLikely) {
+    for (let i = 0; i < 3; i += 1) {
+      await execAdbForText(config, padCode, "input swipe 360 560 360 1180 420", 8_000, 500).catch(() => "");
+      await delay(500);
+    }
+  }
+
+  let uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  let editTarget = uiXml
+    ? findThreadsTextTargetFromUiXml(
+        uiXml,
+        [/編輯個人檔案|编辑个人档案|編輯個人資料|编辑个人资料|編輯主页|编辑主页|Edit profile/i],
+        { preferTop: true },
+      )
+    : null;
+  let editTargetSource: ThreadsProfileLinkTargetSource | null = editTarget ? "xml" : null;
+  const profileShotUrl = await screenshot(config, padCode).catch(() => profile.screenshotUrl);
+  const editVisionShotUrl = profileShotUrl || profile.screenshotUrl;
+  if (!editTarget && editVisionShotUrl) {
+    editTarget = await locateThreadsButtonByVision(
+      editVisionShotUrl,
+      "Threads 自己个人主页上的「编辑个人档案 / 编辑个人资料 / 编辑主页 / Edit profile」按钮中心点；不要选分享个人档案、关注、返回键或底部导航",
+    ).catch(() => null);
+    if (editTarget) editTargetSource = "vision";
+  }
+  if (!editTarget && profile.profileLikely) {
+    editTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 176, y: 596 }, FIXED_VMOS_SCREEN);
+    editTargetSource = "fallback";
+  }
+  if (!editTarget) throw new Error("未找到 Threads 个人主页的编辑按钮");
+
+  onProgress?.({ step: "进入编辑个人资料页面...", done: false });
+  const editTapPoint = await resolveThreadsProfileLinkTapPoint(config, padCode, editTarget, editTargetSource || "fallback");
+  await tapViaAdbAbsolute(config, padCode, editTapPoint.x, editTapPoint.y, 2800);
+  await delay(900);
+  await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+  await delay(700);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (isThreadsEditProfilePageUiXml(uiXml)) break;
+    await delay(700);
+  }
+  let preResolvedAddLinkTarget: { x: number; y: number } | null = null;
+  let preResolvedAddLinkTargetSource: ThreadsProfileLinkTargetSource | null = null;
+  if (!isThreadsEditProfilePageUiXml(uiXml)) {
+    const currentShot = await screenshot(config, padCode).catch(() => undefined);
+    preResolvedAddLinkTarget = currentShot
+      ? await locateThreadsButtonByVision(
+          currentShot,
+          "Threads 编辑个人资料页面中「Links / 連結 / 链接」管理入口的中心点，通常显示为「Links 0 >」；不要选姓名、用户名、个人简介、性别、Podcast、返回键或右上 Done",
+        ).catch(() => null)
+      : null;
+    if (preResolvedAddLinkTarget) {
+      preResolvedAddLinkTargetSource = "vision";
+    } else {
+      preResolvedAddLinkTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 610, y: 867 }, FIXED_VMOS_SCREEN);
+      preResolvedAddLinkTargetSource = "fallback";
+    }
+  }
+  let resolvedAddLinkTarget: { x: number; y: number } | null = preResolvedAddLinkTarget;
+  let resolvedAddLinkTargetSource: ThreadsProfileLinkTargetSource | null = preResolvedAddLinkTargetSource;
+  for (let attempt = 0; attempt < 3 && !resolvedAddLinkTarget; attempt += 1) {
+    const normalizedXml = normalizeSingleLine(uiXml);
+    const addLinkCandidates = [
+      /^(Links?|連結|链接)(?:\s*\d+)?$/i,
+      /Links?\s*\d+|連結\s*\d+|链接\s*\d+/i,
+      /編輯個人檔案|编辑个人档案|編輯個人資料|编辑个人资料|Edit profile/i,
+    ];
+    if (addLinkCandidates.some((pattern) => pattern.test(normalizedXml))) {
+      resolvedAddLinkTarget = findThreadsTextTargetFromUiXml(
+        uiXml,
+        [/^(Links?|連結|链接)(?:\s*\d+)?$/i, /Links?\s*\d+|連結\s*\d+|链接\s*\d+/i],
+        { minY: 220, maxY: 1380 },
+      );
+      if (resolvedAddLinkTarget) resolvedAddLinkTargetSource = "xml";
+    }
+    if (!resolvedAddLinkTarget) {
+      const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+      resolvedAddLinkTarget = shotUrl
+        ? await locateThreadsButtonByVision(
+            shotUrl,
+            "Threads 编辑个人资料页面中「Links / 連結 / 链接」管理入口的中心点，通常显示为「Links 0 >」；不要选姓名、用户名、个人简介、性别或返回键",
+          ).catch(() => null)
+        : null;
+      if (resolvedAddLinkTarget) resolvedAddLinkTargetSource = "vision";
+    }
+    if (!resolvedAddLinkTarget && attempt < 2) {
+      const swipeCmd = attempt === 0
+        ? "input swipe 360 620 360 1120 420"
+        : "input swipe 360 1050 360 540 420";
+      await execAdbForText(config, padCode, swipeCmd, 8_000, 700).catch(() => "");
+      await delay(900);
+      uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    }
+  }
+  if (!resolvedAddLinkTarget) {
+    resolvedAddLinkTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 610, y: 867 }, FIXED_VMOS_SCREEN);
+    resolvedAddLinkTargetSource = "fallback";
+  }
+  if (!resolvedAddLinkTarget) throw new Error("进入编辑个人资料后未识别到 Links 入口");
+  onProgress?.({ step: "打开新增链接输入框...", done: false });
+  const addLinkTapPoint = await resolveThreadsProfileLinkTapPoint(
+    config,
+    padCode,
+    resolvedAddLinkTarget,
+    resolvedAddLinkTargetSource || "fallback",
+  );
+  await tapViaAdbAbsolute(config, padCode, addLinkTapPoint.x, addLinkTapPoint.y, 2400);
+  await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+  await delay(700);
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (isThreadsProfileLinksPageUiXml(uiXml) || findThreadsProfileLinkInputTarget(uiXml) || findThreadsProfileAddLinkRowTarget(uiXml)) break;
+    await delay(700);
+  }
+  if (uiXml && isThreadsPostOptionsOrThreadDetailUiXml(uiXml)) {
+    const currentShot = await screenshot(config, padCode).catch(() => undefined);
+    throw new Error(`点击 Links 后未进入 Threads 链接管理页面${currentShot ? `，截图：${currentShot}` : ""}`);
+  }
+  let inputTarget = findThreadsProfileLinkInputTarget(uiXml);
+  let inputTargetSource: ThreadsProfileLinkTargetSource | null = inputTarget ? "xml" : null;
+  if (!inputTarget) {
+    const addLinkRowTarget = findThreadsProfileAddLinkRowTarget(uiXml);
+    if (addLinkRowTarget) {
+      const addLinkRowTapPoint = await scaleUiXmlPointToPhysicalTap(config, padCode, addLinkRowTarget);
+      await tapViaAdbAbsolute(config, padCode, addLinkRowTapPoint.x, addLinkRowTapPoint.y, 1800);
+      await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+      await delay(900);
+      uiXml = await dumpUiXml(config, padCode).catch(() => "");
+      inputTarget = findThreadsProfileLinkInputTarget(uiXml);
+      if (inputTarget) inputTargetSource = "xml";
+    }
+  }
+  if (!inputTarget) {
+    const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+    inputTarget = shotUrl
+      ? await locateThreadsButtonByVision(
+          shotUrl,
+          "Threads 新增链接页面中用于输入 URL/链接/网址的文本框中心点；不要选标题、名称、返回键或保存按钮",
+        ).catch(() => null)
+      : null;
+    if (inputTarget) inputTargetSource = "vision";
+  }
+  if (!inputTarget) {
+    const addLinkShotUrl = await screenshot(config, padCode).catch(() => undefined);
+    const addLinkRowTarget = addLinkShotUrl
+      ? await locateThreadsButtonByVision(
+          addLinkShotUrl,
+          "Threads「Links / 連結 / 链接」管理页面中用于新增普通网页/个人简介链接的「Add link / 新增連結 / 新增链接」行中心点；不要选 Podcast、Instagram、徽章、隐私设置或返回键",
+        ).catch(() => null)
+      : null;
+    if (addLinkRowTarget) {
+      await tapViaAdbAbsolute(config, padCode, addLinkRowTarget.x, addLinkRowTarget.y, 1800);
+      await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+      await delay(900);
+      uiXml = await dumpUiXml(config, padCode).catch(() => "");
+      inputTarget = findThreadsProfileLinkInputTarget(uiXml);
+      if (inputTarget) inputTargetSource = "xml";
+      if (!inputTarget) {
+        const retryInputShotUrl = await screenshot(config, padCode).catch(() => undefined);
+        inputTarget = retryInputShotUrl
+          ? await locateThreadsButtonByVision(
+              retryInputShotUrl,
+              "Threads 新增链接页面中用于输入 URL/链接/网址的文本框中心点；不要选标题、名称、返回键或保存按钮",
+            ).catch(() => null)
+          : null;
+        if (inputTarget) inputTargetSource = "vision";
+      }
+    }
+  }
+  if (!inputTarget) {
+    const addLinkFallback = await scaleReferencePointToPhysicalTap(config, padCode, { x: 180, y: 435 }, FIXED_VMOS_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, addLinkFallback.x, addLinkFallback.y, 1800);
+    await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+    await delay(900);
+    uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    inputTarget = findThreadsProfileLinkInputTarget(uiXml);
+    if (inputTarget) inputTargetSource = "xml";
+    if (!inputTarget) {
+      const inputShotUrl = await screenshot(config, padCode).catch(() => undefined);
+      inputTarget = inputShotUrl
+        ? await locateThreadsButtonByVision(
+            inputShotUrl,
+            "Threads 新增链接页面中用于输入 URL/链接/网址的文本框中心点；不要选标题、名称、返回键或保存按钮",
+          ).catch(() => null)
+        : null;
+      if (inputTarget) inputTargetSource = "vision";
+    }
+    if (!inputTarget) {
+      inputTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 180, y: 350 }, FIXED_VMOS_SCREEN);
+      inputTargetSource = "fallback";
+    }
+  }
+  if (!inputTarget) {
+    const normalizedAfterLinkTapXml = normalizeSingleLine(uiXml);
+    if (!/編輯個人檔案|编辑个人档案|編輯個人資料|编辑个人资料|Edit profile/i.test(normalizedAfterLinkTapXml)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
+      await delay(900);
+    }
+    const lowerLinkTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 610, y: 867 }, FIXED_VMOS_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, lowerLinkTarget.x, lowerLinkTarget.y, 2200);
+    await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+    await delay(900);
+    uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    inputTarget = findThreadsProfileLinkInputTarget(uiXml);
+    if (inputTarget) inputTargetSource = "xml";
+    if (!inputTarget) {
+      const addLinkRowTarget = findThreadsProfileAddLinkRowTarget(uiXml);
+      if (addLinkRowTarget) {
+        const addLinkRowTapPoint = await scaleUiXmlPointToPhysicalTap(config, padCode, addLinkRowTarget);
+        await tapViaAdbAbsolute(config, padCode, addLinkRowTapPoint.x, addLinkRowTapPoint.y, 1800);
+        await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+        await delay(900);
+        uiXml = await dumpUiXml(config, padCode).catch(() => "");
+        inputTarget = findThreadsProfileLinkInputTarget(uiXml);
+        if (inputTarget) inputTargetSource = "xml";
+      }
+    }
+    if (!inputTarget) {
+      const retryShotUrl = await screenshot(config, padCode).catch(() => undefined);
+      inputTarget = retryShotUrl
+        ? await locateThreadsButtonByVision(
+            retryShotUrl,
+            "Threads 新增链接页面中用于输入 URL/链接/网址的文本框中心点；不要选标题、名称、返回键或保存按钮",
+          ).catch(() => null)
+        : null;
+      if (inputTarget) inputTargetSource = "vision";
+    }
+  }
+  if (!inputTarget) throw new Error("未找到 Threads 链接输入框");
+
+  onProgress?.({ step: "填写个人简介链接...", done: false });
+  const inputTapPoint = await resolveThreadsProfileLinkTapPoint(config, padCode, inputTarget, inputTargetSource || "fallback");
+  await tapViaAdbAbsolute(config, padCode, inputTapPoint.x, inputTapPoint.y, 900);
+  const clearLinkTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 622, y: 385 }, FIXED_VMOS_SCREEN);
+  await tapViaAdbAbsolute(config, padCode, clearLinkTarget.x, clearLinkTarget.y, 700).catch(() => undefined);
+  await delay(500);
+  await tapViaAdbAbsolute(config, padCode, inputTapPoint.x, inputTapPoint.y, 700);
+  await clearFocusedTextInput(config, padCode, 300);
+  await typeTextViaAndroidInputText(config, padCode, targetLink, 1600);
+
+  let afterInputXml = await dumpUiXml(config, padCode).catch(() => "");
+  if (hasReadableUiXml(afterInputXml) && !threadsProfileLinkAcceptedTextPresent(afterInputXml, targetLink)) {
+    await tapViaAdbAbsolute(config, padCode, inputTapPoint.x, inputTapPoint.y, 500);
+    await clearFocusedTextInput(config, padCode, 300);
+    await typeTextViaAndroidInputText(config, padCode, targetLink, 1600);
+    afterInputXml = await dumpUiXml(config, padCode).catch(() => "");
+  }
+
+  onProgress?.({ step: "保存链接...", done: false });
+  const keyboardConfirmTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 666, y: 1515 }, FIXED_VMOS_SCREEN);
+  await tapViaAdbAbsolute(config, padCode, keyboardConfirmTarget.x, keyboardConfirmTarget.y, 1200).catch(() => undefined);
+  await delay(700);
+  const savePatterns = [/^完成$|^Done$|^儲存$|^保存$|^Save$|^新增$|^添加$|^Add$/i];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const currentXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (isThreadsPostOptionsOrThreadDetailUiXml(currentXml)) {
+      const currentShot = await screenshot(config, padCode).catch(() => undefined);
+      throw new Error(`保存链接前已离开链接编辑页面${currentShot ? `，截图：${currentShot}` : ""}`);
+    }
+    const saveTarget = findThreadsTextTargetFromUiXml(currentXml, savePatterns, { maxY: 220, preferTop: true });
+    if (!saveTarget) {
+      const doneFallback = await scaleReferencePointToPhysicalTap(config, padCode, { x: 640, y: 145 }, FIXED_VMOS_SCREEN);
+      await tapViaAdbAbsolute(config, padCode, doneFallback.x, doneFallback.y, 2200);
+    } else {
+      const saveTapPoint = await scaleUiXmlPointToPhysicalTap(config, padCode, saveTarget);
+      await tapViaAdbAbsolute(config, padCode, saveTapPoint.x, saveTapPoint.y, 2600);
+    }
+    const nextXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (/編輯個人檔案|编辑个人档案|Edit profile/i.test(normalizeSingleLine(nextXml)) && threadsProfileLinkAcceptedTextPresent(nextXml, targetLink)) {
+      continue;
+    }
+    if (!/新增連結|新增链接|Add link|URL|網址|网址/i.test(normalizeSingleLine(nextXml))) {
+      break;
+    }
+  }
+
+  const beforeFinalXml = await dumpUiXml(config, padCode).catch(() => "");
+  if (/新增連結|新增链接|Add link|URL|網址|网址|編輯個人檔案|编辑个人档案|Edit profile/i.test(normalizeSingleLine(beforeFinalXml))) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
+    await delay(1800);
+  }
+  await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
+  await delay(700);
+  const finalXml = await dumpUiXml(config, padCode).catch(() => "");
+  const finalShot = await screenshot(config, padCode).catch(() => undefined);
+  const verified = threadsProfileLinkAcceptedTextPresent(finalXml, targetLink);
+  onProgress?.({ step: verified ? "个人简介链接已更新" : "链接已提交，等待人工确认", done: true });
+
+  return {
+    ok: true,
+    state: verified ? "verified" : "submitted",
+    detail: verified ? "Threads 个人简介中已看到目标链接" : "已完成保存动作，但当前截图/XML 未直接确认链接显示",
+    screenshotUrl: finalShot,
+  };
+}
+
+export async function queryThreadsAccount(
+  config: VmosConfig,
+  padCode: string,
+): Promise<PadAccountInfo> {
+  let numericAccountId: string | undefined;
+
+  const profilePage = await openThreadsProfileForAccountQuery(config, padCode).catch((error) => ({
+    ok: false as const,
+    error: error instanceof Error ? error.message : String(error),
+  }));
+  if (!profilePage.ok) {
+    return { padCode, platform: "threads", method: "failed", error: profilePage.error };
+  }
+
+  let uiProfileCue = false;
+  let uiXmlHadNodes = false;
+
+  // ── 方案一：只从 Threads 个人页 UI 提取账号 ───────────────────────────────
+  try {
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    uiXmlHadNodes = /<node\b/i.test(uiXml);
+    uiProfileCue = uiXml ? hasThreadsProfileUiCue(uiXml) : false;
+    const username = uiXml ? extractThreadsProfileUsernameFromUiXml(uiXml) : null;
+    if (username) {
+      return { padCode, platform: "threads", username, method: "adb" };
+    }
+    if (uiXmlHadNodes && !uiProfileCue && !profilePage.profileLikely) {
+      return { padCode, platform: "threads", method: "failed", error: "未能确认当前画面是 Threads 个人页，已停止账号猜测" };
+    }
+  } catch {}
+
+  // ── 方案二：仅在已打开个人页后使用截图辅助识别 ───────────────────────────
+  try {
+    if (!profilePage.profileLikely && !uiProfileCue && uiXmlHadNodes) {
+      return { padCode, platform: "threads", method: "failed", error: "未能确认当前画面是 Threads 个人页，已停止视觉识别" };
+    }
+    const { callGemini, extractText, getInlineData } = await import("./gemini-client");
+
+    const shotUrl = profilePage.screenshotUrl || await screenshot(config, padCode);
+    const inlineData = await getInlineData(shotUrl).catch(() => null);
+    if (!inlineData) throw new Error("截图获取失败");
+
+    const raw = await callGemini(
+      "gemini-3-flash-preview",
+      [{
+        role: "user",
+        parts: [
+          {
+            text: [
+              "这是一张 Android 手机截图。只允许在 Threads 个人主页/Profile 页顶部或个人资料区识别已登录账号用户名。",
+              "如果截图不是 Threads 个人主页，或只看到浏览器/Google/桌面/首页信息，必须返回 null。",
+              "请找出个人主页上的用户名，通常以 @ 开头，或显示在头像/简介附近。",
+              "只输出纯 JSON，格式：{\"username\":\"找到的用户名\",\"email\":\"找到的邮箱或null\"}",
+              "如果找不到任何账号信息，输出：{\"username\":null,\"email\":null}",
+              "不要输出 JSON 以外的任何内容。",
+            ].join("\n"),
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 120, temperature: 0 },
+    );
+
+    const rawText = (extractText(raw) || "").trim().replace(/^```json\s*/i, "").replace(/```\s*$/, "");
+    if (rawText) {
+      const jsonMatch = rawText.match(/\{[\s\S]*?\}/);
+      if (jsonMatch) {
+        try {
+          const json: { username?: string | null; email?: string | null } = JSON.parse(jsonMatch[0]);
+          const username = json.username && json.username !== "null"
+            ? normalizeThreadsProfileUsername(json.username)
+            : undefined;
+          const email = json.email && json.email !== "null" ? json.email : undefined;
+          if (username || email) {
+            return { padCode, platform: "threads", username, email, method: "vision" };
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  // ── 方案三：AccountManager 数字 ID（至少能确认已登录）────────────────────
+  try {
+    const accountResult = await execAdbForText(
+      config,
+      padCode,
+      "dumpsys account 2>/dev/null | grep 'Account {name='",
+      15000,
+      1000,
+    ).catch(() => "");
+
+    if (accountResult) {
+      const matches = [...accountResult.matchAll(/Account \{name=([^,}]+)/g)];
+      const accountName = matches[0]?.[1]?.trim();
+      if (accountName && /^\d+$/.test(accountName)) {
+        numericAccountId = accountName;
+      }
+    }
+  } catch {}
+
+  if (numericAccountId) {
+    return {
+      padCode,
+      platform: "threads",
+      method: "adb",
+      error: `已登录（内部ID：${numericAccountId}，未识别到可读用户名）`,
+    };
+  }
+
+  return { padCode, platform: "threads", method: "failed", error: "未识别到账号" };
+}
+
+export async function publishPost(
+  config: VmosConfig,
+  task: PublishTask,
+  onProgress: (p: PublishProgress) => void,
+  options: PublishRunOptions = {},
+): Promise<PublishResult | void> {
+  try {
+    options.cancellationToken?.throwIfCancelled?.();
+    if (task.platform === "telegram") {
+      if (task.mediaUrl) {
+        const isVideoMedia = isVideoMediaUrl(task.mediaUrl);
+        const mediaLabel = isVideoMedia ? "视频" : "图片";
+        onProgress({ step: `写入 Telegram ${mediaLabel}到云机...`, done: false });
+        await ensurePermissions(config, task.padCode, TELEGRAM_PACKAGE, MEDIA_PERMISSIONS);
+        const remotePath = buildStableDeviceMediaRemotePath("telegram_group", task.mediaUrl);
+        const stagedRemotePath = await stageMediaOnDevice(config, task.padCode, task.mediaUrl, remotePath, onProgress);
+        options.cancellationToken?.throwIfCancelled?.();
+        const contentUri = await queryMediaStoreContentUri(config, task.padCode, stagedRemotePath, isVideoMedia);
+        if (!contentUri) {
+          throw new Error(`${mediaLabel}已写入云机，但未找到 MediaStore content:// 记录`);
+        }
+        return await publishTelegramGroupPost(config, {
+          ...task,
+          mediaContentUri: contentUri,
+          mediaMimeType: getTelegramShareMimeType(task.mediaUrl),
+        }, onProgress);
+      }
+      return await publishTelegramGroupPost(config, task, onProgress);
+    }
+    if (Array.isArray(config.accounts) && config.accounts.length > 1) {
+      await listPads(config).catch(() => undefined);
+    }
+    if (task.platform === "threads") {
+      return await publishThreads(config, task, onProgress, options);
+    }
+    throw new Error(`Unsupported publish platform: ${task.platform || "(empty)"}`);
+  } catch (err: unknown) {
+    let msg = err instanceof Error ? err.message : String(err);
+    const cancelled = isPublishCancellationMessage(msg);
+    if (task.platform === "threads" && !cancelled && !/｜sample=/.test(msg)) {
+      const samplePath = await captureThreadsPublishSample(config, task.padCode, {
+        scenario: "publish-top-level-failure",
+        mediaKind: !task.mediaUrl ? "text" : isVideoMediaUrl(task.mediaUrl) ? "video" : "image",
+        step: "發布失敗",
+        reason: msg,
+      });
+      msg = appendSamplePath(msg, samplePath);
+    }
+    onProgress({ step: "發布失敗", done: true, error: msg });
+    if (err instanceof Error && msg !== err.message) {
+      throw new Error(msg);
+    }
+    throw err;
+  }
+}
+
+// ─── 养号（账号活跃度维护）────────────────────────────────────────────────────
+
+export interface WarmupCommentPersona {
+  name?: string;
+  description?: string;
+  style?: string;
+  personality?: string;
+  language?: string;
+  interests?: string[];
+}
+
+export interface WarmupConfig {
+  browseCount: number;
+  minSessionMinutes?: number;
+  maxSessionMinutes?: number;
+  minWatchSeconds?: number;
+  maxWatchSeconds?: number;
+  minAfterScrollPauseMs?: number;
+  maxAfterScrollPauseMs?: number;
+  interactionEveryMinPosts?: number;
+  interactionEveryMaxPosts?: number;
+  likeChance?: number;
+  maxLikes?: number;
+  commentChance?: number;
+  maxComments?: number;
+  commentTemplates?: string[];
+  commentPersona?: WarmupCommentPersona;
+  keywords?: string[];
+  searchChance?: number;
+  riskManaged?: boolean;
+  stopOnRiskLimit?: boolean;
+  strictCompletion?: boolean;
+  requireReadablePostForComment?: boolean;
+}
+
+export interface WarmupCandidate {
+  id: string;
+  padCode: string;
+  type: "like" | "comment";
+  screenshotUrl: string;
+  postPreview: string;
+  x?: number;
+  y?: number;
+  suggestedComment?: string;
+}
+
+export interface WarmupProgress {
+  step: string;
+  browsed: number;
+  liked: number;
+  commented: number;
+  candidates: WarmupCandidate[];
+  likeScreenshots?: string[];
+  commentScreenshots?: string[];
+  done: boolean;
+  error?: string;
+}
+
+type WarmupRiskDayState = {
+  date: string;
+  sessions: number;
+  browsed: number;
+  liked: number;
+  commented: number;
+  failures: number;
+  lastSessionAt?: string;
+  blockedUntil?: string;
+  lastBlockReason?: string;
+};
+
+function getWarmupRiskStateFile() {
+  return process.env.WARMUP_RISK_STATE_FILE
+    || path.join(process.cwd(), ".runtime", "automatic-script", "warmup-risk-state.json");
+}
+const WARMUP_DAILY_LIMITS = {
+  sessions: 2,
+  browsed: 100,
+  liked: 16,
+  commented: 8,
+};
+
+function getWarmupDateKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function readWarmupRiskStore(): Record<string, WarmupRiskDayState> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(getWarmupRiskStateFile(), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeWarmupRiskStore(store: Record<string, WarmupRiskDayState>) {
+  try {
+    const file = getWarmupRiskStateFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(store, null, 2), "utf8");
+  } catch {
+    // Risk state is a guardrail. If persistence fails, keep the live session conservative.
+  }
+}
+
+function warmupRiskKey(padCode: string, dateKey = getWarmupDateKey()) {
+  return `${padCode}:${dateKey}`;
+}
+
+function getWarmupRiskDayState(padCode: string, dateKey = getWarmupDateKey()): WarmupRiskDayState {
+  const store = readWarmupRiskStore();
+  const key = warmupRiskKey(padCode, dateKey);
+  return store[key] || {
+    date: dateKey,
+    sessions: 0,
+    browsed: 0,
+    liked: 0,
+    commented: 0,
+    failures: 0,
+  };
+}
+
+function saveWarmupRiskDayState(padCode: string, state: WarmupRiskDayState) {
+  const store = readWarmupRiskStore();
+  store[warmupRiskKey(padCode, state.date)] = state;
+  writeWarmupRiskStore(store);
+}
+
+export function planRiskManagedWarmupConfig(
+  padCode: string,
+  cfg: WarmupConfig,
+  now = new Date(),
+): { allowed: boolean; cfg: WarmupConfig; notes: string[]; state: WarmupRiskDayState } {
+  const state = getWarmupRiskDayState(padCode, getWarmupDateKey(now));
+  const notes: string[] = [];
+  const isTimedSession = Number(cfg.minSessionMinutes) > 0 || Number(cfg.maxSessionMinutes) > 0;
+  const stopOnRiskLimit = cfg.stopOnRiskLimit === true;
+  const blockedUntil = state.blockedUntil ? new Date(state.blockedUntil) : null;
+  if (blockedUntil && blockedUntil.getTime() > now.getTime()) {
+    notes.push(`近期出现高风险页面：${state.lastBlockReason || "未知原因"}，当前不适合养号，但不阻断本次操作`);
+  }
+
+  const remainingSessions = Math.max(0, WARMUP_DAILY_LIMITS.sessions - state.sessions);
+  const remainingBrowsed = Math.max(0, WARMUP_DAILY_LIMITS.browsed - state.browsed);
+  const remainingLikes = Math.max(0, WARMUP_DAILY_LIMITS.liked - state.liked);
+  const remainingComments = Math.max(0, WARMUP_DAILY_LIMITS.commented - state.commented);
+  if (remainingSessions <= 0 || remainingBrowsed <= 0) {
+    notes.push("今日养号预算已超出，当前不建议继续频繁操作；本次仍按低风险配置执行");
+  }
+
+  if (stopOnRiskLimit) {
+    if (blockedUntil && blockedUntil.getTime() > now.getTime()) {
+      return { allowed: false, cfg, notes: [`账号近期触发风险页：${state.lastBlockReason || "未知原因"}，请人工介入处理后再养号`], state };
+    }
+    if (remainingSessions <= 0 || remainingBrowsed <= 0) {
+      return { allowed: false, cfg, notes: ["今日养号浏览/会话风险预算已用完，请人工介入确认后再继续"], state };
+    }
+  }
+
+  const lastSessionAt = state.lastSessionAt ? new Date(state.lastSessionAt).getTime() : 0;
+  const minutesSinceLast = lastSessionAt ? (now.getTime() - lastSessionAt) / 60_000 : Infinity;
+  if (minutesSinceLast < 10) {
+    notes.push(`距离上次养号约 ${Math.max(1, Math.floor(minutesSinceLast))} 分钟，本次自动降频`);
+  }
+
+  const requestedBrowse = Math.max(1, Math.floor(cfg.browseCount || (isTimedSession ? 80 : 1)));
+  const browseCap = isTimedSession ? 120 : (minutesSinceLast < 10 ? 3 : 12);
+  const browseBudgetCap = remainingBrowsed > 0 ? remainingBrowsed : requestedBrowse;
+  const browseCount = Math.max(1, Math.min(requestedBrowse, browseBudgetCap, browseCap));
+  if (browseCount < requestedBrowse) notes.push(`浏览数从 ${requestedBrowse} 收紧到 ${browseCount}`);
+
+  const requestedLikes = Math.max(0, Math.floor(cfg.maxLikes || 0));
+  const requestedComments = Math.max(0, Math.floor(cfg.maxComments || 0));
+  const likeBudgetCap = remainingLikes > 0 ? remainingLikes : requestedLikes;
+  const commentBudgetCap = remainingComments > 0 ? remainingComments : requestedComments;
+  const maxLikes = isTimedSession
+    ? Math.min(requestedLikes, likeBudgetCap)
+    : Math.min(requestedLikes, likeBudgetCap, 1);
+  const maxComments = isTimedSession
+    ? Math.min(requestedComments, commentBudgetCap)
+    : Math.min(requestedComments, commentBudgetCap, 1);
+  if (requestedLikes > maxLikes) notes.push(`点赞预算从 ${requestedLikes} 收紧到 ${maxLikes}`);
+  if (requestedComments > maxComments) notes.push(`留言预算从 ${requestedComments} 收紧到 ${maxComments}`);
+
+  if (stopOnRiskLimit && (requestedLikes > 0 || requestedComments > 0) && maxLikes <= 0 && maxComments <= 0) {
+    return { allowed: false, cfg, notes: ["今日点赞/留言风险预算已用完，请人工介入确认是否继续"], state };
+  }
+
+  const likeChance = maxLikes > 0
+    ? (isTimedSession ? 100 : Math.min(Math.max(10, cfg.likeChance || 0), minutesSinceLast < 10 ? 18 : 35))
+    : 0;
+  const commentChance = maxComments > 0
+    ? (isTimedSession ? 100 : Math.min(Math.max(6, cfg.commentChance || 0), minutesSinceLast < 10 ? 8 : 15))
+    : 0;
+
+  return {
+    allowed: true,
+    cfg: {
+      ...cfg,
+      browseCount,
+      likeChance,
+      maxLikes,
+      commentChance,
+      maxComments,
+      riskManaged: true,
+      stopOnRiskLimit,
+      strictCompletion: false,
+      requireReadablePostForComment: cfg.requireReadablePostForComment ?? true,
+    },
+    notes,
+    state,
+  };
+}
+
+function recordWarmupRiskResult(
+  padCode: string,
+  result: Pick<WarmupProgress, "browsed" | "liked" | "commented" | "error">,
+  options: { blockedReason?: string } = {},
+) {
+  const state = getWarmupRiskDayState(padCode);
+  state.sessions += 1;
+  state.browsed += Math.max(0, result.browsed || 0);
+  state.liked += Math.max(0, result.liked || 0);
+  state.commented += Math.max(0, result.commented || 0);
+  state.lastSessionAt = new Date().toISOString();
+  if (result.error) state.failures += 1;
+  if (options.blockedReason) {
+    state.failures += 1;
+    state.lastBlockReason = options.blockedReason.slice(0, 160);
+  }
+  saveWarmupRiskDayState(padCode, state);
+}
+
+function warmupRandom(min: number, max: number) {
+  return min + Math.random() * (max - min);
+}
+
+function warmupRandomInt(min: number, max: number) {
+  return Math.floor(warmupRandom(min, max + 1));
+}
+
+function warmupHumanOffset(radius = 5) {
+  const raw = (Math.random() + Math.random() + Math.random()) / 3 - 0.5;
+  return Math.round(raw * radius * 2);
+}
+
+export function buildWarmupCommentTurnSchedule(
+  browseCount: number,
+  maxComments: number,
+  firstInteractionIndex = 0,
+): number[] {
+  const totalTurns = Math.max(0, Math.floor(browseCount));
+  const totalComments = Math.max(0, Math.floor(maxComments));
+  if (totalTurns <= 0 || totalComments <= 0) return [];
+  const start = Math.max(0, Math.min(Math.floor(firstInteractionIndex), Math.max(0, totalTurns - 1)));
+  const end = totalTurns - 1;
+  const slots = Math.min(totalComments, totalTurns);
+  const schedule: number[] = [];
+  for (let slot = 0; slot < slots; slot += 1) {
+    const fraction = (slot + 1) / (slots + 1);
+    let turn = Math.floor(start + (end - start) * fraction);
+    if (turn < start) turn = start;
+    if (turn > end) turn = end;
+    if (schedule.length > 0 && turn <= schedule[schedule.length - 1]) {
+      turn = Math.min(end, schedule[schedule.length - 1] + 1);
+    }
+    schedule.push(turn);
+  }
+  return schedule;
+}
+
+function warmupHumanizePoint(
+  point: { x: number; y: number },
+  bounds: { width?: number; height?: number } = {},
+  radius = 5,
+) {
+  const width = bounds.width || BASE_SCREEN.width;
+  const height = bounds.height || BASE_SCREEN.height;
+  return {
+    x: Math.max(1, Math.min(width - 1, Math.round(point.x + warmupHumanOffset(radius)))),
+    y: Math.max(1, Math.min(height - 1, Math.round(point.y + warmupHumanOffset(radius)))),
+  };
+}
+
+async function warmupTapAbsoluteHuman(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+  waitMs = 900,
+  radius = 5,
+) {
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  const tapPoint = warmupHumanizePoint(point, screen, radius);
+  await execAdbForText(config, padCode, `input tap ${tapPoint.x} ${tapPoint.y}`, 6_000, 800);
+  await delay(waitMs);
+  return tapPoint;
+}
+
+async function warmupTapScreenshotPointHuman(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl: string,
+  point: { x: number; y: number },
+  waitMs = 900,
+  radius = 5,
+) {
+  const [screen, image] = await Promise.all([
+    getScreenSize(config, padCode).catch(() => BASE_SCREEN),
+    getImageDimensions(screenshotUrl).catch(() => null),
+  ]);
+  const physicalScreen = {
+    width: screen.width > 100 ? screen.width : BASE_SCREEN.width,
+    height: screen.height > 100 ? screen.height : BASE_SCREEN.height,
+  };
+  const validImage = isUsableScreenshotSize(image) ? image : null;
+  const imageBounds = { width: validImage?.width || physicalScreen.width, height: validImage?.height || physicalScreen.height };
+  const imagePoint = warmupHumanizePoint(point, imageBounds, radius);
+  if (!validImage) {
+    const tapPoint = await warmupTapAbsoluteHuman(config, padCode, imagePoint, waitMs, 0);
+    return { imagePoint, tapPoint };
+  }
+
+  const tapPoint = {
+    x: Math.max(1, Math.min(physicalScreen.width - 1, Math.round(imagePoint.x * physicalScreen.width / validImage.width))),
+    y: Math.max(1, Math.min(physicalScreen.height - 1, Math.round(imagePoint.y * physicalScreen.height / validImage.height))),
+  };
+  await execAdbForText(config, padCode, `input tap ${tapPoint.x} ${tapPoint.y}`, 6_000, 800);
+  await delay(waitMs);
+  return { imagePoint, tapPoint };
+}
+
+async function warmupAdbSwipeByRatio(
+  config: VmosConfig,
+  padCode: string,
+  startXRatio: number,
+  startYRatio: number,
+  endXRatio: number,
+  endYRatio: number,
+  durationMs: number,
+  waitMs: number,
+) {
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  const point = (xRatio: number, yRatio: number) => ({
+    x: Math.max(1, Math.min(screen.width - 1, Math.round(screen.width * xRatio))),
+    y: Math.max(1, Math.min(screen.height - 1, Math.round(screen.height * yRatio))),
+  });
+  const start = point(startXRatio, startYRatio);
+  const end = point(endXRatio, endYRatio);
+  await execAdbForText(
+    config,
+    padCode,
+    `input swipe ${start.x} ${start.y} ${end.x} ${end.y} ${Math.max(120, Math.round(durationMs))}`,
+    8_000,
+    500,
+  );
+  if (waitMs > 0) await delay(waitMs);
+}
+
+async function warmupHumanSwipeByRatio(
+  config: VmosConfig,
+  padCode: string,
+  startXRatio: number,
+  startYRatio: number,
+  endXRatio: number,
+  endYRatio: number,
+  durationMs: number,
+  waitMs: number,
+) {
+  const xDrift = warmupRandom(-0.018, 0.018);
+  const startYDrift = warmupRandom(-0.018, 0.018);
+  const endYDrift = warmupRandom(-0.018, 0.018);
+  await warmupAdbSwipeByRatio(
+    config,
+    padCode,
+    Math.max(0.08, Math.min(0.92, startXRatio + warmupRandom(-0.026, 0.026))),
+    Math.max(0.16, Math.min(0.88, startYRatio + startYDrift)),
+    Math.max(0.08, Math.min(0.92, endXRatio + xDrift)),
+    Math.max(0.12, Math.min(0.90, endYRatio + endYDrift)),
+    durationMs,
+    waitMs,
+  );
+}
+
+async function warmupMicroReadSwipe(config: VmosConfig, padCode: string, direction: "peek_down" | "peek_up") {
+  const x = warmupRandom(0.44, 0.58);
+  const durationMs = Math.random() < 0.25 ? warmupRandomInt(420, 760) : warmupRandomInt(180, 420);
+  if (direction === "peek_down") {
+    const startY = warmupRandom(0.43, 0.55);
+    const distance = warmupRandom(0.035, 0.085);
+    await warmupHumanSwipeByRatio(
+      config,
+      padCode,
+      x,
+      startY,
+      x + warmupRandom(-0.018, 0.018),
+      Math.min(0.72, startY + distance),
+      durationMs,
+      warmupRandomInt(260, 620),
+    );
+    return;
+  }
+
+  const startY = warmupRandom(0.59, 0.72);
+  const distance = warmupRandom(0.045, 0.11);
+  await warmupHumanSwipeByRatio(
+    config,
+    padCode,
+    x,
+    startY,
+    x + warmupRandom(-0.018, 0.018),
+    Math.max(0.38, startY - distance),
+    durationMs,
+    warmupRandomInt(260, 620),
+  );
+}
+
+async function warmupDwellLikeHuman(config: VmosConfig, padCode: string, watchMs: number) {
+  const deadline = Date.now() + Math.max(500, watchMs);
+  await delay(Math.min(warmupRandomInt(550, 1200), Math.max(250, deadline - Date.now())));
+
+  const gestures: Array<"peek_up" | "peek_down"> = [];
+  if (Math.random() < 0.55) gestures.push("peek_up");
+  if (Math.random() < 0.38) gestures.push("peek_down");
+  if (Math.random() < 0.22) gestures.push("peek_up");
+  if (Math.random() < 0.14) gestures.push("peek_up");
+  if (Math.random() < 0.10) gestures.push("peek_down");
+
+  for (const gesture of gestures) {
+    if (Date.now() + 650 >= deadline) break;
+    await warmupMicroReadSwipe(config, padCode, gesture).catch(() => undefined);
+  }
+
+  const remaining = deadline - Date.now();
+  if (remaining > 0) await delay(remaining);
+}
+
+async function warmupSafeBackOrRelaunchThreads(
+  config: VmosConfig,
+  padCode: string,
+  waitAfterBackMs = 900,
+): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string } | null> {
+  const before = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (before?.reason === "LOCAL_ANDROID_LAUNCHER") {
+    await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+    return classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  }
+  if (before?.page === "home_feed") return before;
+
+  const focus = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+  if (focus && !focus.includes(THREADS_PACKAGE)) {
+    await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+    return classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  }
+
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+  await delay(waitAfterBackMs);
+  const after = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (after?.reason === "LOCAL_ANDROID_LAUNCHER") {
+    await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+    return classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  }
+  return after;
+}
+
+async function warmupDismissAcpSideDrawerAndCapture(
+  config: VmosConfig,
+  padCode: string,
+  currentShotUrl: string,
+): Promise<string> {
+  let shotUrl = currentShotUrl;
+  const tapCandidates = [
+    { x: Math.round(BASE_SCREEN.width * 0.88), y: Math.round(BASE_SCREEN.height * 0.48) },
+    { x: Math.round(BASE_SCREEN.width * 0.92), y: Math.round(BASE_SCREEN.height * 0.62) },
+  ];
+
+  for (const point of tapCandidates) {
+    await tapViaAdbAbsolute(config, padCode, point.x, point.y, 650).catch(() => undefined);
+    const afterTapShotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      8_000,
+      "warmup after side drawer outside tap screenshot timeout",
+    ).catch(() => "");
+    if (afterTapShotUrl) {
+      shotUrl = afterTapShotUrl;
+      if (!(await detectThreadsSideDrawerLocally(shotUrl).catch(() => false))) return shotUrl;
+    }
+  }
+
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+  await delay(800);
+  const afterBackShotUrl = await withTimeout(
+    screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+    8_000,
+    "warmup after side drawer back screenshot timeout",
+  ).catch(() => "");
+  if (afterBackShotUrl) {
+    shotUrl = afterBackShotUrl;
+    if (!(await detectThreadsSideDrawerLocally(shotUrl).catch(() => false))) return shotUrl;
+  }
+
+  await relaunchThreads(config, padCode, 3200).catch(() => undefined);
+  const afterRelaunchShotUrl = await withTimeout(
+    screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+    8_000,
+    "warmup after side drawer relaunch screenshot timeout",
+  ).catch(() => "");
+  return afterRelaunchShotUrl || shotUrl;
+}
+
+async function warmupScrollDown(config: VmosConfig, padCode: string) {
+  if (Math.random() < 0.28) {
+    await warmupMicroReadSwipe(config, padCode, "peek_down").catch(() => undefined);
+  }
+  const x = warmupRandom(0.42, 0.60);
+  const style = Math.random();
+  const startY = style < 0.16 ? warmupRandom(0.72, 0.82) : warmupRandom(0.63, 0.78);
+  const distance = style < 0.16
+    ? warmupRandom(0.13, 0.22)
+    : style < 0.34
+      ? warmupRandom(0.36, 0.50)
+      : warmupRandom(0.23, 0.39);
+  const durationMs = style < 0.18
+    ? warmupRandomInt(760, 1250)
+    : style < 0.42
+      ? warmupRandomInt(280, 520)
+      : warmupRandomInt(460, 900);
+  await warmupHumanSwipeByRatio(
+    config,
+    padCode,
+    x,
+    startY,
+    x + warmupRandom(-0.025, 0.025),
+    Math.max(0.30, startY - distance),
+    durationMs,
+    warmupRandomInt(360, 980),
+  ).catch(async () => {
+    const screen = await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
+    const startX = warmupRandomInt(
+      Math.round(screen.width * 0.42),
+      Math.round(screen.width * 0.58),
+    );
+    const startY = warmupRandomInt(
+      Math.round(screen.height * 0.64),
+      Math.round(screen.height * 0.76),
+    );
+    const endY = warmupRandomInt(
+      Math.round(screen.height * 0.30),
+      Math.round(screen.height * 0.44),
+    );
+    await simulateSwipe(config, padCode, "BOTTOM_TO_TOP", {
+      width: screen.width,
+      height: screen.height,
+      startX,
+      startY,
+      endX: startX + warmupRandomInt(-20, 20),
+      endY,
+    });
+    await delay(warmupRandomInt(420, 860));
+  });
+  await warmupWaitForScrollSettle();
+  if (Math.random() < 0.18) {
+    await warmupMicroReadSwipe(config, padCode, "peek_up").catch(() => undefined);
+    await warmupWaitForScrollSettle(420, 860);
+  }
+  await warmupAlignToReadablePost(config, padCode).catch(() => undefined);
+}
+
+async function warmupWaitForScrollSettle(minMs = 850, maxMs = 1450) {
+  await delay(warmupRandomInt(minMs, maxMs));
+}
+
+async function warmupInstagramScrollDown(config: VmosConfig, padCode: string) {
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  const startX = warmupRandomInt(
+    Math.round(screen.width * 0.42),
+    Math.round(screen.width * 0.58),
+  );
+  const startY = warmupRandomInt(
+    Math.round(screen.height * 0.66),
+    Math.round(screen.height * 0.80),
+  );
+  const endY = warmupRandomInt(
+    Math.round(screen.height * 0.26),
+    Math.round(screen.height * 0.42),
+  );
+  await warmupHumanSwipeByRatio(
+    config,
+    padCode,
+    startX / screen.width,
+    startY / screen.height,
+    (startX + warmupRandomInt(-18, 18)) / screen.width,
+    endY / screen.height,
+    warmupRandomInt(360, 900),
+    warmupRandomInt(420, 980),
+  ).catch(async () => {
+    await simulateSwipe(config, padCode, "BOTTOM_TO_TOP", {
+      width: screen.width,
+      height: screen.height,
+      startX,
+      startY,
+      endX: startX + warmupRandomInt(-20, 20),
+      endY,
+    });
+  });
+  await warmupWaitForScrollSettle(780, 1450);
+}
+
+type WarmupVisualTarget = { x: number; y: number; screenshotUrl: string; debugReason?: string };
+
+type WarmupFeedAnchorTarget = {
+  x: number;
+  y: number;
+  reason?: string;
+};
+
+type WarmupFeedActionTargets = {
+  screenshotUrl: string;
+  like?: { x: number; y: number };
+  comment?: { x: number; y: number };
+  alternateLikes?: Array<{ x: number; y: number }>;
+  alternateComments?: Array<{ x: number; y: number }>;
+  engagementScore?: number;
+  debugReason?: string;
+  debugRaw?: string;
+};
+
+export type InstagramWarmupActionKind = "like" | "comment";
+
+const INSTAGRAM_WARMUP_LIKE_RE = /(^|\b)Like(\b|$)|喜歡|喜欢|讚|赞|按讚|按赞|點讚|点赞|愛心|爱心|button_like|row_feed_button_like/i;
+const INSTAGRAM_WARMUP_UNLIKE_RE = /(Unlike|Liked|已讚|已赞|已點讚|已点赞|已按讚|已按赞|取消讚|取消赞|取消點讚|取消点赞)/i;
+const INSTAGRAM_WARMUP_COMMENT_RE = /(^|\b)Comment(\b|$)|留言|評論|评论|回覆|回复|button_comment|row_feed_button_comment/i;
+const INSTAGRAM_COMMENT_INPUT_RE = /(Add a comment|Write a comment|新增留言|新增评论|添加留言|添加评论|發表留言|发表评论|發表評論|留言|評論|评论|Comment)/i;
+const INSTAGRAM_COMMENT_SEND_RE = /(^|\b)(Post|Send|Share|Publish)(\b|$)|發布|发布|發佈|發表|发表|張貼|张贴|发送|傳送|传送|送出|分享|button_post|comment_post/i;
+const INSTAGRAM_WARMUP_PREVIEW_IGNORE_RE = /^(Home|Search|Explore|Reels|Shop|Profile|For you|Following|Instagram|Story|Add a comment|Comment|Like|Share|Post|Send|Follow|Following|Message|More|首頁|主頁|主页|搜尋|搜索|探索|貼文|贴文|動態|动态|限時動態|限时动态|你的限時動態|你的限时动态|留言|評論|评论|喜歡|喜欢|讚|赞|分享|發布|发布|傳送|发送|追蹤|关注|已追蹤|已关注|發訊息|发消息|更多|查看更多|查看翻譯|查看翻译)$/i;
+
+function instagramNodeText(node: string): string {
+  return normalizeSingleLine([
+    decodeXmlAttr(getXmlAttr(node, "text")),
+    decodeXmlAttr(getXmlAttr(node, "content-desc")),
+    decodeXmlAttr(getXmlAttr(node, "resource-id")),
+  ].filter(Boolean).join(" "));
+}
+
+export function findInstagramWarmupActionTarget(
+  uiXml: string,
+  kind: InstagramWarmupActionKind,
+): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+
+  for (const node of nodes) {
+    const text = instagramNodeText(node);
+    const rect = parseBoundsRect(getXmlAttr(node, "bounds"));
+    const center = rect ? { x: Math.round((rect.left + rect.right) / 2), y: Math.round((rect.top + rect.bottom) / 2) } : null;
+    if (!rect || !center || !text) continue;
+    if (center.y < BASE_SCREEN.height * 0.12 || center.y > BASE_SCREEN.height * 0.92) continue;
+    if (rect.width > BASE_SCREEN.width * 0.55 || rect.height > BASE_SCREEN.height * 0.22) continue;
+
+    let score = 0;
+    if (kind === "like") {
+      if (!INSTAGRAM_WARMUP_LIKE_RE.test(text) || INSTAGRAM_WARMUP_UNLIKE_RE.test(text)) continue;
+      score += 20;
+      if (/content-desc="/.test(node)) score += 4;
+      if (center.x < BASE_SCREEN.width * 0.38 || center.x > BASE_SCREEN.width * 0.72) score += 4; // Reels right rail or feed left rail.
+    } else {
+      if (!INSTAGRAM_WARMUP_COMMENT_RE.test(text)) continue;
+      score += 20;
+      if (/content-desc="/.test(node)) score += 4;
+      if (center.x < BASE_SCREEN.width * 0.45 || center.x > BASE_SCREEN.width * 0.70) score += 4;
+    }
+    if (/clickable="true"/.test(node)) score += 3;
+    if (/enabled="true"/.test(node)) score += 2;
+    if (center.y > BASE_SCREEN.height * 0.20 && center.y < BASE_SCREEN.height * 0.86) score += 2;
+    candidates.push({ ...center, score });
+  }
+
+  candidates.sort((a, b) => b.score - a.score || a.y - b.y);
+  return candidates[0] ? { x: candidates[0].x, y: candidates[0].y } : null;
+}
+
+function findInstagramCommentInputTarget(uiXml: string): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const text = instagramNodeText(node);
+    const rect = parseBoundsRect(getXmlAttr(node, "bounds"));
+    const center = rect ? { x: Math.round((rect.left + rect.right) / 2), y: Math.round((rect.top + rect.bottom) / 2) } : null;
+    if (!rect || !center) continue;
+    let score = 0;
+    if (/EditText|AutoCompleteTextView/i.test(getXmlAttr(node, "class"))) score += 12;
+    if (INSTAGRAM_COMMENT_INPUT_RE.test(text)) score += 12;
+    if (center.y > BASE_SCREEN.height * 0.58) score += 4;
+    if (rect.width > BASE_SCREEN.width * 0.25) score += 2;
+    if (score >= 12) candidates.push({ ...center, score });
+  }
+  candidates.sort((a, b) => b.score - a.score || b.y - a.y);
+  return candidates[0] ? { x: candidates[0].x, y: candidates[0].y } : null;
+}
+
+function findInstagramCommentSendTarget(uiXml: string): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const text = instagramNodeText(node);
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center || !text) continue;
+    if (!INSTAGRAM_COMMENT_SEND_RE.test(text)) continue;
+    let score = 20;
+    if (center.x > BASE_SCREEN.width * 0.60) score += 4;
+    if (center.y > BASE_SCREEN.height * 0.45) score += 3;
+    if (/clickable="true"/.test(node)) score += 3;
+    candidates.push({ ...center, score });
+  }
+  candidates.sort((a, b) => b.score - a.score || b.x - a.x);
+  return candidates[0] ? { x: candidates[0].x, y: candidates[0].y } : null;
+}
+
+async function getInstagramWarmupFallbackActionTarget(
+  config: VmosConfig,
+  padCode: string,
+  kind: InstagramWarmupActionKind,
+): Promise<{ x: number; y: number; screenshotUrl?: string; debugReason: string }> {
+  const shotUrl = await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "");
+  const image = shotUrl ? await getImageDimensions(shotUrl).catch(() => null) : null;
+  const width = image?.width || BASE_SCREEN.width;
+  const height = image?.height || BASE_SCREEN.height;
+  const bottomActionY = Math.round(height * 0.68);
+  const reelsRailY = kind === "like" ? Math.round(height * 0.62) : Math.round(height * 0.69);
+  const feedTarget = {
+    x: Math.round(width * (kind === "like" ? 0.075 : 0.285)),
+    y: bottomActionY,
+  };
+  const reelsTarget = {
+    x: Math.round(width * 0.91),
+    y: reelsRailY,
+  };
+  const target = height >= 1450 ? feedTarget : reelsTarget;
+  return {
+    ...target,
+    screenshotUrl: shotUrl || undefined,
+    debugReason: `instagram_geometry_${kind}_fallback`,
+  };
+}
+
+function isTrustedWarmupCommentDebugReason(debugReason: string | undefined, padCode: string): boolean {
+  if (!isAcpPad(padCode)) return true;
+  const reason = debugReason || "";
+  if (/acp_safe_geometry_action_row/.test(reason)) return true;
+  if (/acp_verified_common_action_row_fallback/.test(reason)) return true;
+  if (/geometry_action_row_detected|acp_common_action_row_fallback/.test(reason)) return false;
+  return /thread_detail_visual|acp_detail_action_row|acp_local_action_row|column_action_row_detected|local_action_row_detected|acp_media_overlay_actions|acp_fast_screenshot_action_row/.test(reason);
+}
+
+export function isThreadsWarmupCommentExpectedSkipMessage(message: string): boolean {
+  return /私密主页限制回复非粉丝|Private profiles can only reply to their followers|To respond to the author|Update profile privacy|Switch to public to reply to anyone|留言目标不够可靠|视觉识别找不到评论按钮|未打开回复输入框|点留言误入|留言证据为侧栏|留言输入未确认|留言发布失败：评论仍停留在输入框|留言发布结果未确认|留言输入未能被 UI 确认|留言生成失败：生成内容为空|留言候选缺少模板|已跳过/.test(message);
+}
+
+function parseWarmupGeometryRowY(debugRaw: string | undefined): number | null {
+  const match = String(debugRaw || "").match(/\browY=(\d+)/);
+  if (!match) return null;
+  const rowY = Number(match[1]);
+  return Number.isFinite(rowY) ? rowY : null;
+}
+
+function parseWarmupDebugNumber(debugRaw: string | undefined, key: string): number | null {
+  const match = String(debugRaw || "").match(new RegExp(`\\b${key}=([0-9]+(?:\\.[0-9]+)?)`));
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function countWarmupGeometryComponents(debugRaw: string | undefined): number | null {
+  const match = String(debugRaw || "").match(/\bcomponents=([^|]+)/);
+  if (!match) return null;
+  const components = match[1]
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return components.length;
+}
+
+function isSafeAcpGeometryActionRow(
+  targets: Omit<WarmupFeedActionTargets, "screenshotUrl"> | null | undefined,
+  height: number,
+  width = BASE_SCREEN.width,
+): boolean {
+  if (!targets?.like || !targets.comment || !String(targets.debugReason || "").includes("geometry_action_row_detected")) return false;
+  const rowY = parseWarmupGeometryRowY(targets.debugRaw);
+  if (!rowY) return false;
+  const likeX = targets.like.x;
+  const commentX = targets.comment.x;
+  if (likeX < width * 0.15 || likeX > width * 0.25) return false;
+  if (commentX < width * 0.33 || commentX > width * 0.41) return false;
+  if (Math.abs(targets.comment.y - targets.like.y) > height * 0.025) return false;
+  const gap = targets.comment.x - targets.like.x;
+  if (gap < width * 0.10 || gap > width * 0.20) return false;
+  const light = parseWarmupDebugNumber(targets.debugRaw, "light");
+  if (light !== null && light < 0.88) return false;
+  const componentCount = countWarmupGeometryComponents(targets.debugRaw);
+  if (componentCount !== null && componentCount < 3) return false;
+  return rowY >= height * 0.34 && rowY <= height * 0.64;
+}
+
+function isSafeAcpGeometryLikeCandidate(
+  targets: Omit<WarmupFeedActionTargets, "screenshotUrl"> | null | undefined,
+  height: number,
+  width = BASE_SCREEN.width,
+): boolean {
+  if (!targets?.like || !String(targets.debugReason || "").includes("geometry_action_row_detected")) return false;
+  const rowY = parseWarmupGeometryRowY(targets.debugRaw);
+  if (!rowY) return false;
+  const likeX = targets.like.x;
+  if (likeX < width * 0.16 || likeX > width * 0.25) return false;
+  if (Math.abs(targets.like.y - rowY) > height * 0.035) return false;
+  const light = parseWarmupDebugNumber(targets.debugRaw, "light");
+  if (light !== null && light < 0.88) return false;
+  const componentCount = countWarmupGeometryComponents(targets.debugRaw);
+  if (componentCount !== null && componentCount < 4) return false;
+  return rowY >= height * 0.28 && rowY <= height * 0.70;
+}
+
+async function warmupAlignToReadablePost(config: VmosConfig, padCode: string) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const shotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      isAcpPad(padCode) ? 7_000 : 10_000,
+      "warmup align screenshot timeout",
+    ).catch(() => "");
+    if (!shotUrl) return;
+    if (await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) return;
+    if (await detectThreadsSideDrawerLocally(shotUrl).catch(() => false)) return;
+
+    const image = await getImageDimensions(shotUrl).catch(() => null);
+    const height = image?.height || BASE_SCREEN.height;
+    const targets = await locateThreadsWarmupActionsWithFallback(
+      shotUrl,
+      undefined,
+      isAcpPad(padCode) ? { allowRemoteVision: false } : undefined,
+    ).catch(() => null);
+    const rowY = targets?.like?.y || targets?.comment?.y || 0;
+    if (rowY > height * 0.26 && rowY < height * 0.72) return;
+
+    if (rowY > 0 && rowY <= height * 0.26) {
+      await warmupHumanSwipeByRatio(
+        config,
+        padCode,
+        warmupRandom(0.43, 0.58),
+        warmupRandom(0.48, 0.58),
+        warmupRandom(0.42, 0.58),
+        warmupRandom(0.57, 0.68),
+        warmupRandomInt(360, 680),
+        warmupRandomInt(320, 760),
+      ).catch(() => undefined);
+      continue;
+    }
+
+    if (rowY === 0 || rowY >= height * 0.72) {
+      await warmupHumanSwipeByRatio(
+        config,
+        padCode,
+        warmupRandom(0.43, 0.58),
+        warmupRandom(0.70, 0.80),
+        warmupRandom(0.42, 0.58),
+        warmupRandom(0.46, 0.58),
+        warmupRandomInt(520, 980),
+        warmupRandomInt(380, 820),
+      ).catch(() => undefined);
+    }
+  }
+}
+
+export function buildAcpWarmupFallbackRows(width = BASE_SCREEN.width, height = BASE_SCREEN.height) {
+  return [0.61, 0.62, 0.58, 0.57, 0.64, 0.68, 0.50].map((ratio) => ({
+    like: { x: Math.round(width * 0.22), y: Math.round(height * ratio) },
+    comment: { x: Math.round(width * 0.385), y: Math.round(height * ratio) },
+  }));
+}
+
+async function fallbackWarmupHomeFeedActionsFromScreenshot(
+  screenshotUrl: string,
+): Promise<Omit<WarmupFeedActionTargets, "screenshotUrl"> | null> {
+  void screenshotUrl;
+  return null;
+}
+
+function parseWarmupVisionPoint(value: unknown, width: number, height: number): { x: number; y: number } | undefined {
+  const point = value as { x?: unknown; y?: unknown } | null | undefined;
+  const x = Number(point?.x);
+  const y = Number(point?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) return undefined;
+  const rounded = {
+    x: Math.max(0, Math.min(width - 1, Math.round(x))),
+    y: Math.max(0, Math.min(height - 1, Math.round(y))),
+  };
+  if (rounded.y > height * 0.86) return undefined;
+  return rounded;
+}
+
+function normalizeWarmupActionPair(
+  targets: { like?: { x: number; y: number }; comment?: { x: number; y: number } },
+  width = BASE_SCREEN.width,
+  height = BASE_SCREEN.height,
+) {
+  const clamp = (point: { x: number; y: number }) => ({
+    x: Math.max(0, Math.min(width - 1, Math.round(point.x))),
+    y: Math.max(0, Math.min(height - 1, Math.round(point.y))),
+  });
+  const like = targets.like ? clamp(targets.like) : undefined;
+  const comment = targets.comment ? clamp(targets.comment) : undefined;
+  const expectedGap = Math.max(90, Math.min(150, Math.round(width * 0.17)));
+
+  if (like && (!comment || Math.abs(comment.y - like.y) > 70 || comment.x <= like.x || comment.x - like.x > 210)) {
+    return { like, comment: clamp({ x: like.x + expectedGap, y: like.y }) };
+  }
+  if (comment && (!like || Math.abs(comment.y - like.y) > 70 || comment.x <= like.x || comment.x - like.x > 210)) {
+    return { like: clamp({ x: comment.x - expectedGap, y: comment.y }), comment };
+  }
+  return { like, comment };
+}
+
+async function locateThreadsWarmupFeedAnchorByVision(
+  screenshotUrl: string,
+): Promise<WarmupFeedAnchorTarget | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const image = await loadImage(screenshotUrl).catch(() => null);
+  if (!image) return null;
+  const inline = await cropMiddleLowerRegionToInlineData(screenshotUrl, 0.34, 0.86);
+  if (!inline) return null;
+  const cropTop = Math.max(0, Math.floor(image.height * 0.34));
+  const cropHeight = Math.max(1, Math.floor(image.height * 0.86) - cropTop);
+  const request = createTimeoutSignal(10000);
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在看一张裁切后的 Threads 首页推荐流截图，这张图只包含原始页面的中下部区域。
+请找出其中一条最清楚、最容易点击的普通帖子正文区域中心点。
+
+只输出一行，格式固定为：
+TAP|x|y|原因
+或
+NOT_FOUND|原因
+
+要求：
+- x 与 y 是这张“裁切后图片”内部的像素坐标。
+- 这里要找的是一条普通帖子的正文/内容区域中心点，优先正文文字区域或正文下方靠近交互栏上方的位置。
+- 不要选择头像、用户名、底部导航栏、返回按钮、搜索按钮或系统按钮。
+- 找不到就输出 NOT_FOUND。`,
+          },
+          { text: `裁切图尺寸 360x${Math.max(1, Math.round((cropHeight / image.width) * 360))}` },
+          { inlineData: inline },
+        ],
+      }],
+      { maxOutputTokens: 40, temperature: 0 },
+      request.signal,
+    );
+
+    const line = normalizeSingleLine(extractText(raw));
+    const match = line.match(/^TAP\|(\d+)\|(\d+)\|?(.*)$/i);
+    if (!match) return null;
+    const croppedX = Number(match[1]);
+    const croppedY = Number(match[2]);
+    if (!Number.isFinite(croppedX) || !Number.isFinite(croppedY)) return null;
+    const scale = image.width / 360;
+    const x = Math.round(croppedX * scale);
+    const y = Math.round(cropTop + croppedY * scale);
+    if (x < 0 || y < 0 || x > image.width || y > image.height) return null;
+    return { x, y, reason: match[3]?.trim() || undefined };
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function locateThreadsWarmupActionNearAnchorByVision(
+  screenshotUrl: string,
+  anchor: { x: number; y: number },
+  target: "like" | "comment",
+): Promise<{ x: number; y: number } | null> {
+  const { apiKey } = getGeminiEndpoint();
+  if (!apiKey) return null;
+
+  const image = await loadImage(screenshotUrl).catch(() => null);
+  if (!image) return null;
+  const cropTop = Math.max(0, Math.floor(image.height * 0.34));
+  const cropBottom = Math.max(cropTop + 1, Math.floor(image.height * 0.86));
+  const inline = await cropMiddleLowerRegionToInlineData(screenshotUrl, 0.34, 0.86);
+  if (!inline) return null;
+  const request = createTimeoutSignal(10000);
+  const targetPrompt = target === "like"
+    ? "请找出离这个正文锚点最近、属于同一条帖子的空心爱心/未点赞图标中心点。通常它在帖子底部交互栏最左侧，不要选择已经填色的已点赞爱心。"
+    : "请找出离这个正文锚点最近、属于同一条帖子的评论/回复气泡图标中心点。通常它在爱心右侧。";
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `你在看一张裁切后的 Threads 首页推荐流截图，这张图只包含原始页面的中下部区域。
+已知同一条普通帖子的正文区域中心点在原图大致为 (${anchor.x}, ${anchor.y})。
+把它换算到这张裁切图里时，正文锚点大致在 (${anchor.x}, ${Math.max(0, anchor.y - cropTop)})。
+${targetPrompt}
+
+只输出一行，格式固定为：
+TAP|x|y|原因
+或
+NOT_FOUND|原因
+
+要求：
+- x 与 y 是这张“裁切后图片”内部的像素坐标。
+- 只选择与这个正文锚点同一条帖子相关的图标。
+- 不要选择底部导航栏、头像、用户名、图片、系统按钮。
+- 找不到就输出 NOT_FOUND。`,
+          },
+          { inlineData: inline },
+        ],
+      }],
+      { maxOutputTokens: 40, temperature: 0 },
+      request.signal,
+    );
+
+    const line = normalizeSingleLine(extractText(raw));
+    const match = line.match(/^TAP\|(\d+)\|(\d+)\|?/i);
+    if (!match) return null;
+    const croppedX = Number(match[1]);
+    const croppedY = Number(match[2]);
+    if (!Number.isFinite(croppedX) || !Number.isFinite(croppedY)) return null;
+    const scale = image.width / 360;
+    const x = Math.round(croppedX * scale);
+    const y = Math.round(cropTop + croppedY * scale);
+    if (x < 0 || y < 0 || x > image.width || y > cropBottom) return null;
+    return { x, y };
+  } catch {
+    return null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+type LocateThreadsWarmupActionsOptions = {
+  allowRemoteVision?: boolean;
+};
+
+async function locateThreadsWarmupActionsByVision(
+  screenshotUrl: string,
+  options: LocateThreadsWarmupActionsOptions = {},
+): Promise<Omit<WarmupFeedActionTargets, "screenshotUrl"> | null> {
+  const image = await getImageDimensions(screenshotUrl);
+  if (!image) return { debugReason: "image_load_failed" };
+  const allowRemoteVision = options.allowRemoteVision !== false;
+
+  const columnActions = await detectThreadsFeedActionRowByExpectedColumns(screenshotUrl);
+  if (columnActions?.like || columnActions?.comment) {
+    return {
+      ...normalizeWarmupActionPair({
+        like: parseWarmupVisionPoint(columnActions.like, image.width, image.height),
+        comment: parseWarmupVisionPoint(columnActions.comment, image.width, image.height),
+      }, image.width, image.height),
+      alternateLikes: columnActions.alternateLikes
+        ?.map((point) => parseWarmupVisionPoint(point, image.width, image.height))
+        .filter((point): point is { x: number; y: number } => Boolean(point)),
+      alternateComments: columnActions.alternateComments
+        ?.map((point) => parseWarmupVisionPoint(point, image.width, image.height))
+        .filter((point): point is { x: number; y: number } => Boolean(point)),
+      engagementScore: columnActions.engagementScore,
+      debugReason: "column_action_row_detected",
+      debugRaw: columnActions.debugRaw,
+    };
+  }
+
+  const localActions = await detectThreadsFeedActionRowLocally(screenshotUrl);
+  if (localActions?.like || localActions?.comment) {
+    return {
+      ...normalizeWarmupActionPair({
+        like: parseWarmupVisionPoint(localActions.like, image.width, image.height),
+        comment: parseWarmupVisionPoint(localActions.comment, image.width, image.height),
+      }, image.width, image.height),
+      debugReason: "local_action_row_detected",
+      debugRaw: localActions.debugRaw,
+    };
+  }
+
+  const geometryActions = await estimateThreadsFeedActionRowByGeometry(screenshotUrl);
+  const geometryResult = geometryActions?.like || geometryActions?.comment
+    ? {
+        ...normalizeWarmupActionPair({
+          like: parseWarmupVisionPoint(geometryActions.like, image.width, image.height),
+          comment: parseWarmupVisionPoint(geometryActions.comment, image.width, image.height),
+        }, image.width, image.height),
+        debugReason: "geometry_action_row_detected",
+        debugRaw: geometryActions.debugRaw,
+      }
+    : null;
+  if (geometryActions?.like || geometryActions?.comment) {
+    if (!allowRemoteVision || !getGeminiEndpoint().apiKey) return geometryResult;
+  }
+
+  if (!allowRemoteVision || !getGeminiEndpoint().apiKey) return { debugReason: "local_geometry_actions_missing" };
+
+  const directLike = parseWarmupVisionPoint(
+    await locateThreadsButtonByVision(
+      screenshotUrl,
+      "Threads 首页推荐流里属于别人帖子的实际互动栏空心爱心/未点赞按钮中心点。它必须在帖子图片或正文外部的横向互动栏里，旁边同一行通常还有评论气泡、转发、纸飞机图标；不要选择图片内容内部的图案、文字、股票图表、头像、底部导航或已填色的爱心",
+    ),
+    image.width,
+    image.height,
+  );
+  const directComment = parseWarmupVisionPoint(
+    await locateThreadsButtonByVision(
+      screenshotUrl,
+      "Threads 首页推荐流里属于别人帖子的实际互动栏评论/回复气泡按钮中心点。它必须在帖子图片或正文外部的横向互动栏里，通常位于空心爱心右侧；不要选择图片内容内部的图案、文字、股票图表、头像、底部导航或纸飞机分享按钮",
+    ),
+    image.width,
+    image.height,
+  );
+  if (directLike || directComment) {
+    return {
+      ...normalizeWarmupActionPair({ like: directLike, comment: directComment }, image.width, image.height),
+      debugReason: "vision_action_row_direct_detected",
+    };
+  }
+
+  const anchor = await locateThreadsWarmupFeedAnchorByVision(screenshotUrl);
+  if (!anchor) {
+    const lowerHalfLike = parseWarmupVisionPoint(
+      await locateThreadsButtonByVision(
+        screenshotUrl,
+        "Threads 首页推荐流当前屏幕下半部，属于别人帖子底部交互栏的空心爱心/未点赞图标中心点。优先选择最清楚的一条普通帖子，不要选择底部导航栏、搜索、头像、自己主页入口或发帖按钮，不要选择已经填色的已点赞爱心",
+      ),
+      image.width,
+      image.height,
+    );
+    const lowerHalfComment = parseWarmupVisionPoint(
+      await locateThreadsButtonByVision(
+        screenshotUrl,
+        "Threads 首页推荐流当前屏幕下半部，属于别人帖子底部交互栏的评论/回复气泡图标中心点，通常在爱心右侧。优先选择与同一条帖子对应的气泡，不要选择底部导航栏、搜索、头像、自己主页入口或发帖按钮",
+      ),
+      image.width,
+      image.height,
+    );
+
+    if (lowerHalfLike || lowerHalfComment) {
+      return {
+        ...normalizeWarmupActionPair({ like: lowerHalfLike, comment: lowerHalfComment }, image.width, image.height),
+        debugReason: "vision_lower_half_direct_detected",
+      };
+    }
+
+    return geometryResult ?? { debugReason: "anchor_not_found" };
+  }
+
+  const like = parseWarmupVisionPoint(
+    await locateThreadsWarmupActionNearAnchorByVision(screenshotUrl, anchor, "like"),
+    image.width,
+    image.height,
+  );
+  const comment = parseWarmupVisionPoint(
+    await locateThreadsWarmupActionNearAnchorByVision(screenshotUrl, anchor, "comment"),
+    image.width,
+    image.height,
+  );
+
+  if (!like && !comment) {
+    return geometryResult ?? {
+      debugReason: "anchored_actions_missing",
+      debugRaw: `anchor=${anchor.x},${anchor.y}${anchor.reason ? `:${anchor.reason}` : ""}`,
+    };
+  }
+
+  return {
+    ...normalizeWarmupActionPair({ like, comment }, image.width, image.height),
+    debugReason: "vision_anchor_action_row",
+    debugRaw: `anchor=${anchor.x},${anchor.y}${anchor.reason ? `:${anchor.reason}` : ""}`,
+  };
+}
+
+async function locateThreadsWarmupActionsWithFallback(
+  screenshotUrl: string,
+  uiXml?: string,
+  options: LocateThreadsWarmupActionsOptions = {},
+): Promise<Omit<WarmupFeedActionTargets, "screenshotUrl"> | null> {
+  const image = await getImageDimensions(screenshotUrl);
+  const allowRemoteVision = options.allowRemoteVision !== false;
+  const accept = (point: { x: number; y: number } | null | undefined) => {
+    if (!point) return undefined;
+    if (image && point.y < image.height * 0.15) return undefined;
+    if (image && point.y > image.height - 30) return undefined;
+    if (image && point.y > image.height * 0.86) return undefined;
+    return point;
+  };
+
+  const debugBits: string[] = [];
+
+  const xmlTargets = uiXml ? findThreadsHomeFeedActionTargetsFromUiXml(uiXml) : null;
+  const xmlLike = accept(xmlTargets?.like);
+  const xmlComment = accept(xmlTargets?.comment);
+  if (xmlLike || xmlComment) {
+    const likeOk = xmlLike ? await isLikelyWarmupActionRowAtPoint(screenshotUrl, xmlLike) : false;
+    const commentOk = xmlComment ? await isLikelyWarmupActionRowAtPoint(screenshotUrl, xmlComment) : false;
+    if (likeOk || commentOk) {
+      return {
+        ...normalizeWarmupActionPair({
+          like: likeOk ? xmlLike : undefined,
+          comment: commentOk ? xmlComment : undefined,
+        }, image?.width, image?.height),
+        debugReason: "xml_action_targets",
+        debugRaw: `xml_like=${xmlLike ? `${xmlLike.x},${xmlLike.y}` : "missing"};xml_comment=${xmlComment ? `${xmlComment.x},${xmlComment.y}` : "missing"}`,
+      };
+    }
+    debugBits.push("xml_action_targets_rejected");
+  }
+
+  const primary = await locateThreadsWarmupActionsByVision(screenshotUrl, options);
+  debugBits.push(...[primary?.debugReason, primary?.debugRaw].filter(Boolean));
+  const primaryLikeCandidate = accept(primary?.like);
+  let like = accept(primary?.like);
+  let comment = accept(primary?.comment);
+  let alternateLikes = (primary?.alternateLikes || []).map(accept).filter((point): point is { x: number; y: number } => Boolean(point));
+  let alternateComments = (primary?.alternateComments || []).map(accept).filter((point): point is { x: number; y: number } => Boolean(point));
+  const trustHighEngagementColumn = primary?.debugReason === "column_action_row_detected" && (primary.engagementScore || 0) >= 80;
+  if (like && !trustHighEngagementColumn && !(await isLikelyWarmupActionRowAtPoint(screenshotUrl, like))) {
+    like = undefined;
+    debugBits.push("primary_like_shape_rejected");
+  }
+  if (comment && !trustHighEngagementColumn && !(await isLikelyWarmupActionRowAtPoint(screenshotUrl, comment))) {
+    comment = undefined;
+    debugBits.push("primary_comment_shape_rejected");
+  }
+  if (!trustHighEngagementColumn) {
+    alternateLikes = (await Promise.all(alternateLikes.map(async (point) => (
+      await isLikelyWarmupActionRowAtPoint(screenshotUrl, point) ? point : null
+    )))).filter((point): point is { x: number; y: number } => Boolean(point));
+    alternateComments = (await Promise.all(alternateComments.map(async (point) => (
+      await isLikelyWarmupActionRowAtPoint(screenshotUrl, point) ? point : null
+    )))).filter((point): point is { x: number; y: number } => Boolean(point));
+  }
+
+  const useXmlFallback = !allowRemoteVision || !getGeminiEndpoint().apiKey;
+  if ((!like || !comment) && useXmlFallback && uiXml) {
+    if (!like) like = accept(xmlTargets?.like);
+    if (!comment) comment = accept(xmlTargets?.comment);
+    debugBits.push(xmlTargets?.like || xmlTargets?.comment ? "xml_action_targets" : "xml_action_targets_missing");
+  }
+
+  if (!like && primaryLikeCandidate && image && isSafeAcpGeometryLikeCandidate(primary, image.height, image.width)) {
+    like = primaryLikeCandidate;
+    debugBits.push("geometry_like_shape_override");
+  }
+
+  if (!like) debugBits.push("fallback_like_missing");
+  if (!comment) debugBits.push("fallback_comment_missing");
+
+  if (!like && !comment) {
+    const fallback = await fallbackWarmupHomeFeedActionsFromScreenshot(screenshotUrl);
+    if (fallback?.like || fallback?.comment) {
+      return {
+        ...fallback,
+        debugRaw: [debugBits.join(" | "), fallback.debugReason].filter(Boolean).join(" | "),
+      };
+    }
+    return { debugReason: debugBits.join(" | ") || "no_actions_found" };
+  }
+  const debugSummary = debugBits.join(" | ");
+  return {
+    ...normalizeWarmupActionPair({ like, comment }, image?.width, image?.height),
+    alternateLikes,
+    alternateComments,
+    engagementScore: primary?.engagementScore,
+    debugReason: debugSummary,
+    debugRaw: debugSummary,
+  };
+}
+
+async function warmupLocateHomeFeedActions(
+  config: VmosConfig,
+  padCode: string,
+): Promise<WarmupFeedActionTargets | null> {
+  const focusBeforeLocate = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  if (focusBeforeLocate && !focusBeforeLocate.includes(THREADS_PACKAGE)) {
+    await relaunchThreads(config, padCode, 2500).catch(() => undefined);
+    const focusAfterLaunch = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+    if (focusAfterLaunch && !focusAfterLaunch.includes(THREADS_PACKAGE)) {
+      return { debugReason: `threads_not_foreground:${focusAfterLaunch.slice(0, 120)}` };
+    }
+  }
+
+  const locateOnHome = async (screenshotUrl: string, reason: string) => {
+    if (await detectThreadsFullscreenMediaViewerLocally(screenshotUrl)) {
+      return { screenshotUrl, debugReason: `media_viewer:${reason}` };
+    }
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (/访问主页|訪問主頁|访问主頁|Visit profile/i.test(uiXml)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(900);
+      return { screenshotUrl, debugReason: `profile_menu_dismissed:${reason}` };
+    }
+    if (looksLikeThreadsUnfollowDialogUiXml(uiXml)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(900);
+      return { screenshotUrl, debugReason: `profile_unfollow_dialog_dismissed:${reason}` };
+    }
+    if (await detectThreadsProfilePopupMenuVisually(screenshotUrl)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(900);
+      return { screenshotUrl, debugReason: `profile_menu_dismissed_visual:${reason}` };
+    }
+    if (/赞助内容|贊助內容|Sponsored|广告|廣告/i.test(uiXml)) {
+      return { screenshotUrl, debugReason: `sponsored_screen_skipped:${reason}` };
+    }
+    if (findThreadsReplyComposerInputTarget(uiXml)) {
+      return { screenshotUrl, debugReason: `thread_detail_ui:${reason}` };
+    }
+    if (await detectThreadsProfilePageLocally(screenshotUrl)) {
+      return { screenshotUrl, debugReason: `profile_ui:${reason}` };
+    }
+    if (looksLikeThreadsProfileUiXml(uiXml)) {
+      return { screenshotUrl, debugReason: `profile_ui:${reason}` };
+    }
+    const targets = await locateThreadsWarmupActionsWithFallback(
+      screenshotUrl,
+      uiXml,
+      isAcpPad(padCode) ? { allowRemoteVision: false } : undefined,
+    );
+    const targetDebug = [targets?.debugReason, targets?.debugRaw].filter(Boolean).join(" | ");
+    const coordinateDetected = Boolean(targetDebug.includes("xml_action_targets")
+      || targetDebug.includes("thread_detail_visual")
+      || targetDebug.includes("local_action_row_detected")
+      || targetDebug.includes("column_action_row_detected")
+      || targetDebug.includes("geometry_action_row_detected"));
+    const needsVisionValidation = Boolean(targets && !coordinateDetected && getGeminiEndpoint().apiKey);
+    if (needsVisionValidation) {
+      if (targets.like && !(await verifyThreadsWarmupActionTargetVisually(screenshotUrl, targets.like, "like"))) {
+        targets.like = undefined;
+        targets.debugReason = [targets.debugReason, "like_target_unverified"].filter(Boolean).join(" | ");
+      }
+      if (targets.comment && !(await verifyThreadsWarmupActionTargetVisually(screenshotUrl, targets.comment, "comment"))) {
+        targets.comment = undefined;
+        targets.debugReason = [targets.debugReason, "comment_target_unverified"].filter(Boolean).join(" | ");
+      }
+    }
+    if (targets?.like || targets?.comment) {
+      return {
+        screenshotUrl,
+        ...targets,
+        debugReason: [targets.debugReason, reason].filter(Boolean).join(" | "),
+      };
+    }
+    return targets
+      ? {
+          screenshotUrl,
+          ...targets,
+          debugReason: [targets.debugReason, reason].filter(Boolean).join(" | "),
+        }
+      : { screenshotUrl, debugReason: `no_actions:${reason}` };
+  };
+
+  const focusBeforeClassify = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  if (focusBeforeClassify.includes(THREADS_PACKAGE)) {
+    const directShot = await screenshot(config, padCode)
+      .then((url) => freezeScreenshotUrl(url))
+      .catch(() => "");
+    if (directShot) {
+      const directTargets = await locateOnHome(directShot, "warmup_direct_threads_focus");
+      if (directTargets?.like || directTargets?.comment || /sponsored_screen_skipped|profile_ui|thread_detail_ui|media_viewer/.test(directTargets?.debugReason || "")) {
+        return directTargets;
+      }
+    }
+  }
+
+  const state = await classifyThreadsPageOnDevice(config, padCode);
+  if (state.page !== "home_feed") {
+    if (state.page === "login_required" || state.page === "challenge" || state.page === "system_dialog") {
+      throw new Error(`Threads 当前不适合养号：${state.reason}`);
+    }
+    await withTimeout(
+      ensureThreadsHomeFeed(config, padCode),
+      20_000,
+      "warmup home redirect timeout",
+    ).catch(() => undefined);
+    const homeState = await classifyThreadsPageOnDevice(config, padCode);
+    if (homeState.page !== "home_feed") {
+      const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+      if (homeState.page === "unknown" && focus.includes(THREADS_PACKAGE)) {
+        return locateOnHome(homeState.screenshotUrl, `non_home_current:${homeState.reason}`);
+      }
+      return locateOnHome(homeState.screenshotUrl, `non_home_current:${homeState.reason}`);
+    }
+    return locateOnHome(homeState.screenshotUrl, `home_after_redirect:${homeState.reason}`);
+  }
+
+  const initialTargets = await locateOnHome(state.screenshotUrl, `home:${state.reason}`);
+  if (initialTargets?.like || initialTargets?.comment) return initialTargets;
+  if (/profile_ui|thread_detail_ui|media_viewer/.test(initialTargets?.debugReason || "")) {
+    await ensureThreadsHomeFeed(config, padCode);
+    const redirected = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (redirected?.page === "home_feed") {
+      const redirectedTargets = await locateOnHome(redirected.screenshotUrl, `home_after_ui_redirect:${redirected.reason}`);
+      if (redirectedTargets?.like || redirectedTargets?.comment) return redirectedTargets;
+      return {
+        ...redirectedTargets,
+        debugReason: [initialTargets?.debugReason, redirectedTargets?.debugReason].filter(Boolean).join(" | "),
+      };
+    }
+  }
+
+  await tapViaAdbReferencePoint(config, padCode, { x: 72, y: 1540 }, 2400);
+  const refreshed = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (!refreshed || refreshed.page !== "home_feed") {
+    if (refreshed?.page === "profile_page") {
+      await ensureThreadsHomeFeed(config, padCode).catch(() => undefined);
+      const homeAfterProfile = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (homeAfterProfile?.page === "home_feed") {
+        const homeTargets = await locateOnHome(homeAfterProfile.screenshotUrl, `home_after_profile_redirect:${homeAfterProfile.reason}`);
+        if (homeTargets?.like || homeTargets?.comment) return homeTargets;
+        return {
+          ...homeTargets,
+          debugReason: [initialTargets?.debugReason, homeTargets?.debugReason].filter(Boolean).join(" | "),
+        };
+      }
+    }
+    return {
+      ...initialTargets,
+      debugReason: [initialTargets?.debugReason, `home_refresh_failed:${refreshed?.page || "null"}:${refreshed?.reason || ""}`].filter(Boolean).join(" | "),
+    };
+  }
+  const refreshedTargets = await locateOnHome(refreshed.screenshotUrl, `home_after_home_tap:${refreshed.reason}`);
+  if (refreshedTargets?.like || refreshedTargets?.comment) return refreshedTargets;
+  return {
+    ...refreshedTargets,
+    debugReason: [initialTargets?.debugReason, refreshedTargets?.debugReason].filter(Boolean).join(" | "),
+  };
+}
+
+async function detectThreadsWarmupBlackLetterboxMedia(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const darkRatio = (x1: number, y1: number, x2: number, y2: number) => {
+    const sx = Math.max(0, Math.floor(width * x1));
+    const ex = Math.min(width, Math.ceil(width * x2));
+    const sy = Math.max(0, Math.floor(height * y1));
+    const ey = Math.min(height, Math.ceil(height * y2));
+    let total = 0;
+    let dark = 0;
+    const step = Math.max(1, Math.floor(Math.min(width, height) / 180));
+    for (let y = sy; y < ey; y += step) {
+      for (let x = sx; x < ex; x += step) {
+        const i = (y * width + x) * 4;
+        const r = data[i] ?? 0;
+        const g = data[i + 1] ?? 0;
+        const b = data[i + 2] ?? 0;
+        total++;
+        if ((r + g + b) / 3 < 18) dark++;
+      }
+    }
+    return total ? dark / total : 0;
+  };
+  const topDark = darkRatio(0, 0, 1, 0.34);
+  const bottomDark = darkRatio(0, 0.66, 1, 1);
+  const middleDark = darkRatio(0.08, 0.38, 0.92, 0.62);
+  return topDark > 0.82 && bottomDark > 0.78 && middleDark < 0.55;
+}
+
+function looksLikeThreadsMessagesUiXml(uiXml: string): boolean {
+  return /訊息|消息|信息|Direct\s*訊息|Direct\s*消息|收件匣|发讯息|發訊息/i.test(uiXml);
+}
+
+async function dismissThreadsMessagesPage(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 1200,
+) {
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+  await delay(500);
+  const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+  await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.13), Math.round(screen.height * 0.9625), waitMs).catch(() => undefined);
+}
+
+function looksLikeThreadsStatusMessageUiXml(uiXml: string): boolean {
+  return /建立動態消息|建立动态消息|讓動態消息保持新意|让动态消息保持新意|公開動態消息|公开动态消息|回覆選項|回复选项/i.test(uiXml);
+}
+
+function looksLikeThreadsUnfollowDialogUiXml(uiXml: string): boolean {
+  return /Unfollow|取消追蹤|取消关注/i.test(uiXml)
+    && /Cancel|取消/i.test(uiXml);
+}
+
+function looksLikeThreadsMediaMarkupUiXml(uiXml: string): boolean {
+  return /標註|标注|Markup|完成/i.test(uiXml)
+    && /android\.widget\.ImageButton|android\.widget\.ImageView|android\.widget\.Button/i.test(uiXml)
+    && !/回覆|回复|留言|串文|發佈|发布|reply|comment|post/i.test(uiXml);
+}
+
+async function detectThreadsStatusMessageVisually(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl || !getGeminiEndpoint().apiKey) return false;
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return false;
+  const request = createTimeoutSignal(7000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `這張截圖是不是 Threads 的「建立/設定動態消息」頁，包含公開動態消息、回覆選項、建立個人檔案或新增主題等設定內容？
+只回答 true 或 false。`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 20, temperature: 0 },
+      request.signal,
+    );
+    return /\btrue\b|是|建立|設定|动态消息|動態消息/i.test(normalizeSingleLine(extractText(raw)));
+  } catch {
+    return false;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function detectThreadsWarmupMediaOverlayActions(
+  screenshotUrl: string | undefined,
+): Promise<Omit<WarmupFeedActionTargets, "screenshotUrl"> | null> {
+  if (!screenshotUrl) return null;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return null;
+  const { data, width, height } = pixels;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number) => boolean,
+  ) => {
+    const sx = Math.max(0, Math.floor(width * x1));
+    const ex = Math.min(width, Math.ceil(width * x2));
+    const sy = Math.max(0, Math.floor(height * y1));
+    const ey = Math.min(height, Math.ceil(height * y2));
+    let total = 0;
+    let matched = 0;
+    const step = Math.max(1, Math.floor(Math.min(width, height) / 180));
+    for (let y = sy; y < ey; y += step) {
+      for (let x = sx; x < ex; x += step) {
+        const i = (y * width + x) * 4;
+        const r = data[i] ?? 0;
+        const g = data[i + 1] ?? 0;
+        const b = data[i + 2] ?? 0;
+        total++;
+        if (predicate(r, g, b)) matched++;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const screenDark = ratio(0, 0, 1, 0.9, (r, g, b) => (r + g + b) / 3 < 70);
+  const bottomLight = ratio(0.15, 0.92, 0.85, 0.992, (r, g, b) => r > 205 && g > 205 && b > 205);
+  const topCloseLight = ratio(0.02, 0.02, 0.12, 0.08, (r, g, b) => r > 180 && g > 180 && b > 180);
+  if (screenDark < 0.52 || bottomLight < 0.014 || topCloseLight < 0.01) return null;
+  return {
+    like: { x: Math.round(width * 0.245), y: Math.round(height * 0.965) },
+    comment: { x: Math.round(width * 0.415), y: Math.round(height * 0.965) },
+    alternateLikes: [{ x: Math.round(width * 0.24), y: Math.round(height * 0.955) }],
+    alternateComments: [{ x: Math.round(width * 0.41), y: Math.round(height * 0.955) }],
+    debugReason: "acp_media_overlay_actions",
+    debugRaw: `screenDark=${screenDark.toFixed(2)};bottomLight=${bottomLight.toFixed(3)};topCloseLight=${topCloseLight.toFixed(3)}`,
+  };
+}
+
+async function warmupLocateCurrentAcpActions(
+  config: VmosConfig,
+  padCode: string,
+): Promise<WarmupFeedActionTargets | null> {
+  const focusBefore = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+  if (focusBefore && !focusBefore.includes(THREADS_PACKAGE)) {
+    await relaunchThreads(config, padCode, 2500).catch(() => undefined);
+    const focusAfter = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+    if (focusAfter && !focusAfter.includes(THREADS_PACKAGE)) {
+      return { screenshotUrl: "", debugReason: `threads_not_foreground:${focusAfter.slice(0, 120)}` };
+    }
+  }
+  let shotUrl = await withTimeout(
+    screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+    8_000,
+    "warmup current screenshot timeout",
+  ).catch(() => "");
+  if (shotUrl && await detectAndroidLauncherLocally(shotUrl).catch(() => false)) {
+    await relaunchThreads(config, padCode, 2500).catch(() => undefined);
+    shotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      8_000,
+      "warmup relaunched screenshot timeout",
+    ).catch(() => "");
+  }
+  if (!shotUrl) {
+    await delay(900);
+    shotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      10_000,
+      "warmup current screenshot retry timeout",
+    ).catch(() => "");
+  }
+  if (!shotUrl) return { debugReason: "acp_fast_screenshot_missing" };
+  const dumpAcpUiFast = () => withTimeout(
+    dumpUiXml(config, padCode),
+    4_000,
+    "warmup acp ui dump timeout",
+  ).catch(() => "");
+  if (await detectAndroidLauncherLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "acp_still_android_launcher" };
+  }
+  if (await detectThreadsExternalWebViewLocally(shotUrl).catch(() => false)) {
+    const maybeUiXml = await dumpAcpUiFast();
+    if (looksLikeThreadsMessagesUiXml(maybeUiXml)) {
+      await dismissThreadsMessagesPage(config, padCode, 2200);
+      await delay(900);
+      return { screenshotUrl: shotUrl, debugReason: "acp_messages_dismissed" };
+    }
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    return { screenshotUrl: shotUrl, debugReason: "acp_external_webview_dismissed" };
+  }
+  if (await detectThreadsComposerLocally(shotUrl).catch(() => null)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    shotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      8_000,
+      "warmup after composer back screenshot timeout",
+    ).catch(() => shotUrl);
+  }
+  if (await detectThreadsSideDrawerLocally(shotUrl).catch(() => false)) {
+    const afterDrawerShotUrl = await warmupDismissAcpSideDrawerAndCapture(config, padCode, shotUrl).catch(() => shotUrl);
+    if (afterDrawerShotUrl && !(await detectThreadsSideDrawerLocally(afterDrawerShotUrl).catch(() => false))) {
+      shotUrl = afterDrawerShotUrl;
+    } else {
+      return { screenshotUrl: afterDrawerShotUrl || shotUrl, debugReason: "acp_side_drawer_still_open" };
+    }
+  }
+  let uiXml = await dumpAcpUiFast();
+  if (looksLikeThreadsUnfollowDialogUiXml(uiXml)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    return { screenshotUrl: shotUrl, debugReason: "profile_unfollow_dialog_dismissed" };
+  }
+  if (looksLikeThreadsProfileUiXml(uiXml)) {
+    const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.13), Math.round(screen.height * 0.9625), 2200).catch(() => undefined);
+    await delay(600);
+    return { screenshotUrl: shotUrl, debugReason: "profile_ui:acp_current_ui" };
+  }
+  const earlyMediaOverlayActions = await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null);
+  if (earlyMediaOverlayActions?.like) {
+    return { screenshotUrl: shotUrl, ...earlyMediaOverlayActions };
+  }
+  const acpLocalOnlyLocateOptions: LocateThreadsWarmupActionsOptions = { allowRemoteVision: false };
+  const fastScreenshotTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, acpLocalOnlyLocateOptions).catch(() => null);
+  if (
+    fastScreenshotTargets?.like
+    && /column_action_row_detected|local_action_row_detected|geometry_action_row_detected/.test(fastScreenshotTargets.debugReason || "")
+  ) {
+    const fastDebug = fastScreenshotTargets.debugReason || "";
+    const geometryOnly = fastDebug.includes("geometry_action_row_detected")
+      && !/column_action_row_detected|local_action_row_detected/.test(fastDebug);
+    const fastImage = await getImageDimensions(shotUrl).catch(() => null);
+    const commentTooLow = Boolean(
+      fastImage?.height
+      && fastScreenshotTargets.comment
+      && fastScreenshotTargets.comment.y > fastImage.height * 0.76
+    );
+    const rowTooLowForFastAccept = Boolean(
+      fastImage?.height
+      && (fastScreenshotTargets.comment?.y || fastScreenshotTargets.like?.y || 0) > fastImage.height * 0.68
+    );
+    if (geometryOnly) {
+      // Geometry-only rows often match article text or image content on ACP
+      // screenshots. Keep searching so XML/fallback validation can provide a
+      // stronger target before any comment tap is attempted.
+    } else {
+    if (rowTooLowForFastAccept) {
+      const maybeUiXml = await dumpAcpUiFast();
+      if (looksLikeThreadsMessagesUiXml(maybeUiXml)) {
+        await dismissThreadsMessagesPage(config, padCode, 2200);
+        await delay(900);
+        return { screenshotUrl: shotUrl, debugReason: "acp_messages_dismissed" };
+      }
+    }
+    return {
+      screenshotUrl: shotUrl,
+      ...fastScreenshotTargets,
+      comment: commentTooLow ? undefined : fastScreenshotTargets.comment,
+      alternateComments: commentTooLow ? [] : fastScreenshotTargets.alternateComments,
+      debugReason: [
+        fastScreenshotTargets.debugReason,
+        "acp_fast_screenshot_action_row",
+        geometryOnly ? "acp_geometry_comment_retained" : "",
+        commentTooLow ? "acp_comment_low_screen_stripped" : "",
+      ].filter(Boolean).join(" | "),
+    };
+    }
+  }
+  uiXml = uiXml || await dumpAcpUiFast();
+  if (looksLikeThreadsMediaMarkupUiXml(uiXml)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    return { screenshotUrl: shotUrl, debugReason: "media_markup_dismissed" };
+  }
+  const initialReplyInputTarget = findThreadsReplyComposerInputTarget(uiXml);
+  if (initialReplyInputTarget && looksLikeThreadsReplyComposerUiXml(uiXml)) {
+    return {
+      screenshotUrl: shotUrl,
+      comment: initialReplyInputTarget,
+      debugReason: "thread_detail_visual:LOCAL_REPLY_COMPOSER | acp_detail_reply_input",
+      debugRaw: `reply_input=${initialReplyInputTarget.x},${initialReplyInputTarget.y}`,
+    };
+  }
+  if (looksLikeThreadsStatusMessageUiXml(uiXml)) {
+    const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.075), Math.round(96 * (screen.width / THREADS_TALL_REFERENCE_SCREEN.width)), 1200).catch(() => undefined);
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    return { screenshotUrl: shotUrl, debugReason: "acp_status_message_dismissed" };
+  }
+  if (looksLikeThreadsMessagesUiXml(uiXml)) {
+    await dismissThreadsMessagesPage(config, padCode, 2200);
+    shotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      8_000,
+      "warmup after messages home screenshot timeout",
+    ).catch(() => shotUrl);
+    uiXml = await dumpAcpUiFast();
+    const messagesReplyInputTarget = findThreadsReplyComposerInputTarget(uiXml);
+    if (messagesReplyInputTarget && looksLikeThreadsReplyComposerUiXml(uiXml)) {
+      return {
+        screenshotUrl: shotUrl,
+        comment: messagesReplyInputTarget,
+        debugReason: "thread_detail_visual:LOCAL_REPLY_COMPOSER | acp_detail_reply_input",
+        debugRaw: `reply_input=${messagesReplyInputTarget.x},${messagesReplyInputTarget.y}`,
+      };
+    }
+  }
+  if (await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+    const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.13), Math.round(screen.height * 0.9625), 2200);
+    shotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      8_000,
+      "warmup after profile home screenshot timeout",
+    ).catch(() => shotUrl);
+    uiXml = await dumpAcpUiFast();
+    if (await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+      return { screenshotUrl: shotUrl, debugReason: "profile_ui:acp_current_screenshot" };
+    }
+  }
+  const mediaOverlayActions = await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null);
+  if (mediaOverlayActions?.like || mediaOverlayActions?.comment) {
+    return { screenshotUrl: shotUrl, ...mediaOverlayActions };
+  }
+  if (await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_current_screenshot" };
+  }
+  if (await detectThreadsWarmupBlackLetterboxMedia(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_black_letterbox" };
+  }
+
+  const earlyHomeTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, acpLocalOnlyLocateOptions).catch(() => null);
+  if (
+    earlyHomeTargets?.like
+    && /column_action_row_detected|local_action_row_detected|geometry_action_row_detected/.test(earlyHomeTargets.debugReason || "")
+  ) {
+    const earlyDebug = earlyHomeTargets.debugReason || "";
+    const geometryOnly = earlyDebug.includes("geometry_action_row_detected")
+      && !/column_action_row_detected|local_action_row_detected/.test(earlyDebug);
+    if (geometryOnly) {
+      // Do not accept ACP geometry-only rows as a fast target; they are kept as
+      // diagnostics and the stricter branches below decide whether to interact.
+    } else {
+    return {
+      screenshotUrl: shotUrl,
+      ...earlyHomeTargets,
+      debugReason: [
+        earlyHomeTargets.debugReason,
+        "acp_early_screenshot_action_row",
+        geometryOnly ? "acp_geometry_comment_retained" : "",
+      ].filter(Boolean).join(" | "),
+    };
+    }
+  }
+
+  const detailReason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
+  const localTargets = detailReason
+    ? await detectThreadsDetailActionRowLocally(shotUrl)
+    : await locateThreadsWarmupActionsWithFallback(shotUrl, uiXml, acpLocalOnlyLocateOptions);
+  const image = await getImageDimensions(shotUrl).catch(() => null);
+  const acpFallbackRows = buildAcpWarmupFallbackRows(image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
+  const verifiedFallbackRows = (await Promise.all(acpFallbackRows.map(async (row) => (
+    await isLikelyWarmupActionRowAtPoint(shotUrl, row.like).catch(() => false) ? row : null
+  )))).filter((row): row is { like: { x: number; y: number }; comment: { x: number; y: number } } => Boolean(row));
+  const hasLocalAction = Boolean(localTargets?.like || localTargets?.comment);
+  if (!hasLocalAction && await detectThreadsWarmupBlackLetterboxMedia(shotUrl).catch(() => false)) {
+    return {
+      screenshotUrl: shotUrl,
+      debugReason: ["media_viewer:acp_black_letterbox_rejected", localTargets?.debugReason, localTargets?.debugRaw].filter(Boolean).join(" | "),
+    };
+  }
+  const localDebug = [localTargets?.debugReason, localTargets?.debugRaw].filter(Boolean).join(" | ");
+  const localGeometryOnly = localDebug.includes("geometry_action_row_detected")
+    && !/column_action_row_detected|local_action_row_detected|thread_detail_visual|acp_detail_action_row/.test(localDebug);
+  if (localGeometryOnly && isSafeAcpGeometryActionRow(localTargets, image?.height || BASE_SCREEN.height, image?.width || BASE_SCREEN.width)) {
+    return {
+      screenshotUrl: shotUrl,
+      ...localTargets,
+      debugReason: [
+        localTargets?.debugReason,
+        "acp_safe_geometry_action_row",
+        "acp_local_action_row",
+      ].filter(Boolean).join(" | "),
+    };
+  }
+  const fallbackTargets = hasLocalAction ? {
+    ...localTargets,
+    debugReason: [
+      localTargets?.debugReason,
+      localGeometryOnly ? "acp_geometry_comment_retained" : "",
+    ].filter(Boolean).join(" | "),
+  } : (verifiedFallbackRows.length ? {
+    like: verifiedFallbackRows[0]?.like,
+    comment: verifiedFallbackRows[0]?.comment,
+    alternateLikes: verifiedFallbackRows.slice(1).map((row) => row.like),
+    alternateComments: verifiedFallbackRows.slice(1).map((row) => row.comment),
+    debugReason: "acp_verified_common_action_row_fallback",
+    debugRaw: verifiedFallbackRows.map((row) => `like=${row.like.x},${row.like.y};comment=${row.comment.x},${row.comment.y}`).join("|"),
+  } : null);
+  return fallbackTargets
+    ? {
+        screenshotUrl: shotUrl,
+        ...fallbackTargets,
+        debugReason: [
+          detailReason ? `thread_detail_visual:${detailReason}` : fallbackTargets.debugReason,
+          detailReason ? "acp_detail_action_row" : (hasLocalAction ? "acp_local_action_row" : "acp_common_action_row_fallback"),
+            !hasLocalAction && localTargets?.debugReason ? `local_rejected:${localTargets.debugReason}` : undefined,
+          ].filter(Boolean).join(" | "),
+      }
+    : {
+        screenshotUrl: shotUrl,
+        debugReason: [
+          "acp_local_action_row_missing",
+          localTargets?.debugReason,
+          localTargets?.debugRaw,
+          `fallback_rows_rejected:${acpFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}`,
+        ].filter(Boolean).join(" | "),
+      };
+}
+
+async function warmupLocateCurrentAcpActionsLocalSnapshot(
+  config: VmosConfig,
+  padCode: string,
+): Promise<WarmupFeedActionTargets | null> {
+  const focusBefore = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+  if (focusBefore && !focusBefore.includes(THREADS_PACKAGE)) {
+    return { screenshotUrl: "", debugReason: `threads_not_foreground:${focusBefore.slice(0, 120)}` };
+  }
+
+  let shotUrl = "";
+  for (let attempt = 0; attempt < 2 && !shotUrl; attempt += 1) {
+    shotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      10_000,
+      "warmup acp local screenshot timeout",
+    ).catch(() => "");
+    if (!shotUrl && attempt === 0) await delay(450);
+  }
+  if (!shotUrl) return { debugReason: "acp_local_screenshot_missing" };
+
+  if (await detectAndroidLauncherLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "acp_still_android_launcher" };
+  }
+  if (await detectThreadsExternalWebViewLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "acp_external_webview_detected" };
+  }
+  if (await detectThreadsSideDrawerLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "acp_side_drawer_detected" };
+  }
+  if (await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "profile_ui:acp_local_screenshot" };
+  }
+  const mediaOverlayActions = await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null);
+  if (mediaOverlayActions?.like || mediaOverlayActions?.comment) {
+    return { screenshotUrl: shotUrl, ...mediaOverlayActions };
+  }
+  if (await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_local_screenshot" };
+  }
+  if (await detectThreadsWarmupBlackLetterboxMedia(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_local_black_letterbox" };
+  }
+
+  const localOnlyOptions: LocateThreadsWarmupActionsOptions = { allowRemoteVision: false };
+  const localTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, localOnlyOptions).catch(() => null);
+  const localDebug = [localTargets?.debugReason, localTargets?.debugRaw].filter(Boolean).join(" | ");
+  const localGeometryOnly = localDebug.includes("geometry_action_row_detected")
+    && !/column_action_row_detected|local_action_row_detected/.test(localDebug);
+  const image = await getImageDimensions(shotUrl).catch(() => null);
+  if (localGeometryOnly && isSafeAcpGeometryActionRow(localTargets, image?.height || BASE_SCREEN.height, image?.width || BASE_SCREEN.width)) {
+    return {
+      screenshotUrl: shotUrl,
+      ...localTargets,
+      debugReason: [
+        localTargets?.debugReason,
+        "acp_safe_geometry_action_row",
+        "acp_local_snapshot_action_row",
+      ].filter(Boolean).join(" | "),
+    };
+  }
+
+  if ((localTargets?.like || localTargets?.comment) && !localGeometryOnly) {
+    return {
+      screenshotUrl: shotUrl,
+      ...localTargets,
+      debugReason: [localTargets.debugReason, "acp_local_snapshot_action_row"].filter(Boolean).join(" | "),
+    };
+  }
+
+  const acpFallbackRows = buildAcpWarmupFallbackRows(image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
+  const verifiedFallbackRows = (await Promise.all(acpFallbackRows.map(async (row) => (
+    await isLikelyWarmupActionRowAtPoint(shotUrl, row.like).catch(() => false) ? row : null
+  )))).filter((row): row is { like: { x: number; y: number }; comment: { x: number; y: number } } => Boolean(row));
+  if (verifiedFallbackRows.length) {
+    return {
+      screenshotUrl: shotUrl,
+      like: verifiedFallbackRows[0]?.like,
+      comment: verifiedFallbackRows[0]?.comment,
+      alternateLikes: verifiedFallbackRows.slice(1).map((row) => row.like),
+      alternateComments: verifiedFallbackRows.slice(1).map((row) => row.comment),
+      debugReason: [
+        "acp_verified_common_action_row_fallback",
+        "acp_local_snapshot_fallback",
+        localDebug ? `local_rejected:${localDebug}` : undefined,
+      ].filter(Boolean).join(" | "),
+      debugRaw: verifiedFallbackRows.map((row) => `like=${row.like.x},${row.like.y};comment=${row.comment.x},${row.comment.y}`).join("|"),
+    };
+  }
+
+  return {
+    screenshotUrl: shotUrl,
+    debugReason: [
+      "acp_local_snapshot_no_actions",
+      localDebug,
+      `fallback_rows_rejected:${acpFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}`,
+    ].filter(Boolean).join(" | "),
+  };
+}
+
+async function dismissThreadsWarmupProfilePopup(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl?: string,
+): Promise<boolean> {
+  const uiXml = await withTimeout(
+    dumpUiXml(config, padCode),
+    isAcpPad(padCode) ? 4_000 : 12_000,
+    "warmup popup ui dump timeout",
+  ).catch(() => "");
+  if (/访问主页|訪問主頁|访问主頁|Visit profile/i.test(uiXml)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    return true;
+  }
+  if (looksLikeThreadsUnfollowDialogUiXml(uiXml)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    return true;
+  }
+  const shotUrl = screenshotUrl || await screenshot(config, padCode)
+    .then((url) => freezeScreenshotUrl(url))
+    .catch(() => "");
+  if (shotUrl && await detectThreadsProfilePopupMenuVisually(shotUrl)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    return true;
+  }
+  return false;
+}
+
+async function warmupLocateHomeFeedTarget(
+  config: VmosConfig,
+  padCode: string,
+  targetDescription: string,
+): Promise<WarmupVisualTarget | null> {
+  const state = await classifyThreadsPageOnDevice(config, padCode);
+  if (state.page !== "home_feed") {
+    if (state.page === "login_required" || state.page === "challenge" || state.page === "system_dialog") {
+      throw new Error(`Threads 当前不适合养号：${state.reason}`);
+    }
+    await ensureThreadsHomeFeed(config, padCode);
+    const homeState = await classifyThreadsPageOnDevice(config, padCode);
+    if (homeState.page !== "home_feed") return null;
+    const target = await locateThreadsButtonByVision(homeState.screenshotUrl, targetDescription);
+    return target ? { ...target, screenshotUrl: homeState.screenshotUrl } : null;
+  }
+
+  const target = await locateThreadsButtonByVision(state.screenshotUrl, targetDescription);
+  return target ? { ...target, screenshotUrl: state.screenshotUrl } : null;
+}
+
+async function warmupLocateCurrentScreenTarget(
+  config: VmosConfig,
+  padCode: string,
+  targetDescription: string,
+): Promise<WarmupVisualTarget | null> {
+  const screenshotUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+  const target = await locateThreadsButtonByVision(screenshotUrl, targetDescription);
+  return target ? { ...target, screenshotUrl } : null;
+}
+
+function warmupJitterPoint(point: { x: number; y: number }) {
+  return {
+    x: point.x + warmupRandomInt(-4, 4),
+    y: point.y + warmupRandomInt(-4, 4),
+  };
+}
+
+async function warmupFindLikeButton(
+  config: VmosConfig,
+  padCode: string,
+): Promise<WarmupVisualTarget | null> {
+  const targets = await warmupLocateHomeFeedActions(config, padCode);
+  return targets?.like ? { ...targets.like, screenshotUrl: targets.screenshotUrl } : null;
+}
+
+async function warmupFindCommentButton(
+  config: VmosConfig,
+  padCode: string,
+): Promise<WarmupVisualTarget | null> {
+  const targets = await warmupLocateHomeFeedActions(config, padCode);
+  return targets?.comment
+    ? { ...targets.comment, screenshotUrl: targets.screenshotUrl, debugReason: targets.debugReason }
+    : null;
+}
+
+async function warmupFindCommentInput(
+  config: VmosConfig,
+  padCode: string,
+): Promise<WarmupVisualTarget | null> {
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const xmlTarget = uiXml ? findThreadsReplyComposerInputTarget(uiXml) : null;
+  if (xmlTarget) {
+    const screenshotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    return { ...xmlTarget, screenshotUrl };
+  }
+
+  return warmupLocateCurrentScreenTarget(
+    config,
+    padCode,
+    "Threads 回复或评论页面底部可以输入评论内容的文本输入框中心点",
+  );
+}
+
+async function warmupFindCommentSendButton(
+  config: VmosConfig,
+  padCode: string,
+): Promise<WarmupVisualTarget | null> {
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const xmlTarget = uiXml ? findThreadsReplySendButtonTarget(uiXml) : null;
+  if (xmlTarget) {
+    const screenshotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    return { ...xmlTarget, screenshotUrl };
+  }
+
+  return warmupLocateCurrentScreenTarget(
+    config,
+    padCode,
+    "Threads 评论输入框右侧或键盘上方用于发送/发布回复的按钮中心点",
+  );
+}
+
+export function extractWarmupPostPreviewFromUiXml(uiXml: string): string {
+  const values = Array.from(uiXml.matchAll(/\btext="([^"]+)"/g))
+    .map((match) => match[1]
+      .replace(/&quot;/g, "\"")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .trim())
+    .filter(Boolean);
+  const ignored = /^(关注|已关注|热门|查看动态|分享新鲜事|回复|转发|申文|取消|公开主页|私密主页|\d+|\d+[,.]?\d*次观看)$/;
+  const candidates = values
+    .filter((value) => value.length >= 8 && !ignored.test(value))
+    .filter((value) => !/^[@#]?[a-z0-9_.-]+\s*(\d+\s*(分钟|小时|天)|\d+[mhds])?$/i.test(value));
+  return normalizeSingleLine(candidates.join(" ")).slice(0, 120);
+}
+
+async function warmupExtractPostPreview(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl?: string,
+  options: { allowVisionFallback?: boolean } = {},
+): Promise<string> {
+  const fallbackFromUi = async () => extractWarmupPostPreviewFromUiXml(await dumpUiXml(config, padCode).catch(() => ""));
+  const uiPreview = await fallbackFromUi();
+  if (uiPreview) return uiPreview.slice(0, 80);
+  if (options.allowVisionFallback === false) return "";
+
+  const shotUrl = screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode));
+  const inlineData = await getInlineData(shotUrl).catch(() => null);
+  if (!inlineData) return "";
+
+  const request = createTimeoutSignal(7000);
+  try {
+    const raw = await callGemini(
+      "gemini-3-flash-preview",
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `看这张 Threads 截图，提取当前屏幕中间区域最适合互动的那条帖子正文，最多 80 个中文字符。
+优先提取主帖或当前可见回复上方的原帖内容，不要提取底部输入框、按钮、用户名、时间、点赞数。
+只返回帖子正文，不要解释，不要输出“图片中的文字”。`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 120, temperature: 0 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw))
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .replace(/^帖子正文[:：]\s*/i, "")
+      .trim();
+    const jsonText = text.match(/\{[\s\S]*?\}/)?.[0];
+    if (jsonText) {
+      const parsed = JSON.parse(jsonText);
+      return normalizeSingleLine(String(parsed.text || "")).slice(0, 80);
+    }
+    if (!text || /图片中的文字|無法|无法|看不到|不能/i.test(text)) return "";
+    return text.slice(0, 80);
+  } catch {
+    return "";
+  } finally {
+    request.cleanup();
+  }
+}
+
+export function sanitizeWarmupComment(text: string): string {
+  const cleaned = normalizeSingleLine(text)
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
+    .replace(/^(?:Space|Enter|Backspace|Shift|QWERTY)\s*(?=\p{Script=Han})/iu, "")
+    .replace(/[#@][^\s，。,.!?！？]+/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 80)
+    .trim();
+  return collapseRepeatedWarmupComment(cleaned);
+}
+
+export function hasRepeatedWarmupCommentText(text: string, comment: string): boolean {
+  const normalizedText = normalizeSingleLine(text).replace(/\s+/g, "");
+  const normalizedComment = normalizeSingleLine(comment).replace(/\s+/g, "");
+  if (!normalizedText || !normalizedComment || normalizedComment.length < 3) return false;
+  return normalizedText.includes(`${normalizedComment}${normalizedComment}`);
+}
+
+function hasThreadsReplyComposerRepeatedText(uiXml: string, comment: string): boolean {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  return nodes.some((node) => {
+    const className = getXmlAttr(node, "class");
+    const resourceId = getXmlAttr(node, "resource-id");
+    if (!className.includes("EditText") && !/composer/i.test(resourceId)) return false;
+    const text = decodeXmlAttr(getXmlAttr(node, "text"));
+    return hasRepeatedWarmupCommentText(text, comment);
+  });
+}
+
+function collapseRepeatedWarmupComment(text: string): string {
+  const normalized = normalizeSingleLine(text).trim();
+  const compact = normalized.replace(/\s+/g, "");
+  if (compact.length < 10) return normalized;
+
+  for (let unitLength = 3; unitLength <= Math.floor(compact.length / 2); unitLength += 1) {
+    const unit = compact.slice(0, unitLength);
+    let offset = 0;
+    let repeats = 0;
+    while (compact.slice(offset, offset + unitLength) === unit) {
+      repeats += 1;
+      offset += unitLength;
+    }
+    const tail = compact.slice(offset);
+    const tailIsPartialRepeat = tail.length > 0 && unit.startsWith(tail);
+    if (repeats >= 2 && (offset === compact.length || tailIsPartialRepeat)) {
+      return unit;
+    }
+  }
+
+  const repeatedMiddle = compact.match(/^(.{0,8}?)(.{4,24})\2+(.*)$/u);
+  if (repeatedMiddle) {
+    const prefix = repeatedMiddle[1] || "";
+    const unit = repeatedMiddle[2] || "";
+    const suffix = repeatedMiddle[3] || "";
+    if (!suffix || unit.startsWith(suffix)) {
+      return `${prefix}${unit}`.trim();
+    }
+  }
+
+  return normalized;
+}
+
+function warmupCommentContentLength(comment: string): number {
+  return comment.replace(/\s+/g, "").length;
+}
+
+function isShortLowInfoWarmupPost(postPreview: string): boolean {
+  const compact = normalizeSingleLine(postPreview)
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[#@][^\s，。,.!?！？]+/g, "")
+    .replace(/\s+/g, "");
+  if (!compact) return false;
+  if (/股|投資|投资|買|賣|买|卖|量能|財報|财报|市場|市场|回撤|部位|工作|職場|职场|會議|会议|同事|創業|创业|政策|新聞|新闻/.test(compact)) {
+    return false;
+  }
+  return compact.length <= 12;
+}
+
+function isShortMarketMoodWarmupPost(postPreview: string): boolean {
+  const compact = normalizeSingleLine(postPreview)
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[#@][^\s，。,.!?！？]+/g, "")
+    .replace(/\s+/g, "");
+  if (!compact) return false;
+  return compact.length <= 28
+    && /明天|明日|明早|下週|下周|希望|可能|期待|會變好|会变好|大漲|大涨|轉好|转好/.test(compact)
+    && /股市|台股|股票|市場|市场|行情|盤|盘/.test(compact);
+}
+
+function isUsableShortWarmupReaction(text: string): boolean {
+  const comment = sanitizeWarmupComment(text);
+  const length = warmupCommentContentLength(comment);
+  if (length < 2 || length > 8) return false;
+  if (/[的之和與跟及在]$/.test(comment)) return false;
+  if (collapseRepeatedWarmupComment(comment).replace(/\s+/g, "") !== comment.replace(/\s+/g, "")) return false;
+  if (/^(不错|不錯|支持|好看|认同|認同|学到了|學到了)$/.test(comment)) return false;
+  return /[\p{L}\p{N}]/u.test(comment);
+}
+
+function isThinWarmupComment(comment: string): boolean {
+  const compact = sanitizeWarmupComment(comment).replace(/\s+/g, "");
+  if (!compact) return true;
+  if (/^(這個|这个)?(角度|觀察|观察|分享|內容|内容|感受|日常)(很|蠻|蛮|挺)?(自然|有趣|有意思|值得看|有參考感|有参考感|有共鳴|有共鸣|有畫面|有画面感)$/.test(compact)) {
+    return true;
+  }
+  if (/^(這點|这点|這段|这段|這件事|这件事)(我也)?(有感|能理解|蠻有共鳴|蛮有共鸣)$/.test(compact)) {
+    return true;
+  }
+  if (/^(後續|后续)(變化|变化)?(想再看|想看)$/.test(compact)) {
+    return true;
+  }
+  return false;
+}
+
+function isAwkwardWarmupComment(comment: string): boolean {
+  const compact = sanitizeWarmupComment(comment).replace(/\s+/g, "");
+  if (!compact) return true;
+  if (/那個心臟|那个心脏|心臟明天|心脏明天|那個心情那個|那个心情那个/.test(compact)) return true;
+  if (/^(明天那個|明天那个|那個明天|那个明天)/.test(compact)) return true;
+  if (/明天.{0,4}明天/.test(compact)) return true;
+  return false;
+}
+
+export function isUsableWarmupComment(text: string): boolean {
+  const comment = sanitizeWarmupComment(text);
+  const length = warmupCommentContentLength(comment);
+  if (length < 6 || length > 55) return false;
+  if (/[的之和與跟及在]$/.test(comment)) return false;
+  if (collapseRepeatedWarmupComment(comment).replace(/\s+/g, "") !== comment.replace(/\s+/g, "")) return false;
+  if (isAwkwardWarmupComment(comment)) return false;
+  if (isThinWarmupComment(comment)) return false;
+  if (/^(不错|不錯|支持|好看|很强|很強|真的强|真的強|有意思|认同|認同|学到了|學到了|值得看|继续关注|繼續關注|期待后续|期待後續|说得很到位|說得很到位|确实有启发|確實有啟發|这个点我认同|這個點我認同)$/.test(comment)) {
+    return false;
+  }
+  return /[\p{L}\p{N}]/u.test(comment);
+}
+
+function warmupCommentPersonaText(persona?: WarmupCommentPersona): string {
+  return normalizeSingleLine([
+    persona?.name,
+    persona?.description,
+    persona?.style,
+    persona?.personality,
+    persona?.language,
+    ...(persona?.interests || []),
+  ].filter(Boolean).join(" "));
+}
+
+export function buildWarmupInterestKeywords(
+  persona?: WarmupCommentPersona,
+  explicitKeywords: string[] = [],
+): string[] {
+  const compact = warmupCommentPersonaText(persona);
+  const candidates = [
+    ...explicitKeywords,
+    ...(persona?.interests || []),
+  ];
+  const addIf = (pattern: RegExp, values: string[]) => {
+    if (pattern.test(compact)) candidates.push(...values);
+  };
+  addIf(/理財|投资|投資|股票|台股|港股|金融|财经|財經|交易|market|stock/i, ["台股", "投資", "財經"]);
+  addIf(/咖啡|咖啡館|手搖|飲料|甜點|下午茶/i, ["咖啡", "甜點", "手搖飲"]);
+  addIf(/瑜伽|健身|運動|跑步|健康|減脂|养生|養生/i, ["瑜伽", "健身", "健康生活"]);
+  addIf(/穿搭|時尚|美妝|保養|髮型|日系|可愛/i, ["穿搭", "日系穿搭", "保養"]);
+  addIf(/旅行|風景|城市|日本|韓國|台北|生活/i, ["台北生活", "旅行", "風景"]);
+  addIf(/職場|主管|創業|生意|銷售|管理|上班/i, ["職場", "創業", "上班日常"]);
+  addIf(/媽媽|家庭|孩子|親子|阿姨|熟齡/i, ["熟齡生活", "家庭", "親子"]);
+
+  const inlineMatches = compact.match(/[\p{Script=Han}A-Za-z0-9]{2,10}/gu) || [];
+  for (const token of inlineMatches) {
+    if (/^(人設|人格|台灣地區|繁體中文|自然口語|故事化|真實|直接|風格|性格|不限)$/.test(token)) continue;
+    if (/^[A-Za-z0-9]{1,3}$/.test(token)) continue;
+    candidates.push(token);
+  }
+
+  const seen = new Set<string>();
+  return candidates
+    .map((item) => normalizeSingleLine(String(item || "")).replace(/^#/, "").trim())
+    .filter((item) => item.length >= 2 && item.length <= 12)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 8);
+}
+
+async function warmupMaybeSearchInterest(
+  config: VmosConfig,
+  padCode: string,
+  cfg: WarmupConfig,
+  report: (step: string) => void,
+) {
+  const browseCount = Math.max(0, Math.floor(Number(cfg.browseCount) || 0));
+  if (browseCount < 5) return;
+
+  const keywords = buildWarmupInterestKeywords(cfg.commentPersona, cfg.keywords || []);
+  if (!keywords.length) return;
+
+  const riskManaged = cfg.riskManaged !== false;
+  const chance = Math.max(0, Math.min(100, cfg.searchChance ?? (riskManaged ? 16 : 24)));
+  if (chance <= 0 || Math.random() * 100 >= chance) return;
+
+  const keyword = keywords[warmupRandomInt(0, keywords.length - 1)];
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  const point = (xRatio: number, yRatio: number) => ({
+    x: Math.round(screen.width * xRatio),
+    y: Math.round(screen.height * yRatio),
+  });
+
+  report(`按人设兴趣搜索阅读：${keyword}`);
+  try {
+    const beforeXml = await dumpUiXml(config, padCode).catch(() => "");
+    const searchTab = beforeXml ? findThreadsBottomSearchTabTarget(beforeXml) : null;
+    await warmupTapAbsoluteHuman(config, padCode, searchTab || point(0.28, 0.955), warmupRandomInt(900, 1400), 8);
+
+    const searchXml = await dumpUiXml(config, padCode).catch(() => "");
+    const searchInput = searchXml ? findThreadsSearchInputTarget(searchXml) : null;
+    await warmupTapAbsoluteHuman(config, padCode, searchInput || point(0.42, 0.09), warmupRandomInt(650, 1050), 8);
+    await typeText(config, padCode, keyword, warmupRandomInt(1000, 1600));
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_ENTER", 8_000, 700).catch(() => "");
+    await warmupWaitForScrollSettle(1800, 3200);
+    await warmupDwellLikeHuman(config, padCode, warmupRandomInt(1800, 4200)).catch(() => undefined);
+    if (Math.random() < 0.70) {
+      await warmupScrollDown(config, padCode).catch(() => undefined);
+      await warmupDwellLikeHuman(config, padCode, warmupRandomInt(1500, 3600)).catch(() => undefined);
+    }
+  } catch (error) {
+    report(`兴趣搜索失败，回推荐流继续：${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    await relaunchThreads(config, padCode, 2800).catch(() => undefined);
+    const afterScreen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    await warmupTapAbsoluteHuman(
+      config,
+      padCode,
+      { x: Math.round(afterScreen.width * 0.11), y: Math.round(afterScreen.height * 0.955) },
+      warmupRandomInt(700, 1200),
+      8,
+    ).catch(() => undefined);
+    if (!isAcpPad(padCode)) {
+      await ensureThreadsHomeFeed(config, padCode, () => undefined).catch(() => undefined);
+    }
+  }
+}
+
+function resolveWarmupCommentLanguage(persona?: WarmupCommentPersona): string {
+  const hint = warmupCommentPersonaText(persona).toLowerCase();
+  if (/english|英文/.test(hint)) return "英文";
+  if (/日本語|日文|japanese/.test(hint)) return "日文";
+  if (/粵語|粤语|廣東話|广东话|香港|hong\s*kong|cantonese/.test(hint)) return "香港繁體中文";
+  if (/简体|簡體|大陆|大陸|mainland|zh-cn/.test(hint)) return "简体中文";
+  return "台灣地區繁體中文";
+}
+
+function fallbackWarmupComment(
+  postPreview: string,
+  templates: string[] = [],
+  persona?: WarmupCommentPersona,
+): string {
+  const explicit = templates.map(sanitizeWarmupComment).filter(isUsableWarmupComment);
+  if (explicit.length) return explicit[warmupRandomInt(0, explicit.length - 1)];
+
+  const text = postPreview.toLowerCase();
+  if (isShortMarketMoodWarmupPost(postPreview)) {
+    const comments = resolveWarmupCommentLanguage(persona) === "英文"
+      ? ["Hope market goes up tomorrow", "Fingers crossed for tomorrow", "Hope tomorrow is green"]
+      : ["期待", "希望明天股市大漲", "希望明天轉好", "明天開盤加油", "希望明天一片紅"];
+    return comments[warmupRandomInt(0, comments.length - 1)];
+  }
+  if (isShortLowInfoWarmupPost(postPreview)) {
+    const shortDefaults = resolveWarmupCommentLanguage(persona) === "英文"
+      ? ["Yeah really", "True lol", "So real"]
+      : ["真的欸", "哈哈真的", "也太懂", "笑死真的", "有夠真"];
+    return shortDefaults[warmupRandomInt(0, shortDefaults.length - 1)];
+  }
+  const personaText = warmupCommentPersonaText(persona);
+  const personaIsFinance = /理財|投資|金融|股|財經|财经|market|stock|trade/i.test(personaText);
+  const personaIsElegant = /知性|優雅|优雅|細膩|细腻|克制|專業|专业/i.test(personaText);
+  const personaIsCasual = /口語|口语|生活|碎碎念|幽默|搞笑|日常|鬆弛|松弛/i.test(personaText);
+
+  if (/朋友|同事|大家|你們|你们/.test(text) && /賺|赚|獲利|获利|飆|涨|漲/.test(text)) {
+    const comments = [
+      "大家都賺時更要看風險",
+      "朋友都賺反而要控部位",
+      "熱度起來更要留退路",
+    ];
+    return comments[warmupRandomInt(0, comments.length - 1)];
+  }
+  if (/股|投資|投资|買|卖|財報|财报|市場|市场|price|stock|market/.test(text)) {
+    const stockTopic = postPreview.match(/[A-Z0-9]{3,6}|[\u4e00-\u9fff]{2,8}(?:股|板|基板|材料|市場|市场|投資|投资|財報|财报|走勢|走势)/)?.[0];
+    const topic = stockTopic ? sanitizeWarmupComment(stockTopic) : "";
+    const comments = topic
+      ? [
+          `${topic}先看量能能不能續`,
+          `${topic}追高前要看回撤`,
+          `${topic}有量才比較能續`,
+        ]
+      : [
+          "追高前還是要看回撤",
+          "量能續不續才是重點",
+          "部位控好比較睡得著",
+        ];
+    return comments[warmupRandomInt(0, comments.length - 1)];
+  }
+  if (/生活|日常|旅行|吃|喝|心情/.test(text)) {
+    const comments = personaIsElegant
+      ? ["這種細節真的很像生活", "慢下來那刻最有感", "這個場景讓人想停一下"]
+      : ["這種日常反而最療癒", "這個瞬間真的很生活", "這種心情我懂"];
+    return comments[warmupRandomInt(0, comments.length - 1)];
+  }
+  if (/工作|上班|同事|會議|会议|簡報|简报|加班|職場|职场/.test(text)) {
+    const comments = [
+      "職場裡這種細節最耗神",
+      "這種溝通成本真的不低",
+      "會議前先對齊很重要",
+    ];
+    return comments[warmupRandomInt(0, comments.length - 1)];
+  }
+  const topic = postPreview
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[#@][^\s，。,.!?！？]+/g, "")
+    .match(/[\u4e00-\u9fffA-Za-z0-9]{3,14}/)?.[0];
+  if (topic) {
+    const topicComments = [
+      `${topic}這裡可以再拆細`,
+      `${topic}後面變化才關鍵`,
+      `${topic}這段判斷蠻實際`,
+    ];
+    return sanitizeWarmupComment(topicComments[warmupRandomInt(0, topicComments.length - 1)]);
+  }
+  const defaults = personaIsFinance
+    ? ["先看風險再談機會", "節奏太熱時要留退路", "這種行情別把倉位打滿"]
+    : personaIsCasual
+      ? ["這種小細節才真實", "先看後面怎麼發展", "這種狀況很容易共感"]
+      : [
+          "先看後續怎麼落地",
+          "脈絡補上會更好判斷",
+          "這種判斷要看脈絡",
+          "細節補上會更好判斷",
+          "這件事關鍵在後續",
+        ];
+  return defaults[warmupRandomInt(0, defaults.length - 1)];
+}
+
+function fallbackAcpAsciiWarmupComment(postPreview: string): string {
+  const text = postPreview.toLowerCase();
+  if (/stock|market|price|invest|trade|股|投資|投资|買|卖|市場|市场/.test(text)) {
+    return "Useful market view thanks";
+  }
+  if (/life|travel|food|日常|旅行|生活|心情/.test(text)) {
+    return "Nice slice of daily life";
+  }
+  const defaults = [
+    "Useful context thanks",
+    "Good point worth noting",
+    "Helpful view thanks",
+    "Nice insight worth a look",
+  ];
+  return defaults[warmupRandomInt(0, defaults.length - 1)];
+}
+
+function isGenericWarmupComment(comment: string): boolean {
+  const normalized = normalizeSingleLine(comment);
+  return isThinWarmupComment(normalized)
+    || /^(这个角度很有意思|這個角度很有意思|说得很到位|說得很到位|这个分享值得参考|這個分享值得參考|确实有启发|確實有啟發|这个点我认同|這個點我認同|这个分享很有共鸣|這個分享很有共鳴|這段觀察蠻值得看|這個角度很有參考感|後續變化想再看|這點我也有感|這段真的蠻有畫面|想看後續怎麼走|這個角度很自然|這段分享蠻有共鳴|這個觀察值得再看|這件事很有畫面感|這點我能理解)$/.test(normalized);
+}
+
+export function finalizeWarmupComment(
+  text: string,
+  postPreview: string,
+  templates: string[] = [],
+  persona?: WarmupCommentPersona,
+): string {
+  const comment = sanitizeWarmupComment(text);
+  if (isShortMarketMoodWarmupPost(postPreview)) {
+    const shortMarketComment = warmupCommentContentLength(comment) <= 12
+      && /期待|希望|明天|明日|大漲|大涨|轉好|转好|開盤|开盘|加油|green|tomorrow|market/i.test(comment)
+      && !isAwkwardWarmupComment(comment)
+      ? comment
+      : "";
+    return shortMarketComment || fallbackWarmupComment(postPreview, templates, persona);
+  }
+  if (isShortLowInfoWarmupPost(postPreview) && isUsableShortWarmupReaction(comment)) return comment;
+  if (comment && isUsableWarmupComment(comment) && !isGenericWarmupComment(comment)) return comment;
+  return fallbackWarmupComment(postPreview, templates, persona);
+}
+
+async function warmupGenerateCommentForPost(
+  postPreview: string,
+  templates: string[] = [],
+  persona?: WarmupCommentPersona,
+): Promise<string> {
+  const cleanedPreview = normalizeSingleLine(postPreview).slice(0, 180);
+  if (!cleanedPreview) return fallbackWarmupComment(cleanedPreview, templates, persona);
+  if (!getGeminiEndpoint().apiKey) return fallbackWarmupComment(cleanedPreview, templates, persona);
+
+  const request = createTimeoutSignal(7000);
+  try {
+    const templateHint = templates.length
+      ? `\n可参考这些语气模板，但不要照抄：${templates.map((t) => `「${sanitizeWarmupComment(t)}」`).filter(Boolean).join("、")}`
+      : "";
+    const personaHint = warmupCommentPersonaText(persona);
+    const language = resolveWarmupCommentLanguage(persona);
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [{
+          text: `根據下面這條 Threads 推文內容，寫一條自然、簡短、像真人隨手留下的留言。
+
+要求：
+- 只輸出留言本身，不要解釋。
+- 語言：${language}；若人設明確指定其他語言，以人設為準，否則使用台灣地區繁體中文。
+- 如果原帖本身很短或只是情緒句，可以只回 2 到 8 個有效字的自然語氣反應，例如「真的欸」「哈哈真的」「也太懂」，不要硬拉長。
+- 如果原帖只是短句祝願行情變好，例如「明天股市心情會變好」，只回「期待」「希望明天股市大漲」「希望明天轉好」這類簡單短句，不要硬湊比喻或奇怪名詞。
+- 如果原帖有明確資訊量，回 8 到 28 個有效字即可，留言要帶出原帖中的具體名詞、場景、風險、情緒或判斷。
+- 必須是完整短句，不要停在“的”“和”“在”這類未完成語尾。
+- 不要重複同一個詞或同一句話，不可輸出「這個角度很自然這個角度很自然」這類拼接內容。
+- 內容必須貼合推文內容，不要泛泛說“不錯”“支持”“這個角度很自然”“這段分享蠻有共鳴”。
+- 語氣要符合留言帳號人設：${personaHint || "未指定，使用台灣 Threads 自然口語"}。
+- 不要使用 hashtag、@、連結、表情符號、逗號、句號、問號、驚嘆號或任何標點符號。
+- 不要提到你是 AI 或自動化。
+${templateHint}
+
+目標推文：${cleanedPreview}`,
+        }],
+      }],
+      { maxOutputTokens: 80, temperature: 0.75 },
+      request.signal,
+    );
+    return finalizeWarmupComment(extractText(raw), cleanedPreview, templates, persona);
+  } catch {
+    return fallbackWarmupComment(cleanedPreview, templates, persona);
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function warmupGenerateCommentFromScreenshot(
+  screenshotUrl: string | undefined,
+  templates: string[] = [],
+  persona?: WarmupCommentPersona,
+): Promise<{ comment: string; preview: string }> {
+  if (!screenshotUrl || !getGeminiEndpoint().apiKey) {
+    return { comment: fallbackWarmupComment("", templates, persona), preview: "" };
+  }
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return { comment: fallbackWarmupComment("", templates, persona), preview: "" };
+
+  const request = createTimeoutSignal(12000);
+  try {
+    const templateHint = templates.length
+      ? `\n可参考这些语气模板，但不要照抄：${templates.map((t) => `「${sanitizeWarmupComment(t)}」`).filter(Boolean).join("、")}`
+      : "";
+    const personaHint = warmupCommentPersonaText(persona);
+    const language = resolveWarmupCommentLanguage(persona);
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `看圖，基於 Threads 畫面中最適合互動的一條帖子寫一句自然留言，並提取帖子摘要。
+留言語言：${language}；若人設沒有明確指定語言，預設台灣地區繁體中文。
+留言人設：${personaHint || "未指定，使用台灣 Threads 自然口語"}。
+如果帖子本身很短或只是情緒句，可以只回 2 到 8 個有效字的自然語氣反應，例如「真的欸」「哈哈真的」「也太懂」，不要硬拉長。
+如果帖子有明確資訊量，評論必須貼合具體內容，8 到 28 個有效字即可，要帶出畫面中的具體名詞、場景、風險、情緒或判斷。
+不要 hashtag、@、連結、表情符號、逗號、句號、問號、驚嘆號或任何標點符號，不要泛泛說“這個角度很有意思”“這個點我認同”“值得參考”“這個角度很自然”“這段分享蠻有共鳴”。
+不要重複同一個詞或同一句話，不可輸出「這個角度很自然這個角度很自然」這類拼接內容。
+留言必須是完整短句，不要停在“的”“和”“在”這類未完成語尾。
+${templateHint}
+只按這個格式返回：評論|帖子摘要`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 120, temperature: 0.75 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw));
+    if (text.includes("|")) {
+      const [commentPart, ...previewParts] = text.split("|");
+      const preview = normalizeSingleLine(previewParts.join("|")).slice(0, 80);
+      const comment = finalizeWarmupComment(commentPart, preview, templates, persona);
+      return {
+        comment,
+        preview,
+      };
+    }
+    const jsonText = text.match(/\{[\s\S]*?\}/)?.[0];
+    if (jsonText) {
+      const parsed = JSON.parse(jsonText);
+      const preview = normalizeSingleLine(String(parsed.preview || "")).slice(0, 80);
+      const comment = finalizeWarmupComment(String(parsed.comment || ""), preview, templates, persona);
+      return {
+        comment,
+        preview,
+      };
+    }
+    return { comment: finalizeWarmupComment(text, "", templates, persona), preview: "" };
+  } catch {
+    return { comment: fallbackWarmupComment("", templates, persona), preview: "" };
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function warmupExecuteLikeAtPoint(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+  screenshotUrl?: string,
+): Promise<{ x: number; y: number }> {
+  if (screenshotUrl) {
+    const result = await warmupTapScreenshotPointHuman(config, padCode, screenshotUrl, point, warmupRandom(1500, 2200), 4);
+    return result.imagePoint;
+  }
+  return await warmupTapAbsoluteHuman(config, padCode, point, warmupRandom(1500, 2200), 4);
+}
+
+async function detectThreadsDetailActionRowLocally(
+  screenshotUrl: string,
+): Promise<{ like?: { x: number; y: number }; comment?: { x: number; y: number }; debugRaw?: string } | null> {
+  try {
+    const pixels = await getImagePixelData(screenshotUrl);
+    if (!pixels) return null;
+    const { data, width, height } = pixels;
+    const visited = new Uint8Array(width * height);
+    const startX = Math.max(0, Math.floor(width * 0.015));
+    const endX = Math.min(width - 1, Math.floor(width * 0.62));
+    const startY = Math.max(0, Math.floor(height * 0.22));
+    const endY = Math.min(height - 1, Math.floor(height * 0.84));
+
+    const isDarkPixel = (index: number) => {
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const a = data[index + 3];
+      if (a < 110) return false;
+      const value = (r + g + b) / 3;
+      const spread = Math.max(r, g, b) - Math.min(r, g, b);
+      return value < 125 && (spread < 70 || value < 75);
+    };
+
+    const components: Array<{ x: number; y: number; width: number; height: number; count: number; score: number }> = [];
+    for (let y = startY; y <= endY; y += 1) {
+      for (let x = startX; x <= endX; x += 1) {
+        const start = y * width + x;
+        if (visited[start]) continue;
+        visited[start] = 1;
+        if (!isDarkPixel(start * 4)) continue;
+        const queue = [start];
+        let cursor = 0;
+        let count = 0;
+        let minX = x;
+        let maxX = x;
+        let minY = y;
+        let maxY = y;
+        while (cursor < queue.length) {
+          const current = queue[cursor++];
+          const cy = Math.floor(current / width);
+          const cx = current % width;
+          count += 1;
+          minX = Math.min(minX, cx);
+          maxX = Math.max(maxX, cx);
+          minY = Math.min(minY, cy);
+          maxY = Math.max(maxY, cy);
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx < startX || nx > endX || ny < startY || ny > endY) continue;
+              const next = ny * width + nx;
+              if (visited[next]) continue;
+              visited[next] = 1;
+              if (isDarkPixel(next * 4)) queue.push(next);
+            }
+          }
+        }
+        const boxWidth = maxX - minX + 1;
+        const boxHeight = maxY - minY + 1;
+        const density = count / Math.max(boxWidth * boxHeight, 1);
+        if (count < 10 || count > 1100) continue;
+        if (boxWidth < 6 || boxWidth > width * 0.12) continue;
+        if (boxHeight < 6 || boxHeight > height * 0.06) continue;
+        if (density < 0.08) continue;
+        const centerX = Math.round((minX + maxX) / 2);
+        const centerY = Math.round((minY + maxY) / 2);
+        components.push({
+          x: centerX,
+          y: centerY,
+          width: boxWidth,
+          height: boxHeight,
+          count,
+          score: count + (boxWidth >= 14 && boxHeight >= 12 ? 45 : 0),
+        });
+      }
+    }
+
+    const sorted = components.sort((a, b) => a.y - b.y || a.x - b.x);
+    const rowBand = Math.max(22, Math.round(height * 0.02));
+    const rows = sorted.map((seed) => {
+      const row = sorted
+        .filter((item) => Math.abs(item.y - seed.y) <= rowBand)
+        .filter((item) => item.x >= width * 0.025 && item.x <= width * 0.58)
+        .sort((a, b) => a.x - b.x);
+      const deduped: typeof components = [];
+      for (const item of row) {
+        const prev = deduped[deduped.length - 1];
+        if (prev && Math.abs(prev.x - item.x) < Math.max(18, width * 0.025)) {
+          if (item.score > prev.score) deduped[deduped.length - 1] = item;
+        } else {
+          deduped.push(item);
+        }
+      }
+      const first = deduped[0];
+      const second = deduped[1];
+      if (!first || !second) return null;
+      const spacing = second.x - first.x;
+      if (first.x > width * 0.13) return null;
+      if (spacing < width * 0.10 || spacing > width * 0.25) return null;
+      const rowY = Math.round(deduped.reduce((sum, item) => sum + item.y, 0) / deduped.length);
+      let score = deduped.slice(0, 4).reduce((sum, item) => sum + item.score, 0);
+      score += Math.max(0, 120 - Math.abs(first.x - width * 0.06) * 2);
+      score += Math.max(0, 90 - Math.abs(second.x - width * 0.23) * 1.5);
+      score += deduped.length >= 3 ? 50 : 0;
+      if (rowY < height * 0.28 || rowY > height * 0.78) score -= 70;
+      return { y: rowY, icons: deduped, score };
+    }).filter(Boolean) as Array<{ y: number; icons: typeof components; score: number }>;
+
+    const best = rows.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+    if (!best || best.score < 120) return null;
+    const preview = best.icons.slice(0, 5).map((item) => `${item.x},${item.y},${item.width}x${item.height},c${item.count}`).join(";");
+    const likeIcon = best.icons[0];
+    const commentIcon = best.icons[1];
+    return {
+      like: likeIcon ? { x: likeIcon.x, y: best.y } : undefined,
+      comment: commentIcon ? { x: commentIcon.x, y: best.y } : undefined,
+      debugRaw: `detail_row_score=${Math.round(best.score)};rowY=${best.y};icons=${preview}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function annotateWarmupActionScreenshot(
+  screenshotUrl: string,
+  point: { x: number; y: number },
+  label: string,
+): Promise<string> {
+  try {
+    const inline = await getInlineData(screenshotUrl);
+    if (!inline) return screenshotUrl;
+    const sharp = (await import("sharp")).default;
+    const input = Buffer.from(inline.data, "base64");
+    const metadata = await sharp(input).metadata();
+    const width = metadata.width || BASE_SCREEN.width;
+    const height = metadata.height || BASE_SCREEN.height;
+    const pointLooksLikeImageCoords = point.x >= 0 && point.x <= width && point.y >= 0 && point.y <= height;
+    const x = Math.max(0, Math.min(width - 1, Math.round(pointLooksLikeImageCoords ? point.x : point.x * width / BASE_SCREEN.width)));
+    const y = Math.max(0, Math.min(height - 1, Math.round(pointLooksLikeImageCoords ? point.y : point.y * height / BASE_SCREEN.height)));
+    const r = Math.max(28, Math.round(Math.min(width, height) * 0.035));
+    const fontSize = Math.max(24, Math.round(Math.min(width, height) * 0.028));
+    const labelY = Math.max(fontSize + 10, y - r - 8);
+    const safeLabel = label.replace(/[<>&"]/g, "");
+    const labelWidth = Math.min(width - 12, safeLabel.length * fontSize * 0.68 + 18);
+    const preferredRightX = x + r + 10;
+    const labelRectX = preferredRightX + labelWidth + 6 <= width
+      ? Math.max(6, preferredRightX - 6)
+      : Math.max(6, Math.min(width - labelWidth - 6, x - r - labelWidth - 10));
+    const labelX = labelRectX + 6;
+    const overlay = Buffer.from(`
+      <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="#ff1744" stroke-width="8"/>
+        <circle cx="${x}" cy="${y}" r="8" fill="#ff1744" stroke="#ffffff" stroke-width="4"/>
+        <line x1="${Math.max(0, x - r - 14)}" y1="${y}" x2="${Math.min(width, x + r + 14)}" y2="${y}" stroke="#ff1744" stroke-width="5"/>
+        <line x1="${x}" y1="${Math.max(0, y - r - 14)}" x2="${x}" y2="${Math.min(height, y + r + 14)}" stroke="#ff1744" stroke-width="5"/>
+        <rect x="${labelRectX}" y="${Math.max(6, labelY - fontSize - 8)}" width="${labelWidth}" height="${fontSize + 16}" rx="8" fill="#ff1744" opacity="0.92"/>
+        <text x="${labelX}" y="${labelY}" font-family="Arial, sans-serif" font-size="${fontSize}" font-weight="700" fill="#ffffff">${safeLabel}</text>
+      </svg>
+    `);
+    const annotated = await sharp(input)
+      .composite([{ input: overlay, top: 0, left: 0 }])
+      .jpeg({ quality: 88 })
+      .toBuffer();
+    const cropHeight = Math.min(height, Math.max(420, Math.round(height * 0.46)));
+    const cropTop = Math.max(0, Math.min(height - cropHeight, Math.round(y - cropHeight * 0.48)));
+    const output = await sharp(annotated)
+      .extract({ left: 0, top: cropTop, width, height: cropHeight })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${output.toString("base64")}`;
+  } catch {
+    return screenshotUrl;
+  }
+}
+
+function escapeXmlText(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function buildWarmupCommentEvidenceScreenshot(
+  beforeSendUrl: string,
+  afterSendUrl: string,
+  comment = "",
+): Promise<string> {
+  try {
+    const [beforeInline, afterInline] = await Promise.all([
+      getInlineData(beforeSendUrl),
+      getInlineData(afterSendUrl),
+    ]);
+    if (!beforeInline || !afterInline) return beforeSendUrl;
+    const sharp = (await import("sharp")).default;
+    const width = 720;
+    const panelHeight = 720;
+    const headerHeight = 48;
+    const cropPanel = async (inline: { data: string }, focus: "after" | "before") => {
+      const resized = await sharp(Buffer.from(inline.data, "base64"))
+        .resize({ width })
+        .jpeg({ quality: 90 })
+        .toBuffer();
+      const meta = await sharp(resized).metadata();
+      const resizedHeight = meta.height || panelHeight;
+      if (focus === "after") {
+        return sharp(resized)
+          .resize({ width, height: panelHeight, fit: "contain", background: "#ffffff" })
+          .jpeg({ quality: 90 })
+          .toBuffer();
+      }
+      const cropHeight = Math.min(panelHeight, resizedHeight);
+      const top = Math.max(0, resizedHeight - cropHeight);
+      return sharp(resized)
+        .extract({ left: 0, top, width, height: cropHeight })
+        .extend({
+          top: 0,
+          bottom: panelHeight - cropHeight,
+          left: 0,
+          right: 0,
+          background: "#ffffff",
+        })
+        .jpeg({ quality: 90 })
+        .toBuffer();
+    };
+    const beforePanel = await cropPanel(beforeInline, "before");
+    const afterPanel = await cropPanel(afterInline, "after");
+    const safeComment = escapeXmlText(comment ? ` ${comment.slice(0, 32)}` : "");
+    const overlay = Buffer.from(`
+      <svg width="${width}" height="${(panelHeight + headerHeight) * 2}" xmlns="http://www.w3.org/2000/svg">
+        <rect x="0" y="0" width="${width}" height="${headerHeight}" fill="#111111"/>
+        <text x="24" y="32" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#ffffff">AFTER SEND: posted reply visible${safeComment}</text>
+        <rect x="0" y="${panelHeight + headerHeight}" width="${width}" height="${headerHeight}" fill="#111111"/>
+        <text x="24" y="${panelHeight + headerHeight + 32}" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#ffffff">BEFORE SEND: typed reply visible</text>
+      </svg>
+    `);
+    const output = await sharp({
+      create: {
+        width,
+        height: (panelHeight + headerHeight) * 2,
+        channels: 3,
+        background: "#ffffff",
+      },
+    })
+      .composite([
+        { input: afterPanel, top: headerHeight, left: 0 },
+        { input: beforePanel, top: panelHeight + headerHeight * 2, left: 0 },
+        { input: overlay, top: 0, left: 0 },
+      ])
+      .jpeg({ quality: 88 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${output.toString("base64")}`;
+  } catch {
+    return beforeSendUrl;
+  }
+}
+
+async function warmupTryLikeFromThreadDetail(
+  config: VmosConfig,
+  padCode: string,
+  currentShotUrl: string,
+): Promise<{ point: { x: number; y: number }; screenshotUrl: string } | null> {
+  const localActions = await detectThreadsDetailActionRowLocally(currentShotUrl);
+  if (localActions?.like) {
+    if (await detectThreadsWarmupLikeConfirmedVisually(currentShotUrl, localActions.like)) {
+      return { point: localActions.like, screenshotUrl: currentShotUrl };
+    }
+    await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, localActions.like, 1600);
+    const screenshotUrl = await screenshot(config, padCode)
+      .then((url) => freezeScreenshotUrl(url));
+    return { point: localActions.like, screenshotUrl };
+  }
+
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const replyInput = uiXml ? findThreadsReplyComposerInputTarget(uiXml) : null;
+  if (!replyInput) return null;
+
+  const visualLike = await locateThreadsButtonByVision(
+    currentShotUrl,
+    "Threads 串文详情页里当前帖子图片或正文外部的互动栏空心爱心/未点赞按钮中心点；它通常在左侧，和评论气泡、转发、纸飞机在同一行；不要选择图片内容内部的图案、股票图表、文字或底部回复输入框",
+  );
+  const image = await getImageDimensions(currentShotUrl).catch(() => null);
+  const detailFallbackY = Math.round((image?.height || BASE_SCREEN.height) * 0.25);
+  const point = visualLike && visualLike.x <= 180 && visualLike.y >= (image?.height || BASE_SCREEN.height) * 0.18
+      ? visualLike
+      : {
+          x: Math.round((image?.width || BASE_SCREEN.width) * 0.058),
+          y: Math.max(detailFallbackY, Math.min((image?.height || BASE_SCREEN.height) - 220, replyInput.y - Math.round((image?.height || BASE_SCREEN.height) * 0.62))),
+        };
+  if (await detectThreadsWarmupLikeConfirmedVisually(currentShotUrl, point)) {
+    return { point, screenshotUrl: currentShotUrl };
+  }
+  await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, point, 1600);
+  const screenshotUrl = await screenshot(config, padCode)
+    .then((url) => freezeScreenshotUrl(url));
+  return { point, screenshotUrl };
+}
+
+async function warmupCaptureLikeScreenshot(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string | undefined> {
+  return withTimeout(
+    screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+    isAcpPad(padCode) ? 8_000 : 15_000,
+    "warmup like screenshot timeout",
+  )
+    .catch(() => undefined);
+}
+
+async function warmupVerifyLikeAfterTap(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl: string | undefined,
+  point: { x: number; y: number },
+  _beforeScreenshotUrl?: string,
+): Promise<{ verified: boolean; point: { x: number; y: number }; screenshotUrl?: string; movedToDetail: boolean }> {
+  let shotUrl = screenshotUrl;
+  let evidencePoint = point;
+  let movedToDetail = false;
+  if (shotUrl && !isAcpPad(padCode)) {
+    const detailLike = await warmupTryLikeFromThreadDetail(config, padCode, shotUrl).catch(() => null);
+    if (detailLike) {
+      shotUrl = detailLike.screenshotUrl;
+      evidencePoint = detailLike.point;
+      movedToDetail = true;
+    }
+  }
+  let verified = await detectThreadsWarmupLikeConfirmedVisually(shotUrl, evidencePoint);
+  if (!verified) {
+    await delay(900);
+    const retryShotUrl = await warmupCaptureLikeScreenshot(config, padCode);
+    if (retryShotUrl) {
+      const retryVerified = await detectThreadsWarmupLikeConfirmedVisually(retryShotUrl, evidencePoint);
+      if (retryVerified) {
+        shotUrl = retryShotUrl;
+        verified = true;
+      }
+    }
+  }
+  return { verified, point: evidencePoint, screenshotUrl: shotUrl, movedToDetail };
+}
+
+async function warmupTryLikeViaThreadDetail(
+  config: VmosConfig,
+  padCode: string,
+  actions: WarmupFeedActionTargets | null | undefined,
+): Promise<{ ok: boolean; message: string; point?: { x: number; y: number }; screenshotUrl?: string; movedToDetail?: boolean } | null> {
+  if (!actions?.comment) return null;
+  const commentPoint = { x: Math.round(actions.comment.x), y: Math.round(actions.comment.y) };
+  if (actions.screenshotUrl) {
+    await tapScreenshotPointViaAdb(config, padCode, actions.screenshotUrl, commentPoint, 2600);
+  } else {
+    await tapViaAdbAbsolute(config, padCode, commentPoint.x, commentPoint.y, 2600);
+  }
+  await handleThreadsWarmupCommentPrivacyPrompt(config, padCode).catch(() => false);
+  const detailShot = await warmupCaptureLikeScreenshot(config, padCode);
+  if (!detailShot) return { ok: false, message: "已打开详情页，但截图失败", movedToDetail: true };
+  const detailLike = await warmupTryLikeFromThreadDetail(config, padCode, detailShot).catch(() => null);
+  if (!detailLike) {
+    return { ok: false, message: `已点评论进入详情，但未找到详情页爱心（comment=${commentPoint.x},${commentPoint.y}）`, screenshotUrl: detailShot, movedToDetail: true };
+  }
+  const verified = await detectThreadsWarmupLikeConfirmedVisually(detailLike.screenshotUrl, detailLike.point);
+  if (!verified) {
+    return { ok: false, message: `详情页点赞后未确认红心（like=${Math.round(detailLike.point.x)},${Math.round(detailLike.point.y)}）`, point: detailLike.point, screenshotUrl: detailLike.screenshotUrl, movedToDetail: true };
+  }
+  return {
+    ok: true,
+    message: "详情页点赞确认成功",
+    point: detailLike.point,
+    screenshotUrl: detailLike.screenshotUrl,
+    movedToDetail: true,
+  };
+}
+
+async function warmupAttemptLikeOnCurrentScreen(
+  config: VmosConfig,
+  padCode: string,
+  actions?: WarmupFeedActionTargets | null,
+  options: { avoidHomeRecovery?: boolean } = {},
+): Promise<{ ok: boolean; message: string; point?: { x: number; y: number }; screenshotUrl?: string; movedToDetail?: boolean }> {
+  let currentActions = actions;
+  const errors: string[] = [];
+  const avoidHomeRecovery = options.avoidHomeRecovery || isAcpPad(padCode);
+  if (isAcpPad(padCode)) {
+    currentActions ||= await warmupLocateCurrentAcpActions(config, padCode).catch((error: any) => {
+      errors.push(`定位异常:${error?.message || String(error)}`);
+      return null;
+    });
+    if (!currentActions?.like) {
+      return {
+        ok: false,
+        message: currentActions?.debugReason || errors.filter(Boolean).slice(-2).join("；") || "未找到点赞按钮",
+        screenshotUrl: currentActions?.screenshotUrl,
+      };
+    }
+    await warmupWaitForScrollSettle(650, 1100);
+    const freshActions = await warmupLocateCurrentAcpActions(config, padCode).catch((error: any) => {
+      errors.push(`点击前重定位异常:${error?.message || String(error)}`);
+      return null;
+    });
+    if (freshActions?.like) {
+      currentActions = freshActions;
+    } else if (freshActions?.debugReason) {
+      return {
+        ok: false,
+        message: `点击前重定位未找到点赞按钮：${freshActions.debugReason}`,
+        screenshotUrl: freshActions.screenshotUrl || currentActions.screenshotUrl,
+      };
+    }
+    const point = currentActions.like;
+    const beforeShotUrl = currentActions.screenshotUrl;
+    const tapPoint = await warmupExecuteLikeAtPoint(config, padCode, point, currentActions.screenshotUrl);
+    const shotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      8_000,
+      "warmup acp like evidence screenshot timeout",
+    ).catch(() => currentActions?.screenshotUrl);
+    const verified = await detectThreadsWarmupLikeConfirmedVisually(shotUrl, tapPoint).catch(() => false);
+    if (!verified) {
+      const debugPath = saveThreadsDebugScreenshot(shotUrl, "warmup-acp-like-unconfirmed");
+      return {
+        ok: false,
+        message: `ACP 点赞点击后未确认红心或点赞数变化（target=${Math.round(point.x)},${Math.round(point.y)} tap=${Math.round(tapPoint.x)},${Math.round(tapPoint.y)}${debugPath ? ` debug=${debugPath}` : ""}）`,
+        point: tapPoint,
+        screenshotUrl: shotUrl,
+      };
+    }
+    return {
+      ok: true,
+      message: `ACP 快速点赞已确认（target=${Math.round(point.x)},${Math.round(point.y)} tap=${Math.round(tapPoint.x)},${Math.round(tapPoint.y)}）`,
+      point: tapPoint,
+      screenshotUrl: shotUrl,
+    };
+  }
+  const recoverForNextTarget = async () => {
+    if (avoidHomeRecovery) {
+      await warmupSafeBackOrRelaunchThreads(config, padCode, 800).catch(() => null);
+      return;
+    }
+    await ensureThreadsHomeFeed(config, padCode).catch(() => undefined);
+    await delay(1200);
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await dismissThreadsWarmupProfilePopup(config, padCode, currentActions?.screenshotUrl).catch(() => false);
+    if (!currentActions?.like || attempt > 0) {
+      currentActions = await (isAcpPad(padCode)
+        ? warmupLocateCurrentAcpActions(config, padCode)
+        : warmupLocateHomeFeedActions(config, padCode)
+      ).catch((error: any) => {
+        errors.push(`定位异常:${error?.message || String(error)}`);
+        return null;
+      });
+    }
+    if (!currentActions?.like && currentActions?.screenshotUrl && /thread_detail_ui|thread_detail_visual/.test(currentActions.debugReason || "")) {
+      const detailLike = await warmupTryLikeFromThreadDetail(config, padCode, currentActions.screenshotUrl).catch(() => null);
+      if (detailLike && await detectThreadsWarmupLikeConfirmedVisually(detailLike.screenshotUrl, detailLike.point)) {
+        return {
+          ok: true,
+          message: "详情页点赞确认成功",
+          point: detailLike.point,
+          screenshotUrl: detailLike.screenshotUrl,
+          movedToDetail: true,
+        };
+      }
+      errors.push("当前在详情页但点赞未确认");
+      await recoverForNextTarget();
+      currentActions = null;
+      continue;
+    }
+    if (!currentActions?.like && /profile_ui|profile_menu_dismissed/.test(currentActions?.debugReason || "")) {
+      errors.push(currentActions?.debugReason || "当前在个人页");
+      await recoverForNextTarget();
+      currentActions = null;
+      continue;
+    }
+    if (!currentActions?.like) {
+      errors.push(currentActions?.debugReason || "未找到点赞按钮");
+      await warmupScrollDown(config, padCode).catch(() => undefined);
+      await delay(warmupRandom(1200, 2200));
+      continue;
+    }
+
+    await warmupWaitForScrollSettle(600, 1050);
+    const freshActions = await warmupLocateHomeFeedActions(config, padCode).catch((error: any) => {
+      errors.push(`点击前重定位异常:${error?.message || String(error)}`);
+      return null;
+    });
+    if (freshActions?.like) {
+      currentActions = freshActions;
+    } else if (freshActions?.debugReason) {
+      errors.push(`点击前重定位未找到点赞按钮:${freshActions.debugReason}`);
+      currentActions = null;
+      continue;
+    }
+
+    const seenCandidateKeys = new Set<string>();
+    const likeCandidates = [currentActions.like, ...(currentActions.alternateLikes || [])]
+      .map((candidate, index) => {
+        const point = attempt === 2 || index > 0
+          ? { x: candidate.x + warmupRandomInt(-4, 4), y: candidate.y + warmupRandomInt(-3, 3) }
+          : candidate;
+        const key = `${Math.round(point.x / 8)}:${Math.round(point.y / 8)}`;
+        if (seenCandidateKeys.has(key)) return null;
+        seenCandidateKeys.add(key);
+        return point;
+      })
+      .filter((point): point is { x: number; y: number } => Boolean(point))
+      .slice(0, 4);
+    const focusBeforeTap = normalizeSingleLine(await (isAcpPad(padCode)
+      ? getAndroidCurrentFocusQuick(config, padCode)
+      : getAndroidCurrentFocus(config, padCode)
+    ).catch(() => ""));
+    if (focusBeforeTap && !focusBeforeTap.includes(THREADS_PACKAGE)) {
+      errors.push(`点赞前焦点已离开 Threads:${focusBeforeTap.slice(0, 80)}`);
+      await recoverForNextTarget();
+      currentActions = null;
+      continue;
+    }
+    let shouldRelocate = false;
+    for (const point of likeCandidates) {
+      if (currentActions.screenshotUrl && await detectThreadsWarmupLikeConfirmedVisually(currentActions.screenshotUrl, point)) {
+        errors.push(`目标已是点赞状态但未产生新点赞，不计入本次养号 target=${Math.round(point.x)},${Math.round(point.y)}`);
+        continue;
+      }
+      const tapPoint = await warmupExecuteLikeAtPoint(config, padCode, point, currentActions.screenshotUrl);
+      const shotUrl = await warmupCaptureLikeScreenshot(config, padCode);
+      const result = await warmupVerifyLikeAfterTap(config, padCode, shotUrl, tapPoint, currentActions.screenshotUrl);
+      if (result.verified) {
+        return {
+          ok: true,
+          message: `点赞确认成功（第 ${attempt + 1} 次尝试）`,
+          point: result.point,
+          screenshotUrl: result.screenshotUrl,
+          movedToDetail: result.movedToDetail,
+        };
+      }
+
+      errors.push(`第${attempt + 1}次未确认红心 target=${Math.round(point.x)},${Math.round(point.y)} tap=${Math.round(tapPoint.x)},${Math.round(tapPoint.y)}`);
+      if (currentActions.comment && !isAcpPad(padCode)) {
+        const detailFallback = await warmupTryLikeViaThreadDetail(config, padCode, currentActions).catch(() => null);
+        if (detailFallback?.ok && detailFallback.point) {
+          return {
+            ok: true,
+            message: detailFallback.message || "通过详情页点赞确认成功",
+            point: detailFallback.point,
+            screenshotUrl: detailFallback.screenshotUrl,
+            movedToDetail: true,
+          };
+        }
+        if (detailFallback?.message) {
+          errors.push(detailFallback.message);
+        }
+        await recoverForNextTarget();
+        shouldRelocate = true;
+        break;
+      }
+      await dismissThreadsWarmupProfilePopup(config, padCode, shotUrl).catch(() => false);
+      const focusAfterTap = normalizeSingleLine(await (isAcpPad(padCode)
+        ? getAndroidCurrentFocusQuick(config, padCode)
+        : getAndroidCurrentFocus(config, padCode)
+      ).catch(() => ""));
+      if (focusAfterTap && !focusAfterTap.includes(THREADS_PACKAGE)) {
+        errors.push(`点赞后焦点离开 Threads:${focusAfterTap.slice(0, 80)}`);
+        await recoverForNextTarget();
+        shouldRelocate = true;
+        break;
+      }
+      if (result.movedToDetail) {
+        shouldRelocate = true;
+        break;
+      }
+      await warmupScrollDown(config, padCode).catch(() => undefined);
+      await delay(warmupRandom(700, 1400));
+      shouldRelocate = true;
+      break;
+    }
+    if (shouldRelocate) {
+      currentActions = null;
+      continue;
+    }
+
+    await recoverForNextTarget();
+    await warmupScrollDown(config, padCode).catch(() => undefined);
+    await delay(warmupRandom(1200, 2200));
+    currentActions = null;
+  }
+
+  return {
+    ok: false,
+    message: errors.filter(Boolean).slice(-3).join("；") || "点赞未确认成功",
+  };
+}
+
+async function handleThreadsWarmupCommentPrivacyPrompt(
+  config: VmosConfig,
+  padCode: string,
+  options: { switchToPublic?: boolean } = {},
+): Promise<boolean> {
+  const uiXml = await withTimeout(
+    dumpUiXml(config, padCode),
+    5_000,
+    "warmup privacy prompt ui dump timeout",
+  ).catch(() => "");
+  let matched = /私密主[页頁].{0,12}(只能|只可).{0,12}(回复|回覆).{0,12}(粉丝|粉絲)|切[换換]为.?公开.?即可(回复|回覆)任何用户|公開主頁|公开主页|Private profiles can only reply to their followers|To respond to the author|Switch to public to reply to anyone|Public profile|Private profile/i.test(uiXml);
+  if (!matched) {
+    const shotUrl = await screenshot(config, padCode)
+      .then((url) => freezeScreenshotUrl(url))
+      .catch(() => "");
+    if (shotUrl) {
+      if (await detectThreadsPrivateReplyPromptLocally(shotUrl).catch(() => false)) {
+        matched = true;
+      }
+      const pixels = await getImagePixelData(shotUrl).catch(() => null);
+      if (!matched && pixels) {
+        const { data, width, height } = pixels;
+        const sample = (xRatio: number, yRatio: number) => {
+          const x = Math.max(0, Math.min(width - 1, Math.round(width * xRatio)));
+          const y = Math.max(0, Math.min(height - 1, Math.round(height * yRatio)));
+          const idx = (y * width + x) * 4;
+          return { r: data[idx], g: data[idx + 1], b: data[idx + 2] };
+        };
+        const luminance = (pixel: { r: number; g: number; b: number }) => (pixel.r + pixel.g + pixel.b) / 3;
+        const regionRatio = (
+          x1: number,
+          y1: number,
+          x2: number,
+          y2: number,
+          predicate: (r: number, g: number, b: number) => boolean,
+        ) => {
+          const left = Math.max(0, Math.min(width - 1, Math.round(width * x1)));
+          const top = Math.max(0, Math.min(height - 1, Math.round(height * y1)));
+          const right = Math.max(left + 1, Math.min(width, Math.round(width * x2)));
+          const bottom = Math.max(top + 1, Math.min(height, Math.round(height * y2)));
+          let matchedPixels = 0;
+          let total = 0;
+          for (let y = top; y < bottom; y += 2) {
+            for (let x = left; x < right; x += 2) {
+              const index = (y * width + x) * 4;
+              total += 1;
+              if (predicate(data[index], data[index + 1], data[index + 2])) matchedPixels += 1;
+            }
+          }
+          return total ? matchedPixels / total : 0;
+        };
+        const dimHeader = luminance(sample(0.5, 0.08)) < 220;
+        const sheetWhite = [sample(0.5, 0.18), sample(0.5, 0.48), sample(0.5, 0.83)]
+          .every((pixel) => luminance(pixel) > 238 && Math.max(pixel.r, pixel.g, pixel.b) - Math.min(pixel.r, pixel.g, pixel.b) < 18);
+        const privateSheetWhite = [sample(0.5, 0.42), sample(0.5, 0.52), sample(0.5, 0.76)]
+          .every((pixel) => luminance(pixel) > 238 && Math.max(pixel.r, pixel.g, pixel.b) - Math.min(pixel.r, pixel.g, pixel.b) < 18);
+        const privateHeadingDark = (
+          luminance(sample(0.50, 0.64)) < 70
+          && luminance(sample(0.50, 0.68)) < 100
+        ) || (
+          luminance(sample(0.50, 0.34)) < 85
+            && luminance(sample(0.50, 0.43)) < 95
+        );
+        const topDimmed = regionRatio(0.05, 0.02, 0.95, 0.09, (r, g, b) => {
+          const avg = (r + g + b) / 3;
+          return avg > 105 && avg < 210 && Math.max(r, g, b) - Math.min(r, g, b) < 24;
+        }) > 0.45;
+        const sheetWhiteByRegion = regionRatio(0.08, 0.20, 0.92, 0.86, (r, g, b) => {
+          const avg = (r + g + b) / 3;
+          return avg > 238 && Math.max(r, g, b) - Math.min(r, g, b) < 22;
+        }) > 0.78;
+        const headingDarkRatio = regionRatio(0.12, 0.28, 0.88, 0.45, (r, g, b) => (r + g + b) / 3 < 85);
+        const subtitleGrayRatio = regionRatio(0.12, 0.46, 0.88, 0.52, (r, g, b) => {
+          const avg = (r + g + b) / 3;
+          return avg > 105 && avg < 220 && Math.max(r, g, b) - Math.min(r, g, b) < 28;
+        });
+        matched = dimHeader && (sheetWhite || (privateSheetWhite && privateHeadingDark))
+          || (topDimmed && sheetWhiteByRegion && headingDarkRatio > 0.08 && subtitleGrayRatio > 0.05);
+      }
+    }
+  }
+  if (!matched) return false;
+  if (options.switchToPublic) {
+    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    await tapViaAdbAbsoluteQuick(
+      config,
+      padCode,
+      Math.round(screen.width * 0.50),
+      Math.round(screen.height * 0.61),
+      1800,
+    );
+    await delay(1500);
+    return true;
+  }
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(async () => {
+    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    await tapViaAdbAbsoluteQuick(
+      config,
+      padCode,
+      Math.round(screen.width * 0.50),
+      Math.round(screen.height * 0.91),
+      1200,
+    );
+  });
+  await delay(500);
+  return true;
+}
+
+async function warmupExecuteCommentAtPoint(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+  commentInput: string | (() => Promise<string>),
+  options: {
+    likeBeforeSend?: boolean;
+    alreadyInReplyComposer?: boolean;
+    preferBottomReplyInput?: boolean;
+    sourceScreenshotUrl?: string;
+    skipAbsoluteOpenRetry?: boolean;
+    openViaCommentFirst?: boolean;
+    debugReason?: string;
+  } = {},
+): Promise<{
+  comment: string;
+  screenshotUrl?: string;
+  liked?: { point: { x: number; y: number }; screenshotUrl: string; message: string };
+}> {
+  if (!isTrustedWarmupCommentDebugReason(options.debugReason, padCode)) {
+    throw new Error(`留言目标不够可靠，已跳过：${options.debugReason || "unknown"}`);
+  }
+  const dumpReplyUiFast = () => withTimeout(
+    dumpUiXml(config, padCode),
+    2_500,
+    "warmup comment ui dump timeout",
+  ).catch(() => "");
+  const commentPoint = isAcpPad(padCode)
+    ? { x: Math.round(point.x), y: Math.round(point.y) }
+    : warmupJitterPoint(point);
+  let comment = "";
+  const ensureComment = async () => {
+    if (!comment) {
+      comment = typeof commentInput === "function" ? await commentInput() : commentInput;
+    }
+    if (!comment.trim()) {
+      throw new Error("留言生成失败：生成内容为空");
+    }
+    return comment;
+  };
+  if (isAcpPad(padCode)) {
+    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    const acpCommentStartedAt = Date.now();
+    const logAcpCommentStage = (stage: string) => {
+      console.log(`[warmup][acp-comment] pad=${padCode} target=${Math.round(point.x)},${Math.round(point.y)} elapsed=${Date.now() - acpCommentStartedAt}ms stage=${stage}`);
+    };
+    const enforceAcpCommentBudget = async (stage: string, currentShotUrl?: string) => {
+      if (Date.now() - acpCommentStartedAt < 125_000) return;
+      if (await handleThreadsWarmupCommentPrivacyPrompt(config, padCode).catch(() => false)) {
+        throw new Error("当前账号私密主页限制回复非粉丝，已取消并跳过这条");
+      }
+      const budgetShotUrl = currentShotUrl || await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        10_000,
+        "warmup comment budget screenshot timeout",
+      ).catch(() => "");
+      const debugPath = budgetShotUrl
+        ? saveThreadsDebugScreenshot(budgetShotUrl, "warmup-acp-comment-budget-timeout")
+        : null;
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言执行超时保护：${stage}，已返回并跳过${debugPath ? `（debug=${debugPath}）` : ""}`);
+    };
+    const throwIfThreadsWarmupPrivacyPrompt = async () => {
+      if (await handleThreadsWarmupCommentPrivacyPrompt(config, padCode).catch(() => false)) {
+        throw new Error("当前账号私密主页限制回复非粉丝，已取消并跳过这条");
+      }
+    };
+    const tapAcpBottomReplyInput = async (shotUrl: string | undefined, waitMs = 900) => {
+      const image = shotUrl ? await getImageDimensions(shotUrl).catch(() => null) : null;
+      const imageWidth = image?.width || screen.width || BASE_SCREEN.width;
+      const imageHeight = image?.height || screen.height || BASE_SCREEN.height;
+      const imagePoint = {
+        x: Math.round(imageWidth * 0.30),
+        y: Math.round(imageHeight * 0.955),
+      };
+      const x = image?.width
+        ? Math.round(imagePoint.x * (screen.width / image.width))
+        : imagePoint.x;
+      const y = image?.height
+        ? Math.round(imagePoint.y * (screen.height / image.height))
+        : imagePoint.y;
+      await tapViaAdbAbsoluteQuick(config, padCode, x, y, waitMs);
+    };
+    const tapSourceScreenshotPointQuick = async (
+      shotUrl: string | undefined,
+      target: { x: number; y: number },
+      waitMs = 900,
+    ) => {
+      const image = shotUrl ? await getImageDimensions(shotUrl).catch(() => null) : null;
+      const x = image?.width
+        ? Math.round(target.x * ((screen.width || BASE_SCREEN.width) / image.width))
+        : Math.round(target.x);
+      const y = image?.height
+        ? Math.round(target.y * ((screen.height || BASE_SCREEN.height) / image.height))
+        : Math.round(target.y);
+      await tapViaAdbAbsoluteQuick(config, padCode, x, y, waitMs);
+    };
+    const beforeUiXml = await dumpReplyUiFast();
+    if (looksLikeThreadsStatusMessageUiXml(beforeUiXml)) {
+      await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.075), 96, 600);
+      throw new Error("当前是 Threads 动态消息页，不是回复页，已关闭并跳过");
+    }
+    if (looksLikeThreadsMediaMarkupUiXml(beforeUiXml)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error("当前是 Threads 图片标注页，不是回复页，已关闭并跳过");
+    }
+    const sourceIsMediaOverlay = /acp_media_overlay_actions/.test(options.debugReason || "");
+    let afterOpenUiXml = "";
+    let afterOpenShotUrl = "";
+    if (!options.alreadyInReplyComposer && options.sourceScreenshotUrl && !options.openViaCommentFirst && !sourceIsMediaOverlay) {
+      const image = await getImageDimensions(options.sourceScreenshotUrl).catch(() => null);
+      const detailPoint = {
+        x: Math.round((image?.width || BASE_SCREEN.width) * 0.50),
+        y: Math.max(
+          Math.round((image?.height || BASE_SCREEN.height) * 0.18),
+          Math.min(
+            Math.round(commentPoint.y - (image?.height || BASE_SCREEN.height) * 0.28),
+            Math.round(commentPoint.y - 72),
+          ),
+        ),
+      };
+      await tapSourceScreenshotPointQuick(options.sourceScreenshotUrl, detailPoint, 1500);
+      await throwIfThreadsWarmupPrivacyPrompt();
+      afterOpenUiXml = await dumpReplyUiFast();
+      afterOpenShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        10_000,
+        "warmup comment detail-open screenshot timeout",
+      ).catch(() => "");
+      if (
+        afterOpenShotUrl
+        && (
+          await detectThreadsFullscreenMediaViewerLocally(afterOpenShotUrl).catch(() => false)
+          || await detectThreadsWarmupBlackLetterboxMedia(afterOpenShotUrl).catch(() => false)
+          || await detectThreadsWarmupMediaOverlayActions(afterOpenShotUrl).catch(() => null)
+          || await detectThreadsExternalWebViewLocally(afterOpenShotUrl).catch(() => false)
+        )
+      ) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        throw new Error("点正文误入 Threads 媒体或外链页，已返回并跳过");
+      }
+    }
+    const detailOpenedReplyComposer = Boolean(
+      afterOpenUiXml
+      && (
+        findThreadsReplyComposerInputTarget(afterOpenUiXml)
+        || looksLikeThreadsReplyComposerUiXml(afterOpenUiXml)
+        || await detectThreadsReplyComposerLocally(afterOpenShotUrl).catch(() => null)
+      )
+    );
+    if (!options.alreadyInReplyComposer && !detailOpenedReplyComposer) {
+      if (options.sourceScreenshotUrl) {
+        logAcpCommentStage("tap-comment-first");
+        await tapSourceScreenshotPointQuick(options.sourceScreenshotUrl, commentPoint, 1800);
+      } else {
+        await tapViaAdbAbsoluteQuick(config, padCode, commentPoint.x, commentPoint.y, 1800);
+      }
+      await throwIfThreadsWarmupPrivacyPrompt();
+      afterOpenUiXml = await dumpReplyUiFast();
+      afterOpenShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        10_000,
+        "warmup comment after-open screenshot timeout",
+      ).catch(() => "");
+    }
+    if (options.alreadyInReplyComposer) {
+      afterOpenUiXml = await dumpReplyUiFast();
+      afterOpenShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        5_000,
+        "warmup comment already-open screenshot timeout",
+      ).catch(() => "");
+    }
+    const openedReplyComposer = async () => Boolean(
+      findThreadsReplyComposerInputTarget(afterOpenUiXml)
+      || looksLikeThreadsReplyComposerUiXml(afterOpenUiXml)
+      || await detectThreadsReplyComposerLocally(afterOpenShotUrl).catch(() => null)
+      || await detectThreadsInlineReplyBarLocally(afterOpenShotUrl).catch(() => false),
+    );
+    if (options.openViaCommentFirst && options.sourceScreenshotUrl && !(await openedReplyComposer())) {
+      logAcpCommentStage("direct-retry-before");
+      await delay(900);
+      await tapSourceScreenshotPointQuick(options.sourceScreenshotUrl, commentPoint, 2400);
+      await throwIfThreadsWarmupPrivacyPrompt();
+      afterOpenUiXml = await dumpReplyUiFast();
+      afterOpenShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        10_000,
+        "warmup comment after-open direct retry screenshot timeout",
+      ).catch(() => afterOpenShotUrl);
+    }
+    if (options.sourceScreenshotUrl && !options.skipAbsoluteOpenRetry && !(await openedReplyComposer())) {
+      await tapSourceScreenshotPointQuick(options.sourceScreenshotUrl, commentPoint, 1500);
+      await throwIfThreadsWarmupPrivacyPrompt();
+      afterOpenUiXml = await dumpReplyUiFast();
+      afterOpenShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        10_000,
+        "warmup comment after-open absolute retry screenshot timeout",
+      ).catch(() => afterOpenShotUrl);
+    }
+    const openedMediaOrExternal = async (shotUrl: string | undefined) => {
+      const replyComposerVisible = Boolean(
+        findThreadsReplyComposerInputTarget(afterOpenUiXml)
+        || looksLikeThreadsReplyComposerUiXml(afterOpenUiXml)
+        || await detectThreadsReplyComposerLocally(shotUrl).catch(() => null)
+        || await detectThreadsInlineReplyBarLocally(shotUrl).catch(() => false)
+      );
+      if (replyComposerVisible) return false;
+      return Boolean(
+        await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)
+        || await detectThreadsWarmupBlackLetterboxMedia(shotUrl).catch(() => false)
+        || await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null)
+        || await detectThreadsExternalWebViewLocally(shotUrl).catch(() => false)
+      );
+    };
+    if (await openedMediaOrExternal(afterOpenShotUrl)) {
+      const overlayActions = await detectThreadsWarmupMediaOverlayActions(afterOpenShotUrl).catch(() => null);
+      if (overlayActions?.comment) {
+        await tapSourceScreenshotPointQuick(afterOpenShotUrl, overlayActions.comment, 1700);
+        await throwIfThreadsWarmupPrivacyPrompt();
+        afterOpenUiXml = await dumpReplyUiFast();
+        afterOpenShotUrl = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          10_000,
+          "warmup comment media-overlay-reply screenshot timeout",
+        ).catch(() => afterOpenShotUrl);
+      }
+    }
+    if (await openedMediaOrExternal(afterOpenShotUrl)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(800);
+      if (options.sourceScreenshotUrl && !options.alreadyInReplyComposer) {
+        await tapScreenshotPointViaAdb(config, padCode, options.sourceScreenshotUrl, point, 1700).catch(() => undefined);
+        await throwIfThreadsWarmupPrivacyPrompt();
+        afterOpenUiXml = await dumpReplyUiFast();
+        afterOpenShotUrl = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          10_000,
+          "warmup comment precise-retry screenshot timeout",
+        ).catch(() => "");
+      }
+      if (await openedMediaOrExternal(afterOpenShotUrl)) {
+        const debugPath = saveThreadsDebugScreenshot(afterOpenShotUrl, "warmup-acp-comment-media-after-retry");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        throw new Error(`点留言误入 Threads 媒体或外链页，精确重试后仍未打开回复框，已返回并跳过${debugPath ? `（debug=${debugPath}）` : ""}`);
+      }
+    }
+    if (looksLikeThreadsStatusMessageUiXml(afterOpenUiXml)) {
+      await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.075), 96, 600);
+      throw new Error("点留言误入 Threads 动态消息页，已关闭并跳过");
+    }
+    if (looksLikeThreadsMediaMarkupUiXml(afterOpenUiXml)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error("点留言误入 Threads 图片标注页，已关闭并跳过");
+    }
+    if (!(await openedReplyComposer())) {
+      const debugPath = saveThreadsDebugScreenshot(afterOpenShotUrl, "warmup-acp-comment-reply-not-opened");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言未打开回复输入框，已跳过（target=${Math.round(point.x)},${Math.round(point.y)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    logAcpCommentStage("reply-opened");
+    await enforceAcpCommentBudget("打开回复框后", afterOpenShotUrl);
+    const replyInputTarget = findThreadsReplyComposerInputTarget(afterOpenUiXml);
+    if (replyInputTarget) {
+      await tapViaAdbAbsoluteQuick(config, padCode, replyInputTarget.x, replyInputTarget.y, 900);
+    }
+    await tapAcpBottomReplyInput(afterOpenShotUrl, replyInputTarget ? 1300 : 1500);
+    await throwIfThreadsWarmupPrivacyPrompt();
+    logAcpCommentStage("before-generate-comment");
+    await ensureComment();
+    logAcpCommentStage("before-type-comment");
+    await withTimeout(
+      typeWarmupCommentText(config, padCode, comment, 900),
+      14_000,
+      "warmup comment type timeout",
+    );
+    logAcpCommentStage("after-type-before-screenshot");
+    let typedShotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      12_000,
+      "warmup comment typed screenshot timeout",
+    ).catch(() => undefined);
+    if (!typedShotUrl) {
+      throw new Error(`ACP 留言截图未取得，已跳过（comment=${comment.slice(0, 24)}）`);
+    }
+    if (await detectThreadsWarmupMediaOverlayActions(typedShotUrl).catch(() => null)) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-media-overlay");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言落到媒体覆盖层，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    if (await detectThreadsExternalWebViewLocally(typedShotUrl).catch(() => false)) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-external-webview");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言落到外链页，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    let typedUiXml = await dumpReplyUiFast();
+    let typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
+    let typedTextConfirmedByDraftOnly = false;
+    if (!typedTextConfirmed) {
+      typedTextConfirmedByDraftOnly = await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
+      typedTextConfirmed = typedTextConfirmedByDraftOnly;
+    }
+    if (typedTextConfirmedByDraftOnly && !(await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null))) {
+      typedTextConfirmed = false;
+      typedTextConfirmedByDraftOnly = false;
+    }
+    if (!typedTextConfirmed) {
+      await throwIfThreadsWarmupPrivacyPrompt();
+    }
+    const retryInputTarget = findThreadsReplyComposerInputTarget(typedUiXml);
+    if (!typedTextConfirmed && retryInputTarget) {
+      await delay(900);
+      typedUiXml = await dumpReplyUiFast();
+      typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
+      if (!typedTextConfirmed) {
+        typedShotUrl = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          8_000,
+          "warmup comment delayed typed screenshot timeout",
+        ).catch(() => typedShotUrl);
+        typedTextConfirmed = await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
+      }
+    }
+    if (!typedTextConfirmed && retryInputTarget) {
+      await tapViaAdbAbsoluteQuick(config, padCode, retryInputTarget.x, retryInputTarget.y, 700);
+      await tapAcpBottomReplyInput(typedShotUrl, 500);
+      await clearFocusedTextInput(config, padCode, 300);
+      await withTimeout(
+        typeWarmupCommentText(config, padCode, comment, 900),
+        14_000,
+        "warmup comment retype timeout",
+      ).catch(() => undefined);
+      typedShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        12_000,
+        "warmup comment retyped screenshot timeout",
+      ).catch(() => typedShotUrl);
+      typedUiXml = await dumpReplyUiFast();
+      typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
+      typedTextConfirmedByDraftOnly = false;
+      if (typedTextConfirmed && hasThreadsReplyComposerRepeatedText(typedUiXml, comment)) {
+        await tapViaAdbAbsoluteQuick(config, padCode, retryInputTarget.x, retryInputTarget.y, 500);
+        await tapAcpBottomReplyInput(typedShotUrl, 400);
+        await clearFocusedTextInput(config, padCode, 300);
+        await withTimeout(
+          typeWarmupCommentText(config, padCode, comment, 1000),
+          14_000,
+          "warmup comment duplicate cleanup retype timeout",
+        ).catch(() => undefined);
+        typedShotUrl = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          12_000,
+          "warmup comment duplicate cleanup screenshot timeout",
+        ).catch(() => typedShotUrl);
+        typedUiXml = await dumpReplyUiFast();
+        typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment)
+          && !hasThreadsReplyComposerRepeatedText(typedUiXml, comment);
+      }
+      if (!typedTextConfirmed) {
+        typedTextConfirmedByDraftOnly = await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
+        typedTextConfirmed = typedTextConfirmedByDraftOnly
+          && Boolean(await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null));
+      }
+    }
+    if (!typedTextConfirmed && /[^\x20-\x7E]/.test(comment)) {
+      if (retryInputTarget) {
+        await tapViaAdbAbsoluteQuick(config, padCode, retryInputTarget.x, retryInputTarget.y, 500);
+      }
+      await tapAcpBottomReplyInput(typedShotUrl, 1200);
+      await clearFocusedTextInput(config, padCode, 300);
+      await withTimeout(
+        typeText(config, padCode, comment, 1400),
+        16_000,
+        "warmup comment direct unicode type timeout",
+      ).catch(() => undefined);
+      typedShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        12_000,
+        "warmup comment direct unicode typed screenshot timeout",
+      ).catch(() => typedShotUrl);
+      typedUiXml = await dumpReplyUiFast();
+      typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
+      typedTextConfirmedByDraftOnly = false;
+      if (typedTextConfirmed && hasThreadsReplyComposerRepeatedText(typedUiXml, comment)) {
+        await tapAcpBottomReplyInput(typedShotUrl, 500);
+        await clearFocusedTextInput(config, padCode, 300);
+        await withTimeout(
+          typeText(config, padCode, comment, 1400),
+          16_000,
+          "warmup comment direct unicode duplicate cleanup timeout",
+        ).catch(() => undefined);
+        typedShotUrl = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          12_000,
+          "warmup comment direct unicode duplicate cleanup screenshot timeout",
+        ).catch(() => typedShotUrl);
+        typedUiXml = await dumpReplyUiFast();
+        typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment)
+          && !hasThreadsReplyComposerRepeatedText(typedUiXml, comment);
+      }
+      if (!typedTextConfirmed) {
+        typedTextConfirmedByDraftOnly = await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
+        typedTextConfirmed = typedTextConfirmedByDraftOnly
+          && Boolean(await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null));
+      }
+    }
+    if (
+      !typedTextConfirmed
+      && (
+        looksLikeThreadsStatusMessageUiXml(typedUiXml)
+      )
+    ) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-status-message");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言误入动态消息设置页，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    if (!typedTextConfirmed) {
+      await tapAcpBottomReplyInput(typedShotUrl, 1200);
+      await clearFocusedTextInput(config, padCode, 300);
+      await withTimeout(
+        typeWarmupCommentText(config, padCode, comment, 1400),
+        14_000,
+        "warmup comment visual-bottom retype timeout",
+      ).catch(() => undefined);
+      typedShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        12_000,
+        "warmup comment visual-bottom retyped screenshot timeout",
+      ).catch(() => typedShotUrl);
+      typedUiXml = await dumpReplyUiFast();
+      typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
+      typedTextConfirmedByDraftOnly = false;
+      if (typedTextConfirmed && hasThreadsReplyComposerRepeatedText(typedUiXml, comment)) {
+        await tapAcpBottomReplyInput(typedShotUrl, 500);
+        await clearFocusedTextInput(config, padCode, 300);
+        await withTimeout(
+          typeWarmupCommentText(config, padCode, comment, 1400),
+          14_000,
+          "warmup comment visual-bottom duplicate cleanup timeout",
+        ).catch(() => undefined);
+        typedShotUrl = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          12_000,
+          "warmup comment visual-bottom duplicate cleanup screenshot timeout",
+        ).catch(() => typedShotUrl);
+        typedUiXml = await dumpReplyUiFast();
+        typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment)
+          && !hasThreadsReplyComposerRepeatedText(typedUiXml, comment);
+      }
+      if (!typedTextConfirmed) {
+        typedTextConfirmedByDraftOnly = await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
+        typedTextConfirmed = typedTextConfirmedByDraftOnly
+          && Boolean(await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null));
+      }
+    }
+    if (typedTextConfirmed && hasThreadsReplyComposerRepeatedText(typedUiXml, comment)) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-duplicate-draft");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言输入出现重复内容，已取消发送避免机器感回复（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    if (!typedTextConfirmed) {
+      typedTextConfirmed = await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
+    }
+    const keyboardVisibleAfterType = await detectAndroidKeyboardVisibleLocally(typedShotUrl).catch(() => false);
+    const sendButtonVisibleAfterType = keyboardVisibleAfterType
+      ? await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null)
+      : null;
+    const replyComposerVisibleAfterType = keyboardVisibleAfterType
+      ? await detectThreadsReplyComposerLocally(typedShotUrl).catch(() => null)
+      : null;
+    if (typedTextConfirmedByDraftOnly && !sendButtonVisibleAfterType) {
+      typedTextConfirmed = false;
+      typedTextConfirmedByDraftOnly = false;
+    }
+    if (hasReadableUiXml(typedUiXml) && !typedTextConfirmed) {
+      await throwIfThreadsWarmupPrivacyPrompt();
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-text-not-in-reply-input");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言输入未出现在回复框，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    if (!typedTextConfirmed && !keyboardVisibleAfterType) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-text-unconfirmed");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言输入未确认，已跳过发送，避免空回复或误点（comment=${comment.slice(0, 24)} keyboard=${keyboardVisibleAfterType ? "yes" : "no"} composer=${replyComposerVisibleAfterType ? "yes" : "no"} send=${sendButtonVisibleAfterType ? "yes" : "no"}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    logAcpCommentStage("typed-confirmed");
+    await enforceAcpCommentBudget("输入留言后", typedShotUrl);
+    const typedReplyInputVisible = Boolean(
+      findThreadsReplyComposerInputTarget(typedUiXml)
+      || looksLikeThreadsReplyComposerUiXml(typedUiXml)
+      || await detectThreadsReplyComposerLocally(typedShotUrl).catch(() => null)
+      || await detectThreadsComposerLocally(typedShotUrl).catch(() => null)
+    );
+    if (!typedReplyInputVisible && !keyboardVisibleAfterType && await detectThreadsProfilePageLocally(typedShotUrl).catch(() => false)) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-profile-before-send");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言发送前停在个人页，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    if (!typedReplyInputVisible && !keyboardVisibleAfterType && await detectThreadsSideDrawerLocally(typedShotUrl).catch(() => false)) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-side-drawer");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言证据为侧栏，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    const tapReplySendButton = async (shotUrl: string | undefined, waitMs = 1200) => {
+      const visualSendButton = await findAcpReplySendButtonPointFromScreenshot(shotUrl).catch(() => null);
+      if (visualSendButton && shotUrl) {
+        await tapSourceScreenshotPointQuick(shotUrl, visualSendButton, waitMs);
+        return true;
+      }
+      const image = shotUrl ? await getImageDimensions(shotUrl).catch(() => null) : null;
+      if (image?.width && image?.height && await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false)) {
+        const sendYRatio = image.height >= 1500 ? 0.505 : 0.50;
+        await tapViaAdbAbsoluteQuick(
+          config,
+          padCode,
+          Math.round(image.width * 0.91),
+          Math.round(image.height * sendYRatio),
+          waitMs,
+        );
+        return true;
+      }
+      return false;
+    };
+    logAcpCommentStage("before-send");
+    const xmlSendButton = findThreadsReplySendButtonTarget(typedUiXml);
+    if (xmlSendButton) {
+      await tapViaAdbAbsoluteQuick(config, padCode, xmlSendButton.x, xmlSendButton.y, 1200);
+    } else if (!(await tapReplySendButton(typedShotUrl, 1300))) {
+      const typedImage = await getImageDimensions(typedShotUrl).catch(() => null);
+      const fullReplyEditorVisible = Boolean(await detectThreadsComposerLocally(typedShotUrl).catch(() => null));
+      const keyboardVisible = await detectAndroidKeyboardVisibleLocally(typedShotUrl).catch(() => false);
+      const sendYRatio = fullReplyEditorVisible ? 0.845 : (keyboardVisible ? 0.552 : 0.955);
+      await tapScreenshotPointViaAdb(
+        config,
+        padCode,
+        typedShotUrl,
+        {
+          x: Math.round((typedImage?.width || BASE_SCREEN.width) * 0.91),
+          y: Math.round((typedImage?.height || BASE_SCREEN.height) * sendYRatio),
+        },
+        1200,
+      );
+    }
+    await delay(350);
+    logAcpCommentStage("after-send-before-confirm");
+    const immediatePostSendShotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      12_000,
+      "warmup comment immediate post-send screenshot timeout",
+    ).catch(() => typedShotUrl);
+    let immediatePostSendXml = await dumpReplyUiFast();
+    let immediatePostSendEvidenceUrl = immediatePostSendShotUrl;
+    if (await dismissAndroidPermissionDialog(config, padCode, "deny")) {
+      await delay(700);
+      const afterPermissionShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        8_000,
+        "warmup comment after permission screenshot timeout",
+      ).catch(() => immediatePostSendEvidenceUrl);
+      const afterPermissionXml = await dumpReplyUiFast();
+      const stillHasDraft = hasThreadsReplyComposerText(afterPermissionXml, comment)
+        || await detectAcpReplyInputHasDraftLocally(afterPermissionShotUrl).catch(() => false);
+      if (stillHasDraft) {
+        await tapReplySendButton(afterPermissionShotUrl, 1600).catch(() => false);
+      }
+      immediatePostSendEvidenceUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        8_000,
+        "warmup comment after permission resend screenshot timeout",
+      ).catch(() => afterPermissionShotUrl);
+      immediatePostSendXml = await dumpReplyUiFast();
+    }
+    await delay(1600);
+    const settledPostSendShotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      12_000,
+      "warmup comment settled post-send screenshot timeout",
+    ).catch(() => immediatePostSendEvidenceUrl);
+    const settledPostSendXml = await dumpReplyUiFast();
+    let postSendEvidenceUrl = settledPostSendShotUrl || immediatePostSendEvidenceUrl || typedShotUrl;
+    const postedTextInUi = hasThreadsPostedCommentText(immediatePostSendXml, comment)
+      || hasThreadsPostedCommentText(settledPostSendXml, comment);
+    const postedCueInUi = detectThreadsWarmupCommentPostedCueFromUiXml(immediatePostSendXml)
+      || detectThreadsWarmupCommentPostedCueFromUiXml(settledPostSendXml);
+    const postedToastVisible = await detectThreadsPostSuccessToastLocally(postSendEvidenceUrl).catch(() => false);
+    const detectReplyComposerClearedAfterSend = async (shotUrl: string | undefined, uiXml: string) => Boolean(
+      shotUrl
+      && (
+        await detectThreadsReplyComposerLocally(shotUrl).catch(() => null)
+        || await detectThreadsInlineReplyBarLocally(shotUrl).catch(() => false)
+      )
+      && !hasThreadsReplyComposerText(uiXml, comment)
+      && !(await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false))
+      && !(await detectAcpReplyInputHasDraftLocally(shotUrl).catch(() => false))
+      && !(await detectThreadsSideDrawerLocally(shotUrl).catch(() => false))
+    );
+    const replyComposerClearedAfterSend = Boolean(
+      !postedTextInUi
+      && !postedCueInUi
+      && await detectReplyComposerClearedAfterSend(postSendEvidenceUrl, settledPostSendXml)
+    );
+    let postedVisually = false;
+    let postSendLooksPosted = postedTextInUi || postedCueInUi || postedVisually || postedToastVisible || replyComposerClearedAfterSend;
+    let postedTextEvidence = postedTextInUi;
+    let postedVisualEvidence = postedTextInUi || postedVisually || replyComposerClearedAfterSend;
+    const stillTypedAfterFirstTap = !postSendLooksPosted
+      && Boolean(
+        (
+          hasThreadsReplyComposerText(settledPostSendXml, comment)
+          && !hasThreadsReplyComposerRepeatedText(settledPostSendXml, comment)
+        )
+        || (
+          await detectAndroidKeyboardVisibleLocally(settledPostSendShotUrl).catch(() => false)
+          && await detectAcpReplyInputHasDraftLocally(settledPostSendShotUrl).catch(() => false)
+        ),
+      );
+    if (stillTypedAfterFirstTap && await tapReplySendButton(settledPostSendShotUrl, 1800)) {
+      await delay(1800);
+      const retryPostSendShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        12_000,
+        "warmup comment retry post-send screenshot timeout",
+      ).catch(() => settledPostSendShotUrl);
+      const retryPostSendXml = await dumpReplyUiFast();
+      const retryPostedText = hasThreadsPostedCommentText(retryPostSendXml, comment);
+      const retryPostedCue = detectThreadsWarmupCommentPostedCueFromUiXml(retryPostSendXml);
+      const retryPostedToast = await detectThreadsPostSuccessToastLocally(retryPostSendShotUrl).catch(() => false);
+      const retryPostedVisual = false;
+      const retryComposerCleared = Boolean(
+        !retryPostedText
+        && !retryPostedCue
+        && await detectReplyComposerClearedAfterSend(retryPostSendShotUrl, retryPostSendXml)
+      );
+      if (retryPostedText || retryPostedCue || retryPostedVisual || retryPostedToast || retryComposerCleared) {
+        postSendEvidenceUrl = retryPostSendShotUrl || postSendEvidenceUrl;
+        postedVisually = postedVisually || retryPostedVisual;
+        postSendLooksPosted = true;
+        postedTextEvidence = postedTextEvidence || retryPostedText;
+        postedVisualEvidence = postedVisualEvidence || retryPostedText || retryPostedVisual || retryComposerCleared;
+      }
+    }
+    if (!postedVisualEvidence && !hasThreadsReplyComposerText(settledPostSendXml, comment)) {
+      for (let revealAttempt = 0; revealAttempt < 3 && !postedVisualEvidence; revealAttempt += 1) {
+        await execAdbForText(config, padCode, "input swipe 360 1040 360 430 520", 8000, 800).catch(() => "");
+        await delay(1200);
+        await throwIfThreadsWarmupPrivacyPrompt();
+        const revealPostSendShotUrl = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          12_000,
+          "warmup comment reveal post-send screenshot timeout",
+        ).catch(() => settledPostSendShotUrl);
+        const revealPostSendXml = await dumpReplyUiFast();
+        const revealPostedText = hasThreadsPostedCommentText(revealPostSendXml, comment);
+        const revealPostedCue = detectThreadsWarmupCommentPostedCueFromUiXml(revealPostSendXml);
+        const revealPostedToast = await detectThreadsPostSuccessToastLocally(revealPostSendShotUrl).catch(() => false);
+        const revealPostedVisual = false;
+        const revealComposerCleared = Boolean(
+          !revealPostedText
+          && !revealPostedCue
+          && await detectReplyComposerClearedAfterSend(revealPostSendShotUrl, revealPostSendXml)
+        );
+        if (revealPostedText || revealPostedCue || revealPostedVisual || revealPostedToast || revealComposerCleared) {
+          postSendEvidenceUrl = revealPostSendShotUrl || postSendEvidenceUrl;
+          postedVisually = postedVisually || revealPostedVisual;
+          postSendLooksPosted = true;
+          postedTextEvidence = postedTextEvidence || revealPostedText;
+          postedVisualEvidence = postedVisualEvidence || revealPostedText || revealPostedVisual || revealComposerCleared;
+        }
+      }
+    }
+    if (!postSendLooksPosted) {
+      await throwIfThreadsWarmupPrivacyPrompt();
+    }
+    if (
+      !postedTextInUi
+      && (
+        looksLikeThreadsStatusMessageUiXml(immediatePostSendXml)
+        || looksLikeThreadsStatusMessageUiXml(settledPostSendXml)
+      )
+    ) {
+      const debugPath = saveThreadsDebugScreenshot(postSendEvidenceUrl, "warmup-acp-comment-postsend-status-message");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言发送后停在动态消息设置页，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    const postSendStillComposer = Boolean(
+      await detectThreadsComposerLocally(postSendEvidenceUrl).catch(() => null)
+      || looksLikeThreadsReplyComposerUiXml(settledPostSendXml)
+      || findThreadsReplyComposerInputTarget(settledPostSendXml)
+    );
+    if (!postSendLooksPosted && !postSendStillComposer && await detectThreadsProfilePageLocally(postSendEvidenceUrl).catch(() => false)) {
+      const debugPath = saveThreadsDebugScreenshot(postSendEvidenceUrl, "warmup-acp-comment-postsend-profile");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言发送后落到个人页，未确认是回复，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    if (
+      (await detectThreadsComposerLocally(settledPostSendShotUrl).catch(() => null))
+      && hasThreadsReplyComposerText(settledPostSendXml, comment)
+    ) {
+      const debugPath = saveThreadsDebugScreenshot(settledPostSendShotUrl, "warmup-acp-comment-still-editor");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言发送后仍停在编辑器，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    const postedConfirmed = postSendLooksPosted;
+    if (!postedConfirmed) {
+      const debugPath = saveThreadsDebugScreenshot(postSendEvidenceUrl, "warmup-acp-comment-postsend-unconfirmed");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言发送后未在截图中确认已发布回复，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    let evidencePostSendUrl = postSendEvidenceUrl;
+    await enforceAcpCommentBudget("发送后确认阶段", postSendEvidenceUrl);
+    if (!postedTextEvidence) {
+      await delay(2600);
+      const latePostSendShotUrl = await withTimeout(
+        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+        12_000,
+        "warmup comment late post-send screenshot timeout",
+      ).catch(() => undefined);
+      const latePostSendXml = latePostSendShotUrl ? await dumpReplyUiFast() : "";
+      const latePostedText = hasThreadsPostedCommentText(latePostSendXml, comment);
+      if (
+        latePostSendShotUrl
+        && !(await detectThreadsProfilePageLocally(latePostSendShotUrl).catch(() => false))
+        && (
+          latePostedText
+        )
+      ) {
+        evidencePostSendUrl = latePostSendShotUrl;
+        postedTextEvidence = postedTextEvidence || latePostedText;
+        postedVisualEvidence = true;
+      }
+    }
+    if (!postedVisualEvidence) {
+      const debugPath = saveThreadsDebugScreenshot(evidencePostSendUrl, "warmup-acp-comment-evidence-not-visible");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言发送后没有可见回复证据，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(700);
+    return {
+      comment,
+      screenshotUrl: await buildWarmupCommentEvidenceScreenshot(
+        typedShotUrl,
+        evidencePostSendUrl,
+        comment,
+      ),
+    };
+  }
+  const initialUiXml = await dumpReplyUiFast();
+  let inputPos = initialUiXml ? findThreadsReplyComposerInputTarget(initialUiXml) : null;
+  if (!inputPos && options.alreadyInReplyComposer && isAcpPad(padCode)) {
+    const currentShot = await screenshot(config, padCode)
+      .then((url) => freezeScreenshotUrl(url))
+      .catch(() => "");
+    if (await detectThreadsSideDrawerLocally(currentShot).catch(() => false)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error("当前是 Threads 侧栏，不是回复页，已返回并跳过");
+    }
+    if (await detectThreadsComposerLocally(currentShot).catch(() => null)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error("当前是新串文编辑页，不是回复页，已返回并跳过");
+    }
+    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    inputPos = {
+      x: Math.round(screen.width * 0.44),
+      y: Math.round(screen.height * (options.preferBottomReplyInput ? 0.955 : 0.425)),
+    };
+  }
+  if (!inputPos && !options.alreadyInReplyComposer) {
+    if (isAcpPad(padCode)) {
+      if (options.sourceScreenshotUrl) {
+        await tapScreenshotPointViaAdb(config, padCode, options.sourceScreenshotUrl, commentPoint, 1500);
+      } else {
+        await tapViaAdbAbsoluteQuick(config, padCode, commentPoint.x, commentPoint.y, 1500);
+      }
+    } else {
+      await tapViaAdbAbsolute(config, padCode, commentPoint.x, commentPoint.y, 2500);
+    }
+    await handleThreadsWarmupCommentPrivacyPrompt(config, padCode);
+    let afterOpenXml = await dumpReplyUiFast();
+    if (looksLikeThreadsMessagesUiXml(afterOpenXml)) {
+      const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+      await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.13), Math.round(screen.height * 0.9625), 1600).catch(() => undefined);
+      throw new Error(`点留言误入 Threads 消息页，已返回首页（target=${Math.round(commentPoint.x)},${Math.round(commentPoint.y)}）`);
+    }
+    const focusAfterOpen = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
+    if (focusAfterOpen && !focusAfterOpen.includes(THREADS_PACKAGE)) {
+      await relaunchThreads(config, padCode, 2200).catch(() => undefined);
+      throw new Error(`点留言后焦点离开 Threads，已重启 Threads（target=${Math.round(commentPoint.x)},${Math.round(commentPoint.y)} focus=${focusAfterOpen.slice(0, 80)}）`);
+    }
+    let afterOpenShot = await screenshot(config, padCode)
+      .then((url) => freezeScreenshotUrl(url))
+      .catch(() => "");
+    if (
+      await detectThreadsFullscreenMediaViewerLocally(afterOpenShot).catch(() => false)
+      || await detectThreadsWarmupBlackLetterboxMedia(afterOpenShot).catch(() => false)
+    ) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`点留言误入媒体查看页，已返回（target=${Math.round(commentPoint.x)},${Math.round(commentPoint.y)}）`);
+    }
+    if (
+      await detectThreadsComposerLocally(afterOpenShot).catch(() => null)
+      && !looksLikeThreadsReplyComposerUiXml(afterOpenXml)
+      && !(options.alreadyInReplyComposer && options.preferBottomReplyInput)
+    ) {
+      const replyDetailReason = await detectThreadsReplyComposerLocally(afterOpenShot).catch(() => null);
+      if (replyDetailReason && isAcpPad(padCode)) {
+        const image = await getImageDimensions(afterOpenShot).catch(() => null);
+        const inputYRatio = 0.955;
+        const inputPoint = {
+          x: Math.round((image?.width || BASE_SCREEN.width) * 0.36),
+          y: Math.round((image?.height || BASE_SCREEN.height) * inputYRatio),
+        };
+        await tapScreenshotPointViaAdb(config, padCode, afterOpenShot, inputPoint, 900);
+        afterOpenXml = await dumpReplyUiFast();
+      } else {
+        const debugPath = saveThreadsDebugScreenshot(afterOpenShot, "warmup-acp-comment-opened-composer");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        throw new Error(`点留言误入新串文编辑页，已返回（target=${Math.round(commentPoint.x)},${Math.round(commentPoint.y)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+      }
+    }
+    if (await detectThreadsProfilePageLocally(afterOpenShot).catch(() => false)) {
+      if (isAcpPad(padCode)) {
+        const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+        await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.32), Math.round(screen.height * 0.845), 1800);
+        await handleThreadsWarmupCommentPrivacyPrompt(config, padCode);
+        afterOpenXml = await dumpReplyUiFast();
+        afterOpenShot = await screenshot(config, padCode)
+          .then((url) => freezeScreenshotUrl(url))
+          .catch(() => afterOpenShot);
+        if (await detectThreadsProfilePageLocally(afterOpenShot).catch(() => false)) {
+          const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+          await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.13), Math.round(screen.height * 0.9625), 1600).catch(() => undefined);
+          throw new Error(`点留言误入 Threads 个人页且个人页帖子入口无效，已返回首页（target=${Math.round(commentPoint.x)},${Math.round(commentPoint.y)}）`);
+        }
+      } else {
+        const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+        await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.13), Math.round(screen.height * 0.9625), 1600).catch(() => undefined);
+        throw new Error(`点留言误入 Threads 个人页，已返回首页（target=${Math.round(commentPoint.x)},${Math.round(commentPoint.y)}）`);
+      }
+    }
+  }
+
+  let liked: { point: { x: number; y: number }; screenshotUrl: string; message: string } | undefined;
+  if (options.likeBeforeSend) {
+    const detailShot = await warmupCaptureLikeScreenshot(config, padCode);
+    if (detailShot) {
+      const detailLike = await warmupTryLikeFromThreadDetail(config, padCode, detailShot).catch(() => null);
+      if (detailLike && await detectThreadsWarmupLikeConfirmedVisually(detailLike.screenshotUrl, detailLike.point)) {
+        liked = {
+          point: detailLike.point,
+          screenshotUrl: detailLike.screenshotUrl,
+          message: "详情页同步点赞确认成功",
+        };
+      }
+    }
+  }
+
+  inputPos ||= await warmupFindCommentInput(config, padCode);
+  if (!inputPos) {
+    const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.5), Math.max(Math.round(screen.height * 0.175), point.y - 180), 2200);
+    await handleThreadsWarmupCommentPrivacyPrompt(config, padCode);
+    inputPos = await warmupFindCommentInput(config, padCode);
+  }
+  if (!inputPos) {
+    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    inputPos = {
+      x: Math.round(screen.width * 0.40),
+      y: Math.round(screen.height * (isAcpPad(padCode) ? (options.preferBottomReplyInput ? 0.958 : 0.425) : 0.955)),
+      screenshotUrl: "",
+    };
+  }
+  if (isAcpPad(padCode)) {
+    await tapViaAdbAbsoluteQuick(config, padCode, inputPos.x, inputPos.y, 600);
+  } else {
+    await tapViaAdbAbsolute(config, padCode, inputPos.x, inputPos.y, 800);
+  }
+  await ensureComment();
+  const isAcp = isAcpPad(padCode);
+  const typeComment = isAcp
+    ? typeWarmupCommentText(config, padCode, comment, 900)
+    : typeTextViaAdbBroadcast(config, padCode, comment, 1200).catch(async () => {
+        await typeText(config, padCode, comment, 1200);
+      });
+  await withTimeout(
+    typeComment,
+    isAcp ? 14_000 : 14_000,
+    "warmup comment type timeout",
+  );
+  const typedUiXml = isAcp ? await dumpReplyUiFast() : "";
+
+  const fallbackSendBtn = async () => {
+      const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+      return {
+        x: Math.round(screen.width * 0.917),
+        y: Math.round(screen.height * 0.934),
+        screenshotUrl: "",
+      };
+    };
+  if (isAcp) {
+    const sendBtn = await fallbackSendBtn();
+    const typedShotUrl = await withTimeout(
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+      15_000,
+      "warmup comment typed screenshot timeout",
+    ).catch(() => undefined);
+    if (!typedShotUrl) {
+      throw new Error(`ACP 留言截图未取得，已跳过（input=${Math.round(inputPos.x)},${Math.round(inputPos.y)} comment=${comment.slice(0, 24)}）`);
+    }
+    if (await detectThreadsSideDrawerLocally(typedShotUrl).catch(() => false)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言证据为侧栏，已跳过（comment=${comment.slice(0, 24)}）`);
+    }
+    if (
+      await detectThreadsComposerLocally(typedShotUrl).catch(() => null)
+      && !looksLikeThreadsReplyComposerUiXml(typedUiXml)
+      && !(options.alreadyInReplyComposer && options.preferBottomReplyInput)
+    ) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-not-reply");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言证据不是回复框，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    const xmlSendButton = findThreadsReplySendButtonTarget(typedUiXml);
+    if (xmlSendButton) {
+      await tapViaAdbAbsoluteQuick(config, padCode, xmlSendButton.x, xmlSendButton.y, 1200);
+    } else {
+      const typedImage = await getImageDimensions(typedShotUrl).catch(() => null);
+      await tapScreenshotPointViaAdb(
+        config,
+        padCode,
+        typedShotUrl,
+        {
+          x: Math.round((typedImage?.width || BASE_SCREEN.width) * 0.91),
+          y: Math.round((typedImage?.height || BASE_SCREEN.height) * 0.955),
+        },
+        1200,
+      );
+    }
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(700);
+    return { comment, screenshotUrl: typedShotUrl, liked };
+  }
+
+  const waitForTypedComment = async (attempts: number) => {
+    let latestXml = "";
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await delay(1400 + attempt * 650);
+      latestXml = await dumpReplyUiFast();
+      if (hasThreadsReplyComposerText(latestXml, comment)) return { ok: true, uiXml: latestXml };
+    }
+    return { ok: false, uiXml: latestXml };
+  };
+
+  let typedState = await waitForTypedComment(4);
+  if (!typedState.ok) {
+    const typedXml = typedState.uiXml;
+    if (hasReadableUiXml(typedXml)) {
+      const retryInput = findThreadsReplyComposerInputTarget(typedXml) || inputPos;
+      await tapViaAdbAbsolute(config, padCode, retryInput.x, retryInput.y, 800);
+      await clearFocusedTextInput(config, padCode, 300);
+      await typeTextViaAdbBroadcast(config, padCode, comment, 1800);
+      typedState = await waitForTypedComment(5);
+    }
+  }
+  if (typedState.ok && hasThreadsReplyComposerRepeatedText(typedState.uiXml, comment)) {
+    throw new Error(`留言输入出现重复内容，已取消发送避免机器感回复（comment=${comment.slice(0, 24)}）`);
+  }
+  const typedBeforeSend = typedState.ok;
+
+  const sendBtn = isAcpPad(padCode)
+    ? await fallbackSendBtn()
+    : await warmupFindCommentSendButton(config, padCode) || await fallbackSendBtn();
+  await tapViaAdbAbsolute(config, padCode, sendBtn.x, sendBtn.y, 2600);
+  let shotUrl = await screenshot(config, padCode)
+    .then((url) => freezeScreenshotUrl(url))
+    .catch(() => undefined);
+  let confirmed = false;
+  let stillHasText = false;
+  let stillHasInput = false;
+  let sawReadableUi = false;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await delay(1500 + attempt * 700);
+    const uiXml = await dumpReplyUiFast();
+    const readableUi = hasReadableUiXml(uiXml);
+    sawReadableUi ||= readableUi;
+    if (detectThreadsWarmupCommentPostedCueFromUiXml(uiXml)) {
+      confirmed = true;
+      break;
+    }
+    stillHasText = readableUi && hasThreadsReplyComposerText(uiXml, comment);
+    stillHasInput = readableUi && Boolean(findThreadsReplyComposerInputTarget(uiXml));
+    shotUrl = await screenshot(config, padCode)
+      .then((url) => freezeScreenshotUrl(url))
+      .catch(() => shotUrl);
+  }
+  if (!confirmed && shotUrl && await detectThreadsWarmupCommentPostedVisually(shotUrl, comment)) {
+    confirmed = true;
+  }
+
+  if (!confirmed) {
+    if (!typedBeforeSend) {
+      throw new Error(`留言输入未能被 UI 确认，已尝试发布但未确认成功（input=${Math.round(inputPos.x)},${Math.round(inputPos.y)} send=${Math.round(sendBtn.x)},${Math.round(sendBtn.y)} comment=${comment.slice(0, 24)}）`);
+    }
+    throw new Error(stillHasText
+      ? "留言发布失败：评论仍停留在输入框"
+      : `留言发布结果未确认${sawReadableUi ? "" : "：当前页面结构不可读"}`);
+  }
+
+  shotUrl = await screenshot(config, padCode)
+    .then((url) => freezeScreenshotUrl(url))
+    .catch(() => shotUrl);
+  const evidenceUrl = shotUrl
+    ? await annotateWarmupActionScreenshot(shotUrl, sendBtn, "COMMENTED")
+    : undefined;
+  await execAdbAndWait(config, padCode, "input keyevent KEYCODE_BACK", 15000).catch(() => undefined);
+  await delay(900);
+  return { comment, screenshotUrl: evidenceUrl || shotUrl, liked };
+}
+
+export async function executeWarmupCandidate(
+  config: VmosConfig,
+  candidate: WarmupCandidate,
+): Promise<{ ok: boolean; message: string; screenshotUrl?: string }> {
+  const padCode = candidate.padCode;
+  if (candidate.type === "like") {
+    const likeBtn = await warmupFindLikeButton(config, padCode);
+    if (!likeBtn) return { ok: false, message: "视觉识别找不到点赞按钮，未执行点赞" };
+    const result = await warmupAttemptLikeOnCurrentScreen(config, padCode, {
+      like: likeBtn,
+      screenshotUrl: likeBtn.screenshotUrl,
+      debugReason: "candidate_like",
+    });
+    if (!result.ok || !result.point) {
+      const evidenceUrl = result.screenshotUrl && result.point
+        ? await annotateWarmupActionScreenshot(result.screenshotUrl, result.point, "LIKE?")
+        : undefined;
+      return { ok: false, message: result.message || "已尝试点赞，但截图未确认爱心变为已点赞状态", screenshotUrl: evidenceUrl };
+    }
+    const evidenceUrl = result.screenshotUrl
+      ? await annotateWarmupActionScreenshot(result.screenshotUrl, result.point, "LIKED")
+      : undefined;
+    return { ok: true, message: `已执行点赞：${candidate.postPreview}`, screenshotUrl: evidenceUrl };
+  }
+
+  if (candidate.type === "comment") {
+    if (!candidate.suggestedComment) {
+      return { ok: false, message: "留言候选缺少模板" };
+    }
+
+    const commentBtn = await warmupFindCommentButton(config, padCode);
+    if (!commentBtn) return { ok: false, message: "视觉识别找不到评论按钮，未执行留言" };
+    const result = await warmupExecuteCommentAtPoint(config, padCode, commentBtn, candidate.suggestedComment, {
+      sourceScreenshotUrl: commentBtn.screenshotUrl || candidate.screenshotUrl,
+      debugReason: commentBtn.debugReason,
+    });
+    return { ok: true, message: `已执行留言：${result.comment}`, screenshotUrl: result.screenshotUrl };
+  }
+
+  return { ok: false, message: "未知候选类型" };
+}
+
+export async function warmupThreadsAccount(
+  config: VmosConfig,
+  padCode: string,
+  cfg: WarmupConfig,
+  onProgress: (p: WarmupProgress) => void,
+): Promise<WarmupProgress> {
+  const riskManaged = cfg.riskManaged !== false;
+  const riskPlan = riskManaged ? planRiskManagedWarmupConfig(padCode, cfg) : null;
+  if (riskPlan && !riskPlan.allowed) {
+    throw new Error(riskPlan.notes.join("；") || "账号风险预算不足，已暂停自动养号");
+  }
+  const effectiveCfg = riskPlan?.cfg || cfg;
+  const {
+    browseCount,
+    minSessionMinutes,
+    maxSessionMinutes,
+    minWatchSeconds = 2,
+    maxWatchSeconds = 5,
+    minAfterScrollPauseMs = 600,
+    maxAfterScrollPauseMs = 1400,
+    interactionEveryMinPosts = 2,
+    interactionEveryMaxPosts = 3,
+    likeChance = 0,
+    maxLikes = 0,
+    commentChance = 0,
+    maxComments = 0,
+    commentTemplates = [],
+    commentPersona,
+    strictCompletion = !riskManaged,
+    requireReadablePostForComment = riskManaged,
+  } = effectiveCfg;
+  const timedSession = Number(minSessionMinutes) > 0 || Number(maxSessionMinutes) > 0;
+  const sessionMinMinutes = Math.max(1, Number(minSessionMinutes || maxSessionMinutes || 0));
+  const sessionMaxMinutes = Math.max(sessionMinMinutes, Number(maxSessionMinutes || minSessionMinutes || 0));
+  const targetSessionMs = timedSession
+    ? warmupRandom(sessionMinMinutes * 60_000, sessionMaxMinutes * 60_000)
+    : 0;
+  const sessionDeadline = timedSession ? Date.now() + targetSessionMs : 0;
+  const interactionMinPosts = Math.max(2, Math.floor(interactionEveryMinPosts || 2));
+  const interactionMaxPosts = Math.max(interactionMinPosts, Math.floor(interactionEveryMaxPosts || 3));
+
+  let browsed = 0;
+  let liked = 0;
+  let commented = 0;
+  let interactionFailures = 0;
+  let likeFailures = 0;
+  let commentFailures = 0;
+  const candidates: WarmupCandidate[] = [];
+  const likeScreenshots: string[] = [];
+  const commentScreenshots: string[] = [];
+
+  const report = (step: string, done = false, error?: string): WarmupProgress => {
+    const p: WarmupProgress = {
+      step,
+      browsed,
+      liked,
+      commented,
+      candidates: [...candidates],
+      likeScreenshots: [...likeScreenshots],
+      commentScreenshots: [...commentScreenshots],
+      done,
+      error,
+    };
+    onProgress(p);
+    return p;
+  };
+
+  const locateFeedActionsForWarmup = async (
+    timeoutMs = isAcpPad(padCode) ? 24_000 : 16_000,
+  ): Promise<WarmupFeedActionTargets | null> => {
+    if (isAcpPad(padCode)) {
+      const currentState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (currentState?.page === "challenge") {
+        report(`当前屏出现 Threads 风控提示，先尝试关闭：${currentState.reason || currentState.page}`);
+        const afterDismiss = await dismissThreadsChallengeIfPossible(config, padCode, currentState).catch(() => currentState);
+        if (afterDismiss.page === "challenge") {
+          return {
+            screenshotUrl: afterDismiss.screenshotUrl,
+            debugReason: `threads_challenge_blocked:${afterDismiss.reason || "challenge"}`,
+          };
+        }
+      } else if (currentState?.page === "login_required" || currentState?.page === "system_dialog") {
+        return {
+          screenshotUrl: currentState.screenshotUrl,
+          debugReason: `threads_blocked:${currentState.reason || currentState.page}`,
+        };
+      }
+      const locateOnce = () => withTimeout(
+        warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode),
+        timeoutMs,
+        "warmupLocateCurrentAcpActionsLocalSnapshot timeout",
+      );
+      const first = await locateOnce().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        report(`当前屏互动识别超时，跳过本屏：${message}`);
+        return null;
+      });
+      if (
+        first
+        && !first.like
+        && !first.comment
+        && /acp_side_drawer|acp_status_message|profile_ui|threads_not_foreground|acp_still_android_launcher/.test(first.debugReason || "")
+      ) {
+        report(`当前屏被可恢复界面遮挡，重置后再识别一次：${first.debugReason}`);
+        if (/acp_side_drawer/.test(first.debugReason || "") && first.screenshotUrl) {
+          await warmupDismissAcpSideDrawerAndCapture(config, padCode, first.screenshotUrl).catch(() => "");
+        }
+        await relaunchThreads(config, padCode, 3000).catch(() => undefined);
+        return locateOnce().catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          report(`重试互动识别仍超时，跳过本屏：${message}`);
+          return first;
+        });
+      }
+      return first;
+    }
+    return withTimeout(
+      warmupLocateHomeFeedActions(config, padCode),
+      timeoutMs,
+      "warmupLocateHomeFeedActions timeout",
+    ).catch(async (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      report(`互动按钮识别超时，安全恢复后继续浏览：${message}`);
+      await warmupSafeBackOrRelaunchThreads(config, padCode, 800).catch(() => null);
+      return null;
+    });
+  };
+
+  // 确保 Threads 在前台
+  try {
+    if (riskPlan?.notes.length) {
+      report(`风险托管已启用：${riskPlan.notes.join("；")}`);
+    }
+    report("启动 Threads...");
+    await withTimeout(
+      relaunchThreads(config, padCode, 5000),
+      60_000,
+      "Threads 启动超时：VMOS ADB 启动/截图链路 60 秒内没有返回",
+    );
+    if (isAcpPad(padCode)) {
+      let state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (state?.page === "challenge") {
+        report(`Threads 出现风控提示，先尝试关闭后再继续：${state.reason || state.page}`);
+        const afterDismiss = await dismissThreadsChallengeIfPossible(config, padCode, state).catch(() => state);
+        if (afterDismiss?.page === "challenge") {
+          throw new Error(`Threads 当前出现自动化风控提示，已停止本轮养号：${afterDismiss.reason || state.reason || "challenge"}`);
+        }
+        state = afterDismiss;
+        report(`Threads 风控提示已关闭，当前页面：${afterDismiss?.reason || afterDismiss?.page || "unknown"}`);
+      } else if (state?.page === "login_required" || state?.page === "system_dialog") {
+        throw new Error(`Threads 当前不适合养号：${state.reason || state.page}`);
+      }
+      if (state?.page === "compose_editor") {
+        report("Threads 停在新串文编辑页，先退出后直接继续养号...");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(900);
+      }
+      report(`ACP 快速模式：跳过首页硬恢复，直接尝试当前页面互动${state?.reason ? `（${state.reason}）` : ""}`);
+    } else {
+      await withTimeout(
+        ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)),
+        35_000,
+        "Threads 首页恢复超时",
+      ).catch(async (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        report(`首页恢复失败，跳过阻塞直接尝试当前页面互动：${message}`);
+        await relaunchThreads(config, padCode, 2500).catch(() => undefined);
+      });
+    }
+
+    await warmupMaybeSearchInterest(
+      config,
+      padCode,
+      effectiveCfg,
+      (step) => report(step),
+    ).catch((error) => {
+      report(`兴趣搜索分支已跳过：${error instanceof Error ? error.message : String(error)}`);
+    });
+
+    report(timedSession
+      ? `开始低频浏览：目标滑动 ${Math.round(targetSessionMs / 60_000)} 分钟，每 ${interactionMinPosts}-${interactionMaxPosts} 篇最多随机互动 1 次`
+      : `开始低频浏览：本次最多点赞 ${maxLikes} 个，最多留言 ${maxComments} 个`);
+
+  const firstInteractionIndex = riskManaged ? warmupRandomInt(1, Math.min(3, Math.max(1, browseCount - 1))) : 0;
+  let nextInteractionAfterBrowsed = warmupRandomInt(interactionMinPosts, interactionMaxPosts);
+  const commentTurnSchedule = !timedSession && maxComments > 0
+    ? buildWarmupCommentTurnSchedule(browseCount, maxComments, firstInteractionIndex)
+    : [];
+  const commentTurnSet = new Set(commentTurnSchedule);
+  let consecutiveAcpLocateMisses = 0;
+
+  for (let i = 0; i < browseCount && (!timedSession || Date.now() < sessionDeadline); i++) {
+    const interactionTargetsDone = (maxLikes <= 0 || liked >= maxLikes)
+      && (maxComments <= 0 || commented >= maxComments)
+      && (maxLikes > 0 || maxComments > 0);
+    if (!timedSession && interactionTargetsDone && browsed >= Math.min(browseCount, 2)) {
+      report(`互动目标已完成，提前结束浏览：已浏览 ${browsed}/${browseCount} 条`);
+      break;
+    }
+
+    report(timedSession
+      ? `滑动浏览中：已浏览约 ${browsed} 篇，已执行 ${Math.round((targetSessionMs - Math.max(0, sessionDeadline - Date.now())) / 60_000)} / ${Math.round(targetSessionMs / 60_000)} 分钟...`
+      : `浏览第 ${i + 1}/${browseCount} 条...`);
+
+    // 随机停留观看
+    const watchMs = warmupRandom(minWatchSeconds * 1000, maxWatchSeconds * 1000);
+    const scrollPauseMs = warmupRandom(minAfterScrollPauseMs, maxAfterScrollPauseMs);
+
+    const interactionAllowed = timedSession ? browsed >= nextInteractionAfterBrowsed : i >= firstInteractionIndex;
+    const maxCommentFailuresThisRun = isAcpPad(padCode) ? 4 : 4;
+    const remainingTurns = browseCount - i;
+    const likeChanceThisTurn = !timedSession && maxLikes > 0 && liked < maxLikes && remainingTurns <= 2 ? 100 : likeChance;
+    const scheduledCommentTurn = commentTurnSet.has(i);
+    const commentChanceThisTurn = !timedSession && maxComments > 0 && commented < maxComments
+      ? (scheduledCommentTurn ? 100 : commentChance)
+      : commentChance;
+    let shouldLike = interactionAllowed && likeFailures < 3 && likeChanceThisTurn > 0 && liked < maxLikes && Math.random() * 100 < likeChanceThisTurn;
+    let shouldComment = interactionAllowed && commentFailures < maxCommentFailuresThisRun && commentChanceThisTurn > 0 && commented < maxComments && Math.random() * 100 < commentChanceThisTurn;
+    if (timedSession) {
+      shouldLike = false;
+      shouldComment = false;
+      if (interactionAllowed) {
+        const choices: Array<"like" | "comment"> = [];
+        if (likeChance > 0 && liked < maxLikes && likeFailures < 3) choices.push("like");
+        if (commentChance > 0 && commented < maxComments && commentFailures < maxCommentFailuresThisRun) choices.push("comment");
+        if (choices.length === 0 && (likeChance > 0 || commentChance > 0)) {
+          throw new Error("今日养号互动风险预算已达到上限，请人工介入确认后再继续");
+        }
+        const choice = choices.length ? choices[warmupRandomInt(0, choices.length - 1)] : null;
+        shouldLike = choice === "like";
+        shouldComment = choice === "comment";
+      }
+    }
+    let feedActions: WarmupFeedActionTargets | null = null;
+    if (shouldLike || shouldComment) {
+      if (isAcpPad(padCode) && shouldComment && !shouldLike) {
+        await warmupAlignToReadablePost(config, padCode).catch(() => undefined);
+      }
+      feedActions = await locateFeedActionsForWarmup(isAcpPad(padCode) && shouldComment && !shouldLike ? 24_000 : undefined);
+    }
+    if ((shouldLike || shouldComment) && (!feedActions?.like && !feedActions?.comment)) {
+      report(`互动按钮识别为空：${feedActions?.debugReason ?? "warmupLocateHomeFeedActions returned null"}${feedActions?.debugRaw ? ` | ${feedActions.debugRaw}` : ""}${feedActions?.screenshotUrl ? " | screenshot_captured" : ""}`);
+      if (isAcpPad(padCode)) {
+        consecutiveAcpLocateMisses++;
+        const maxLocateMissesBeforeBrowseOnly = shouldComment && commented < maxComments ? 5 : 2;
+        if (consecutiveAcpLocateMisses >= maxLocateMissesBeforeBrowseOnly) {
+          if (shouldLike) likeFailures = Math.max(likeFailures, 3);
+          if (shouldComment) commentFailures = Math.max(commentFailures, maxCommentFailuresThisRun);
+          report("ACP 连续无法定位互动按钮，本轮停止互动尝试，仅保留浏览滑动，避免反复等待超时");
+        }
+      }
+    } else if (shouldLike || shouldComment) {
+      consecutiveAcpLocateMisses = 0;
+    }
+    if ((shouldLike || shouldComment) && /profile_ui|profile_menu/.test(feedActions?.debugReason || "")) {
+      report("Threads 停在个人页，退回后继续换目标...");
+      await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+      if (!isAcpPad(padCode)) {
+        await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+      }
+      continue;
+    }
+    if ((shouldLike || shouldComment) && /media_viewer/.test(feedActions?.debugReason || "")) {
+      report("Threads 停在图片查看页，返回后继续换目标...");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      await delay(900);
+      if (!isAcpPad(padCode)) {
+        await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+      }
+      continue;
+    }
+    let postPreview: string | null = null;
+    const getPostPreview = async (allowVisionFallback = false) => {
+      if (postPreview) return postPreview;
+      const extracted = await withTimeout(
+        warmupExtractPostPreview(config, padCode, feedActions?.screenshotUrl, { allowVisionFallback }),
+        allowVisionFallback ? 12_000 : 8_000,
+        "warmupExtractPostPreview timeout",
+      ).catch(() => "");
+      if (extracted) postPreview = extracted;
+      return postPreview;
+    };
+    let shouldRelocateBeforeComment = false;
+    const combineLikeWithComment = shouldLike
+      && shouldComment
+      && liked < maxLikes
+      && Boolean(feedActions?.comment)
+      && !isAcpPad(padCode);
+
+    if (shouldLike && !combineLikeWithComment) {
+      const result = await withTimeout(
+        warmupAttemptLikeOnCurrentScreen(config, padCode, feedActions, { avoidHomeRecovery: isAcpPad(padCode) }),
+        isAcpPad(padCode) ? 28_000 : 45_000,
+        "warmupAttemptLikeOnCurrentScreen timeout",
+      ).catch((error) => ({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      if (result.ok && result.point) {
+        liked++;
+        if (result.screenshotUrl) {
+          likeScreenshots.push(await annotateWarmupActionScreenshot(result.screenshotUrl, result.point, `LIKE ${liked}`));
+        }
+        const preview = await getPostPreview(false);
+        report(`已自动点赞第 ${liked} 个：${preview || "当前推荐流帖子"}`);
+        shouldRelocateBeforeComment = Boolean(result.movedToDetail);
+      } else {
+        report(`自动点赞失败：${result.message}`);
+        likeFailures++;
+        interactionFailures++;
+        shouldRelocateBeforeComment = true;
+      }
+    }
+
+    let commentActions = feedActions;
+    if (shouldComment && shouldRelocateBeforeComment) {
+      if (isAcpPad(padCode)) {
+        commentActions = await locateFeedActionsForWarmup(24_000);
+      } else {
+        await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+        commentActions = await locateFeedActionsForWarmup(14_000);
+      }
+      if (!commentActions?.comment) {
+        report(`留言前重新定位失败：${commentActions?.debugReason ?? "warmupLocateHomeFeedActions returned null"}${commentActions?.debugRaw ? ` | ${commentActions.debugRaw}` : ""}`);
+      }
+    }
+
+    if (shouldComment && commentActions?.comment) {
+      try {
+        if (
+          isAcpPad(padCode)
+          && !isTrustedWarmupCommentDebugReason(commentActions.debugReason, padCode)
+        ) {
+          report(`留言目标不够可靠，跳过当前图文帖：${commentActions.debugReason || "unknown"}`);
+          commentActions = null;
+        }
+        if (!commentActions?.comment) {
+          throw new Error("留言目标不够可靠，已跳过");
+        }
+        await warmupWaitForScrollSettle(650, 1100);
+        report(`准备自动留言：target=${Math.round(commentActions.comment.x)},${Math.round(commentActions.comment.y)} ${commentActions.debugReason || ""}`);
+        let commentReferencePreview = "";
+        const generateCommentAfterOpen = async () => {
+          const preview = await getPostPreview(true);
+          const currentShot = preview
+            ? undefined
+            : await withTimeout(
+                screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+                5_500,
+                "warmup comment current screenshot timeout",
+              ).catch(() => commentActions?.screenshotUrl);
+          const screenshotComment = preview
+            ? null
+            : await withTimeout(
+                warmupGenerateCommentFromScreenshot(currentShot || commentActions?.screenshotUrl, commentTemplates, commentPersona),
+                9_000,
+                "warmupGenerateCommentFromScreenshot timeout",
+              ).catch(() => null);
+          const effectivePreview = preview || screenshotComment?.preview || "";
+          commentReferencePreview = effectivePreview;
+          const hasSpecificScreenshotComment = Boolean(
+            screenshotComment?.comment
+            && isUsableWarmupComment(screenshotComment.comment)
+            && !isGenericWarmupComment(screenshotComment.comment),
+          );
+          if (requireReadablePostForComment && normalizeSingleLine(effectivePreview).length < 6 && !hasSpecificScreenshotComment) {
+            report("未读到足够明确的帖子正文，改用保守短评继续留言");
+          }
+          return screenshotComment?.comment
+            || await withTimeout(
+              warmupGenerateCommentForPost(effectivePreview, commentTemplates, commentPersona),
+              6_500,
+              "warmupGenerateCommentForPost timeout",
+            ).catch(() => fallbackWarmupComment(effectivePreview, commentTemplates, commentPersona));
+        };
+        const commentResult = await withTimeout(
+          warmupExecuteCommentAtPoint(
+            config,
+            padCode,
+            commentActions.comment,
+            generateCommentAfterOpen,
+            {
+              likeBeforeSend: combineLikeWithComment,
+              alreadyInReplyComposer: isAcpPad(padCode)
+                && /thread_detail_visual:LOCAL_REPLY_COMPOSER/.test(commentActions.debugReason || ""),
+              preferBottomReplyInput: isAcpPad(padCode)
+                && /thread_detail_visual:LOCAL_REPLY_COMPOSER/.test(commentActions.debugReason || ""),
+              sourceScreenshotUrl: commentActions.screenshotUrl,
+              debugReason: commentActions.debugReason,
+              skipAbsoluteOpenRetry: isAcpPad(padCode)
+                && /acp_fast_screenshot_action_row|acp_safe_geometry_action_row|acp_verified_common_action_row_fallback/.test(commentActions.debugReason || ""),
+              openViaCommentFirst: isAcpPad(padCode)
+                && /acp_fast_screenshot_action_row|acp_safe_geometry_action_row|acp_verified_common_action_row_fallback/.test(commentActions.debugReason || ""),
+            },
+          ),
+          isAcpPad(padCode) ? 170_000 : 25_000,
+          "warmupExecuteCommentAtPoint timeout",
+        );
+        if (commentResult.liked && liked < maxLikes) {
+          liked++;
+          likeScreenshots.push(await annotateWarmupActionScreenshot(
+            commentResult.liked.screenshotUrl,
+            commentResult.liked.point,
+            `LIKE ${liked}`,
+          ));
+          report(`已随留言同步点赞第 ${liked} 个`);
+        }
+        commented++;
+        if (commentResult.screenshotUrl) commentScreenshots.push(commentResult.screenshotUrl);
+        report(`已自动留言第 ${commented} 个：${commentResult.comment}${commentReferencePreview ? `（参考：${commentReferencePreview.slice(0, 42)}）` : ""}`);
+        if (!timedSession && liked < maxLikes) {
+          report("留言完成后继续补点赞...");
+          await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+          if (!isAcpPad(padCode)) {
+            await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+          }
+        }
+      } catch (error: any) {
+        const errorMessage = error?.message || String(error);
+        const expectedSkip = isThreadsWarmupCommentExpectedSkipMessage(errorMessage);
+        report(`${expectedSkip ? "自动留言跳过" : "自动留言失败"}：${errorMessage}`);
+        if (!expectedSkip) {
+          commentFailures++;
+          if (!/未读到足够明确的帖子正文/.test(errorMessage)) {
+            interactionFailures++;
+          }
+        }
+        await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
+        if (isAcpPad(padCode)) {
+          await relaunchThreads(config, padCode, 2600).catch(() => undefined);
+        } else {
+          await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+        }
+      }
+    }
+
+    if (timedSession && interactionAllowed) {
+      nextInteractionAfterBrowsed = browsed + warmupRandomInt(interactionMinPosts, interactionMaxPosts);
+      if (shouldLike || shouldComment) {
+        report(`本次互动窗口结束，下次约 ${interactionMinPosts}-${interactionMaxPosts} 篇后再随机互动`);
+      }
+    }
+    if (timedSession && interactionFailures >= 3) {
+      throw new Error("养号连续互动失败达到风险阈值，请人工介入检查当前账号或页面状态");
+    }
+
+    // 停留时加入短距离上下回看，再推进到下一条，避免机械单向刷屏。
+    await warmupDwellLikeHuman(config, padCode, watchMs);
+    await warmupScrollDown(config, padCode);
+    await delay(scrollPauseMs);
+    browsed++;
+  }
+
+  const shouldRecoverLikes = !timedSession && likeChance > 0 && maxLikes > 0 && liked < maxLikes;
+  if (shouldRecoverLikes) {
+    const maxRecoveries = Math.max(2, Math.min(4, maxLikes * 2 + 1));
+    report(`自动点赞未达标，继续补点 ${liked}/${maxLikes}...`);
+    await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+    if (!isAcpPad(padCode)) {
+      await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+    }
+    for (let attempt = 0; attempt < maxRecoveries && liked < maxLikes; attempt += 1) {
+      const actions = await locateFeedActionsForWarmup(isAcpPad(padCode) ? 24_000 : 14_000).catch(() => null);
+      if (/profile_ui|profile_menu/.test(actions?.debugReason || "")) {
+        report("补点时停在个人页，重新打开 Threads...");
+        await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+        if (!isAcpPad(padCode)) {
+          await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+        }
+        continue;
+      }
+      const result = await withTimeout(
+        warmupAttemptLikeOnCurrentScreen(config, padCode, actions, { avoidHomeRecovery: isAcpPad(padCode) }),
+        isAcpPad(padCode) ? 28_000 : 45_000,
+        "warmupAttemptLikeOnCurrentScreen timeout",
+      ).catch((error) => ({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      if (result.ok && result.point) {
+        liked++;
+        if (result.screenshotUrl) {
+          likeScreenshots.push(await annotateWarmupActionScreenshot(result.screenshotUrl, result.point, `LIKE ${liked}`));
+        }
+        const preview = await warmupExtractPostPreview(config, padCode, actions?.screenshotUrl, { allowVisionFallback: false }).catch(() => "");
+        report(`补点成功第 ${liked} 个：${preview || "当前推荐流帖子"}`);
+        if (result.movedToDetail && !isAcpPad(padCode)) {
+          await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+        }
+      } else {
+        report(`补点失败：${result.message}`);
+      }
+      if (liked < maxLikes) {
+        await warmupScrollDown(config, padCode).catch(() => undefined);
+        await delay(warmupRandom(1200, 2600));
+      }
+    }
+  }
+
+  if (strictCompletion && likeChance >= 100 && maxLikes > 0 && liked < maxLikes) {
+    throw new Error(`养号未完成：要求自动点赞 ${maxLikes} 个，实际成功 ${liked} 个`);
+  }
+  const shouldRecoverComments = !timedSession && commentChance > 0 && maxComments > 0 && commented < maxComments;
+  if (shouldRecoverComments) {
+    const maxRecoveries = isAcpPad(padCode) ? 2 : Math.max(2, Math.min(4, maxComments * 2 + 1));
+    const plannedTurns = commentTurnSchedule.length ? `，计划留言轮次：${commentTurnSchedule.map((turn) => turn + 1).join(", ")}` : "";
+    report(`自动留言未达标，进入尾部补漏 ${commented}/${maxComments}${plannedTurns}...`);
+    await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+    for (let attempt = 0; attempt < maxRecoveries && commented < maxComments; attempt += 1) {
+      const actions = await locateFeedActionsForWarmup(isAcpPad(padCode) ? 24_000 : 14_000).catch(() => null);
+      if (!actions?.comment) {
+        report(`补留言定位失败：${actions?.debugReason || "no_comment_target"}${actions?.debugRaw ? ` | ${actions.debugRaw}` : ""}`);
+        await warmupScrollDown(config, padCode).catch(() => undefined);
+        await delay(warmupRandom(900, 1800));
+        continue;
+      }
+      if (
+        isAcpPad(padCode)
+        && !isTrustedWarmupCommentDebugReason(actions.debugReason, padCode)
+      ) {
+        report(`补留言目标不够可靠，跳过：${actions.debugReason || "unknown"}`);
+        await warmupScrollDown(config, padCode).catch(() => undefined);
+        await delay(warmupRandom(900, 1800));
+        continue;
+      }
+      try {
+        await warmupWaitForScrollSettle(650, 1100);
+        const commentResult = await withTimeout(
+          warmupExecuteCommentAtPoint(
+            config,
+            padCode,
+            actions.comment,
+            async () => {
+              const preview = await warmupExtractPostPreview(config, padCode, actions.screenshotUrl, { allowVisionFallback: true }).catch(() => "");
+              return await withTimeout(
+                warmupGenerateCommentForPost(preview, commentTemplates, commentPersona),
+                6_500,
+                "warmupRecoveryGenerateComment timeout",
+              ).catch(() => fallbackWarmupComment(preview, commentTemplates, commentPersona));
+            },
+            {
+              alreadyInReplyComposer: isAcpPad(padCode)
+                && /thread_detail_visual:LOCAL_REPLY_COMPOSER/.test(actions.debugReason || ""),
+              preferBottomReplyInput: isAcpPad(padCode)
+                && /thread_detail_visual:LOCAL_REPLY_COMPOSER/.test(actions.debugReason || ""),
+              sourceScreenshotUrl: actions.screenshotUrl,
+              debugReason: actions.debugReason,
+              skipAbsoluteOpenRetry: isAcpPad(padCode)
+                && /acp_fast_screenshot_action_row|acp_safe_geometry_action_row|acp_verified_common_action_row_fallback/.test(actions.debugReason || ""),
+              openViaCommentFirst: isAcpPad(padCode)
+                && /acp_fast_screenshot_action_row|acp_safe_geometry_action_row|acp_verified_common_action_row_fallback/.test(actions.debugReason || ""),
+            },
+          ),
+          isAcpPad(padCode) ? 170_000 : 25_000,
+          "warmupRecoveryExecuteComment timeout",
+      );
+      commented++;
+      if (commentResult.screenshotUrl) commentScreenshots.push(commentResult.screenshotUrl);
+      report(`补留言成功第 ${commented} 个：${commentResult.comment}`);
+      } catch (error: any) {
+        const errorMessage = error?.message || String(error);
+        report(`${isThreadsWarmupCommentExpectedSkipMessage(errorMessage) ? "补留言跳过" : "补留言失败"}：${errorMessage}`);
+        await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
+        if (isAcpPad(padCode)) {
+          await relaunchThreads(config, padCode, 2600).catch(() => undefined);
+        }
+      }
+      if (commented < maxComments) {
+        await warmupScrollDown(config, padCode).catch(() => undefined);
+        await delay(warmupRandom(1000, 2200));
+      }
+    }
+  }
+  if (strictCompletion && commentChance >= 100 && maxComments > 0 && commented < maxComments) {
+    throw new Error(`养号未完成：要求自动留言 ${maxComments} 个，实际成功 ${commented} 个`);
+  }
+
+    const result = report(`养号完成：浏览 ${browsed} 条，自动点赞 ${liked} 个，自动留言 ${commented} 个`, true);
+    if (riskManaged) recordWarmupRiskResult(padCode, result);
+    return result;
+  } catch (error) {
+    if (riskManaged && !String(error instanceof Error ? error.message : error).includes("已暂停")) {
+      recordWarmupRiskResult(padCode, {
+        browsed,
+        liked,
+        commented,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    throw error;
+  }
+}
+
+function extractInstagramWarmupPostPreviewFromUiXml(uiXml: string): string {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const lines: string[] = [];
+  for (const node of nodes) {
+    const text = normalizeSingleLine(decodeXmlAttr(getXmlAttr(node, "text")));
+    if (!text) continue;
+    if (text.length < 4 || text.length > 80) continue;
+    if (INSTAGRAM_WARMUP_PREVIEW_IGNORE_RE.test(text)) continue;
+    if (/^\d+\s*(likes?|comments?|views?)$/i.test(text)) continue;
+    if (/^\d+\s*(個)?(讚|赞|喜歡|喜欢|留言|評論|评论|觀看|观看|瀏覽|浏览)$/i.test(text)) continue;
+    lines.push(text);
+    if (lines.length >= 2) break;
+  }
+  return normalizeSingleLine(lines.join(" ")).slice(0, 120);
+}
+
+async function warmupLikeInstagramCurrentPost(
+  config: VmosConfig,
+  padCode: string,
+  uiXml?: string,
+): Promise<{ ok: boolean; message: string; screenshotUrl?: string }> {
+  const xml = uiXml || await dumpUiXml(config, padCode).catch(() => "");
+  const detected = findInstagramWarmupActionTarget(xml, "like");
+  const fallback = detected ? null : await getInstagramWarmupFallbackActionTarget(config, padCode, "like");
+  const like = detected || fallback;
+  if (!like) return { ok: false, message: "未识别到 Instagram 点赞按钮" };
+  await tapViaAdbAbsolute(config, padCode, like.x, like.y, 1600);
+  await delay(900);
+  const shotUrl = await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "");
+  const evidenceUrl = shotUrl
+    ? await annotateWarmupActionScreenshot(shotUrl, like, "LIKED")
+    : undefined;
+  return { ok: true, message: fallback?.debugReason || "已执行点赞", screenshotUrl: evidenceUrl || shotUrl || undefined };
+}
+
+async function warmupCommentInstagramCurrentPost(
+  config: VmosConfig,
+  padCode: string,
+  templates: string[],
+  persona?: WarmupCommentPersona,
+  uiXml?: string,
+): Promise<{ ok: boolean; message: string; screenshotUrl?: string; comment?: string }> {
+  const xml = uiXml || await dumpUiXml(config, padCode).catch(() => "");
+  const detected = findInstagramWarmupActionTarget(xml, "comment");
+  const fallback = detected ? null : await getInstagramWarmupFallbackActionTarget(config, padCode, "comment");
+  const commentBtn = detected || fallback;
+  if (!commentBtn) return { ok: false, message: "未识别到 Instagram 留言按钮" };
+
+  const preview = extractInstagramWarmupPostPreviewFromUiXml(xml);
+  const comment = await warmupGenerateCommentForPost(preview, templates, persona);
+
+  await tapViaAdbAbsolute(config, padCode, commentBtn.x, commentBtn.y, 1800);
+  await delay(900);
+
+  const composerXml = await dumpUiXml(config, padCode).catch(() => "");
+  const input = findInstagramCommentInputTarget(composerXml) || { x: Math.round(BASE_SCREEN.width * 0.36), y: Math.round(BASE_SCREEN.height * 0.92) };
+  await tapViaAdbAbsolute(config, padCode, input.x, input.y, 500);
+  await clearFocusedTextInput(config, padCode, 200);
+  await typeTextViaAdbBroadcast(config, padCode, comment, 1300);
+
+  const sendXml = await dumpUiXml(config, padCode).catch(() => "");
+  const send = findInstagramCommentSendTarget(sendXml) || { x: Math.round(BASE_SCREEN.width * 0.88), y: Math.round(BASE_SCREEN.height * 0.92) };
+  await tapViaAdbAbsolute(config, padCode, send.x, send.y, 1800);
+  await delay(1200);
+
+  const shotUrl = await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "");
+  const evidenceUrl = shotUrl
+    ? await annotateWarmupActionScreenshot(shotUrl, send, "COMMENTED")
+    : undefined;
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+  await delay(500);
+  return { ok: true, message: "已执行留言", screenshotUrl: evidenceUrl || shotUrl || undefined, comment };
+}
+

@@ -205,6 +205,39 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(resp["runtime_config"]["remote_comfy_gateway_token"], "secret-token")
         self.assertEqual(resp["runtime_config"]["remote_comfy_workflow_mappings"]["text_to_image"], "wf-text")
 
+    def test_runtime_config_bot_token_empty_save_preserves_existing_token(self):
+        put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
+        server._write_runtime_config_file({"telegram_bot_token": "old-token-123"})
+
+        resp = put_runtime_config(server.RuntimeConfigPayload(telegram_bot_token="", llm_base_url="http://llm.local"), self.admin_user)
+
+        self.assertEqual(resp["runtime_config"]["telegram_bot_token"], "old-token-123")
+        self.assertEqual(resp["runtime_config"]["llm_base_url"], "http://llm.local")
+
+    def test_runtime_config_bot_token_save_writes_local_bot_token_file(self):
+        put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
+        token_file = Path(self._tmpdir.name) / "bot-runtime" / "telegram_bot_token.txt"
+        local_env = Path(self._tmpdir.name) / "bot-runtime" / "local-bot.env"
+        old_token_file = os.environ.get("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE")
+        old_local_env = os.environ.get("TOOL_R18_LOCAL_BOT_ENV_PATH")
+        os.environ["TOOL_R18_TELEGRAM_BOT_TOKEN_FILE"] = str(token_file)
+        os.environ["TOOL_R18_LOCAL_BOT_ENV_PATH"] = str(local_env)
+        try:
+            resp = put_runtime_config(server.RuntimeConfigPayload(telegram_bot_token="new-token-456"), self.admin_user)
+        finally:
+            if old_token_file is None:
+                os.environ.pop("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", None)
+            else:
+                os.environ["TOOL_R18_TELEGRAM_BOT_TOKEN_FILE"] = old_token_file
+            if old_local_env is None:
+                os.environ.pop("TOOL_R18_LOCAL_BOT_ENV_PATH", None)
+            else:
+                os.environ["TOOL_R18_LOCAL_BOT_ENV_PATH"] = old_local_env
+
+        self.assertEqual(resp["runtime_config"]["telegram_bot_token"], "new-token-456")
+        self.assertEqual(token_file.read_text(encoding="utf-8").strip(), "new-token-456")
+        self.assertIn("TELEGRAM_BOT_TOKEN=new-token-456", local_env.read_text(encoding="utf-8"))
+
     def test_runtime_defaults_prefer_local_file_and_keep_explicit_app_id(self):
         with db_module.db() as conn:
             db_module.set_admin_config(
@@ -557,6 +590,56 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertIn("现代卧室中", normalized)
         self.assertNotIn("现代，卧室中", normalized)
+
+    def test_non_r18_generated_post_image_prompt_rules_do_not_force_exposure(self):
+        system_prompt, prompt_chain = server._build_tg_prompt_system_prompt(
+            "text_to_image",
+            "text-to-image",
+            non_r18_free=True,
+        )
+
+        self.assertEqual("image", prompt_chain)
+        self.assertIn("NON-R18 FREE-GROUP IMAGE RULE", system_prompt)
+        self.assertNotIn("露出丰满坚挺的乳房和清晰可见的乳头", system_prompt)
+        self.assertNotIn("Upper-body exposure is mandatory", system_prompt)
+
+    def test_non_r18_generated_post_image_validation_allows_safe_prompt(self):
+        prompt = (
+            "一位身形纤细修长且腰胯比例轻盈自然的女性坐在床边，"
+            "穿着米白色细肩带吊带背心和深灰色短裙，"
+            "服装贴合场景并保持完整自然，"
+            "她的左手扶在床沿而右手轻放在膝侧，"
+            "她的身体微微前倾面向镜头，"
+            "她的头自然转向镜头，目光看向镜头，眼神柔和且表情嘴角上扬，"
+            "背景是简洁卧室环境，床铺和窗帘保持清楚，"
+            "柔和自然光从侧面照射，浅景深突出主体，"
+            "真实皮肤纹理与布料褶皱自然，高清写实摄影"
+        )
+
+        server._validate_tg_image_structured_prompt(prompt, require_erotic=False)
+        with self.assertRaises(RuntimeError):
+            server._validate_tg_image_structured_prompt(prompt)
+
+    def test_non_r18_generated_post_image_canonicalizer_keeps_clothing_safe(self):
+        prompt = (
+            "一位女性坐在床边，穿着米白色细肩带吊带背心和深灰色短裙，"
+            "她的左手扶在床沿而右手轻放在膝侧，"
+            "她的身体微微前倾面向镜头，"
+            "她的头自然转向镜头，目光看向镜头，眼神柔和且表情嘴角上扬，"
+            "背景是简洁卧室环境，柔和自然光从侧面照射，浅景深突出主体，"
+            "真实皮肤纹理与布料褶皱自然，高清写实摄影"
+        )
+
+        final_prompt = server._canonicalize_tg_image_nine_segment_prompt(
+            prompt,
+            {"tg_no_r18_exposure": True, "source": "telegram-generated-post-image-candidates"},
+            "为免费群推文生成配图",
+        )
+
+        self.assertIn("服装贴合场景并保持完整自然", final_prompt)
+        self.assertNotIn("乳房", final_prompt)
+        self.assertNotIn("乳头", final_prompt)
+        server._validate_tg_image_structured_prompt(final_prompt, require_erotic=False)
 
     def test_tg_image_clothing_anchor_adds_missing_color_and_structure(self):
         prompt = (
@@ -1005,6 +1088,55 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertFalse(server._should_reject_generated_person_image(report))
 
+    def test_text_to_image_auto_qa_accepts_minor_color_difference_when_deliverable(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 88,
+            "prompt_match_score": 82,
+            "anatomy_score": 92,
+            "visual_score": 90,
+            "prompt_mismatch_visible": True,
+            "deliverable_ready": True,
+            "issues": ["上衣颜色与提示词描述略有差异"],
+        }
+
+        self.assertFalse(server._should_reject_generated_person_image(report))
+
+    def test_text_to_image_auto_qa_accepts_minor_hand_pose_when_deliverable(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 88,
+            "prompt_match_score": 90,
+            "anatomy_score": 85,
+            "visual_score": 88,
+            "hand_anomaly_visible": True,
+            "deliverable_ready": True,
+            "issues": ["右手手指轻微姿态异常"],
+        }
+
+        self.assertFalse(server._should_reject_generated_person_image(report))
+
+    def test_text_to_image_auto_qa_accepts_unavailable_hand_review_when_main_report_deliverable(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 92,
+            "prompt_match_score": 95,
+            "anatomy_score": 95,
+            "visual_score": 90,
+            "deliverable_ready": True,
+            "issues": ["图像手部肢体复审未完成，不能确认候选图可交付。"],
+            "hand_limb_audit": {
+                "inspected": False,
+                "qa_unavailable": True,
+                "issues": ["图像手部肢体复审未完成，不能确认候选图可交付。"],
+            },
+        }
+
+        self.assertFalse(server._should_reject_generated_person_image(report))
+
     def test_internal_tg_cancel_finds_latest_active_webapp_task(self):
         server._create_task_record("task_old", 1, "text_to_image", {"tg_chat_id": 8100401093})
         server._create_task_record("task_other_chat", 1, "text_to_image", {"tg_chat_id": 123})
@@ -1359,6 +1491,58 @@ class RuntimeConfigStoreTests(unittest.TestCase):
                 server._run_remote_comfy_mapped_task("task_batch_qa_limit", payload, "text_to_image")
 
         self.assertEqual(len(calls), 6)
+
+    def test_person_t2i_batch_qa_keeps_passed_images_and_regenerates_full_batches(self):
+        batch_sizes: list[int] = []
+        qa_results = iter(
+            [
+                {"inspected": True, "passed": True, "overall_score": 90, "prompt_match_score": 90, "anatomy_score": 90, "visual_score": 90, "deliverable_ready": True},
+                {"inspected": True, "passed": True, "overall_score": 90, "prompt_match_score": 90, "anatomy_score": 90, "visual_score": 90, "deliverable_ready": True},
+                {"inspected": True, "passed": False, "limb_or_body_broken": True, "issues": ["test reject"]},
+                {"inspected": True, "passed": False, "limb_or_body_broken": True, "issues": ["test reject"]},
+                {"inspected": True, "passed": True, "overall_score": 90, "prompt_match_score": 90, "anatomy_score": 90, "visual_score": 90, "deliverable_ready": True},
+                {"inspected": True, "passed": True, "overall_score": 90, "prompt_match_score": 90, "anatomy_score": 90, "visual_score": 90, "deliverable_ready": True},
+                {"inspected": True, "passed": False, "limb_or_body_broken": True, "issues": ["test reject"]},
+                {"inspected": True, "passed": False, "limb_or_body_broken": True, "issues": ["test reject"]},
+            ]
+        )
+
+        def fake_run_remote(**kwargs):
+            requested = int(kwargs.get("batch_size") or 1)
+            batch_sizes.append(requested)
+            outputs = []
+            for image_idx in range(requested):
+                path = Path(self._tmpdir.name) / f"candidate_{len(batch_sizes)}_{image_idx}.jpg"
+                path.write_bytes(b"fake")
+                outputs.append({"local_path": str(path), "type": "output", "filename": path.name})
+            return {
+                "ok": True,
+                "prompt_id": f"prompt_{len(batch_sizes)}",
+                "local_outputs": outputs,
+            }
+
+        payload = {
+            "_task_id": "task_batch_qa_missing_only",
+            "_task_type": "text_to_image",
+            "prompt": "test prompt",
+            "remote_comfy_gateway_url": "http://gateway",
+            "remote_comfy_gateway_token": "secret",
+            "remote_comfy_workflow_mappings": {"text_to_image": "person_t2i.api.json"},
+            "text_to_image_auto_qa_enabled": True,
+            "text_to_image_auto_qa_max_attempts": 3,
+            "text_to_image_qa_target_count": 4,
+            "batch_size": 4,
+        }
+
+        with patch.object(server, "_run_remote_comfy_gateway_test", side_effect=fake_run_remote), \
+             patch.object(server, "_analyze_generated_person_image_quality", side_effect=lambda **kwargs: next(qa_results)), \
+             patch.object(server, "_new_image_qa_seed", return_value=123456):
+            output = server._run_remote_comfy_mapped_task("task_batch_qa_missing_only", payload, "text_to_image")
+
+        self.assertEqual(batch_sizes, [4, 4])
+        self.assertEqual(len(output["image_paths"]), 4)
+        self.assertEqual(output["image_qa"]["attempts"], 2)
+        self.assertEqual(output["image_qa"]["passed_count"], 4)
 
     def test_comfy_gpu_memory_stats_parse_comfy_system_stats(self):
         stats = {
