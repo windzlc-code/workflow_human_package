@@ -55,6 +55,9 @@ RUNTIME_CONFIG_PATH = Path(os.getenv("APP_RUNTIME_CONFIG_PATH", str(DATA_DIR / "
 TG_WORKBENCH_DB_PATH = Path(os.getenv("TG_WORKBENCH_DB_PATH", str(ROOT_DIR / "data" / "workbench.db"))).resolve()
 CLOSED_IMAGE_WORKFLOW_STAGE_PREFIX = "closed_image_model:"
 CLOSED_LLM_WORKFLOW_STAGE_PREFIX = "closed_llm_model:"
+_TG_PROMPT_VARIANT_HISTORY_LOCK = threading.Lock()
+_TG_PROMPT_VARIANT_HISTORY: dict[str, list[str]] = {}
+_TG_PROMPT_VARIANT_HISTORY_LIMIT = 18
 
 SECRET_KEY_HINTS = {
     "api_key",
@@ -5487,6 +5490,32 @@ def _generated_person_prompt_has_clothing_requirement(prompt_text: str) -> bool:
     return bool(_GENERATED_PERSON_CLOTHING_REQUIREMENT_PATTERN.search(str(prompt_text or "")))
 
 
+_GENERATED_PERSON_BOUNDARY_ARTIFACT_PATTERN = re.compile(
+    r"(clip|clipping|intersect|intersection|fusion|fuse|floating|pasted|misaligned|sticker|hard[- ]?edge|"
+    r"穿模|穿插|交叠|交疊|融合|粘连|黏连|粘贴|粘貼|贴片|貼片|硬边|硬邊|错位|錯位|断裂|斷裂)",
+    re.IGNORECASE,
+)
+_GENERATED_PERSON_BOUNDARY_AREA_PATTERN = re.compile(
+    r"(clothing|fabric|garment|body|exposed|chest|breast|nipple|areola|strap|"
+    r"衣物|衣服|服装|服裝|布料|身体|身體|暴露|胸|乳|吊带|吊帶|肩带|肩帶|边界|邊界)",
+    re.IGNORECASE,
+)
+
+
+def _generated_person_boundary_artifact_mentioned(*values: Any) -> bool:
+    parts: list[str] = []
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            parts.extend(str(item or "") for item in value)
+        else:
+            parts.append(str(value or ""))
+    text = "\n".join(parts)
+    return bool(
+        _GENERATED_PERSON_BOUNDARY_ARTIFACT_PATTERN.search(text)
+        and _GENERATED_PERSON_BOUNDARY_AREA_PATTERN.search(text)
+    )
+
+
 def _analyze_generated_person_image_quality(
     *,
     image_path: str,
@@ -5509,7 +5538,7 @@ def _analyze_generated_person_image_quality(
             "如果图像没有清晰人物，或者主体不是人物，也应按提示词符合度和画面语义判断是否拦截。",
             "必须只返回 JSON，不要输出解释性正文。",
             "Strict face visibility rule: when the prompt requires head, face, gaze, expression, or looking at camera, the face itself must be fully visible from forehead to chin: visible forehead/upper face, both eyes, nose, mouth, chin, and the main facial oval must be inside the frame and not hidden by crop. Do not fail for hair/top-of-head margin alone, but fail if the forehead or upper face is cropped, or if facial features are partially cut off.",
-            "R18 clothing-boundary rule: standalone exposed local rendering imperfections are not enough, and normal coherent garment openings/cutouts around exposed areas should pass. Reject only severe clothing geometry failures: fabric clearly clips into/intersects/fuses with the body, garment pieces pass through exposed areas, disconnected floating fabric, pasted/misaligned local details caused by transparent fabric, or body/clothing boundaries that are visibly broken. Light or ambiguous edge blending should pass.",
+            "R18 clothing-boundary rule: standalone exposed local rendering imperfections are not enough, and normal coherent garment openings/cutouts around exposed areas should pass. Reject clear clothing geometry failures: fabric visibly clips into/intersects/fuses with the body, garment pieces pass through exposed areas, disconnected floating fabric, pasted/sticker-like/misaligned local details caused by transparent fabric, or body/clothing boundaries that are visibly broken. Light or ambiguous edge blending should pass.",
             "JSON schema:",
             "{",
             '  "summary": "中文一句话总结",',
@@ -5552,7 +5581,7 @@ def _analyze_generated_person_image_quality(
             if requires_visible_head
             else "本次提示词没有明确要求头部/脸部/眼神/表情可见：否。无需仅因普通构图裁切头部而拦截，但仍需按主体和画面语义判断。",
             "Strictly inspect face visibility: pass only when the forehead/upper face, both eyes, nose, mouth, chin, and main face oval are visible. Reject if the frame cuts through the forehead or face, if only part of the face is visible, or if gaze/expression cannot be judged. Do not reject merely because hair/top-of-head margin is tight while the forehead and full face are visible.",
-            "Strictly inspect clothing/body boundaries: normal coherent garment openings/cutouts should pass. Reject only clear severe failures: clothing clips into, intersects, or fuses with the body/exposed region; fabric pieces pass through exposed details; disconnected floating fabric; transparent fabric creates pasted/misaligned local details; or the body/clothing boundary is visibly broken. Light or ambiguous edge blending is not enough.",
+            "Strictly inspect clothing/body boundaries: normal coherent garment openings/cutouts should pass. Reject clear failures: clothing clips into, intersects, or fuses with the body/exposed region; fabric pieces pass through exposed details; disconnected floating fabric; transparent fabric creates pasted/sticker-like/misaligned local details; or the body/clothing boundary is visibly broken. Pay special attention to requested exposed chest/upper-body regions. Light or ambiguous edge blending is not enough.",
         ]
     )
     try:
@@ -5851,7 +5880,7 @@ def _analyze_generated_person_body_shape_quality(
             "額外檢查上半身前側輪廓：若出現誇張球形、硬邊貼圖感、比例過大、左右結構明顯失衡、與軀幹連接不自然、像局部被放大或覆蓋到身體上的錯誤造型，必須將 upperTorsoContourAnomaly 設為 true，並視為不可交付。",
             "正常透視、寬鬆衣物、自然姿勢、鏡頭壓縮或健康自然曲線不應被誤判；只有明顯不符合交付要求時才攔截。",
             "必須只返回 JSON，不要輸出解釋性正文。",
-            "Exposed local detail rule: standalone exposed local rendering imperfections should not fail this body-shape audit. Mark exposedRegionAnatomyArtifact only when the issue is tied to clothing/body clipping, intersection, fusion, or impossible garment boundary.",
+            "Exposed local detail rule: standalone exposed local rendering imperfections should not fail this body-shape audit. Mark exposedRegionAnatomyArtifact only when the issue is tied to clothing/body clipping, intersection, fusion, pasted/sticker-like texture, hard broken edge, or impossible garment boundary.",
             "JSON schema:",
             "{",
             '  "summary": "中文一句話總結",',
@@ -5873,7 +5902,7 @@ def _analyze_generated_person_body_shape_quality(
             f"當前為第 {max(int(attempt), 1)} 輪候選圖，通過第一輪通用 QA，現在進行身形視覺複審。",
             "請觀察主體人物的整體輪廓、肩腰比例、腰腹厚度、四肢體量和衣物下的身形輪廓。若身形明顯過於豐滿、厚重、臃腫或肥胖，請標記為不可交付。",
             "請特別檢查上半身前側輪廓是否出現錯誤造型：誇張球形、硬邊貼圖感、局部尺寸過大、左右不平衡、與軀幹銜接不自然、比例明顯偏離人設體型參考。若存在，upperTorsoContourAnomaly 必須為 true。",
-            "Also inspect exposed local detail rendering only when it interacts with clothing/body boundaries: fabric clipping, intersection, fusion, impossible garment edge, or clothing passing through exposed regions may set exposedRegionAnatomyArtifact=true.",
+            "Also inspect exposed local detail rendering only when it interacts with clothing/body boundaries: fabric clipping, intersection, fusion, pasted/sticker-like hard edge, impossible garment edge, or clothing passing through exposed regions may set exposedRegionAnatomyArtifact=true.",
         ]
     )
     try:
@@ -5930,7 +5959,7 @@ def _analyze_generated_person_clothing_quality(
             "Only compare visible clothing against the generation prompt and visible clothing/body boundary quality. Do not judge aesthetics, body shape, pose style, or subject matter.",
             "Check garment type, main garment color, requested clothing state, and whether the clothing is physically coherent on the body without clipping, fusion, impossible openings, floating fabric, or pasted/translucent boundary artifacts.",
             "Be tolerant of shadows, highlights, folds, transparency, small trim colors, and minor lighting shifts. Do not fail a candidate for tiny color-temperature differences.",
-            "Fail when the requested garment type is clearly absent or replaced, the main requested garment color is clearly wrong, the requested clothing state is clearly contradicted, or the garment clearly and severely clips into/fuses with the body or exposed regions. Normal coherent openings/cutouts are acceptable; only broken boundaries, fabric passing through body, floating/disconnected fabric, or transparent-fabric pasted/misaligned local details should fail.",
+            "Fail when the requested garment type is clearly absent or replaced, the main requested garment color is clearly wrong, the requested clothing state is clearly contradicted, or the garment clearly clips into/fuses with the body or exposed regions. Normal coherent openings/cutouts are acceptable; broken boundaries, fabric passing through body, floating/disconnected fabric, or transparent-fabric pasted/sticker-like/misaligned local details should fail.",
             "If clothing is mostly hidden and cannot be reliably judged, mark clothingRequirementVisible as false and do not mark mismatch.",
             "Return JSON only. Put user-facing issues in Chinese.",
             "JSON schema:",
@@ -5960,7 +5989,7 @@ def _analyze_generated_person_clothing_quality(
             f"Candidate round: {max(int(attempt), 1)}.",
             "Extract the clothing and color requirements from the prompt, then compare them to the visible candidate image.",
             "If the prompt says white shirt and black skirt, a red dress or blue jacket is a visible mismatch. If the prompt requests an open shirt or raised skirt, a fully closed or different garment state is a state mismatch.",
-            "Fail candidates only when fabric edges pass through the body, clothing and exposed body details are clearly fused into one broken texture, fabric is floating/disconnected, garment openings are physically incoherent, or translucent garments create clearly pasted/misaligned local details. Do not fail normal coherent garment openings or mild edge blending.",
+            "Fail candidates when fabric edges pass through the body, clothing and exposed body details are clearly fused into one broken texture, fabric is floating/disconnected, garment openings are physically incoherent, or translucent garments create clearly pasted/sticker-like/misaligned local details. Pay special attention to requested chest/upper-body clothing boundaries. Do not fail normal coherent garment openings or mild edge blending.",
             "If the candidate preserves the garment type and main color but lighting makes it warmer/cooler, pass it.",
         ]
     )
@@ -6106,8 +6135,17 @@ def _merge_generated_person_body_shape_audit(report: dict[str, Any], audit: dict
     bulky_or_obese = _to_bool(audit.get("body_shape_bulky_or_obese"), False)
     upper_torso_anomaly = _to_bool(audit.get("upper_torso_contour_anomaly"), False)
     exposed_region_artifact = _to_bool(audit.get("exposed_region_anatomy_artifact"), False)
-    upper_torso_failure = upper_torso_anomaly and confidence >= 85 and (silhouette_score <= 45 or too_full or bulky_or_obese)
-    exposed_region_failure = False
+    boundary_artifact_mentioned = _generated_person_boundary_artifact_mentioned(
+        audit.get("summary"),
+        _parse_qa_string_list(audit.get("issues"), 6),
+    )
+    upper_torso_failure = upper_torso_anomaly and (
+        (confidence >= 85 and (silhouette_score <= 45 or too_full or bulky_or_obese))
+        or (boundary_artifact_mentioned and confidence >= 80 and silhouette_score <= 55)
+    )
+    exposed_region_failure = exposed_region_artifact and confidence >= 80 and (
+        silhouette_score <= 55 or boundary_artifact_mentioned
+    )
     # Prominent requested R18 curves are not enough to fail QA by themselves.
     # Reject clear upper-body contour artifacts, heavy/bulky body drift, or very low silhouette quality.
     extreme_body_shape = (
@@ -6161,8 +6199,19 @@ def _merge_generated_person_clothing_audit(report: dict[str, Any], audit: dict[s
     impossible_structure = _to_bool(audit.get("impossible_clothing_structure_visible"), False)
     exposed_region_conflict = _to_bool(audit.get("exposed_region_clothing_conflict_visible"), False)
     clothing_artifact = clipping_or_fusion or impossible_structure or exposed_region_conflict
+    boundary_artifact_mentioned = _generated_person_boundary_artifact_mentioned(
+        audit.get("summary"),
+        _parse_qa_string_list(audit.get("issues"), 6),
+    )
+    severe_clothing_artifact = clothing_artifact and (
+        confidence >= 85
+        or (
+            confidence >= 75
+            and (clothing_score <= 75 or boundary_artifact_mentioned or impossible_structure or exposed_region_conflict)
+        )
+    )
     rejectable = (
-        (clothing_artifact and confidence >= 85)
+        severe_clothing_artifact
         or (garment_mismatch and clothing_score < 75 and confidence >= 70)
         or (state_mismatch and clothing_score < 75 and confidence >= 70)
         or (color_mismatch and color_score < 70 and confidence >= 75)
@@ -6262,6 +6311,16 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
             audit_bulky_or_obese = _to_bool(body_audit.get("body_shape_bulky_or_obese"), False)
             audit_upper_torso_anomaly = _to_bool(body_audit.get("upper_torso_contour_anomaly"), False)
             audit_exposed_region_artifact = _to_bool(body_audit.get("exposed_region_anatomy_artifact"), False)
+            audit_boundary_artifact_mentioned = _generated_person_boundary_artifact_mentioned(
+                body_audit.get("summary"),
+                _parse_qa_string_list(body_audit.get("issues"), 6),
+            )
+            if audit_exposed_region_artifact and audit_confidence >= 80 and (
+                audit_silhouette <= 55 or audit_boundary_artifact_mentioned
+            ):
+                return True
+            if audit_upper_torso_anomaly and audit_boundary_artifact_mentioned and audit_confidence >= 80 and audit_silhouette <= 55:
+                return True
             if audit_upper_torso_anomaly and audit_confidence >= 95 and (audit_silhouette <= 25 or audit_bulky_or_obese or audit_exposed_region_artifact):
                 return True
             if audit_silhouette < 25:
@@ -6275,14 +6334,30 @@ def _should_reject_generated_person_image(report: dict[str, Any] | None) -> bool
         clothing_score = _to_int(clothing_audit.get("clothing_match_score"), 85)
         color_score = _to_int(clothing_audit.get("color_match_score"), 85)
         clothing_confidence = _to_int(clothing_audit.get("confidence"), 75)
+        clothing_artifact = (
+            _to_bool(clothing_audit.get("clothing_clipping_or_fusion_visible"), False)
+            or _to_bool(clothing_audit.get("impossible_clothing_structure_visible"), False)
+            or _to_bool(clothing_audit.get("exposed_region_clothing_conflict_visible"), False)
+        )
+        clothing_boundary_artifact_mentioned = _generated_person_boundary_artifact_mentioned(
+            clothing_audit.get("summary"),
+            _parse_qa_string_list(clothing_audit.get("issues"), 6),
+        )
         if _to_bool(clothing_audit.get("garment_mismatch_visible"), False) and clothing_score < 75 and clothing_confidence >= 70:
             return True
         if _to_bool(clothing_audit.get("clothing_state_mismatch_visible"), False) and clothing_score < 75 and clothing_confidence >= 70:
             return True
-        if clothing_confidence >= 85 and (
-            _to_bool(clothing_audit.get("clothing_clipping_or_fusion_visible"), False)
-            or _to_bool(clothing_audit.get("impossible_clothing_structure_visible"), False)
-            or _to_bool(clothing_audit.get("exposed_region_clothing_conflict_visible"), False)
+        if clothing_artifact and (
+            clothing_confidence >= 85
+            or (
+                clothing_confidence >= 75
+                and (
+                    clothing_score <= 75
+                    or clothing_boundary_artifact_mentioned
+                    or _to_bool(clothing_audit.get("impossible_clothing_structure_visible"), False)
+                    or _to_bool(clothing_audit.get("exposed_region_clothing_conflict_visible"), False)
+                )
+            )
         ):
             return True
         if _to_bool(clothing_audit.get("color_mismatch_visible"), False) and color_score < 70 and clothing_confidence >= 75:
@@ -9553,66 +9628,22 @@ def _tg_image_aspect_ratio_pose_guidance(payload: dict[str, Any] | None) -> str:
     elif ratio == "1:1":
         orientation = "square"
 
-    if _tg_payload_is_non_r18_free_image(source):
-        request_text = " ".join(
-            str(source.get(key) or "")
-            for key in (
-                "tg_original_user_request",
-                "tg_user_instruction",
-                "prompt_text",
-                "prompt",
-                "message",
-                "tg_generation_context",
-            )
-        )
-        mentions_private_scene = bool(re.search(r"床|床邊|床边|臥室|卧室|bed|bedroom", request_text, re.IGNORECASE))
-        if ratio == "9:16" or orientation == "portrait":
-            detail = (
-                "For free non-R18 content, use a public-safe vertical composition: standing, seated, leaning by a doorway, "
-                "counter, desk, street corner, cafe, classroom, office, shopfront, travel spot, or the concrete scene from the tweet. "
-                "Keep clothing intact and natural. Do not introduce unrelated private-room resting poses, lingerie focus, opened clothing, or paid-content posing "
-                "unless the user/tweet explicitly asks for that scene."
-            )
-        elif ratio == "16:9" or ratio in {"3:2", "4:3"} or orientation == "landscape":
-            detail = (
-                "For free non-R18 landscape content, choose a public-safe scene-driven composition: street storefront, breakfast shop, cafe table, "
-                "classroom, office desk, travel background, sofa/living room only when the tweet supports it, or another normal public/social setting. "
-                "Use seated, standing, walking, leaning by a counter/table, or holding a prop according to the tweet. "
-            )
-            if not mentions_private_scene:
-                detail += "Do not change the scene into an unrelated private indoor resting pose or paid-content posing. "
-            detail += "Preserve the tweet's concrete object/location first, then adapt camera distance to the selected ratio."
-        elif ratio == "1:1" or orientation == "square":
-            detail = (
-                "For free non-R18 square content, use a centered public-safe half-body or three-quarter composition that keeps the tweet's real scene, "
-                "main clothing, prop, and action visible. Do not default to an unrelated private indoor resting scene unless explicitly requested."
-            )
-        else:
-            detail = (
-                "For free non-R18 content, select a public-safe pose and scene from the tweet first, then adapt it to the aspect ratio. "
-                "Do not replace a public scene with an unrelated private indoor resting scene."
-            )
-        return (
-            f"Aspect-ratio composition rule: current ratio {ratio or 'unspecified'}, resolution {width or '-'} x {height or '-'}. "
-            f"{detail} The aspect ratio may adjust framing only; it must not override the user's scene, prop, clothing, or free-content safety."
-        )
-
     if ratio == "9:16":
-        detail = "手机长竖图优先选择站立、跪坐、倚靠门框或床边的纵向动作，身体重心沿画面竖向展开，头部完整入镜并保留头顶留白，手部靠近衣物边缘或道具，避免横向平躺和过宽场景。"
+        detail = "手机长竖图优先选择纵向动作，但不要固定正面：可用三分之二侧身站姿、倚门框、坐在床沿、跪坐、背向镜头回头、低头整理衣物、从侧后方拍摄或轻微仰拍，身体沿竖向展开，镜头可在平视、轻微俯视和轻微仰视之间变化。"
     elif ratio in {"2:3", "3:4"} or orientation == "portrait":
-        detail = "竖图优先选择全身或半身站姿、坐姿、跪姿、侧身倚靠等纵向姿势，身体从头部到腰腿形成清晰竖向线条，动作集中在上半身和手部，镜头距离拉开，避免把人物横向铺满。"
+        detail = "竖图优先选择全身或半身站姿、坐姿、跪姿、侧身倚靠、回眸、低头、斜向镜头等纵向姿态，身体从头部到腰腿形成清晰竖向线条；人物不必每次看向镜头，可看向窗边、手部、侧方或画面外。"
     elif ratio == "16:9":
-        detail = "宽屏横图优先选择床、沙发、车厢、桌边等横向场景动作，人物可侧躺、斜靠、坐在画面一侧或沿对角线展开，利用左右背景空间，双手动作分开且不重叠，避免直挺全身站姿挤在中央。"
+        detail = "宽屏横图优先使用床、沙发、车厢、桌边等横向场景，人物可侧躺、斜靠、坐在画面一侧、沿对角线展开、背向镜头回头或视线离开镜头，利用左右空间和前后景深，避免直挺站在画面正中。"
     elif ratio in {"3:2", "4:3"} or orientation == "landscape":
-        detail = "横图优先选择坐姿、斜靠、侧卧、趴伏在床边或桌边等横向动作，让身体与场景形成稳定对角线，背景物件分布在左右两侧，头部和手部都清楚可见，避免过窄的竖直站姿。"
+        detail = "横图优先选择坐姿、斜靠、侧卧、趴伏在床边或桌边、倚靠窗边、回头侧坐等横向动作，让身体与场景形成稳定对角线；镜头可从侧前方、侧后方、轻微俯视或平视拍摄。"
     elif ratio == "1:1" or orientation == "square":
-        detail = "正方形构图优先选择居中半身、跪坐、坐在床边或椅边的稳定姿态，头部、肩部、手部和主要服装状态集中在画面中心，左右留白均衡，避免过长全身动作和过宽横躺动作。"
+        detail = "正方形构图优先选择居中半身、跪坐、坐在床边或椅边、侧身回眸、低头整理衣物、三分之二侧向镜头等稳定姿态，左右留白均衡，避免每次正面看镜头。"
     else:
-        detail = "根据画面比例选择合理姿势：竖图用纵向站姿或坐姿，横图用横向场景动作或对角线姿态，正方形用居中稳定半身姿态。"
+        detail = "根据画面比例选择合理姿势：竖图用纵向站姿、坐姿、倚靠或回眸，横图用横向场景动作或对角线姿态，正方形用居中半身或侧向稳定姿态。"
 
     return (
         f"画面比例构图规则：当前比例 {ratio or '未指定'}，分辨率 {width or '-'} x {height or '-'}。"
-        f"{detail}Grok 必须根据当前画面比例选择合理姿势、手部动作、身体朝向、镜头距离和场景空间，不能套用会裁掉头部或挤压脸部的通用姿势，必须保证头部完整入镜、脸部处在镜头范围内、身体结构自然、肢体不交叠。"
+        f"{detail}Grok 必须主动选择多样的姿态、手部动作、身体朝向、镜头距离、镜头方位和场景空间；不要默认正面站立、正面坐姿或一直看向镜头。脸部完整与否不作为构图硬要求，重点是主体、服装、身体结构、动作关系和画面可用性自然。"
     )
 
 
@@ -9903,9 +9934,9 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         "高级质感": "真实纹理、浅景深和柔和侧光",
         "福利感": "明确的裸露范围和半身构图",
         "私密福利": "室内半身构图",
-        "视线避开镜头": "脸部清晰可见",
-        "人物不露脸": "人物脸部清晰可见",
-        "头部自然入镜": "脸部清晰可见",
+        "视线避开镜头": "视线自然避开镜头",
+        "人物不露脸": "人物不必看向镜头",
+        "头部自然入镜": "头部角度自然",
         "不合常理的破洞": "纽扣自然解开，布料沿身体曲线滑落",
         "破洞": "纽扣自然解开，布料沿身体曲线滑落",
         "破口": "衣物边缘自然打开",
@@ -9914,15 +9945,15 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         "撕破": "衣物自然松开",
         "撕开": "衣物自然解开",
         "布料缺失": "衣物开合状态清晰",
-        "避开镜头": "脸部清晰可见",
-        "不露脸": "脸部清晰可见",
-        "遮住脸": "脸部清晰可见",
-        "遮脸": "脸部清晰可见",
-        "裁掉头部": "脸部清晰可见",
-        "头部裁切": "脸部清晰可见",
-        "面部避开": "脸部清晰可见",
-        "面部遮挡": "脸部清晰可见",
-        "脸部遮挡": "脸部清晰可见",
+        "避开镜头": "视线避开镜头",
+        "不露脸": "人物不必看向镜头",
+        "遮住脸": "头部角度自然",
+        "遮脸": "头部角度自然",
+        "裁掉头部": "镜头构图自然",
+        "头部裁切": "镜头构图自然",
+        "面部避开": "视线避开镜头",
+        "面部遮挡": "头部角度自然",
+        "脸部遮挡": "头部角度自然",
         "脸部无遮挡": "脸部清晰可见",
         "脸部清晰进入画面没有遮挡": "脸部清晰可见",
         "脸部清晰进入画面且无遮挡": "脸部清晰可见",
@@ -9957,7 +9988,7 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         "用户指定服装、场景和道具": "原设服装、场景和道具",
         "裸露只能来自自然开扣、拉链松开、衣摆掀起、肩带滑落、裙摆上移、腰头下拉、布料贴身或半脱状态": "纽扣解开、拉链松开、衣摆掀起、肩带滑落、裙摆上移、腰头下拉、布料贴身或半脱",
         "禁止为了裸露强行制造破洞、撕裂、破口、布料凭空消失、不合受力逻辑的开口": "服装结构完整",
-        "构图必须能看到人物脸部": "脸部清晰可见",
+        "构图必须能看到人物脸部": "构图保持主体关系自然",
         "人物脸部需要精简描述": "脸部清晰可见",
         "允许写脸型、肤质、眉眼、鼻梁、嘴唇和表情": "保留表情状态",
         "金君雅": "",
@@ -9971,7 +10002,7 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         "忠实匹配用户指定主体": "人物主体",
         "用户指定主体": "人物主体",
         "单帧静态画面": "静态摄影画面",
-        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、半身或全身构图、脸部清晰可见、脸部特征和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，半身或全身构图，脸部清晰可见",
+        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、半身或全身构图、脸部清晰可见、脸部特征和裸露范围": "身体朝向可正面、侧向或斜向镜头，手部位置明确，衣物开合状态清晰，半身或全身构图",
         "脸部特征和裸露范围": "脸部清晰可见和裸露范围",
         "明确的情色裸露": "",
         "根据场景动态判断": "",
@@ -9981,8 +10012,8 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
         "若隐若现": "清晰可见",
         "边缘可见": "边界清晰可见",
         "部分遮挡": "无遮挡",
-        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、头部自然入镜和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，镜头距离为半身或全身构图，脸部清晰可见",
-        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、脸部完整露出且无遮挡、头部自然入镜和裸露范围": "身体朝向镜头，手部位置明确，衣物开合状态清晰，镜头距离为半身或全身构图，脸部清晰可见",
+        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、头部自然入镜和裸露范围": "身体朝向可正面、侧向或斜向镜头，手部位置明确，衣物开合状态清晰，镜头距离为半身或全身构图",
+        "明确写出身体朝向、手放置位置、衣物开合状态、镜头距离、脸部完整露出且无遮挡、头部自然入镜和裸露范围": "身体朝向可正面、侧向或斜向镜头，手部位置明确，衣物开合状态清晰，镜头距离为半身或全身构图",
         "禁止凭空纽扣自然解开，布料沿身体曲线滑落、衣物自然松开、衣物边缘自然打开和不合受力逻辑的衣物开合状态清晰": "服装结构完整，纽扣或拉链自然解开，布料沿身体曲线滑落",
         "禁止凭空破坏服装结构": "服装结构完整",
         "禁止凭空": "",
@@ -9993,7 +10024,7 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
     }
     for source, replacement in cleanup_replacements.items():
         text = text.replace(source, replacement)
-    text = text.replace("视线头部自然入镜", "脸部清晰可见")
+    text = text.replace("视线头部自然入镜", "头部角度自然")
     text = text.replace("出现纽扣自然解开", "纽扣自然解开")
     text = text.replace("卧，室", "卧室")
     text = text.replace("解，开", "解开")
@@ -10007,8 +10038,8 @@ def _force_tg_image_chinese_prompt(prompt_text: str) -> str:
     text = re.sub(r"(?:必须|禁止|不要|允许|需要|只保留|保留)[^，。；、\n]{0,80}?(?:提示词|规则|字段|描述|写入|来自)[^，。；、\n]{0,80}", "", text)
     text = text.replace("低角度，", "")
     text = text.replace("低角度", "平视角度")
-    text = text.replace("头部自然进入画面", "脸部清晰可见")
-    text = text.replace("头部自然入镜", "脸部清晰可见")
+    text = text.replace("头部自然进入画面", "头部角度自然")
+    text = text.replace("头部自然入镜", "头部角度自然")
     text = re.sub(r"(头部完整入镜[，、\s]*){2,}", "头部完整入镜，", text)
     text = re.sub(r"(脸部完整露出且无遮挡[，、\s]*){2,}", "脸部完整露出且无遮挡，", text)
     text = re.sub(r"(头顶额头下巴都在画面内[，、\s]*){2,}", "头顶额头下巴都在画面内，", text)
@@ -10594,14 +10625,24 @@ def _tg_request_has_manual_lower_action(request_text: str) -> bool:
     return bool(re.search(r"手指|指尖|手|自慰|自摸|手淫|插入|插进|插進|伸入|伸进|伸進|抚摸|撫摸|触碰|觸碰", text))
 
 
+def _tg_explicit_user_image_request_text(request_text: str) -> str:
+    text = _strip_prompt_response_wrappers(request_text)
+    match = re.search(r"(?im)^User image request:\s*(.+?)\s*$", text)
+    if match:
+        return str(match.group(1) or "").strip()
+    return text
+
+
 def _tg_request_has_explicit_head_expression(request_text: str) -> bool:
-    text = str(request_text or "")
-    return bool(
-        re.search(
-            r"目光|眼神|视线|視線|看镜头|看鏡頭|对着镜头|對著鏡頭|直视|直視|凝视|凝視|注视|注視|表情|神情|微笑|笑意|嘴角|抿唇|羞涩|羞澀|挑逗|诱惑|誘惑|暧昧|曖昧|自信|冷淡|高冷|温柔|溫柔|甜美|紧张|緊張|局促|不安|慌张|慌張|放松|放鬆|自然",
-            text,
-        )
+    text = _tg_explicit_user_image_request_text(request_text)
+    head_scoped = r"(?:头|頭|头部|頭部|脸|臉|脸部|臉部|面部|眼|眼神|目光|视线|視線|表情|神情|嘴角|抿唇)"
+    explicit_head_pattern = (
+        r"目光|眼神|视线|視線|看镜头|看鏡頭|对着镜头|對著鏡頭|直视|直視|凝视|凝視|注视|注視|"
+        r"表情|神情|微笑|笑意|嘴角|抿唇|羞涩|羞澀|暧昧|曖昧|冷淡|高冷|"
+        rf"{head_scoped}[^，。；、\n]{{0,24}}(?:温柔|溫柔|甜美|紧张|緊張|局促|不安|慌张|慌張|放松|放鬆|自然|自信|挑逗|诱惑|誘惑)|"
+        rf"(?:温柔|溫柔|甜美|紧张|緊張|局促|不安|慌张|慌張|放松|放鬆|自然|自信|挑逗|诱惑|誘惑)[^，。；、\n]{{0,24}}{head_scoped}"
     )
+    return bool(re.search(explicit_head_pattern, text))
 
 
 def _tg_stable_prompt_seed(seed_text: str) -> int:
@@ -10610,12 +10651,30 @@ def _tg_stable_prompt_seed(seed_text: str) -> int:
     return int.from_bytes(digest[:8], "big", signed=False)
 
 
-def _tg_pick_prompt_variant(seed_text: str, options: list[str], nonce: str = "") -> str:
+def _tg_pick_prompt_variant(seed_text: str, options: list[str], nonce: str = "", history_key: str = "") -> str:
     choices = [str(item or "").strip(" ，。；、") for item in options if str(item or "").strip(" ，。；、")]
     if not choices:
         return ""
     seed = _tg_stable_prompt_seed(f"{seed_text}|{nonce}" if nonce else seed_text)
-    return choices[seed % len(choices)]
+    start = seed % len(choices)
+    if not history_key or len(choices) <= 1:
+        return choices[start]
+    with _TG_PROMPT_VARIANT_HISTORY_LOCK:
+        recent = _TG_PROMPT_VARIANT_HISTORY.get(history_key, [])
+        recent_set = set(recent)
+        selected = ""
+        for offset in range(len(choices)):
+            candidate = choices[(start + offset) % len(choices)]
+            if candidate not in recent_set:
+                selected = candidate
+                break
+        if not selected:
+            selected = choices[start]
+            recent = []
+        recent = [item for item in recent if item != selected]
+        recent.append(selected)
+        _TG_PROMPT_VARIANT_HISTORY[history_key] = recent[-min(_TG_PROMPT_VARIANT_HISTORY_LIMIT, max(len(choices) - 1, 1)) :]
+        return selected
 
 
 def _tg_default_eye_state(seed_text: str, nonce: str = "") -> str:
@@ -10659,7 +10718,7 @@ def _tg_request_clause_matching(request_text: str, pattern: str) -> str:
 
 
 def _tg_request_pose_scene(request_text: str, nonce: str = "") -> str:
-    text = _strip_prompt_response_wrappers(request_text)
+    text = _tg_explicit_user_image_request_text(request_text)
     general_scene = _tg_request_explicit_scene_phrase(text)
     clause = _tg_request_clause_matching(
         text,
@@ -10686,56 +10745,76 @@ def _tg_request_pose_scene(request_text: str, nonce: str = "") -> str:
         return _tg_pick_prompt_variant(
             text,
             [
-                "坐在床边",
-                "靠坐在床头",
-                "斜坐在床沿",
-                "跪坐在床上",
-                "侧身躺在床上面向镜头",
-                "半身坐在床边靠近枕头",
+                "坐在床边三分之二侧向画面一侧",
+                "靠坐在床头并低头看向手部",
+                "斜坐在床沿形成对角线构图",
+                "跪坐在床上并侧身回眸",
+                "侧身躺在床上，视线越过镜头边缘",
+                "半身坐在床边靠近枕头，镜头从侧前方拍摄",
+                "背向镜头坐在床沿并自然回头",
+                "趴伏在床边，镜头轻微俯视",
+                "坐在床沿一侧，身体沿画面对角线展开",
+                "跪坐在床边低头整理衣物，镜头轻微俯视",
+                "侧坐在床尾回头看向画面边缘",
+                "倚在床头侧方，镜头从侧后方拉开距离",
             ],
             nonce,
+            history_key="tg-r18-pose-bed",
         )
     if re.search(r"教室|讲台|黑板|老師|老师|教师", text):
         return _tg_pick_prompt_variant(
             text,
             [
-                "站在教室讲台前",
-                "坐在教室讲台边",
-                "站在黑板前",
-                "倚在讲台旁",
-                "半身坐在课桌边",
-                "侧身站在教室黑板旁",
+                "站在教室讲台前但身体斜向画面一侧",
+                "坐在教室讲台边并低头整理衣物",
+                "站在黑板前形成三分之二侧身构图",
+                "倚在讲台旁，镜头从侧前方拍摄",
+                "半身坐在课桌边，视线落向桌面",
+                "侧身站在教室黑板旁并回头",
+                "靠在课桌边，镜头轻微俯视",
+                "斜坐在课桌边，镜头从侧后方拍摄",
+                "站在窗边课桌旁，身体转向画面外",
             ],
             nonce,
+            history_key="tg-r18-pose-classroom",
         )
     if re.search(r"沙发|客厅|客廳", text):
         return _tg_pick_prompt_variant(
             text,
             [
-                "坐在沙发边",
-                "靠坐在客厅沙发上",
-                "站在客厅沙发前",
-                "斜坐在沙发扶手旁",
-                "半身靠坐在沙发中央",
+                "坐在沙发边并斜向画面一侧",
+                "靠坐在客厅沙发上，视线看向侧方",
+                "站在客厅沙发前形成侧前方角度",
+                "斜坐在沙发扶手旁，身体沿对角线展开",
+                "半身靠坐在沙发中央，镜头从侧面拍摄",
+                "背向沙发站立并自然回头",
+                "侧卧在沙发边，镜头轻微俯视",
+                "斜靠在沙发扶手上，镜头从侧后方拍摄",
+                "坐在沙发一侧低头整理衣物，身体不正对镜头",
             ],
             nonce,
+            history_key="tg-r18-pose-sofa",
         )
     if re.search(r"浴室|浴缸|淋浴", text):
         return _tg_pick_prompt_variant(
             text,
             [
-                "站在浴室镜前",
-                "坐在浴缸边缘",
-                "靠在浴室墙边",
-                "半身站在洗手台旁",
-                "侧身坐在浴缸边",
+                "站在浴室镜前，镜头从侧前方拍摄",
+                "坐在浴缸边缘并低头看向手部",
+                "靠在浴室墙边形成三分之二侧身",
+                "半身站在洗手台旁，视线看向镜面侧方",
+                "侧身坐在浴缸边，镜头轻微俯视",
+                "背向镜面站立并自然回头",
+                "倚在浴室门边，镜头从侧前方拍摄",
+                "坐在浴缸边低头整理衣物，身体斜向画面",
             ],
             nonce,
+            history_key="tg-r18-pose-bathroom",
         )
     if re.search(r"办公室|辦公室|桌|工位", text):
-        return _tg_pick_prompt_variant(text, ["坐在办公桌边", "站在办公桌旁", "倚在办公室桌沿", "半身坐在办公椅上"], nonce)
+        return _tg_pick_prompt_variant(text, ["坐在办公桌边并斜向画面一侧", "站在办公桌旁侧身回头", "倚在办公室桌沿并看向窗边", "半身坐在办公椅上，镜头从侧前方拍摄", "靠在工位边低头整理衣物", "转向窗边办公椅，镜头从侧后方拍摄", "斜靠在桌沿形成对角线构图"], nonce, history_key="tg-r18-pose-office")
     if re.search(r"车厢|車廂|机舱|機艙|飞机|飛機", text):
-        return _tg_pick_prompt_variant(text, ["站在机舱过道旁", "坐在机舱座椅边", "倚在车厢座椅旁", "半身站在狭窄过道中"], nonce)
+        return _tg_pick_prompt_variant(text, ["站在机舱过道旁并斜向画面一侧", "坐在机舱座椅边看向窗侧", "倚在车厢座椅旁形成侧身构图", "半身站在狭窄过道中，镜头从侧前方拍摄", "坐在车厢座椅上自然回头", "侧坐在车厢座椅边，镜头从过道方向拍摄", "站在车厢门边低头整理衣物"], nonce, history_key="tg-r18-pose-cabin")
     return ""
 
 
@@ -10833,9 +10912,9 @@ def _tg_image_action_decomposition_for_llm(request_text: str) -> str:
         parts.extend(
             [
                 "用户动作拆解：把抽象氛围拆成可见动作，不要只写挑逗或诱惑。",
-                "姿态：身体轻微前倾或自然侧坐，镜头距离拉开。",
+                "姿态：身体可以侧坐、斜靠、回眸、低头整理衣物、沿对角线展开或从侧后方拍摄，镜头距离拉开，不要固定正面坐姿。",
                 "手部：手指轻扶衣物边缘、腿侧、椅边或床边，动作与服装状态对应。",
-                "头部：头部自然转向镜头或看向镜头，目光方向、眼神状态和表情必须写出，表情要明确直白。",
+                "头部：头部可以看向侧方、手部、窗边、画面外或镜头边缘，目光方向、眼神状态和表情必须写出，表情要明确直白，不要默认一直看镜头。",
             ]
         )
     elif re.search(r"对着镜头|對著鏡頭|看镜头|看鏡頭|直视镜头|直視鏡頭", text):
@@ -10843,29 +10922,80 @@ def _tg_image_action_decomposition_for_llm(request_text: str) -> str:
     return "\n".join(parts)
 
 
-def _tg_request_body_orientation(request_text: str) -> str:
-    text = _strip_prompt_response_wrappers(request_text)
+def _tg_request_body_orientation(request_text: str, nonce: str = "") -> str:
+    text = _tg_explicit_user_image_request_text(request_text)
     if re.search(r"侧身|側身|侧向|側向", text):
-        return "她的身体侧向镜头"
+        return _tg_pick_prompt_variant(text, ["她的身体侧向画面一侧，肩线斜向镜头", "她的身体三分之二侧向镜头，重心落在支撑侧", "她的身体侧身靠向身旁支点，腰胯线条自然"], nonce)
     if re.search(r"俯身|前倾|前傾", text):
-        return "她的身体微微前倾面向镜头"
+        return _tg_pick_prompt_variant(text, ["她的身体微微前倾但肩线斜向镜头", "她的身体前倾靠向身旁支点，镜头从侧前方拍摄", "她的身体沿画面对角线前倾，重心保持稳定"], nonce)
     if re.search(r"背对|背對", text):
-        return "她的身体侧向镜头"
+        return _tg_pick_prompt_variant(text, ["她的身体背向镜头后自然回转", "她的身体侧后方朝向镜头，肩线自然回旋", "她的身体背向画面一侧，腰胯形成侧后方角度"], nonce)
     if re.search(r"正面|面对|面對|看镜头|看鏡頭", text):
         return "她的身体正面朝向镜头"
     return ""
 
 
+def _tg_default_body_orientation(original_request: str, pose_scene: str, random_nonce: str = "") -> str:
+    return _tg_pick_prompt_variant(
+        f"{original_request}|{pose_scene}|body",
+        [
+            "她的身体三分之二侧向画面一侧，重心落在支撑侧",
+            "她的身体侧向画面一侧，肩线形成斜线",
+            "她的身体背向镜头后自然回转，腰胯形成侧后方角度",
+            "她的身体坐姿斜向画面一侧，重心靠向一侧",
+            "她的身体沿画面对角线展开，镜头从侧前方拍摄",
+            "她的身体微微前倾但肩线不正对镜头",
+            "她的身体靠向身旁支点，镜头从轻微俯视角度拍摄",
+            "她的身体转向窗边，侧腰线条与画面边缘形成角度",
+            "她的身体从侧后方进入画面，头部自然回转",
+            "她的身体低头整理衣物时微微侧倾，重心稳定",
+            "她的身体斜坐在画面一侧，镜头从侧面拉开距离",
+            "她的身体半侧坐姿展开，肩线与腿部形成对角线",
+        ],
+        random_nonce,
+        history_key="tg-r18-body-orientation",
+    )
+
+
 def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
-    text = _strip_prompt_response_wrappers(request_text)
+    text = _tg_explicit_user_image_request_text(request_text)
+    if re.search(r"对着镜头|對著鏡頭|看镜头|看鏡頭|直视镜头|直視鏡頭", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头自然转向镜头，目光看向镜头，眼神平稳且表情自然",
+                "她的头轻轻抬起看向镜头，目光稳定，眼神从容且表情明确",
+                "她的头微微侧转后看向镜头，目光迎向镜头，眼神柔和且表情放松",
+            ],
+            nonce,
+        )
+    if re.search(r"避开镜头|避開鏡頭|不看镜头|不看鏡頭|不露脸|不露臉|遮脸|遮臉|侧脸|側臉|回头|回頭", text):
+        return _tg_pick_prompt_variant(
+            text,
+            [
+                "她的头微微转向侧方，目光避开镜头，眼神收敛且表情克制",
+                "她的头低垂看向手部，目光不看镜头，眼神柔和且表情自然",
+                "她的头偏向窗边，目光落在画面外，眼神安静且表情放松",
+                "她的头从侧后方轻轻回转，目光掠过镜头边缘，眼神带有试探感且表情明确",
+            ],
+            nonce,
+        )
     if re.search(r"挑逗|诱惑|誘惑|媚|勾人", text):
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光直视镜头，眼神暧昧且表情嘴角上扬",
-                "她的头轻轻看向镜头，目光柔和扫向镜头，眼神从容且表情带着明显笑意",
-                "她的头微微侧转看向镜头，目光直视前方，眼神主动且表情带着明显笑意",
-                "她的头抬起注视镜头，目光主动迎向镜头，眼神松弛且表情呼吸放缓",
+                "她的头微微侧转，目光越过镜头边缘，眼神暧昧且表情嘴角上扬",
+                "她的头低垂看向手部，目光短暂避开镜头，眼神从容且表情带着明显笑意",
+                "她的头从侧方回眸，目光掠向画面前方，眼神主动且表情带着明显笑意",
+                "她的头轻轻抬起看向镜头边缘，目光掠过画面前方，眼神松弛且表情呼吸放缓",
+                "她的头偏向窗边，目光落在画面外，眼神带有试探感且表情轻微微笑",
+                "她的头轻轻低垂，目光沿着衣物边缘下移，眼神克制且表情嘴角上扬",
+                "她的头从侧后方自然回眸，目光停在镜头边缘，眼神主动且表情呼吸放缓",
+                "她的头微微仰起，目光越过画面前方，眼神松弛且表情从容",
+                "她的头转向侧方，目光短暂回避镜头，眼神暧昧且表情带着明显笑意",
+                "她的头贴近肩侧，目光看向画面外，眼神柔和且表情羞涩抿唇",
+                "她的头轻轻回转，目光掠过镜头边缘，眼神专注且表情嘴角上扬",
+                "她的头低垂后重新抬起，目光停在镜头边缘，眼神带有试探感且表情明确",
             ],
             nonce,
         )
@@ -10873,9 +11003,9 @@ def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光略微下垂后看向镜头，眼神克制且表情羞涩",
-                "她的头轻轻看向镜头，目光望向镜头，眼神克制且表情羞涩抿唇",
-                "她的头微微侧转看向镜头，目光短暂回避后看向镜头，眼神柔和且表情带着紧张笑意",
+                "她的头低垂看向手部，目光避开镜头，眼神克制且表情羞涩",
+                "她的头偏向侧方，目光落在画面外，眼神柔和且表情羞涩抿唇",
+                "她的头微微侧转，目光短暂回避后看向镜头边缘，眼神柔和且表情带着紧张笑意",
             ],
             nonce,
         )
@@ -10883,9 +11013,9 @@ def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光直视镜头，眼神自信且表情从容",
-                "她的头轻轻看向镜头，目光稳定望向镜头，眼神冷静且表情带着克制笑意",
-                "她的头抬起注视镜头，目光坚定看向镜头，眼神克制且表情从容克制",
+                "她的头微微抬起，目光越过镜头，眼神自信且表情从容",
+                "她的头侧向画面一侧，目光稳定落向远处，眼神冷静且表情克制",
+                "她的头轻轻看向镜头，目光坚定，眼神克制且表情从容",
             ],
             nonce,
         )
@@ -10893,9 +11023,9 @@ def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光温柔望向镜头，眼神柔和且表情轻微微笑",
-                "她的头轻轻看向镜头，目光柔和落向镜头，眼神平静且表情嘴角上扬",
-                "她的头微微侧转看向镜头，目光亲近迎向镜头，眼神温柔且表情带着明显笑意",
+                "她的头偏向窗边，目光柔和落向侧方，眼神平静且表情轻微微笑",
+                "她的头低垂看向手部，目光柔和，眼神安静且表情嘴角上扬",
+                "她的头微微侧转看向镜头边缘，目光亲近，眼神温柔且表情带着明显笑意",
             ],
             nonce,
         )
@@ -10903,10 +11033,10 @@ def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光看向镜头，眼神柔和且表情嘴角上扬",
-                "她的头轻轻看向镜头，目光平稳望向镜头，眼神松弛且表情带着明显笑意",
-                "她的头微微侧转看向镜头，目光直视镜头，眼神从容且表情轻微微笑",
-                "她的头抬起注视镜头，目光亲近迎向镜头，眼神平稳且表情嘴角微微上扬",
+                "她的头偏向侧方，目光落在画面外，眼神柔和且表情嘴角上扬",
+                "她的头轻轻低垂，目光落向手部，眼神松弛且表情带着明显笑意",
+                "她的头微微侧转看向镜头边缘，目光从容，眼神平稳且表情轻微微笑",
+                "她的头抬起望向窗边，目光亲近，眼神平稳且表情嘴角微微上扬",
             ],
             nonce,
         )
@@ -10914,9 +11044,9 @@ def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光看向镜头，眼神紧张且表情克制",
-                "她的头轻轻看向镜头，目光不安望向镜头，眼神收敛且表情克制",
-                "她的头微微侧转看向镜头，目光游移后落向镜头，眼神轻微躲闪且表情嘴唇微张",
+                "她的头低垂看向手部，目光不安，眼神收敛且表情克制",
+                "她的头偏向侧方，目光短暂回避镜头，眼神轻微躲闪且表情嘴唇微张",
+                "她的头微微侧转，目光游移后落向画面边缘，眼神紧张且表情克制",
             ],
             nonce,
         )
@@ -10924,9 +11054,9 @@ def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光专注凝视镜头，眼神平稳且表情认真",
-                "她的头轻轻看向镜头，目光集中落在镜头，眼神专注且表情认真",
-                "她的头抬起注视镜头，目光凝视前方，眼神集中且表情认真专注",
+                "她的头轻轻低垂，目光专注落在手部，眼神平稳且表情认真",
+                "她的头侧向画面一侧，目光集中看向窗边，眼神专注且表情认真",
+                "她的头抬起看向镜头边缘，目光凝视前方，眼神集中且表情认真专注",
             ],
             nonce,
         )
@@ -10934,77 +11064,80 @@ def _tg_request_head_expression(request_text: str, nonce: str = "") -> str:
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光看向镜头，眼神放松且表情嘴角上扬",
-                "她的头轻轻看向镜头，目光平稳望向镜头，眼神松弛且表情呼吸放缓",
-                "她的头微微侧转看向镜头，目光柔和落向镜头，眼神柔和且表情轻微微笑",
+                "她的头偏向侧方，目光自然落在画面外，眼神放松且表情嘴角上扬",
+                "她的头轻轻低垂，目光平稳落向手部，眼神松弛且表情呼吸放缓",
+                "她的头微微侧转，目光柔和看向窗边，眼神柔和且表情轻微微笑",
             ],
             nonce,
         )
-    if re.search(r"目光|眼神|视线|視線|看镜头|看鏡頭|对着镜头|對著鏡頭|直视|直視|凝视|凝視|注视|注視", text):
+    if re.search(r"目光|眼神|视线|視線|凝视|凝視|注视|注視", text):
         return _tg_pick_prompt_variant(
             text,
             [
-                "她的头自然转向镜头，目光直视镜头，眼神平稳且表情嘴角上扬",
-                "她的头轻轻看向镜头，目光稳定望向镜头，眼神从容且表情轻微微笑",
-                "她的头微微侧转看向镜头，目光专注落向镜头，眼神柔和且表情呼吸放缓",
-                "她的头抬起注视镜头，目光亲近迎向镜头，眼神松弛且表情带着明显笑意",
+                "她的头微微侧转，目光落向画面外，眼神平稳且表情嘴角上扬",
+                "她的头轻轻低垂，目光落向手部，眼神从容且表情轻微微笑",
+                "她的头抬起看向镜头边缘，目光专注，眼神柔和且表情呼吸放缓",
+                "她的头转向窗边，目光亲近落向侧方，眼神松弛且表情带着明显笑意",
             ],
             nonce,
         )
     return ""
 
-
 def _tg_clean_head_expression_clause(text: str, seed_text: str = "") -> str:
     cleaned = str(text or "").strip(" ，。；、")
     seed = str(seed_text or "")
     if not cleaned:
-        return ""
+        cleaned = _tg_pick_prompt_variant(
+            seed_text or "head",
+            [
+                "微微侧转，目光落向画面外，眼神柔和且表情自然放松",
+                "低垂看向手部，目光不看镜头，眼神放松且表情直白",
+                "从侧方回眸，目光掠过镜头边缘，眼神从容且表情自然",
+                "偏向窗边，目光望向侧方，眼神平稳且表情安静",
+                "轻轻抬起看向镜头边缘，目光平稳，眼神柔和且表情自然",
+                "侧后方自然回头，目光停在画面边缘，眼神松弛且表情明确",
+                "低头整理衣物，目光落向手部，眼神从容且表情嘴角上扬",
+            ],
+            history_key="tg-r18-head-default",
+        )
 
     def _split_eye_direction(match: re.Match[str]) -> str:
         content = (match.group(1) or "").strip()
         direction_match = re.search(
-            r"(略微下垂后看向|短暂回避后看向|游移后落向|集中落在|直视|看向|望向|凝视|注视|落向|迎向|扫向)(.*)",
+            r"(略微下垂后看向|短暂回避后看向|游移后落向|集中落在|直视|看向|望向|凝视|注视|落向|迎向|扫向|越过|避开|回避)(.*)",
             content,
         )
         if not direction_match:
-            return f"目光看向镜头，眼神{content or '自然'}"
+            return f"目光{content or _tg_pick_prompt_variant(seed or 'gaze', ['看向侧方', '落向手部', '望向窗边', '掠过镜头边缘'])}，眼神自然"
         mood = content[: direction_match.start()].strip()
         direction = f"{direction_match.group(1)}{direction_match.group(2)}".strip()
-        if not re.search(r"镜头|鏡頭|前方", direction):
-            direction = f"{direction}镜头"
+        if not direction:
+            direction = _tg_pick_prompt_variant(seed or content, ["看向侧方", "落向手部", "望向画面外", "掠过镜头边缘"])
         return f"目光{direction}，眼神{mood or '自然'}"
 
     cleaned = re.sub(r"^(她的头|头部|脸部|视线|眼神|表情)[：:，、\s]*", "", cleaned)
     cleaned = re.sub(r"(脸型|五官|眉眼|鼻梁|嘴唇|唇形|发型|头发|肤质|皮肤)[^，。；、]*", "", cleaned)
     cleaned = re.sub(r"脸部(?:清晰可见|完整入镜|无遮挡|可见)|脸部没有遮挡|脸部不遮挡|脸部完整露出|头部完整入镜|完整入镜", "", cleaned)
-    cleaned = re.sub(r"对着镜头|對著鏡頭|看镜头|看鏡頭|保持正向入镜|保持正向入鏡|正向入镜|正向入鏡", "自然转向镜头", cleaned)
+    cleaned = re.sub(r"对着镜头|對著鏡頭|看镜头|看鏡頭|保持正向入镜|保持正向入鏡|正向入镜|正向入鏡", "看向镜头", cleaned)
     cleaned = re.sub(
-        r"眼神([^，。；、且]*(?:镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向|扫向|集中落在)[^，。；、且]*)",
+        r"眼神([^，。；、且]*(?:镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向|扫向|越过|侧方|窗边|手部|画面外|畫面外)[^，。；、且]*)",
         _split_eye_direction,
         cleaned,
         count=1,
     )
     cleaned = cleaned.strip(" ，。；、")
     if not cleaned:
-        cleaned = _tg_pick_prompt_variant(
-            seed_text or "head",
-            [
-                "自然转向镜头，目光看向镜头，眼神柔和且表情自然放松",
-                "轻轻看向镜头，目光平稳望向镜头，眼神放松且表情直白",
-                "微微侧转看向镜头，目光专注落向镜头，眼神从容且表情自然",
-            ],
-        )
-    if not re.search(r"自然转向镜头|轻轻转向镜头|微微侧转看向镜头|转向镜头|看向镜头|看着镜头|注视镜头|凝视镜头|轉向鏡頭|看向鏡頭|看著鏡頭|注視鏡頭|凝視鏡頭", cleaned):
-        cleaned = re.sub(r"^\s*(微微|轻轻|自然|抬起|低垂|偏向|侧转|轉向|转向)[^，。；、]*", "", cleaned).strip(" ，。；、")
-        cleaned = f"自然转向镜头，{cleaned}" if cleaned else "自然转向镜头"
+        cleaned = _tg_pick_prompt_variant(seed or "head", ["微微侧转", "低垂看向手部", "偏向窗边", "从侧方回眸", "轻轻看向镜头边缘", "侧后方自然回头"], history_key="tg-r18-head-turn")
+    if not re.search(r"转向|轉向|看向|望向|注视|注視|凝视|凝視|低垂|抬起|偏向|侧转|側轉|回眸|避开|避開|不看|侧方|窗边|手部|画面外|畫面外|镜头|鏡頭", cleaned):
+        head_turn = _tg_pick_prompt_variant(seed or cleaned, ["微微侧转", "低垂看向手部", "偏向窗边", "从侧方回眸", "轻轻看向镜头边缘", "侧后方自然回头"], history_key="tg-r18-head-turn")
+        cleaned = f"{head_turn}，{cleaned}" if cleaned else head_turn
     if not re.search(r"眼神|目光|视线|視線|凝视|凝視", cleaned):
-        cleaned = f"{cleaned}，目光看向镜头"
-    elif not re.search(r"(目光|视线|視線)[^，。；、且]*(镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向)", cleaned):
-        cleaned = re.sub(r"(目光|视线|視線)([^，。；、且]*)", lambda m: f"{m.group(1)}{m.group(2).strip() or '自然'}看向镜头", cleaned, count=1)
-        if not re.search(r"(目光|视线|視線)[^，。；、且]*(镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向)", cleaned):
-            cleaned = re.sub(r"(眼神)([^，。；、且]*)", lambda m: f"目光看向镜头，{m.group(1)}{m.group(2).strip() or '自然'}", cleaned, count=1)
-        if not re.search(r"(目光|视线|視線)[^，。；、且]*(镜头|鏡頭|前方|下垂|回避|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向)", cleaned):
-            cleaned = f"{cleaned}，目光看向镜头"
+        gaze = _tg_pick_prompt_variant(seed or cleaned, ["目光落向侧方", "目光看向手部", "目光望向窗边", "目光掠过镜头边缘", "目光看向画面外", "目光停在镜头边缘"], history_key="tg-r18-gaze-default")
+        cleaned = f"{cleaned}，{gaze}"
+    elif not re.search(r"(目光|视线|視線)[^，。；、且]*(镜头|鏡頭|前方|下垂|回避|避开|避開|游移|望向|看向|直视|直視|注视|注視|凝视|凝視|落向|迎向|侧方|窗边|手部|画面外|畫面外|边缘|邊緣)", cleaned):
+        cleaned = re.sub(r"(目光|视线|視線)([^，。；、且]*)", lambda m: f"{m.group(1)}{m.group(2).strip() or '自然'}落向侧方", cleaned, count=1)
+        if not re.search(r"(目光|视线|視線)", cleaned):
+            cleaned = f"{cleaned}，目光落向侧方"
     cleaned = re.sub(r"(表情[^，。；、]*)看向镜头", r"\1", cleaned)
     if "眼神" not in cleaned:
         cleaned = f"{cleaned}，眼神{_tg_default_eye_state(seed or cleaned)}"
@@ -11015,10 +11148,10 @@ def _tg_clean_head_expression_clause(text: str, seed_text: str = "") -> str:
     else:
         cleaned = re.sub(r"表情(?:明确自然|明確自然|自然|放松|放鬆|平稳|平穩|柔和)(?=，|且|$)", f"表情{_tg_default_expression_state(seed or cleaned)}", cleaned)
     cleaned = re.sub(r"[，、]{2,}", "，", cleaned)
+    cleaned = cleaned.replace("目光不看向镜头", "目光避开镜头")
     cleaned = re.sub(r"(自然转向镜头[，、]*){2,}", "自然转向镜头，", cleaned)
     cleaned = re.sub(r"，+$", "", cleaned)
     return f"她的头{cleaned}".strip(" ，。；、")
-
 
 def _tg_prompt_head_material_clause(clauses: list[str], original_request: str = "", random_nonce: str = "") -> str:
     source_text = "，".join(clauses)
@@ -11030,14 +11163,19 @@ def _tg_prompt_head_material_clause(clauses: list[str], original_request: str = 
             _tg_pick_prompt_variant(
                 original_request or source_text or "default",
                 [
-                    "自然转向镜头，目光看向镜头，眼神柔和且表情放松",
-                    "轻轻看向镜头，目光专注落向镜头，眼神从容且表情带着明显笑意",
-                    "微微侧转看向镜头，目光平稳望向镜头，眼神专注且表情嘴角上扬",
-                    "抬起头注视镜头，目光亲近迎向镜头，眼神松弛且表情柔和",
-                    "自然转向镜头，目光直视镜头，眼神自信且表情神情从容",
-                    "轻轻看向镜头，目光稳定望向镜头，眼神柔和且表情轻微微笑",
+                    "微微侧转，目光落向画面外，眼神柔和且表情放松",
+                    "低头看向手部，目光不看镜头，眼神从容且表情带着明显笑意",
+                    "从侧方回眸，目光掠过镜头边缘，眼神专注且表情嘴角上扬",
+                    "抬起头看向窗边，目光亲近落向侧方，眼神松弛且表情柔和",
+                    "轻轻抬起看向镜头边缘，目光稳定，眼神自信且表情神情从容",
+                    "偏向侧方，目光望向远处，眼神柔和且表情轻微微笑",
+                    "轻轻低垂，目光落在衣物边缘，眼神平稳且表情自然",
+                    "背向镜头回眸，目光停在画面边缘，眼神带有试探感且表情明确",
+                    "侧后方回头，目光越过肩侧，眼神从容且表情嘴角上扬",
+                    "低头整理衣物边缘，目光落向手部，眼神松弛且表情带着明显笑意",
                 ],
                 random_nonce,
+                history_key="tg-r18-head-random",
             ),
             f"{original_request or source_text}|{random_nonce}",
         )
@@ -11053,14 +11191,17 @@ def _tg_prompt_head_material_clause(clauses: list[str], original_request: str = 
         _tg_pick_prompt_variant(
             original_request or source_text or "default",
             [
-                "自然转向镜头，目光看向镜头，眼神柔和且表情放松",
-                "轻轻看向镜头，目光专注落向镜头，眼神从容且表情带着明显笑意",
-                "微微侧转看向镜头，目光平稳望向镜头，眼神专注且表情嘴角上扬",
-                "抬起头注视镜头，目光亲近迎向镜头，眼神松弛且表情柔和",
-                "自然转向镜头，目光直视镜头，眼神自信且表情神情从容",
-                "轻轻看向镜头，目光稳定望向镜头，眼神柔和且表情轻微微笑",
+                "微微侧转，目光落向画面外，眼神柔和且表情放松",
+                "低头看向手部，目光不看镜头，眼神从容且表情带着明显笑意",
+                "从侧方回眸，目光掠过镜头边缘，眼神专注且表情嘴角上扬",
+                "抬起头看向窗边，目光亲近落向侧方，眼神松弛且表情柔和",
+                "轻轻抬起看向镜头边缘，目光稳定，眼神自信且表情神情从容",
+                "偏向侧方，目光望向远处，眼神柔和且表情轻微微笑",
+                "侧后方自然回头，目光停在画面边缘，眼神带有试探感且表情明确",
+                "低头整理衣物，目光落向手部，眼神平稳且表情嘴角上扬",
             ],
             random_nonce,
+            history_key="tg-r18-head-fallback",
         ),
         original_request or source_text,
     )
@@ -11388,8 +11529,35 @@ def _tg_default_upper_clothing_state_for_text(clothing_text: str) -> str:
     return "上衣前襟完全敞开"
 
 
+def _tg_upper_exposure_clothing_state_for_text(clothing_text: str) -> str:
+    text = str(clothing_text or "")
+    if _tg_request_has_swimwear_intent(text):
+        return ""
+    if re.search(r"吊带|吊帶|背心|睡裙|吊带裙|吊帶裙", text):
+        return "吊带上衣领口下拉至胸下"
+    if re.search(r"T恤|长上衣|長上衣|针织长上衣|針織長上衣|宽松上衣|寬鬆上衣|上衣", text, re.IGNORECASE):
+        return "上衣领口下拉至胸下"
+    if re.search(r"浴袍|睡袍|袍|和服|汉服|漢服|外套|皮衣", text):
+        return "上衣前襟完全敞开"
+    return _tg_default_upper_clothing_state_for_text(text)
+
+
 def _tg_clause_has_upper_clothing_state(text: str) -> bool:
     return bool(re.search(r"上衣前襟完全敞开|前襟敞开|前襟敞開|领口下滑|領口下滑|肩带滑落|肩帶滑落|胸口敞开|胸口敞開|半透明|薄透|透视|透視", text))
+
+
+def _tg_clause_has_upper_exposure_clothing_state(text: str) -> bool:
+    return bool(
+        re.search(
+            r"上衣前襟完全敞开|前襟完全敞开|前襟敞开|前襟敞開|胸口敞开|胸口敞開|"
+            r"领口下拉至胸下|領口下拉至胸下|胸前下拉至胸下|大敞开|大敞開",
+            str(text or ""),
+        )
+    )
+
+
+def _tg_clause_has_weak_upper_exposure_state(text: str) -> bool:
+    return bool(re.search(r"肩带自然滑落|肩帶自然滑落|领口自然下滑|領口自然下滑|上衣面料薄透|半透明|薄透|透视|透視", str(text or "")))
 
 
 def _tg_clause_has_lower_clothing_state(text: str) -> bool:
@@ -11649,16 +11817,18 @@ def _tg_prompt_pose_and_scene(clauses: list[str], original_request: str = "", ra
     request_pose = _tg_request_pose_scene(original_request, random_nonce)
     if request_pose:
         return request_pose
+    if random_nonce:
+        return _tg_pick_prompt_variant(original_request or "default", ["三分之二侧身站在画面中央", "坐在床边并斜向画面一侧", "靠坐在沙发边看向侧方", "背向镜头自然回头", "低头整理衣物的半身构图", "沿画面对角线斜坐", "侧身倚在窗边", "半身站在场景边缘并回眸", "靠在门框旁形成侧前方角度", "坐在椅边并把身体转向侧方", "跪坐在床沿形成纵向线条", "侧卧在沙发边并看向画面外", "站在窗边低头整理衣物", "斜靠在墙边，镜头轻微俯视", "坐在地毯边，身体沿对角线展开", "从侧后方拍摄自然回头", "坐在床尾侧身回头，镜头从侧后方拍摄", "站在门边低头整理衣物，镜头轻微俯视", "斜靠在窗边，身体朝向画面外", "半跪在床沿，身体沿竖向展开", "侧坐在椅边看向窗边，镜头从侧面拍摄", "背向画面坐在沙发边并自然回眸", "靠在桌沿形成对角线构图，镜头拉开距离", "坐在地毯边低头整理衣物，视线不看镜头"], random_nonce, history_key="tg-r18-pose-default")
     pose_clause = _first_tg_clause_matching(clauses, r"站在|坐在|躺在|跪在|靠坐在|倚在|趴在|半身|全身")
     if not pose_clause:
-        return _tg_pick_prompt_variant(original_request or "default", ["站在画面中央", "坐在床边", "靠坐在沙发边"], random_nonce)
+        return _tg_pick_prompt_variant(original_request or "default", ["三分之二侧身站在画面中央", "坐在床边并斜向画面一侧", "靠坐在沙发边看向侧方", "背向镜头自然回头", "低头整理衣物的半身构图", "沿画面对角线斜坐", "侧身倚在窗边", "半身站在场景边缘并回眸", "靠在门框旁形成侧前方角度", "坐在椅边并把身体转向侧方", "跪坐在床沿形成纵向线条", "侧卧在沙发边并看向画面外", "站在窗边低头整理衣物", "斜靠在墙边，镜头轻微俯视", "坐在地毯边，身体沿对角线展开", "从侧后方拍摄自然回头", "坐在床尾侧身回头，镜头从侧后方拍摄", "站在门边低头整理衣物，镜头轻微俯视", "斜靠在窗边，身体朝向画面外", "半跪在床沿，身体沿竖向展开", "侧坐在椅边看向窗边，镜头从侧面拍摄", "背向画面坐在沙发边并自然回眸", "靠在桌沿形成对角线构图，镜头拉开距离", "坐在地毯边低头整理衣物，视线不看镜头"], random_nonce, history_key="tg-r18-pose-default")
     match = re.search(r"(?:半身|全身)?(?:站在|坐在|躺在|跪在|靠坐在|倚在|趴在)[^，。；、]{0,60}", pose_clause)
     if match:
         pose = match.group(0)
         pose = re.sub(r"(?:穿着|露出|她的左手|而右手|她的身体|她的头).*$", "", pose).strip()
         if pose:
             return pose
-    return "站在画面中央"
+    return _tg_pick_prompt_variant(original_request or "default", ["三分之二侧身站在画面中央", "坐在画面一侧并斜向侧方", "侧身倚靠在场景边缘", "背向镜头自然回头", "低头看向手部的半身构图", "半身站在场景边缘并回眸", "坐在椅边并把身体转向侧方", "靠在窗边形成侧前方角度", "沿画面对角线斜坐", "站在门框旁自然回头", "侧卧在沙发边看向画面外", "斜靠墙面，镜头轻微俯视", "坐在床尾侧身回头，镜头从侧后方拍摄", "站在门边低头整理衣物，镜头轻微俯视", "斜靠在窗边，身体朝向画面外", "侧坐在椅边看向窗边，镜头从侧面拍摄"], random_nonce, history_key="tg-r18-pose-fallback")
 
 
 def _tg_join_unique_prompt_clauses(items: list[str], *, max_items: int = 0) -> str:
@@ -11969,10 +12139,16 @@ def _tg_ensure_clothing_state_matches_exposure(clothing_clause: str, exposure_cl
         return clothing
     has_upper = _tg_exposure_has_upper_part(exposure)
     has_lower = _tg_exposure_has_lower_part(exposure)
-    if has_upper and not _tg_clothing_implies_breast_exposure(clothing):
-        upper_state = _tg_default_upper_clothing_state_for_text(clothing)
-        if not any(_tg_clause_has_upper_clothing_state(part) for part in parts):
-            parts.append(upper_state)
+    if has_upper:
+        upper_state = _tg_upper_exposure_clothing_state_for_text(clothing)
+        if upper_state:
+            parts = [
+                part
+                for part in parts
+                if not (_tg_clause_has_weak_upper_exposure_state(part) and not _tg_clause_has_upper_exposure_clothing_state(part))
+            ]
+            if not any(_tg_clause_has_upper_exposure_clothing_state(part) for part in parts):
+                parts.append(upper_state)
     if has_lower and not _tg_clothing_implies_genital_exposure(clothing):
         lower_state = _tg_default_lower_clothing_state_for_text(clothing)
         if not any(_tg_clause_has_lower_clothing_state(part) for part in parts):
@@ -11984,38 +12160,146 @@ def _tg_prompt_head_clause(clauses: list[str], original_request: str = "", rando
     return _tg_prompt_head_material_clause(clauses, original_request, random_nonce)
 
 
-def _tg_prompt_background_clause(clauses: list[str], pose_scene: str) -> str:
+def _tg_prompt_background_clause(
+    clauses: list[str],
+    pose_scene: str,
+    original_request: str = "",
+    random_nonce: str = "",
+    *,
+    non_r18_free: bool = False,
+) -> str:
+    def _is_empty_background_label(value: str) -> bool:
+        return re.sub(r"\s+", "", str(value or "").strip(" ，。；、:：")) in {"背景", "场景", "場景", "环境", "環境"}
+
+    def _normalize_background(value: str) -> str:
+        content = str(value or "").strip(" ，。；、:：")
+        if not content or _is_empty_background_label(content):
+            return ""
+        content = re.sub(r"^(背景|场景|場景|环境|環境)\s*(?:是|为|為|:|：)?", "", content).strip(" ，。；、:：")
+        content = re.sub(r"(?:的)?(?:背景|场景|場景|环境|環境)$", "", content).strip(" ，。；、:：")
+        if not content or _is_empty_background_label(content):
+            return ""
+        return f"背景是{content}环境"
+
     if re.search(r"泳池|游泳池|pool", pose_scene, re.IGNORECASE):
         return "背景是泳池边环境"
     if re.search(r"海边|海邊|海滩|海灘|沙滩|沙灘|海岸|beach|seaside", pose_scene, re.IGNORECASE):
         return "背景是海边度假环境"
     background = _first_tg_clause_matching(clauses, r"^背景|^场景|^場景")
+    if _is_empty_background_label(background):
+        background = ""
     if not background:
         background_candidates = [
             clause
             for clause in clauses[1:]
             if re.search(r"教室|卧室|臥室|室内|室內|房间|房間|客厅|客廳|床|窗|沙发|沙發|椅|讲台|講台|车厢|車廂|浴室|办公室|辦公室|舞台", clause)
             and not re.search(r"穿着|穿著|乳房|乳头|乳頭|阴部|陰部|阴唇|陰唇|她的左手|左手|右手|她的身体|她的身體|她的头|她的頭", clause)
+            and not re.search(r"站在|坐在|躺在|跪在|靠坐在|倚在|趴在|蹲在|俯身|前倾|前傾|侧身|側身|身体转向|身體轉向|看向|回眸", clause)
+            and not _is_empty_background_label(clause)
         ]
         background = background_candidates[0] if background_candidates else ""
     if background:
-        return background
-    scene_match = re.search(r"(教室|卧室|臥室|室内|室內|房间|房間|客厅|客廳|床|窗|沙发|沙發|椅|讲台|講台)", pose_scene)
-    if scene_match:
-        return f"背景是{scene_match.group(1)}环境"
-    return "背景保持简洁室内环境"
+        normalized = _normalize_background(background)
+        if normalized:
+            return normalized
+    scene_backgrounds = [
+        (r"教室|讲台|講台|黑板", "classroom", ["背景是教室讲台旁环境", "背景是黑板与课桌之间环境", "背景是安静教室角落环境", "背景是窗边教室环境"]),
+        (r"卧室|臥室|床头|床頭|床边|床邊|床沿|床上", "bedroom", ["背景是床边卧室环境", "背景是柔软床铺与床头柜环境", "背景是窗帘半开的卧室环境", "背景是暖色床头区域环境", "背景是整洁被褥旁环境"]),
+        (r"客厅|客廳|沙发|沙發", "livingroom", ["背景是客厅沙发旁环境", "背景是浅色沙发与地毯环境", "背景是简洁公寓客厅环境", "背景是落地窗旁客厅环境"]),
+        (r"浴室|洗手台|浴缸", "bathroom", ["背景是浴室镜前环境", "背景是洗手台旁环境", "背景是浴缸边缘环境", "背景是柔光浴室墙边环境"]),
+        (r"办公室|辦公室|工位|办公桌|辦公桌", "office", ["背景是办公室桌边环境", "背景是工位椅旁环境", "背景是夜晚办公室窗边环境", "背景是简洁办公桌旁环境"]),
+        (r"车厢|車廂|机舱|機艙|飞机|飛機", "cabin", ["背景是车厢座椅旁环境", "背景是机舱过道环境", "背景是窗边座椅环境", "背景是狭窄车厢通道环境"]),
+        (r"舞台", "stage", ["背景是舞台侧光环境", "背景是暗色幕布前环境", "背景是柔和聚光灯旁环境"]),
+        (r"窗边|窗邊|窗", "window", ["背景是窗边室内环境", "背景是落地窗旁环境", "背景是窗帘半开室内环境", "背景是城市窗景旁环境"]),
+        (r"椅|座椅", "chair", ["背景是室内座椅旁环境", "背景是简洁房间椅边环境", "背景是窗边座椅旁环境", "背景是暖色室内椅边环境"]),
+        (r"室内|室內|房间|房間", "room", ["背景是简洁室内环境", "背景是现代房间环境", "背景是安静室内角落环境", "背景是柔和布景房间环境"]),
+    ]
+    for pattern, key, options in scene_backgrounds:
+        if re.search(pattern, pose_scene):
+            return _tg_pick_prompt_variant(
+                f"{original_request}|{pose_scene}|{key}",
+                options,
+                random_nonce,
+                history_key=f"tg-{'free' if non_r18_free else 'r18'}-background-{key}",
+            )
+    r18_backgrounds = [
+        "背景是现代酒店房间环境",
+        "背景是暖色卧室环境",
+        "背景是落地窗旁室内环境",
+        "背景是柔软床铺与床头柜环境",
+        "背景是简洁公寓客厅环境",
+        "背景是窗帘半开的私密房间环境",
+        "背景是浅色沙发与地毯环境",
+        "背景是浴室镜前环境",
+        "背景是夜景窗边室内环境",
+        "背景是复古梳妆台旁环境",
+        "背景是安静走廊门边环境",
+        "背景是车厢座椅旁环境",
+    ]
+    free_backgrounds = [
+        "背景是清晨窗边室内环境",
+        "背景是夜晚室内柔光环境",
+        "背景是早晨咖啡桌旁环境",
+        "背景是晚上城市窗边环境",
+        "背景是早晨街角店铺环境",
+        "背景是晚上办公室桌边环境",
+    ]
+    return _tg_pick_prompt_variant(
+        f"{original_request}|{pose_scene}|background",
+        free_backgrounds if non_r18_free else r18_backgrounds,
+        random_nonce,
+        history_key="tg-free-background" if non_r18_free else "tg-r18-background",
+    )
 
 
-def _tg_prompt_lighting_clause(clauses: list[str]) -> str:
-    lighting = _first_tg_clause_matching(clauses, r"光线|光線|灯光|燈光|柔光|窗光|侧光|側光|自然光|阴影|陰影")
+def _tg_prompt_lighting_clause(
+    clauses: list[str],
+    original_request: str = "",
+    random_nonce: str = "",
+    *,
+    non_r18_free: bool = False,
+) -> str:
+    lighting_clauses = _tg_prompt_matching_clauses(
+        clauses,
+        r"光线|光線|灯光|燈光|灯|燈|照明|低照度|暖色|冷色|柔光|窗光|侧光|側光|自然光|阴影|陰影",
+        max_items=2,
+    )
     depth = _first_tg_clause_matching(clauses, r"浅景深|淺景深")
+    lighting = _tg_join_unique_prompt_clauses(lighting_clauses, max_items=2)
     if lighting and depth and depth not in lighting:
-        return f"{lighting}，{depth}"
+        return _tg_join_unique_prompt_clauses([lighting, depth], max_items=3)
     if lighting:
         return lighting
     if depth:
         return depth
-    return "柔和光线从侧面照射，浅景深突出身体曲线"
+    r18_lighting = [
+        "清晨窗边自然光照入，空气明亮干净，浅景深突出主体",
+        "上午柔和自然光从侧面落下，远景保持轻微虚化",
+        "午后暖白色窗光斜照，柔和阴影突出身体轮廓",
+        "傍晚金色侧光贴近人物边缘，浅景深带出空间层次",
+        "黄昏室内暖光与窗外余晖混合，暗部阴影柔和",
+        "夜晚床头灯低照度照明，深色阴影突出私密氛围",
+        "深夜暖色台灯从侧后方照射，暗部层次清晰",
+        "雨夜窗边冷暖混合光，玻璃反光形成柔和空间层次",
+        "浴室柔光从镜前扩散，皮肤与布料纹理清晰",
+        "车厢顶灯与窗边微光混合，浅景深突出人物",
+        "室内柔和补光从侧前方照射，远景保持安静虚化",
+        "低照度暖色灯光贴近人物，阴影柔和不过黑",
+    ]
+    free_lighting = [
+        "清晨自然光从窗边照入，画面明亮干净",
+        "早晨柔和侧光照亮人物，远景轻微虚化",
+        "夜晚室内暖灯照明，画面安静清晰",
+        "晚上城市窗光与室内灯光混合，远景柔和",
+        "清晨店铺外自然光照入，画面真实生活化",
+        "夜晚办公室顶灯柔和照明，主体清楚可见",
+    ]
+    return _tg_pick_prompt_variant(
+        f"{original_request}|lighting",
+        free_lighting if non_r18_free else r18_lighting,
+        random_nonce,
+        history_key="tg-free-lighting" if non_r18_free else "tg-r18-lighting",
+    )
 
 
 def _tg_prompt_quality_clause(clauses: list[str]) -> str:
@@ -12160,9 +12444,12 @@ def _canonicalize_tg_image_nine_segment_prompt(
     requested_pose_scene = _tg_request_pose_scene(original_request, random_nonce)
     pose_scene = _tg_prompt_pose_and_scene(clauses, original_request, random_nonce)
     first_clause = clauses[0].strip(" ，。；、")
+    prefer_randomized_pose_scene = bool(random_nonce and not requested_pose_scene)
     if requested_pose_scene:
         segment_1 = _tg_build_subject_segment(anchor, subject, requested_pose_scene)
         pose_scene = requested_pose_scene
+    elif prefer_randomized_pose_scene:
+        segment_1 = _tg_build_subject_segment(anchor, subject, pose_scene)
     elif (
         _tg_image_first_segment_has_subject_start(first_clause)
         and _tg_prompt_has_subject_role(first_clause)
@@ -12198,11 +12485,17 @@ def _canonicalize_tg_image_nine_segment_prompt(
     if not left_right or "她的左手" not in left_right or "右手" not in left_right:
         left_right = "她的左手轻托身体一侧而右手自然放在大腿内侧"
     segment_4 = left_right.strip(" ，。；、")
-    segment_5 = _tg_request_body_orientation(original_request) or _first_tg_clause_matching(clauses, r"她的身体|她的身體|身体朝向|身體朝向|面向镜头|面向鏡頭|侧向镜头|側向鏡頭|侧身|側身|前倾|前傾|俯身|转向|轉向")
-    segment_5 = segment_5 if segment_5.startswith("她的身体") else "她的身体微微前倾面向镜头"
+    request_body_orientation = _tg_request_body_orientation(original_request, random_nonce)
+    if request_body_orientation:
+        segment_5 = request_body_orientation
+    elif random_nonce:
+        segment_5 = _tg_default_body_orientation(original_request, pose_scene, random_nonce)
+    else:
+        segment_5 = _first_tg_clause_matching(clauses, r"她的身体|她的身體|身体朝向|身體朝向|面向镜头|面向鏡頭|侧向镜头|側向鏡頭|侧身|側身|前倾|前傾|俯身|转向|轉向")
+        segment_5 = segment_5 if segment_5.startswith("她的身体") else _tg_default_body_orientation(original_request, pose_scene, random_nonce)
     segment_6 = _tg_prompt_head_clause(clauses, original_request, random_nonce)
-    segment_7 = _tg_prompt_background_clause(clauses, pose_scene)
-    segment_8 = _tg_prompt_lighting_clause(clauses)
+    segment_7 = _tg_prompt_background_clause(clauses, pose_scene, original_request, random_nonce, non_r18_free=non_r18_free)
+    segment_8 = _tg_prompt_lighting_clause(clauses, original_request, random_nonce, non_r18_free=non_r18_free)
     segment_9 = _tg_prompt_quality_clause(clauses)
     segments = [
         segment_1,
@@ -12454,10 +12747,10 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str, *, non_r18_f
         )
     else:
         image_segment_rule = (
-            "CRITICAL FORMAT RULE - NATURAL ORDERED SEGMENTS: The prompt MUST be one continuous natural Chinese sentence, using Chinese commas (，) to connect the clauses. Use at least these 9 ordered content blocks, but do not output numbers, labels, semicolons, or list formatting: 1.[natural single-subject opening + concise body/persona figure constraint + female subject + full or half-body pose + scene; the first block should start naturally with wording such as 一位, 一名, 一个, 一個, 一名女性, 一位成熟女性, 女子, 女郎, 女模特, 主角, or similar subject wording. Do not force only 一位. The persona constraint here must be very short and only describe big body structure such as 身形纤细修长且腰胯比例轻盈. Do not mention shoulders, neck, waist-abdomen details, limb details, breasts, face, hairstyle, skin, small body details, or exposure in this first block] 2.穿着[clothing body and clothing states must be explicit. Write upper-garment state and lower-garment state separately when both exist, such as 穿着白色衬衫和黑色短裙，上衣前襟完全敞开，短裙向上掀起] 3.[visible exposure block: upper-body exposure is mandatory and must be written first with the exact phrase 露出丰满坚挺的乳房和清晰可见的乳头; lower-body exposure is low-probability unless the user explicitly requests it. If lower-body exposure appears, upper-body exposure must also appear before it. Every exposed part must correspond to a written clothing state. If this block exposes breasts, nipples, areola, labia, or another specific body part, immediately follow that exposed part with the selected persona's matching exposed-part feature description. Do not use 边缘可见, 部分可见, 可见, 隐约可见, or any ambiguous wording] 4.她的[left hand action]而右手[right hand action] 5.她的身体[orientation toward camera] 6.她的头[dynamic head process + explicit 目光方向 + independent 眼神状态 + direct expression; prefer 她的头自然转向镜头，目光看向镜头，眼神柔和且表情嘴角上扬. Never merge 目光 and 眼神 into one phrase, and never use vague expressions like 表情自然 or 表情明确自然] 7.[background / props / spatial relation] 8.[lighting / shadows / depth of field] 9.[technical quality / realism / texture]. You may add block 10 or 11 for anatomy stability, camera distance, or fabric logic, but keep the final text as one smooth comma-connected paragraph. Keep each block concise and non-repetitive."
+            "CRITICAL FORMAT RULE - NATURAL ORDERED SEGMENTS: The prompt MUST be one continuous natural Chinese sentence, using Chinese commas (，) to connect the clauses. Use at least these 9 ordered content blocks, but do not output numbers, labels, semicolons, or list formatting: 1.[natural single-subject opening + concise body/persona figure constraint + female subject + full or half-body pose + scene; the first block should start naturally with wording such as 一位, 一名, 一个, 一個, 一名女性, 一位成熟女性, 女子, 女郎, 女模特, 主角, or similar subject wording. Do not force only 一位. The persona constraint here must be very short and only describe big body structure such as 身形纤细修长且腰胯比例轻盈. Do not mention shoulders, neck, waist-abdomen details, limb details, breasts, face, hairstyle, skin, small body details, or exposure in this first block] 2.穿着[clothing body and clothing states must be explicit. Write upper-garment state and lower-garment state separately when both exist, such as 穿着白色衬衫和黑色短裙，上衣前襟完全敞开，短裙向上掀起. If block 3 exposes breasts/nipples, shoulder straps slipping, transparent fabric, or a loose neckline alone is not enough; the upper garment state must say 前襟完全敞开 or 领口下拉至胸下] 3.[visible exposure block: upper-body exposure is mandatory and must be written first with the exact phrase 露出丰满坚挺的乳房和清晰可见的乳头; lower-body exposure is low-probability unless the user explicitly requests it. If lower-body exposure appears, upper-body exposure must also appear before it. Every exposed part must correspond to a written clothing state in block 2. If this block exposes breasts, nipples, areola, labia, or another specific body part, immediately follow that exposed part with the selected persona's matching exposed-part feature description. Do not use 边缘可见, 部分可见, 可见, 隐约可见, or any ambiguous wording] 4.她的[left hand action]而右手[right hand action] 5.她的身体[orientation and camera angle; use side, three-quarter, diagonal, back-turn, slight overhead, side-front, or side-back angles unless the user explicitly asks for front-facing] 6.她的头[dynamic head process + explicit 目光方向 + independent 眼神状态 + direct expression; prefer varied gaze directions such as 画面外, 手部, 窗边, 侧方, 镜头边缘. Never merge 目光 and 眼神 into one phrase, and never use vague expressions like 表情自然 or 表情明确自然] 7.[background / props / spatial relation] 8.[lighting / shadows / depth of field] 9.[technical quality / realism / texture]. You may add block 10 or 11 for anatomy stability, camera distance, or fabric logic, but keep the final text as one smooth comma-connected paragraph. Keep each block concise and non-repetitive."
         )
         exposure_rule = (
-            "MANDATORY EXPOSURE LOGIC: Upper-body exposure is mandatory for the image prompt and must be supported by an upper-garment state. Lower-body exposure is low-probability and should appear only when the user explicitly asks for a lower-body area/action or when the scene logic strongly requires it; when lower-body exposure is included, write the lower-garment state first and keep upper-body exposure before lower-body exposure. Do not invent a lower-body exposure when the prompt is clearly upper-body-only."
+            "MANDATORY EXPOSURE LOGIC: Upper-body exposure is mandatory for the image prompt and must be supported by a physically matching upper-garment state in the clothing block. Shoulder straps slipping, transparent fabric, or a loose neckline alone does not support full breast/nipple exposure; use 前襟完全敞开 or 领口下拉至胸下 according to the garment type. Lower-body exposure is low-probability and should appear only when the user explicitly asks for a lower-body area/action or when the scene logic strongly requires it; when lower-body exposure is included, write the lower-garment state first and keep upper-body exposure before lower-body exposure. Do not invent a lower-body exposure when the prompt is clearly upper-body-only."
         )
     image_rules = [
         *internal_reasoning_layers,
@@ -12476,6 +12769,7 @@ def _build_tg_prompt_system_prompt(task_type: str, task_label: str, *, non_r18_f
         "Pose description must be concise and direct: use simple posture terms such as standing, sitting, kneeling, or lying. Specify exact body orientation and hand placement in one short clause. Avoid verbose or poetic pose descriptions.",
         "The character's head and face must always be visible within the frame. Full head must be in frame with natural headroom. Never crop the head or face. Back-facing poses are not allowed. Side profiles are acceptable only if the face remains clearly visible.",
         "MANDATORY CLOTHING ANCHOR: for person images, describe clothing and clothing state together in ONE short direct clause. Merge garment type, color, and state into the same phrase, such as 穿着前襟敞开的白色衬衫和黑色短裙. Do not write clothing first and then a separate clothing-state clause. Do not leave clothing as vague words like beautiful outfit, sexy outfit, fashion style, or clothing state only.",
+        "When an exposure block describes visible breasts or nipples, the clothing clause must contain a matching upper-garment opening/down-pulled state. Do not rely on 肩带滑落, 薄透, 透视, or 领口自然下滑 as the only clothing state for that exposure.",
         "If the user explicitly requests no clothing, nude body, or unclothed appearance, do not add garment colors or garment structures. In that case describe the no-clothing state directly and keep the body-shape anchor separate from clothing.",
         "Keep clothing logic visually coherent. Use intact garments unless the user explicitly asks for damaged clothing. Do not invent holes, tears, ripped openings, disappearing fabric, crossed straps, duplicated sleeves, or force-illogical openings.",
         "Describe exposure range and clothing state directly in Chinese, without vague phrases such as depending on the scene, if appropriate, can, may, or partially visible. Keep the clothing phrase simple: garment style/type, main color, and broad visible appearance; avoid repeated construction details across the prompt.",

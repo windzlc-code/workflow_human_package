@@ -5,6 +5,7 @@ const mockState = vi.hoisted(() => ({
   commands: [] as string[],
   input: [] as string[],
   taskResults: new Map<number, string>(),
+  uiXmlQueue: [] as string[],
   sharePickerXml: "",
   screenshotBase64: "",
   launcherStartReturnsInstagram: false,
@@ -19,7 +20,7 @@ vi.mock("@/lib/vmos-client", () => ({
     }
     const taskId = mockState.commands.length;
     const result = command.includes("uiautomator dump")
-      ? mockState.sharePickerXml
+      ? (mockState.uiXmlQueue.length ? mockState.uiXmlQueue.shift() : mockState.sharePickerXml)
       : mockState.launcherStartReturnsInstagram && command.includes("dumpsys window") && !mockState.explicitTelegramLaunchStarted
         ? "com.instagram.barcelona/.mainactivity.BarcelonaActivity"
         : "org.telegram.messenger/.DefaultIcon";
@@ -46,6 +47,7 @@ describe("VMOS Telegram group publisher", () => {
     mockState.commands = [];
     mockState.input = [];
     mockState.taskResults = new Map();
+    mockState.uiXmlQueue = [];
     mockState.sharePickerXml = "";
     mockState.screenshotBase64 = "";
     mockState.launcherStartReturnsInstagram = false;
@@ -57,7 +59,13 @@ describe("VMOS Telegram group publisher", () => {
 
     const result = await publishTelegramGroupPost(
       {},
-      { padCode: "ACP250322677KIRJ", caption: "Test1 VMOS Telegram 自动化发推文验证" },
+      {
+        padCode: "ACP250322677KIRJ",
+        caption: "Test1 VMOS Telegram 自动化发推文验证",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
+      },
       (item) => progress.push(item),
     );
 
@@ -66,14 +74,14 @@ describe("VMOS Telegram group publisher", () => {
       detail: "已通过 VMOS Telegram App 发送到当前打开的群组",
       screenshotUrl: "https://example.test/screenshot.jpg",
     });
-    expect(mockState.input).toEqual(["Test1 VMOS Telegram 自动化发推文验证"]);
+    expect(mockState.input).toEqual(["TG群測試", "Test1 VMOS Telegram 自动化发推文验证"]);
     expect(mockState.commands.join("\n")).toContain("input tap 170 1518");
     expect(mockState.commands.join("\n")).toContain("input tap 655 1000");
     expect(progress.at(-1)).toEqual({ step: "Telegram 群组发布完成", done: true });
   });
 
   it("posts media through Telegram Android share intent", async () => {
-    mockState.sharePickerXml = '<node text="输入消息"/><node text="test"/>';
+    mockState.sharePickerXml = '<node text="输入消息"/><node text="TG群測試"/>';
 
     const result = await publishTelegramGroupPost(
       {},
@@ -83,6 +91,9 @@ describe("VMOS Telegram group publisher", () => {
         mediaUrl: "https://example.test/a.jpg",
         mediaContentUri: "content://media/external/images/media/123",
         mediaMimeType: "image/jpeg",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
       },
       () => undefined,
     );
@@ -98,6 +109,11 @@ describe("VMOS Telegram group publisher", () => {
   });
 
   it("still advances when Telegram share opens the media preview without UI XML", async () => {
+    mockState.uiXmlQueue = [
+      "",
+      '<node text="输入消息"/><node text="TG群測試"/>',
+      '<node text="test"/><node text="Telegram Image"/>',
+    ];
     mockState.sharePickerXml = '<node text="test"/><node text="Telegram Image"/>';
 
     const result = await publishTelegramGroupPost(
@@ -108,6 +124,9 @@ describe("VMOS Telegram group publisher", () => {
         mediaUrl: "https://example.test/a.jpg",
         mediaContentUri: "content://media/external/images/media/123",
         mediaMimeType: "image/jpeg",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
       },
       () => undefined,
     );
@@ -121,6 +140,12 @@ describe("VMOS Telegram group publisher", () => {
 
   it("does not mark media as sent when Telegram remains on the share picker", async () => {
     const sharp = (await import("sharp")).default;
+    mockState.uiXmlQueue = [
+      "",
+      '<node text="输入消息"/><node text="TG群測試"/>',
+      '<node text="选择聊天"/><node text="搜索聊天"/>',
+      '<node text="选择聊天"/><node text="搜索聊天"/>',
+    ];
     mockState.sharePickerXml = '<node text="选择聊天"/><node text="搜索聊天"/>';
     mockState.screenshotBase64 = (await sharp({
       create: { width: 120, height: 120, channels: 3, background: "white" },
@@ -134,6 +159,9 @@ describe("VMOS Telegram group publisher", () => {
         mediaUrl: "https://example.test/a.jpg",
         mediaContentUri: "content://media/external/images/media/123",
         mediaMimeType: "image/jpeg",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
       },
       () => undefined,
     )).rejects.toThrow("Telegram 分享页没有选中目标群组");
@@ -142,7 +170,14 @@ describe("VMOS Telegram group publisher", () => {
   it("requires staged content uri for media posting", async () => {
     await expect(publishTelegramGroupPost(
       {},
-      { padCode: "ACP250322677KIRJ", caption: "media", mediaUrl: "https://example.test/a.jpg" },
+      {
+        padCode: "ACP250322677KIRJ",
+        caption: "media",
+        mediaUrl: "https://example.test/a.jpg",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
+      },
       () => undefined,
     )).rejects.toThrow("图片或视频没有成功写入云机");
   });
@@ -152,7 +187,13 @@ describe("VMOS Telegram group publisher", () => {
 
     await publishTelegramGroupPost(
       {},
-      { padCode: "ATP64K6RON7LCGMR", caption: "金君雅2.0 Telegram 启动兼容验证" },
+      {
+        padCode: "ATP64K6RON7LCGMR",
+        caption: "金君雅2.0 Telegram 启动兼容验证",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
+      },
       () => undefined,
     );
 

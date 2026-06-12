@@ -16,7 +16,7 @@ import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/per
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { publishPost, queryThreadsAccount, loginThreadsAccount, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
-import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
+import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
 import { WORKFLOW_PERSONA_SEEDS } from "@/lib/workflow-personas";
@@ -29,6 +29,7 @@ const DEFAULT_PUBLISH_PLATFORM: TelegramPublishPlatform = "threads";
 const DEFAULT_WARMUP_PLATFORM: TelegramWarmupPlatform = "threads";
 const TELEGRAM_POLLING_STALL_CHECK_MS = 60_000;
 const TELEGRAM_POLLING_STALL_IDLE_MS = 60_000;
+type TelegramGroupContentType = "free" | "paid";
 
 // ─── listPads TTL 缓存（60 秒）────────────────────────────────────────────────
 type PadListItem = { padCode: string; padName?: string; padStatus: number; padGrade?: string; padType?: string; vmosAccountName?: string };
@@ -74,6 +75,32 @@ function appendWarmupProgressLog(line: string) {
 
 function normalizeTelegramSingleLine(text: string): string {
   return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeTelegramChatIdInput(text: string): string | null {
+  const value = normalizeTelegramSingleLine(text).replace(/[，。；;]+$/g, "");
+  if (!/^-?\d+$/.test(value)) return null;
+  return value;
+}
+
+function telegramChatTitle(chat: any, fallback: string): string {
+  return normalizeTelegramSingleLine(chat?.title || chat?.username || chat?.first_name || fallback) || fallback;
+}
+
+function isTelegramGroupContentType(value: unknown): value is TelegramGroupContentType {
+  return value === "free" || value === "paid";
+}
+
+function resolveKnownTelegramGroupName(groupId: string, groupContentType?: TelegramGroupContentType): string {
+  if (groupId === "-1003703865776") return "TG fufei qun";
+  if (groupId === "-1003812332642") return "TG群測試";
+  return groupContentType === "paid" ? "TG付費群" : groupContentType === "free" ? "TG免費群" : groupId;
+}
+
+function formatTelegramGroupBindingDisplay(name?: string, id?: string): string {
+  const displayName = normalizeTelegramSingleLine(name || "") || "未綁定";
+  const displayId = normalizeTelegramSingleLine(id || "");
+  return displayId ? `${displayName}（ID：${displayId}）` : displayName;
 }
 
 function formatWarmupStepForTelegram(step: string | undefined): string {
@@ -409,9 +436,10 @@ interface PersonaLocal {
 }
 
 const pendingActions = new Map<number, {
-  type: "bind-pad" | "edit-persona-name" | "edit-persona-content" | "create-persona" | "set-persona-tweet-style";
+  type: "bind-pad" | "edit-persona-name" | "edit-persona-content" | "create-persona" | "set-persona-tweet-style" | "set-telegram-group-binding";
   archiveId: string;
   mode?: "patch" | "replace";
+  groupContentType?: TelegramGroupContentType;
 }>();
 
 const pendingLoginActions = new Map<number, {
@@ -532,6 +560,7 @@ const pendingCustomPublishes = new Map<number, PendingCustomPublish>();
 const pendingPostSelections = new Map<number, {
   archiveId: string;
   postIds: string[];
+  groupContentType?: TelegramGroupContentType;
 }>();
 
 const pendingPostActions = new Map<number, {
@@ -545,6 +574,7 @@ type PendingBulkPostAction = {
   selectedPostIds: string[];
   page: number;
   platform?: TelegramPublishPlatform;
+  groupContentType?: TelegramGroupContentType;
 };
 
 const pendingBulkPostActions = new Map<number, PendingBulkPostAction>();
@@ -1028,21 +1058,63 @@ function resolvePendingPostSelection(chatId: number, data: string, prefix: strin
 
 const STORED_POSTS_PAGE_SIZE = 5;
 
-function buildStoredPostsPageCallback(archiveId: string, page: number) {
-  return `posts_${archiveId}_p${Math.max(0, page)}`;
+type PersonaContentTypeTarget = "posts" | "history" | "publish";
+
+export function buildPersonaContentTypeCallback(
+  target: PersonaContentTypeTarget,
+  archiveId: string,
+  groupContentType: TelegramGroupContentType,
+) {
+  const prefix = target === "publish" ? "pub" : target;
+  return `${prefix}_${archiveId}_ct_${groupContentType}`;
+}
+
+export function parsePersonaContentTypeCallback(data: string): {
+  target: PersonaContentTypeTarget;
+  archiveId: string;
+  groupContentType: TelegramGroupContentType;
+} | null {
+  const match = data.match(/^(posts|history|pub)_(.+)_ct_(free|paid)$/);
+  if (!match) return null;
+  return {
+    target: match[1] === "pub" ? "publish" : match[1] as PersonaContentTypeTarget,
+    archiveId: match[2],
+    groupContentType: match[3] as TelegramGroupContentType,
+  };
+}
+
+export function buildPersonaContentTypePickerRows(args: {
+  archiveId: string;
+  target: PersonaContentTypeTarget;
+  counts?: Partial<Record<TelegramGroupContentType, number>>;
+}) {
+  const freeCount = Number(args.counts?.free || 0);
+  const paidCount = Number(args.counts?.paid || 0);
+  return [
+    [
+      { text: `免費內容（${freeCount}）`, callback_data: buildPersonaContentTypeCallback(args.target, args.archiveId, "free") },
+      { text: `付費內容（${paidCount}）`, callback_data: buildPersonaContentTypeCallback(args.target, args.archiveId, "paid") },
+    ],
+    [{ text: "◀️ 返回人設詳情", callback_data: `pd_${args.archiveId}` }],
+  ];
+}
+
+function buildStoredPostsPageCallback(archiveId: string, page: number, groupContentType?: TelegramGroupContentType) {
+  const suffix = groupContentType ? `_ct_${groupContentType}` : "";
+  return `posts_${archiveId}${suffix}_p${Math.max(0, page)}`;
 }
 
 export function parseStoredPostsCallback(data: string) {
   if (!data.startsWith("posts_")) return null;
   const payload = data.slice("posts_".length);
   const pageMatch = payload.match(/^(.*)_p(\d+)$/);
-  if (pageMatch) {
-    return {
-      archiveId: pageMatch[1],
-      page: Math.max(0, Number(pageMatch[2] || 0)),
-    };
-  }
-  return { archiveId: payload, page: 0 };
+  const rawArchiveId = pageMatch ? pageMatch[1] : payload;
+  const branchMatch = rawArchiveId.match(/^(.*)_ct_(free|paid)$/);
+  return {
+    archiveId: branchMatch ? branchMatch[1] : rawArchiveId,
+    ...(branchMatch ? { groupContentType: branchMatch[2] as TelegramGroupContentType } : {}),
+    page: pageMatch ? Math.max(0, Number(pageMatch[2] || 0)) : 0,
+  };
 }
 
 function buildStoredPostPreviewHtml(
@@ -1070,15 +1142,21 @@ function buildStoredPostPreviewHtml(
 
 export function buildStoredPostsListView(
   archiveId: string,
-  posts: Array<{ id: string; content: string }>,
+  posts: Array<{ id: string; content: string; telegramGroupContentType?: "free" | "paid" }>,
   page = 0,
   pageSize = STORED_POSTS_PAGE_SIZE,
   linkPresentation: { url: string; text: string } | null = null,
+  groupContentType?: TelegramGroupContentType,
 ) {
-  const totalPages = Math.max(1, Math.ceil(posts.length / pageSize));
+  const scopedPosts = groupContentType
+    ? (posts.some((post) => post.telegramGroupContentType === "free" || post.telegramGroupContentType === "paid")
+        ? posts.filter((post) => post.telegramGroupContentType === groupContentType)
+        : posts)
+    : posts;
+  const totalPages = Math.max(1, Math.ceil(scopedPosts.length / pageSize));
   const safePage = Math.min(Math.max(0, page), totalPages - 1);
   const start = safePage * pageSize;
-  const visiblePosts = posts.slice(start, start + pageSize);
+  const visiblePosts = scopedPosts.slice(start, start + pageSize);
   const lines = visiblePosts.map((post, idx) => {
     const displayIndex = start + idx + 1;
     const preview = buildStoredPostPreviewHtml(post.content, linkPresentation);
@@ -1096,19 +1174,21 @@ export function buildStoredPostsListView(
   if (totalPages > 1) {
     const navRow: Array<{ text: string; callback_data: string }> = [];
     if (safePage > 0) {
-      navRow.push({ text: "\u25C0\uFE0F \u4E0A\u4E00\u9801", callback_data: buildStoredPostsPageCallback(archiveId, safePage - 1) });
+      navRow.push({ text: "\u25C0\uFE0F \u4E0A\u4E00\u9801", callback_data: buildStoredPostsPageCallback(archiveId, safePage - 1, groupContentType) });
     }
-    navRow.push({ text: `${safePage + 1}/${totalPages}`, callback_data: buildStoredPostsPageCallback(archiveId, safePage) });
+    navRow.push({ text: `${safePage + 1}/${totalPages}`, callback_data: buildStoredPostsPageCallback(archiveId, safePage, groupContentType) });
     if (safePage < totalPages - 1) {
-      navRow.push({ text: "\u4E0B\u4E00\u9801 \u25B6\uFE0F", callback_data: buildStoredPostsPageCallback(archiveId, safePage + 1) });
+      navRow.push({ text: "\u4E0B\u4E00\u9801 \u25B6\uFE0F", callback_data: buildStoredPostsPageCallback(archiveId, safePage + 1, groupContentType) });
     }
     keyboard.push(navRow);
   }
+  const branchSuffix = groupContentType ? `_ct_${groupContentType}` : "";
   keyboard.push([
-    { text: "\uD83D\uDE80 \u767C\u5E03\u63A8\u6587", callback_data: `bulkpub_${archiveId}_p${safePage}` },
-    { text: "\uD83D\uDDD1 \u522A\u9664\u63A8\u6587", callback_data: `bulkdel_${archiveId}_p${safePage}` },
+    { text: "\uD83D\uDE80 \u767C\u5E03\u63A8\u6587", callback_data: `bulkpub_${archiveId}${branchSuffix}_p${safePage}` },
+    { text: "\uD83D\uDDD1 \u522A\u9664\u63A8\u6587", callback_data: `bulkdel_${archiveId}${branchSuffix}_p${safePage}` },
   ]);
-  keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: `pd_${archiveId}` }]);
+  keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: groupContentType ? `posts_branch_${archiveId}` : `pd_${archiveId}` }]);
+  const branchTitle = groupContentType === "paid" ? "付費內容" : groupContentType === "free" ? "免費內容" : "";
   return {
     page: safePage,
     pageSize,
@@ -1116,8 +1196,8 @@ export function buildStoredPostsListView(
     start,
     visiblePosts,
     visiblePostIds: visiblePosts.map((post) => post.id),
-    postIds: posts.map((post) => post.id),
-    text: `<b>\uD83D\uDCDD \u5F85\u767C\u4F48\u63A8\u6587\u5217\u8868</b>\uFF08\u5171 ${posts.length} \u7BC7\uFF0C\u7B2C ${safePage + 1}/${totalPages} \u9801\uFF09\n\n${lines.join("\n\n")}`,
+    postIds: scopedPosts.map((post) => post.id),
+    text: `<b>\uD83D\uDCDD \u5F85\u767C\u4F48\u63A8\u6587\u5217\u8868</b>${branchTitle ? ` - ${branchTitle}` : ""}\uFF08\u5171 ${scopedPosts.length} \u7BC7\uFF0C\u7B2C ${safePage + 1}/${totalPages} \u9801\uFF09\n\n${lines.join("\n\n")}`,
     keyboard,
   };
 }
@@ -1127,25 +1207,34 @@ function parseBulkStoredPostsCallback(data: string, prefix: "bulkpub_" | "bulkde
   if (!data.startsWith(prefix)) return null;
   const payload = data.slice(prefix.length);
   const pageMatch = payload.match(/^(.*)_p(\d+)$/);
+  const rawArchiveId = pageMatch ? pageMatch[1] : payload;
+  const branchMatch = rawArchiveId.match(/^(.*)_ct_(free|paid)$/);
   return {
-    archiveId: pageMatch ? pageMatch[1] : payload,
+    archiveId: branchMatch ? branchMatch[1] : rawArchiveId,
+    ...(branchMatch ? { groupContentType: branchMatch[2] as TelegramGroupContentType } : {}),
     page: pageMatch ? Math.max(0, Number(pageMatch[2] || 0)) : 0,
   };
 }
 
 function buildBulkStoredPostsSelectView(args: {
   archiveId: string;
-  posts: Array<{ id: string; content: string }>;
+  posts: Array<{ id: string; content: string; telegramGroupContentType?: "free" | "paid" }>;
   mode: "publish" | "delete";
   selectedPostIds: string[];
   page?: number;
   pageSize?: number;
+  groupContentType?: TelegramGroupContentType;
 }) {
   const pageSize = args.pageSize || STORED_POSTS_PAGE_SIZE;
-  const totalPages = Math.max(1, Math.ceil(args.posts.length / pageSize));
+  const scopedPosts = args.groupContentType
+    ? (args.posts.some((post) => post.telegramGroupContentType === "free" || post.telegramGroupContentType === "paid")
+        ? args.posts.filter((post) => post.telegramGroupContentType === args.groupContentType)
+        : args.posts)
+    : args.posts;
+  const totalPages = Math.max(1, Math.ceil(scopedPosts.length / pageSize));
   const safePage = Math.min(Math.max(0, args.page || 0), totalPages - 1);
   const start = safePage * pageSize;
-  const visiblePosts = args.posts.slice(start, start + pageSize);
+  const visiblePosts = scopedPosts.slice(start, start + pageSize);
   const selected = new Set(args.selectedPostIds);
   const actionText = args.mode === "publish" ? "发布" : "删除";
   const lines = visiblePosts.map((post, idx) => {
@@ -1173,12 +1262,32 @@ function buildBulkStoredPostsSelectView(args: {
     ]);
   }
   keyboard.push([{ text: `✅ 确认${actionText}（已选${selected.size}篇）`, callback_data: "bconfirm" }]);
-  keyboard.push([{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(args.archiveId, safePage) }]);
+  keyboard.push([{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(args.archiveId, safePage, args.groupContentType) }]);
   return {
     page: safePage,
     text: `请选择要${actionText}的推文：\n已選：${selected.size} 篇\n\n${lines.join("\n\n")}`,
     keyboard,
   };
+}
+
+function resolveTelegramGroupContentTypeForPost(post?: { telegramGroupContentType?: "free" | "paid" } | null): TelegramGroupContentType | undefined {
+  return post?.telegramGroupContentType === "paid" ? "paid" : post?.telegramGroupContentType === "free" ? "free" : undefined;
+}
+
+function resolveTelegramTargetChatIdForPost(
+  archive: { boundTelegramFreeGroupId?: string; boundTelegramPaidGroupId?: string } | null | undefined,
+  post?: { telegramGroupContentType?: "free" | "paid" } | null,
+) {
+  const groupType: TelegramGroupContentType = post?.telegramGroupContentType === "paid" ? "paid" : "free";
+  return groupType === "paid" ? archive?.boundTelegramPaidGroupId : archive?.boundTelegramFreeGroupId;
+}
+
+function resolveTelegramTargetGroupNameForPost(
+  archive: { boundTelegramFreeGroupName?: string; boundTelegramPaidGroupName?: string } | null | undefined,
+  post?: { telegramGroupContentType?: "free" | "paid" } | null,
+) {
+  const groupType: TelegramGroupContentType = post?.telegramGroupContentType === "paid" ? "paid" : "free";
+  return groupType === "paid" ? archive?.boundTelegramPaidGroupName : archive?.boundTelegramFreeGroupName;
 }
 for (const seed of WORKFLOW_PERSONA_SEEDS) {
   void seed;
@@ -1670,6 +1779,12 @@ export function formatUserFacingError(errorOrMessage: unknown, fallback = "操�
     message = "Telegram 分享页没有选中目标群组，请先在云机 Telegram 里打开目标群组后重试。";
   } else if (/Telegram 群组媒体发布缺少|缺少 contentUri|缺少已写入云机的媒体记录|mediaContentUri/i.test(rawForMatch)) {
     message = "图片或视频没有成功写入云机，请重新上传媒体后再发布。";
+  } else if (/下載 Telegram 素材失敗|Telegram 文件下載失敗|Telegram 檔案下載失敗|Telegram file.*download|file download/i.test(rawForMatch)) {
+    message = message || "Telegram 素材下載失敗，請確認本地 Bot 代理可用後重新上傳。";
+  } else if (/R18 後台連線失敗|Tool_R18 後台連線失敗|fetch failed|Failed to fetch/i.test(rawForMatch)) {
+    message = /R18 後台連線失敗|Tool_R18 後台連線失敗/i.test(message)
+      ? message
+      : "Tool_R18 後台連線失敗，請確認本地後台服務和端口配置正常後重試。";
   } else if (/Telegram 群组输入失败|inputText|输入失败/i.test(rawForMatch) && /Telegram/i.test(rawForMatch)) {
     message = "Telegram 输入消息失败，请确认当前停留在目标群组聊天页。";
   } else if (/未能打开.*Instagram|Instagram.*(未安装|未檢測|未检测)|com\.instagram\.android.*(not found|does not exist|No activities found|unable to resolve|not installed)|Activity class.*com\.instagram\.android/i.test(rawForMatch)) {
@@ -2002,6 +2117,10 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
       { text: "\uD83E\uDDFE \u63A8\u6587\u98A8\u683C", callback_data: `tweetstyle_${id}` },
     ],
     [{ text: "📱 绑定云机", callback_data: `bindpad_${id}` }],
+    [
+      { text: "TG免費群ID", callback_data: `bindtg_free_${id}` },
+      { text: "TG付費群ID", callback_data: `bindtg_paid_${id}` },
+    ],
   ];
 
   if (!isWorkflow) {
@@ -2363,7 +2482,7 @@ function buildGenerateTimeSlotKeyboard(state: PendingGeneratePostState) {
     [{ text: "早上文案", callback_data: "genmem_time_morning" }, { text: "晚上文案", callback_data: "genmem_time_night" }],
   ];
   if (state.contentBranch === "r18") {
-    rows.push([{ text: "圖生視頻", callback_data: "toolr18_task_video_i2v" }]);
+    rows.push([{ text: "圖生視頻", callback_data: "paidr18_group_video" }]);
   }
   rows.push([{ text: "◀️ 返回群內容類型", callback_data: "genmem_time_back" }]);
   return { inline_keyboard: rows };
@@ -2442,7 +2561,13 @@ async function toolR18JsonRequest(method: "GET" | "POST", pathName: string, body
   if (token) headers["x-tg-internal-token"] = token;
   const fetchFn = (globalThis as any).fetch;
   if (typeof fetchFn !== "function") throw new Error("目前 Node 執行環境不支援 fetch");
-  const response = await fetchFn(url, { method, headers, body: method === "POST" ? JSON.stringify(body || {}) : undefined });
+  let response: any;
+  try {
+    response = await fetchFn(url, { method, headers, body: method === "POST" ? JSON.stringify(body || {}) : undefined });
+  } catch (error: any) {
+    const detail = String(error?.message || error || "").trim();
+    throw new Error(`Tool_R18 後台連線失敗：${url.origin}${url.pathname} 無法連線。${detail ? `原因：${detail}` : ""}`);
+  }
   const text = await response.text();
   let data: any = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
@@ -2611,6 +2736,46 @@ function toolR18FlowCancelCallback(params?: Record<string, any>, fallback = "too
   return hasPaidR18ImageFlowContext(params) ? "paidr18_back_workflow" : fallback;
 }
 
+function toolR18ContextBackCallback(chatId: number, fallback = "toolr18_entry") {
+  return pendingPaidR18ImageFlows.has(chatId) ? "paidr18_back_workflow" : fallback;
+}
+
+function toolR18TaskBackLabel(chatId: number) {
+  return pendingPaidR18ImageFlows.has(chatId) ? "◀️ 返回付費內容" : "◀️ 返回";
+}
+
+function hasActivePaidR18ImageFlowContext(chatId: number, params?: Record<string, any>) {
+  return hasPaidR18ImageFlowContext(params) || pendingPaidR18ImageFlows.has(chatId);
+}
+
+function toolR18ContextBackButton(chatId: number, params?: Record<string, any>, fallback = "toolr18_entry") {
+  const paidContext = hasActivePaidR18ImageFlowContext(chatId, params);
+  return {
+    text: paidContext ? "◀️ 返回付費內容" : "◀️ 返回",
+    callback_data: paidContext ? "paidr18_back_workflow" : fallback,
+  };
+}
+
+function buildToolR18SubmittedKeyboard(chatId: number, taskId: string, params?: Record<string, any>) {
+  const rows = [[{ text: "查看任務", callback_data: "toolr18_detail_" + taskId }]];
+  if (hasActivePaidR18ImageFlowContext(chatId, params)) {
+    rows.push([{ text: "◀️ 返回付費內容", callback_data: "paidr18_back_workflow" }]);
+  } else {
+    rows.push([{ text: "繼續R18", callback_data: "toolr18_entry" }, { text: "工作臺狀態", callback_data: "toolr18_status" }]);
+  }
+  return rows;
+}
+
+function buildToolR18ResubmittedKeyboard(chatId: number, taskId: string, params?: Record<string, any>) {
+  const rows = [[{ text: "查看任務", callback_data: "toolr18_detail_" + taskId }]];
+  if (hasActivePaidR18ImageFlowContext(chatId, params)) {
+    rows.push([{ text: "◀️ 返回付費內容", callback_data: "paidr18_back_workflow" }]);
+  } else {
+    rows.push([{ text: "最近任務", callback_data: "toolr18_tasks" }, { text: "繼續R18", callback_data: "toolr18_entry" }]);
+  }
+  return rows;
+}
+
 function buildPaidR18TimeVisualInstruction(contentTimeSlot?: unknown) {
   const slot = String(contentTimeSlot || "").trim();
   if (slot === "morning") {
@@ -2671,10 +2836,13 @@ async function startPaidR18ImageWorkflow(bot: TelegramBot, chatId: number, messa
   }
 }
 
-function buildToolR18VideoKeyboard() {
+function buildToolR18VideoKeyboard(chatId?: number) {
+  const backCallback = typeof chatId === "number" && pendingPaidR18ImageFlows.has(chatId)
+    ? "paidr18_back_workflow"
+    : "toolr18_entry";
   return [
     [toolR18TaskButton("圖生視頻")],
-    [{ text: "◀️ 返回", callback_data: "toolr18_entry" }],
+    [{ text: typeof chatId === "number" && pendingPaidR18ImageFlows.has(chatId) ? "◀️ 返回付費內容" : "◀️ 返回", callback_data: backCallback }],
   ];
 }
 
@@ -2743,10 +2911,10 @@ function toolR18VideoI2vStatusText(step: string, params: Record<string, any>) {
   return lines.join(String.fromCharCode(10));
 }
 
-function buildToolR18VideoI2vResolutionKeyboard() {
+function buildToolR18VideoI2vResolutionKeyboard(backCallback = "toolr18_group_video", backLabel = "◀️ 返回") {
   return [
     [{ text: "720p（最小資源）", callback_data: "toolr18_i2v_resolution_720p" }, { text: "1080p", callback_data: "toolr18_i2v_resolution_1080p" }],
-    [{ text: "◀️ 返回", callback_data: "toolr18_group_video" }],
+    [{ text: backLabel, callback_data: backCallback }],
   ];
 }
 
@@ -2782,10 +2950,11 @@ function buildToolR18VideoI2vPromptModeKeyboard() {
 }
 
 async function sendToolR18VideoI2vResolutionStep(bot: TelegramBot, chatId: number, messageId?: number, seedParams?: Record<string, any>) {
-  const params = { ...(await toolR18VideoI2vDefaultParams()), ...(seedParams || {}) };
-  pendingToolR18Tasks.set(chatId, { stage: "video_i2v_resolution", taskType: "video_i2v", taskLabel: "圖生視頻", params, files: [] });
+  const existing = pendingToolR18Tasks.get(chatId);
+  const params = { ...(await toolR18VideoI2vDefaultParams()), ...(existing?.params || {}), ...(seedParams || {}) };
+  pendingToolR18Tasks.set(chatId, { ...(existing || {}), stage: "video_i2v_resolution", taskType: "video_i2v", taskLabel: "圖生視頻", params, files: existing?.files || [] });
   await safeEditOrSend(bot, chatId, messageId, toolR18VideoI2vStatusText("1/5 選擇分辨率", params), {
-    reply_markup: { inline_keyboard: buildToolR18VideoI2vResolutionKeyboard() },
+    reply_markup: { inline_keyboard: buildToolR18VideoI2vResolutionKeyboard(toolR18FlowCancelCallback(params, "toolr18_group_video"), hasPaidR18ImageFlowContext(params) ? "◀️ 返回付費內容" : "◀️ 返回") },
   });
 }
 
@@ -3022,6 +3191,11 @@ async function sendToolR18Menu(bot: TelegramBot, chatId: number, messageId?: num
   });
 }
 
+async function sendToolR18ContextOrMenu(bot: TelegramBot, chatId: number, messageId?: number, target: "entry" | "image" = "image") {
+  if (await sendPaidR18ImageWorkflowFromContext(bot, chatId, messageId, true, target)) return;
+  await sendToolR18Menu(bot, chatId, messageId);
+}
+
 function formatToolR18TaskLine(task: any, index: number) {
   const id = String(task?.id || "");
   const type = toolR18TaskLabel(String(task?.type || ""));
@@ -3041,26 +3215,29 @@ async function sendToolR18Status(bot: TelegramBot, chatId: number, messageId?: n
     active ? "目前任務：" + toolR18TaskLabel(active.type) + " / " + (active.status_label || active.status) : "目前任務：無",
     latest ? "最近任務：" + toolR18TaskLabel(latest.type) + " / " + (latest.status_label || latest.status) : "最近任務：無",
   ].join(String.fromCharCode(10));
-  await safeEditOrSend(bot, chatId, messageId, text, { reply_markup: { inline_keyboard: [[{ text: "查看最近任務", callback_data: "toolr18_tasks" }], [{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] } });
+  const backCallback = toolR18ContextBackCallback(chatId);
+  await safeEditOrSend(bot, chatId, messageId, text, { reply_markup: { inline_keyboard: [[{ text: "查看最近任務", callback_data: "toolr18_tasks" }], [{ text: toolR18TaskBackLabel(chatId), callback_data: backCallback }]] } });
 }
 
 async function sendToolR18Tasks(bot: TelegramBot, chatId: number, messageId?: number) {
   const data = await toolR18JsonRequest("GET", "/api/internal/tg/tasks", undefined, { chat_id: chatId, limit: 5 });
   const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
   const rows = tasks.map((task: any) => [{ text: toolR18TaskLabel(task.type) + " / " + task.status, callback_data: "toolr18_detail_" + String(task.id || "").slice(0, 42) }]);
-  await safeEditOrSend(bot, chatId, messageId, tasks.length ? ["R18 最近任務", "", tasks.map(formatToolR18TaskLine).join(String.fromCharCode(10) + String.fromCharCode(10))].join(String.fromCharCode(10)) : "R18 最近還沒有任務。", { reply_markup: { inline_keyboard: [...rows, [{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] } });
+  await safeEditOrSend(bot, chatId, messageId, tasks.length ? ["R18 最近任務", "", tasks.map(formatToolR18TaskLine).join(String.fromCharCode(10) + String.fromCharCode(10))].join(String.fromCharCode(10)) : "R18 最近還沒有任務。", { reply_markup: { inline_keyboard: [...rows, [{ text: toolR18TaskBackLabel(chatId), callback_data: toolR18ContextBackCallback(chatId) }]] } });
 }
 
-function buildToolR18TaskDetailKeyboard(task: any) {
+function buildToolR18TaskDetailKeyboard(task: any, chatId: number) {
   const taskId = String(task?.id || "").slice(0, 42);
+  const backCallback = toolR18ContextBackCallback(chatId);
+  const backLabel = toolR18TaskBackLabel(chatId);
   if (String(task?.status || "") === "failed" && taskId) {
     return [
       [{ text: "\u91cd\u65b0\u63d0\u4ea4\u4efb\u52d9", callback_data: "toolr18_resubmit_" + taskId }],
-      [{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, { text: "\u25c0\ufe0f \u8fd4\u56de", callback_data: "toolr18_entry" }],
+      [{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, { text: backLabel, callback_data: backCallback }],
     ];
   }
   return [
-    [{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, { text: "\u25c0\ufe0f \u8fd4\u56de", callback_data: "toolr18_entry" }],
+    [{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, { text: backLabel, callback_data: backCallback }],
   ];
 }
 
@@ -3073,7 +3250,7 @@ async function sendToolR18TaskDetail(bot: TelegramBot, chatId: number, taskId: s
       ? "\u7d50\u679c\uff1a\u751f\u6210\u5931\u6557\uff0c\u53ef\u76f4\u63a5\u91cd\u65b0\u63d0\u4ea4\u4efb\u52d9\u3002"
       : "\u7d50\u679c\uff1a\u66ab\u7121\u53ef\u4e0b\u8f09\u6a94\u6848\u3002";
   const text = ["R18 \u4efb\u52d9\u8a73\u60c5", "\u985e\u578b\uff1a" + toolR18TaskLabel(task.type), "\u72c0\u614b\uff1a" + (task.status || "unknown"), task.error ? "\u932f\u8aa4\uff1a" + String(task.error).slice(0, 500) : "", task.latest_event?.message ? "\u9032\u5ea6\uff1a" + String(task.latest_event.message).slice(0, 500) : "", resultLine].filter(Boolean).join(String.fromCharCode(10));
-  await safeEditOrSend(bot, chatId, messageId, text, { reply_markup: { inline_keyboard: buildToolR18TaskDetailKeyboard(task) } });
+  await safeEditOrSend(bot, chatId, messageId, text, { reply_markup: { inline_keyboard: buildToolR18TaskDetailKeyboard(task, chatId) } });
 }
 
 
@@ -3127,7 +3304,7 @@ async function submitToolR18ImageRerunOrContinue(bot: TelegramBot, chatId: numbe
   const result = await toolR18JsonRequest("POST", "/api/internal/tg/submit", { task_type: "text_to_image", tg_chat_id: chatId, params });
   pendingToolR18Tasks.delete(chatId);
   await safeEditOrSend(bot, chatId, messageId, ["\u2705 R18 \u4efb\u52d9\u5df2\u63d0\u4ea4", "\u985e\u578b\uff1a" + (state.taskType === "r18_text_to_image_continue" ? "\u7e7c\u7e8c\u751f\u6210\u5716\u7247" : "\u91cd\u65b0\u751f\u6210\u5716\u7247"), "ID\uff1a" + result.id].filter(Boolean).join(String.fromCharCode(10)), {
-    reply_markup: { inline_keyboard: [[{ text: "\u67e5\u770b\u4efb\u52d9", callback_data: "toolr18_detail_" + result.id }], [{ text: "\u7e7c\u7e8cR18", callback_data: "toolr18_entry" }, { text: "\u5de5\u4f5c\u81fa\u72c0\u614b", callback_data: "toolr18_status" }]] },
+    reply_markup: { inline_keyboard: buildToolR18SubmittedKeyboard(chatId, String(result.id || ""), params) },
   });
 }
 
@@ -3138,7 +3315,7 @@ async function resubmitToolR18Task(bot: TelegramBot, chatId: number, taskId: str
   const params = { ...(task.input || {}), tg_rerun_from_task_id: String(task.id || taskId), source: "telegram-rerun" };
   const result = await toolR18JsonRequest("POST", "/api/internal/tg/submit", { task_type: task.type, tg_chat_id: chatId, params });
   await safeEditOrSend(bot, chatId, messageId, ["\u2705 R18 \u4efb\u52d9\u5df2\u91cd\u65b0\u63d0\u4ea4", "\u985e\u578b\uff1a" + toolR18TaskLabel(result.task_type || task.type), "ID\uff1a" + result.id].filter(Boolean).join(String.fromCharCode(10)), {
-    reply_markup: { inline_keyboard: [[{ text: "\u67e5\u770b\u4efb\u52d9", callback_data: "toolr18_detail_" + result.id }], [{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, { text: "\u7e7c\u7e8cR18", callback_data: "toolr18_entry" }]] },
+    reply_markup: { inline_keyboard: buildToolR18ResubmittedKeyboard(chatId, String(result.id || ""), params) },
   });
 }
 
@@ -3624,7 +3801,7 @@ function scheduleToolR18PaidPostCandidateSelection(bot: TelegramBot, chatId: num
         "任務ID：" + taskId,
         "原因：" + formatUserFacingError(error, "請稍後查看任務詳情或重新生成圖片。"),
       ].join(String.fromCharCode(10)), {
-        reply_markup: { inline_keyboard: [[{ text: "查看任務", callback_data: "toolr18_detail_" + taskId }], [{ text: "繼續R18", callback_data: "toolr18_entry" }]] },
+        reply_markup: { inline_keyboard: [[{ text: "查看任務", callback_data: "toolr18_detail_" + taskId }], [{ text: "◀️ 返回付費內容", callback_data: "paidr18_back_workflow" }]] },
       });
     }
   })();
@@ -3653,8 +3830,11 @@ async function submitToolR18PromptReview(bot: TelegramBot, chatId: number, state
   const taskId = String(result.id || "").trim();
   const linkedToPaidR18Post = scheduleToolR18PaidPostCandidateSelection(bot, chatId, taskId, params, finalPrompt);
   const linkedToGeneratedPost = state.taskType === "text_to_image" && scheduleToolR18GeneratedPostAttachment(bot, chatId, taskId, params, finalPrompt);
+  const submittedKeyboard = linkedToPaidR18Post
+    ? [[{ text: "\u67E5\u770B\u4EFB\u52D9", callback_data: "toolr18_detail_" + taskId }], [{ text: "\u25C0\uFE0F \u8FD4\u56DE\u4ED8\u8CBB\u5167\u5BB9", callback_data: "paidr18_back_workflow" }]]
+    : [[{ text: "\u67E5\u770B\u4EFB\u52D9", callback_data: "toolr18_detail_" + taskId }], [{ text: "\u7E7C\u7E8CR18", callback_data: "toolr18_entry" }, { text: "\u5DE5\u4F5C\u81FA\u72C0\u614B", callback_data: "toolr18_status" }]];
   await bot.sendMessage(chatId, ["\u2705 R18 \u4EFB\u52D9\u5DF2\u63D0\u4EA4", "\u985E\u578B\uFF1A" + state.taskLabel, "ID\uFF1A" + taskId, linkedToPaidR18Post ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\uFF0C\u5B8C\u6210\u5F8C\u6703\u56DE\u50B3\u5019\u9078\u5716\u4F9B\u4F60\u9078\u64C7\uFF0C\u518D\u751F\u6210\u4ED8\u8CBB\u7FA4\u63A8\u6587\u3002" : linkedToGeneratedPost ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\u4E26\u5BEB\u5165\u63A8\u6587\u3002" : ""].filter(Boolean).join(String.fromCharCode(10)), {
-    reply_markup: { inline_keyboard: [[{ text: "\u67E5\u770B\u4EFB\u52D9", callback_data: "toolr18_detail_" + taskId }], [{ text: "\u7E7C\u7E8CR18", callback_data: "toolr18_entry" }, { text: "\u5DE5\u4F5C\u81FA\u72C0\u614B", callback_data: "toolr18_status" }]] },
+    reply_markup: { inline_keyboard: submittedKeyboard },
   });
 }
 
@@ -3675,13 +3855,18 @@ async function downloadToolR18TelegramMedia(bot: TelegramBot, msg: TelegramBot.M
   const hostDir = path.join(TOOL_R18_UPLOAD_HOST_DIR, String(chatId));
   fs.mkdirSync(hostDir, { recursive: true });
   const hostPath = path.join(hostDir, safeBase);
-  const fileLink = await bot.getFileLink(fileId);
-  const fetchFn = (globalThis as any).fetch;
-  if (typeof fetchFn !== "function") throw new Error("目前 Node 執行環境不支援 fetch");
-  const response = await fetchFn(fileLink);
-  if (!response.ok) throw new Error("下載 Telegram 檔案失敗 HTTP " + response.status);
-  const arrayBuffer = await response.arrayBuffer();
-  fs.writeFileSync(hostPath, Buffer.from(arrayBuffer));
+  const tmpDir = path.join(TOOL_R18_UPLOAD_HOST_DIR, ".telegram_tmp", String(chatId));
+  fs.mkdirSync(tmpDir, { recursive: true });
+  let downloadedPath = "";
+  try {
+    downloadedPath = await bot.downloadFile(fileId, tmpDir);
+    fs.copyFileSync(downloadedPath, hostPath);
+  } catch (error: any) {
+    const detail = String(error?.message || error || "").trim();
+    throw new Error("下載 Telegram 素材失敗，請確認本地 Bot 代理可用後重新上傳。原因：" + (detail || "Telegram 文件下載失敗"));
+  } finally {
+    if (downloadedPath) fs.rmSync(downloadedPath, { force: true });
+  }
   const containerPath = path.posix.join(TOOL_R18_UPLOAD_CONTAINER_DIR, String(chatId), safeBase);
   return { name: originalName || safeBase, path: containerPath, kind: guessToolR18FileKind(originalName || safeBase, media?.mime_type) };
 }
@@ -3738,7 +3923,7 @@ function buildToolR18PendingKeyboard(state: PendingToolR18TaskState) {
   const hasText = Boolean(String(state.text || "").trim()) || state.taskType === "get_gemini";
   const rows: any[] = [];
   if (enoughFiles && hasText) rows.push([{ text: "提交R18任務", callback_data: "toolr18_submit" }]);
-  rows.push([{ text: "清空重來", callback_data: "toolr18_clear" }, { text: "取消", callback_data: "toolr18_entry" }]);
+  rows.push([{ text: "清空重來", callback_data: "toolr18_clear" }, { text: "取消", callback_data: toolR18FlowCancelCallback(state.params, "toolr18_entry") }]);
   return rows;
 }
 
@@ -3753,7 +3938,7 @@ async function submitPendingToolR18Task(bot: TelegramBot, chatId: number, state:
     const result = await toolR18JsonRequest("POST", "/api/internal/tg/agent_submit", { message: text, tg_chat_id: chatId, files: state.files || [], use_ai_copy: true, duration_seconds: 15 });
     pendingToolR18Tasks.delete(chatId);
     const submitted = result?.submitted !== false && result?.id;
-    await bot.sendMessage(chatId, submitted ? ["✅ R18 智能任務已提交", "類型：" + toolR18TaskLabel(result.task_type), "ID：" + result.id].join(String.fromCharCode(10)) : ["R18 智能提交需要補充資訊：", String(result?.reply || result?.summary || "請補充任務類型和素材。")].join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: submitted ? [[{ text: "查看任務", callback_data: "toolr18_detail_" + result.id }], [{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] : buildToolR18MenuKeyboard(chatId) } });
+    await bot.sendMessage(chatId, submitted ? ["✅ R18 智能任務已提交", "類型：" + toolR18TaskLabel(result.task_type), "ID：" + result.id].join(String.fromCharCode(10)) : ["R18 智能提交需要補充資訊：", String(result?.reply || result?.summary || "請補充任務類型和素材。")].join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: submitted ? buildToolR18SubmittedKeyboard(chatId, String(result.id || ""), state.params) : buildToolR18MenuKeyboard(chatId) } });
     return;
   }
   if (!state.taskType) throw new Error("R18 任務類型缺失");
@@ -3763,7 +3948,7 @@ async function submitPendingToolR18Task(bot: TelegramBot, chatId: number, state:
     const keys = ["image_generate_mode_default", "comfy_workflow_source", "remote_comfy_gateway_url", "text_to_image_workflow_profile", "replace_model_app_id", "replace_product_app_id", "create_video_app_id", "commerce_video_app_id"];
     const lines = ["R18 後臺工作流配置摘要", ...keys.map((key) => key + ": " + String(cfg[key] ?? "").slice(0, 120))];
     pendingToolR18Tasks.delete(chatId);
-    await bot.sendMessage(chatId, lines.join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] } });
+    await bot.sendMessage(chatId, lines.join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: [[toolR18ContextBackButton(chatId, state.params)]] } });
     return;
   }
   if (state.taskType === "r18_rerun_latest") {
@@ -3804,7 +3989,10 @@ async function submitPendingToolR18Task(bot: TelegramBot, chatId: number, state:
   const finalPrompt = String(params.prompt_text || params.prompt || params.message || text || "");
   const linkedToPaidR18Post = scheduleToolR18PaidPostCandidateSelection(bot, chatId, taskId, params, finalPrompt);
   const linkedToGeneratedPost = state.taskType === "text_to_image" && scheduleToolR18GeneratedPostAttachment(bot, chatId, taskId, params, finalPrompt);
-  await bot.sendMessage(chatId, ["\u2705 R18 \u4EFB\u52D9\u5DF2\u63D0\u4EA4", "\u985E\u578B\uFF1A" + state.taskLabel, "ID\uFF1A" + taskId, linkedToPaidR18Post ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\uFF0C\u5B8C\u6210\u5F8C\u6703\u56DE\u50B3\u5019\u9078\u5716\u4F9B\u4F60\u9078\u64C7\uFF0C\u518D\u751F\u6210\u4ED8\u8CBB\u7FA4\u63A8\u6587\u3002" : linkedToGeneratedPost ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\u4E26\u5BEB\u5165\u63A8\u6587\u3002" : ""].filter(Boolean).join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: [[{ text: "\u67E5\u770B\u4EFB\u52D9", callback_data: "toolr18_detail_" + taskId }], [{ text: "\u7E7C\u7E8CR18", callback_data: "toolr18_entry" }, { text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: "toolr18_entry" }]] } });
+  const submittedKeyboard = linkedToPaidR18Post
+    ? [[{ text: "\u67E5\u770B\u4EFB\u52D9", callback_data: "toolr18_detail_" + taskId }], [{ text: "\u25C0\uFE0F \u8FD4\u56DE\u4ED8\u8CBB\u5167\u5BB9", callback_data: "paidr18_back_workflow" }]]
+    : [[{ text: "\u67E5\u770B\u4EFB\u52D9", callback_data: "toolr18_detail_" + taskId }], [{ text: "\u7E7C\u7E8CR18", callback_data: "toolr18_entry" }, { text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: "toolr18_entry" }]];
+  await bot.sendMessage(chatId, ["\u2705 R18 \u4EFB\u52D9\u5DF2\u63D0\u4EA4", "\u985E\u578B\uFF1A" + state.taskLabel, "ID\uFF1A" + taskId, linkedToPaidR18Post ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\uFF0C\u5B8C\u6210\u5F8C\u6703\u56DE\u50B3\u5019\u9078\u5716\u4F9B\u4F60\u9078\u64C7\uFF0C\u518D\u751F\u6210\u4ED8\u8CBB\u7FA4\u63A8\u6587\u3002" : linkedToGeneratedPost ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\u4E26\u5BEB\u5165\u63A8\u6587\u3002" : ""].filter(Boolean).join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: submittedKeyboard } });
 }
 async function handlePendingToolR18Input(bot: TelegramBot, msg: TelegramBot.Message, state: PendingToolR18TaskState, media: any, text: string) {
   const chatId = msg.chat.id;
@@ -3892,7 +4080,9 @@ async function handlePendingToolR18Input(bot: TelegramBot, msg: TelegramBot.Mess
       else await sendToolR18ImageEditReferenceStep(bot, chatId);
       return;
     }
-    await bot.sendMessage(chatId, meta.label + String.fromCharCode(10) + "步驟 1/" + meta.totalSteps + "：請上傳需要編輯的原圖。", { reply_markup: { inline_keyboard: buildToolR18ImageStepKeyboard(undefined, Boolean(params.input_image_local_path)) } });
+    await bot.sendMessage(chatId, meta.label + String.fromCharCode(10) + "步驟 1/" + meta.totalSteps + "：請上傳需要編輯的原圖。", {
+      reply_markup: { inline_keyboard: buildToolR18ImageStepKeyboard(undefined, Boolean(params.input_image_local_path), toolR18FlowCancelCallback(params, "toolr18_group_image")) },
+    });
     return;
   }
 
@@ -3907,7 +4097,9 @@ async function handlePendingToolR18Input(bot: TelegramBot, msg: TelegramBot.Mess
       await sendToolR18ImageEditPromptModeStep(bot, chatId);
       return;
     }
-    await bot.sendMessage(chatId, "圖片編輯" + String.fromCharCode(10) + "步驟 2/4：請上傳參考圖或素材圖。", { reply_markup: { inline_keyboard: buildToolR18ImageStepKeyboard("toolr18_imgedit_back_input", Boolean(params.reference_image_local_path)) } });
+    await bot.sendMessage(chatId, "圖片編輯" + String.fromCharCode(10) + "步驟 2/4：請上傳參考圖或素材圖。", {
+      reply_markup: { inline_keyboard: buildToolR18ImageStepKeyboard("toolr18_imgedit_back_input", Boolean(params.reference_image_local_path), toolR18FlowCancelCallback(params, "toolr18_group_image")) },
+    });
     return;
   }
 
@@ -3938,7 +4130,9 @@ async function handlePendingToolR18Input(bot: TelegramBot, msg: TelegramBot.Mess
       await sendToolR18FaceSwapSourceStep(bot, chatId);
       return;
     }
-    await bot.sendMessage(chatId, "人物換臉" + String.fromCharCode(10) + "步驟 1/4：請上傳原圖，也就是需要被換臉的圖片。", { reply_markup: { inline_keyboard: buildToolR18FaceSwapStepKeyboard(undefined, Boolean(params.target_image_local_path)) } });
+    await bot.sendMessage(chatId, "人物換臉" + String.fromCharCode(10) + "步驟 1/4：請上傳原圖，也就是需要被換臉的圖片。", {
+      reply_markup: { inline_keyboard: buildToolR18FaceSwapStepKeyboard(undefined, Boolean(params.target_image_local_path), toolR18FlowCancelCallback(params, "toolr18_group_image")) },
+    });
     return;
   }
 
@@ -3953,7 +4147,9 @@ async function handlePendingToolR18Input(bot: TelegramBot, msg: TelegramBot.Mess
       await sendToolR18FaceSwapPromptModeStep(bot, chatId);
       return;
     }
-    await bot.sendMessage(chatId, "人物換臉" + String.fromCharCode(10) + "步驟 2/4：請上傳人臉參考圖。", { reply_markup: { inline_keyboard: buildToolR18FaceSwapStepKeyboard("toolr18_faceswap_back_target", Boolean(params.source_image_local_path)) } });
+    await bot.sendMessage(chatId, "人物換臉" + String.fromCharCode(10) + "步驟 2/4：請上傳人臉參考圖。", {
+      reply_markup: { inline_keyboard: buildToolR18FaceSwapStepKeyboard("toolr18_faceswap_back_target", Boolean(params.source_image_local_path), toolR18FlowCancelCallback(params, "toolr18_group_image")) },
+    });
     return;
   }
 
@@ -4912,6 +5108,11 @@ async function executePaidR18PostFromSelectedImage(args: {
     prompt: args.context.imageDirection,
   });
   if (!persisted) throw new Error("付費群文案已生成，但選中圖片寫入失敗");
+  if (postId) {
+    await markPersonaArchivePostTelegramGroupContentType(args.archiveId, postId, "paid").catch((error) => {
+      console.warn("[telegram][paid_r18_mark_group_type_failed]", error?.message || error);
+    });
+  }
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const post = archive?.posts.find((item) => postId && item.id === postId)
     || [...(archive?.posts || [])].reverse().find((item) => item.content.trim() === finalContent.trim());
@@ -8170,7 +8371,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
   const callbackHandler = async (query: TelegramBot.CallbackQuery) => {
       const chatId = query.message!.chat.id;
       const msgId = query.message!.message_id;
-      const data = query.data || "";
+      let data = query.data || "";
       console.log(`[telegram][callback] chat=${chatId} msg=${msgId} data=${data} len=${data.length}`);
       // 先回应 Telegram，避免后续菜单编辑或外部 API 调用占住使用者端按钮 loading。
       if (query.id) {
@@ -8860,15 +9061,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: {
             inline_keyboard: [
               [
-                { text: "📝 查看推文", callback_data: `posts_${id}` },
-                { text: "🕘 发布历史", callback_data: `history_${id}` },
+                { text: "📝 查看推文", callback_data: `posts_branch_${id}` },
+                { text: "🕘 发布历史", callback_data: `history_branch_${id}` },
               ],
               [
                 { text: "✍️ 新建推文", callback_data: `genpost_branch_${id}` },
                 { text: "⚙️ 人设设置", callback_data: `settings_${id}` },
               ],
               [
-                { text: "🚀 发布推文", callback_data: `pub_${id}` },
+                { text: "🚀 发布推文", callback_data: `pub_branch_${id}` },
               ],
               [{ text: "◀️ 返回", callback_data: "list_personas" }],
             ],
@@ -8883,8 +9084,24 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const boundPadName = await resolvePadBindingDisplayName(archive.boundPadCode, archive.boundPadName, defaultPadCode, await listPadsForThisBot());
+      const tgFreeGroupName = normalizeTelegramSingleLine(archive.boundTelegramFreeGroupName || "") || "未綁定";
+      const tgPaidGroupName = normalizeTelegramSingleLine(archive.boundTelegramPaidGroupName || "") || "未綁定";
+      const tgFreeGroupId = normalizeTelegramSingleLine(archive.boundTelegramFreeGroupId || "") || "未綁定";
+      const tgPaidGroupId = normalizeTelegramSingleLine(archive.boundTelegramPaidGroupId || "") || "未綁定";
       const settingsRows = buildPersonaSettingsRows(archive);
-      await safeEditOrSend(bot, chatId, msgId, `⚙️ *人设设置*\n\n人設：${archive.name}\n绑定云机：${boundPadName}\n待发布推文：${archive.posts.length} 篇\n已发布：${archive.publishHistory?.length || 0} 篇`, {
+      console.log(`[telegram][settings_group_binding] archive=${id} free="${tgFreeGroupName}" freeId="${tgFreeGroupId}" paid="${tgPaidGroupName}" paidId="${tgPaidGroupId}"`);
+      await safeEditOrSend(bot, chatId, msgId, [
+        "⚙️ *人設設定*",
+        "",
+        `人設：${archive.name}`,
+        `綁定雲機：${boundPadName}`,
+        `TG免費群：${tgFreeGroupName}`,
+        `TG免費群ID：${tgFreeGroupId}`,
+        `TG付費群：${tgPaidGroupName}`,
+        `TG付費群ID：${tgPaidGroupId}`,
+        `待發布推文：${archive.posts.length} 篇`,
+        `已發布：${archive.publishHistory?.length || 0} 篇`,
+      ].join("\n"), {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: settingsRows,
@@ -8925,7 +9142,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data === "toolr18_entry") {
-      if (await sendPaidR18ImageWorkflowFromContext(bot, chatId, msgId, false, "entry")) return;
+      if (await sendPaidR18ImageWorkflowFromContext(bot, chatId, msgId, true, "entry")) return;
       await sendToolR18Menu(bot, chatId, msgId);
       return;
     }
@@ -8951,13 +9168,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data === "toolr18_group_video") {
-      await safeEditOrSend(bot, chatId, msgId, "R18 / 視頻生成", { reply_markup: { inline_keyboard: buildToolR18VideoKeyboard() } });
+      if (await sendPaidR18ImageWorkflowFromContext(bot, chatId, msgId, false, "entry")) return;
+      await safeEditOrSend(bot, chatId, msgId, "R18 / 視頻生成", { reply_markup: { inline_keyboard: buildToolR18VideoKeyboard(chatId) } });
       return;
     }
 
     if (data === "toolr18_submit") {
       const pending = pendingToolR18Tasks.get(chatId);
-      if (!pending) { await sendToolR18Menu(bot, chatId, msgId); return; }
+      if (!pending) {
+        await sendToolR18ContextOrMenu(bot, chatId, msgId);
+        return;
+      }
       try {
         await safeEditOrSend(bot, chatId, msgId, "⏳ 正在提交 R18 任務...");
         await submitPendingToolR18Task(bot, chatId, pending);
@@ -8970,7 +9191,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data === "toolr18_clear") {
+      const pending = pendingToolR18Tasks.get(chatId);
       pendingToolR18Tasks.delete(chatId);
+      if (hasPaidR18ImageFlowContext(pending?.params) || pendingPaidR18ImageFlows.has(chatId)) {
+        if (await sendPaidR18ImageWorkflowFromContext(bot, chatId, msgId)) return;
+      }
       await sendToolR18Menu(bot, chatId, msgId);
       return;
     }
@@ -8985,14 +9210,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data === "toolr18_prompt_submit") {
       const pending = pendingToolR18Tasks.get(chatId);
-      if (!pending) { await sendToolR18Menu(bot, chatId, msgId); return; }
+      if (!pending) { await sendToolR18ContextOrMenu(bot, chatId, msgId); return; }
       await submitToolR18PromptReview(bot, chatId, pending);
       return;
     }
 
     if (data === "toolr18_prompt_custom") {
       const pending = pendingToolR18Tasks.get(chatId);
-      if (!pending) { await sendToolR18Menu(bot, chatId, msgId); return; }
+      if (!pending) { await sendToolR18ContextOrMenu(bot, chatId, msgId); return; }
       pendingToolR18Tasks.set(chatId, { ...pending, stage: "await_custom_prompt_submit" });
       await safeEditOrSend(bot, chatId, msgId, "請發送自定義最終提示詞。下一條訊息會直接提交生成任務。", { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "toolr18_prompt_back_review" }]] } });
       return;
@@ -9000,7 +9225,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data === "toolr18_prompt_adjust") {
       const pending = pendingToolR18Tasks.get(chatId);
-      if (!pending) { await sendToolR18Menu(bot, chatId, msgId); return; }
+      if (!pending) { await sendToolR18ContextOrMenu(bot, chatId, msgId); return; }
       pendingToolR18Tasks.set(chatId, { ...pending, stage: "await_prompt_adjustment" });
       await safeEditOrSend(bot, chatId, msgId, "請直接發送調整要求，Grok 會基於目前提示詞重新生成。", { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "toolr18_prompt_back_review" }]] } });
       return;
@@ -9008,14 +9233,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data === "toolr18_prompt_regen") {
       const pending = pendingToolR18Tasks.get(chatId);
-      if (!pending) { await sendToolR18Menu(bot, chatId, msgId); return; }
+      if (!pending) { await sendToolR18ContextOrMenu(bot, chatId, msgId); return; }
       await sendToolR18PromptPreview(bot, chatId, { ...pending, stage: "await_task_input" }, String(pending.originalRequest || pending.text || ""));
       return;
     }
 
     if (data === "toolr18_prompt_back_review") {
       const pending = pendingToolR18Tasks.get(chatId);
-      if (!pending) { await sendToolR18Menu(bot, chatId, msgId); return; }
+      if (!pending) { await sendToolR18ContextOrMenu(bot, chatId, msgId); return; }
       pendingToolR18Tasks.set(chatId, { ...pending, stage: "await_prompt_review" });
       await safeEditOrSend(bot, chatId, msgId, ["R18 / " + pending.taskLabel, "Grok 已生成提示詞：", "", String(pending.promptText || ""), "", "請確認提示詞是否合適，確認後再提交 R18 任務。"].join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: buildToolR18PromptReviewKeyboard(pending.taskType) } });
       return;
@@ -9257,7 +9482,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("toolr18_task_")) {
       const taskType = data.slice("toolr18_task_".length) as ToolR18TaskType;
       const item = TOOL_R18_TASKS.find((entry) => entry.type === taskType);
-      if (!item) { await sendToolR18Menu(bot, chatId, msgId); return; }
+      if (!item) { await sendToolR18ContextOrMenu(bot, chatId, msgId); return; }
+      if (
+        pendingPaidR18ImageFlows.has(chatId)
+        && ["text_to_image", "single_image_edit", "get_nano_banana", "face_swap", "video_i2v"].includes(taskType)
+      ) {
+        await startPaidR18ImageWorkflow(bot, chatId, msgId, taskType);
+        return;
+      }
       if (taskType === "text_to_image") {
         const pending = pendingToolR18Tasks.get(chatId);
         await sendToolR18TextToImageRatioStep(bot, chatId, msgId, hasPaidR18ImageFlowContext(pending?.params) ? { ...(pending?.params || {}) } : {});
@@ -9289,7 +9521,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           await submitPendingToolR18Task(bot, chatId, nextPending);
         } catch (error: any) {
           await safeEditOrSend(bot, chatId, msgId, "R18 指令處理失敗：" + formatUserFacingError(error, "請稍後重試。"), {
-            reply_markup: { inline_keyboard: [[{ text: "最近任務", callback_data: "toolr18_tasks" }], [{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] },
+            reply_markup: { inline_keyboard: [[{ text: "最近任務", callback_data: "toolr18_tasks" }], [toolR18ContextBackButton(chatId, nextPending.params)]] },
           });
         }
         return;
@@ -9303,19 +9535,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data === "toolr18_status") {
       try { await sendToolR18Status(bot, chatId, msgId); }
-      catch (error: any) { await safeEditOrSend(bot, chatId, msgId, "R18 狀態查詢失敗：" + formatUserFacingError(error, "請稍後重試。"), { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] } }); }
+      catch (error: any) { await safeEditOrSend(bot, chatId, msgId, "R18 狀態查詢失敗：" + formatUserFacingError(error, "請稍後重試。"), { reply_markup: { inline_keyboard: [[toolR18ContextBackButton(chatId)]] } }); }
       return;
     }
 
     if (data === "toolr18_tasks") {
       try { await sendToolR18Tasks(bot, chatId, msgId); }
-      catch (error: any) { await safeEditOrSend(bot, chatId, msgId, "R18 最近任務查詢失敗：" + formatUserFacingError(error, "請稍後重試。"), { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] } }); }
+      catch (error: any) { await safeEditOrSend(bot, chatId, msgId, "R18 最近任務查詢失敗：" + formatUserFacingError(error, "請稍後重試。"), { reply_markup: { inline_keyboard: [[toolR18ContextBackButton(chatId)]] } }); }
       return;
     }
 
     if (data.startsWith("toolr18_detail_")) {
       try { await sendToolR18TaskDetail(bot, chatId, data.slice("toolr18_detail_".length), msgId); }
-      catch (error: any) { await safeEditOrSend(bot, chatId, msgId, "R18 \u4efb\u52d9\u8a73\u60c5\u67e5\u8a62\u5931\u6557\uff1a" + formatUserFacingError(error, "\u8acb\u7a0d\u5f8c\u91cd\u8a66\u3002"), { reply_markup: { inline_keyboard: [[{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, { text: "\u25c0\ufe0f \u8fd4\u56de", callback_data: "toolr18_entry" }]] } }); }
+      catch (error: any) { await safeEditOrSend(bot, chatId, msgId, "R18 \u4efb\u52d9\u8a73\u60c5\u67e5\u8a62\u5931\u6557\uff1a" + formatUserFacingError(error, "\u8acb\u7a0d\u5f8c\u91cd\u8a66\u3002"), { reply_markup: { inline_keyboard: [[{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, toolR18ContextBackButton(chatId)]] } }); }
       return;
     }
 
@@ -9324,7 +9556,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       catch (error: any) {
         const failedTaskId = data.slice("toolr18_resubmit_".length);
         await safeEditOrSend(bot, chatId, msgId, "R18 \u91cd\u65b0\u63d0\u4ea4\u5931\u6557\uff1a" + formatUserFacingError(error, "\u8acb\u78ba\u8a8d 4090 \u7db2\u95dc\u6062\u5fa9\u5f8c\u518d\u91cd\u8a66\u3002"), {
-          reply_markup: { inline_keyboard: [[{ text: "\u91cd\u65b0\u63d0\u4ea4\u4efb\u52d9", callback_data: "toolr18_resubmit_" + failedTaskId }], [{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, { text: "\u25c0\ufe0f \u8fd4\u56de", callback_data: "toolr18_entry" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "\u91cd\u65b0\u63d0\u4ea4\u4efb\u52d9", callback_data: "toolr18_resubmit_" + failedTaskId }], [{ text: "\u6700\u8fd1\u4efb\u52d9", callback_data: "toolr18_tasks" }, toolR18ContextBackButton(chatId)]] },
         });
       }
       return;
@@ -9334,10 +9566,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       try {
         const result = await toolR18JsonRequest("POST", "/api/internal/tg/tasks/cancel_latest", {}, { chat_id: chatId });
         await safeEditOrSend(bot, chatId, msgId, "R18 強制停止：" + String(result?.message || (result?.cancelled ? "已提交取消。" : "沒有可取消任務。")), {
-          reply_markup: { inline_keyboard: [[{ text: "查看狀態", callback_data: "toolr18_status" }], [{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "查看狀態", callback_data: "toolr18_status" }], [toolR18ContextBackButton(chatId)]] },
         });
       } catch (error: any) {
-        await safeEditOrSend(bot, chatId, msgId, "R18 強制停止失敗：" + formatUserFacingError(error, "請稍後重試。"), { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] } });
+        await safeEditOrSend(bot, chatId, msgId, "R18 強制停止失敗：" + formatUserFacingError(error, "請稍後重試。"), { reply_markup: { inline_keyboard: [[toolR18ContextBackButton(chatId)]] } });
       }
       return;
     }
@@ -9612,7 +9844,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data.startsWith("paidr18_task_")) {
       const taskType = data.slice("paidr18_task_".length) as ToolR18TaskType;
-      if (!["text_to_image", "single_image_edit", "get_nano_banana", "face_swap"].includes(taskType)) {
+      if (!["text_to_image", "single_image_edit", "get_nano_banana", "face_swap", "video_i2v"].includes(taskType)) {
         await safeEditOrSend(bot, chatId, msgId, "暫不支援這個付費群圖片工作流。", {
           reply_markup: { inline_keyboard: buildPaidR18ImageWorkflowKeyboard() },
         });
@@ -9731,7 +9963,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       setPendingGeneratePost(chatId, { ...pending, prompt: "", stage: "await_word_count" });
-      await safeEditOrSend(bot, chatId, msgId, `? ???????AI ??????????\n\n? ???????????? ?\n?????????????\n\n???120`);
+      await safeEditOrSend(bot, chatId, msgId, "✅ 已選擇讓 AI 自動生成提示詞。\n\n⭐ 請輸入每篇推文的目標字數 ⭐\n只需要發送數字即可。\n\n例如：120");
       return;
     }
 
@@ -9767,6 +9999,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         imageRatioLabel: pending.imageRatioLabel,
       });
       return;
+    }
+
+    const earlyContentTypeSelection = parsePersonaContentTypeCallback(data);
+    if (earlyContentTypeSelection?.target === "history") {
+      data = `history_${earlyContentTypeSelection.archiveId}`;
+    }
+
+    if (data.startsWith("history_branch_")) {
+      data = `history_${data.slice("history_branch_".length)}`;
     }
 
     if (data.startsWith("history_")) {
@@ -9832,6 +10073,34 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
 
+    if (data.startsWith("posts_branch_") || data.startsWith("history_branch_") || data.startsWith("pub_branch_")) {
+      const target: PersonaContentTypeTarget = data.startsWith("history_branch_")
+        ? "history"
+        : data.startsWith("pub_branch_")
+          ? "publish"
+          : "posts";
+      const id = data.slice(`${target === "publish" ? "pub" : target}_branch_`.length);
+      const archive = await loadPersonaForThisBot(id).catch(() => null);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const counts = (archive.posts || []).reduce((acc: Record<TelegramGroupContentType, number>, post: any) => {
+        const type: TelegramGroupContentType = post?.telegramGroupContentType === "paid" ? "paid" : "free";
+        acc[type] += 1;
+        return acc;
+      }, { free: 0, paid: 0 });
+      const title = target === "history" ? "發布歷史" : target === "publish" ? "發布推文" : "待發布推文";
+      await safeEditOrSend(bot, chatId, msgId, `請選擇要查看的${title}內容類型：`, {
+        reply_markup: { inline_keyboard: buildPersonaContentTypePickerRows({ archiveId: id, target, counts }) },
+      });
+      return;
+    }
+
+    const contentTypeSelection = parsePersonaContentTypeCallback(data);
+    if (contentTypeSelection?.target === "posts") {
+      data = buildStoredPostsPageCallback(contentTypeSelection.archiveId, 0, contentTypeSelection.groupContentType);
+    } else if (contentTypeSelection?.target === "publish") {
+      data = `pub_${contentTypeSelection.archiveId}`;
+    }
+
     if (data.startsWith("posts_")) {
       const parsed = parseStoredPostsCallback(data);
       const id = parsed?.archiveId || "";
@@ -9849,10 +10118,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         parsed?.page || 0,
         STORED_POSTS_PAGE_SIZE,
         getTweetStyleLinkPresentation(archive.setup),
+        parsed?.groupContentType,
       );
       pendingPostSelections.set(chatId, {
         archiveId: id,
         postIds: listView.postIds,
+        groupContentType: parsed?.groupContentType,
       });
       await safeEditOrSend(bot, chatId, msgId, listView.text, {
         parse_mode: "HTML",
@@ -9875,9 +10146,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const mode: PendingBulkPostAction["mode"] = bulkPublishStart ? "publish" : "delete";
-      const state: PendingBulkPostAction = { archiveId: parsed.archiveId, mode, selectedPostIds: [], page: parsed.page };
+      const state: PendingBulkPostAction = { archiveId: parsed.archiveId, mode, selectedPostIds: [], page: parsed.page, groupContentType: parsed.groupContentType };
       pendingBulkPostActions.set(chatId, state);
-      const view = buildBulkStoredPostsSelectView({ archiveId: parsed.archiveId, posts: archive.posts, mode, selectedPostIds: [], page: parsed.page });
+      const view = buildBulkStoredPostsSelectView({ archiveId: parsed.archiveId, posts: archive.posts, mode, selectedPostIds: [], page: parsed.page, groupContentType: parsed.groupContentType });
       await safeEditOrSend(bot, chatId, msgId, view.text, {
         reply_markup: { inline_keyboard: view.keyboard },
       });
@@ -9909,10 +10180,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const selected = new Set(state.selectedPostIds.filter((id) => archive.posts.some((post) => post.id === id)));
-      const visiblePage = Math.max(0, Math.min(state.page || 0, Math.max(0, Math.ceil(archive.posts.length / STORED_POSTS_PAGE_SIZE) - 1)));
+      const scopedPosts = state.groupContentType
+        ? (archive.posts.some((post: any) => post.telegramGroupContentType === "free" || post.telegramGroupContentType === "paid")
+            ? archive.posts.filter((post: any) => post.telegramGroupContentType === state.groupContentType)
+            : archive.posts)
+        : archive.posts;
+      const selected = new Set(state.selectedPostIds.filter((id) => scopedPosts.some((post) => post.id === id)));
+      const visiblePage = Math.max(0, Math.min(state.page || 0, Math.max(0, Math.ceil(scopedPosts.length / STORED_POSTS_PAGE_SIZE) - 1)));
       const pageStart = visiblePage * STORED_POSTS_PAGE_SIZE;
-      const pagePostIds = archive.posts.slice(pageStart, pageStart + STORED_POSTS_PAGE_SIZE).map((post) => post.id);
+      const pagePostIds = scopedPosts.slice(pageStart, pageStart + STORED_POSTS_PAGE_SIZE).map((post) => post.id);
 
       const renderSelection = async (nextState: PendingBulkPostAction) => {
         pendingBulkPostActions.set(chatId, nextState);
@@ -9922,6 +10198,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           mode: nextState.mode,
           selectedPostIds: nextState.selectedPostIds,
           page: nextState.page,
+          groupContentType: nextState.groupContentType,
         });
         await safeEditOrSend(bot, chatId, msgId, view.text, {
           reply_markup: { inline_keyboard: view.keyboard },
@@ -9934,7 +10211,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (data.startsWith("btog_")) {
         const postIndex = Math.max(0, Number(data.slice("btog_".length) || 0));
-        const postId = archive.posts[postIndex]?.id;
+        const postId = scopedPosts[postIndex]?.id;
         if (postId) {
           if (selected.has(postId)) selected.delete(postId);
           else selected.add(postId);
@@ -10074,7 +10351,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
             logs.push(`▶️ 发布第 ${i + 1}/${selectedPosts.length} 篇`);
             const result = await publishPost(
               credentials,
-              { padCode, platform: platform as any, caption: post.content, mediaUrl: post.imageUrl, telegramChatId: chatId },
+              {
+                padCode,
+                platform: platform as any,
+                caption: post.content,
+                mediaUrl: post.imageUrl,
+                telegramChatId: chatId,
+                telegramTargetChatId: platform === "telegram" ? resolveTelegramTargetChatIdForPost(archive, post) : undefined,
+                telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
+                telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined,
+              },
               (progress) => {
                 assertPadOperationNotCancelled(padOperationKey);
                 logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
@@ -10736,6 +11022,44 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data.startsWith("bindtg_")) {
+      const parts = data.slice("bindtg_".length).split("_");
+      const groupContentType = parts[0] as TelegramGroupContentType;
+      const id = parts.slice(1).join("_");
+      if (!isTelegramGroupContentType(groupContentType) || !id) {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 群組設定參數無效。", {
+          reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(id).catch(() => null);
+      if (!archive) {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 當前 Bot 不能讀取這個人設。", {
+          reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+        });
+        return;
+      }
+      const current = groupContentType === "paid"
+        ? formatTelegramGroupBindingDisplay(archive.boundTelegramPaidGroupName, archive.boundTelegramPaidGroupId)
+        : formatTelegramGroupBindingDisplay(archive.boundTelegramFreeGroupName, archive.boundTelegramFreeGroupId);
+      pendingActions.set(chatId, {
+        type: "set-telegram-group-binding",
+        archiveId: id,
+        groupContentType,
+      });
+      const groupLabel = groupContentType === "paid" ? "TG付費群" : "TG免費群";
+      await safeEditOrSend(bot, chatId, msgId, [
+        `請輸入「${archive.name}」的 ${groupLabel} 群組 ID。`,
+        "",
+        `目前：${current}`,
+        "",
+        "保存後會用綁定雲機的 Telegram 帳號發送；請確認該雲機帳號已加入該群組。",
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `settings_${id}` }]] },
+      });
+      return;
+    }
+
     if (data.startsWith("bindpad_")) {
       const id = data.slice(8);
       const [archive, pads] = await Promise.all([
@@ -11224,7 +11548,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
           void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs, `发布第 ${startIndex + index + 1} 篇`);
           const result = await publishPost(
             credentials,
-            { padCode, platform: platform as any, caption: post.content, mediaUrl: post.imageUrl, telegramChatId: chatId },
+            {
+              padCode,
+              platform: platform as any,
+              caption: post.content,
+              mediaUrl: post.imageUrl,
+              telegramChatId: chatId,
+              telegramTargetChatId: platform === "telegram" ? resolveTelegramTargetChatIdForPost(archive, post) : undefined,
+              telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
+              telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined,
+            },
             (progress) => {
               assertPadOperationNotCancelled(padOperationKey);
               const line = `${publishProgressIcon(progress)} [第${startIndex + index + 1}篇/${describePostMedia(post)}] ${progress.step}`;
@@ -11323,7 +11656,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const logs: string[] = [];
         const result = await publishPost(
           credentials,
-          { padCode, platform: platform as any, caption: post.content, mediaUrl: post.imageUrl, telegramChatId: chatId },
+          {
+            padCode,
+            platform: platform as any,
+            caption: post.content,
+            mediaUrl: post.imageUrl,
+            telegramChatId: chatId,
+            telegramTargetChatId: platform === "telegram" ? resolveTelegramTargetChatIdForPost(archive, post) : undefined,
+            telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
+            telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined,
+          },
           (progress) => {
             assertPadOperationNotCancelled(padOperationKey);
             logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
@@ -11856,7 +12198,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const logs: string[] = [];
         const result = await publishPost(
           credentials,
-          { padCode, platform: platform as any, caption: post.content, mediaUrl: post.imageUrl, telegramChatId: chatId },
+          {
+            padCode,
+            platform: platform as any,
+            caption: post.content,
+            mediaUrl: post.imageUrl,
+            telegramChatId: chatId,
+            telegramTargetChatId: platform === "telegram" ? resolveTelegramTargetChatIdForPost(archive, post) : undefined,
+            telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
+            telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined,
+          },
           (progress) => {
             assertPadOperationNotCancelled(padOperationKey);
             logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
@@ -12051,20 +12402,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
     if (msg.text?.startsWith("/")) return;
 
-    const replyMenuAction = getReplyMenuAction(chatId, text);
-    if (replyMenuAction) {
-      if (!isCanonicalReplyMenuText(chatId, text) && replyMenuAction !== "fresh_main_menu") {
-        sendMainMenu(chatId);
-      }
-      await handleReplyMenuAction(chatId, msg, replyMenuAction);
-      return;
-    }
-
     const pendingToolR18 = pendingToolR18Tasks.get(chatId);
     if (pendingToolR18) {
       if (!text && !media) {
         await bot.sendMessage(chatId, "請發送 R18 任務要求；需要素材的任務請附帶圖片/視頻/檔案。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] },
+          reply_markup: { inline_keyboard: [[toolR18ContextBackButton(chatId, pendingToolR18.params)]] },
         });
         return;
       }
@@ -12073,10 +12415,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await handlePendingToolR18Input(bot, msg, pendingToolR18, media, text);
         await bot.deleteMessage(chatId, thinking.message_id).catch(() => undefined);
       } catch (error: any) {
-        await bot.editMessageText("R18 提交失敗：" + formatUserFacingError(error, "請檢查素材和參數後重試。"), {
+        const errorText = formatUserFacingError(error, "請檢查素材和參數後重試。");
+        const title = /下載 Telegram 素材失敗|Telegram 文件下載失敗|素材/i.test(errorText)
+          ? "R18 素材處理失敗："
+          : "R18 提交失敗：";
+        await bot.editMessageText(title + errorText, {
           chat_id: chatId,
           message_id: thinking.message_id,
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "toolr18_entry" }]] },
+          reply_markup: { inline_keyboard: [[toolR18ContextBackButton(chatId, pendingToolR18.params)]] },
         }).catch(() => undefined);
       }
       return;
@@ -12143,7 +12489,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           prompt: text,
           stage: "await_word_count",
         });
-        await telegramBestEffort("generatePost.awaitWordCount", bot.sendMessage(chatId, `? ???????${text}\n\n? ???????????? ?\n?????????????\n\n???120`));
+        await telegramBestEffort("generatePost.awaitWordCount", bot.sendMessage(chatId, `✅ 已收到提示詞：${text}\n\n⭐ 請輸入每篇推文的目標字數 ⭐\n只需要發送數字即可。\n\n例如：120`));
         return;
       }
       const targetWords = Number(text.match(/\d+/)?.[0] || 0);
@@ -12687,6 +13033,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
     }
 
+    const replyMenuAction = getReplyMenuAction(chatId, text);
+    if (replyMenuAction) {
+      if (!isCanonicalReplyMenuText(chatId, text) && replyMenuAction !== "fresh_main_menu") {
+        sendMainMenu(chatId);
+      }
+      await handleReplyMenuAction(chatId, msg, replyMenuAction);
+      return;
+    }
+
     const pending = pendingActions.get(chatId);
     if (pending?.type === "set-persona-tweet-style") {
       pendingActions.delete(chatId);
@@ -12734,6 +13089,41 @@ function sendMainMenu(chatId: number, msgId?: number) {
             [{ text: "\u25C0\uFE0F \u8FD4\u56DE\u8A2D\u5B9A", callback_data: `settings_${pending.archiveId}` }],
           ],
         },
+      });
+      return;
+    }
+
+    if (pending?.type === "set-telegram-group-binding") {
+      pendingActions.delete(chatId);
+      const groupId = normalizeTelegramChatIdInput(text || "");
+      if (!pending.groupContentType || !groupId) {
+        await bot.sendMessage(chatId, "❌ 請輸入正確的 Telegram 群組 ID（例如 -1001234567890）。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(pending.archiveId).catch(() => null);
+      if (!archive) {
+        await bot.sendMessage(chatId, "❌ 當前 Bot 不能讀取這個人設。", {
+          reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+        });
+        return;
+      }
+      let groupName = resolveKnownTelegramGroupName(groupId, pending.groupContentType);
+      let botLookupWarning = "";
+      try {
+        const chat = await bot.getChat(groupId as any);
+        groupName = telegramChatTitle(chat, groupId);
+      } catch (error: any) {
+        botLookupWarning = formatUserFacingError(error, "Bot API 無法讀取該群；將改用綁定雲機的 Telegram 帳號路由。");
+      }
+      await updatePersonaArchivePadBinding(pending.archiveId, pending.groupContentType === "paid"
+        ? { telegramPaidGroupId: groupId, telegramPaidGroupName: groupName }
+        : { telegramFreeGroupId: groupId, telegramFreeGroupName: groupName }).catch(() => null);
+      invalidatePersonaListCache();
+      const groupLabel = pending.groupContentType === "paid" ? "TG付費群" : "TG免費群";
+      await bot.sendMessage(chatId, `✅ 已保存 ${groupLabel}：${groupName}\nID：${groupId}${botLookupWarning ? `\n\n提示：${botLookupWarning}` : ""}`, {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
       });
       return;
     }

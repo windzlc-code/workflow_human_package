@@ -26,6 +26,8 @@ const LEGACY_PROJECTS_KEY = "storyforge_drama_projects";
 const WORKFLOW_PERSONAS_SEEDED_KEY = "workflow_persona_archives_seeded_v1";
 const buildArchiveMemoryOutline = buildMemoryOutline;
 const WORKFLOW_PERSONA_ID_PREFIX = "workflow-persona-";
+const PUBLISH_PLATFORMS = ["threads", "telegram"] as const;
+type PublishPlatformQueue = typeof PUBLISH_PLATFORMS[number];
 
 type EpisodeScript = import("@/types/drama").EpisodeScript;
 
@@ -235,6 +237,7 @@ function normalizePost(raw: any, fallbackIndex: number): PersonaArchivePost {
     imageUrl: typeof raw?.imageUrl === "string" ? raw.imageUrl : undefined,
     imageHistory: Array.isArray(raw?.imageHistory) ? raw.imageHistory : undefined,
     history: Array.isArray(raw?.history) ? raw.history : undefined,
+    telegramGroupContentType: raw?.telegramGroupContentType === "paid" ? "paid" : raw?.telegramGroupContentType === "free" ? "free" : undefined,
   };
 }
 
@@ -277,6 +280,7 @@ function normalizePublishRecord(raw: any, fallbackIndex: number): PersonaPublish
       : typeof raw?.mediaUrl === "string"
         ? raw.mediaUrl
         : undefined,
+    telegramGroupContentType: raw?.telegramGroupContentType === "paid" ? "paid" : raw?.telegramGroupContentType === "free" ? "free" : undefined,
   };
 }
 
@@ -304,12 +308,62 @@ function normalizeWorkflowSeedSetup(
   return merged;
 }
 
+function normalizePlatformPosts(raw: any, fallbackPosts: PersonaArchivePost[]): Record<string, PersonaArchivePost[]> {
+  const output: Record<string, PersonaArchivePost[]> = {};
+  for (const platform of PUBLISH_PLATFORMS) {
+    const rawPosts = raw && typeof raw === "object" && Array.isArray(raw[platform])
+      ? raw[platform]
+      : null;
+    output[platform] = rawPosts
+      ? sortArchivePosts(rawPosts.map((post: any, index: number) => normalizePost(post, index)))
+      : sortArchivePosts(fallbackPosts);
+  }
+  return output;
+}
+
+function platformFromMeta(metaById: Record<string, PersonaPublishMeta>): PublishPlatformQueue | undefined {
+  for (const meta of Object.values(metaById)) {
+    const platform = String(meta?.platform || "").trim();
+    if (PUBLISH_PLATFORMS.includes(platform as PublishPlatformQueue)) return platform as PublishPlatformQueue;
+  }
+  return undefined;
+}
+
+export function getArchivePendingPostsForPlatform(
+  archive: Pick<PersonaArchive, "posts" | "platformPosts"> | null | undefined,
+  platform?: string,
+): PersonaArchivePost[] {
+  const normalizedPlatform = PUBLISH_PLATFORMS.includes(platform as PublishPlatformQueue)
+    ? platform as PublishPlatformQueue
+    : undefined;
+  if (!normalizedPlatform) return sortArchivePosts(archive?.posts || []);
+  const posts = archive?.platformPosts?.[normalizedPlatform];
+  return sortArchivePosts(Array.isArray(posts) ? posts : archive?.posts || []);
+}
+
+function withPlatformQueues(
+  archive: PersonaArchive,
+  updater: (posts: PersonaArchivePost[], platform: PublishPlatformQueue) => PersonaArchivePost[],
+): PersonaArchive {
+  const current = normalizePlatformPosts(archive.platformPosts, archive.posts || []);
+  const platformPosts: Record<string, PersonaArchivePost[]> = {};
+  for (const platform of PUBLISH_PLATFORMS) {
+    platformPosts[platform] = sortArchivePosts(updater(current[platform] || [], platform));
+  }
+  return {
+    ...archive,
+    posts: platformPosts.threads || [],
+    platformPosts,
+  };
+}
+
 function normalizeArchive(raw: any): PersonaArchive {
   const now = new Date().toISOString();
   const createdAt = toIso(raw?.createdAt, now);
   const posts = Array.isArray(raw?.posts)
     ? raw.posts.map((post: any, index: number) => normalizePost(post, index))
     : [];
+  const platformPosts = normalizePlatformPosts(raw?.platformPosts, posts);
   const publishHistory = Array.isArray(raw?.publishHistory)
     ? raw.publishHistory.map((record: any, index: number) => normalizePublishRecord(record, index))
     : [];
@@ -336,10 +390,23 @@ function normalizeArchive(raw: any): PersonaArchive {
     boundTelegramChatId: typeof raw?.boundTelegramChatId === "string" && raw.boundTelegramChatId.trim()
       ? raw.boundTelegramChatId.trim()
       : undefined,
+    boundTelegramFreeGroupId: typeof raw?.boundTelegramFreeGroupId === "string" && raw.boundTelegramFreeGroupId.trim()
+      ? raw.boundTelegramFreeGroupId.trim()
+      : undefined,
+    boundTelegramPaidGroupId: typeof raw?.boundTelegramPaidGroupId === "string" && raw.boundTelegramPaidGroupId.trim()
+      ? raw.boundTelegramPaidGroupId.trim()
+      : undefined,
+    boundTelegramFreeGroupName: typeof raw?.boundTelegramFreeGroupName === "string" && raw.boundTelegramFreeGroupName.trim()
+      ? raw.boundTelegramFreeGroupName.trim()
+      : undefined,
+    boundTelegramPaidGroupName: typeof raw?.boundTelegramPaidGroupName === "string" && raw.boundTelegramPaidGroupName.trim()
+      ? raw.boundTelegramPaidGroupName.trim()
+      : undefined,
     ownerBotName: typeof raw?.ownerBotName === "string" && raw.ownerBotName.trim()
       ? raw.ownerBotName.trim()
       : undefined,
-    posts: sortArchivePosts(posts),
+    posts: sortArchivePosts(platformPosts.threads || posts),
+    platformPosts,
     publishHistory: sortPublishHistory(publishHistory),
     personaImageLibrary,
     personaReferenceSheet: typeof raw?.personaReferenceSheet === "string" && raw.personaReferenceSheet
@@ -757,14 +824,38 @@ export async function updatePersonaArchiveProfile(
 
 export async function updatePersonaArchivePadBinding(
   id: string,
-  binding: { padCode?: string; padName?: string },
+  binding: {
+    padCode?: string;
+    padName?: string;
+    telegramFreeGroupId?: string;
+    telegramPaidGroupId?: string;
+    telegramFreeGroupName?: string;
+    telegramPaidGroupName?: string;
+  },
 ): Promise<PersonaArchive | null> {
   const archive = await loadPersonaArchive(id);
   if (!archive) return null;
+  const hasAnyBindingPatch = Object.keys(binding).length > 0;
   return savePersonaArchive({
     ...archive,
-    boundPadCode: binding.padCode?.trim() || undefined,
-    boundPadName: binding.padName?.trim() || undefined,
+    boundPadCode: Object.prototype.hasOwnProperty.call(binding, "padCode")
+      ? binding.padCode?.trim() || undefined
+      : hasAnyBindingPatch ? archive.boundPadCode : undefined,
+    boundPadName: Object.prototype.hasOwnProperty.call(binding, "padName")
+      ? binding.padName?.trim() || undefined
+      : hasAnyBindingPatch ? archive.boundPadName : undefined,
+    boundTelegramFreeGroupId: Object.prototype.hasOwnProperty.call(binding, "telegramFreeGroupId")
+      ? binding.telegramFreeGroupId?.trim() || undefined
+      : archive.boundTelegramFreeGroupId,
+    boundTelegramPaidGroupId: Object.prototype.hasOwnProperty.call(binding, "telegramPaidGroupId")
+      ? binding.telegramPaidGroupId?.trim() || undefined
+      : archive.boundTelegramPaidGroupId,
+    boundTelegramFreeGroupName: Object.prototype.hasOwnProperty.call(binding, "telegramFreeGroupName")
+      ? binding.telegramFreeGroupName?.trim() || undefined
+      : archive.boundTelegramFreeGroupName,
+    boundTelegramPaidGroupName: Object.prototype.hasOwnProperty.call(binding, "telegramPaidGroupName")
+      ? binding.telegramPaidGroupName?.trim() || undefined
+      : archive.boundTelegramPaidGroupName,
   });
 }
 
@@ -839,10 +930,23 @@ export async function appendEpisodesToArchive(
   if (!archive || episodes.length === 0) return episodes;
 
   const { posts: nextPosts, appended: appendedPosts } = appendEpisodesToArchivePosts(archive.posts, episodes);
-  const saved = await savePersonaArchive({
-    ...archive,
-    posts: nextPosts,
-  });
+  const appendedByOriginalId = new Map(appendedPosts.map((post) => [post.id, post]));
+  const saved = await savePersonaArchive(withPlatformQueues(
+    {
+      ...archive,
+      posts: nextPosts,
+    },
+    (posts, platform) => {
+      if (platform === "threads") return nextPosts;
+      return [
+        ...posts,
+        ...appendedPosts.map((post) => ({
+          ...post,
+          id: appendedByOriginalId.get(post.id)?.id || post.id,
+        })),
+      ];
+    },
+  ));
 
   const appendedById = new Map(appendedPosts.map((post) => [post.id, post]));
   return episodes.map((ep, index) => {
@@ -892,7 +996,15 @@ export async function updateArchiveEpisode(
         }
       : post,
   );
-  const saved = await savePersonaArchive({ ...archive, posts: nextPosts });
+  const saved = await savePersonaArchive(withPlatformQueues(
+    { ...archive, posts: nextPosts },
+    (posts, platform) => platform === "threads"
+      ? nextPosts
+      : posts.map((post) => {
+          const updated = nextPosts.find((item) => item.id === post.id);
+          return updated || post;
+        }),
+  ));
   const savedPost = saved.posts.find((post) => post.id === episode.archivePostId);
   return savedPost ? archivePostsToEpisodes([savedPost])[0] : null;
 }
@@ -903,10 +1015,7 @@ export async function deleteArchiveEpisode(
 ): Promise<PersonaArchive | null> {
   const archive = await loadPersonaArchive(archiveId);
   if (!archive) return null;
-  return savePersonaArchive({
-    ...archive,
-    posts: archive.posts.filter((post) => post.id !== archivePostId),
-  });
+  return savePersonaArchive(withPlatformQueues(archive, (posts) => posts.filter((post) => post.id !== archivePostId)));
 }
 
 export async function deleteArchiveEpisodes(
@@ -917,10 +1026,7 @@ export async function deleteArchiveEpisodes(
   if (ids.size === 0) return loadPersonaArchive(archiveId);
   const archive = await loadPersonaArchive(archiveId);
   if (!archive) return null;
-  return savePersonaArchive({
-    ...archive,
-    posts: archive.posts.filter((post) => !ids.has(post.id)),
-  });
+  return savePersonaArchive(withPlatformQueues(archive, (posts) => posts.filter((post) => !ids.has(post.id))));
 }
 
 export async function replaceArchivePosts(
@@ -929,10 +1035,11 @@ export async function replaceArchivePosts(
 ): Promise<PersonaArchive | null> {
   const archive = await loadPersonaArchive(archiveId);
   if (!archive) return null;
-  return savePersonaArchive({
-    ...archive,
-    posts: replaceArchivePostsFromEpisodes(episodes),
-  });
+  const nextPosts = replaceArchivePostsFromEpisodes(episodes);
+  return savePersonaArchive(withPlatformQueues(
+    { ...archive, posts: nextPosts },
+    () => nextPosts,
+  ));
 }
 
 export async function reorderArchivePosts(
@@ -941,10 +1048,7 @@ export async function reorderArchivePosts(
 ): Promise<PersonaArchive | null> {
   const archive = await loadPersonaArchive(archiveId);
   if (!archive) return null;
-  return savePersonaArchive({
-    ...archive,
-    posts: reorderArchivePostsByIds(archive.posts, orderedPostIds),
-  });
+  return savePersonaArchive(withPlatformQueues(archive, (posts) => reorderArchivePostsByIds(posts, orderedPostIds)));
 }
 
 export async function requeuePublishRecord(
@@ -962,25 +1066,22 @@ export async function requeuePublishRecord(
     -1,
   ) + 1;
 
-  return savePersonaArchive({
-    ...archive,
-    posts: [
-      ...archive.posts,
-      normalizePost(
-        {
-          id: crypto.randomUUID(),
-          title: record.title || `重發推文 #${archive.posts.length + 1}`,
-          content: record.content,
-          wordCount: record.content.length,
-          orderIndex: nextOrderIndex,
-          createdAt: now,
-          updatedAt: now,
-          imageUrl: record.imageUrl,
-        },
-        nextOrderIndex,
-      ),
-    ],
-  });
+  const post = normalizePost(
+    {
+      id: crypto.randomUUID(),
+      title: record.title || `重發推文 #${archive.posts.length + 1}`,
+      content: record.content,
+      wordCount: record.content.length,
+      orderIndex: nextOrderIndex,
+      createdAt: now,
+      updatedAt: now,
+      imageUrl: record.imageUrl,
+      telegramGroupContentType: record.telegramGroupContentType,
+    },
+    nextOrderIndex,
+  );
+
+  return savePersonaArchive(withPlatformQueues(archive, (posts) => [...posts, post]));
 }
 
 export async function appendCustomPersonaArchivePost(args: {
@@ -988,6 +1089,7 @@ export async function appendCustomPersonaArchivePost(args: {
   content: string;
   mediaUrl?: string;
   title?: string;
+  telegramGroupContentType?: "free" | "paid";
 }): Promise<PersonaArchive | null> {
   const archive = await loadPersonaArchive(args.archiveId);
   if (!archive) return null;
@@ -998,25 +1100,34 @@ export async function appendCustomPersonaArchivePost(args: {
     -1,
   ) + 1;
 
-  return savePersonaArchive({
-    ...archive,
-    posts: [
-      ...archive.posts,
-      normalizePost(
-        {
-          id: crypto.randomUUID(),
-          title: args.title || (content ? `自定义推文 #${archive.posts.length + 1}` : `自定义媒体 #${archive.posts.length + 1}`),
-          content,
-          wordCount: content.length,
-          orderIndex: nextOrderIndex,
-          createdAt: now,
-          updatedAt: now,
-          imageUrl: args.mediaUrl,
-        },
-        nextOrderIndex,
-      ),
-    ],
-  });
+  const post = normalizePost(
+    {
+      id: crypto.randomUUID(),
+      title: args.title || (content ? `自定义推文 #${archive.posts.length + 1}` : `自定义媒体 #${archive.posts.length + 1}`),
+      content,
+      wordCount: content.length,
+      orderIndex: nextOrderIndex,
+      createdAt: now,
+      updatedAt: now,
+      imageUrl: args.mediaUrl,
+      telegramGroupContentType: args.telegramGroupContentType,
+    },
+    nextOrderIndex,
+  );
+
+  return savePersonaArchive(withPlatformQueues(archive, (posts) => [...posts, post]));
+}
+
+export async function markPersonaArchivePostTelegramGroupContentType(
+  archiveId: string,
+  archivePostId: string,
+  telegramGroupContentType: "free" | "paid",
+): Promise<PersonaArchive | null> {
+  const archive = await loadPersonaArchive(archiveId);
+  if (!archive || !archivePostId) return archive;
+  return savePersonaArchive(withPlatformQueues(archive, (posts) => posts.map((post) =>
+    post.id === archivePostId ? { ...post, telegramGroupContentType } : post,
+  )));
 }
 
 export async function markArchiveEpisodesPublished(
@@ -1030,7 +1141,11 @@ export async function markArchiveEpisodesPublished(
   if (!archive) return null;
   const idSet = new Set(archivePostIds);
   const publishedAt = new Date().toISOString();
-  const publishedPosts = archive.posts.filter((post) => idSet.has(post.id));
+  const publishPlatform = platformFromMeta(publishedMetaById);
+  const sourcePosts = publishPlatform
+    ? getArchivePendingPostsForPlatform(archive, publishPlatform)
+    : archive.posts;
+  const publishedPosts = sourcePosts.filter((post) => idSet.has(post.id));
 
   const getSentContent = (post: PersonaArchivePost) => {
     const sentContent = typeof publishedContentById[post.id] === "string"
@@ -1065,6 +1180,7 @@ export async function markArchiveEpisodesPublished(
         padCode: meta.padCode,
         padName: meta.padName,
         imageUrl: meta.mediaUrl || meta.imageUrl || post.imageUrl,
+        telegramGroupContentType: post.telegramGroupContentType,
       }, (archive.publishHistory?.length || 0) + index);
     })
     .filter((record) => record.content.trim());
@@ -1075,15 +1191,19 @@ export async function markArchiveEpisodesPublished(
     }
   };
 
-  const nextArchive = {
+  const nextArchiveBase = {
     ...archive,
     updatedAt: publishedAt,
-    posts: archive.posts.filter((post) => !idSet.has(post.id)),
     publishHistory: sortPublishHistory([
       ...(archive.publishHistory || []),
       ...publishHistory,
     ]),
   };
+  const nextArchive = publishPlatform
+    ? withPlatformQueues(nextArchiveBase, (posts, platform) =>
+        platform === publishPlatform ? posts.filter((post) => !idSet.has(post.id)) : posts,
+      )
+    : withPlatformQueues(nextArchiveBase, (posts) => posts.filter((post) => !idSet.has(post.id)));
 
   if (!hasElectronMemoryAPI() && publishedMemories.length > 0) {
     await writeMemories();

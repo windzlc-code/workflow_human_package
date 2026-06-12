@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildManualConfirmCallback,
+  buildPersonaContentTypeCallback,
+  buildPersonaContentTypePickerRows,
   buildPostDetailText,
   buildPostImagePreviewOptions,
   buildPostImageRegenerateCallback,
@@ -12,6 +14,7 @@ import {
   formatUserFacingError,
   inferStoredPostMediaKind,
   normalizeThreadsProfileLinkInput,
+  parsePersonaContentTypeCallback,
   parseStoredPostsCallback,
 } from "@/telegram-bot";
 import type { PersonaArchive } from "@/core/archives/persona-archive-domain";
@@ -70,7 +73,7 @@ describe("stored post media previews", () => {
     const text = buildPostDetailText(2, "今天喝咖啡", "data:image/png;base64,AAAA");
 
     expect(inferStoredPostMediaKind("data:image/png;base64,AAAA")).toBe("image");
-    expect(text).toContain("可点击下方按钮查看");
+    expect(text).toMatch(/可點擊下方按[钮鈕]查看/);
     expect(text).not.toContain("不支持");
     expect(buildPostImagePreviewOptions("data:image/png;base64,AAAA")).toEqual({});
   });
@@ -79,7 +82,7 @@ describe("stored post media previews", () => {
     const text = buildPostDetailText(3, "今天拍了一段影片", "data:video/mp4;base64,AAAA");
 
     expect(inferStoredPostMediaKind("data:video/mp4;base64,AAAA")).toBe("video");
-    expect(text).toContain("可点击下方按钮查看");
+    expect(text).toMatch(/可點擊下方按[钮鈕]查看/);
     expect(text).not.toContain("配图");
     expect(text).not.toContain("不支持");
   });
@@ -156,10 +159,10 @@ describe("stored posts pagination", () => {
     expect(view.totalPages).toBe(2);
     expect(view.visiblePostIds).toEqual(["post-1", "post-2", "post-3", "post-4", "post-5"]);
     expect(view.postIds).toEqual(posts.map((post) => post.id));
-    expect(view.text).toContain("第 1/2 页");
-    expect(view.keyboard.flat().map((button) => button.text)).toContain("下一页 ▶️");
-    expect(view.keyboard.flat().map((button) => button.text)).toContain("🚀 发布推文");
-    expect(view.keyboard.flat().map((button) => button.text)).toContain("🗑 删除推文");
+    expect(view.text).toContain("第 1/2 頁");
+    expect(view.keyboard.flat().map((button) => button.text)).toContain("下一頁 ▶️");
+    expect(view.keyboard.flat().map((button) => button.text)).toContain("🚀 發布推文");
+    expect(view.keyboard.flat().map((button) => button.text)).toContain("🗑 刪除推文");
     expect(view.keyboard.flat().map((button) => button.text)).not.toContain("👁 查看第6篇");
   });
 
@@ -184,9 +187,9 @@ describe("stored posts pagination", () => {
 
     expect(view.visiblePostIds).toEqual(["post-6", "post-7", "post-8"]);
     expect(view.postIds).toEqual(posts.map((post) => post.id));
-    expect(view.text).toContain("【6】第6篇内容");
+    expect(view.text).toContain("<b>【6】</b>第6篇内容");
     expect(view.keyboard.flat().map((button) => button.text)).toContain("👁 查看第6篇");
-    expect(view.keyboard.flat().map((button) => button.text)).toContain("◀️ 上一页");
+    expect(view.keyboard.flat().map((button) => button.text)).toContain("◀️ 上一頁");
   });
 
   it("uses global view indexes on later pages and keeps publish/delete as bottom bulk actions", () => {
@@ -196,13 +199,90 @@ describe("stored posts pagination", () => {
     expect(buttons.find((button) => button.text === "👁 查看第8篇")?.callback_data).toBe("vp_7");
     expect(buttons.find((button) => button.text === "🚀 发布第8篇")).toBeUndefined();
     expect(buttons.find((button) => button.text === "🗑 删除第8篇")).toBeUndefined();
-    expect(buttons.find((button) => button.text === "🚀 发布推文")?.callback_data).toBe("bulkpub_archive-1_p1");
-    expect(buttons.find((button) => button.text === "🗑 删除推文")?.callback_data).toBe("bulkdel_archive-1_p1");
+    expect(buttons.find((button) => button.text === "🚀 發布推文")?.callback_data).toBe("bulkpub_archive-1_p1");
+    expect(buttons.find((button) => button.text === "🗑 刪除推文")?.callback_data).toBe("bulkdel_archive-1_p1");
+  });
+
+  it("keeps stored post actions inside the selected Telegram content branch", () => {
+    const view = buildStoredPostsListView("archive-1", posts, 1, 5, null, "paid");
+    const buttons = view.keyboard.flat();
+
+    expect(view.text).toContain("付費內容");
+    expect(buttons.find((button) => button.text === "◀️ 上一頁")?.callback_data).toBe("posts_archive-1_ct_paid_p0");
+    expect(buttons.find((button) => button.text === "🚀 發布推文")?.callback_data).toBe("bulkpub_archive-1_ct_paid_p1");
+    expect(buttons.find((button) => button.text === "🗑 刪除推文")?.callback_data).toBe("bulkdel_archive-1_ct_paid_p1");
+    expect(buttons.find((button) => button.text === "◀️ 返回")?.callback_data).toBe("posts_branch_archive-1");
   });
 
   it("parses stored post page callbacks", () => {
     expect(parseStoredPostsCallback("posts_archive-1_p2")).toEqual({ archiveId: "archive-1", page: 2 });
+    expect(parseStoredPostsCallback("posts_archive-1_ct_paid_p2")).toEqual({ archiveId: "archive-1", groupContentType: "paid", page: 2 });
+    expect(parseStoredPostsCallback("posts_archive-1_ct_free")).toEqual({ archiveId: "archive-1", groupContentType: "free", page: 0 });
     expect(parseStoredPostsCallback("posts_archive-1")).toEqual({ archiveId: "archive-1", page: 0 });
+  });
+});
+
+describe("persona content branch picker", () => {
+  it("shows content counts on every branch button and keeps callbacks compact", () => {
+    for (const target of ["posts", "history", "publish"] as const) {
+      const rows = buildPersonaContentTypePickerRows({
+        archiveId: "workflow-persona-jinjunya",
+        target,
+        counts: { free: 3, paid: 2 },
+      });
+      const buttons = rows.flat();
+
+      expect(buttons[0].text).toContain("3");
+      expect(buttons[1].text).toContain("2");
+      expect(buttons[0].callback_data.length).toBeLessThanOrEqual(64);
+      expect(buttons[1].callback_data.length).toBeLessThanOrEqual(64);
+      expect(parsePersonaContentTypeCallback(buttons[0].callback_data)).toEqual({
+        target,
+        archiveId: "workflow-persona-jinjunya",
+        groupContentType: "free",
+      });
+      expect(parsePersonaContentTypeCallback(buttons[1].callback_data)).toEqual({
+        target,
+        archiveId: "workflow-persona-jinjunya",
+        groupContentType: "paid",
+      });
+    }
+  });
+
+  it("parses legacy branch callbacks for existing Telegram messages", () => {
+    expect(parsePersonaContentTypeCallback("posts_archive-1_ct_free")).toEqual({
+      target: "posts",
+      archiveId: "archive-1",
+      groupContentType: "free",
+    });
+    expect(parsePersonaContentTypeCallback("history_archive-1_ct_paid")).toEqual({
+      target: "history",
+      archiveId: "archive-1",
+      groupContentType: "paid",
+    });
+    expect(parsePersonaContentTypeCallback("pub_archive-1_ct_paid")).toEqual({
+      target: "publish",
+      archiveId: "archive-1",
+      groupContentType: "paid",
+    });
+  });
+
+  it("builds callbacks for direct preview buttons for every target", () => {
+    expect(parsePersonaContentTypeCallback(buildPersonaContentTypeCallback("posts", "workflow-persona-jinjunya", "free"))).toEqual({
+      target: "posts",
+      archiveId: "workflow-persona-jinjunya",
+      groupContentType: "free",
+    });
+    expect(parsePersonaContentTypeCallback(buildPersonaContentTypeCallback("history", "workflow-persona-jinjunya", "paid"))).toEqual({
+      target: "history",
+      archiveId: "workflow-persona-jinjunya",
+      groupContentType: "paid",
+    });
+    expect(parsePersonaContentTypeCallback(buildPersonaContentTypeCallback("publish", "workflow-persona-jinjunya", "free"))).toEqual({
+      target: "publish",
+      archiveId: "workflow-persona-jinjunya",
+      groupContentType: "free",
+    });
   });
 });
 
@@ -232,7 +312,7 @@ describe("buildPostDetailActionRows", () => {
     const texts = flattenButtonTexts(rows);
 
     expect(texts).toContain("🔄 重新生成推文");
-    expect(texts).toContain("🖼 查看配图/视频");
+    expect(texts).toContain("🖼 查看配圖/視頻");
     expect(texts).toContain("🖼 重新生成图片");
     expect(texts).not.toContain("🖼 单独生成图片");
   });

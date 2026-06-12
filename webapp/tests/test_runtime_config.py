@@ -1755,6 +1755,84 @@ class RuntimeConfigStoreTests(unittest.TestCase):
 
         self.assertTrue(server._should_reject_generated_person_image(report))
 
+    def test_text_to_image_auto_qa_rejects_clothing_boundary_artifact_at_moderate_confidence(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 98,
+            "prompt_match_score": 98,
+            "anatomy_score": 99,
+            "visual_score": 98,
+            "deliverable_ready": True,
+            "issues": [],
+        }
+        clothing_audit = {
+            "inspected": True,
+            "clothing_requirement_visible": True,
+            "garment_mismatch_visible": False,
+            "color_mismatch_visible": False,
+            "clothing_state_mismatch_visible": False,
+            "clothing_clipping_or_fusion_visible": True,
+            "impossible_clothing_structure_visible": True,
+            "exposed_region_clothing_conflict_visible": False,
+            "clothing_match_score": 70,
+            "color_match_score": 95,
+            "confidence": 80,
+            "summary": "衣物边缘与胸部边界融合，出现贴片硬边。",
+            "issues": ["衣物边缘与身体边界穿插融合，局部像贴片。"],
+        }
+
+        server._merge_generated_person_clothing_audit(report, clothing_audit)
+
+        self.assertTrue(report["clothing_mismatch_visible"])
+        self.assertTrue(report["clothing_clipping_or_fusion_visible"])
+        self.assertFalse(report["deliverable_ready"])
+        self.assertTrue(server._should_reject_generated_person_image(report))
+
+    def test_text_to_image_auto_qa_rejects_body_boundary_artifact_at_moderate_confidence(self):
+        report = {
+            "inspected": True,
+            "passed": True,
+            "overall_score": 98,
+            "prompt_match_score": 98,
+            "anatomy_score": 99,
+            "visual_score": 98,
+            "body_silhouette_score": 92,
+            "deliverable_ready": True,
+            "issues": [],
+        }
+        body_audit = {
+            "inspected": True,
+            "clear_person_body_visible": True,
+            "body_shape_too_full": False,
+            "body_shape_bulky_or_obese": False,
+            "upper_torso_contour_anomaly": True,
+            "exposed_region_anatomy_artifact": True,
+            "body_silhouette_score": 55,
+            "confidence": 80,
+            "summary": "衣物与身体边界穿模融合。",
+            "issues": ["上半身局部边界与布料融合，出现硬边贴片。"],
+        }
+
+        server._merge_generated_person_body_shape_audit(report, body_audit)
+
+        self.assertTrue(report["upper_torso_contour_anomaly"])
+        self.assertTrue(report["exposed_region_artifact_visible"])
+        self.assertFalse(report["deliverable_ready"])
+        self.assertTrue(server._should_reject_generated_person_image(report))
+
+    def test_tg_clothing_state_matches_upper_exposure_without_quality_tail_constraint(self):
+        clothing = "穿着浅粉色柔软吊带上衣和米白色丝质短裙，肩带自然滑落"
+        exposure = "露出丰满坚挺的乳房和清晰可见的乳头"
+
+        fixed = server._tg_ensure_clothing_state_matches_exposure(clothing, exposure)
+
+        self.assertIn("吊带上衣领口下拉至胸下", fixed)
+        self.assertNotIn("肩带自然滑落", fixed)
+
+        quality = server._tg_prompt_quality_clause(["高清", "写实摄影"])
+        self.assertNotIn("衣物边缘与暴露区域边界清晰分离", quality)
+
     def test_generated_person_qa_rejects_clothing_audit_before_hand_audit(self):
         image_path = Path(self._tmpdir.name) / "candidate_clothing.png"
         image_path.write_bytes(b"not-a-real-png-but-existing")

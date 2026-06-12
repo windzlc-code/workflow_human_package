@@ -28,6 +28,7 @@ export interface PersonaArchivePost {
   imageUrl?: string;
   imageHistory?: EpisodeScript["imageHistory"];
   history?: EpisodeScript["history"];
+  telegramGroupContentType?: "free" | "paid";
 }
 
 export interface PersonaImageLibraryItem {
@@ -52,6 +53,7 @@ export interface PersonaPublishRecord {
   padCode?: string;
   padName?: string;
   imageUrl?: string;
+  telegramGroupContentType?: "free" | "paid";
 }
 
 export interface PersonaPublishMeta {
@@ -72,8 +74,13 @@ export interface PersonaArchive {
   boundPadCode?: string;
   boundPadName?: string;
   boundTelegramChatId?: string;
+  boundTelegramFreeGroupId?: string;
+  boundTelegramPaidGroupId?: string;
+  boundTelegramFreeGroupName?: string;
+  boundTelegramPaidGroupName?: string;
   ownerBotName?: string;
   posts: PersonaArchivePost[];
+  platformPosts?: Record<string, PersonaArchivePost[]>;
   publishHistory?: PersonaPublishRecord[];
   personaImageLibrary?: PersonaImageLibraryItem[];
   personaReferenceSheet?: string;
@@ -122,6 +129,7 @@ export function buildArchivePostFromEpisode(ep: EpisodeScript, index: number): P
     imageUrl: ep.imageUrl,
     imageHistory: ep.imageHistory,
     history: ep.history,
+    telegramGroupContentType: (ep as any).telegramGroupContentType === "paid" ? "paid" : (ep as any).telegramGroupContentType === "free" ? "free" : undefined,
   };
 }
 
@@ -140,6 +148,7 @@ export function archivePostsToEpisodes(posts: PersonaArchivePost[]): EpisodeScri
     imageUrl: post.imageUrl,
     imageHistory: post.imageHistory,
     history: post.history,
+    telegramGroupContentType: post.telegramGroupContentType,
   }));
 }
 

@@ -9,6 +9,7 @@ import {
   deletePersonaArchive,
   getCachedPersonaArchive,
   getCachedPersonaArchives,
+  getArchivePendingPostsForPlatform,
   markArchiveEpisodesPublished,
   requeuePublishRecord,
   reorderArchivePosts,
@@ -455,6 +456,46 @@ describe("persona archives migration", () => {
     expect(published?.publishHistory?.[0].publishedAt).toBeTruthy();
     expect(getCachedPersonaArchives()[0].publishHistory?.[0].content).toBe(fullSentContent);
     expect(getPersonaMemory(archive.id).entries[0].summary).not.toContain("發布紀錄需要保留的完整細節發布紀錄需要保留的完整細節");
+  });
+
+  it("keeps platform publish queues independent after one platform publishes", async () => {
+    const archive = await createPersonaArchive({
+      id: "platform-independent-queues",
+      name: "平台獨立待發測試",
+      content: "測試人設",
+    });
+    const [episode] = await appendEpisodesToArchive(archive.id, [{
+      number: 1,
+      title: "貼文 #1",
+      content: "同一篇內容要分別發到 Threads 和 Telegram。",
+      wordCount: 24,
+      createdAt: "2026-05-01T00:00:00.000Z",
+    }]);
+    const postId = episode.archivePostId!;
+
+    const afterThreads = await markArchiveEpisodesPublished(
+      archive.id,
+      [postId],
+      { [postId]: "Threads 實際發出的內容" },
+      { [postId]: { platform: "threads", padCode: "PAD-A" } },
+    );
+
+    expect(getArchivePendingPostsForPlatform(afterThreads, "threads")).toHaveLength(0);
+    expect(getArchivePendingPostsForPlatform(afterThreads, "telegram")).toHaveLength(1);
+    expect(getArchivePendingPostsForPlatform(afterThreads, "telegram")[0].id).toBe(postId);
+    expect(afterThreads?.publishHistory).toHaveLength(1);
+    expect(afterThreads?.publishHistory?.[0].platform).toBe("threads");
+
+    const afterTelegram = await markArchiveEpisodesPublished(
+      archive.id,
+      [postId],
+      { [postId]: "Telegram 實際發出的內容" },
+      { [postId]: { platform: "telegram", padCode: "PAD-A" } },
+    );
+
+    expect(getArchivePendingPostsForPlatform(afterTelegram, "threads")).toHaveLength(0);
+    expect(getArchivePendingPostsForPlatform(afterTelegram, "telegram")).toHaveLength(0);
+    expect(afterTelegram?.publishHistory?.map((record) => record.platform).sort()).toEqual(["telegram", "threads"]);
   });
 
   it("can copy a published history record back into the publish queue", async () => {

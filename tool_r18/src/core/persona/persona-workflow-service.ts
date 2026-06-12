@@ -1,4 +1,4 @@
-import { createPersonaArchive, listPersonaArchives, loadPersonaArchive, appendEpisodesToArchive, updatePersonaArchiveProfile, deletePersonaArchive } from "@/lib/persona-archives";
+import { createPersonaArchive, listPersonaArchives, loadPersonaArchive, appendEpisodesToArchive, updatePersonaArchiveProfile, deletePersonaArchive, getArchivePendingPostsForPlatform } from "@/lib/persona-archives";
 import { markArchiveEpisodesPublished } from "@/lib/persona-archives";
 import { buildSocialPostsPrompt } from "@/lib/drama-prompts";
 import { callTextUnderstandingModelWithFallback, explainGeminiNoText, extractText, isTextModelFallbackError } from "@/lib/gemini-client";
@@ -419,9 +419,11 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
       if (!archive) throw new Error("人设不存在");
       const repo = createNodePublishQueueRepository();
       const postIdSet = new Set(input.postIds || []);
+      const platform = input.platform || "threads";
+      const platformPosts = getArchivePendingPostsForPlatform(archive, platform);
       const selectedPosts = (input.postIds?.length
-        ? archive.posts.filter((post) => postIdSet.has(post.id))
-        : archive.posts.slice(0, 1)
+        ? platformPosts.filter((post) => postIdSet.has(post.id))
+        : platformPosts.slice(0, 1)
       );
       if (!selectedPosts.length) {
         return {
@@ -439,7 +441,6 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
       const enqueued: Array<{ taskId: string; postId: string }> = [];
       const skipped: Array<{ postId: string; reason: string }> = [];
       const padCode = input.padCode || archive.boundPadCode || "ACP250801768QX47";
-      const platform = input.platform || "threads";
 
       for (const post of selectedPosts) {
         const dedupeKey = `${post.id}::${platform}::${padCode}`;
@@ -447,6 +448,13 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
           skipped.push({ postId: post.id, reason: "already-enqueued" });
           continue;
         }
+        const telegramGroupType = post.telegramGroupContentType === "paid" ? "paid" : "free";
+        const telegramTargetGroupName = platform === "telegram"
+          ? (telegramGroupType === "paid" ? archive.boundTelegramPaidGroupName : archive.boundTelegramFreeGroupName)
+          : undefined;
+        const telegramTargetChatId = platform === "telegram"
+          ? (telegramGroupType === "paid" ? archive.boundTelegramPaidGroupId : archive.boundTelegramFreeGroupId)
+          : undefined;
         const task = repo.enqueueTask({
           archive_id: archive.id,
           archive_post_id: post.id,
@@ -455,6 +463,9 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
           caption: post.content,
           media_url: post.imageUrl,
           telegram_chat_id: input.telegramChatId,
+          telegram_target_chat_id: telegramTargetChatId,
+          telegram_target_group_name: telegramTargetGroupName,
+          telegram_group_content_type: platform === "telegram" ? telegramGroupType : undefined,
         });
         existingKeys.add(dedupeKey);
         enqueued.push({ taskId: task.id, postId: post.id });

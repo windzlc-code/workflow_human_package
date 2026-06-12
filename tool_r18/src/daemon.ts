@@ -273,6 +273,9 @@ async function main() {
           caption: task.caption,
           mediaUrl: task.media_url || undefined,
           telegramChatId: task.telegram_chat_id || undefined,
+          telegramTargetChatId: task.telegram_target_chat_id || undefined,
+          telegramTargetGroupName: task.telegram_target_group_name || undefined,
+          telegramGroupContentType: task.telegram_group_content_type === "paid" ? "paid" : task.telegram_group_content_type === "free" ? "free" : undefined,
         },
         (progress) => {
           cancellationToken.throwIfCancelled?.();

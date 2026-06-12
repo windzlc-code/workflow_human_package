@@ -20,6 +20,9 @@ export interface PublishTask {
   finished_at?: string;
   created_at: string;
   telegram_chat_id?: string;
+  telegram_target_chat_id?: string;
+  telegram_target_group_name?: string;
+  telegram_group_content_type?: "free" | "paid";
 }
 
 export interface EnqueueTaskInput {
@@ -31,6 +34,9 @@ export interface EnqueueTaskInput {
   media_url?: string;
   scheduled_at?: string;
   telegram_chat_id?: string;
+  telegram_target_chat_id?: string;
+  telegram_target_group_name?: string;
+  telegram_group_content_type?: "free" | "paid";
 }
 
 export interface TaskFilter {
@@ -62,7 +68,10 @@ CREATE TABLE IF NOT EXISTS publish_tasks (
   started_at       TEXT,
   finished_at      TEXT,
   created_at       TEXT NOT NULL,
-  telegram_chat_id TEXT
+  telegram_chat_id TEXT,
+  telegram_target_chat_id TEXT,
+  telegram_target_group_name TEXT,
+  telegram_group_content_type TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pad_locks (
@@ -112,6 +121,15 @@ export interface NodePublishQueueRepository {
 export function createNodePublishQueueRepository(dbPath = resolveRuntimeFile("publish_queue.db")): NodePublishQueueRepository {
   const db = new Database(path.resolve(dbPath));
   db.exec(SCHEMA_SQL);
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN telegram_target_chat_id TEXT").run();
+  } catch {}
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN telegram_target_group_name TEXT").run();
+  } catch {}
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN telegram_group_content_type TEXT").run();
+  } catch {}
 
   return {
     enqueueTask(input: EnqueueTaskInput): PublishTask {
@@ -131,14 +149,17 @@ export function createNodePublishQueueRepository(dbPath = resolveRuntimeFile("pu
         scheduled_at: input.scheduled_at || now,
         created_at: now,
         telegram_chat_id: input.telegram_chat_id,
+        telegram_target_chat_id: input.telegram_target_chat_id,
+        telegram_target_group_name: input.telegram_target_group_name,
+        telegram_group_content_type: input.telegram_group_content_type === "paid" ? "paid" : input.telegram_group_content_type === "free" ? "free" : undefined,
       };
       db.prepare(`
         INSERT INTO publish_tasks
           (id, archive_id, archive_post_id, pad_code, platform, caption, media_url,
-           status, attempts, scheduled_at, created_at, telegram_chat_id)
+           status, attempts, scheduled_at, created_at, telegram_chat_id, telegram_target_chat_id, telegram_target_group_name, telegram_group_content_type)
         VALUES
           (@id, @archive_id, @archive_post_id, @pad_code, @platform, @caption, @media_url,
-           @status, @attempts, @scheduled_at, @created_at, @telegram_chat_id)
+           @status, @attempts, @scheduled_at, @created_at, @telegram_chat_id, @telegram_target_chat_id, @telegram_target_group_name, @telegram_group_content_type)
       `).run(task);
       return task;
     },

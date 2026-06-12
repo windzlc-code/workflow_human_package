@@ -38,7 +38,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import sharp from "sharp";
 
-export type Platform = "threads" | "telegram";
+export type Platform = "instagram" | "threads" | "twitter" | "rednote" | "telegram";
 
 export interface PublishTask {
   padCode: string;
@@ -51,6 +51,10 @@ export interface PublishTask {
   mediaUrl?: string;
   /** 兼容旧队列字段；VMOS Telegram 群组发布会使用云机当前打开的群组页面 */
   telegramChatId?: string | number;
+  telegramTargetChatId?: string;
+  /** Telegram 群组名；提供后会先尝试在云机 Telegram 内搜索并进入目标群 */
+  telegramTargetGroupName?: string;
+  telegramGroupContentType?: "free" | "paid";
   /** ACP 的 Instagram 無圖 fallback：先渲染成文字卡圖片再發布 */
   generatedCaptionCard?: boolean;
 }
@@ -1267,6 +1271,7 @@ export function findThreadsHomeFeedActionTargetsFromUiXml(uiXml: string): { like
 }
 
 export function findThreadsReplyComposerInputTarget(uiXml: string): { x: number; y: number } | null {
+  if (looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml)) return null;
   const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
   const candidates: Array<{ x: number; y: number; score: number }> = [];
 
@@ -1293,6 +1298,7 @@ export function findThreadsReplyComposerInputTarget(uiXml: string): { x: number;
 }
 
 export function findThreadsReplySendButtonTarget(uiXml: string): { x: number; y: number } | null {
+  if (looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml)) return null;
   const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
   const candidates: Array<{ x: number; y: number; score: number }> = [];
 
@@ -1318,6 +1324,7 @@ export function findThreadsReplySendButtonTarget(uiXml: string): { x: number; y:
 }
 
 export function hasThreadsReplyComposerText(uiXml: string, comment: string): boolean {
+  if (looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml)) return false;
   const target = normalizeSingleLine(comment).slice(0, 40);
   if (!target) return false;
   const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
@@ -1361,9 +1368,16 @@ function hasThreadsPostedCommentText(uiXml: string, comment: string): boolean {
 
 export function looksLikeThreadsReplyComposerUiXml(uiXml: string): boolean {
   if (!uiXml) return false;
+  if (looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml)) return false;
   const line = normalizeSingleLine(uiXml);
   if (!/(回复|回覆|Reply|新增回覆|添加回复|permalink_inline_composer)/i.test(line)) return false;
   return Boolean(findThreadsReplyComposerInputTarget(uiXml));
+}
+
+export function looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml: string): boolean {
+  const line = normalizeSingleLine(uiXml);
+  if (!line) return false;
+  return /(?:只有|僅有|仅有).{1,90}(?:可以|可).{0,30}(?:查看|檢視|检视|看見|看见|看到|瀏覽|浏览).{0,30}(?:和|及|並|并|與|与)?.{0,30}(?:回覆|回复)|Only .{1,90} can (?:see|view|read).{0,50}(?:reply|respond)|Only .{1,90} can (?:reply|respond)/i.test(line);
 }
 
 export function detectThreadsWarmupCommentPostedCueFromUiXml(uiXml: string): boolean {
@@ -1445,18 +1459,47 @@ export async function detectThreadsProfilePageLocally(screenshotUrl: string | un
   const publicProfileStats = darkRatio(0.04, 0.42, 0.88, 0.50);
   const publicProfileButtons = darkRatio(0.04, 0.50, 0.96, 0.60);
   const suggestedForYouTitle = darkRatio(0.04, 0.60, 0.70, 0.68);
+  const profileTabRow = darkRatio(0.03, 0.84, 0.96, 0.91);
+  const suggestionCards = darkRatio(0.04, 0.66, 0.96, 0.86);
   const editProfileButtons = darkRatio(0.04, 0.28, 0.96, 0.36);
   const composerPublishPill = darkRatio(0.78, 0.91, 0.985, 0.985);
   const largeComposerMedia = darkRatio(0.12, 0.18, 0.96, 0.68);
   const keyboardComposerPublishPill = darkRatio(0.78, 0.45, 0.985, 0.61);
   const keyboardComposerToolbar = darkRatio(0.02, 0.48, 0.98, 0.63);
   const threadTitle = darkRatio(0.13, 0.055, 0.38, 0.13);
+  const detailActionRow = darkRatio(0.03, 0.48, 0.72, 0.56);
   const bottomReplyPill = regionRatio(0.03, 0.91, 0.97, 0.985, (r, g, b, a) => {
     const avg = (r + g + b) / 3;
     const spread = Math.max(r, g, b) - Math.min(r, g, b);
     return a > 220 && avg > 205 && avg < 248 && spread < 30;
   });
   const bottomReplyActions = darkRatio(0.63, 0.91, 0.98, 0.985);
+  if (
+    threadTitle > 0.035
+    && backArrow > 0.025
+    && topRightActions > 0.020
+    && lowerProfileTabs < 0.020
+    && bottomProfileTab < 0.020
+    && publicProfileStats < 0.006
+    && publicProfileButtons < 0.012
+    && suggestedForYouTitle < 0.012
+    && suggestionCards < 0.012
+  ) {
+    return false;
+  }
+  if (
+    threadTitle > 0.035
+    && backArrow > 0.025
+    && detailActionRow > 0.020
+    && lowerProfileTabs < 0.090
+    && bottomProfileTab < 0.200
+    && profileTabs < 0.120
+    && publicProfileStats < 0.120
+    && publicProfileButtons < 0.120
+    && ownProfileButtons < 0.100
+  ) {
+    return false;
+  }
   if (bottomReplyPill > 0.55 && threadTitle > 0.025) {
     return false;
   }
@@ -1480,6 +1523,22 @@ export async function detectThreadsProfilePageLocally(screenshotUrl: string | un
     && (publicProfileButtons > 0.012 || editProfileButtons > 0.045)
     && (suggestedForYouTitle > 0.035 || midFollowButtons > 0.075);
   if (publicProfileLike) return true;
+  const publicProfileWithSuggestions = backArrow > 0.025
+    && topRightActions > 0.035
+    && nameArea > 0.035
+    && publicProfileButtons > 0.014
+    && profileTabRow > 0.018
+    && (suggestedForYouTitle > 0.018 || suggestionCards > 0.028);
+  if (publicProfileWithSuggestions) return true;
+  const publicProfileSuggestionsOnly = backArrow > 0.025
+    && topRightActions > 0.030
+    && nameArea > 0.030
+    && publicProfileBody > 0.040
+    && publicProfileStats > 0.008
+    && publicProfileButtons > 0.012
+    && suggestedForYouTitle > 0.014
+    && suggestionCards > 0.018;
+  if (publicProfileSuggestionsOnly) return true;
   return backArrow > 0.025 && homeLogo < 0.035 && (
     (followButton > 0.018 && profileTabs > 0.012)
     || (midFollowButtons > 0.055 && lowerProfileTabs > 0.012)
@@ -1896,6 +1955,44 @@ async function detectAcpReplyInputHasDraftLocally(screenshotUrl: string | undefi
   return dark >= 95 && dark / total >= 0.018;
 }
 
+export async function detectAcpReplyBarClearedAfterSendLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * x1));
+    const top = Math.max(0, Math.floor(height * y1));
+    const right = Math.min(width - 1, Math.ceil(width * x2));
+    const bottom = Math.min(height - 1, Math.ceil(height * y2));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const offset = (y * width + x) * 4;
+        total += 1;
+        if (predicate(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isReplyPill = (r: number, g: number, b: number, a: number) => {
+    if (a < 180) return false;
+    const avg = (r + g + b) / 3;
+    return avg >= 218 && avg <= 252 && Math.max(r, g, b) - Math.min(r, g, b) < 18;
+  };
+  const isTextOrAvatar = (r: number, g: number, b: number, a: number) => a > 180 && (r + g + b) / 3 < 175;
+  const bottomPill = ratio(0.05, 0.885, 0.96, 0.985, isReplyPill);
+  const leftContent = ratio(0.06, 0.885, 0.55, 0.985, isTextOrAvatar);
+  return bottomPill > 0.30 && leftContent > 0.004;
+}
+
 export async function detectThreadsPostSuccessToastLocally(screenshotUrl: string | undefined): Promise<boolean> {
   if (!screenshotUrl) return false;
   const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
@@ -2038,7 +2135,8 @@ export async function findAcpReplySendButtonPointFromScreenshot(
     };
   };
 
-  return scanBand(0.42, 0.64)
+  return scanBand(0.48, 0.58)
+    ?? scanBand(0.42, 0.64)
     ?? scanBand(0.58, 0.72)
     ?? scanBand(0.78, 0.91)
     ?? scanBand(0.90, 0.985);
@@ -2455,13 +2553,36 @@ export async function detectThreadsPrivateReplyPromptLocally(screenshotUrl: stri
     const avg = (r + g + b) / 3;
     return avg > 215 && avg < 250 && Math.max(r, g, b) - Math.min(r, g, b) < 28;
   };
-  return (
+  const legacyLayout = (
     ratio(0.04, 0.02, 0.96, 0.34, dimmed) > 0.35
     && ratio(0.03, 0.39, 0.97, 0.96, white) > 0.70
     && ratio(0.08, 0.60, 0.92, 0.70, dark) > 0.10
     && ratio(0.10, 0.71, 0.90, 0.78, gray) > 0.12
     && ratio(0.08, 0.83, 0.92, 0.91, lightGray) > 0.30
   );
+  if (legacyLayout) return true;
+
+  const newerBottomSheetLayout = (
+    ratio(0.04, 0.02, 0.96, 0.26, dimmed) > 0.32
+    && ratio(0.04, 0.27, 0.96, 0.98, white) > 0.64
+    && ratio(0.08, 0.30, 0.92, 0.43, dark) > 0.045
+    && ratio(0.10, 0.44, 0.90, 0.54, gray) > 0.045
+    && (
+      ratio(0.10, 0.55, 0.90, 0.64, dark) > 0.20
+      || ratio(0.10, 0.64, 0.90, 0.72, dark) > 0.05
+    )
+  );
+  if (newerBottomSheetLayout) return true;
+
+  const profilePrivacyChoiceSheet = (
+    ratio(0.04, 0.02, 0.96, 0.26, dimmed) > 0.22
+    && ratio(0.04, 0.30, 0.96, 0.98, white) > 0.60
+    && ratio(0.08, 0.43, 0.92, 0.55, dark) > 0.05
+    && ratio(0.10, 0.55, 0.90, 0.62, gray) > 0.035
+    && ratio(0.12, 0.63, 0.88, 0.73, dark) > 0.015
+    && ratio(0.12, 0.74, 0.88, 0.84, dark) > 0.035
+  );
+  return profilePrivacyChoiceSheet;
 }
 
 async function cropImageToInlineData(
@@ -2565,7 +2686,7 @@ async function detectThreadsFeedActionRowLocally(
     const { data, width, height } = pixels;
     const visited = new Uint8Array(width * height);
     const startY = Math.max(0, Math.floor(height * 0.15));
-    const endY = Math.min(height - 1, Math.floor(height * 0.86));
+    const endY = Math.min(height - 1, Math.floor(height * 0.90));
     const startX = Math.max(0, Math.floor(width * 0.04));
     const endX = Math.min(width - 1, Math.floor(width * 0.68));
 
@@ -2697,11 +2818,11 @@ async function detectThreadsFeedActionRowLocally(
         if (boxHeight < 7 || boxHeight > Math.max(58, height * 0.055)) continue;
         if (ratio < 0.22 || ratio > 4.6) continue;
         if (density < 0.12) continue;
-        if (centerY > height * 0.86) continue;
+        if (centerY > height * 0.90) continue;
         if (centerX < width * 0.08 || centerX > width * 0.62) continue;
 
         let score = 0;
-        if (centerY >= height * 0.24 && centerY <= height * 0.86) score += 5;
+        if (centerY >= height * 0.24 && centerY <= height * 0.90) score += 5;
         if (centerX >= width * 0.10 && centerX <= width * 0.40) score += 4;
         if (boxWidth >= 12 && boxWidth <= 38 && boxHeight >= 10 && boxHeight <= 34) score += 4;
         if (density >= 0.16 && density <= 0.72) score += 2;
@@ -2710,7 +2831,7 @@ async function detectThreadsFeedActionRowLocally(
         if (aboveBrightness < 80 && belowBrightness < 100) score -= 12;
         if (Math.abs(leftBrightness - rightBrightness) < 65) score += 1;
         if (centerY < height * 0.22) score -= 12;
-        if (centerY >= height * 0.86) score -= 10;
+        if (centerY >= height * 0.90) score -= 10;
         if (boxWidth < 10 || boxHeight < 10) score -= 3;
         if (boxHeight > boxWidth * 2.2) score -= 4;
 
@@ -2778,7 +2899,7 @@ async function detectThreadsFeedActionRowLocally(
       ));
       if (!third) continue;
       const spacing = second.x - first.x;
-      if (first.y < height * 0.15 || first.y > height * 0.86) continue;
+      if (first.y < height * 0.15 || first.y > height * 0.90) continue;
       if (spacing < width * 0.09 || spacing > width * 0.22) continue;
       if (first.x < width * 0.14 || first.x > width * 0.25) continue;
       if (second.x < width * 0.28 || second.x > width * 0.43) continue;
@@ -2805,7 +2926,7 @@ async function detectThreadsFeedActionRowLocally(
       let score = deduped.slice(0, 4).reduce((total, item) => total + item.score, 0);
       score += deduped.length >= 3 ? 5 : 0;
       score += first.x >= width * 0.08 && first.x <= width * 0.24 ? 5 : 0;
-      score += first.y >= height * 0.15 && first.y <= height * 0.86 ? 10 : 0;
+      score += first.y >= height * 0.15 && first.y <= height * 0.90 ? 10 : 0;
       score += spacing >= width * 0.055 && spacing <= width * 0.16 ? 4 : 0;
       score += widthSpread <= 12 ? 4 : 0;
       score += heightSpread <= 12 ? 3 : 0;
@@ -2818,7 +2939,7 @@ async function detectThreadsFeedActionRowLocally(
       }
       score -= textPenalty;
       if (first.y < height * 0.22) score -= 14;
-      if (first.y >= height * 0.86) score -= 18;
+      if (first.y >= height * 0.90) score -= 18;
 
       rows.push({
         y: rowY,
@@ -2874,7 +2995,7 @@ async function detectThreadsFeedActionRowByExpectedColumns(
     const startX = Math.max(0, Math.floor(width * 0.08));
     const endX = Math.min(width - 1, Math.floor(width * 0.66));
     const startY = Math.max(0, Math.floor(height * 0.15));
-    const endY = Math.min(height - 1, Math.floor(height * 0.86));
+    const endY = Math.min(height - 1, Math.floor(height * 0.90));
 
     const isDarkGlyphPixel = (index: number) => {
       const r = data[index];
@@ -2890,6 +3011,25 @@ async function detectThreadsFeedActionRowByExpectedColumns(
     const lightStripRatio = (centerY: number) => {
       const left = Math.max(0, Math.floor(width * 0.08));
       const right = Math.min(width - 1, Math.floor(width * 0.66));
+      const top = Math.max(0, Math.round(centerY - 18));
+      const bottom = Math.min(height - 1, Math.round(centerY + 18));
+      let light = 0;
+      let total = 0;
+      for (let y = top; y <= bottom; y += 3) {
+        for (let x = left; x <= right; x += 3) {
+          const index = (y * width + x) * 4;
+          const a = data[index + 3];
+          if (a < 100) continue;
+          const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+          total += 1;
+          if (avg > 205) light += 1;
+        }
+      }
+      return total ? light / total : 0;
+    };
+    const lightRegionRatio = (centerY: number, leftRatio: number, rightRatio: number) => {
+      const left = Math.max(0, Math.floor(width * leftRatio));
+      const right = Math.min(width - 1, Math.floor(width * rightRatio));
       const top = Math.max(0, Math.round(centerY - 18));
       const bottom = Math.min(height - 1, Math.round(centerY + 18));
       let light = 0;
@@ -3079,7 +3219,10 @@ async function isLikelyWarmupActionRowAtPoint(
   const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
   if (!pixels) return false;
   const { data, width, height } = pixels;
-  if (point.y < height * 0.22 || point.y > height * 0.86) return false;
+  if (point.y < height * 0.22 || point.y > height * 0.90) return false;
+  if (point.y > height * 0.84 && await detectThreadsBottomReplyComposerBarLocally(screenshotUrl).catch(() => false)) {
+    return false;
+  }
 
   const rowStats = (() => {
     const left = Math.max(0, Math.floor(width * 0.08));
@@ -3148,6 +3291,30 @@ async function isLikelyWarmupActionRowAtPoint(
   return likeIcon.dark >= 14 && commentIcon.dark >= 10;
 }
 
+async function detectThreadsTopBackNavigationLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  let dark = 0;
+  let total = 0;
+  const left = Math.round(width * 0.035);
+  const right = Math.round(width * 0.14);
+  const top = Math.round(height * 0.052);
+  const bottom = Math.round(height * 0.122);
+  for (let y = top; y <= bottom; y += 2) {
+    for (let x = left; x <= right; x += 2) {
+      const index = (y * width + x) * 4;
+      const a = data[index + 3];
+      if (a < 120) continue;
+      total += 1;
+      const avg = (data[index] + data[index + 1] + data[index + 2]) / 3;
+      if (avg < 105) dark += 1;
+    }
+  }
+  return total ? dark / total > 0.018 : false;
+}
+
 async function estimateThreadsFeedActionRowByGeometry(
   screenshotUrl: string,
 ): Promise<{ like?: { x: number; y: number }; comment?: { x: number; y: number }; debugRaw?: string } | null> {
@@ -3159,7 +3326,7 @@ async function estimateThreadsFeedActionRowByGeometry(
     const startX = Math.max(0, Math.floor(width * 0.07));
     const endX = Math.min(width - 1, Math.floor(width * 0.64));
     const startY = Math.max(0, Math.floor(height * 0.15));
-    const endY = Math.min(height - 1, Math.floor(height * 0.86));
+    const endY = Math.min(height - 1, Math.floor(height * 0.90));
 
     const isDarkUiPixel = (index: number) => {
       const r = data[index];
@@ -3324,14 +3491,14 @@ async function estimateThreadsFeedActionRowByGeometry(
       const spacing = like && comment ? comment.x - like.x : width * 0.145;
       const totalDark = rowComponents.reduce((total, item) => total + item.count, 0);
       let score = 0;
-      if (rowY >= height * 0.15 && rowY <= height * 0.86) score += 24;
+      if (rowY >= height * 0.15 && rowY <= height * 0.90) score += 24;
       if (like) score += 18;
       if (comment) score += 18;
       if (spacing >= width * 0.08 && spacing <= width * 0.22) score += 16;
       if (totalDark >= 35 && totalDark <= 2200) score += 10;
       if (rowComponents.length >= 3 && rowComponents.length <= 12) score += 8;
       score += lightRatio * 50;
-      if (rowY < height * 0.15 || rowY > height * 0.86) score -= 28;
+      if (rowY < height * 0.15 || rowY > height * 0.90) score -= 28;
       if (totalDark > 3000) score -= 18;
 
       rows.push({ y: rowY, components: rowComponents, score, lightRatio, like, comment });
@@ -3707,6 +3874,11 @@ export async function detectThreadsReplyComposerLocally(screenshotUrl: string | 
   const feedActionRow = countRegion(0.02, 0.55, 0.72, 0.72, isDark);
   const upperFeedActionRow = countRegion(0.02, 0.35, 0.72, 0.58, isDark);
   const highFeedActionRow = countRegion(0.02, 0.18, 0.72, 0.36, isDark);
+  const midReplyPill = countRegion(0.03, 0.47, 0.82, 0.59, isPillGray);
+  const keyboardPanel = countRegion(0.00, 0.59, 1.00, 0.99, (r, g, b, a) => {
+    const avg = (r + g + b) / 3;
+    return a > 220 && avg > 150 && avg < 248;
+  });
 
   // Full-page Threads reply editor. It visually resembles the new-thread editor,
   // but the top title is the short two-character "回覆/回复" instead of "新串文",
@@ -3757,7 +3929,68 @@ export async function detectThreadsReplyComposerLocally(screenshotUrl: string | 
   ) {
     return "LOCAL_REPLY_COMPOSER";
   }
+  if (
+    midReplyPill >= 900
+    && keyboardPanel >= 12000
+    && topBackOrTitle >= 70
+    && (highFeedActionRow >= 60 || upperFeedActionRow >= 60 || feedActionRow >= 60)
+  ) {
+    return "LOCAL_REPLY_COMPOSER";
+  }
+  if (await detectThreadsBottomReplyComposerBarLocally(screenshotUrl)) {
+    return "LOCAL_INLINE_REPLY_BAR";
+  }
   return null;
+}
+
+export async function detectThreadsBottomReplyComposerBarLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * x1));
+    const top = Math.max(0, Math.floor(height * y1));
+    const right = Math.min(width - 1, Math.ceil(width * x2));
+    const bottom = Math.min(height - 1, Math.ceil(height * y2));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const offset = (y * width + x) * 4;
+        total += 1;
+        if (predicate(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 105;
+  const isLight = (r: number, g: number, b: number, a: number) => a > 220 && r > 238 && g > 238 && b > 238;
+  const isPill = (r: number, g: number, b: number, a: number) => {
+    if (a < 220) return false;
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return avg > 210 && avg < 252 && spread < 36;
+  };
+  const topBack = ratio(0.045, 0.050, 0.135, 0.110, isDark);
+  const topTitle = ratio(0.13, 0.050, 0.40, 0.115, isDark);
+  const topRight = ratio(0.72, 0.050, 0.98, 0.120, isDark);
+  const bottomPill = ratio(0.03, 0.900, 0.96, 0.985, isPill);
+  const bottomBandLight = ratio(0.00, 0.885, 1.00, 1.00, (r, g, b, a) => isLight(r, g, b, a) || isPill(r, g, b, a));
+  const leftContent = ratio(0.04, 0.915, 0.42, 0.985, isDark);
+  const rightTools = ratio(0.62, 0.915, 0.98, 0.985, isDark);
+  return topBack > 0.018
+    && topTitle > 0.018
+    && topRight > 0.012
+    && bottomPill > 0.40
+    && bottomBandLight > 0.58
+    && (leftContent > 0.006 || rightTools > 0.014);
 }
 
 export async function detectThreadsSideDrawerLocally(screenshotUrl: string | undefined): Promise<boolean> {
@@ -6951,6 +7184,57 @@ async function detectThreadsInlineReplyBarLocally(screenshotUrl?: string): Promi
     && navBarLike < 0.22;
 }
 
+export async function detectThreadsThreadDetailShellLocally(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * x1));
+    const top = Math.max(0, Math.floor(height * y1));
+    const right = Math.min(width - 1, Math.ceil(width * x2));
+    const bottom = Math.min(height - 1, Math.ceil(height * y2));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const offset = (y * width + x) * 4;
+        const a = data[offset + 3];
+        if (a < 80) continue;
+        total += 1;
+        if (predicate(data[offset], data[offset + 1], data[offset + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isWhite = (r: number, g: number, b: number, a: number) => a > 220 && r > 238 && g > 238 && b > 238;
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 105;
+  const isLightPill = (r: number, g: number, b: number, a: number) => {
+    if (a < 220) return false;
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return avg > 210 && avg < 252 && spread < 32;
+  };
+  const topWhite = ratio(0.00, 0.035, 1.00, 0.125, isWhite);
+  const backArrow = ratio(0.045, 0.055, 0.125, 0.105, isDark);
+  const title = ratio(0.13, 0.050, 0.36, 0.105, isDark);
+  const topRightActions = ratio(0.72, 0.055, 0.98, 0.115, isDark);
+  const bottomReplyPill = ratio(0.03, 0.915, 0.97, 0.985, isLightPill);
+  const bottomReplyLeftContent = ratio(0.04, 0.925, 0.44, 0.985, isDark);
+  return topWhite > 0.62
+    && backArrow > 0.025
+    && title > 0.030
+    && topRightActions > 0.025
+    && bottomReplyPill > 0.34
+    && bottomReplyLeftContent > 0.006;
+}
+
 async function dismissThreadsTagUserPageIfOpen(
   config: VmosConfig,
   padCode: string,
@@ -8724,6 +9008,11 @@ async function dismissAndroidPermissionDialog(
   }
   const target = findAndroidPermissionDialogButtonTarget(uiXml, preference);
   if (!target) {
+    if (preference === "allow" && /Gboard|record audio|錄音|录音|RECORD_AUDIO/i.test(uiXml)) {
+      const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+      await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.5), Math.round(screen.height * 0.53), 900);
+      return true;
+    }
     if (preference === "deny" && /Gboard|record audio|錄音|录音|RECORD_AUDIO/i.test(uiXml)) {
       const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
       await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.5), Math.round(screen.height * 0.73), 900);
@@ -8733,6 +9022,49 @@ async function dismissAndroidPermissionDialog(
   }
   await tapViaAdbAbsoluteQuick(config, padCode, target.x, target.y, 900);
   return true;
+}
+
+export async function detectAndroidPermissionDialogLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const ratio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.min(width - 1, Math.round(width * x1)));
+    const top = Math.max(0, Math.min(height - 1, Math.round(height * y1)));
+    const right = Math.max(left + 1, Math.min(width, Math.round(width * x2)));
+    const bottom = Math.max(top + 1, Math.min(height, Math.round(height * y2)));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y < bottom; y += 3) {
+      for (let x = left; x < right; x += 3) {
+        const index = (y * width + x) * 4;
+        const a = data[index + 3];
+        if (a < 80) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], a)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const isWhiteCard = (r: number, g: number, b: number) => r > 232 && g > 232 && b > 232;
+  const isPermissionBlue = (r: number, g: number, b: number) => r > 178 && g > 210 && b > 238 && b >= r + 8;
+  const isDimmed = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    return avg > 45 && avg < 175;
+  };
+  const card = ratio(0.08, 0.22, 0.92, 0.83, (r, g, b) => isWhiteCard(r, g, b));
+  const buttons = ratio(0.14, 0.48, 0.86, 0.78, (r, g, b) => isPermissionBlue(r, g, b));
+  const dimTop = ratio(0.00, 0.00, 1.00, 0.20, (r, g, b) => isDimmed(r, g, b));
+  const dimSides = ratio(0.00, 0.24, 0.07, 0.82, (r, g, b) => isDimmed(r, g, b))
+    + ratio(0.93, 0.24, 1.00, 0.82, (r, g, b) => isDimmed(r, g, b));
+  return card > 0.42 && buttons > 0.30 && (dimTop > 0.35 || dimSides > 0.55);
 }
 
 async function dismissThreadsSystemCrashDialogIfPossible(
@@ -9055,6 +9387,8 @@ interface ThreadsPageSnapshot {
   uiXml?: string;
   capturedAt: number;
 }
+
+type ThreadsBottomToastState = "none" | "pending" | "success";
 
 function isAndroidCameraFocus(focus: string | undefined | null): boolean {
   return /com\.android\.camera|camera2|CaptureActivity/i.test(focus || "");
@@ -15028,6 +15362,752 @@ async function verifyRednotePublish(
   };
 }
 
+async function publishRednote(
+  config: VmosConfig,
+  task: PublishTask,
+  onProgress: (p: PublishProgress) => void,
+): Promise<PublishResult> {
+  const { padCode } = task;
+  const caption = task.caption.trim();
+  if (!caption) throw new Error("小红书发布文案不能为空");
+  let mediaUrl = task.mediaUrl;
+  if (!mediaUrl) {
+    onProgress({ step: "生成小红书文字卡片...", done: false });
+    mediaUrl = await buildRednoteTextCardDataUrl(caption);
+  }
+  const isVideoMedia = isVideoMediaUrl(mediaUrl);
+  const mimeType = isVideoMedia ? "video/mp4" : getThreadsShareMimeType(mediaUrl);
+
+  onProgress({ step: isVideoMedia ? "写入视频到云机..." : "写入图片到云机...", done: false });
+  await ensurePermissions(config, padCode, REDNOTE_PACKAGE, CAMERA_MEDIA_PERMISSIONS);
+  const remotePath = buildStableDeviceMediaRemotePath("rednote_post", mediaUrl);
+  const stagedRemotePath = await stageMediaOnDevice(config, padCode, mediaUrl, remotePath, onProgress);
+  const contentUri = await queryMediaStoreContentUri(config, padCode, stagedRemotePath, isVideoMedia);
+  if (!contentUri) {
+    throw new Error(`${isVideoMedia ? "视频" : "图片"}已写入云机，但未找到 MediaStore content:// 记录`);
+  }
+
+  await launchRednoteShareIntent(config, padCode, contentUri, caption, mimeType, onProgress);
+
+  onProgress({ step: isVideoMedia ? "选择发布视频..." : "选择发布图片...", done: false });
+  await tapRednoteTarget(config, padCode, [/下一步|Next/i], { xRatio: 0.88, yRatio: 0.96 }, 900).catch(() => undefined);
+  await tapRednoteTarget(config, padCode, [/选择|Select|完成|Done|下一步|Next/i], { xRatio: 0.18, yRatio: 0.26 }, 1600);
+  await tapRednoteTarget(config, padCode, [/下一步|Next/i], { xRatio: 0.88, yRatio: 0.96 }, 2600);
+
+  onProgress({ step: "进入小红书编辑页...", done: false });
+  await tapRednoteTarget(config, padCode, [/下一步|Next/i], { xRatio: 0.89, yRatio: 0.045 }, 2600).catch(() => undefined);
+  await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+
+  const title = caption
+    .replace(/[#\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 28) || "AI 工作流观察";
+
+  onProgress({ step: "填写小红书标题和正文...", done: false });
+  await tapRednoteTarget(config, padCode, [/标题|Title|添加标题|Add title/i], { xRatio: 0.18, yRatio: 0.57 }, 700);
+  await clearFocusedTextInput(config, padCode, 200);
+  await typeTextViaAdbBroadcast(config, padCode, title, 1000);
+  await tapRednoteTarget(config, padCode, [/正文|描述|Description|caption|分享你的|Add text|Write/i], { xRatio: 0.18, yRatio: 0.66 }, 700);
+  await clearFocusedTextInput(config, padCode, 200);
+  await typeTextViaAdbBroadcast(config, padCode, caption, 1200);
+  await dismissKeyboard(config, padCode, 900).catch(() => undefined);
+
+  onProgress({ step: "点击小红书发布...", done: false });
+  await tapRednoteTarget(config, padCode, [/发布|Post|Publish/i], { xRatio: 0.82, yRatio: 0.955 }, 4200);
+
+  onProgress({ step: "校验小红书发布结果...", done: false });
+  const verification = await verifyRednotePublish(config, padCode, caption);
+  onProgress({
+    step: verification.detail,
+    done: true,
+    warning: verification.state === "warning" ? verification.detail : undefined,
+  });
+  return verification;
+}
+
+async function publishRednoteWithRecovery(
+  config: VmosConfig,
+  task: PublishTask,
+  onProgress: (p: PublishProgress) => void,
+  options: PublishRunOptions = {},
+): Promise<PublishResult> {
+  const maxAttempts = 2;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    options.cancellationToken?.throwIfCancelled?.();
+    let publishTapped = false;
+    const wrappedProgress = (progress: PublishProgress) => {
+      if (/点击小红书发布|點擊小紅書發布/.test(progress.step || "")) {
+        publishTapped = true;
+      }
+      onProgress(attempt === 1 ? progress : {
+        ...progress,
+        step: `小红书发布重试 ${attempt}/${maxAttempts}：${progress.step}`,
+      });
+    };
+
+    try {
+      return await publishRednote(config, task, wrappedProgress);
+    } catch (error) {
+      lastError = error;
+      const msg = error instanceof Error ? error.message : String(error);
+      const canRetry = !publishTapped
+        && !/小红书发布文案不能为空|已写入云机，但未找到 MediaStore content:\/\/ 记录/.test(msg);
+      onProgress({
+        step: `小红书发布第 ${attempt}/${maxAttempts} 次失败：${normalizeSingleLine(msg).slice(0, 160)}`,
+        done: false,
+        warning: canRetry && attempt < maxAttempts ? "准备恢复页面并重试" : undefined,
+        error: canRetry && attempt < maxAttempts ? undefined : msg,
+      });
+      if (!canRetry || attempt >= maxAttempts) {
+        throw error;
+      }
+      await execAdbForText(config, task.padCode, "input keyevent KEYCODE_BACK; input keyevent KEYCODE_BACK", 12_000, 600).catch(() => "");
+      await execAdbForText(config, task.padCode, `am force-stop ${REDNOTE_PACKAGE}`, 20_000, 800).catch(() => "");
+      await delay(1600);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || "小红书发布失败"));
+}
+
+// ─── Twitter/X 發文流程 ──────────────────────────────────────────────────────
+//
+// 實測座標（720x1600 / 360dpi）：
+// - 首頁右下角撰寫按鈕（鉛筆圖示）：(660, 1517)
+// - 文字輸入框：(360, 400)
+// - 右上角"發布/Post"按鈕：(640, 75)
+// - 圖片附加按鈕（編輯頁底部左側）：(60, 1517)
+// - 圖庫第一張圖片：(120, 450)
+// - 圖庫"完成"按鈕：(640, 104)
+//
+// ⚠️ 座標基於 Twitter/X 7.x 版本估算，如有偏差請根據實測調整
+//
+async function publishTwitter(
+  config: VmosConfig,
+  task: PublishTask,
+  onProgress: (p: PublishProgress) => void
+): Promise<void> {
+  const { padCode, caption, mediaUrl } = task;
+
+  if (mediaUrl) {
+    // ── 模式 A：帶圖推文 ────────────────────────────────────────────────────
+
+    // Step 1: 下載圖片到裝置
+    const mediaLabel = getDeviceMediaLabel(mediaUrl);
+    onProgress({ step: mediaUrl.startsWith("data:") ? `寫入${mediaLabel}到裝置...` : `下載${mediaLabel}到裝置...`, done: false });
+    const remotePath = buildStableDeviceMediaRemotePath("twitter_post", mediaUrl);
+    await stageMediaOnDevice(config, padCode, mediaUrl, remotePath, onProgress);
+
+    // Step 2: 冷啟動 Twitter
+    onProgress({ step: "啟動 Twitter/X...", done: false });
+    await relaunchTwitter(config, padCode, 5000);
+
+    // Step 3: 點選右下角撰寫按鈕
+    onProgress({ step: "點選撰寫按鈕...", done: false });
+    await tap(config, padCode, 660, 1517, 3000);
+
+    // Step 4: 點選圖片附加按鈕（編輯頁底部左側圖片圖示）
+    onProgress({ step: "開啟圖庫...", done: false });
+    await tap(config, padCode, 60, 1517, 3000);
+
+    // Step 5: 點選第一張圖片
+    onProgress({ step: "選擇媒體...", done: false });
+    await tap(config, padCode, 120, 450, 1500);
+
+    // Step 6: 點選"完成"確認選圖
+    onProgress({ step: "確認選圖...", done: false });
+    await tap(config, padCode, 640, 104, 2000);
+
+    // Step 7: 點選文字輸入框並輸入推文
+    onProgress({ step: "輸入推文...", done: false });
+    await tap(config, padCode, 360, 400, 1000);
+    await typeText(config, padCode, caption.slice(0, 280), 3000);
+
+    // Step 8: 點選右上角"Post/發布"按鈕
+    onProgress({ step: "點選發布...", done: false });
+    await tap(config, padCode, 640, 75, 3000);
+
+    onProgress({ step: "校驗發布結果...", done: false });
+    const verification = await verifyTwitterPublish(config, padCode, caption.slice(0, 280));
+    onProgress({
+      step: verification.detail,
+      done: true,
+      warning: verification.state === "warning" ? verification.detail : undefined,
+    });
+  } else {
+    // ── 模式 B：純文字推文 ──────────────────────────────────────────────────
+
+    // Step 1: 冷啟動 Twitter
+    onProgress({ step: "啟動 Twitter/X...", done: false });
+    await relaunchTwitter(config, padCode, 5000);
+
+    // Step 2: 點選右下角撰寫按鈕
+    onProgress({ step: "點選撰寫按鈕...", done: false });
+    await tap(config, padCode, 660, 1517, 3000);
+
+    // Step 3: 點選文字輸入框
+    onProgress({ step: "點選輸入框...", done: false });
+    await tap(config, padCode, 360, 400, 1000);
+
+    // Step 4: 輸入推文
+    onProgress({ step: "輸入推文...", done: false });
+    await typeText(config, padCode, caption.slice(0, 280), 3000);
+
+    // Step 5: 點選右上角"Post/發布"按鈕
+    onProgress({ step: "點選發布...", done: false });
+    await tap(config, padCode, 640, 75, 3000);
+
+    onProgress({ step: "校驗發布結果...", done: false });
+    const verification = await verifyTwitterPublish(config, padCode, caption.slice(0, 280));
+    onProgress({
+      step: verification.detail,
+      done: true,
+      warning: verification.state === "warning" ? verification.detail : undefined,
+    });
+  }
+}
+
+
+//
+// 兩種模式：
+// A. 有圖片（mediaUrl）→ Story 圖片模式（下載圖片後進入 Story 相機選圖）
+//    ⚠️ 座標待實測，目前為估算值
+//
+// B. 無圖片 → Story "建立/Create" 純文字模式（已實測驗證）
+//    完整流程（720x1600 / 360dpi 實測座標）：
+//    1. 啟動 Instagram（monkey launcher）
+//    2. 等待主頁載入（4s）
+//    3. 從左邊緣右滑進入 Story 相機：swipe 10 640 300 640 300
+//    4. 等待相機載入（3s）
+//    5. 點選左側 "建立" 文字進入 Create 模式：(155, 540)
+//    6. 等待進入文字輸入介面（2s）
+//    7. 輸入文案（base64 編碼）
+//    8. 等待輸入完成（3s）
+//    9. 點選右上角 "下一步"：(660, 75)
+//    10. 等待預覽介面載入（2s）
+//    11. 點選底部 "限時動態" 發布：約 (163, 1436)
+//    12. 等待發布完成（5s）
+//
+async function publishInstagram(
+  config: VmosConfig,
+  task: PublishTask,
+  onProgress: (p: PublishProgress) => void
+): Promise<PublishResult> {
+  const { padCode, caption } = task;
+  let mediaUrl = task.mediaUrl;
+  let generatedCaptionCard = task.generatedCaptionCard;
+  if (!mediaUrl && isAcpPad(padCode)) {
+    onProgress({ step: "生成 Instagram 文字卡片...", done: false });
+    mediaUrl = await buildInstagramTextCardDataUrl(caption);
+    generatedCaptionCard = true;
+  }
+  const isVideoMedia = isVideoMediaUrl(mediaUrl);
+  const useAcpVideoFeedPath = isAcpPad(padCode) && isVideoMedia && !generatedCaptionCard;
+  const useAcpFeedIntentPath = isAcpPad(padCode) && Boolean(mediaUrl) && !isVideoMedia;
+  const useAcpSharePath = useAcpFeedIntentPath || useAcpVideoFeedPath;
+  const needsLocalProfileBaseline = getLocalVisualVerificationSupport().supported && Boolean(mediaUrl);
+  let beforeProfileGridUrl: string | undefined;
+  let beforeProfileTopUrl: string | undefined;
+  let beforeProfileReelsUrl: string | undefined;
+
+  if (mediaUrl) {
+    // ── 模式 A：圖片 Feed 貼文（已實測驗證 2026-04-21）────────────────────
+    // 實測流程：Story相機 → 切換"貼文"模式 → 圖庫自動開啟 → 選圖 → 編輯 → 發布
+
+    // Step 1: 準備圖片到裝置 /sdcard/Download/
+    const mediaLabel = getDeviceMediaLabel(mediaUrl);
+    onProgress({ step: mediaUrl.startsWith("data:") ? `寫入${mediaLabel}到裝置...` : `下載${mediaLabel}到裝置...`, done: false });
+    const remotePath = buildStableDeviceMediaRemotePath("ig_post", mediaUrl);
+    const stagedRemotePath = await stageMediaOnDevice(config, padCode, mediaUrl, remotePath, onProgress);
+
+    // Step 2: 冷啟動 Instagram
+    onProgress({ step: "準備媒體許可權...", done: false });
+    await ensurePermissions(config, padCode, INSTAGRAM_PACKAGE, INSTAGRAM_PROFILE_PERMISSIONS);
+
+    onProgress({ step: "啟動 Instagram...", done: false });
+    await ensureInstagramHomeForPublish(config, padCode, onProgress);
+
+    if (needsLocalProfileBaseline) {
+      onProgress({ step: "讀取主頁基線...", done: false });
+      beforeProfileTopUrl = await captureInstagramProfileTopScreenshot(config, padCode);
+      beforeProfileGridUrl = await captureInstagramProfileGridScreenshot(config, padCode);
+      if (isVideoMedia && isAcpPad(padCode) && !useAcpVideoFeedPath) {
+        beforeProfileReelsUrl = await captureInstagramProfileReelsScreenshot(config, padCode);
+      }
+      onProgress({ step: "回到首頁準備發布...", done: false });
+      await ensureInstagramHomeForPublish(config, padCode, onProgress);
+    }
+
+    let generatedCardShareTarget: { x: number; y: number } | undefined;
+    if (useAcpFeedIntentPath) {
+      const contentUri = await queryMediaStoreContentUri(config, padCode, stagedRemotePath, false);
+      if (!contentUri) {
+        throw new Error("圖片已寫入裝置，但未找到 MediaStore content:// 記錄");
+      }
+      await launchInstagramFeedIntentShare(
+        config,
+        padCode,
+        contentUri,
+        getThreadsShareMimeType(mediaUrl),
+        onProgress,
+      );
+      const imageFlowEndState = await advanceInstagramImageFlowToSharePage(config, padCode, onProgress);
+      if (imageFlowEndState !== "share_page" && imageFlowEndState !== "publishing_home") {
+        onProgress({
+          step: `分享頁狀態未明確（state=${imageFlowEndState}），繼續嘗試輸入併發布...`,
+          done: false,
+        });
+      }
+    } else if (useAcpVideoFeedPath) {
+      onProgress({
+        step: "使用 Feed 視頻直發路徑...",
+        done: false,
+      });
+      await advanceInstagramAcpDirectFeedSharePage(config, padCode, onProgress);
+      await dismissInstagramFeedShareInfoDialog(config, padCode, onProgress);
+    } else if (generatedCaptionCard && isAcpPad(padCode)) {
+      await advanceInstagramAcpGeneratedCaptionCardSharePage(config, padCode, mediaUrl!, onProgress);
+    } else {
+      // Step 3: 點選首頁左上角 "+" 進入新貼文
+      onProgress({ step: "進入新貼文...", done: false });
+      await tap(config, padCode, 49, 96, 2500);
+
+      // Step 4: 根據目前實際頁面狀態推進到分享頁。
+      if (generatedCaptionCard) {
+        onProgress({ step: "推進圖文卡片到分享頁...", done: false });
+        const advanced = await advanceInstagramGeneratedCaptionCardFlow(config, padCode, onProgress);
+        generatedCardShareTarget = advanced.shareTarget;
+      } else {
+        onProgress({ step: "推進到分享頁...", done: false });
+        const imageFlowEndState = await advanceInstagramImageFlowToSharePage(config, padCode, onProgress);
+        if (imageFlowEndState !== "share_page" && imageFlowEndState !== "publishing_home") {
+          if (isVideoMedia) {
+            throw new Error(`Instagram 影片流程未進入分享頁（state=${imageFlowEndState}）`);
+          }
+          onProgress({
+            step: `分享頁狀態未明確（state=${imageFlowEndState}），繼續嘗試輸入併發布...`,
+            done: false,
+          });
+        }
+      }
+    }
+
+    if (!generatedCaptionCard) {
+      // Step 8: 嘗試進入說明文字頁並輸入 caption。
+      // 如果此時 Instagram 已經回到首頁後台佇列，這幾步通常是無害空點；
+      // 如果已經進入分享頁，則能把說明文字真正填進去。
+      onProgress({ step: "輸入貼文說明...", done: false });
+      if (useAcpVideoFeedPath) {
+        const captionTapTarget = { x: 190, y: 690 };
+        await tapViaAdbReferencePoint(config, padCode, captionTapTarget, 1800, FIXED_VMOS_SCREEN);
+      } else if (useAcpSharePath) {
+        const captionTapTarget = { x: 190, y: 690 };
+        await tapViaAdbReferencePoint(config, padCode, captionTapTarget, 1800, FIXED_VMOS_SCREEN);
+      } else {
+        await tap(config, padCode, 180, 735, 2000);
+      }
+      await typeText(config, padCode, caption.slice(0, 2200), 4000);
+      if (useAcpVideoFeedPath) {
+        onProgress({ step: "確認貼文說明...", done: false });
+        await tapViaAdbReferencePoint(config, padCode, { x: 650, y: 74 }, 2000, FIXED_VMOS_SCREEN);
+      } else if (useAcpSharePath) {
+        onProgress({ step: "確認貼文說明...", done: false });
+        await tapViaAdbReferencePoint(config, padCode, { x: 650, y: 74 }, 2000, FIXED_VMOS_SCREEN);
+      } else {
+        await execAdb(config, padCode, "input keyevent KEYCODE_BACK");
+        await delay(2000);
+      }
+
+      // Step 9: 點選底部“分享”發布
+      onProgress({ step: "點選分享發布...", done: false });
+      if (useAcpVideoFeedPath) {
+        await tapViaAdbReferencePoint(config, padCode, { x: 362, y: 1518 }, 6000, FIXED_VMOS_SCREEN);
+      } else if (useAcpSharePath) {
+        await tapViaAdbReferencePoint(config, padCode, { x: 362, y: 1518 }, 6000, FIXED_VMOS_SCREEN);
+      } else {
+        await tap(config, padCode, 360, 1516, 4000);
+      }
+    } else {
+      onProgress({ step: "點選圖文卡片分享...", done: false });
+      if (useAcpSharePath) {
+        await tapViaAdbReferencePoint(config, padCode, { x: 362, y: 1518 }, 6000, FIXED_VMOS_SCREEN);
+      } else if (generatedCardShareTarget) {
+        if (isAcpPad(padCode)) {
+          await tapViaAdbReferencePoint(config, padCode, generatedCardShareTarget, 4000, FIXED_VMOS_SCREEN);
+        } else {
+          await tapAbsolute(config, padCode, generatedCardShareTarget.x, generatedCardShareTarget.y, 4000);
+        }
+      } else {
+        await tap(config, padCode, 360, 1516, 4000);
+      }
+    }
+
+    if (useAcpSharePath) {
+      const postShareState = useAcpVideoFeedPath
+        ? await ensureInstagramAcpReelShareSubmitted(config, padCode, onProgress)
+        : await ensureInstagramAcpFeedShareSubmitted(config, padCode, onProgress);
+      if (
+        postShareState === "share_page"
+        || postShareState === "editor"
+        || postShareState === "effects_drawer"
+      ) {
+        throw new Error(`Instagram 分享未真正送出（state=${postShareState}）`);
+      }
+    }
+
+    onProgress({ step: "校驗發布結果...", done: false });
+    const verification = generatedCaptionCard
+      ? await verifyInstagramGeneratedCaptionCardPublish(
+        config,
+        padCode,
+        mediaUrl,
+        beforeProfileGridUrl,
+        beforeProfileTopUrl,
+      )
+      : await verifyInstagramPublish(
+        config,
+        padCode,
+        caption.slice(0, 2200),
+        mediaUrl,
+        beforeProfileGridUrl,
+        beforeProfileTopUrl,
+        beforeProfileReelsUrl,
+        onProgress,
+      );
+    onProgress({
+      step: verification.detail,
+      done: true,
+      warning: verification.state === "warning" ? verification.detail : undefined,
+    });
+    return verification;
+  } else {
+    // ── 模式 B：無圖 → Story 純文字（APP5 實測路徑）────────────────────
+    let beforeStoryHomeUrl: string | undefined;
+    const canVerifyStoryLocally = getLocalVisualVerificationSupport().supported;
+    const useAcpAbsolute = isAcpPad(padCode);
+
+    // Step 1: 預授權 Story 相機常見系統許可權，避免在右滑進入時被錄音/相機彈窗打斷。
+    onProgress({ step: "準備 Story 許可權...", done: false });
+    await ensurePermissions(config, padCode, INSTAGRAM_PACKAGE, CAMERA_MEDIA_PERMISSIONS);
+
+    // Step 2: 啟動 Instagram
+    onProgress({ step: "啟動 Instagram...", done: false });
+    await relaunchInstagram(config, padCode, 5000);
+    if (canVerifyStoryLocally) {
+      beforeStoryHomeUrl = await screenshot(config, padCode);
+    }
+
+    // Step 3: 從首頁左上角「+」進入建立流程，再切到 Story。
+    // 直接點自己的 Story 會在已有/廣告 Story 場景中進入瀏覽器，不適合作為發佈入口。
+    onProgress({ step: "進入建立入口...", done: false });
+    if (useAcpAbsolute) {
+      await tapViaAdbReferencePoint(config, padCode, { x: 50, y: 140 }, 3200, FIXED_VMOS_SCREEN);
+    } else {
+      await tap(config, padCode, 49, 96, 3200);
+    }
+
+    // Step 4: 切換到 Story 相機頁。
+    onProgress({ step: "切換 Story 編輯器...", done: false });
+    await switchInstagramStoryMode(config, padCode, onProgress);
+
+    // Step 5: 先確認沒有誤入設定頁；若還在相機工具頁，就優先選中「建立」模式。
+    let storyState = await ensureInstagramStoryTextEditor(config, padCode, onProgress);
+    if (storyState === "settings") {
+      throw new Error("Story 流程誤入相機設定頁");
+    }
+
+    // Step 6: 點中間輸入區聚焦，再輸入文案
+    onProgress({ step: "聚焦輸入區...", done: false });
+    if (useAcpAbsolute) {
+      await tapAbsolute(config, padCode, 360, 620, 2500);
+    } else {
+      await tapViaAdb(config, padCode, 340, 245, 2500);
+    }
+    storyState = await classifyInstagramStoryTextFlowState(config, padCode);
+    if (storyState === "camera_tools" || storyState === "unknown") {
+      onProgress({ step: "點選建立快門...", done: false });
+      if (useAcpAbsolute) {
+        await tapAbsolute(config, padCode, 360, 1305, 2200);
+      } else {
+        await tapViaAdb(config, padCode, 360, 840, 2200);
+      }
+      storyState = await classifyInstagramStoryTextFlowState(config, padCode);
+    }
+    if (storyState === "camera_tools" || storyState === "unknown") {
+      onProgress({ step: "再次聚焦輸入區...", done: false });
+      if (useAcpAbsolute) {
+        await tapAbsolute(config, padCode, 360, 620, 2200);
+      } else {
+        await tapViaAdb(config, padCode, 360, 640, 2200);
+      }
+      storyState = await classifyInstagramStoryTextFlowState(config, padCode);
+    }
+    if (storyState !== "text_editor") {
+      if (storyState === "settings") {
+        throw new Error("Story 流程誤入相機設定頁");
+      }
+      onProgress({
+        step: `未明確進入文字編輯模式（state=${storyState}），繼續嘗試下一步...`,
+        done: false,
+      });
+    }
+    onProgress({ step: "輸入文案...", done: false });
+    await typeText(config, padCode, caption, 3000);
+    onProgress({ step: "收起鍵盤...", done: false });
+    await dismissKeyboard(config, padCode, 1200);
+
+    // Step 7: 點選右上角 “下一步”
+    onProgress({ step: "點選下一步...", done: false });
+    if (useAcpAbsolute) {
+      await tapAbsolute(config, padCode, 664, 95, 3500);
+    } else {
+      await tapViaAdb(config, padCode, 650, 63, 3500);
+    }
+    storyState = await classifyInstagramStoryTextFlowState(config, padCode);
+    let resolvedShareTarget: { x: number; y: number } | null = null;
+    if (storyState !== "share_screen" && storyState !== "settings") {
+      const shareProbeUrl = await screenshot(config, padCode);
+      resolvedShareTarget = await locateInstagramStoryTapTarget(shareProbeUrl, "share");
+      if (resolvedShareTarget) {
+        storyState = "share_screen";
+      }
+    }
+    if (!resolvedShareTarget && (storyState === "text_editor" || storyState === "unknown")) {
+      onProgress({ step: "視覺定位下一步...", done: false });
+      const shotUrl = await screenshot(config, padCode);
+      const tapPoint = await locateInstagramStoryTapTarget(shotUrl, "next");
+      if (tapPoint) {
+        await tapScreenshotPointViaAdb(config, padCode, shotUrl, tapPoint, 2600);
+        storyState = await classifyInstagramStoryTextFlowState(config, padCode);
+        if (storyState !== "share_screen" && storyState !== "settings") {
+          const shareProbeUrl = await screenshot(config, padCode);
+          resolvedShareTarget = await locateInstagramStoryTapTarget(shareProbeUrl, "share");
+          if (resolvedShareTarget) {
+            storyState = "share_screen";
+          }
+        }
+      }
+    }
+    if (storyState === "settings") {
+      throw new Error("Story 流程誤入相機設定頁");
+    }
+    if (storyState !== "share_screen") {
+      if (useAcpAbsolute) {
+        onProgress({
+          step: `未明確識別分享頁（state=${storyState}），直接嘗試發布鈕...`,
+          done: false,
+        });
+      } else {
+        throw new Error(`Story 流程未進入分享頁（state=${storyState}）`);
+      }
+    }
+
+    // Step 8: 點選底部 “限時動態” 發布
+    onProgress({ step: "發布到 Story...", done: false });
+    if (useAcpAbsolute) {
+      let shareScreenUrl = await screenshot(config, padCode);
+      const shareTarget = resolvedShareTarget ?? await locateInstagramStoryTapTarget(shareScreenUrl, "share");
+      if (shareTarget) {
+        await tapScreenshotPointViaAdb(config, padCode, shareScreenUrl, shareTarget, 5000);
+      } else {
+        await tapViaAdbReferencePoint(config, padCode, { x: 160, y: 1370 }, 5000, FIXED_VMOS_SCREEN);
+      }
+      if (await dismissInstagramStoryFacebookPrompt(config, padCode, onProgress)) {
+        shareScreenUrl = await screenshot(config, padCode);
+        if (/Your story|你的限時動態|你的限时动态/i.test(await dumpUiXml(config, padCode).catch(() => ""))) {
+          const retryShareTarget = await locateInstagramStoryTapTarget(shareScreenUrl, "share")
+            || { x: 160, y: 1370 };
+          await tapScreenshotPointViaAdb(config, padCode, shareScreenUrl, retryShareTarget, 4000);
+          await dismissInstagramStoryFacebookPrompt(config, padCode, onProgress);
+        }
+      }
+    } else {
+      await tapViaAdb(config, padCode, 170, 1118, 5000);
+    }
+
+    onProgress({ step: "校驗發布結果...", done: false });
+    let verification = await verifyInstagramStoryQuickSuccessToast(config, padCode)
+      .then((result) => result ?? ({ state: "warning" as const, detail: "未命中快速 Story 成功提示" }));
+    if (verification.state !== "verified" && beforeStoryHomeUrl) {
+      const localFallback = await verifyInstagramStoryPublishLocally(config, padCode, beforeStoryHomeUrl, 9000)
+        .catch((error: unknown) => ({
+          state: "warning" as const,
+          detail: error instanceof Error ? error.message : String(error),
+        }));
+      if (localFallback.state === "verified") {
+        verification = localFallback;
+      }
+    }
+    if (verification.state !== "verified") {
+      verification = await verifyInstagramStoryByOpeningOwnBubble(config, padCode, caption, onProgress);
+    }
+    if (verification.state !== "verified" && getGeminiEndpoint().apiKey) {
+      verification = await verifyInstagramPublish(config, padCode, caption, undefined, beforeProfileGridUrl);
+    }
+    onProgress({
+      step: verification.detail,
+      done: true,
+      warning: verification.state === "warning" ? verification.detail : undefined,
+    });
+    return verification;
+  }
+}
+
+// ─── Threads 账号登录 ─────────────────────────────────────────────────────────
+
+export interface ThreadsLoginInput {
+  username: string;
+  password: string;
+}
+
+export interface ThreadsLoginResult {
+  ok: boolean;
+  state: "logged_in" | "challenge_otp" | "challenge_manual" | "failed";
+  message: string;
+  screenshotUrl?: string;
+}
+
+const PKG_THREADS = "com.instagram.barcelona";
+
+async function classifyThreadsPage(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ page: string; confidence: number; evidence: string }> {
+  const { callGemini, extractText, getInlineData } = await import("./gemini-client");
+  const shotUrl = await screenshot(config, padCode);
+  const inlineData = await getInlineData(shotUrl).catch(() => null);
+  if (!inlineData) return { page: "unknown", confidence: 0, evidence: "截图失败" };
+
+  const prompt = `看这张 Android Threads (com.instagram.barcelona) 截图，判断当前页面类型。
+
+类型枚举：
+- home_feed              主页 feed（已登录，看到他人帖子流）
+- profile_page           个人主页（看到自己头像 + 用户名）
+- login_account_picker   登录-账号选择页（历史 IG 账号卡片 + 「使用其他帳號」链接，无输入框）
+- login_username_form    登录-用户名表单（单一文本输入框 + 「下一步」按钮）
+- login_password_form    登录-密码表单（有密码输入框 + 「登入/Log in」按钮）
+- login_2fa_choice       登录-2FA 验证方式选择页
+- login_2fa_device_push  登录-等待另一设备批准
+- otp_input              需要输入验证码（短信/邮件/2FA）
+- save_login_info        保存登录信息提示（「儲存您的登入資料？」）
+- system_dialog          系统弹窗（权限请求/通知）
+- account_disabled       账号已被停用
+- challenge_other        其他需要人工的挑战页
+- unknown                都不像
+
+严格只返回 JSON：
+{"page": "<枚举值>", "confidence": 0.0-1.0, "evidence": "判断依据简述"}`;
+
+  const raw = await callGemini(
+    "gemini-3-flash-preview",
+    [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
+    { maxOutputTokens: 200, temperature: 0 },
+  );
+  const text = (extractText(raw) || "").trim().replace(/^```json\s*/i, "").replace(/```\s*$/, "");
+  // 用更宽松的正则匹配 JSON 对象（允许 evidence 里有引号）
+  const jsonMatch = text.match(/\{[\s\S]*?\}/);
+  if (!jsonMatch) return { page: "unknown", confidence: 0, evidence: text.slice(0, 80) };
+  try {
+    const json = JSON.parse(jsonMatch[0]);
+    return { page: json.page || "unknown", confidence: json.confidence || 0, evidence: json.evidence || "" };
+  } catch {
+    // 尝试直接解析整个 text
+    try {
+      const json = JSON.parse(text);
+      return { page: json.page || "unknown", confidence: json.confidence || 0, evidence: json.evidence || "" };
+    } catch {
+      return { page: "unknown", confidence: 0, evidence: text.slice(0, 80) };
+    }
+  }
+}
+
+async function findButtonOnScreen(
+  config: VmosConfig,
+  padCode: string,
+  targetDescription: string,
+  timeoutMs = 25000,
+): Promise<{ x: number; y: number } | null> {
+  const { callGemini, extractText, getInlineData } = await import("./gemini-client");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const shotUrl = await screenshot(config, padCode);
+    const inlineData = await getInlineData(shotUrl).catch(() => null);
+    if (!inlineData) { await delay(2000); continue; }
+
+    const prompt = `看这张 Android 手机截图（屏幕分辨率 720x1600，左上角=(0,0)，右下角=(720,1600)）。
+
+任务是找一个特定 UI 元素的中心点像素坐标。
+目标：${targetDescription}
+
+注意：
+- x ∈ [0, 720]，y ∈ [0, 1600]
+- 不要把不同按钮搞混
+
+严格只返回 JSON（不要任何其他文字）：
+{"found": true/false, "x": 整数, "y": 整数, "note": "短描述"}`;
+
+    const raw = await callGemini(
+      "gemini-3-flash-preview",
+      [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
+      { maxOutputTokens: 80, temperature: 0 },
+    );
+    const text = (extractText(raw) || "").trim();
+    const jsonMatch = text.match(/\{[^}]+\}/);
+    if (!jsonMatch) { await delay(2000); continue; }
+    try {
+      const json = JSON.parse(jsonMatch[0]);
+      if (json.found && typeof json.x === "number" && typeof json.y === "number") {
+        const x = Math.round(json.x);
+        const y = Math.round(json.y);
+        if (x >= 0 && x <= 720 && y >= 0 && y <= 1600) {
+          return { x, y };
+        }
+      }
+    } catch {}
+    await delay(2000);
+  }
+  return null;
+}
+
+async function login_tapAndWait(config: VmosConfig, padCode: string, x: number, y: number, waitMs = 2500) {
+  await simulateClick(config, padCode, x, y, FIXED_VMOS_SCREEN.width, FIXED_VMOS_SCREEN.height);
+  await delay(waitMs);
+}
+
+async function login_inputText(config: VmosConfig, padCode: string, text: string) {
+  await inputText(config, padCode, text);
+  await delay(800);
+}
+
+async function login_pressBack(config: VmosConfig, padCode: string) {
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 10000, 500).catch(() => "");
+  await delay(800);
+}
+
+async function login_clearAppData(config: VmosConfig, padCode: string) {
+  await execAdbForText(config, padCode, `pm clear ${PKG_THREADS}`, 30000, 1000).catch(() => "");
+  await delay(2000);
+}
+
+async function login_launchThreads(config: VmosConfig, padCode: string) {
+  await execAdbForText(
+    config,
+    padCode,
+    `am start -n ${PKG_THREADS}/.activity.MainActivity 2>/dev/null`,
+    15000,
+    1000,
+  ).catch(() => "");
+  await delay(4000);
+}
+
+async function login_dismissKeyboard(config: VmosConfig, padCode: string) {
+  const out = await execAdbForText(config, padCode, "dumpsys input_method | grep mInputShown", 5000, 500).catch(() => "");
+  if (out.includes("mInputShown=true")) {
+    await login_pressBack(config, padCode);
+  }
+}
+
 export async function loginThreadsAccount(
   config: VmosConfig,
   padCode: string,
@@ -15236,7 +16316,7 @@ export async function loginThreadsAccount(
     }
 
     if (page === "login_username_form" || page === "login_password_form") {
-      return { ok: false, state: "failed", message: `登录失败：仍在登录页（密码错误或风控）: ${evidence}` };
+      return { ok: false, state: "failed", message: `登录失败：仍在登录页（密码错误或页面验证未通过）: ${evidence}` };
     }
 
     await delay(2000);
@@ -16711,8 +17791,13 @@ export async function publishPost(
     }
     if (task.platform === "threads") {
       return await publishThreads(config, task, onProgress, options);
+    } else if (task.platform === "twitter") {
+      await publishTwitter(config, task, onProgress);
+    } else if (task.platform === "rednote") {
+      return await publishRednoteWithRecovery(config, task, onProgress, options);
+    } else {
+      return await publishInstagram(config, task, onProgress);
     }
-    throw new Error(`Unsupported publish platform: ${task.platform || "(empty)"}`);
   } catch (err: unknown) {
     let msg = err instanceof Error ? err.message : String(err);
     const cancelled = isPublishCancellationMessage(msg);
@@ -16756,8 +17841,10 @@ export interface WarmupConfig {
   interactionEveryMaxPosts?: number;
   likeChance?: number;
   maxLikes?: number;
+  minRequiredLikes?: number;
   commentChance?: number;
   maxComments?: number;
+  minRequiredComments?: number;
   commentTemplates?: string[];
   commentPersona?: WarmupCommentPersona;
   keywords?: string[];
@@ -16766,6 +17853,25 @@ export interface WarmupConfig {
   stopOnRiskLimit?: boolean;
   strictCompletion?: boolean;
   requireReadablePostForComment?: boolean;
+}
+
+function assertWarmupMinimumCompletion(
+  platformLabel: string,
+  result: { liked: number; commented: number },
+  cfg: Pick<WarmupConfig, "minRequiredLikes" | "minRequiredComments">,
+) {
+  const minRequiredLikes = Math.max(0, Math.floor(cfg.minRequiredLikes || 0));
+  const minRequiredComments = Math.max(0, Math.floor(cfg.minRequiredComments || 0));
+  const missing: string[] = [];
+  if (minRequiredLikes > 0 && result.liked < minRequiredLikes) {
+    missing.push(`要求点赞至少 ${minRequiredLikes} 个，实际成功 ${result.liked} 个`);
+  }
+  if (minRequiredComments > 0 && result.commented < minRequiredComments) {
+    missing.push(`要求回复/留言至少 ${minRequiredComments} 个，实际成功 ${result.commented} 个`);
+  }
+  if (missing.length) {
+    throw new Error(`${platformLabel} 养号未完成：${missing.join("；")}`);
+  }
 }
 
 export interface WarmupCandidate {
@@ -16807,13 +17913,6 @@ function getWarmupRiskStateFile() {
   return process.env.WARMUP_RISK_STATE_FILE
     || path.join(process.cwd(), ".runtime", "automatic-script", "warmup-risk-state.json");
 }
-const WARMUP_DAILY_LIMITS = {
-  sessions: 2,
-  browsed: 100,
-  liked: 16,
-  commented: 8,
-};
-
 function getWarmupDateKey(date = new Date()) {
   return date.toISOString().slice(0, 10);
 }
@@ -16866,82 +17965,16 @@ export function planRiskManagedWarmupConfig(
   now = new Date(),
 ): { allowed: boolean; cfg: WarmupConfig; notes: string[]; state: WarmupRiskDayState } {
   const state = getWarmupRiskDayState(padCode, getWarmupDateKey(now));
-  const notes: string[] = [];
-  const isTimedSession = Number(cfg.minSessionMinutes) > 0 || Number(cfg.maxSessionMinutes) > 0;
-  const stopOnRiskLimit = cfg.stopOnRiskLimit === true;
-  const blockedUntil = state.blockedUntil ? new Date(state.blockedUntil) : null;
-  if (blockedUntil && blockedUntil.getTime() > now.getTime()) {
-    notes.push(`近期出现高风险页面：${state.lastBlockReason || "未知原因"}，当前不适合养号，但不阻断本次操作`);
-  }
-
-  const remainingSessions = Math.max(0, WARMUP_DAILY_LIMITS.sessions - state.sessions);
-  const remainingBrowsed = Math.max(0, WARMUP_DAILY_LIMITS.browsed - state.browsed);
-  const remainingLikes = Math.max(0, WARMUP_DAILY_LIMITS.liked - state.liked);
-  const remainingComments = Math.max(0, WARMUP_DAILY_LIMITS.commented - state.commented);
-  if (remainingSessions <= 0 || remainingBrowsed <= 0) {
-    notes.push("今日养号预算已超出，当前不建议继续频繁操作；本次仍按低风险配置执行");
-  }
-
-  if (stopOnRiskLimit) {
-    if (blockedUntil && blockedUntil.getTime() > now.getTime()) {
-      return { allowed: false, cfg, notes: [`账号近期触发风险页：${state.lastBlockReason || "未知原因"}，请人工介入处理后再养号`], state };
-    }
-    if (remainingSessions <= 0 || remainingBrowsed <= 0) {
-      return { allowed: false, cfg, notes: ["今日养号浏览/会话风险预算已用完，请人工介入确认后再继续"], state };
-    }
-  }
-
-  const lastSessionAt = state.lastSessionAt ? new Date(state.lastSessionAt).getTime() : 0;
-  const minutesSinceLast = lastSessionAt ? (now.getTime() - lastSessionAt) / 60_000 : Infinity;
-  if (minutesSinceLast < 10) {
-    notes.push(`距离上次养号约 ${Math.max(1, Math.floor(minutesSinceLast))} 分钟，本次自动降频`);
-  }
-
-  const requestedBrowse = Math.max(1, Math.floor(cfg.browseCount || (isTimedSession ? 80 : 1)));
-  const browseCap = isTimedSession ? 120 : (minutesSinceLast < 10 ? 3 : 12);
-  const browseBudgetCap = remainingBrowsed > 0 ? remainingBrowsed : requestedBrowse;
-  const browseCount = Math.max(1, Math.min(requestedBrowse, browseBudgetCap, browseCap));
-  if (browseCount < requestedBrowse) notes.push(`浏览数从 ${requestedBrowse} 收紧到 ${browseCount}`);
-
-  const requestedLikes = Math.max(0, Math.floor(cfg.maxLikes || 0));
-  const requestedComments = Math.max(0, Math.floor(cfg.maxComments || 0));
-  const likeBudgetCap = remainingLikes > 0 ? remainingLikes : requestedLikes;
-  const commentBudgetCap = remainingComments > 0 ? remainingComments : requestedComments;
-  const maxLikes = isTimedSession
-    ? Math.min(requestedLikes, likeBudgetCap)
-    : Math.min(requestedLikes, likeBudgetCap, 1);
-  const maxComments = isTimedSession
-    ? Math.min(requestedComments, commentBudgetCap)
-    : Math.min(requestedComments, commentBudgetCap, 1);
-  if (requestedLikes > maxLikes) notes.push(`点赞预算从 ${requestedLikes} 收紧到 ${maxLikes}`);
-  if (requestedComments > maxComments) notes.push(`留言预算从 ${requestedComments} 收紧到 ${maxComments}`);
-
-  if (stopOnRiskLimit && (requestedLikes > 0 || requestedComments > 0) && maxLikes <= 0 && maxComments <= 0) {
-    return { allowed: false, cfg, notes: ["今日点赞/留言风险预算已用完，请人工介入确认是否继续"], state };
-  }
-
-  const likeChance = maxLikes > 0
-    ? (isTimedSession ? 100 : Math.min(Math.max(10, cfg.likeChance || 0), minutesSinceLast < 10 ? 18 : 35))
-    : 0;
-  const commentChance = maxComments > 0
-    ? (isTimedSession ? 100 : Math.min(Math.max(6, cfg.commentChance || 0), minutesSinceLast < 10 ? 8 : 15))
-    : 0;
-
   return {
     allowed: true,
     cfg: {
       ...cfg,
-      browseCount,
-      likeChance,
-      maxLikes,
-      commentChance,
-      maxComments,
       riskManaged: true,
-      stopOnRiskLimit,
+      stopOnRiskLimit: false,
       strictCompletion: false,
       requireReadablePostForComment: cfg.requireReadablePostForComment ?? true,
     },
-    notes,
+    notes: [],
     state,
   };
 }
@@ -17196,6 +18229,88 @@ async function warmupSafeBackOrRelaunchThreads(
   return after;
 }
 
+async function warmupRecoverAcpInteractionSurface(
+  config: VmosConfig,
+  padCode: string,
+  reason: string,
+): Promise<void> {
+  const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+  const tapHome = async (waitMs = 1200) => tapViaAdbAbsolute(
+    config,
+    padCode,
+    Math.round(screen.width * 0.10),
+    Math.round(screen.height * 0.9625),
+    waitMs,
+  ).catch(() => undefined);
+  const tapTopLeftBack = async (waitMs = 900) => tapViaAdbAbsolute(
+    config,
+    padCode,
+    Math.round(screen.width * 0.075),
+    Math.round(screen.height * 0.064),
+    waitMs,
+  ).catch(() => undefined);
+  const relaunchAndTapThreadsHome = async (waitMs = 1300) => {
+    await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+    await tapHome(waitMs);
+    await warmupHumanSwipeByRatio(
+      config,
+      padCode,
+      0.48,
+      0.72,
+      0.48,
+      0.50,
+      warmupRandomInt(420, 680),
+      warmupRandomInt(220, 420),
+    ).catch(() => undefined);
+  };
+
+  const current = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (current?.page === "login_required" || current?.page === "challenge" || current?.page === "system_dialog") {
+    return;
+  }
+  if (current?.reason === "LOCAL_ANDROID_LAUNCHER") {
+    await relaunchAndTapThreadsHome(1100);
+    return;
+  }
+  if (current?.screenshotUrl && await detectThreadsSideDrawerLocally(current.screenshotUrl).catch(() => false)) {
+    await warmupDismissAcpSideDrawerAndCapture(config, padCode, current.screenshotUrl).catch(() => "");
+    await tapHome(900);
+    return;
+  }
+
+  if (/thread_detail_no_action_row|LOCAL_REPLY_COMPOSER|LOCAL_INLINE_REPLY_BAR|LOCAL_THREAD_DETAIL_SHELL/.test(reason)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(450);
+    await tapTopLeftBack(700);
+    await relaunchAndTapThreadsHome(1300);
+    return;
+  }
+
+  if (/acp_external_webview|LOCAL_THREADS_INAPP_BROWSER|media_viewer|acp_messages|acp_status_message/.test(reason)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(450);
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await tapHome(1300);
+    return;
+  }
+
+  if (/profile_ui|profile_menu/.test(reason)) {
+    await relaunchAndTapThreadsHome(1300);
+    return;
+  }
+
+  if (/acp_local_snapshot_no_actions|acp_local_action_row_missing|local_geometry_actions_missing|fallback_like_missing|fallback_comment_missing|acp_like_target_implausible/.test(reason)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(450);
+    await tapTopLeftBack(700);
+    await relaunchAndTapThreadsHome(1300);
+    return;
+  }
+
+  await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
+  await tapHome(900);
+}
+
 async function warmupDismissAcpSideDrawerAndCapture(
   config: VmosConfig,
   padCode: string,
@@ -17375,6 +18490,26 @@ function instagramNodeText(node: string): string {
   ].filter(Boolean).join(" "));
 }
 
+export function detectInstagramWarmupBlockedFromUiXml(uiXml: string): string | null {
+  const text = normalizeSingleLine(uiXml);
+  if (!text) return null;
+  const hasPassword = /(密碼|密码|Password)/i.test(text);
+  const hasLoginButton = /(登入|登录|Log in|Login)/i.test(text);
+  const hasAccountInput = /(用戶名稱|用户名|使用者名稱|電子郵件|电子邮件|手機號碼|手机号码|phone number|email address|username)/i.test(text);
+  const hasMetaBrand = /\bMeta\b/i.test(text);
+  const hasInstagramBrand = /\bInstagram\b/i.test(text);
+  if (hasAccountInput && hasPassword && hasLoginButton) {
+    return "Instagram 登录页：需要先在云机内登录账号";
+  }
+  if (hasInstagramBrand && hasLoginButton && (hasPassword || hasAccountInput || hasMetaBrand)) {
+    return "Instagram 登录页：需要先在云机内登录账号";
+  }
+  if (/(安全驗證|安全验证|驗證碼|验证码|captcha|challenge|checkpoint|suspicious|unusual activity|Confirm it's you|Help us confirm)/i.test(text)) {
+    return "Instagram 验证页：请先处理当前页面";
+  }
+  return null;
+}
+
 export function findInstagramWarmupActionTarget(
   uiXml: string,
   kind: InstagramWarmupActionKind,
@@ -17524,15 +18659,15 @@ function isSafeAcpGeometryActionRow(
   const likeX = targets.like.x;
   const commentX = targets.comment.x;
   if (likeX < width * 0.15 || likeX > width * 0.25) return false;
-  if (commentX < width * 0.33 || commentX > width * 0.41) return false;
+  if (commentX < width * 0.33 || commentX > width * 0.43) return false;
   if (Math.abs(targets.comment.y - targets.like.y) > height * 0.025) return false;
   const gap = targets.comment.x - targets.like.x;
-  if (gap < width * 0.10 || gap > width * 0.20) return false;
+  if (gap < width * 0.10 || gap > width * 0.22) return false;
   const light = parseWarmupDebugNumber(targets.debugRaw, "light");
   if (light !== null && light < 0.88) return false;
   const componentCount = countWarmupGeometryComponents(targets.debugRaw);
   if (componentCount !== null && componentCount < 3) return false;
-  return rowY >= height * 0.34 && rowY <= height * 0.64;
+  return rowY >= height * 0.34 && rowY <= height * 0.90;
 }
 
 function isSafeAcpGeometryLikeCandidate(
@@ -17550,7 +18685,94 @@ function isSafeAcpGeometryLikeCandidate(
   if (light !== null && light < 0.88) return false;
   const componentCount = countWarmupGeometryComponents(targets.debugRaw);
   if (componentCount !== null && componentCount < 4) return false;
-  return rowY >= height * 0.28 && rowY <= height * 0.70;
+  return rowY >= height * 0.28 && rowY <= height * 0.90;
+}
+
+function isSafeAcpGeometryCommentCandidate(
+  targets: Omit<WarmupFeedActionTargets, "screenshotUrl"> | null | undefined,
+  height: number,
+  width = BASE_SCREEN.width,
+): boolean {
+  if (!targets?.comment || !String(targets.debugReason || "").includes("geometry_action_row_detected")) return false;
+  const rowY = parseWarmupGeometryRowY(targets.debugRaw);
+  if (!rowY) return false;
+  const commentX = targets.comment.x;
+  if (commentX < width * 0.33 || commentX > width * 0.43) return false;
+  if (Math.abs(targets.comment.y - rowY) > height * 0.035) return false;
+  if (targets.like) {
+    const gap = targets.comment.x - targets.like.x;
+    if (gap < width * 0.10 || gap > width * 0.22) return false;
+  }
+  const light = parseWarmupDebugNumber(targets.debugRaw, "light");
+  if (light !== null && light < 0.88) return false;
+  const componentCount = countWarmupGeometryComponents(targets.debugRaw);
+  if (componentCount !== null && componentCount < 4) return false;
+  return rowY >= height * 0.28 && rowY <= height * 0.90;
+}
+
+export function isPlausibleAcpWarmupActionPoint(
+  kind: "like" | "comment",
+  point: { x: number; y: number } | null | undefined,
+  width = BASE_SCREEN.width,
+  height = BASE_SCREEN.height,
+): boolean {
+  if (!point) return false;
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
+  if (point.y < height * 0.20 || point.y > height * 0.90) return false;
+
+  if (kind === "like") {
+    return point.x >= width * 0.14 && point.x <= width * 0.34;
+  }
+  return point.x >= width * 0.33 && point.x <= width * 0.43;
+}
+
+export function isPlausibleAcpThreadDetailActionPoint(
+  kind: "like" | "comment",
+  point: { x: number; y: number } | null | undefined,
+  width = BASE_SCREEN.width,
+  height = BASE_SCREEN.height,
+): boolean {
+  if (!point) return false;
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
+  if (point.y < height * 0.34 || point.y > height * 0.88) return false;
+  if (kind === "like") {
+    return point.x >= width * 0.035 && point.x <= width * 0.16;
+  }
+  return point.x >= width * 0.15 && point.x <= width * 0.34;
+}
+
+export function sanitizeAcpWarmupActionTargets<T extends WarmupFeedActionTargets | null | undefined>(
+  targets: T,
+  width = BASE_SCREEN.width,
+  height = BASE_SCREEN.height,
+): T {
+  if (!targets) return targets;
+  const like = isPlausibleAcpWarmupActionPoint("like", targets.like, width, height)
+    ? targets.like
+    : undefined;
+  const comment = isPlausibleAcpWarmupActionPoint("comment", targets.comment, width, height)
+    ? targets.comment
+    : undefined;
+  const alternateLikes = (targets.alternateLikes || [])
+    .filter((point) => isPlausibleAcpWarmupActionPoint("like", point, width, height));
+  const alternateComments = (targets.alternateComments || [])
+    .filter((point) => isPlausibleAcpWarmupActionPoint("comment", point, width, height));
+  const rejected: string[] = [];
+  if (targets.like && !like) rejected.push(`like=${Math.round(targets.like.x)},${Math.round(targets.like.y)}`);
+  if (targets.comment && !comment) rejected.push(`comment=${Math.round(targets.comment.x)},${Math.round(targets.comment.y)}`);
+  if (!rejected.length && alternateLikes.length === (targets.alternateLikes || []).length && alternateComments.length === (targets.alternateComments || []).length) {
+    return targets;
+  }
+  return {
+    ...targets,
+    like,
+    comment,
+    alternateLikes,
+    alternateComments,
+    debugReason: [targets.debugReason, rejected.length ? `acp_implausible_targets_rejected:${rejected.join(",")}` : undefined]
+      .filter(Boolean)
+      .join(" | "),
+  } as T;
 }
 
 async function warmupAlignToReadablePost(config: VmosConfig, padCode: string) {
@@ -17604,10 +18826,24 @@ async function warmupAlignToReadablePost(config: VmosConfig, padCode: string) {
 }
 
 export function buildAcpWarmupFallbackRows(width = BASE_SCREEN.width, height = BASE_SCREEN.height) {
-  return [0.61, 0.62, 0.58, 0.57, 0.64, 0.68, 0.50].map((ratio) => ({
+  return [0.61, 0.62, 0.58, 0.57, 0.64, 0.68, 0.50, 0.873].map((ratio) => ({
     like: { x: Math.round(width * 0.22), y: Math.round(height * ratio) },
     comment: { x: Math.round(width * 0.385), y: Math.round(height * ratio) },
   }));
+}
+
+function chooseAcpWarmupFallbackRow(
+  rows: Array<{ like: { x: number; y: number }; comment: { x: number; y: number } }>,
+  height = BASE_SCREEN.height,
+  options: { topBackNavigationVisible?: boolean } = {},
+) {
+  const usableRows = options.topBackNavigationVisible
+    ? rows.filter((row) => row.like.y < height * 0.84)
+    : rows;
+  const candidates = usableRows.length ? usableRows : rows;
+  return [...candidates].sort((a, b) => (
+    Math.abs(a.like.y - height * 0.66) - Math.abs(b.like.y - height * 0.66)
+  ))[0];
 }
 
 async function fallbackWarmupHomeFeedActionsFromScreenshot(
@@ -17626,7 +18862,7 @@ function parseWarmupVisionPoint(value: unknown, width: number, height: number): 
     x: Math.max(0, Math.min(width - 1, Math.round(x))),
     y: Math.max(0, Math.min(height - 1, Math.round(y))),
   };
-  if (rounded.y > height * 0.86) return undefined;
+  if (rounded.y > height * 0.90) return undefined;
   return rounded;
 }
 
@@ -17928,7 +19164,7 @@ async function locateThreadsWarmupActionsWithFallback(
     if (!point) return undefined;
     if (image && point.y < image.height * 0.15) return undefined;
     if (image && point.y > image.height - 30) return undefined;
-    if (image && point.y > image.height * 0.86) return undefined;
+    if (image && point.y > image.height * 0.90) return undefined;
     return point;
   };
 
@@ -17956,6 +19192,7 @@ async function locateThreadsWarmupActionsWithFallback(
   const primary = await locateThreadsWarmupActionsByVision(screenshotUrl, options);
   debugBits.push(...[primary?.debugReason, primary?.debugRaw].filter(Boolean));
   const primaryLikeCandidate = accept(primary?.like);
+  const primaryCommentCandidate = accept(primary?.comment);
   let like = accept(primary?.like);
   let comment = accept(primary?.comment);
   let alternateLikes = (primary?.alternateLikes || []).map(accept).filter((point): point is { x: number; y: number } => Boolean(point));
@@ -17989,6 +19226,10 @@ async function locateThreadsWarmupActionsWithFallback(
     like = primaryLikeCandidate;
     debugBits.push("geometry_like_shape_override");
   }
+  if (!comment && primaryCommentCandidate && image && isSafeAcpGeometryCommentCandidate(primary, image.height, image.width)) {
+    comment = primaryCommentCandidate;
+    debugBits.push("geometry_comment_shape_override");
+  }
 
   if (!like) debugBits.push("fallback_like_missing");
   if (!comment) debugBits.push("fallback_comment_missing");
@@ -18004,8 +19245,9 @@ async function locateThreadsWarmupActionsWithFallback(
     return { debugReason: debugBits.join(" | ") || "no_actions_found" };
   }
   const debugSummary = debugBits.join(" | ");
+  const keepSparseGeometryPair = debugSummary.includes("geometry_action_row_detected") && (!like || !comment);
   return {
-    ...normalizeWarmupActionPair({ like, comment }, image?.width, image?.height),
+    ...(keepSparseGeometryPair ? { like, comment } : normalizeWarmupActionPair({ like, comment }, image?.width, image?.height)),
     alternateLikes,
     alternateComments,
     engagementScore: primary?.engagementScore,
@@ -18264,7 +19506,7 @@ async function detectThreadsStatusMessageVisually(screenshotUrl: string | undefi
   }
 }
 
-async function detectThreadsWarmupMediaOverlayActions(
+export async function detectThreadsWarmupMediaOverlayActions(
   screenshotUrl: string | undefined,
 ): Promise<Omit<WarmupFeedActionTargets, "screenshotUrl"> | null> {
   if (!screenshotUrl) return null;
@@ -18300,14 +19542,99 @@ async function detectThreadsWarmupMediaOverlayActions(
   const screenDark = ratio(0, 0, 1, 0.9, (r, g, b) => (r + g + b) / 3 < 70);
   const bottomLight = ratio(0.15, 0.92, 0.85, 0.992, (r, g, b) => r > 205 && g > 205 && b > 205);
   const topCloseLight = ratio(0.02, 0.02, 0.12, 0.08, (r, g, b) => r > 180 && g > 180 && b > 180);
-  if (screenDark < 0.52 || bottomLight < 0.014 || topCloseLight < 0.01) return null;
+  if (screenDark < 0.28 || bottomLight < 0.006 || topCloseLight < 0.01) return null;
+  const findBottomIcon = (xMinRatio: number, xMaxRatio: number) => {
+    const startX = Math.max(0, Math.floor(width * xMinRatio));
+    const endX = Math.min(width - 1, Math.ceil(width * xMaxRatio));
+    const startY = Math.max(0, Math.floor(height * 0.86));
+    const endY = Math.min(height - 1, Math.ceil(height * 0.965));
+    const visited = new Uint8Array(width * height);
+    const isIconPixel = (index: number) => {
+      const r = data[index] ?? 0;
+      const g = data[index + 1] ?? 0;
+      const b = data[index + 2] ?? 0;
+      const a = data[index + 3] ?? 0;
+      if (a < 100) return false;
+      const white = r > 175 && g > 175 && b > 175;
+      const red = r > 180 && g < 135 && b < 165 && r > g * 1.35 && r > b * 1.2;
+      return white || red;
+    };
+    const components: Array<{ x: number; y: number; width: number; height: number; count: number; score: number }> = [];
+    for (let y = startY; y <= endY; y += 1) {
+      for (let x = startX; x <= endX; x += 1) {
+        const start = y * width + x;
+        if (visited[start]) continue;
+        visited[start] = 1;
+        if (!isIconPixel(start * 4)) continue;
+        const queue = [start];
+        let cursor = 0;
+        let count = 0;
+        let minX = x;
+        let maxX = x;
+        let minY = y;
+        let maxY = y;
+        let sumX = 0;
+        let sumY = 0;
+        while (cursor < queue.length) {
+          const current = queue[cursor++];
+          const cy = Math.floor(current / width);
+          const cx = current % width;
+          count += 1;
+          sumX += cx;
+          sumY += cy;
+          minX = Math.min(minX, cx);
+          maxX = Math.max(maxX, cx);
+          minY = Math.min(minY, cy);
+          maxY = Math.max(maxY, cy);
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx < startX || nx > endX || ny < startY || ny > endY) continue;
+              const next = ny * width + nx;
+              if (visited[next]) continue;
+              visited[next] = 1;
+              if (isIconPixel(next * 4)) queue.push(next);
+            }
+          }
+        }
+        const boxWidth = maxX - minX + 1;
+        const boxHeight = maxY - minY + 1;
+        const density = count / Math.max(1, boxWidth * boxHeight);
+        if (count < 35 || count > 1800) continue;
+        if (boxWidth < width * 0.025 || boxWidth > width * 0.11) continue;
+        if (boxHeight < height * 0.012 || boxHeight > height * 0.065) continue;
+        if (density < 0.08) continue;
+        const centerX = Math.round(sumX / count);
+        const centerY = Math.round(sumY / count);
+        components.push({
+          x: centerX,
+          y: centerY,
+          width: boxWidth,
+          height: boxHeight,
+          count,
+          score: count + Math.min(120, boxWidth * 2 + boxHeight * 2),
+        });
+      }
+    }
+    return components.sort((a, b) => b.score - a.score)[0] || null;
+  };
+  const likeIcon = findBottomIcon(0.18, 0.34);
+  const commentIcon = findBottomIcon(0.35, 0.52);
+  const like = likeIcon
+    ? { x: likeIcon.x, y: likeIcon.y }
+    : { x: Math.round(width * 0.252), y: Math.round(height * 0.923) };
+  const comment = commentIcon
+    ? { x: commentIcon.x, y: commentIcon.y }
+    : { x: Math.round(width * 0.445), y: Math.round(height * 0.923) };
   return {
-    like: { x: Math.round(width * 0.245), y: Math.round(height * 0.965) },
-    comment: { x: Math.round(width * 0.415), y: Math.round(height * 0.965) },
-    alternateLikes: [{ x: Math.round(width * 0.24), y: Math.round(height * 0.955) }],
-    alternateComments: [{ x: Math.round(width * 0.41), y: Math.round(height * 0.955) }],
+    like,
+    comment,
+    alternateLikes: [{ x: Math.round(width * 0.252), y: Math.round(height * 0.923) }],
+    alternateComments: [{ x: Math.round(width * 0.445), y: Math.round(height * 0.923) }],
     debugReason: "acp_media_overlay_actions",
-    debugRaw: `screenDark=${screenDark.toFixed(2)};bottomLight=${bottomLight.toFixed(3)};topCloseLight=${topCloseLight.toFixed(3)}`,
+    debugRaw: `screenDark=${screenDark.toFixed(2)};bottomLight=${bottomLight.toFixed(3)};topCloseLight=${topCloseLight.toFixed(3)};like=${like.x},${like.y}${likeIcon ? `,${likeIcon.width}x${likeIcon.height},c${likeIcon.count}` : ",fallback"};comment=${comment.x},${comment.y}${commentIcon ? `,${commentIcon.width}x${commentIcon.height},c${commentIcon.count}` : ",fallback"}`,
   };
 }
 
@@ -18397,8 +19724,34 @@ async function warmupLocateCurrentAcpActions(
   if (earlyMediaOverlayActions?.like) {
     return { screenshotUrl: shotUrl, ...earlyMediaOverlayActions };
   }
+  const earlyDetailReason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
+  const earlyInlineReplyBar = earlyDetailReason ? false : await detectThreadsInlineReplyBarLocally(shotUrl).catch(() => false);
+  const earlyDetailShell = earlyDetailReason || earlyInlineReplyBar ? false : await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false);
+  if (earlyDetailReason || earlyInlineReplyBar || earlyDetailShell) {
+    const earlyDetailTargets = await detectThreadsDetailActionRowLocally(shotUrl).catch(() => null);
+    if (earlyDetailTargets?.like || earlyDetailTargets?.comment) {
+      return {
+        screenshotUrl: shotUrl,
+        ...earlyDetailTargets,
+        debugReason: [
+          `thread_detail_visual:${earlyDetailReason || (earlyInlineReplyBar ? "LOCAL_INLINE_REPLY_BAR" : "LOCAL_THREAD_DETAIL_SHELL")}`,
+          "acp_detail_action_row",
+        ].join(" | "),
+      };
+    }
+    return {
+      screenshotUrl: shotUrl,
+      debugReason: `thread_detail_no_action_row:${earlyDetailReason || (earlyInlineReplyBar ? "LOCAL_INLINE_REPLY_BAR" : "LOCAL_THREAD_DETAIL_SHELL")}`,
+    };
+  }
   const acpLocalOnlyLocateOptions: LocateThreadsWarmupActionsOptions = { allowRemoteVision: false };
-  const fastScreenshotTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, acpLocalOnlyLocateOptions).catch(() => null);
+  let fastScreenshotTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, acpLocalOnlyLocateOptions).catch(() => null);
+  const fastImage = await getImageDimensions(shotUrl).catch(() => null);
+  fastScreenshotTargets = sanitizeAcpWarmupActionTargets(
+    fastScreenshotTargets,
+    fastImage?.width || BASE_SCREEN.width,
+    fastImage?.height || BASE_SCREEN.height,
+  );
   if (
     fastScreenshotTargets?.like
     && /column_action_row_detected|local_action_row_detected|geometry_action_row_detected/.test(fastScreenshotTargets.debugReason || "")
@@ -18406,7 +19759,6 @@ async function warmupLocateCurrentAcpActions(
     const fastDebug = fastScreenshotTargets.debugReason || "";
     const geometryOnly = fastDebug.includes("geometry_action_row_detected")
       && !/column_action_row_detected|local_action_row_detected/.test(fastDebug);
-    const fastImage = await getImageDimensions(shotUrl).catch(() => null);
     const commentTooLow = Boolean(
       fastImage?.height
       && fastScreenshotTargets.comment
@@ -18507,7 +19859,13 @@ async function warmupLocateCurrentAcpActions(
     return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_black_letterbox" };
   }
 
-  const earlyHomeTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, acpLocalOnlyLocateOptions).catch(() => null);
+  let earlyHomeTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, acpLocalOnlyLocateOptions).catch(() => null);
+  const earlyImage = await getImageDimensions(shotUrl).catch(() => null);
+  earlyHomeTargets = sanitizeAcpWarmupActionTargets(
+    earlyHomeTargets,
+    earlyImage?.width || BASE_SCREEN.width,
+    earlyImage?.height || BASE_SCREEN.height,
+  );
   if (
     earlyHomeTargets?.like
     && /column_action_row_detected|local_action_row_detected|geometry_action_row_detected/.test(earlyHomeTargets.debugReason || "")
@@ -18532,15 +19890,39 @@ async function warmupLocateCurrentAcpActions(
   }
 
   const detailReason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
-  const localTargets = detailReason
+  let localTargets = detailReason
     ? await detectThreadsDetailActionRowLocally(shotUrl)
     : await locateThreadsWarmupActionsWithFallback(shotUrl, uiXml, acpLocalOnlyLocateOptions);
-  const image = await getImageDimensions(shotUrl).catch(() => null);
-  const acpFallbackRows = buildAcpWarmupFallbackRows(image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
-  const verifiedFallbackRows = (await Promise.all(acpFallbackRows.map(async (row) => (
-    await isLikelyWarmupActionRowAtPoint(shotUrl, row.like).catch(() => false) ? row : null
-  )))).filter((row): row is { like: { x: number; y: number }; comment: { x: number; y: number } } => Boolean(row));
-  const hasLocalAction = Boolean(localTargets?.like || localTargets?.comment);
+	  const image = await getImageDimensions(shotUrl).catch(() => null);
+	  localTargets = sanitizeAcpWarmupActionTargets(localTargets, image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
+	  const hasLocalAction = Boolean(localTargets?.like || localTargets?.comment);
+	  const acpFallbackRows = buildAcpWarmupFallbackRows(image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
+	  const homeCueForCommonFallback = await detectThreadsHomeFeedLocally(shotUrl).catch(() => null);
+	  const topBackNavigationVisible = await detectThreadsTopBackNavigationLocally(shotUrl).catch(() => false);
+	  const allowCommonFallbackRows = Boolean(homeCueForCommonFallback) || !topBackNavigationVisible;
+	  const verifiedFallbackRows = (await Promise.all(acpFallbackRows.map(async (row) => (
+	    await isLikelyWarmupActionRowAtPoint(shotUrl, row.like).catch(() => false) ? row : null
+	  )))).filter((row): row is { like: { x: number; y: number }; comment: { x: number; y: number } } => Boolean(row));
+	  if (!hasLocalAction && allowCommonFallbackRows && verifiedFallbackRows.length) {
+	    const chosen = chooseAcpWarmupFallbackRow(verifiedFallbackRows, image?.height || BASE_SCREEN.height, { topBackNavigationVisible });
+	    const countAwareComment = {
+	      x: Math.round((image?.width || BASE_SCREEN.width) * 0.425),
+	      y: chosen.comment.y,
+	    };
+	    return {
+	      screenshotUrl: shotUrl,
+	      like: chosen.like,
+	      comment: countAwareComment,
+	      alternateLikes: verifiedFallbackRows.map((row) => row.like),
+	      alternateComments: [countAwareComment, chosen.comment, ...verifiedFallbackRows.map((row) => row.comment)],
+	      debugReason: [
+	        "acp_verified_common_action_row_fallback",
+	        localTargets?.debugReason,
+	        localTargets?.debugRaw,
+	      ].filter(Boolean).join(" | "),
+	      debugRaw: `fallback=${chosen.like.x},${chosen.like.y};comment=${countAwareComment.x},${countAwareComment.y};verified=${verifiedFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}`,
+	    };
+	  }
   if (!hasLocalAction && await detectThreadsWarmupBlackLetterboxMedia(shotUrl).catch(() => false)) {
     return {
       screenshotUrl: shotUrl,
@@ -18567,14 +19949,7 @@ async function warmupLocateCurrentAcpActions(
       localTargets?.debugReason,
       localGeometryOnly ? "acp_geometry_comment_retained" : "",
     ].filter(Boolean).join(" | "),
-  } : (verifiedFallbackRows.length ? {
-    like: verifiedFallbackRows[0]?.like,
-    comment: verifiedFallbackRows[0]?.comment,
-    alternateLikes: verifiedFallbackRows.slice(1).map((row) => row.like),
-    alternateComments: verifiedFallbackRows.slice(1).map((row) => row.comment),
-    debugReason: "acp_verified_common_action_row_fallback",
-    debugRaw: verifiedFallbackRows.map((row) => `like=${row.like.x},${row.like.y};comment=${row.comment.x},${row.comment.y}`).join("|"),
-  } : null);
+  } : null;
   return fallbackTargets
     ? {
         screenshotUrl: shotUrl,
@@ -18591,6 +19966,7 @@ async function warmupLocateCurrentAcpActions(
           "acp_local_action_row_missing",
           localTargets?.debugReason,
           localTargets?.debugRaw,
+          verifiedFallbackRows.length ? `common_fallback_disabled:${allowCommonFallbackRows ? "no_local_action" : "not_home"}:${verifiedFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}` : undefined,
           `fallback_rows_rejected:${acpFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}`,
         ].filter(Boolean).join(" | "),
       };
@@ -18632,6 +20008,27 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
   if (mediaOverlayActions?.like || mediaOverlayActions?.comment) {
     return { screenshotUrl: shotUrl, ...mediaOverlayActions };
   }
+  const detailReason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
+  const inlineReplyBar = detailReason ? false : await detectThreadsInlineReplyBarLocally(shotUrl).catch(() => false);
+  const detailShell = detailReason || inlineReplyBar ? false : await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false);
+  if (detailReason || inlineReplyBar || detailShell) {
+    const detailTargets = await detectThreadsDetailActionRowLocally(shotUrl).catch(() => null);
+    if (detailTargets?.like || detailTargets?.comment) {
+      return {
+        screenshotUrl: shotUrl,
+        ...detailTargets,
+        debugReason: [
+          `thread_detail_visual:${detailReason || (inlineReplyBar ? "LOCAL_INLINE_REPLY_BAR" : "LOCAL_THREAD_DETAIL_SHELL")}`,
+          "acp_detail_action_row",
+          "acp_local_snapshot_action_row",
+        ].join(" | "),
+      };
+    }
+    return {
+      screenshotUrl: shotUrl,
+      debugReason: `thread_detail_no_action_row:${detailReason || (inlineReplyBar ? "LOCAL_INLINE_REPLY_BAR" : "LOCAL_THREAD_DETAIL_SHELL")}`,
+    };
+  }
   if (await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) {
     return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_local_screenshot" };
   }
@@ -18640,11 +20037,12 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
   }
 
   const localOnlyOptions: LocateThreadsWarmupActionsOptions = { allowRemoteVision: false };
-  const localTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, localOnlyOptions).catch(() => null);
+  let localTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, localOnlyOptions).catch(() => null);
+  const image = await getImageDimensions(shotUrl).catch(() => null);
+  localTargets = sanitizeAcpWarmupActionTargets(localTargets, image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
   const localDebug = [localTargets?.debugReason, localTargets?.debugRaw].filter(Boolean).join(" | ");
   const localGeometryOnly = localDebug.includes("geometry_action_row_detected")
     && !/column_action_row_detected|local_action_row_detected/.test(localDebug);
-  const image = await getImageDimensions(shotUrl).catch(() => null);
   if (localGeometryOnly && isSafeAcpGeometryActionRow(localTargets, image?.height || BASE_SCREEN.height, image?.width || BASE_SCREEN.width)) {
     return {
       screenshotUrl: shotUrl,
@@ -18665,31 +20063,39 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
     };
   }
 
-  const acpFallbackRows = buildAcpWarmupFallbackRows(image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
-  const verifiedFallbackRows = (await Promise.all(acpFallbackRows.map(async (row) => (
-    await isLikelyWarmupActionRowAtPoint(shotUrl, row.like).catch(() => false) ? row : null
-  )))).filter((row): row is { like: { x: number; y: number }; comment: { x: number; y: number } } => Boolean(row));
-  if (verifiedFallbackRows.length) {
-    return {
-      screenshotUrl: shotUrl,
-      like: verifiedFallbackRows[0]?.like,
-      comment: verifiedFallbackRows[0]?.comment,
-      alternateLikes: verifiedFallbackRows.slice(1).map((row) => row.like),
-      alternateComments: verifiedFallbackRows.slice(1).map((row) => row.comment),
-      debugReason: [
-        "acp_verified_common_action_row_fallback",
-        "acp_local_snapshot_fallback",
-        localDebug ? `local_rejected:${localDebug}` : undefined,
-      ].filter(Boolean).join(" | "),
-      debugRaw: verifiedFallbackRows.map((row) => `like=${row.like.x},${row.like.y};comment=${row.comment.x},${row.comment.y}`).join("|"),
-    };
-  }
-
-  return {
-    screenshotUrl: shotUrl,
+	  const acpFallbackRows = buildAcpWarmupFallbackRows(image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
+	  const homeCueForCommonFallback = await detectThreadsHomeFeedLocally(shotUrl).catch(() => null);
+	  const topBackNavigationVisible = await detectThreadsTopBackNavigationLocally(shotUrl).catch(() => false);
+	  const allowCommonFallbackRows = Boolean(homeCueForCommonFallback) || !topBackNavigationVisible;
+	  const verifiedFallbackRows = (await Promise.all(acpFallbackRows.map(async (row) => (
+	    await isLikelyWarmupActionRowAtPoint(shotUrl, row.like).catch(() => false) ? row : null
+	  )))).filter((row): row is { like: { x: number; y: number }; comment: { x: number; y: number } } => Boolean(row));
+	  if (allowCommonFallbackRows && verifiedFallbackRows.length) {
+	    const chosen = chooseAcpWarmupFallbackRow(verifiedFallbackRows, image?.height || BASE_SCREEN.height, { topBackNavigationVisible });
+	    const countAwareComment = {
+	      x: Math.round((image?.width || BASE_SCREEN.width) * 0.425),
+	      y: chosen.comment.y,
+	    };
+	    return {
+	      screenshotUrl: shotUrl,
+	      like: chosen.like,
+	      comment: countAwareComment,
+	      alternateLikes: verifiedFallbackRows.map((row) => row.like),
+	      alternateComments: [countAwareComment, chosen.comment, ...verifiedFallbackRows.map((row) => row.comment)],
+	      debugReason: [
+	        "acp_verified_common_action_row_fallback",
+	        "acp_local_snapshot_action_row",
+	        localDebug,
+	      ].filter(Boolean).join(" | "),
+	      debugRaw: `fallback=${chosen.like.x},${chosen.like.y};comment=${countAwareComment.x},${countAwareComment.y};verified=${verifiedFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}`,
+	    };
+	  }
+	  return {
+	    screenshotUrl: shotUrl,
     debugReason: [
       "acp_local_snapshot_no_actions",
       localDebug,
+      verifiedFallbackRows.length ? `common_fallback_disabled:${allowCommonFallbackRows ? "no_local_action" : "not_home"}:${verifiedFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}` : undefined,
       `fallback_rows_rejected:${acpFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}`,
     ].filter(Boolean).join(" | "),
   };
@@ -19408,10 +20814,13 @@ async function warmupExecuteLikeAtPoint(
   return await warmupTapAbsoluteHuman(config, padCode, point, warmupRandom(1500, 2200), 4);
 }
 
-async function detectThreadsDetailActionRowLocally(
+export async function detectThreadsDetailActionRowLocally(
   screenshotUrl: string,
 ): Promise<{ like?: { x: number; y: number }; comment?: { x: number; y: number }; debugRaw?: string } | null> {
   try {
+    if (await detectThreadsFullscreenMediaViewerLocally(screenshotUrl).catch(() => false)) return null;
+    if (await detectThreadsWarmupBlackLetterboxMedia(screenshotUrl).catch(() => false)) return null;
+    if (await detectThreadsWarmupMediaOverlayActions(screenshotUrl).catch(() => null)) return null;
     const pixels = await getImagePixelData(screenshotUrl);
     if (!pixels) return null;
     const { data, width, height } = pixels;
@@ -19681,25 +21090,30 @@ async function warmupTryLikeFromThreadDetail(
     await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, localActions.like, 1600);
     const screenshotUrl = await screenshot(config, padCode)
       .then((url) => freezeScreenshotUrl(url));
-    return { point: localActions.like, screenshotUrl };
+    if (await detectThreadsWarmupLikeConfirmedVisually(screenshotUrl, localActions.like).catch(() => false)) {
+      return { point: localActions.like, screenshotUrl };
+    }
   }
 
   const uiXml = await dumpUiXml(config, padCode).catch(() => "");
   const replyInput = uiXml ? findThreadsReplyComposerInputTarget(uiXml) : null;
-  if (!replyInput) return null;
+  const inlineReplyBar = replyInput ? true : await detectThreadsInlineReplyBarLocally(currentShotUrl).catch(() => false);
+  const detailShell = replyInput || inlineReplyBar ? false : await detectThreadsThreadDetailShellLocally(currentShotUrl).catch(() => false);
+  if (!replyInput && !inlineReplyBar && !detailShell) return null;
 
-  const visualLike = await locateThreadsButtonByVision(
-    currentShotUrl,
-    "Threads 串文详情页里当前帖子图片或正文外部的互动栏空心爱心/未点赞按钮中心点；它通常在左侧，和评论气泡、转发、纸飞机在同一行；不要选择图片内容内部的图案、股票图表、文字或底部回复输入框",
-  );
+  const visualLike = isAcpPad(padCode)
+    ? null
+    : await locateThreadsButtonByVision(
+        currentShotUrl,
+        "Threads 串文详情页里当前帖子图片或正文外部的互动栏空心爱心/未点赞按钮中心点；它通常在左侧，和评论气泡、转发、纸飞机在同一行；不要选择图片内容内部的图案、股票图表、文字或底部回复输入框",
+      );
   const image = await getImageDimensions(currentShotUrl).catch(() => null);
-  const detailFallbackY = Math.round((image?.height || BASE_SCREEN.height) * 0.25);
-  const point = visualLike && visualLike.x <= 180 && visualLike.y >= (image?.height || BASE_SCREEN.height) * 0.18
-      ? visualLike
-      : {
-          x: Math.round((image?.width || BASE_SCREEN.width) * 0.058),
-          y: Math.max(detailFallbackY, Math.min((image?.height || BASE_SCREEN.height) - 220, replyInput.y - Math.round((image?.height || BASE_SCREEN.height) * 0.62))),
-        };
+  const imageWidth = image?.width || BASE_SCREEN.width;
+  const imageHeight = image?.height || BASE_SCREEN.height;
+  const point = visualLike && isPlausibleAcpThreadDetailActionPoint("like", visualLike, imageWidth, imageHeight)
+    ? visualLike
+    : null;
+  if (!point) return null;
   if (await detectThreadsWarmupLikeConfirmedVisually(currentShotUrl, point)) {
     return { point, screenshotUrl: currentShotUrl };
   }
@@ -19808,8 +21222,12 @@ async function warmupAttemptLikeOnCurrentScreen(
       };
     }
     await warmupWaitForScrollSettle(650, 1100);
-    const freshActions = await warmupLocateCurrentAcpActions(config, padCode).catch((error: any) => {
-      errors.push(`点击前重定位异常:${error?.message || String(error)}`);
+    const freshActions = await withTimeout(
+      warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode),
+      9_000,
+      "warmup ACP like fast relocalize timeout",
+    ).catch((error: any) => {
+      errors.push(`点击前快速重定位异常:${error?.message || String(error)}`);
       return null;
     });
     if (freshActions?.like) {
@@ -19821,16 +21239,104 @@ async function warmupAttemptLikeOnCurrentScreen(
         screenshotUrl: freshActions.screenshotUrl || currentActions.screenshotUrl,
       };
     }
-    const point = currentActions.like;
     const beforeShotUrl = currentActions.screenshotUrl;
+    const beforeImage = beforeShotUrl ? await getImageDimensions(beforeShotUrl).catch(() => null) : null;
+    const candidateWidth = beforeImage?.width || BASE_SCREEN.width;
+    const candidateHeight = beforeImage?.height || BASE_SCREEN.height;
+    const beforeReplyComposerReason = beforeShotUrl
+      ? await detectThreadsReplyComposerLocally(beforeShotUrl).catch(() => null)
+      : null;
+    const beforeInlineReplyBar = beforeShotUrl && !beforeReplyComposerReason
+      ? await detectThreadsInlineReplyBarLocally(beforeShotUrl).catch(() => false)
+      : false;
+    if (
+      beforeShotUrl
+      && (beforeReplyComposerReason || beforeInlineReplyBar)
+      && !/thread_detail_visual|acp_detail_action_row/.test(currentActions.debugReason || "")
+    ) {
+      return {
+        ok: false,
+        message: `thread_detail_no_action_row:${beforeReplyComposerReason || "LOCAL_INLINE_REPLY_BAR"}_BEFORE_LIKE`,
+        screenshotUrl: beforeShotUrl,
+        movedToDetail: true,
+      };
+    }
+    if (
+      beforeShotUrl
+      && (beforeReplyComposerReason || beforeInlineReplyBar)
+      && await detectAcpReplyInputHasDraftLocally(beforeShotUrl).catch(() => false)
+    ) {
+      return {
+        ok: false,
+        message: `thread_detail_no_action_row:${beforeReplyComposerReason || "LOCAL_INLINE_REPLY_BAR"}_BEFORE_LIKE`,
+        screenshotUrl: beforeShotUrl,
+        movedToDetail: true,
+      };
+    }
+    const targetIsThreadDetail = /thread_detail_visual|acp_detail_action_row/.test(currentActions.debugReason || "");
+    const point = [currentActions.like, ...(currentActions.alternateLikes || [])]
+      .filter((candidate): candidate is { x: number; y: number } => Boolean(candidate))
+      .find((candidate) => targetIsThreadDetail
+        ? isPlausibleAcpThreadDetailActionPoint("like", candidate, candidateWidth, candidateHeight)
+        : isPlausibleAcpWarmupActionPoint("like", candidate, candidateWidth, candidateHeight));
+    if (!point) {
+      return {
+        ok: false,
+        message: `acp_like_target_implausible:${currentActions.like ? `${Math.round(currentActions.like.x)},${Math.round(currentActions.like.y)}` : "missing"}`,
+        screenshotUrl: beforeShotUrl,
+      };
+    }
+    if (beforeShotUrl && await detectThreadsProfilePageLocally(beforeShotUrl).catch(() => false)) {
+      return {
+        ok: false,
+        message: "profile_ui:acp_like_target_screenshot",
+        screenshotUrl: beforeShotUrl,
+      };
+    }
     const tapPoint = await warmupExecuteLikeAtPoint(config, padCode, point, currentActions.screenshotUrl);
     const shotUrl = await withTimeout(
       screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
       8_000,
       "warmup acp like evidence screenshot timeout",
     ).catch(() => currentActions?.screenshotUrl);
-    const verified = await detectThreadsWarmupLikeConfirmedVisually(shotUrl, tapPoint).catch(() => false);
-    if (!verified) {
+	    const verified = await detectThreadsWarmupLikeConfirmedVisually(shotUrl, tapPoint).catch(() => false);
+	    if (!verified) {
+	      const detailLike = await withTimeout(
+	        warmupTryLikeFromThreadDetail(config, padCode, shotUrl),
+	        7_500,
+	        "warmup ACP detail-like fallback timeout",
+	      ).catch(() => null);
+	      if (detailLike) {
+	        const detailVerified = await detectThreadsWarmupLikeConfirmedVisually(detailLike.screenshotUrl, detailLike.point).catch(() => false);
+	        if (detailVerified) {
+	          return {
+	            ok: true,
+	            message: `ACP 详情页点赞已确认（target=${Math.round(detailLike.point.x)},${Math.round(detailLike.point.y)}）`,
+	            point: detailLike.point,
+	            screenshotUrl: detailLike.screenshotUrl,
+	            movedToDetail: true,
+	          };
+	        }
+	      }
+	      const mediaOverlayActions = await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null);
+	      if (mediaOverlayActions?.like && shotUrl) {
+        const overlayTapPoint = await warmupExecuteLikeAtPoint(config, padCode, mediaOverlayActions.like, shotUrl);
+        const overlayShotUrl = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          8_000,
+          "warmup acp media overlay like evidence screenshot timeout",
+        ).catch(() => shotUrl);
+        const overlayVerified = await detectThreadsWarmupLikeConfirmedVisually(overlayShotUrl, overlayTapPoint).catch(() => false);
+        if (overlayVerified) {
+          return {
+            ok: true,
+            message: `ACP 媒体页点赞已确认（target=${Math.round(mediaOverlayActions.like.x)},${Math.round(mediaOverlayActions.like.y)} tap=${Math.round(overlayTapPoint.x)},${Math.round(overlayTapPoint.y)}）`,
+            point: overlayTapPoint,
+            screenshotUrl: overlayShotUrl,
+            movedToDetail: true,
+          };
+        }
+      }
       const debugPath = saveThreadsDebugScreenshot(shotUrl, "warmup-acp-like-unconfirmed");
       return {
         ok: false,
@@ -20091,12 +21597,25 @@ async function handleThreadsWarmupCommentPrivacyPrompt(
     const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
     await tapViaAdbAbsoluteQuick(
       config,
-      padCode,
-      Math.round(screen.width * 0.50),
-      Math.round(screen.height * 0.61),
-      1800,
-    );
+	      padCode,
+	      Math.round(screen.width * 0.50),
+	      Math.round(screen.height * 0.68),
+	      1800,
+	    );
     await delay(1500);
+    const stillVisibleShotUrl = await screenshot(config, padCode)
+      .then((url) => freezeScreenshotUrl(url))
+      .catch(() => "");
+    if (stillVisibleShotUrl && await detectThreadsPrivateReplyPromptLocally(stillVisibleShotUrl).catch(() => false)) {
+      await tapViaAdbAbsoluteQuick(
+        config,
+        padCode,
+        Math.round(screen.width * 0.50),
+        Math.round(screen.height * 0.72),
+        1800,
+      );
+      await delay(1500);
+    }
     return true;
   }
   await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(async () => {
@@ -20140,6 +21659,19 @@ async function warmupExecuteCommentAtPoint(
     2_500,
     "warmup comment ui dump timeout",
   ).catch(() => "");
+  const captureReplyScreenshotFast = async (timeoutLabel: string): Promise<string | undefined> => {
+    const url = await withTimeout(
+      screenshot(config, padCode),
+      8_000,
+      `${timeoutLabel} screenshot timeout`,
+    ).catch(() => undefined);
+    if (!url) return undefined;
+    return await withTimeout(
+      freezeScreenshotUrl(url),
+      4_000,
+      `${timeoutLabel} screenshot freeze timeout`,
+    ).catch(() => url);
+  };
   const commentPoint = isAcpPad(padCode)
     ? { x: Math.round(point.x), y: Math.round(point.y) }
     : warmupJitterPoint(point);
@@ -20159,7 +21691,23 @@ async function warmupExecuteCommentAtPoint(
     const logAcpCommentStage = (stage: string) => {
       console.log(`[warmup][acp-comment] pad=${padCode} target=${Math.round(point.x)},${Math.round(point.y)} elapsed=${Date.now() - acpCommentStartedAt}ms stage=${stage}`);
     };
+    const dismissAcpPermissionDialog = async (shotUrl?: string): Promise<boolean> => {
+      if (await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false)) return true;
+      if (!(await detectAndroidPermissionDialogLocally(shotUrl).catch(() => false))) return false;
+      await tapViaAdbAbsoluteQuick(
+        config,
+        padCode,
+        Math.round((screen.width || BASE_SCREEN.width) * 0.50),
+        Math.round((screen.height || BASE_SCREEN.height) * 0.53),
+        900,
+      );
+      return true;
+    };
     const enforceAcpCommentBudget = async (stage: string, currentShotUrl?: string) => {
+      if (await dismissAcpPermissionDialog(currentShotUrl)) {
+        await delay(700);
+        return;
+      }
       if (Date.now() - acpCommentStartedAt < 125_000) return;
       if (await handleThreadsWarmupCommentPrivacyPrompt(config, padCode).catch(() => false)) {
         throw new Error("当前账号私密主页限制回复非粉丝，已取消并跳过这条");
@@ -20383,6 +21931,11 @@ async function warmupExecuteCommentAtPoint(
     await tapAcpBottomReplyInput(afterOpenShotUrl, replyInputTarget ? 1300 : 1500);
     await throwIfThreadsWarmupPrivacyPrompt();
     logAcpCommentStage("before-generate-comment");
+    if (looksLikeThreadsRestrictedReplyNoticeUiXml(afterOpenUiXml)) {
+      const debugPath = saveThreadsDebugScreenshot(afterOpenShotUrl, "warmup-acp-comment-restricted-reply");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言受限：目标帖只允许指定用户查看和回复，已跳过（target=${Math.round(point.x)},${Math.round(point.y)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
     await ensureComment();
     logAcpCommentStage("before-type-comment");
     await withTimeout(
@@ -20391,25 +21944,34 @@ async function warmupExecuteCommentAtPoint(
       "warmup comment type timeout",
     );
     logAcpCommentStage("after-type-before-screenshot");
-    let typedShotUrl = await withTimeout(
-      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
-      12_000,
-      "warmup comment typed screenshot timeout",
-    ).catch(() => undefined);
+    let typedShotUrl = await captureReplyScreenshotFast("warmup comment typed");
     if (!typedShotUrl) {
       throw new Error(`ACP 留言截图未取得，已跳过（comment=${comment.slice(0, 24)}）`);
     }
-    if (await detectThreadsWarmupMediaOverlayActions(typedShotUrl).catch(() => null)) {
+    if (await withTimeout(
+      detectThreadsWarmupMediaOverlayActions(typedShotUrl),
+      3_000,
+      "warmup comment media overlay detection timeout",
+    ).catch(() => null)) {
       const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-media-overlay");
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
       throw new Error(`ACP 留言落到媒体覆盖层，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
     }
-    if (await detectThreadsExternalWebViewLocally(typedShotUrl).catch(() => false)) {
+    if (await withTimeout(
+      detectThreadsExternalWebViewLocally(typedShotUrl),
+      3_000,
+      "warmup comment external webview detection timeout",
+    ).catch(() => false)) {
       const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-external-webview");
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
       throw new Error(`ACP 留言落到外链页，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
     }
     let typedUiXml = await dumpReplyUiFast();
+    if (looksLikeThreadsRestrictedReplyNoticeUiXml(typedUiXml)) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-restricted-reply");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言受限：目标帖只允许指定用户查看和回复，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
     let typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
     let typedTextConfirmedByDraftOnly = false;
     if (!typedTextConfirmed) {
@@ -20452,6 +22014,11 @@ async function warmupExecuteCommentAtPoint(
         "warmup comment retyped screenshot timeout",
       ).catch(() => typedShotUrl);
       typedUiXml = await dumpReplyUiFast();
+      if (looksLikeThreadsRestrictedReplyNoticeUiXml(typedUiXml)) {
+        const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-restricted-reply");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        throw new Error(`ACP 留言受限：目标帖只允许指定用户查看和回复，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+      }
       typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
       typedTextConfirmedByDraftOnly = false;
       if (typedTextConfirmed && hasThreadsReplyComposerRepeatedText(typedUiXml, comment)) {
@@ -20495,6 +22062,11 @@ async function warmupExecuteCommentAtPoint(
         "warmup comment direct unicode typed screenshot timeout",
       ).catch(() => typedShotUrl);
       typedUiXml = await dumpReplyUiFast();
+      if (looksLikeThreadsRestrictedReplyNoticeUiXml(typedUiXml)) {
+        const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-restricted-reply");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        throw new Error(`ACP 留言受限：目标帖只允许指定用户查看和回复，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+      }
       typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
       typedTextConfirmedByDraftOnly = false;
       if (typedTextConfirmed && hasThreadsReplyComposerRepeatedText(typedUiXml, comment)) {
@@ -20544,6 +22116,11 @@ async function warmupExecuteCommentAtPoint(
         "warmup comment visual-bottom retyped screenshot timeout",
       ).catch(() => typedShotUrl);
       typedUiXml = await dumpReplyUiFast();
+      if (looksLikeThreadsRestrictedReplyNoticeUiXml(typedUiXml)) {
+        const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-restricted-reply");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        throw new Error(`ACP 留言受限：目标帖只允许指定用户查看和回复，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+      }
       typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
       typedTextConfirmedByDraftOnly = false;
       if (typedTextConfirmed && hasThreadsReplyComposerRepeatedText(typedUiXml, comment)) {
@@ -20575,6 +22152,11 @@ async function warmupExecuteCommentAtPoint(
       throw new Error(`ACP 留言输入出现重复内容，已取消发送避免机器感回复（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
     }
     if (!typedTextConfirmed) {
+      if (looksLikeThreadsRestrictedReplyNoticeUiXml(typedUiXml)) {
+        const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-restricted-reply");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        throw new Error(`ACP 留言受限：目标帖只允许指定用户查看和回复，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+      }
       typedTextConfirmed = await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
     }
     const keyboardVisibleAfterType = await detectAndroidKeyboardVisibleLocally(typedShotUrl).catch(() => false);
@@ -20637,6 +22219,30 @@ async function warmupExecuteCommentAtPoint(
       }
       return false;
     };
+    const resolvePostSendPermissionDialog = async (
+      shotUrl: string | undefined,
+      uiXml: string,
+      label: string,
+    ): Promise<{ dismissed: boolean; shotUrl: string | undefined; uiXml: string; resent: boolean }> => {
+      if (!(await dismissAcpPermissionDialog(shotUrl))) {
+        return { dismissed: false, shotUrl, uiXml, resent: false };
+      }
+      await delay(900);
+      let nextShotUrl = await captureReplyScreenshotFast(`${label} after permission`)
+        .catch(() => shotUrl);
+      let nextUiXml = await dumpReplyUiFast();
+      const stillHasDraft = hasThreadsReplyComposerText(nextUiXml, comment)
+        || await detectAcpReplyInputHasDraftLocally(nextShotUrl).catch(() => false);
+      let resent = false;
+      if (stillHasDraft && await tapReplySendButton(nextShotUrl, 1700).catch(() => false)) {
+        resent = true;
+        await delay(1500);
+        nextShotUrl = await captureReplyScreenshotFast(`${label} after permission resend`)
+          .catch(() => nextShotUrl);
+        nextUiXml = await dumpReplyUiFast();
+      }
+      return { dismissed: true, shotUrl: nextShotUrl, uiXml: nextUiXml, resent };
+    };
     logAcpCommentStage("before-send");
     const xmlSendButton = findThreadsReplySendButtonTarget(typedUiXml);
     if (xmlSendButton) {
@@ -20659,66 +22265,144 @@ async function warmupExecuteCommentAtPoint(
     }
     await delay(350);
     logAcpCommentStage("after-send-before-confirm");
-    const immediatePostSendShotUrl = await withTimeout(
-      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
-      12_000,
-      "warmup comment immediate post-send screenshot timeout",
-    ).catch(() => typedShotUrl);
-    let immediatePostSendXml = await dumpReplyUiFast();
-    let immediatePostSendEvidenceUrl = immediatePostSendShotUrl;
-    if (await dismissAndroidPermissionDialog(config, padCode, "deny")) {
-      await delay(700);
-      const afterPermissionShotUrl = await withTimeout(
-        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
-        8_000,
-        "warmup comment after permission screenshot timeout",
-      ).catch(() => immediatePostSendEvidenceUrl);
+	    const immediatePostSendShotUrl = await captureReplyScreenshotFast("warmup comment immediate post-send")
+        .catch(() => typedShotUrl);
+	    let immediatePostSendXml = await dumpReplyUiFast();
+	    let immediatePostSendEvidenceUrl = immediatePostSendShotUrl;
+	    if (await handleThreadsWarmupCommentPrivacyPrompt(config, padCode, { switchToPublic: true }).catch(() => false)) {
+	      await delay(1200);
+	      immediatePostSendEvidenceUrl = await captureReplyScreenshotFast("warmup comment after privacy switch")
+          .catch(() => immediatePostSendEvidenceUrl);
+	      immediatePostSendXml = await dumpReplyUiFast();
+	      const stillHasDraftAfterPrivacySwitch = hasThreadsReplyComposerText(immediatePostSendXml, comment)
+	        || await detectAcpReplyInputHasDraftLocally(immediatePostSendEvidenceUrl).catch(() => false);
+	      if (stillHasDraftAfterPrivacySwitch) {
+	        await tapReplySendButton(immediatePostSendEvidenceUrl, 1800).catch(() => false);
+	        await delay(1500);
+	        immediatePostSendEvidenceUrl = await captureReplyScreenshotFast("warmup comment after privacy resend")
+            .catch(() => immediatePostSendEvidenceUrl);
+	        immediatePostSendXml = await dumpReplyUiFast();
+	      }
+	    }
+		    if (await dismissAcpPermissionDialog(immediatePostSendEvidenceUrl)) {
+	      await delay(700);
+	      const afterPermissionShotUrl = await captureReplyScreenshotFast("warmup comment after permission")
+        .catch(() => immediatePostSendEvidenceUrl);
       const afterPermissionXml = await dumpReplyUiFast();
       const stillHasDraft = hasThreadsReplyComposerText(afterPermissionXml, comment)
         || await detectAcpReplyInputHasDraftLocally(afterPermissionShotUrl).catch(() => false);
       if (stillHasDraft) {
         await tapReplySendButton(afterPermissionShotUrl, 1600).catch(() => false);
       }
-      immediatePostSendEvidenceUrl = await withTimeout(
-        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
-        8_000,
-        "warmup comment after permission resend screenshot timeout",
-      ).catch(() => afterPermissionShotUrl);
+      immediatePostSendEvidenceUrl = await captureReplyScreenshotFast("warmup comment after permission resend")
+        .catch(() => afterPermissionShotUrl);
       immediatePostSendXml = await dumpReplyUiFast();
-    }
-    await delay(1600);
-    const settledPostSendShotUrl = await withTimeout(
-      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
-      12_000,
-      "warmup comment settled post-send screenshot timeout",
-    ).catch(() => immediatePostSendEvidenceUrl);
-    const settledPostSendXml = await dumpReplyUiFast();
+	    }
+	    await delay(1600);
+	    let settledPostSendShotUrl = await captureReplyScreenshotFast("warmup comment settled post-send")
+        .catch(() => immediatePostSendEvidenceUrl);
+	    let settledPostSendXml = await dumpReplyUiFast();
+		    if (await dismissAcpPermissionDialog(settledPostSendShotUrl)) {
+	      await delay(700);
+	      settledPostSendShotUrl = await captureReplyScreenshotFast("warmup comment settled after permission")
+	        .catch(() => settledPostSendShotUrl);
+	      settledPostSendXml = await dumpReplyUiFast();
+	      const stillHasDraftAfterSettledPermission = hasThreadsReplyComposerText(settledPostSendXml, comment)
+	        || await detectAcpReplyInputHasDraftLocally(settledPostSendShotUrl).catch(() => false);
+	      if (stillHasDraftAfterSettledPermission) {
+	        await tapReplySendButton(settledPostSendShotUrl, 1600).catch(() => false);
+	        await delay(1200);
+	        settledPostSendShotUrl = await captureReplyScreenshotFast("warmup comment settled permission resend")
+	          .catch(() => settledPostSendShotUrl);
+	        settledPostSendXml = await dumpReplyUiFast();
+	      }
+	    }
+	    if (await handleThreadsWarmupCommentPrivacyPrompt(config, padCode, { switchToPublic: true }).catch(() => false)) {
+	      await delay(1200);
+	      settledPostSendShotUrl = await captureReplyScreenshotFast("warmup comment settled after privacy switch")
+          .catch(() => settledPostSendShotUrl);
+	      settledPostSendXml = await dumpReplyUiFast();
+	      const stillHasDraftAfterSettledPrivacySwitch = hasThreadsReplyComposerText(settledPostSendXml, comment)
+	        || await detectAcpReplyInputHasDraftLocally(settledPostSendShotUrl).catch(() => false);
+	      if (stillHasDraftAfterSettledPrivacySwitch) {
+	        await tapReplySendButton(settledPostSendShotUrl, 1800).catch(() => false);
+	        await delay(1500);
+	        settledPostSendShotUrl = await captureReplyScreenshotFast("warmup comment settled after privacy resend")
+            .catch(() => settledPostSendShotUrl);
+	        settledPostSendXml = await dumpReplyUiFast();
+	      }
+	    }
     let postSendEvidenceUrl = settledPostSendShotUrl || immediatePostSendEvidenceUrl || typedShotUrl;
-    const postedTextInUi = hasThreadsPostedCommentText(immediatePostSendXml, comment)
+    let postedTextInUi = hasThreadsPostedCommentText(immediatePostSendXml, comment)
       || hasThreadsPostedCommentText(settledPostSendXml, comment);
-    const postedCueInUi = detectThreadsWarmupCommentPostedCueFromUiXml(immediatePostSendXml)
+    let postedCueInUi = detectThreadsWarmupCommentPostedCueFromUiXml(immediatePostSendXml)
       || detectThreadsWarmupCommentPostedCueFromUiXml(settledPostSendXml);
-    const postedToastVisible = await detectThreadsPostSuccessToastLocally(postSendEvidenceUrl).catch(() => false);
-    const detectReplyComposerClearedAfterSend = async (shotUrl: string | undefined, uiXml: string) => Boolean(
-      shotUrl
-      && (
-        await detectThreadsReplyComposerLocally(shotUrl).catch(() => null)
-        || await detectThreadsInlineReplyBarLocally(shotUrl).catch(() => false)
-      )
-      && !hasThreadsReplyComposerText(uiXml, comment)
-      && !(await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false))
+    let postedToastVisible = await detectThreadsPostSuccessToastLocally(postSendEvidenceUrl).catch(() => false);
+    const screenshotOnlyReplyBarClearedAfterSend = Boolean(
+      postSendEvidenceUrl
+      && await detectAcpReplyBarClearedAfterSendLocally(postSendEvidenceUrl).catch(() => false)
+      && !(await detectThreadsSideDrawerLocally(postSendEvidenceUrl).catch(() => false))
+      && !(await detectThreadsProfilePageLocally(postSendEvidenceUrl).catch(() => false))
+      && !looksLikeThreadsStatusMessageUiXml(settledPostSendXml)
+      && !looksLikeThreadsRestrictedReplyNoticeUiXml(settledPostSendXml)
+    );
+	    const detectReplyComposerClearedAfterSend = async (shotUrl: string | undefined, uiXml: string) => Boolean(
+	      shotUrl
+        && !looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml)
+	      && (
+	        await detectThreadsReplyComposerLocally(shotUrl).catch(() => null)
+	        || await detectThreadsInlineReplyBarLocally(shotUrl).catch(() => false)
+	        || await detectAcpReplyBarClearedAfterSendLocally(shotUrl).catch(() => false)
+	      )
+	      && !hasThreadsReplyComposerText(uiXml, comment)
       && !(await detectAcpReplyInputHasDraftLocally(shotUrl).catch(() => false))
       && !(await detectThreadsSideDrawerLocally(shotUrl).catch(() => false))
     );
     const replyComposerClearedAfterSend = Boolean(
       !postedTextInUi
       && !postedCueInUi
-      && await detectReplyComposerClearedAfterSend(postSendEvidenceUrl, settledPostSendXml)
+      && (
+        screenshotOnlyReplyBarClearedAfterSend
+        || await detectReplyComposerClearedAfterSend(postSendEvidenceUrl, settledPostSendXml)
+      )
     );
     let postedVisually = false;
     let postSendLooksPosted = postedTextInUi || postedCueInUi || postedVisually || postedToastVisible || replyComposerClearedAfterSend;
     let postedTextEvidence = postedTextInUi;
     let postedVisualEvidence = postedTextInUi || postedVisually || replyComposerClearedAfterSend;
+    if (!postSendLooksPosted && await handleThreadsWarmupCommentPrivacyPrompt(config, padCode, { switchToPublic: true }).catch(() => false)) {
+      await delay(1400);
+      let privacyPostSendShotUrl = await captureReplyScreenshotFast("warmup comment privacy-postsend")
+        .catch(() => postSendEvidenceUrl);
+      let privacyPostSendXml = await dumpReplyUiFast();
+      const stillHasDraftAfterPrivacySwitch = hasThreadsReplyComposerText(privacyPostSendXml, comment)
+        || await detectAcpReplyInputHasDraftLocally(privacyPostSendShotUrl).catch(() => false);
+      if (stillHasDraftAfterPrivacySwitch && await tapReplySendButton(privacyPostSendShotUrl, 1800).catch(() => false)) {
+        await delay(1700);
+        privacyPostSendShotUrl = await captureReplyScreenshotFast("warmup comment privacy-resend")
+          .catch(() => privacyPostSendShotUrl);
+        privacyPostSendXml = await dumpReplyUiFast();
+      }
+      const privacyPostedText = hasThreadsPostedCommentText(privacyPostSendXml, comment);
+      const privacyPostedCue = detectThreadsWarmupCommentPostedCueFromUiXml(privacyPostSendXml);
+      const privacyPostedToast = await detectThreadsPostSuccessToastLocally(privacyPostSendShotUrl).catch(() => false);
+      const privacyComposerCleared = Boolean(
+        !privacyPostedText
+        && !privacyPostedCue
+        && await detectReplyComposerClearedAfterSend(privacyPostSendShotUrl, privacyPostSendXml)
+      );
+      if (privacyPostedText || privacyPostedCue || privacyPostedToast || privacyComposerCleared) {
+        postSendEvidenceUrl = privacyPostSendShotUrl || postSendEvidenceUrl;
+        settledPostSendShotUrl = privacyPostSendShotUrl || settledPostSendShotUrl;
+        settledPostSendXml = privacyPostSendXml || settledPostSendXml;
+        postedTextInUi = postedTextInUi || privacyPostedText;
+        postedCueInUi = postedCueInUi || privacyPostedCue;
+        postedToastVisible = postedToastVisible || privacyPostedToast;
+        postSendLooksPosted = true;
+        postedTextEvidence = postedTextEvidence || privacyPostedText;
+        postedVisualEvidence = postedVisualEvidence || privacyPostedText || privacyComposerCleared;
+      }
+    }
     const stillTypedAfterFirstTap = !postSendLooksPosted
       && Boolean(
         (
@@ -20732,11 +22416,8 @@ async function warmupExecuteCommentAtPoint(
       );
     if (stillTypedAfterFirstTap && await tapReplySendButton(settledPostSendShotUrl, 1800)) {
       await delay(1800);
-      const retryPostSendShotUrl = await withTimeout(
-        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
-        12_000,
-        "warmup comment retry post-send screenshot timeout",
-      ).catch(() => settledPostSendShotUrl);
+      const retryPostSendShotUrl = await captureReplyScreenshotFast("warmup comment retry post-send")
+        .catch(() => settledPostSendShotUrl);
       const retryPostSendXml = await dumpReplyUiFast();
       const retryPostedText = hasThreadsPostedCommentText(retryPostSendXml, comment);
       const retryPostedCue = detectThreadsWarmupCommentPostedCueFromUiXml(retryPostSendXml);
@@ -20755,16 +22436,59 @@ async function warmupExecuteCommentAtPoint(
         postedVisualEvidence = postedVisualEvidence || retryPostedText || retryPostedVisual || retryComposerCleared;
       }
     }
-    if (!postedVisualEvidence && !hasThreadsReplyComposerText(settledPostSendXml, comment)) {
-      for (let revealAttempt = 0; revealAttempt < 3 && !postedVisualEvidence; revealAttempt += 1) {
-        await execAdbForText(config, padCode, "input swipe 360 1040 360 430 520", 8000, 800).catch(() => "");
+	    if (!postedVisualEvidence && !hasThreadsReplyComposerText(settledPostSendXml, comment)) {
+	      for (let revealAttempt = 0; revealAttempt < 2 && !postedVisualEvidence; revealAttempt += 1) {
+	        logAcpCommentStage(`post-send-reveal-${revealAttempt + 1}`);
+        const revealPermission = await resolvePostSendPermissionDialog(
+          postSendEvidenceUrl,
+          settledPostSendXml,
+          `warmup comment reveal ${revealAttempt + 1}`,
+        );
+        if (revealPermission.dismissed) {
+          postSendEvidenceUrl = revealPermission.shotUrl || postSendEvidenceUrl;
+          settledPostSendShotUrl = revealPermission.shotUrl || settledPostSendShotUrl;
+          settledPostSendXml = revealPermission.uiXml || settledPostSendXml;
+          const permissionPostedText = hasThreadsPostedCommentText(settledPostSendXml, comment);
+          const permissionPostedCue = detectThreadsWarmupCommentPostedCueFromUiXml(settledPostSendXml);
+          const permissionPostedToast = await detectThreadsPostSuccessToastLocally(settledPostSendShotUrl).catch(() => false);
+          const permissionComposerCleared = Boolean(
+            !permissionPostedText
+            && !permissionPostedCue
+            && await detectReplyComposerClearedAfterSend(settledPostSendShotUrl, settledPostSendXml)
+          );
+          if (permissionPostedText || permissionPostedCue || permissionPostedToast || permissionComposerCleared) {
+            postedTextEvidence = postedTextEvidence || permissionPostedText;
+            postedVisualEvidence = postedVisualEvidence || permissionPostedText || permissionComposerCleared;
+            postSendLooksPosted = true;
+            break;
+          }
+        }
+        const preRevealComposerCleared = Boolean(
+          postSendEvidenceUrl
+          && await detectAcpReplyBarClearedAfterSendLocally(postSendEvidenceUrl).catch(() => false)
+          && !(await detectAcpReplyInputHasDraftLocally(postSendEvidenceUrl).catch(() => false))
+          && !(await detectThreadsSideDrawerLocally(postSendEvidenceUrl).catch(() => false))
+          && !(await detectThreadsProfilePageLocally(postSendEvidenceUrl).catch(() => false))
+          && !looksLikeThreadsStatusMessageUiXml(settledPostSendXml)
+          && !looksLikeThreadsRestrictedReplyNoticeUiXml(settledPostSendXml)
+        );
+        if (preRevealComposerCleared) {
+          postedVisualEvidence = true;
+          postSendLooksPosted = true;
+          break;
+        }
+	        await enforceAcpCommentBudget(`发送后展开确认第 ${revealAttempt + 1} 次`, postSendEvidenceUrl);
+		        if (await dismissAcpPermissionDialog(postSendEvidenceUrl)) {
+	          await delay(700);
+	        }
+	        const swipeCommand = revealAttempt % 2 === 0
+	          ? "input swipe 360 1370 360 360 650"
+	          : "input swipe 360 1260 360 300 720";
+        await execAdbForText(config, padCode, swipeCommand, 9000, 900).catch(() => "");
         await delay(1200);
         await throwIfThreadsWarmupPrivacyPrompt();
-        const revealPostSendShotUrl = await withTimeout(
-          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
-          12_000,
-          "warmup comment reveal post-send screenshot timeout",
-        ).catch(() => settledPostSendShotUrl);
+        const revealPostSendShotUrl = await captureReplyScreenshotFast("warmup comment reveal post-send")
+          .catch(() => settledPostSendShotUrl);
         const revealPostSendXml = await dumpReplyUiFast();
         const revealPostedText = hasThreadsPostedCommentText(revealPostSendXml, comment);
         const revealPostedCue = detectThreadsWarmupCommentPostedCueFromUiXml(revealPostSendXml);
@@ -20790,6 +22514,17 @@ async function warmupExecuteCommentAtPoint(
     if (
       !postedTextInUi
       && (
+        looksLikeThreadsRestrictedReplyNoticeUiXml(immediatePostSendXml)
+        || looksLikeThreadsRestrictedReplyNoticeUiXml(settledPostSendXml)
+      )
+    ) {
+      const debugPath = saveThreadsDebugScreenshot(postSendEvidenceUrl, "warmup-acp-comment-postsend-restricted-reply");
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      throw new Error(`ACP 留言受限：目标帖只允许指定用户查看和回复，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
+    if (
+      !postedTextInUi
+      && (
         looksLikeThreadsStatusMessageUiXml(immediatePostSendXml)
         || looksLikeThreadsStatusMessageUiXml(settledPostSendXml)
       )
@@ -20803,6 +22538,43 @@ async function warmupExecuteCommentAtPoint(
       || looksLikeThreadsReplyComposerUiXml(settledPostSendXml)
       || findThreadsReplyComposerInputTarget(settledPostSendXml)
     );
+    const finalReplyBarClearedAfterSend = Boolean(
+      !postSendLooksPosted
+      && await detectAcpReplyBarClearedAfterSendLocally(postSendEvidenceUrl).catch(() => false)
+      && !(await detectAcpReplyInputHasDraftLocally(postSendEvidenceUrl).catch(() => false))
+      && !(await detectThreadsSideDrawerLocally(postSendEvidenceUrl).catch(() => false))
+      && !(await detectThreadsProfilePageLocally(postSendEvidenceUrl).catch(() => false))
+      && !looksLikeThreadsStatusMessageUiXml(settledPostSendXml)
+      && !looksLikeThreadsRestrictedReplyNoticeUiXml(settledPostSendXml)
+    );
+    if (finalReplyBarClearedAfterSend) {
+      postSendLooksPosted = true;
+      postedVisualEvidence = true;
+    }
+    if (!postSendLooksPosted && !postSendStillComposer && await detectThreadsProfilePageLocally(postSendEvidenceUrl).catch(() => false)) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 700).catch(() => "");
+      await delay(1200);
+      const afterProfileBackShotUrl = await captureReplyScreenshotFast("warmup comment after profile back")
+        .catch(() => postSendEvidenceUrl);
+      const afterProfileBackXml = await dumpReplyUiFast();
+      const afterProfilePostedText = hasThreadsPostedCommentText(afterProfileBackXml, comment);
+      const afterProfilePostedCue = detectThreadsWarmupCommentPostedCueFromUiXml(afterProfileBackXml);
+      const afterProfilePostedToast = await detectThreadsPostSuccessToastLocally(afterProfileBackShotUrl).catch(() => false);
+      const afterProfileComposerCleared = Boolean(
+        !afterProfilePostedText
+        && !afterProfilePostedCue
+        && !(await detectThreadsProfilePageLocally(afterProfileBackShotUrl).catch(() => false))
+        && await detectReplyComposerClearedAfterSend(afterProfileBackShotUrl, afterProfileBackXml)
+      );
+      if (afterProfilePostedText || afterProfilePostedCue || afterProfilePostedToast || afterProfileComposerCleared) {
+        postSendEvidenceUrl = afterProfileBackShotUrl || postSendEvidenceUrl;
+        settledPostSendShotUrl = afterProfileBackShotUrl || settledPostSendShotUrl;
+        settledPostSendXml = afterProfileBackXml || settledPostSendXml;
+        postedTextEvidence = postedTextEvidence || afterProfilePostedText;
+        postedVisualEvidence = postedVisualEvidence || afterProfilePostedText || afterProfileComposerCleared;
+        postSendLooksPosted = true;
+      }
+    }
     if (!postSendLooksPosted && !postSendStillComposer && await detectThreadsProfilePageLocally(postSendEvidenceUrl).catch(() => false)) {
       const debugPath = saveThreadsDebugScreenshot(postSendEvidenceUrl, "warmup-acp-comment-postsend-profile");
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
@@ -20816,23 +22588,19 @@ async function warmupExecuteCommentAtPoint(
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
       throw new Error(`ACP 留言发送后仍停在编辑器，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
     }
-    const postedConfirmed = postSendLooksPosted;
-    if (!postedConfirmed) {
-      const debugPath = saveThreadsDebugScreenshot(postSendEvidenceUrl, "warmup-acp-comment-postsend-unconfirmed");
-      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
-      throw new Error(`ACP 留言发送后未在截图中确认已发布回复，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
-    }
-    let evidencePostSendUrl = postSendEvidenceUrl;
-    await enforceAcpCommentBudget("发送后确认阶段", postSendEvidenceUrl);
-    if (!postedTextEvidence) {
-      await delay(2600);
-      const latePostSendShotUrl = await withTimeout(
-        screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
-        12_000,
-        "warmup comment late post-send screenshot timeout",
-      ).catch(() => undefined);
-      const latePostSendXml = latePostSendShotUrl ? await dumpReplyUiFast() : "";
-      const latePostedText = hasThreadsPostedCommentText(latePostSendXml, comment);
+	    const postedConfirmed = postSendLooksPosted;
+	    if (!postedConfirmed) {
+	      const debugPath = saveThreadsDebugScreenshot(postSendEvidenceUrl, "warmup-acp-comment-postsend-unconfirmed");
+	      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+	      throw new Error(`ACP 留言发送后未在截图中确认已发布回复，未计数（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+	    }
+	    let evidencePostSendUrl = postSendEvidenceUrl;
+	    if (!postedTextEvidence && Date.now() - acpCommentStartedAt < 118_000) {
+	      await delay(2600);
+	      const latePostSendShotUrl = await captureReplyScreenshotFast("warmup comment late post-send")
+	        .catch(() => undefined);
+	      const latePostSendXml = latePostSendShotUrl ? await dumpReplyUiFast() : "";
+	      const latePostedText = hasThreadsPostedCommentText(latePostSendXml, comment);
       if (
         latePostSendShotUrl
         && !(await detectThreadsProfilePageLocally(latePostSendShotUrl).catch(() => false))
@@ -21184,7 +22952,7 @@ export async function warmupThreadsAccount(
   const riskManaged = cfg.riskManaged !== false;
   const riskPlan = riskManaged ? planRiskManagedWarmupConfig(padCode, cfg) : null;
   if (riskPlan && !riskPlan.allowed) {
-    throw new Error(riskPlan.notes.join("；") || "账号风险预算不足，已暂停自动养号");
+    throw new Error(riskPlan.notes.join("；") || "养号配置不可执行");
   }
   const effectiveCfg = riskPlan?.cfg || cfg;
   const {
@@ -21199,8 +22967,10 @@ export async function warmupThreadsAccount(
     interactionEveryMaxPosts = 3,
     likeChance = 0,
     maxLikes = 0,
+    minRequiredLikes = 0,
     commentChance = 0,
     maxComments = 0,
+    minRequiredComments = 0,
     commentTemplates = [],
     commentPersona,
     strictCompletion = !riskManaged,
@@ -21248,7 +23018,7 @@ export async function warmupThreadsAccount(
     if (isAcpPad(padCode)) {
       const currentState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
       if (currentState?.page === "challenge") {
-        report(`当前屏出现 Threads 风控提示，先尝试关闭：${currentState.reason || currentState.page}`);
+        report(`当前屏出现 Threads 页面验证提示，先尝试关闭：${currentState.reason || currentState.page}`);
         const afterDismiss = await dismissThreadsChallengeIfPossible(config, padCode, currentState).catch(() => currentState);
         if (afterDismiss.page === "challenge") {
           return {
@@ -21267,29 +23037,32 @@ export async function warmupThreadsAccount(
         timeoutMs,
         "warmupLocateCurrentAcpActionsLocalSnapshot timeout",
       );
-      const first = await locateOnce().catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        report(`当前屏互动识别超时，跳过本屏：${message}`);
-        return null;
-      });
-      if (
-        first
-        && !first.like
-        && !first.comment
-        && /acp_side_drawer|acp_status_message|profile_ui|threads_not_foreground|acp_still_android_launcher/.test(first.debugReason || "")
-      ) {
-        report(`当前屏被可恢复界面遮挡，重置后再识别一次：${first.debugReason}`);
-        if (/acp_side_drawer/.test(first.debugReason || "") && first.screenshotUrl) {
-          await warmupDismissAcpSideDrawerAndCapture(config, padCode, first.screenshotUrl).catch(() => "");
-        }
-        await relaunchThreads(config, padCode, 3000).catch(() => undefined);
-        return locateOnce().catch((error) => {
+      let last: WarmupFeedActionTargets | null = null;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const current = await locateOnce().catch((error) => {
           const message = error instanceof Error ? error.message : String(error);
-          report(`重试互动识别仍超时，跳过本屏：${message}`);
-          return first;
+          report(`当前屏互动识别超时，尝试恢复后重试：${message}`);
+          return null;
         });
+        if (current?.like || current?.comment) return current;
+        last = current || last;
+
+        const reason = current?.debugReason || "warmupLocateCurrentAcpActionsLocalSnapshot returned null";
+        if (/threads_challenge_blocked|threads_blocked/.test(reason)) return current;
+        report(`当前屏不可互动，恢复到推荐流后重试：${reason}${current?.screenshotUrl ? " | screenshot_captured" : ""}`);
+
+        if (/acp_side_drawer/.test(reason) && current?.screenshotUrl) {
+          await warmupDismissAcpSideDrawerAndCapture(config, padCode, current.screenshotUrl).catch(() => "");
+        } else if (/threads_not_foreground|acp_still_android_launcher/.test(reason)) {
+          await warmupRecoverAcpInteractionSurface(config, padCode, reason);
+        } else if (/thread_detail_no_action_row|profile_ui|acp_external_webview|acp_messages|acp_status_message|media_viewer|acp_local_snapshot_no_actions|acp_local_action_row_missing|local_geometry_actions_missing|fallback_like_missing|fallback_comment_missing/.test(reason)) {
+          await warmupRecoverAcpInteractionSurface(config, padCode, reason);
+	        } else {
+	          await warmupScrollDown(config, padCode).catch(() => undefined);
+	        }
+        await delay(900);
       }
-      return first;
+      return last;
     }
     return withTimeout(
       warmupLocateHomeFeedActions(config, padCode),
@@ -21297,7 +23070,7 @@ export async function warmupThreadsAccount(
       "warmupLocateHomeFeedActions timeout",
     ).catch(async (error) => {
       const message = error instanceof Error ? error.message : String(error);
-      report(`互动按钮识别超时，安全恢复后继续浏览：${message}`);
+      report(`互动按钮识别超时，恢复页面后继续浏览：${message}`);
       await warmupSafeBackOrRelaunchThreads(config, padCode, 800).catch(() => null);
       return null;
     });
@@ -21306,7 +23079,7 @@ export async function warmupThreadsAccount(
   // 确保 Threads 在前台
   try {
     if (riskPlan?.notes.length) {
-      report(`风险托管已启用：${riskPlan.notes.join("；")}`);
+      report(riskPlan.notes.join("；"));
     }
     report("启动 Threads...");
     await withTimeout(
@@ -21317,13 +23090,13 @@ export async function warmupThreadsAccount(
     if (isAcpPad(padCode)) {
       let state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
       if (state?.page === "challenge") {
-        report(`Threads 出现风控提示，先尝试关闭后再继续：${state.reason || state.page}`);
+        report(`Threads 出现页面验证提示，先尝试关闭后再继续：${state.reason || state.page}`);
         const afterDismiss = await dismissThreadsChallengeIfPossible(config, padCode, state).catch(() => state);
         if (afterDismiss?.page === "challenge") {
-          throw new Error(`Threads 当前出现自动化风控提示，已停止本轮养号：${afterDismiss.reason || state.reason || "challenge"}`);
+          throw new Error(`Threads 当前出现页面验证提示，本轮养号无法继续：${afterDismiss.reason || state.reason || "challenge"}`);
         }
         state = afterDismiss;
-        report(`Threads 风控提示已关闭，当前页面：${afterDismiss?.reason || afterDismiss?.page || "unknown"}`);
+        report(`Threads 页面验证提示已关闭，当前页面：${afterDismiss?.reason || afterDismiss?.page || "unknown"}`);
       } else if (state?.page === "login_required" || state?.page === "system_dialog") {
         throw new Error(`Threads 当前不适合养号：${state.reason || state.page}`);
       }
@@ -21331,6 +23104,18 @@ export async function warmupThreadsAccount(
         report("Threads 停在新串文编辑页，先退出后直接继续养号...");
         await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
         await delay(900);
+        state = await classifyThreadsPageOnDevice(config, padCode).catch(() => state);
+      }
+      if (state && state.page !== "home_feed") {
+        report(`ACP 当前不是推荐流，先恢复到首页后再开始养号：${state.reason || state.page}`);
+        await warmupRecoverAcpInteractionSurface(config, padCode, state.reason || state.page).catch(() => undefined);
+        await delay(900);
+        state = await classifyThreadsPageOnDevice(config, padCode).catch(() => state);
+        if (state?.page !== "home_feed") {
+          await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+          await tapViaAdbReferencePoint(config, padCode, { x: 72, y: 1540 }, 1800).catch(() => undefined);
+          state = await classifyThreadsPageOnDevice(config, padCode).catch(() => state);
+        }
       }
       report(`ACP 快速模式：跳过首页硬恢复，直接尝试当前页面互动${state?.reason ? `（${state.reason}）` : ""}`);
     } else {
@@ -21370,7 +23155,13 @@ export async function warmupThreadsAccount(
     const interactionTargetsDone = (maxLikes <= 0 || liked >= maxLikes)
       && (maxComments <= 0 || commented >= maxComments)
       && (maxLikes > 0 || maxComments > 0);
-    if (!timedSession && interactionTargetsDone && browsed >= Math.min(browseCount, 2)) {
+    const minimumInteractionsDone = liked >= minRequiredLikes && commented >= minRequiredComments;
+    if (
+      interactionTargetsDone
+      && minimumInteractionsDone
+      && browsed >= Math.min(browseCount, 2)
+      && (!timedSession || strictCompletion || minRequiredLikes > 0 || minRequiredComments > 0)
+    ) {
       report(`互动目标已完成，提前结束浏览：已浏览 ${browsed}/${browseCount} 条`);
       break;
     }
@@ -21397,16 +23188,28 @@ export async function warmupThreadsAccount(
       shouldLike = false;
       shouldComment = false;
       if (interactionAllowed) {
-        const choices: Array<"like" | "comment"> = [];
+        const requiredChoices: Array<"like" | "comment"> = [];
+        if (minRequiredLikes > liked && likeChance > 0 && liked < maxLikes && likeFailures < 3) requiredChoices.push("like");
+        if (minRequiredComments > commented && commentChance > 0 && commented < maxComments && commentFailures < maxCommentFailuresThisRun) requiredChoices.push("comment");
+        const choices: Array<"like" | "comment"> = [...requiredChoices];
         if (likeChance > 0 && liked < maxLikes && likeFailures < 3) choices.push("like");
         if (commentChance > 0 && commented < maxComments && commentFailures < maxCommentFailuresThisRun) choices.push("comment");
         if (choices.length === 0 && (likeChance > 0 || commentChance > 0)) {
-          throw new Error("今日养号互动风险预算已达到上限，请人工介入确认后再继续");
+          throw new Error("当前页面连续互动失败，请检查页面状态后重试");
         }
-        const choice = choices.length ? choices[warmupRandomInt(0, choices.length - 1)] : null;
-        shouldLike = choice === "like";
-        shouldComment = choice === "comment";
-      }
+	        let choice: "like" | "comment" | null = null;
+	        if (requiredChoices.length) {
+	          if (minRequiredLikes > liked && requiredChoices.includes("like")) {
+	            choice = "like";
+	          } else if (minRequiredComments > commented && requiredChoices.includes("comment")) {
+	            choice = "comment";
+	          }
+	        } else {
+	          choice = choices.length ? choices[warmupRandomInt(0, choices.length - 1)] : null;
+	        }
+	        shouldLike = choice === "like";
+	        shouldComment = choice === "comment";
+	      }
     }
     let feedActions: WarmupFeedActionTargets | null = null;
     if (shouldLike || shouldComment) {
@@ -21416,7 +23219,22 @@ export async function warmupThreadsAccount(
       feedActions = await locateFeedActionsForWarmup(isAcpPad(padCode) && shouldComment && !shouldLike ? 24_000 : undefined);
     }
     if ((shouldLike || shouldComment) && (!feedActions?.like && !feedActions?.comment)) {
-      report(`互动按钮识别为空：${feedActions?.debugReason ?? "warmupLocateHomeFeedActions returned null"}${feedActions?.debugRaw ? ` | ${feedActions.debugRaw}` : ""}${feedActions?.screenshotUrl ? " | screenshot_captured" : ""}`);
+	      report(`互动按钮识别为空：${feedActions?.debugReason ?? "warmupLocateHomeFeedActions returned null"}${feedActions?.debugRaw ? ` | ${feedActions.debugRaw}` : ""}${feedActions?.screenshotUrl ? " | screenshot_captured" : ""}`);
+	      if (isAcpPad(padCode) && /acp_external_webview|acp_messages_dismissed|profile_ui|acp_side_drawer/.test(feedActions?.debugReason || "")) {
+	        await warmupRecoverAcpInteractionSurface(config, padCode, feedActions?.debugReason || "");
+	        await delay(900);
+	        continue;
+	      }
+	      if (isAcpPad(padCode) && /thread_detail_no_action_row/.test(feedActions?.debugReason || "")) {
+	        await warmupRecoverAcpInteractionSurface(config, padCode, feedActions?.debugReason || "");
+	        await delay(900);
+	        continue;
+	      }
+	      if (isAcpPad(padCode) && /acp_local_snapshot_no_actions|acp_local_action_row_missing|fallback_like_missing/.test(feedActions?.debugReason || "")) {
+	        await warmupRecoverAcpInteractionSurface(config, padCode, feedActions?.debugReason || "");
+	        await delay(900);
+	        continue;
+	      }
       if (isAcpPad(padCode)) {
         consecutiveAcpLocateMisses++;
         const maxLocateMissesBeforeBrowseOnly = shouldComment && commented < maxComments ? 5 : 2;
@@ -21483,6 +23301,16 @@ export async function warmupThreadsAccount(
         shouldRelocateBeforeComment = Boolean(result.movedToDetail);
       } else {
         report(`自动点赞失败：${result.message}`);
+        if (isAcpPad(padCode) && /LOCAL_REPLY_COMPOSER|thread_detail_no_action_row|acp_local_snapshot_no_actions|acp_local_action_row_missing|fallback_like_missing|fallback_comment_missing/.test(result.message || "")) {
+          await warmupRecoverAcpInteractionSurface(config, padCode, result.message || "");
+          await delay(900);
+          continue;
+        }
+        if (isAcpPad(padCode) && /profile_ui:acp_like_target_screenshot|acp_like_target_implausible/.test(result.message)) {
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 900).catch(() => "");
+          await delay(1400);
+          continue;
+        }
         likeFailures++;
         interactionFailures++;
         shouldRelocateBeforeComment = true;
@@ -21585,10 +23413,12 @@ export async function warmupThreadsAccount(
         commented++;
         if (commentResult.screenshotUrl) commentScreenshots.push(commentResult.screenshotUrl);
         report(`已自动留言第 ${commented} 个：${commentResult.comment}${commentReferencePreview ? `（参考：${commentReferencePreview.slice(0, 42)}）` : ""}`);
-        if (!timedSession && liked < maxLikes) {
+        if (liked < maxLikes) {
           report("留言完成后继续补点赞...");
-          await relaunchThreads(config, padCode, 3500).catch(() => undefined);
-          if (!isAcpPad(padCode)) {
+          if (isAcpPad(padCode)) {
+            await warmupRecoverAcpInteractionSurface(config, padCode, "LOCAL_REPLY_COMPOSER_AFTER_COMMENT_SUCCESS");
+          } else if (!timedSession) {
+            await relaunchThreads(config, padCode, 3500).catch(() => undefined);
             await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
           }
         }
@@ -21602,12 +23432,12 @@ export async function warmupThreadsAccount(
             interactionFailures++;
           }
         }
-        await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
-        if (isAcpPad(padCode)) {
-          await relaunchThreads(config, padCode, 2600).catch(() => undefined);
-        } else {
-          await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
-        }
+	        await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
+	        if (isAcpPad(padCode)) {
+	          await warmupRecoverAcpInteractionSurface(config, padCode, errorMessage);
+	        } else {
+	          await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
+	        }
       }
     }
 
@@ -21617,9 +23447,9 @@ export async function warmupThreadsAccount(
         report(`本次互动窗口结束，下次约 ${interactionMinPosts}-${interactionMaxPosts} 篇后再随机互动`);
       }
     }
-    if (timedSession && interactionFailures >= 3) {
-      throw new Error("养号连续互动失败达到风险阈值，请人工介入检查当前账号或页面状态");
-    }
+	    if (timedSession && interactionFailures >= (isAcpPad(padCode) ? 8 : 3)) {
+	      throw new Error("养号连续互动失败，请检查当前账号或页面状态");
+	    }
 
     // 停留时加入短距离上下回看，再推进到下一条，避免机械单向刷屏。
     await warmupDwellLikeHuman(config, padCode, watchMs);
@@ -21628,7 +23458,10 @@ export async function warmupThreadsAccount(
     browsed++;
   }
 
-  const shouldRecoverLikes = !timedSession && likeChance > 0 && maxLikes > 0 && liked < maxLikes;
+  const shouldRecoverLikes = likeChance > 0
+    && maxLikes > 0
+    && liked < maxLikes
+    && (!timedSession || strictCompletion || minRequiredLikes > liked);
   if (shouldRecoverLikes) {
     const maxRecoveries = Math.max(2, Math.min(4, maxLikes * 2 + 1));
     report(`自动点赞未达标，继续补点 ${liked}/${maxLikes}...`);
@@ -21664,9 +23497,12 @@ export async function warmupThreadsAccount(
         if (result.movedToDetail && !isAcpPad(padCode)) {
           await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
         }
-      } else {
-        report(`补点失败：${result.message}`);
-      }
+	      } else {
+	        report(`补点失败：${result.message}`);
+	        if (isAcpPad(padCode) && /acp_like_target_implausible|profile_ui|thread_detail_no_action_row|acp_external_webview|media_viewer|fallback_like_missing|fallback_comment_missing|acp_local_snapshot_no_actions|acp_local_action_row_missing/.test(result.message || actions?.debugReason || "")) {
+	          await warmupRecoverAcpInteractionSurface(config, padCode, [result.message, actions?.debugReason].filter(Boolean).join(" | "));
+	        }
+	      }
       if (liked < maxLikes) {
         await warmupScrollDown(config, padCode).catch(() => undefined);
         await delay(warmupRandom(1200, 2600));
@@ -21677,20 +23513,29 @@ export async function warmupThreadsAccount(
   if (strictCompletion && likeChance >= 100 && maxLikes > 0 && liked < maxLikes) {
     throw new Error(`养号未完成：要求自动点赞 ${maxLikes} 个，实际成功 ${liked} 个`);
   }
-  const shouldRecoverComments = !timedSession && commentChance > 0 && maxComments > 0 && commented < maxComments;
+  const shouldRecoverComments = commentChance > 0
+    && maxComments > 0
+    && commented < maxComments
+    && (!timedSession || strictCompletion || minRequiredComments > commented);
   if (shouldRecoverComments) {
-    const maxRecoveries = isAcpPad(padCode) ? 2 : Math.max(2, Math.min(4, maxComments * 2 + 1));
+    const maxRecoveries = isAcpPad(padCode)
+      ? (timedSession ? 6 : 4)
+      : Math.max(2, Math.min(4, maxComments * 2 + 1));
     const plannedTurns = commentTurnSchedule.length ? `，计划留言轮次：${commentTurnSchedule.map((turn) => turn + 1).join(", ")}` : "";
     report(`自动留言未达标，进入尾部补漏 ${commented}/${maxComments}${plannedTurns}...`);
     await relaunchThreads(config, padCode, 3500).catch(() => undefined);
     for (let attempt = 0; attempt < maxRecoveries && commented < maxComments; attempt += 1) {
-      const actions = await locateFeedActionsForWarmup(isAcpPad(padCode) ? 24_000 : 14_000).catch(() => null);
-      if (!actions?.comment) {
-        report(`补留言定位失败：${actions?.debugReason || "no_comment_target"}${actions?.debugRaw ? ` | ${actions.debugRaw}` : ""}`);
-        await warmupScrollDown(config, padCode).catch(() => undefined);
-        await delay(warmupRandom(900, 1800));
-        continue;
-      }
+	      const actions = await locateFeedActionsForWarmup(isAcpPad(padCode) ? 24_000 : 14_000).catch(() => null);
+	      if (!actions?.comment) {
+	        report(`补留言定位失败：${actions?.debugReason || "no_comment_target"}${actions?.debugRaw ? ` | ${actions.debugRaw}` : ""}`);
+	        if (isAcpPad(padCode)) {
+	          await warmupRecoverAcpInteractionSurface(config, padCode, actions?.debugReason || "no_comment_target");
+	        } else {
+	          await warmupScrollDown(config, padCode).catch(() => undefined);
+	        }
+	        await delay(warmupRandom(900, 1800));
+	        continue;
+	      }
       if (
         isAcpPad(padCode)
         && !isTrustedWarmupCommentDebugReason(actions.debugReason, padCode)
@@ -21734,14 +23579,18 @@ export async function warmupThreadsAccount(
       commented++;
       if (commentResult.screenshotUrl) commentScreenshots.push(commentResult.screenshotUrl);
       report(`补留言成功第 ${commented} 个：${commentResult.comment}`);
-      } catch (error: any) {
-        const errorMessage = error?.message || String(error);
-        report(`${isThreadsWarmupCommentExpectedSkipMessage(errorMessage) ? "补留言跳过" : "补留言失败"}：${errorMessage}`);
-        await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
-        if (isAcpPad(padCode)) {
-          await relaunchThreads(config, padCode, 2600).catch(() => undefined);
-        }
+      if (isAcpPad(padCode) && liked < maxLikes) {
+        report("补留言完成后恢复推荐流继续补点赞...");
+        await warmupRecoverAcpInteractionSurface(config, padCode, "LOCAL_REPLY_COMPOSER_AFTER_COMMENT_RECOVERY_SUCCESS");
       }
+	      } catch (error: any) {
+	        const errorMessage = error?.message || String(error);
+	        report(`${isThreadsWarmupCommentExpectedSkipMessage(errorMessage) ? "补留言跳过" : "补留言失败"}：${errorMessage}`);
+	        await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
+	        if (isAcpPad(padCode)) {
+	          await warmupRecoverAcpInteractionSurface(config, padCode, errorMessage);
+	        }
+	      }
       if (commented < maxComments) {
         await warmupScrollDown(config, padCode).catch(() => undefined);
         await delay(warmupRandom(1000, 2200));
@@ -21751,12 +23600,13 @@ export async function warmupThreadsAccount(
   if (strictCompletion && commentChance >= 100 && maxComments > 0 && commented < maxComments) {
     throw new Error(`养号未完成：要求自动留言 ${maxComments} 个，实际成功 ${commented} 个`);
   }
+  assertWarmupMinimumCompletion("Threads", { liked, commented }, { minRequiredLikes, minRequiredComments });
 
     const result = report(`养号完成：浏览 ${browsed} 条，自动点赞 ${liked} 个，自动留言 ${commented} 个`, true);
     if (riskManaged) recordWarmupRiskResult(padCode, result);
     return result;
   } catch (error) {
-    if (riskManaged && !String(error instanceof Error ? error.message : error).includes("已暂停")) {
+    if (riskManaged) {
       recordWarmupRiskResult(padCode, {
         browsed,
         liked,
@@ -21790,6 +23640,8 @@ async function warmupLikeInstagramCurrentPost(
   uiXml?: string,
 ): Promise<{ ok: boolean; message: string; screenshotUrl?: string }> {
   const xml = uiXml || await dumpUiXml(config, padCode).catch(() => "");
+  const blocked = detectInstagramWarmupBlockedFromUiXml(xml);
+  if (blocked) return { ok: false, message: blocked };
   const detected = findInstagramWarmupActionTarget(xml, "like");
   const fallback = detected ? null : await getInstagramWarmupFallbackActionTarget(config, padCode, "like");
   const like = detected || fallback;
@@ -21811,6 +23663,8 @@ async function warmupCommentInstagramCurrentPost(
   uiXml?: string,
 ): Promise<{ ok: boolean; message: string; screenshotUrl?: string; comment?: string }> {
   const xml = uiXml || await dumpUiXml(config, padCode).catch(() => "");
+  const blocked = detectInstagramWarmupBlockedFromUiXml(xml);
+  if (blocked) return { ok: false, message: blocked };
   const detected = findInstagramWarmupActionTarget(xml, "comment");
   const fallback = detected ? null : await getInstagramWarmupFallbackActionTarget(config, padCode, "comment");
   const commentBtn = detected || fallback;
@@ -21829,6 +23683,8 @@ async function warmupCommentInstagramCurrentPost(
   await typeTextViaAdbBroadcast(config, padCode, comment, 1300);
 
   const sendXml = await dumpUiXml(config, padCode).catch(() => "");
+  const stillBlocked = detectInstagramWarmupBlockedFromUiXml(sendXml);
+  if (stillBlocked) return { ok: false, message: stillBlocked };
   const send = findInstagramCommentSendTarget(sendXml) || { x: Math.round(BASE_SCREEN.width * 0.88), y: Math.round(BASE_SCREEN.height * 0.92) };
   await tapViaAdbAbsolute(config, padCode, send.x, send.y, 1800);
   await delay(1200);
@@ -21842,3 +23698,472 @@ async function warmupCommentInstagramCurrentPost(
   return { ok: true, message: "已执行留言", screenshotUrl: evidenceUrl || shotUrl || undefined, comment };
 }
 
+export async function warmupInstagramAccount(
+  config: VmosConfig,
+  padCode: string,
+  cfg: WarmupConfig,
+  onProgress: (p: WarmupProgress) => void,
+): Promise<WarmupProgress> {
+  const riskPadCode = `instagram:${padCode}`;
+  const riskManaged = cfg.riskManaged !== false;
+  const riskPlan = riskManaged ? planRiskManagedWarmupConfig(riskPadCode, cfg) : null;
+  if (riskPlan && !riskPlan.allowed) {
+    throw new Error(riskPlan.notes.join("；") || "养号配置不可执行");
+  }
+  const effectiveCfg = riskPlan?.cfg || cfg;
+  const {
+    browseCount,
+    minSessionMinutes,
+    maxSessionMinutes,
+    minWatchSeconds = 2,
+    maxWatchSeconds = 5,
+    minAfterScrollPauseMs = 700,
+    maxAfterScrollPauseMs = 1500,
+    interactionEveryMinPosts = 2,
+    interactionEveryMaxPosts = 3,
+    likeChance = 0,
+    maxLikes = 0,
+    minRequiredLikes = 0,
+    commentChance = 0,
+    maxComments = 0,
+    minRequiredComments = 0,
+    commentTemplates = [],
+    commentPersona,
+    strictCompletion = !riskManaged,
+  } = effectiveCfg;
+
+  const timedSession = Number(minSessionMinutes) > 0 || Number(maxSessionMinutes) > 0;
+  const sessionMinMinutes = Math.max(1, Number(minSessionMinutes || maxSessionMinutes || 0));
+  const sessionMaxMinutes = Math.max(sessionMinMinutes, Number(maxSessionMinutes || minSessionMinutes || 0));
+  const targetSessionMs = timedSession
+    ? warmupRandom(sessionMinMinutes * 60_000, sessionMaxMinutes * 60_000)
+    : 0;
+  const sessionDeadline = timedSession ? Date.now() + targetSessionMs : 0;
+  const interactionMinPosts = Math.max(2, Math.floor(interactionEveryMinPosts || 2));
+  const interactionMaxPosts = Math.max(interactionMinPosts, Math.floor(interactionEveryMaxPosts || 3));
+
+  let browsed = 0;
+  let liked = 0;
+  let commented = 0;
+  let interactionFailures = 0;
+  const candidates: WarmupCandidate[] = [];
+  const likeScreenshots: string[] = [];
+  const commentScreenshots: string[] = [];
+
+  const report = (step: string, done = false, error?: string): WarmupProgress => {
+    const p: WarmupProgress = {
+      step,
+      browsed,
+      liked,
+      commented,
+      candidates: [...candidates],
+      likeScreenshots: [...likeScreenshots],
+      commentScreenshots: [...commentScreenshots],
+      done,
+      error,
+    };
+    onProgress(p);
+    return p;
+  };
+
+  const assertInstagramWarmupReady = async (context: string): Promise<string> => {
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    const blocked = detectInstagramWarmupBlockedFromUiXml(uiXml);
+    if (blocked) {
+      const shotUrl = await screenshot(config, padCode)
+        .then((url) => freezeScreenshotUrl(url))
+        .catch(() => "");
+      if (shotUrl) {
+        const savedPath = saveThreadsDebugScreenshot(shotUrl, `instagram-warmup-${context}-blocked`);
+        throw new Error(`${blocked}${savedPath ? `｜debug=${savedPath}` : ""}`);
+      }
+      throw new Error(blocked);
+    }
+    return uiXml;
+  };
+
+  try {
+    if (riskPlan?.notes.length) {
+      report(riskPlan.notes.join("；"));
+    }
+    report("启动 Instagram...");
+    await withTimeout(
+      relaunchInstagram(config, padCode, 4500),
+      60_000,
+      "Instagram 启动超时：VMOS ADB 链路 60 秒内没有返回",
+    );
+    await assertInstagramWarmupReady("launch");
+
+    const firstInteractionIndex = riskManaged ? warmupRandomInt(1, Math.min(3, Math.max(1, browseCount - 1))) : 0;
+    let nextInteractionAfterBrowsed = warmupRandomInt(interactionMinPosts, interactionMaxPosts);
+    const commentTurnSchedule = !timedSession && maxComments > 0
+      ? buildWarmupCommentTurnSchedule(browseCount, maxComments, firstInteractionIndex)
+      : [];
+    const commentTurnSet = new Set(commentTurnSchedule);
+    report(timedSession
+      ? `开始低频浏览：目标 ${Math.round(targetSessionMs / 60_000)} 分钟，每 ${interactionMinPosts}-${interactionMaxPosts} 篇最多互动 1 次`
+      : `开始浏览：本次最多点赞 ${maxLikes} 个，最多留言 ${maxComments} 个`);
+
+    for (let i = 0; i < browseCount && (!timedSession || Date.now() < sessionDeadline); i += 1) {
+      report(timedSession
+        ? `滑动浏览中：已浏览约 ${browsed} 篇...`
+        : `浏览第 ${i + 1}/${browseCount} 条...`);
+      const currentUiXml = await assertInstagramWarmupReady(`loop-${i + 1}`);
+
+      const interactionAllowed = timedSession ? browsed >= nextInteractionAfterBrowsed : i >= firstInteractionIndex;
+      const remainingTurns = browseCount - i;
+      const likeChanceThisTurn = !timedSession && maxLikes > 0 && liked < maxLikes && remainingTurns <= 2 ? 100 : likeChance;
+      const scheduledCommentTurn = commentTurnSet.has(i);
+      const commentChanceThisTurn = !timedSession && maxComments > 0 && commented < maxComments
+        ? (scheduledCommentTurn ? 100 : commentChance)
+        : commentChance;
+      let shouldLike = interactionAllowed && likeChanceThisTurn > 0 && liked < maxLikes && Math.random() * 100 < likeChanceThisTurn;
+      let shouldComment = interactionAllowed && commentChanceThisTurn > 0 && commented < maxComments && Math.random() * 100 < commentChanceThisTurn;
+      if (timedSession && interactionAllowed) {
+        shouldLike = false;
+        shouldComment = false;
+        const requiredChoices: Array<"like" | "comment"> = [];
+        if (minRequiredLikes > liked && likeChance > 0 && liked < maxLikes) requiredChoices.push("like");
+        if (minRequiredComments > commented && commentChance > 0 && commented < maxComments) requiredChoices.push("comment");
+        const choices: Array<"like" | "comment"> = [...requiredChoices];
+        if (likeChance > 0 && liked < maxLikes) choices.push("like");
+        if (commentChance > 0 && commented < maxComments) choices.push("comment");
+        const choicePool = requiredChoices.length ? requiredChoices : choices;
+        const choice = choicePool.length ? choicePool[warmupRandomInt(0, choicePool.length - 1)] : null;
+        shouldLike = choice === "like";
+        shouldComment = choice === "comment";
+      }
+
+      const uiXml = (shouldLike || shouldComment) ? currentUiXml : "";
+      if (shouldLike) {
+        const result = await warmupLikeInstagramCurrentPost(config, padCode, uiXml);
+        if (result.ok) {
+          liked += 1;
+          if (result.screenshotUrl) likeScreenshots.push(result.screenshotUrl);
+          report(`已自动点赞第 ${liked} 个`);
+        } else {
+          interactionFailures += 1;
+          report(`Instagram 点赞跳过：${result.message}`);
+        }
+      }
+
+      if (shouldComment) {
+        const result = await warmupCommentInstagramCurrentPost(config, padCode, commentTemplates, commentPersona, uiXml);
+        if (result.ok) {
+          commented += 1;
+          if (result.screenshotUrl) commentScreenshots.push(result.screenshotUrl);
+          report(`已自动留言第 ${commented} 个：${result.comment || "已发送"}`);
+        } else {
+          interactionFailures += 1;
+          report(`Instagram 留言跳过：${result.message}`);
+        }
+      }
+
+      if (timedSession && interactionAllowed) {
+        nextInteractionAfterBrowsed = browsed + warmupRandomInt(interactionMinPosts, interactionMaxPosts);
+      }
+      if (timedSession && interactionFailures >= 4) {
+        throw new Error("Instagram 养号连续互动失败，请检查当前页面状态");
+      }
+
+      await warmupDwellLikeHuman(config, padCode, warmupRandom(minWatchSeconds * 1000, maxWatchSeconds * 1000));
+      await assertInstagramWarmupReady(`before-scroll-${i + 1}`);
+      await warmupInstagramScrollDown(config, padCode);
+      await delay(warmupRandom(minAfterScrollPauseMs, maxAfterScrollPauseMs));
+      await assertInstagramWarmupReady(`after-scroll-${i + 1}`);
+      browsed += 1;
+    }
+
+    assertWarmupMinimumCompletion("Instagram", { liked, commented }, { minRequiredLikes, minRequiredComments });
+    if (strictCompletion && likeChance >= 100 && maxLikes > 0 && liked < maxLikes) {
+      throw new Error(`养号未完成：要求自动点赞 ${maxLikes} 个，实际成功 ${liked} 个`);
+    }
+    if (strictCompletion && commentChance >= 100 && maxComments > 0 && commented < maxComments) {
+      throw new Error(`养号未完成：要求自动留言 ${maxComments} 个，实际成功 ${commented} 个`);
+    }
+
+    const result = report(`养号完成：浏览 ${browsed} 条，自动点赞 ${liked} 个，自动留言 ${commented} 个`, true);
+    if (riskManaged) recordWarmupRiskResult(riskPadCode, result);
+    return result;
+  } catch (error) {
+    if (riskManaged) {
+      recordWarmupRiskResult(riskPadCode, {
+        browsed,
+        liked,
+        commented,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    throw error;
+  }
+}
+
+async function relaunchRednote(
+  config: VmosConfig,
+  padCode: string,
+  waitMs = 4500,
+) {
+  await execAdbForText(
+    config,
+    padCode,
+    `am force-stop ${REDNOTE_PACKAGE}; sleep 1; monkey -p ${REDNOTE_PACKAGE} -c android.intent.category.LAUNCHER 1`,
+    45_000,
+    1000,
+  ).catch(async () => {
+    await execAdbAndWait(config, padCode, `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p ${REDNOTE_PACKAGE}`, 45_000);
+  });
+  await delay(waitMs);
+  await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+}
+
+async function warmupRednoteScrollDown(config: VmosConfig, padCode: string) {
+  const screen = await getScreenSize(config, padCode).catch(() => ({ width: 1080, height: 2340 }));
+  await warmupHumanSwipeByRatio(
+    config,
+    padCode,
+    warmupRandom(0.42, 0.58),
+    warmupRandom(0.72, 0.82),
+    warmupRandom(0.42, 0.58),
+    warmupRandom(0.30, 0.42),
+    warmupRandomInt(420, 880),
+    warmupRandomInt(450, 980),
+  ).catch(async () => {
+    await execAdbForText(
+      config,
+      padCode,
+      `input swipe ${Math.round(screen.width * 0.5)} ${Math.round(screen.height * 0.76)} ${Math.round(screen.width * 0.5)} ${Math.round(screen.height * 0.34)} 520`,
+      12_000,
+      700,
+    ).catch(() => "");
+  });
+}
+
+function findRednoteWarmupActionTarget(uiXml: string, kind: "like" | "comment"): { x: number; y: number } | null {
+  const patterns = kind === "like"
+    ? [/点赞|讚|赞|Like/i]
+    : [/评论|留言|Comment/i];
+  return findRednoteTargetByText(uiXml, patterns);
+}
+
+async function getRednoteDetailFallbackActionTarget(
+  config: VmosConfig,
+  padCode: string,
+  kind: "like" | "comment",
+): Promise<{ x: number; y: number; debugReason: string } | null> {
+  const focus = await getAndroidCurrentFocusQuick(config, padCode).catch(() => "");
+  if (!focus.includes("NoteDetailActivity")) return null;
+  const screen = await getScreenSize(config, padCode).catch(() => ({ width: 1080, height: 2340 }));
+  return {
+    x: Math.round(screen.width * (kind === "like" ? 0.535 : 0.91)),
+    y: Math.round(screen.height * 0.955),
+    debugReason: `rednote_detail_bottom_${kind}_fallback`,
+  };
+}
+
+async function ensureRednoteDetailForInteraction(config: VmosConfig, padCode: string) {
+  const focus = await getAndroidCurrentFocusQuick(config, padCode).catch(() => "");
+  if (focus.includes("NoteDetailActivity")) return;
+  const screen = await getScreenSize(config, padCode).catch(() => ({ width: 1080, height: 2340 }));
+  await tapViaAdbAbsolute(
+    config,
+    padCode,
+    Math.round(screen.width * 0.25),
+    Math.round(screen.height * 0.28),
+    1800,
+  );
+}
+
+async function backToRednoteFeedIfInDetail(config: VmosConfig, padCode: string) {
+  const focus = await getAndroidCurrentFocusQuick(config, padCode).catch(() => "");
+  if (!focus.includes("NoteDetailActivity")) return;
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 10_000, 500).catch(() => "");
+  await delay(900);
+}
+
+async function warmupLikeRednoteCurrentPost(
+  config: VmosConfig,
+  padCode: string,
+  uiXml?: string,
+): Promise<{ ok: boolean; message: string; screenshotUrl?: string }> {
+  const xml = uiXml || await dumpUiXml(config, padCode).catch(() => "");
+  const target = findRednoteWarmupActionTarget(xml, "like");
+  const fallback = target ? null : await getRednoteDetailFallbackActionTarget(config, padCode, "like");
+  const like = target || fallback;
+  if (!like) return { ok: false, message: "未识别到小红书点赞按钮" };
+  await tapViaAdbAbsolute(config, padCode, like.x, like.y, 1200);
+  const shotUrl = await withTimeout(screenshot(config, padCode), 20_000, "rednote like screenshot timeout").catch(() => "");
+  return { ok: true, message: fallback?.debugReason || "已执行小红书点赞", screenshotUrl: shotUrl || undefined };
+}
+
+async function warmupCommentRednoteCurrentPost(
+  config: VmosConfig,
+  padCode: string,
+  templates: string[],
+  persona?: WarmupCommentPersona,
+  uiXml?: string,
+): Promise<{ ok: boolean; message: string; screenshotUrl?: string; comment?: string }> {
+  const xml = uiXml || await dumpUiXml(config, padCode).catch(() => "");
+  const commentTarget = findRednoteWarmupActionTarget(xml, "comment");
+  const fallback = commentTarget ? null : await getRednoteDetailFallbackActionTarget(config, padCode, "comment");
+  const commentButton = commentTarget || fallback;
+  if (!commentButton) return { ok: false, message: "未识别到小红书评论按钮" };
+  const comment = await warmupGenerateCommentForPost("", templates, persona);
+  await tapViaAdbAbsolute(config, padCode, commentButton.x, commentButton.y, 1500);
+  const composerXml = await dumpUiXml(config, padCode).catch(() => "");
+  const input = findRednoteTargetByText(composerXml, [/说点什么|评论|留言|Comment|输入/i]) || {
+    x: Math.round((await getScreenSize(config, padCode).catch(() => ({ width: 1080 }))).width * 0.35),
+    y: Math.round((await getScreenSize(config, padCode).catch(() => ({ height: 2340 }))).height * 0.93),
+  };
+  await tapViaAdbAbsolute(config, padCode, input.x, input.y, 600);
+  await clearFocusedTextInput(config, padCode, 200);
+  await typeTextViaAdbBroadcast(config, padCode, comment, 1000);
+  const sendXml = await dumpUiXml(config, padCode).catch(() => "");
+  const send = findRednoteTargetByText(sendXml, [/发送|Send|发布/i]) || {
+    x: Math.round((await getScreenSize(config, padCode).catch(() => ({ width: 1080 }))).width * 0.88),
+    y: Math.round((await getScreenSize(config, padCode).catch(() => ({ height: 2340 }))).height * 0.93),
+  };
+  await tapViaAdbAbsolute(config, padCode, send.x, send.y, 1500);
+  const shotUrl = await withTimeout(screenshot(config, padCode), 20_000, "rednote comment screenshot timeout").catch(() => "");
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+  return { ok: true, message: "已执行小红书评论", screenshotUrl: shotUrl || undefined, comment };
+}
+
+export async function warmupRednoteAccount(
+  config: VmosConfig,
+  padCode: string,
+  cfg: WarmupConfig,
+  onProgress: (p: WarmupProgress) => void,
+): Promise<WarmupProgress> {
+  if (Array.isArray(config.accounts) && config.accounts.length > 1) {
+    await listPads(config).catch(() => undefined);
+  }
+  const riskPadCode = `rednote:${padCode}`;
+  const riskManaged = cfg.riskManaged !== false;
+  const riskPlan = riskManaged ? planRiskManagedWarmupConfig(riskPadCode, cfg) : null;
+  if (riskPlan && !riskPlan.allowed) {
+    throw new Error(riskPlan.notes.join("；") || "养号配置不可执行");
+  }
+  const effectiveCfg = riskPlan?.cfg || cfg;
+  const {
+    browseCount,
+    minWatchSeconds = 2,
+    maxWatchSeconds = 5,
+    minAfterScrollPauseMs = 700,
+    maxAfterScrollPauseMs = 1500,
+    likeChance = 0,
+    maxLikes = 0,
+    minRequiredLikes = 0,
+    commentChance = 0,
+    maxComments = 0,
+    minRequiredComments = 0,
+    commentTemplates = [],
+    commentPersona,
+    strictCompletion = !riskManaged,
+  } = effectiveCfg;
+
+  let browsed = 0;
+  let liked = 0;
+  let commented = 0;
+  const candidates: WarmupCandidate[] = [];
+  const likeScreenshots: string[] = [];
+  const commentScreenshots: string[] = [];
+  const report = (step: string, done = false, error?: string): WarmupProgress => {
+    const p: WarmupProgress = {
+      step,
+      browsed,
+      liked,
+      commented,
+      candidates: [...candidates],
+      likeScreenshots: [...likeScreenshots],
+      commentScreenshots: [...commentScreenshots],
+      done,
+      error,
+    };
+    onProgress(p);
+    return p;
+  };
+
+  try {
+    if (riskPlan?.notes.length) report(riskPlan.notes.join("；"));
+    report("启动小红书...");
+    await relaunchRednote(config, padCode, 4500);
+    report(`开始小红书低频浏览：目标 ${browseCount} 条`);
+
+    const commentTurnSchedule = maxComments > 0
+      ? buildWarmupCommentTurnSchedule(browseCount, maxComments, 0)
+      : [];
+    const commentTurnSet = new Set(commentTurnSchedule);
+
+    for (let i = 0; i < browseCount; i += 1) {
+      report(`小红书浏览第 ${i + 1}/${browseCount} 条...`);
+      const remainingTurns = browseCount - i;
+      const likeChanceThisTurn = maxLikes > 0 && liked < maxLikes && remainingTurns <= 2 ? 100 : likeChance;
+      const scheduledCommentTurn = commentTurnSet.has(i);
+      const commentChanceThisTurn = maxComments > 0 && commented < maxComments
+        ? (scheduledCommentTurn ? 100 : commentChance)
+        : commentChance;
+      const shouldLike = likeChanceThisTurn > 0 && liked < maxLikes && Math.random() * 100 < likeChanceThisTurn;
+      const shouldComment = commentChanceThisTurn > 0 && commented < maxComments && Math.random() * 100 < commentChanceThisTurn;
+      if (shouldLike || shouldComment) {
+        await ensureRednoteDetailForInteraction(config, padCode).catch(() => undefined);
+      }
+      const uiXml = (shouldLike || shouldComment) ? await dumpUiXml(config, padCode).catch(() => "") : "";
+
+      if (shouldLike) {
+        try {
+          const result = await warmupLikeRednoteCurrentPost(config, padCode, uiXml);
+          if (result.ok) {
+            liked += 1;
+            if (result.screenshotUrl) likeScreenshots.push(result.screenshotUrl);
+            report(`已自动点赞第 ${liked} 个`);
+          } else {
+            report(`小红书点赞跳过：${result.message}`);
+          }
+        } catch (error) {
+          report(`小红书点赞跳过：${error instanceof Error ? error.message : String(error)}`);
+          await backToRednoteFeedIfInDetail(config, padCode).catch(() => undefined);
+        }
+      }
+
+      if (shouldComment) {
+        try {
+          const result = await warmupCommentRednoteCurrentPost(config, padCode, commentTemplates, commentPersona, uiXml);
+          if (result.ok) {
+            commented += 1;
+            if (result.screenshotUrl) commentScreenshots.push(result.screenshotUrl);
+            report(`已自动评论第 ${commented} 个：${result.comment || "已发送"}`);
+          } else {
+            report(`小红书评论跳过：${result.message}`);
+          }
+        } catch (error) {
+          report(`小红书评论跳过：${error instanceof Error ? error.message : String(error)}`);
+          await backToRednoteFeedIfInDetail(config, padCode).catch(() => undefined);
+        }
+      }
+
+      await backToRednoteFeedIfInDetail(config, padCode).catch(() => undefined);
+      await warmupDwellLikeHuman(config, padCode, warmupRandom(minWatchSeconds * 1000, maxWatchSeconds * 1000));
+      await warmupRednoteScrollDown(config, padCode);
+      await delay(warmupRandom(minAfterScrollPauseMs, maxAfterScrollPauseMs));
+      browsed += 1;
+    }
+
+    assertWarmupMinimumCompletion("小红书", { liked, commented }, { minRequiredLikes, minRequiredComments });
+    if (strictCompletion && likeChance >= 100 && maxLikes > 0 && liked < maxLikes) {
+      throw new Error(`小红书养号未完成预期点赞：目标 ${maxLikes}，实际 ${liked}`);
+    }
+    if (strictCompletion && commentChance >= 100 && maxComments > 0 && commented < maxComments) {
+      throw new Error(`小红书养号未完成预期评论：目标 ${maxComments}，实际 ${commented}`);
+    }
+    const result = report(`小红书养号完成：浏览 ${browsed} 条，自动点赞 ${liked} 个，自动评论 ${commented} 个`, true);
+    if (riskManaged) recordWarmupRiskResult(riskPadCode, result);
+    return result;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (riskManaged) {
+      recordWarmupRiskResult(riskPadCode, { browsed, liked, commented, error: msg });
+    }
+    report(`小红书养号失败：${msg}`, true, msg);
+    throw error;
+  }
+}
