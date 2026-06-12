@@ -17,7 +17,7 @@ import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-r
 import { publishPost, queryThreadsAccount, loginThreadsAccount, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
-import { getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
+import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
 import { WORKFLOW_PERSONA_SEEDS } from "@/lib/workflow-personas";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
@@ -817,7 +817,7 @@ type PendingGeneratePostState = {
   selectedMemoryEntryIds?: string[];
   memoryOptions?: PersonaMemoryEntry[];
   memoryPage?: number;
-  stage: "await_memory" | "await_branch" | "await_time_slot" | "await_count" | "await_ratio" | "await_prompt" | "await_word_count";
+  stage: "await_memory" | "await_custom_memory" | "await_branch" | "await_time_slot" | "await_count" | "await_ratio" | "await_prompt" | "await_word_count";
 };
 
 type PendingPaidR18ImageFlowState = {
@@ -845,7 +845,7 @@ function loadPendingGeneratePosts(): Map<number, PendingGeneratePostState> {
         Number.isFinite(chatId)
         && state?.archiveId
         && state?.archiveName
-        && ["await_memory", "await_branch", "await_time_slot", "await_count", "await_ratio", "await_prompt", "await_word_count"].includes(state.stage)
+        && ["await_memory", "await_custom_memory", "await_branch", "await_time_slot", "await_count", "await_ratio", "await_prompt", "await_word_count"].includes(state.stage)
       ) {
         map.set(chatId, {
           archiveId: state.archiveId,
@@ -932,6 +932,18 @@ type PendingPaidR18ImageFirstGroupFlow = {
 };
 
 const pendingPaidR18ImageFirstGroupFlows = new Map<number, PendingPaidR18ImageFirstGroupFlow>();
+
+function clearToolR18TransientState(chatId: number) {
+  pendingToolR18Tasks.delete(chatId);
+  pendingPaidR18ImageFlows.delete(chatId);
+  pendingPaidR18ImageFirstGroupFlows.delete(chatId);
+}
+
+function clearTelegramNavigationTransientState(chatId: number) {
+  deletePendingGeneratePost(chatId);
+  pendingGeneratedPostImageGroupFlows.delete(chatId);
+  clearToolR18TransientState(chatId);
+}
 
 function setToolR18BackTarget(chatId: number, target?: string) {
   if (target) toolR18BackTargetsByChat.set(chatId, target);
@@ -3833,6 +3845,59 @@ function buildToolR18PromptReviewKeyboard(taskType?: ToolR18TaskType) {
   ];
 }
 
+function toolR18TextToImageInputGuidance(state: PendingToolR18TaskState) {
+  const params = state.params || {};
+  const profile = String(params.text_to_image_workflow_profile || "zit_final");
+  if (!String(params.aspect_ratio || "").trim()) {
+    return {
+      text: "請先點擊按鈕選擇圖像比例，不要直接發送文字或數字。",
+      keyboard: buildToolR18TextToImageRatioKeyboard(profile, toolR18FlowCancelCallback(params, "toolr18_group_image")),
+    };
+  }
+  if (params.final_resolution_available && typeof params.final_resolution_enabled !== "boolean") {
+    return {
+      text: "請先點擊按鈕選擇是否開啟最終分辨率。",
+      keyboard: buildToolR18TextToImageResolutionKeyboard(),
+    };
+  }
+  if (toolR18TextToImagePersonaOptions(profile).length && params.persona_selected !== true && !hasPaidR18ImageFlowContext(params)) {
+    return {
+      text: "請先點擊按鈕選擇人設 LoRA，或選擇「不使用人設」。",
+      keyboard: buildToolR18TextToImagePersonaKeyboard(profile),
+    };
+  }
+  if (typeof params.tg_use_llm_prompt !== "boolean") {
+    return {
+      text: "請先點擊按鈕選擇提示詞方式：AI 自由發揮、讓 Grok 生成提示詞，或輸入自定義提示詞提交。",
+      keyboard: buildToolR18TextToImagePromptModeKeyboard(hasPaidR18ImageFlowContext(params) && params.persona_auto_matched ? "toolr18_task_text_to_image" : "toolr18_t2i_back_before_prompt"),
+    };
+  }
+  return null;
+}
+
+function toolR18PendingInputGuidance(state: PendingToolR18TaskState, hasMedia: boolean) {
+  if (state.taskType === "text_to_image" && state.stage === "await_task_input") {
+    return toolR18TextToImageInputGuidance(state);
+  }
+  if (state.stage === "video_i2v_resolution") {
+    return { text: "請先點擊按鈕選擇視頻分辨率。", keyboard: buildToolR18VideoI2vResolutionKeyboard() };
+  }
+  if (state.stage === "video_i2v_prompt_mode") {
+    return { text: "請先點擊按鈕選擇提示詞方式：讓 Grok 生成提示詞，或輸入自定義提示詞提交。", keyboard: buildToolR18VideoI2vPromptModeKeyboard() };
+  }
+  if (state.stage === "image_edit_prompt_mode") {
+    const meta = toolR18ImageEditMeta(state.taskType);
+    return { text: "請先點擊按鈕選擇圖片編輯提示詞方式。", keyboard: buildToolR18ImageEditPromptModeKeyboard(meta) };
+  }
+  if (state.stage === "face_swap_prompt_mode") {
+    return { text: "請先點擊按鈕選擇人物換臉提示詞方式。", keyboard: buildToolR18FaceSwapPromptModeKeyboard() };
+  }
+  if (state.stage === "video_i2v_audio" && !hasMedia) {
+    return { text: "請上傳音頻檔案，或點擊「跳過音頻」。", keyboard: buildToolR18VideoI2vAudioKeyboard(toolR18VideoI2vParams(state)) };
+  }
+  return null;
+}
+
 function buildToolR18PreviewParams(state: PendingToolR18TaskState, requestText: string) {
   const files = state.files || [];
   const images = files.filter((item) => item.kind === "image").map((item) => item.path);
@@ -4224,6 +4289,14 @@ async function submitPendingToolR18Task(bot: TelegramBot, chatId: number, state:
 }
 async function handlePendingToolR18Input(bot: TelegramBot, msg: TelegramBot.Message, state: PendingToolR18TaskState, media: any, text: string) {
   const chatId = msg.chat.id;
+  const guidance = toolR18PendingInputGuidance(state, Boolean(media));
+  if (guidance) {
+    console.log(`[telegram][toolr18_input_guidance] chat=${chatId} stage=${state.stage} task=${state.taskType || ""}`);
+    await bot.sendMessage(chatId, guidance.text, {
+      reply_markup: { inline_keyboard: guidance.keyboard },
+    });
+    return;
+  }
   const nextState: PendingToolR18TaskState = {
     ...state,
     files: [...(state.files || [])],
@@ -6347,10 +6420,77 @@ function buildGenerateMemorySelectionKeyboard(state: PendingGeneratePostState) {
     const allSelected = options.every((entry) => selected.has(entry.id));
     rows.push([{ text: allSelected ? "\u2610 \u53D6\u6D88\u5168\u9078" : "\u2705 \u5168\u9078\u8A18\u61B6", callback_data: "genmem_select_all" }]);
   }
+  if (selected.size > 0) {
+    rows.push([{ text: "\uD83D\uDDD1 \u522A\u9664\u5DF2\u9078\u8A18\u61B6", callback_data: "genmem_delete_selected" }]);
+  }
+  rows.push([{ text: "➕ 添加自定義記憶", callback_data: "genmem_add_custom" }]);
   rows.push([{ text: "\u2705 \u4F7F\u7528\u5DF2\u9078\u8A18\u61B6", callback_data: "genmem_done" }]);
   rows.push([{ text: "\u23ED \u4E0D\u6307\u5B9A\u8A18\u61B6", callback_data: "genmem_skip" }]);
   rows.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE\u751F\u6210\u6A21\u5F0F", callback_data: `genpost_${state.archiveId}` }]);
   return { inline_keyboard: rows };
+}
+
+async function promptAddCustomPersonaMemory(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number | undefined,
+  state: PendingGeneratePostState,
+) {
+  await safeEditOrSend(bot, chatId, messageId, [
+    "➕ 添加自定義人設記憶",
+    "",
+    `人設：${state.archiveName}`,
+    "",
+    "請直接發送要新增的人設記憶內容。",
+    "可以是一句設定、一次發布經驗、人物偏好、內容方向或避雷要求。",
+    "",
+    "例如：早上內容要偏生活感，語氣輕鬆像朋友聊天。",
+  ].join("\n"), {
+    reply_markup: { inline_keyboard: [[{ text: "◀️ 返回記憶選擇", callback_data: "genmem_custom_back" }]] },
+  });
+}
+
+function selectedMemoryEntriesFromState(state: Pick<PendingGeneratePostState, "selectedMemoryEntryIds" | "memoryOptions">): PersonaMemoryEntry[] {
+  const selected = new Set((state.selectedMemoryEntryIds || []).map((id) => String(id)));
+  if (!selected.size) return [];
+  return (state.memoryOptions || []).filter((entry) => selected.has(String(entry.id)));
+}
+
+async function promptDeleteSelectedPersonaMemories(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number | undefined,
+  state: PendingGeneratePostState,
+) {
+  const entries = selectedMemoryEntriesFromState(state);
+  if (!entries.length) {
+    await safeEditOrSend(bot, chatId, messageId, "請先勾選要刪除的人設記憶。", {
+      reply_markup: buildGenerateMemorySelectionKeyboard(state),
+    });
+    return;
+  }
+  const preview = entries.slice(0, 8).map((entry, index) => {
+    const summary = normalizeTelegramSingleLine(entry.summary || entry.content || "");
+    return `${index + 1}. ${summary}`;
+  });
+  if (entries.length > preview.length) preview.push(`...另有 ${entries.length - preview.length} 條`);
+  await safeEditOrSend(bot, chatId, messageId, [
+    "🗑 刪除已選人設記憶",
+    "",
+    `人設：${state.archiveName}`,
+    `將刪除：${entries.length} 條`,
+    "",
+    ...preview,
+    "",
+    "刪除後會從此人設記憶中移除，後續生成不再引用這些記憶。",
+  ].join("\n"), {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "✅ 確認刪除", callback_data: "genmem_delete_confirm" }],
+        [{ text: "◀️ 返回記憶選擇", callback_data: "genmem_delete_cancel" }],
+      ],
+    },
+  });
 }
 
 function selectedMemorySummariesFromState(state: Pick<PendingGeneratePostState, "selectedMemoryEntryIds" | "memoryOptions">): string[] {
@@ -8608,6 +8748,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
     if (action === "list_personas") {
+      clearTelegramNavigationTransientState(chatId);
       const payload = await getPersonaListMenuPayload();
       const sent = await safeEditOrSend(bot, chatId, undefined, payload.text, payload.options);
       if (sent?.message_id) {
@@ -8617,6 +8758,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
     if (action === "pad_mgmt") {
+      clearTelegramNavigationTransientState(chatId);
       const payload = await getPadMenuPayload();
       const sent = await safeEditOrSend(bot, chatId, undefined, payload.text, payload.options);
       if (sent?.message_id) {
@@ -8624,6 +8766,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         saveControlPanelMessageCache();
       }
       return;
+    }
+    if (action !== "force_stop_current_task") {
+      clearTelegramNavigationTransientState(chatId);
     }
     await callbackHandler({
       id: "",
@@ -8661,6 +8806,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data === "back_main" || data === "fresh_main_menu") {
       deletePendingGeneratePost(chatId);
       pendingScheduledPublishes.delete(chatId);
+      clearToolR18TransientState(chatId);
       sendMainMenu(chatId, msgId);
       return;
     }
@@ -9402,11 +9548,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data === "toolr18_entry_root") {
+      clearToolR18TransientState(chatId);
       await sendToolR18Menu(bot, chatId, msgId, "newpost_branch_picker");
       return;
     }
 
     if (data.startsWith("toolr18_entry_")) {
+      clearToolR18TransientState(chatId);
       const archiveId = data.slice("toolr18_entry_".length);
       await sendToolR18Menu(bot, chatId, msgId, "genpost_branch_" + archiveId);
       return;
@@ -9414,6 +9562,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data === "toolr18_entry") {
       if (await sendPaidR18ImageWorkflowFromContext(bot, chatId, msgId, true, "entry")) return;
+      clearToolR18TransientState(chatId);
       await sendToolR18Menu(bot, chatId, msgId);
       return;
     }
@@ -9906,16 +10055,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         selectedMemoryEntryIds: [],
         memoryOptions,
         memoryPage: 0,
-        stage: memoryOptions.length ? "await_memory" : "await_count",
+        stage: "await_memory",
       };
       setPendingGeneratePost(chatId, pendingState);
-      if (memoryOptions.length) {
-        await safeEditOrSend(bot, chatId, msgId, buildGenerateMemorySelectionText(pendingState), {
-          reply_markup: buildGenerateMemorySelectionKeyboard(pendingState),
-        });
-      } else {
-        await advanceGeneratePostAfterMemorySelection(bot, chatId, msgId, pendingState);
-      }
+      await safeEditOrSend(bot, chatId, msgId, buildGenerateMemorySelectionText(pendingState), {
+        reply_markup: buildGenerateMemorySelectionKeyboard(pendingState),
+      });
       return;
     }
 
@@ -9974,6 +10119,79 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data === "genmem_add_custom" || data === "genmem_custom_back") {
+      const pending = pendingGeneratePosts.get(chatId);
+      if (!pending || !["await_memory", "await_custom_memory"].includes(pending.stage)) {
+        await safeEditOrSend(bot, chatId, msgId, "生成配置已失效，請重新選擇新建推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      if (data === "genmem_custom_back") {
+        const nextState = { ...pending, stage: "await_memory" as const };
+        setPendingGeneratePost(chatId, nextState);
+        await safeEditOrSend(bot, chatId, msgId, buildGenerateMemorySelectionText(nextState), { reply_markup: buildGenerateMemorySelectionKeyboard(nextState) });
+        return;
+      }
+      const nextState = { ...pending, stage: "await_custom_memory" as const };
+      setPendingGeneratePost(chatId, nextState);
+      await promptAddCustomPersonaMemory(bot, chatId, msgId, nextState);
+      return;
+    }
+
+    if (data === "genmem_delete_selected" || data === "genmem_delete_cancel" || data === "genmem_delete_confirm") {
+      const pending = pendingGeneratePosts.get(chatId);
+      if (!pending || pending.stage !== "await_memory") {
+        await safeEditOrSend(bot, chatId, msgId, "生成配置已失效，請重新選擇新建推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      if (data === "genmem_delete_cancel") {
+        await safeEditOrSend(bot, chatId, msgId, buildGenerateMemorySelectionText(pending), {
+          reply_markup: buildGenerateMemorySelectionKeyboard(pending),
+        });
+        return;
+      }
+      if (data === "genmem_delete_selected") {
+        await promptDeleteSelectedPersonaMemories(bot, chatId, msgId, pending);
+        return;
+      }
+
+      const entries = selectedMemoryEntriesFromState(pending);
+      if (!entries.length) {
+        await safeEditOrSend(bot, chatId, msgId, "請先勾選要刪除的人設記憶。", {
+          reply_markup: buildGenerateMemorySelectionKeyboard(pending),
+        });
+        return;
+      }
+      let deletedCount = 0;
+      for (const entry of entries) {
+        const deleted = await deletePersonaMemoryEntryAsync(pending.archiveId, {
+          id: entry.id,
+          date: entry.date,
+          summary: entry.summary,
+        }).catch(() => false);
+        if (deleted) deletedCount += 1;
+      }
+      const memoryOptions = await loadSelectablePersonaMemories(pending.archiveId);
+      const existingIds = new Set(memoryOptions.map((entry) => String(entry.id)));
+      const nextState: PendingGeneratePostState = {
+        ...pending,
+        memoryOptions,
+        memoryPage: Math.min(generateMemoryPageInfo(pending).page, generateMemoryPageInfo({ ...pending, memoryOptions }).totalPages - 1),
+        selectedMemoryEntryIds: (pending.selectedMemoryEntryIds || []).filter((id) => existingIds.has(String(id))),
+      };
+      setPendingGeneratePost(chatId, nextState);
+      const message = deletedCount > 0
+        ? `✅ 已刪除 ${deletedCount} 條人設記憶。`
+        : "未找到可刪除的正式人設記憶；已發布推文摘要不會在這裡刪除。";
+      await safeEditOrSend(bot, chatId, msgId, [message, "", buildGenerateMemorySelectionText(nextState)].join("\n"), {
+        reply_markup: buildGenerateMemorySelectionKeyboard(nextState),
+      });
+      return;
+    }
+
     if (data === "genmem_done" || data === "genmem_skip") {
       const pending = pendingGeneratePosts.get(chatId);
       if (!pending || pending.stage !== "await_memory") {
@@ -10004,13 +10222,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       if (data === "genmem_branch_back") {
-        const nextState = { ...pending, stage: pending.memoryOptions?.length ? "await_memory" as const : "await_branch" as const };
+        const nextState = { ...pending, stage: "await_memory" as const };
         setPendingGeneratePost(chatId, nextState);
-        if (nextState.stage === "await_memory") {
-          await safeEditOrSend(bot, chatId, msgId, buildGenerateMemorySelectionText(nextState), { reply_markup: buildGenerateMemorySelectionKeyboard(nextState) });
-        } else {
-          await sendGenerateMemoryBranchPicker(bot, chatId, msgId, nextState);
-        }
+        await safeEditOrSend(bot, chatId, msgId, buildGenerateMemorySelectionText(nextState), { reply_markup: buildGenerateMemorySelectionKeyboard(nextState) });
         return;
       }
       const nextState = {
@@ -12709,10 +12923,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
     const documentMedia = msg.document || null;
     const media = photo || video || documentMedia;
     if (text === "/start" || text === "/menu" || text === "主菜单" || text === "🏠 主選單") {
+      clearTelegramNavigationTransientState(chatId);
       sendMainMenu(chatId);
       return;
     }
     if (msg.text?.startsWith("/")) return;
+
+    const replyMenuAction = getReplyMenuAction(chatId, text);
+    if (replyMenuAction) {
+      if (!isCanonicalReplyMenuText(chatId, text) && replyMenuAction !== "fresh_main_menu") {
+        sendMainMenu(chatId);
+      }
+      await handleReplyMenuAction(chatId, msg, replyMenuAction);
+      return;
+    }
 
     const pendingToolR18 = pendingToolR18Tasks.get(chatId);
     if (pendingToolR18) {
@@ -12769,6 +12993,41 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await bot.sendMessage(chatId, "請先點擊按鈕勾選本次參考的人設記憶，或點擊「不指定記憶」跳過。", {
           reply_markup: buildGenerateMemorySelectionKeyboard(generatePostState),
         });
+        return;
+      }
+      if (generatePostState.stage === "await_custom_memory") {
+        const rawMemory = String(text || "").replace(/\s+/g, " ").trim();
+        const normalizedMemory = normalizeMemorySummaryForStorage(rawMemory);
+        if (!normalizedMemory || normalizedMemory.length < 2) {
+          await bot.sendMessage(chatId, "❌ 記憶內容太短，請重新發送較完整的人設記憶。", {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回記憶選擇", callback_data: "genmem_custom_back" }]] },
+          });
+          return;
+        }
+        try {
+          await addSummariesToMemoryAsync(generatePostState.archiveId, [rawMemory]);
+          const memoryOptions = await loadSelectablePersonaMemories(generatePostState.archiveId);
+          const selected = new Set(generatePostState.selectedMemoryEntryIds || []);
+          const added = memoryOptions.find((entry) => normalizeTelegramSingleLine(entry.summary) === normalizeTelegramSingleLine(normalizedMemory))
+            || memoryOptions.find((entry) => normalizeTelegramSingleLine(entry.content || "") === normalizeTelegramSingleLine(rawMemory))
+            || memoryOptions[0];
+          if (added?.id) selected.add(added.id);
+          const nextState: PendingGeneratePostState = {
+            ...generatePostState,
+            stage: "await_memory",
+            memoryOptions,
+            memoryPage: 0,
+            selectedMemoryEntryIds: [...selected],
+          };
+          setPendingGeneratePost(chatId, nextState);
+          await bot.sendMessage(chatId, `✅ 已添加自定義記憶，並自動勾選。\n\n${normalizeTelegramSingleLine(normalizedMemory)}`, {
+            reply_markup: buildGenerateMemorySelectionKeyboard(nextState),
+          });
+        } catch (error: any) {
+          await bot.sendMessage(chatId, `❌ 添加記憶失敗：${formatUserFacingError(error, "請稍後重試。")}`, {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回記憶選擇", callback_data: "genmem_custom_back" }]] },
+          });
+        }
         return;
       }
       if (generatePostState.stage === "await_branch") {
@@ -13361,15 +13620,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
         return;
       }
-    }
-
-    const replyMenuAction = getReplyMenuAction(chatId, text);
-    if (replyMenuAction) {
-      if (!isCanonicalReplyMenuText(chatId, text) && replyMenuAction !== "fresh_main_menu") {
-        sendMainMenu(chatId);
-      }
-      await handleReplyMenuAction(chatId, msg, replyMenuAction);
-      return;
     }
 
     const pending = pendingActions.get(chatId);
