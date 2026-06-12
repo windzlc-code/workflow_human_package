@@ -113,7 +113,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "llm_default_model_gemini": "",
     "llm_default_model_gpt": "grok-4.2",
     "llm_model_priority_order": "grok-4.2",
-    "text_to_image_auto_qa_enabled": True,
+    "text_to_image_auto_qa_enabled": False,
     "text_to_image_auto_qa_max_attempts": 3,
     "persona_body_profiles": {},
     "mulerouter_api_name": "",
@@ -2344,7 +2344,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         fallback=llm_gpt_models or ["grok-4.2"],
     )
     merged["llm_model_priority_order"] = ", ".join(llm_priority_models)
-    merged["text_to_image_auto_qa_enabled"] = _to_bool(merged.get("text_to_image_auto_qa_enabled"), True)
+    merged["text_to_image_auto_qa_enabled"] = _to_bool(merged.get("text_to_image_auto_qa_enabled"), False)
     merged["text_to_image_auto_qa_max_attempts"] = min(
         max(_to_int(merged.get("text_to_image_auto_qa_max_attempts"), 3), 1),
         6,
@@ -3171,11 +3171,12 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
         "mulerouter_wan_i2v_negative_prompt",
     ]
     for key in runtime_fill_keys:
-        current_value = str(merged.get(key) or "").strip()
+        current_raw = merged.get(key) if key in merged else None
+        current_value = str(current_raw).strip() if current_raw is not None else ""
         if key in secret_keys and "***" in current_value:
             merged[key] = runtime.get(key)
             continue
-        if not current_value:
+        if current_raw is None or (isinstance(current_raw, str) and not current_value):
             merged[key] = runtime.get(key)
     if not isinstance(merged.get("remote_comfy_workflow_mappings"), dict) or not merged.get("remote_comfy_workflow_mappings"):
         merged["remote_comfy_workflow_mappings"] = runtime.get("remote_comfy_workflow_mappings") if isinstance(runtime.get("remote_comfy_workflow_mappings"), dict) else {}
@@ -6494,7 +6495,7 @@ def _run_remote_comfy_mapped_task(task_id: str, payload: dict[str, Any], task_ty
     base_node_inputs = _merge_node_inputs(binding_node_inputs, base_node_inputs)
     auto_qa_enabled = (
         str(task_type or "").strip() == "text_to_image"
-        and _to_bool(payload.get("text_to_image_auto_qa_enabled"), True)
+        and _to_bool(payload.get("text_to_image_auto_qa_enabled"), False)
     )
     image_task_requires_output = str(task_type or "").strip() in {"text_to_image", "image_generate", "single_image_edit", "get_nano_banana", "face_swap"}
     qa_target_count = _text_to_image_qa_target_count(payload, batch_size=batch_size, workflow_path=workflow_path) if str(task_type or "").strip() == "text_to_image" else 1
@@ -13221,11 +13222,17 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
         attempts.extend(rewrite_attempts)
         rewritten = _strip_prompt_response_wrappers(llm_result.get("raw_text") if isinstance(llm_result, dict) else "")
     except Exception as exc:
-        if not edit_image_task:
+        if prompt_chain == "image" and not edit_image_task:
+            logger.warning("Telegram Grok image prompt rewrite failed; using local fallback prompt: %s", exc)
+            attempts.append({"attempt": 1, "provider": "fallback", "model": "", "ok": False, "stage": "prompt_rewrite", "error": str(exc)})
+            rewritten = _build_tg_image_fallback_prompt(original_request or user_request, enhanced)
+            selected = {}
+        elif not edit_image_task:
             raise
-        rewritten = _build_tg_image_edit_fallback_prompt(original_request or user_request, typ)
-        attempts = [{"attempt": 1, "provider": "fallback", "model": "", "ok": False, "error": str(exc)}]
-        selected = {}
+        else:
+            rewritten = _build_tg_image_edit_fallback_prompt(original_request or user_request, typ)
+            attempts = [{"attempt": 1, "provider": "fallback", "model": "", "ok": False, "error": str(exc)}]
+            selected = {}
     if not rewritten:
         raise RuntimeError("Grok 提示词改写未返回可用文本")
     forbidden_hits = _find_tg_image_forbidden_person_fields(rewritten) if prompt_chain == "image" and not edit_image_task else []
@@ -13251,19 +13258,28 @@ def _enhance_tg_payload_with_llm_prompt(task_type: str, payload: dict[str, Any])
                 "Regenerate only the final Chinese image prompt body. Do not output English.",
             ]
         )
-        retry_result, retry_selected, retry_attempts = _request_llm_text_with_fallback(
-            source=enhanced,
-            user_input=retry_input,
-            system_prompt=retry_prompt,
-            parameters="",
-            image_paths=image_hint_paths or None,
-            allow_builtin=False,
-            retry_count=1,
-            single_model=True,
-            request_label=f"Telegram Grok {prompt_chain} 提示词重试",
-        )
-        retry_text = _strip_prompt_response_wrappers(retry_result.get("raw_text") if isinstance(retry_result, dict) else "")
-        attempts.extend(retry_attempts)
+        try:
+            retry_result, retry_selected, retry_attempts = _request_llm_text_with_fallback(
+                source=enhanced,
+                user_input=retry_input,
+                system_prompt=retry_prompt,
+                parameters="",
+                image_paths=image_hint_paths or None,
+                allow_builtin=False,
+                retry_count=1,
+                single_model=True,
+                request_label=f"Telegram Grok {prompt_chain} 提示词重试",
+            )
+            retry_text = _strip_prompt_response_wrappers(retry_result.get("raw_text") if isinstance(retry_result, dict) else "")
+            attempts.extend(retry_attempts)
+        except Exception as exc:
+            if prompt_chain == "image" and not edit_image_task:
+                logger.warning("Telegram Grok image prompt retry failed; keeping local fallback prompt: %s", exc)
+                attempts.append({"attempt": 1, "provider": "fallback", "model": "", "ok": False, "stage": "prompt_retry", "error": str(exc)})
+                retry_text = ""
+                retry_selected = {}
+            else:
+                raise
         retry_forbidden_hits = _find_tg_image_forbidden_person_fields(retry_text) if prompt_chain == "image" and not edit_image_task else []
         retry_is_good = retry_text and (edit_image_task or not _is_low_quality_tg_prompt(original_request or user_request, retry_text)) and not retry_forbidden_hits
         if retry_is_good:

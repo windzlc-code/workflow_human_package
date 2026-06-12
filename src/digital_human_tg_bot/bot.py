@@ -587,6 +587,7 @@ def _text_to_image_params(data: dict[str, Any] | None = None) -> dict[str, Any]:
         "persona_selected": bool(source.get("persona_selected", False)),
         "prompt_mode_selected": bool(source.get("prompt_mode_selected", False)),
         "prompt_mode_label": str(source.get("prompt_mode_label") or "").strip(),
+        "text_to_image_auto_qa_enabled": bool(source.get("text_to_image_auto_qa_enabled", False)),
     }
 
 
@@ -779,6 +780,7 @@ def _text_to_image_reroll_payload(input_payload: dict[str, Any]) -> tuple[dict[s
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_auto_qa_enabled": bool(params.get("text_to_image_auto_qa_enabled", False)),
             "text_to_image_auto_qa_max_attempts": PERSON_T2I_AUTO_QA_MAX_ATTEMPTS if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
@@ -895,7 +897,7 @@ def _text_to_image_prompt_entry_step_text(params: dict[str, Any], *, custom: boo
     return f"{step_no} 請輸入{'自定義最終提示詞' if custom else '圖片需求或上傳參考圖'}"
 
 
-def _text_to_image_ratio_keyboard(*, selected_ratio: str = "", profile: str = "zit_final") -> InlineKeyboardMarkup:
+def _text_to_image_ratio_keyboard(*, selected_ratio: str = "", profile: str = "zit_final", qa_enabled: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     items = list(_text_to_image_ratio_options(profile).items())
     for idx in range(0, len(items), 2):
@@ -904,6 +906,7 @@ def _text_to_image_ratio_keyboard(*, selected_ratio: str = "", profile: str = "z
             prefix = "✓ " if ratio == selected_ratio else ""
             row.append(InlineKeyboardButton(text=f"{prefix}{option['label']}", callback_data=f"t2i:ratio:{ratio}"))
         rows.append(row)
+    rows.append([InlineKeyboardButton(text="✅ QA 審查：開啟" if qa_enabled else "☑️ QA 審查：關閉", callback_data="t2i:qa:toggle")])
     rows.append([InlineKeyboardButton(text="返回主選單", callback_data="t2i:main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1006,7 +1009,7 @@ def _text_to_image_prompt_display_retry_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _text_to_image_ratio_reply_keyboard(*, profile: str = "zit_final") -> ReplyKeyboardMarkup:
+def _text_to_image_ratio_reply_keyboard(*, profile: str = "zit_final", qa_enabled: bool = False) -> ReplyKeyboardMarkup:
     items = [str(option["label"]) for option in _text_to_image_ratio_options(profile).values()]
     rows = [
         [KeyboardButton(text=items[idx]), KeyboardButton(text=items[idx + 1])]
@@ -1014,6 +1017,7 @@ def _text_to_image_ratio_reply_keyboard(*, profile: str = "zit_final") -> ReplyK
     ]
     if len(items) % 2:
         rows.append([KeyboardButton(text=items[-1])])
+    rows.append([KeyboardButton(text="✅ QA 審查：開啟" if qa_enabled else "☑️ QA 審查：關閉")])
     rows.append([KeyboardButton(text=MAIN_MENU_BUTTON)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
@@ -3242,6 +3246,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             persona_selected=False,
             prompt_mode_selected=False,
             prompt_mode_label="",
+            text_to_image_auto_qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False)),
         )
 
     async def _refresh_text_to_image_runtime_state(state: FSMContext) -> tuple[dict[str, Any], bool]:
@@ -3312,13 +3317,14 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             persona_selected=False,
             prompt_mode_selected=False,
             prompt_mode_label="",
+            text_to_image_auto_qa_enabled=False,
         )
         params = await _current_text_to_image_runtime_params()
         workflow_profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
         await _set_text_to_image_runtime_state(state, params)
         await _answer(message,
             _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
-            reply_markup=_text_to_image_ratio_reply_keyboard(profile=workflow_profile),
+            reply_markup=_text_to_image_ratio_reply_keyboard(profile=workflow_profile, qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
         )
 
     async def _show_text_to_image_prompt_review(message: Message, state: FSMContext, *, prompt_text: str, selected_model: str = "") -> None:
@@ -3399,6 +3405,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_auto_qa_enabled": bool(params.get("text_to_image_auto_qa_enabled", False)),
             "text_to_image_auto_qa_max_attempts": PERSON_T2I_AUTO_QA_MAX_ATTEMPTS if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
@@ -3449,7 +3456,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             await _answer(message,
                 "後臺文生圖工作流已更新，"
                 "本次未提交到隊列。請按最新參數重新選擇。",
-                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile, qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
             )
             return
         data = await state.get_data()
@@ -3477,6 +3484,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             "aspect_ratio": params["aspect_ratio"],
             "batch_size": PERSON_T2I_DEFAULT_BATCH_SIZE if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "text_to_image_qa_target_count": PERSON_T2I_TELEGRAM_RETURN_COUNT if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
+            "text_to_image_auto_qa_enabled": bool(params.get("text_to_image_auto_qa_enabled", False)),
             "text_to_image_auto_qa_max_attempts": PERSON_T2I_AUTO_QA_MAX_ATTEMPTS if str(params.get("text_to_image_workflow_profile") or "") == "person_t2i" else 1,
             "final_resolution_enabled": bool(params["final_resolution_enabled"]),
             "persona_enabled": bool(params["persona_enabled"]),
@@ -3850,12 +3858,39 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 + _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params)
             )
             try:
-                await callback.message.edit_text(text, reply_markup=_text_to_image_ratio_keyboard(profile=profile))
+                await callback.message.edit_text(text, reply_markup=_text_to_image_ratio_keyboard(profile=profile, qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))))
             except Exception:
-                await _answer(callback.message, text, reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile))
+                await _answer(callback.message, text, reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile, qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))))
             await callback.answer("已同步後臺工作流")
             return
         data = await state.get_data()
+        if action == "t2i:qa:toggle":
+            current_params = _text_to_image_params(data)
+            next_enabled = not bool(current_params.get("text_to_image_auto_qa_enabled", False))
+            await state.update_data(text_to_image_auto_qa_enabled=next_enabled)
+            params = _text_to_image_params({**data, "text_to_image_auto_qa_enabled": next_enabled})
+            await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
+            text = _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params)
+            try:
+                await callback.message.edit_text(
+                    text,
+                    reply_markup=_text_to_image_ratio_keyboard(
+                        selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
+                        profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                        qa_enabled=next_enabled,
+                    ),
+                )
+            except Exception:
+                await _answer(
+                    callback.message,
+                    text,
+                    reply_markup=_text_to_image_ratio_reply_keyboard(
+                        profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                        qa_enabled=next_enabled,
+                    ),
+                )
+            await callback.answer("QA 審查已開啟" if next_enabled else "QA 審查已關閉")
+            return
         if action.startswith("t2i:ratio:"):
             ratio = action.split(":", 2)[-1]
             if ratio in _text_to_image_ratio_options(str(_text_to_image_params(data).get("text_to_image_workflow_profile") or "zit_final")):
@@ -3864,6 +3899,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 final_enabled = bool(current_params["final_resolution_enabled"])
                 option["final_resolution_enabled"] = final_enabled
                 option["persona_enabled"] = bool(current_params["persona_enabled"])
+                option["text_to_image_auto_qa_enabled"] = bool(current_params.get("text_to_image_auto_qa_enabled", False))
                 await state.update_data(
                     aspect_ratio=ratio,
                     width=option["width"],
@@ -3877,6 +3913,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     persona_selected=False,
                     prompt_mode_selected=False,
                     prompt_mode_label="",
+                    text_to_image_auto_qa_enabled=bool(current_params.get("text_to_image_auto_qa_enabled", False)),
                 )
                 option["ratio_selected"] = True
                 option["final_resolution_enabled"] = final_enabled if bool(option.get("final_resolution_available")) else False
@@ -3957,6 +3994,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reply_markup=_text_to_image_ratio_keyboard(
                         selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
                         profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                        qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False)),
                     ),
                 )
             except Exception:
@@ -3965,6 +4003,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     reply_markup=_text_to_image_ratio_keyboard(
                         selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
                         profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                        qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False)),
                     ),
                 )
             await callback.answer("已返回比例")
@@ -4076,6 +4115,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         reply_markup=_text_to_image_ratio_keyboard(
                             selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
                             profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                            qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False)),
                         ),
                     )
                 except Exception:
@@ -4084,6 +4124,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         reply_markup=_text_to_image_ratio_keyboard(
                             selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
                             profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                            qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False)),
                         ),
                     )
                 await callback.answer("已返回比例")
@@ -4208,6 +4249,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     markup = _text_to_image_ratio_keyboard(
                         selected_ratio=params["aspect_ratio"] if params.get("ratio_selected") else "",
                         profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                        qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False)),
                     )
                     try:
                         await callback.message.edit_text(text, reply_markup=markup)
@@ -4250,7 +4292,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             await _answer(callback.message,
                 _text_to_image_status_text(step="1/4 請重新選擇圖像比例", params=params),
-                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final"), qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
             )
             await callback.answer()
             return
@@ -4339,7 +4381,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 "後臺文生圖工作流已更新，"
                 "已同步最新可選參數。\n\n"
                 + _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
-                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile, qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
             )
             return
         data = await state.get_data()
@@ -4348,6 +4390,18 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
         text = _message_text(message)
 
         if current_state == ProductionWorkflowForm.text_to_image_waiting_for_ratio.state:
+            if text in {"✅ QA 審查：開啟", "☑️ QA 審查：關閉"}:
+                next_enabled = not bool(params.get("text_to_image_auto_qa_enabled", False))
+                await state.update_data(text_to_image_auto_qa_enabled=next_enabled)
+                params = _text_to_image_params({**data, "text_to_image_auto_qa_enabled": next_enabled})
+                await _answer(message,
+                    _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
+                    reply_markup=_text_to_image_ratio_reply_keyboard(
+                        profile=str(params.get("text_to_image_workflow_profile") or "zit_final"),
+                        qa_enabled=next_enabled,
+                    ),
+                )
+                return
             selected_ratio = ""
             profile = str(params.get("text_to_image_workflow_profile") or "zit_final")
             for ratio, option in _text_to_image_ratio_options(profile).items():
@@ -4360,6 +4414,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 option["resolution_selected"] = False
                 option["persona_selected"] = False
                 option["prompt_mode_selected"] = False
+                option["text_to_image_auto_qa_enabled"] = bool(params.get("text_to_image_auto_qa_enabled", False))
                 await state.update_data(
                     aspect_ratio=selected_ratio,
                     width=option["width"],
@@ -4370,6 +4425,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     persona_selected=False,
                     prompt_mode_selected=False,
                     prompt_mode_label="",
+                    text_to_image_auto_qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False)),
                 )
                 option["final_resolution_enabled"] = bool(option["final_resolution_enabled"]) if bool(option.get("final_resolution_available")) else False
                 option["resolution_selected"] = not bool(option.get("final_resolution_available"))
@@ -4393,7 +4449,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 return
             await _answer(message,
                 _text_to_image_status_text(step="1/4 請先選擇圖像比例", params=params),
-                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final"), qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
             )
             return
 
@@ -4402,7 +4458,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
                 await _answer(message,
                     _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
-                    reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
+                    reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final"), qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
                 )
                 return
             if text in {"使用基礎分辨率", "開啓最終分辨率"}:
@@ -4454,7 +4510,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
                     await _answer(message,
                         _text_to_image_status_text(step="1/3 請選擇圖像比例", params=params),
-                        reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
+                        reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final"), qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
                     )
                     return
                 await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
@@ -4511,7 +4567,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                         await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_ratio)
                         await _answer(message,
                             _text_to_image_status_text(step="1/2 請選擇圖像比例", params=params),
-                            reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
+                            reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final"), qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
                         )
                         return
                     await state.set_state(ProductionWorkflowForm.text_to_image_waiting_for_resolution)
@@ -4567,7 +4623,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
                 "後臺文生圖工作流已更新，"
                 "已同步最新可選參數。\n\n"
                 + _text_to_image_status_text(step="1/4 請選擇圖像比例", params=params),
-                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=profile, qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
             )
             return
         prompt = _message_text(message)
@@ -4722,7 +4778,7 @@ def build_dispatcher(config: AppConfig, service: WorkspaceService) -> Dispatcher
             )
             await _answer(message,
                 _text_to_image_status_text(step="1/4 請重新選擇圖像比例", params=params),
-                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final")),
+                reply_markup=_text_to_image_ratio_reply_keyboard(profile=str(params.get("text_to_image_workflow_profile") or "zit_final"), qa_enabled=bool(params.get("text_to_image_auto_qa_enabled", False))),
             )
             return
         original = str(data.get("original_user_request") or "").strip()

@@ -56,6 +56,7 @@ describe("VMOS Telegram group publisher", () => {
 
   it("posts text through the Telegram app on the VMOS pad", async () => {
     const progress: Array<{ step: string; done: boolean }> = [];
+    mockState.sharePickerXml = '<node text="输入消息"/><node text="TG群測試"/>';
 
     const result = await publishTelegramGroupPost(
       {},
@@ -74,10 +75,43 @@ describe("VMOS Telegram group publisher", () => {
       detail: "已通过 VMOS Telegram App 发送到当前打开的群组",
       screenshotUrl: "https://example.test/screenshot.jpg",
     });
-    expect(mockState.input).toEqual(["TG群測試", "Test1 VMOS Telegram 自动化发推文验证"]);
+    expect(mockState.input).toEqual(["Test1 VMOS Telegram 自动化发推文验证"]);
     expect(mockState.commands.join("\n")).toContain("input tap 170 1518");
     expect(mockState.commands.join("\n")).toContain("input tap 655 1000");
     expect(progress.at(-1)).toEqual({ step: "Telegram 群组发布完成", done: true });
+  });
+
+  it("uses a safe search keyword then clicks the exact Chinese free group result", async () => {
+    const chatListXml = '<node text="Telegram" content-desc="Search" bounds="[0,0][720,1600]"/>';
+    mockState.uiXmlQueue = [
+      "",
+      "",
+      chatListXml,
+      chatListXml,
+      chatListXml,
+      chatListXml,
+      [
+        '<node text="AG-TG群測試" bounds="[40,300][500,380]" clickable="true"/>',
+        '<node text="TG群測試" bounds="[40,520][500,600]" clickable="true"/>',
+      ].join(""),
+      '<node text="输入消息" bounds="[0,1450][720,1600]"/><node text="TG群測試" bounds="[40,60][500,130]"/>',
+    ];
+
+    await publishTelegramGroupPost(
+      {},
+      {
+        padCode: "ACP250322677KIRJ",
+        caption: "free route",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
+      },
+      () => undefined,
+    );
+
+    expect(mockState.input).toEqual(["TG", "free route"]);
+    expect(mockState.input).not.toContain("TG群測試");
+    expect(mockState.commands.join("\n")).toContain("input tap 270 560");
   });
 
   it("posts media through Telegram Android share intent", async () => {
@@ -184,6 +218,7 @@ describe("VMOS Telegram group publisher", () => {
 
   it("falls back to Telegram LaunchActivity when package launcher intent is not resolvable", async () => {
     mockState.launcherStartReturnsInstagram = true;
+    mockState.sharePickerXml = '<node text="输入消息"/><node text="TG群測試"/>';
 
     await publishTelegramGroupPost(
       {},
