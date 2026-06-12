@@ -204,7 +204,8 @@ describe("stored posts pagination", () => {
   });
 
   it("keeps stored post actions inside the selected Telegram content branch", () => {
-    const view = buildStoredPostsListView("archive-1", posts, 1, 5, null, "paid");
+    const paidPosts = posts.map((post) => ({ ...post, telegramGroupContentType: "paid" as const }));
+    const view = buildStoredPostsListView("archive-1", paidPosts, 1, 5, null, "paid");
     const buttons = view.keyboard.flat();
 
     expect(view.text).toContain("付費內容");

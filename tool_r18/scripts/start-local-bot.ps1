@@ -66,7 +66,10 @@ $env:TELEGRAM_BOT_DISABLED = "0"
 if (-not $env:TELEGRAM_INSTANCE_TAG) { $env:TELEGRAM_INSTANCE_TAG = "Tool_R18_LOCAL" }
 if (-not $env:TELEGRAM_WEBHOOK_PORT) { $env:TELEGRAM_WEBHOOK_PORT = "18789" }
 if (-not $env:TOOL_R18_INTERNAL_WEBAPP_BASE_URL) { $env:TOOL_R18_INTERNAL_WEBAPP_BASE_URL = "http://127.0.0.1:8098" }
-if (-not $env:TELEGRAM_PROXY_URL) { $env:TELEGRAM_PROXY_URL = "http://127.0.0.1:9974" }
+if (-not $env:TELEGRAM_PROXY_URL) {
+  $systemProxy = Get-NetTCPConnection -LocalPort 7890 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  $env:TELEGRAM_PROXY_URL = if ($systemProxy) { "http://127.0.0.1:7890" } else { "direct" }
+}
 
 $TokenFile = Join-Path $RuntimeDir "telegram_bot_token.txt"
 if ((-not $env:TELEGRAM_BOT_TOKEN -or -not $env:TELEGRAM_BOT_TOKEN.Trim()) -and (Test-Path -LiteralPath $TokenFile)) {
