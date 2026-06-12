@@ -26,6 +26,20 @@ export interface TelegramGroupPublishResult {
   screenshotUrl?: string;
 }
 
+export interface TelegramGroupIdentifyTask {
+  padCode: string;
+  telegramTargetChatId: string;
+  telegramTargetGroupName?: string;
+  telegramGroupContentType?: "free" | "paid";
+}
+
+export interface TelegramGroupIdentifyResult {
+  chatId: string;
+  groupName: string;
+  source: "ui" | "vision";
+  screenshotUrl?: string;
+}
+
 const TELEGRAM_PACKAGE = "org.telegram.messenger";
 const TELEGRAM_LAUNCH_ACTIVITY = `${TELEGRAM_PACKAGE}/org.telegram.ui.LaunchActivity`;
 const TELEGRAM_FALLBACK_LAUNCH_ACTIVITIES = [
@@ -151,6 +165,102 @@ async function openTelegramTargetGroupById(
   // cannot be resolved from a numeric -100... id. Do not treat foreground focus
   // as success here, otherwise free/paid routes can be posted to the previous chat.
   return false;
+}
+
+function extractTelegramChatTitleFromUiXml(uiXml: string): string {
+  if (!looksLikeTelegramGroupChat(uiXml)) return "";
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ text: string; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const text = decodeXmlAttr(getXmlAttr(node, "text")).trim();
+    if (!text || /输入消息|輸入消息|輸入訊息|输入讯息|Type a message|Telegram/i.test(text)) continue;
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center || center.y > 220) continue;
+    let score = 0;
+    if (center.y >= 35 && center.y <= 145) score += 40;
+    if (center.x >= 70 && center.x <= 520) score += 20;
+    if (/群|group|TG|fufei|測試|测试/i.test(text)) score += 15;
+    if (/^\d+$/.test(text) || /^online|members|订阅者|成員|成员$/i.test(text)) score -= 30;
+    candidates.push({ text, y: center.y, score });
+  }
+  return candidates.sort((a, b) => b.score - a.score || a.y - b.y)[0]?.text || "";
+}
+
+async function identifyCurrentTelegramGroupByVision(
+  config: VmosConfig,
+  padCode: string,
+  onProgress?: (p: TelegramGroupPublishProgress) => void,
+): Promise<TelegramGroupIdentifyResult | null> {
+  const shotUrl = await screenshot(config, padCode).catch(() => "");
+  if (!shotUrl) return null;
+  const inline = await getInlineData(shotUrl).catch(() => null);
+  if (!inline?.data) return null;
+  const data = await callGemini(
+    TELEGRAM_GROUP_VISION_MODEL,
+    [{
+      role: "user",
+      parts: [
+        {
+          text: [
+            "You are looking at a Telegram mobile screenshot.",
+            "Task: read the current chat/group title from the top header.",
+            "Return only a minified JSON object.",
+            "If a Telegram group/chat title is visible, return {\"found\":true,\"groupName\":\"...\"}.",
+            "Do not use message text, keyboard text, or captions as the group title.",
+            "If the current screen is not a Telegram chat/group page, return {\"found\":false}.",
+          ].join("\n"),
+        },
+        { inlineData: { mimeType: inline.mimeType || "image/png", data: inline.data } },
+      ],
+    }],
+    { temperature: 0, maxOutputTokens: 512 },
+  );
+  const text = extractText(data).trim();
+  onProgress?.({ step: `Telegram 群名視覺識別：${text.slice(0, 240) || "空"}`, done: false });
+  const parsed = parseModelJson(text);
+  if (!parsed?.found) return null;
+  const groupName = String(parsed.groupName || parsed.title || parsed.matchedName || "").trim();
+  if (!groupName) return null;
+  return { chatId: "", groupName, source: "vision", screenshotUrl: shotUrl };
+}
+
+export async function identifyTelegramGroupById(
+  config: VmosConfig,
+  task: TelegramGroupIdentifyTask,
+  onProgress: (p: TelegramGroupPublishProgress) => void = () => undefined,
+): Promise<TelegramGroupIdentifyResult> {
+  const chatId = normalizeTelegramTargetChatId(task.telegramTargetChatId);
+  if (!chatId) throw new Error("Telegram 群 ID 不能为空");
+  const internalId = telegramSupergroupInternalId(chatId);
+  const links = [
+    `tg://openmessage?chat_id=${encodeURIComponent(chatId)}`,
+    internalId ? `https://t.me/c/${internalId}` : "",
+  ].filter(Boolean);
+
+  await runAdb(config, task.padCode, `am force-stop ${TELEGRAM_PACKAGE}; sleep 0.8`, 12_000).catch(() => undefined);
+  onProgress({ step: `使用雲機 Telegram 帳號識別群 ID：${chatId}`, done: false });
+
+  for (const link of links) {
+    await runAdb(
+      config,
+      task.padCode,
+      `am start -W -a android.intent.action.VIEW -d ${shellSingleQuote(link)} -p ${TELEGRAM_PACKAGE} 2>&1; sleep 3`,
+      20_000,
+    ).catch(() => "");
+    const uiXml = await dumpTelegramUiXml(config, task.padCode);
+    const groupName = extractTelegramChatTitleFromUiXml(uiXml);
+    if (groupName) {
+      onProgress({ step: `已從雲機 Telegram 識別群名：${groupName}`, done: true });
+      return { chatId, groupName, source: "ui" };
+    }
+    const visionResult = await identifyCurrentTelegramGroupByVision(config, task.padCode, onProgress).catch(() => null);
+    if (visionResult?.groupName) {
+      onProgress({ step: `已從雲機 Telegram 視覺識別群名：${visionResult.groupName}`, done: true });
+      return { ...visionResult, chatId };
+    }
+  }
+
+  throw new Error(`雲機 Telegram 無法用群 ID 打開或識別群組：${chatId}。請確認人設綁定的雲機帳號已加入該群，且 Telegram 能用該 ID 打開群組。`);
 }
 
 async function ensureTelegramTargetGroupOpen(

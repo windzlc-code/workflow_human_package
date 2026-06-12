@@ -16,6 +16,7 @@ import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { publishPost, queryThreadsAccount, loginThreadsAccount, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona } from "@/lib/vmos-publisher";
+import { identifyTelegramGroupById } from "@/lib/telegram-group-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
@@ -3696,6 +3697,22 @@ function toolR18TextToImageQaEnabled(params?: Record<string, any>) {
   return false;
 }
 
+async function toolR18GlobalTextToImageQaEnabled() {
+  try {
+    const data = await toolR18JsonRequest("GET", "/api/internal/tg/runtime_config");
+    return toolR18TextToImageQaEnabled(data?.runtime_config || {});
+  } catch {
+    return false;
+  }
+}
+
+async function toolR18SetGlobalTextToImageQaEnabled(enabled: boolean) {
+  const data = await toolR18JsonRequest("POST", "/api/internal/tg/runtime_config", {
+    text_to_image_auto_qa_enabled: enabled,
+  });
+  return toolR18TextToImageQaEnabled(data?.runtime_config || { text_to_image_auto_qa_enabled: enabled });
+}
+
 function buildToolR18TextToImageRatioKeyboard(profile: string, backCallback = "toolr18_group_image", qaEnabled = false) {
   const options = toolR18TextToImageRatioOptions(profile);
   const rows: any[] = [];
@@ -3712,7 +3729,7 @@ async function freeGeneratedPostImageRatioProfile() {
   return runtime.profile || "zit_final";
 }
 
-function buildFreeGeneratedPostImageRatioKeyboard(profile: string) {
+function buildFreeGeneratedPostImageRatioKeyboard(profile: string, qaEnabled = false) {
   const options = toolR18TextToImageRatioOptions(profile);
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let i = 0; i < options.length; i += 2) {
@@ -3721,6 +3738,7 @@ function buildFreeGeneratedPostImageRatioKeyboard(profile: string) {
       callback_data: "genpost_ratio_" + item.id,
     })));
   }
+  rows.push([{ text: qaEnabled ? "\u2705 QA \u5BE9\u67E5\uFF1A\u958B\u555F" : "\u2611\uFE0F QA \u5BE9\u67E5\uFF1A\u95DC\u9589", callback_data: "genpost_toggle_qa" }]);
   rows.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE\u751F\u6210\u6578\u91CF", callback_data: "genpost_count_back" }]);
   return { inline_keyboard: rows };
 }
@@ -3731,6 +3749,7 @@ function shouldSelectFreeGeneratedPostImageRatio(state: PendingGeneratePostState
 
 async function sendFreeGeneratedPostImageRatioPicker(bot: TelegramBot, chatId: number, msgId: number | undefined, state: PendingGeneratePostState) {
   const profile = await freeGeneratedPostImageRatioProfile();
+  const qaEnabled = await toolR18GlobalTextToImageQaEnabled();
   const nextState: PendingGeneratePostState = { ...state, stage: "await_ratio" };
   setPendingGeneratePost(chatId, nextState);
   await safeEditOrSend(bot, chatId, msgId, [
@@ -3744,7 +3763,7 @@ async function sendFreeGeneratedPostImageRatioPicker(bot: TelegramBot, chatId: n
     "\u9078\u5B8C\u5F8C\u518D\u767C\u9001\u672C\u6B21\u751F\u6210\u63D0\u793A\u8A5E\u3002",
   ].join(String.fromCharCode(10)), {
     parse_mode: "Markdown",
-    reply_markup: buildFreeGeneratedPostImageRatioKeyboard(profile),
+    reply_markup: buildFreeGeneratedPostImageRatioKeyboard(profile, qaEnabled),
   });
 }
 
@@ -5210,7 +5229,7 @@ async function submitGeneratedPostImageCandidateTask(args: {
     "推文內容：" + args.post.content,
     "配圖要求：" + args.prompt,
   ].filter(Boolean).join(String.fromCharCode(10));
-  const qaEnabled = false;
+  const qaEnabled = await toolR18GlobalTextToImageQaEnabled();
   const generationParams: Record<string, any> = {
       prompt: requestText,
       prompt_text: requestText,
@@ -5218,6 +5237,8 @@ async function submitGeneratedPostImageCandidateTask(args: {
       tg_user_instruction: requestText,
       tg_original_user_request: requestText,
       tg_generation_context: "Generated-post image candidates for archive " + args.archiveId + ", post " + (args.post.id || ""),
+      tg_generated_post_content: args.post.content,
+      tg_generated_post_visual_instruction: args.prompt,
       tg_use_llm_prompt: true,
       tg_latest_prompt_only: true,
       tg_prompt_confirmed: false,
@@ -10297,6 +10318,23 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data === "genpost_toggle_qa") {
+      const pending = pendingGeneratePosts.get(chatId);
+      if (!pending || !["await_ratio", "await_prompt"].includes(pending.stage)) {
+        await safeEditOrSend(bot, chatId, msgId, "\u751F\u6210\u914D\u7F6E\u5DF2\u5931\u6548\uFF0C\u8ACB\u91CD\u65B0\u9078\u64C7\u65B0\u5EFA\u63A8\u6587\u3002", {
+          reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE\u4EBA\u8A2D\u5217\u8868", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const current = await toolR18GlobalTextToImageQaEnabled();
+      const enabled = await toolR18SetGlobalTextToImageQaEnabled(!current);
+      const ratioState = { ...pending, stage: "await_ratio" as const };
+      setPendingGeneratePost(chatId, ratioState);
+      await sendFreeGeneratedPostImageRatioPicker(bot, chatId, msgId, ratioState);
+      await callback.answer(enabled ? "QA \u5BE9\u67E5\u5DF2\u958B\u555F" : "QA \u5BE9\u67E5\u5DF2\u95DC\u9589");
+      return;
+    }
+
     if (
       data.startsWith("genpost_")
       && !data.startsWith("genpost_branch_")
@@ -13379,7 +13417,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (generatePostState.stage === "await_ratio") {
         await bot.sendMessage(chatId, "請先點擊按鈕選擇免費群配圖畫面比例。", {
-          reply_markup: buildFreeGeneratedPostImageRatioKeyboard(await freeGeneratedPostImageRatioProfile()),
+          reply_markup: buildFreeGeneratedPostImageRatioKeyboard(await freeGeneratedPostImageRatioProfile(), await toolR18GlobalTextToImageQaEnabled()),
         });
         return;
       }
@@ -14005,22 +14043,81 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      let groupName = resolveKnownTelegramGroupName(groupId, pending.groupContentType);
-      let botLookupWarning = "";
+      const pads = await listPadsForThisBot();
+      const padBinding = await resolvePublishPadBinding(archive, undefined, defaultPadCode, pads).catch((error: any) => {
+        console.error("[telegram][group_binding_pad_error]", error?.message || error);
+        return null;
+      });
+      if (!padBinding) {
+        await bot.sendMessage(chatId, "❌ 無法取得這個人設綁定的雲機，請先在人設設定中重新綁定可用雲機。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
+        });
+        return;
+      }
+      const groupLabel = pending.groupContentType === "paid" ? "TG付費群" : "TG免費群";
+      const statusMsg = await bot.sendMessage(
+        chatId,
+        [
+          `🔎 正在通過雲機 Telegram 識別 ${groupLabel}`,
+          "",
+          `人設：${archive.name}`,
+          `雲機：${padBinding.padName || padBinding.padCode}`,
+          `ID：${groupId}`,
+        ].join("\n"),
+      );
+      let groupName = "";
       try {
-        const chat = await bot.getChat(groupId as any);
-        groupName = telegramChatTitle(chat, groupId);
+        const creds = resolveVmosCredentials();
+        const identified = await identifyTelegramGroupById(
+          creds,
+          {
+            padCode: padBinding.padCode,
+            telegramTargetChatId: groupId,
+            telegramGroupContentType: pending.groupContentType,
+          },
+          (progress) => {
+            bot.editMessageText([
+              `🔎 正在通過雲機 Telegram 識別 ${groupLabel}`,
+              "",
+              `人設：${archive.name}`,
+              `雲機：${padBinding.padName || padBinding.padCode}`,
+              `ID：${groupId}`,
+              "",
+              `${progress.done ? "✅" : "⏳"} ${progress.step}`,
+            ].join("\n"), {
+              chat_id: chatId,
+              message_id: statusMsg.message_id,
+            }).catch(() => undefined);
+          },
+        );
+        groupName = identified.groupName;
       } catch (error: any) {
-        botLookupWarning = formatUserFacingError(error, "Bot API 無法讀取該群；將改用綁定雲機的 Telegram 帳號路由。");
+        await bot.editMessageText([
+          `❌ ${groupLabel} ID 識別失敗`,
+          "",
+          `人設：${archive.name}`,
+          `雲機：${padBinding.padName || padBinding.padCode}`,
+          `ID：${groupId}`,
+          "",
+          `原因：${formatUserFacingError(error, "雲機 Telegram 無法識別這個群組 ID。")}`,
+          "",
+          "請確認該人設綁定的雲機 Telegram 帳號已加入這個群，並且能在 Telegram 內打開該群。",
+        ].join("\n"), {
+          chat_id: chatId,
+          message_id: statusMsg.message_id,
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
+        }).catch(() => undefined);
+        return;
       }
       await updatePersonaArchivePadBinding(pending.archiveId, pending.groupContentType === "paid"
         ? { telegramPaidGroupId: groupId, telegramPaidGroupName: groupName }
         : { telegramFreeGroupId: groupId, telegramFreeGroupName: groupName }).catch(() => null);
       invalidatePersonaListCache();
-      const groupLabel = pending.groupContentType === "paid" ? "TG付費群" : "TG免費群";
-      await bot.sendMessage(chatId, `✅ 已保存 ${groupLabel}：${groupName}\nID：${groupId}${botLookupWarning ? `\n\n提示：${botLookupWarning}` : ""}`, {
+      await bot.editMessageText(`✅ 已保存 ${groupLabel}：${groupName}\nID：${groupId}\n雲機：${padBinding.padName || padBinding.padCode}`, {
+        chat_id: chatId,
+        message_id: statusMsg.message_id,
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
-      });
+      }).catch(() => undefined);
       return;
     }
 

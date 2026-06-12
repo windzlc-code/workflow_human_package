@@ -9629,6 +9629,50 @@ def _tg_image_aspect_ratio_pose_guidance(payload: dict[str, Any] | None) -> str:
     elif ratio == "1:1":
         orientation = "square"
 
+    if _tg_payload_is_non_r18_free_image(source):
+        request_text = " ".join(
+            str(source.get(key) or "")
+            for key in (
+                "tg_original_user_request",
+                "tg_user_instruction",
+                "prompt_text",
+                "prompt",
+                "message",
+                "tg_generation_context",
+            )
+        )
+        mentions_private_scene = bool(re.search(r"床|床邊|床边|臥室|卧室|bed|bedroom", request_text, re.IGNORECASE))
+        if ratio == "9:16" or orientation == "portrait":
+            detail = (
+                "For free non-R18 content, use a public-safe vertical composition: standing, seated, leaning by a doorway, "
+                "counter, desk, street corner, cafe, classroom, office, shopfront, travel spot, or the concrete scene from the tweet. "
+                "Keep clothing intact and natural. Do not introduce unrelated private-room resting poses, lingerie focus, opened clothing, or paid-content posing "
+                "unless the user/tweet explicitly asks for that scene."
+            )
+        elif ratio == "16:9" or ratio in {"3:2", "4:3"} or orientation == "landscape":
+            detail = (
+                "For free non-R18 landscape content, choose a public-safe scene-driven composition: street storefront, breakfast shop, cafe table, "
+                "classroom, office desk, travel background, sofa/living room only when the tweet supports it, or another normal public/social setting. "
+                "Use seated, standing, walking, leaning by a counter/table, or holding a prop according to the tweet. "
+            )
+            if not mentions_private_scene:
+                detail += "Do not change the scene into an unrelated private indoor resting pose or paid-content posing. "
+            detail += "Preserve the tweet's concrete object/location first, then adapt camera distance to the selected ratio."
+        elif ratio == "1:1" or orientation == "square":
+            detail = (
+                "For free non-R18 square content, use a centered public-safe half-body or three-quarter composition that keeps the tweet's real scene, "
+                "main clothing, prop, and action visible. Do not default to an unrelated private indoor resting scene unless explicitly requested."
+            )
+        else:
+            detail = (
+                "For free non-R18 content, select a public-safe pose and scene from the tweet first, then adapt it to the aspect ratio. "
+                "Do not replace a public scene with an unrelated private indoor resting scene."
+            )
+        return (
+            f"Aspect-ratio composition rule: current ratio {ratio or 'unspecified'}, resolution {width or '-'} x {height or '-'}. "
+            f"{detail} The aspect ratio may adjust framing only; it must not override the user's scene, prop, clothing, or free-content safety."
+        )
+
     if ratio == "9:16":
         detail = "手机长竖图优先选择纵向动作，但不要固定正面：可用三分之二侧身站姿、倚门框、坐在床沿、跪坐、背向镜头回头、低头整理衣物、从侧后方拍摄或轻微仰拍，身体沿竖向展开，镜头可在平视、轻微俯视和轻微仰视之间变化。"
     elif ratio in {"2:3", "3:4"} or orientation == "portrait":
@@ -9667,7 +9711,138 @@ def _tg_append_landscape_view_suffix(prompt_text: str, payload: dict[str, Any] |
     return f"{text}，横向视图"
 
 
+def _extract_tg_non_r18_free_post_context(original_request: str, payload: dict[str, Any] | None) -> tuple[str, str]:
+    source = payload if isinstance(payload, dict) else {}
+    post_text = str(source.get("tg_generated_post_content") or "").strip()
+    visual_request = str(source.get("tg_generated_post_visual_instruction") or "").strip()
+    combined = "\n".join(
+        str(value or "")
+        for value in (
+            post_text,
+            visual_request,
+            original_request,
+            source.get("tg_original_user_request"),
+            source.get("tg_user_instruction"),
+            source.get("prompt_text"),
+            source.get("prompt"),
+            source.get("message"),
+        )
+        if str(value or "").strip()
+    )
+    if not post_text:
+        matches = re.findall(
+            r"(?:推文內容|推文内容|Generated copy context|Public Telegram free-group copy to support visually; use it as scene context, not as text to copy into the image prompt)\s*[:：]\s*(.+?)(?=\n(?:配圖要求|配图要求|Candidate image|人設|人设|Highest priority user visual requirement|Public Telegram|Generated copy context)\s*[:：]?|\Z)",
+            combined,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if matches:
+            post_text = matches[-1].strip()
+    if not visual_request:
+        matches = re.findall(
+            r"(?:配圖要求|配图要求|Highest priority user visual requirement|User request to obey)\s*[:：]\s*(.+?)(?=\n(?:推文內容|推文内容|Candidate image|Generated copy context|人設|人设)\s*[:：]?|\Z)",
+            combined,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if matches:
+            visual_request = matches[-1].strip()
+
+    def clean(text: str, limit: int = 180) -> str:
+        text = _strip_prompt_response_wrappers(text)
+        text = re.sub(r"https?://\S+", "", text)
+        text = re.sub(r"^\s*(?:哥哥們|哥哥们)[^\n]{0,20}", "", text)
+        text = re.sub(r"(?:快點我看更多吧|快点我看更多吧)[^\n]*", "", text)
+        text = re.sub(r"\s+", " ", text).strip(" ，。；、\n\t")
+        return text[:limit].strip(" ，。；、\n\t")
+
+    return clean(post_text), clean(visual_request, 120)
+
+
+def _build_tg_non_r18_free_image_fallback_prompt(original_request: str, payload: dict[str, Any]) -> str:
+    post_text, visual_request = _extract_tg_non_r18_free_post_context(original_request, payload)
+    if not post_text and not visual_request:
+        return ""
+    context = "，".join(part for part in (visual_request, post_text) if part)
+
+    scene = "日常生活公共場景"
+    if re.search(r"捷運|地鐵|地铁|月台|車站|车站|通勤|等車|等车", context):
+        scene = "捷運月台或車廂門邊的日常通勤場景"
+    elif re.search(r"滷肉飯|卤肉饭|便當|便当|早餐|小吃|飯|饭|餐|外帶|外带", context):
+        scene = "台灣小吃店或早餐店門口，手邊有餐盒或外帶袋"
+    elif re.search(r"便利店|超商|小七|超市|商店", context):
+        scene = "便利店貨架或門口的日常場景"
+    elif re.search(r"風|风|吹|裙擺|裙摆", context):
+        scene = "戶外街邊有自然風感的生活場景"
+    elif re.search(r"機車|机车|騎車|骑车|單車|单车|路邊|路边", context):
+        scene = "路邊交通或機車旁的日常場景"
+    elif re.search(r"咖啡|奶茶|飲料|饮料", context):
+        scene = "咖啡店或飲料店附近的生活場景"
+
+    clothing = "符合推文語境的日常完整穿搭"
+    if re.search(r"背心|吊帶|吊带|無袖|无袖", context):
+        clothing = "貼身無袖背心或細肩帶上衣，布料完整自然"
+    elif re.search(r"裙|短裙|洋裝|连衣裙|連衣裙", context):
+        clothing = "日常裙裝或連身裙，裙擺與動作自然呼應"
+    elif re.search(r"襯衫|衬衫|上衣", context):
+        clothing = "簡潔上衣或襯衫，領口袖口清楚"
+    elif re.search(r"T恤|tee|短袖", context, re.IGNORECASE):
+        clothing = "日常短袖 T 恤，版型自然"
+    elif re.search(r"牛仔|褲|裤", context):
+        clothing = "日常上衣搭配褲裝，腰線和布料褶皺清楚"
+
+    action = "自然站立或半身自拍，表情輕鬆"
+    if re.search(r"自拍|拍照|鏡頭|镜头", context):
+        action = "一手拿手機自拍，身體自然側向鏡頭"
+    if re.search(r"等車|等车|捷運|地鐵|地铁|月台", context):
+        action = "等待交通時低頭看手機或側身自拍"
+    if re.search(r"買完|买完|外帶|外带|滷肉飯|卤肉饭|便當|便当", context):
+        action = "手拿外帶餐盒或袋子，像剛買完食物的生活抓拍"
+    if re.search(r"風|风|吹|裙擺|裙摆", context):
+        action = "自然風帶動頭髮與衣物邊緣，手部順勢整理裙擺或衣角"
+
+    ratio = str(payload.get("aspect_ratio") or payload.get("image_aspect_ratio") or "").strip()
+    resolution = str(payload.get("base_resolution") or payload.get("resolution") or "").strip()
+    parts = [
+        "女性日常手機隨手拍照片，免費群公開內容配圖，單幀靜態畫面",
+        f"推文視覺語境：{context}",
+        f"背景是{scene}",
+        f"穿著{clothing}",
+        f"動作是{action}",
+        "畫面必須和推文內容一致，優先保留使用者指定的服裝、顏色、場景、道具、動作和情緒",
+        "保持公開安全尺度，服裝完整自然，不要付費群成人風格，不要文字，不要水印",
+        "寫清背景物件、自然光方向、淺景深、皮膚與布料質感，人物臉部清楚可見",
+    ]
+    if ratio:
+        parts.append(f"畫面比例 {ratio}")
+    if resolution:
+        parts.append(f"基礎分辨率 {resolution}")
+    return _force_tg_image_chinese_prompt("，".join(part for part in parts if part))
+
+
+def _tg_non_r18_free_prompt_matches_context(prompt_text: str, original_request: str, payload: dict[str, Any] | None) -> bool:
+    post_text, visual_request = _extract_tg_non_r18_free_post_context(original_request, payload)
+    context = f"{visual_request} {post_text}"
+    prompt = _strip_prompt_response_wrappers(prompt_text)
+    if not context.strip() or not prompt.strip():
+        return True
+    checks: list[tuple[str, str]] = [
+        (r"捷運|地鐵|地铁|月台|車站|车站|通勤|等車|等车", r"捷運|地鐵|地铁|月台|車廂|车厢|車站|车站|通勤"),
+        (r"滷肉飯|卤肉饭|便當|便当|早餐|小吃|飯|饭|餐|外帶|外带", r"滷肉飯|卤肉饭|便當|便当|早餐|小吃|餐盒|外帶|外带|店門口|店门口"),
+        (r"便利店|超商|小七|超市|商店", r"便利店|超商|小七|超市|商店|貨架|货架"),
+        (r"風|风|吹|裙擺|裙摆", r"風|风|吹|裙擺|裙摆|整理裙|衣角"),
+        (r"背心|吊帶|吊带|無袖|无袖", r"背心|吊帶|吊带|無袖|无袖|細肩帶|细肩带"),
+        (r"自拍|拍照", r"自拍|手機|手机|拍照|鏡頭|镜头"),
+    ]
+    for source_pattern, prompt_pattern in checks:
+        if re.search(source_pattern, context) and not re.search(prompt_pattern, prompt):
+            return False
+    return True
+
+
 def _build_tg_image_fallback_prompt(original_request: str, payload: dict[str, Any]) -> str:
+    if _tg_payload_is_non_r18_free_image(payload):
+        free_prompt = _build_tg_non_r18_free_image_fallback_prompt(original_request, payload)
+        if free_prompt:
+            return free_prompt
     request_text = _sanitize_tg_image_person_fields(original_request)
     expression_state = _extract_tg_expression_state(original_request)
     aspect_pose_guidance = _tg_image_aspect_ratio_pose_guidance(payload)
@@ -12434,6 +12609,13 @@ def _canonicalize_tg_image_nine_segment_prompt(
     if not clauses:
         return ""
     text = "，".join(clauses)
+    if _tg_payload_is_non_r18_free_image(payload):
+        result = _normalize_tg_chinese_image_prompt_format(text)
+        if not _tg_non_r18_free_prompt_matches_context(result, original_request, payload):
+            fallback_prompt = _build_tg_non_r18_free_image_fallback_prompt(original_request, payload if isinstance(payload, dict) else {})
+            if fallback_prompt:
+                result = fallback_prompt
+        return _tg_append_landscape_view_suffix(result, payload)
     profile = _persona_body_profile_for_payload(payload)
     anchor = _persona_body_prompt_anchor_for_profile(profile) if profile else ""
     anchor = anchor or "身形纤细修长且腰胯比例轻盈自然"
@@ -12838,6 +13020,8 @@ def _validate_tg_image_structured_prompt(final_prompt: str, *, require_erotic: b
     text = _strip_prompt_response_wrappers(final_prompt)
     if not text:
         raise RuntimeError("Grok final image prompt is empty; blocked before submission.")
+    if not require_erotic:
+        return
     natural_clauses = [part.strip() for part in re.split(r"[，；;]", text) if part.strip()]
     if len(natural_clauses) < 9:
         raise RuntimeError("Grok final image prompt missing enough comma-connected structured clauses; blocked before submission.")
@@ -14637,6 +14821,11 @@ class InternalTgPromptDisplayPayload(BaseModel):
     tg_chat_id: int = 0
 
 
+class InternalTgRuntimeConfigUpdatePayload(BaseModel):
+    text_to_image_auto_qa_enabled: bool | None = None
+    text_to_image_auto_qa_max_attempts: int | None = None
+
+
 class InternalTgAgentFilePayload(BaseModel):
     name: str = ""
     path: str
@@ -14896,6 +15085,33 @@ def create_app() -> FastAPI:
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"ok": True, "runtime_config": runtime}
+
+    @app.post("/api/internal/tg/runtime_config")
+    def api_internal_tg_update_runtime_config(payload: InternalTgRuntimeConfigUpdatePayload, request: Request):
+        _require_internal_tg_request(request)
+        try:
+            with db() as conn:
+                runtime = _get_runtime_config(conn)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        explicit = payload.model_dump(exclude_unset=True)
+        if not explicit:
+            raise HTTPException(status_code=400, detail="沒有可更新的設定")
+        merged = dict(runtime)
+        if "text_to_image_auto_qa_enabled" in explicit:
+            merged["text_to_image_auto_qa_enabled"] = _to_bool(explicit.get("text_to_image_auto_qa_enabled"), False)
+        if "text_to_image_auto_qa_max_attempts" in explicit:
+            merged["text_to_image_auto_qa_max_attempts"] = min(
+                max(_to_int(explicit.get("text_to_image_auto_qa_max_attempts"), 3), 1),
+                6,
+            )
+        try:
+            merged = _normalize_runtime_config(merged)
+            with _RUNTIME_CONFIG_LOCK:
+                _write_runtime_config_file(merged)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"ok": True, "runtime_config": merged}
 
     @app.post("/api/internal/tg/prompt_preview")
     def api_internal_tg_prompt_preview(payload: InternalTgPromptPreviewPayload, request: Request):

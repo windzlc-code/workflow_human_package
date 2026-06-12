@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { publishTelegramGroupPost } from "@/lib/telegram-group-publisher";
+import { identifyTelegramGroupById, publishTelegramGroupPost } from "@/lib/telegram-group-publisher";
 
 const mockState = vi.hoisted(() => ({
   commands: [] as string[],
@@ -79,6 +79,29 @@ describe("VMOS Telegram group publisher", () => {
     expect(mockState.commands.join("\n")).toContain("input tap 170 1518");
     expect(mockState.commands.join("\n")).toContain("input tap 655 1000");
     expect(progress.at(-1)).toEqual({ step: "Telegram 群组发布完成", done: true });
+  });
+
+  it("identifies a Telegram group name from the VMOS Telegram chat opened by group id", async () => {
+    mockState.uiXmlQueue = [
+      '<node text="输入消息" bounds="[0,1450][720,1600]"/><node text="TG群測試" bounds="[90,62][430,128]"/>',
+    ];
+
+    const result = await identifyTelegramGroupById(
+      {},
+      {
+        padCode: "ACP250322677KIRJ",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
+      },
+      () => undefined,
+    );
+
+    expect(result).toEqual({
+      chatId: "-1003812332642",
+      groupName: "TG群測試",
+      source: "ui",
+    });
+    expect(mockState.commands.join("\n")).toContain("tg://openmessage?chat_id=-1003812332642");
   });
 
   it("uses a safe search keyword then clicks the exact Chinese free group result", async () => {
