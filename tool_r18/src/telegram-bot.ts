@@ -548,6 +548,7 @@ type PendingCustomPublish = {
   archiveName?: string;
   padCode?: string;
   platform?: TelegramPublishPlatform;
+  groupContentType?: TelegramGroupContentType;
   source?: "persona_detail" | "entry";
   sourceArchiveId?: string;
   publishWithGeneratedImage?: boolean;
@@ -1190,9 +1191,35 @@ function buildStoredPostsPageCallback(archiveId: string, page: number, groupCont
   return `posts_${archiveId}${suffix}_p${Math.max(0, page)}`;
 }
 
-function buildPersonaHistoryCallback(archiveId: string, groupContentType?: TelegramGroupContentType) {
+function buildListPaginationRows(args: {
+  page: number;
+  totalPages: number;
+  callbackForPage: (page: number) => string;
+}) {
+  const totalPages = Math.max(1, Math.floor(args.totalPages || 1));
+  const safePage = Math.min(Math.max(0, Math.floor(args.page || 0)), totalPages - 1);
+  if (totalPages <= 1) return [];
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  if (safePage > 0) {
+    rows.push([
+      { text: "⏮ 首頁", callback_data: args.callbackForPage(0) },
+      { text: "◀️ 上一頁", callback_data: args.callbackForPage(safePage - 1) },
+    ]);
+  }
+  rows.push([{ text: `${safePage + 1}/${totalPages}`, callback_data: args.callbackForPage(safePage) }]);
+  if (safePage < totalPages - 1) {
+    rows.push([
+      { text: "下一頁 ▶️", callback_data: args.callbackForPage(safePage + 1) },
+      { text: "尾頁 ⏭", callback_data: args.callbackForPage(totalPages - 1) },
+    ]);
+  }
+  return rows;
+}
+
+function buildPersonaHistoryCallback(archiveId: string, groupContentType?: TelegramGroupContentType, page = 0) {
   const suffix = groupContentType ? `_ct_${groupContentType}` : "";
-  return `history_${archiveId}${suffix}`;
+  const pageSuffix = page > 0 ? `_p${Math.max(0, page)}` : "";
+  return `history_${archiveId}${suffix}${pageSuffix}`;
 }
 
 function buildPersonaPublishCallback(archiveId: string, groupContentType?: TelegramGroupContentType) {
@@ -1203,10 +1230,13 @@ function buildPersonaPublishCallback(archiveId: string, groupContentType?: Teleg
 function parsePersonaScopedCallback(data: string, prefix: "history_" | "pub_") {
   if (!data.startsWith(prefix)) return null;
   const payload = data.slice(prefix.length);
-  const branchMatch = payload.match(/^(.*)_ct_(free|paid)$/);
+  const pageMatch = payload.match(/^(.*)_p(\d+)$/);
+  const rawArchiveId = pageMatch ? pageMatch[1] : payload;
+  const branchMatch = rawArchiveId.match(/^(.*)_ct_(free|paid)$/);
   return {
-    archiveId: branchMatch ? branchMatch[1] : payload,
+    archiveId: branchMatch ? branchMatch[1] : rawArchiveId,
     ...(branchMatch ? { groupContentType: branchMatch[2] as TelegramGroupContentType } : {}),
+    page: pageMatch ? Math.max(0, Number(pageMatch[2] || 0)) : 0,
   };
 }
 
@@ -1304,17 +1334,11 @@ export function buildStoredPostsListView(
       ],
     ];
   });
-  if (totalPages > 1) {
-    const navRow: Array<{ text: string; callback_data: string }> = [];
-    if (safePage > 0) {
-      navRow.push({ text: "\u25C0\uFE0F \u4E0A\u4E00\u9801", callback_data: buildStoredPostsPageCallback(archiveId, safePage - 1, groupContentType) });
-    }
-    navRow.push({ text: `${safePage + 1}/${totalPages}`, callback_data: buildStoredPostsPageCallback(archiveId, safePage, groupContentType) });
-    if (safePage < totalPages - 1) {
-      navRow.push({ text: "\u4E0B\u4E00\u9801 \u25B6\uFE0F", callback_data: buildStoredPostsPageCallback(archiveId, safePage + 1, groupContentType) });
-    }
-    keyboard.push(navRow);
-  }
+  keyboard.push(...buildListPaginationRows({
+    page: safePage,
+    totalPages,
+    callbackForPage: (targetPage) => buildStoredPostsPageCallback(archiveId, targetPage, groupContentType),
+  }));
   const branchSuffix = groupContentType ? `_ct_${groupContentType}` : "";
   keyboard.push([
     { text: "\uD83D\uDE80 \u767C\u5E03\u63A8\u6587", callback_data: `bulkpub_${archiveId}${branchSuffix}_p${safePage}` },
@@ -1383,13 +1407,11 @@ function buildBulkStoredPostsSelectView(args: {
       { text: "⬜ 清空本页", callback_data: "bclear_page" },
     ]);
   }
-  if (totalPages > 1) {
-    keyboard.push([
-      { text: safePage > 0 ? "◀️ 上一页" : "第一页", callback_data: `bpage_${Math.max(0, safePage - 1)}` },
-      { text: `${safePage + 1}/${totalPages}`, callback_data: `bpage_${safePage}` },
-      { text: safePage < totalPages - 1 ? "下一页 ▶️" : "最后页", callback_data: `bpage_${Math.min(totalPages - 1, safePage + 1)}` },
-    ]);
-  }
+  keyboard.push(...buildListPaginationRows({
+    page: safePage,
+    totalPages,
+    callbackForPage: (targetPage) => `bpage_${targetPage}`,
+  }));
   keyboard.push([{ text: `✅ 确认${actionText}（已选${selected.size}篇）`, callback_data: "bconfirm" }]);
   keyboard.push([{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(args.archiveId, safePage, args.groupContentType) }]);
   return {
@@ -1421,6 +1443,25 @@ function resolveTelegramTargetGroupNameForPost(
   const groupType: TelegramGroupContentType = resolveTelegramGroupContentTypeForPost(post, fallbackGroupContentType) || "free";
   const name = groupType === "paid" ? archive?.boundTelegramPaidGroupName : archive?.boundTelegramFreeGroupName;
   return normalizeTelegramSingleLine(name || "");
+}
+
+function resolveTelegramTargetForGroupContent(
+  archive: {
+    boundTelegramFreeGroupId?: string;
+    boundTelegramPaidGroupId?: string;
+    boundTelegramFreeGroupName?: string;
+    boundTelegramPaidGroupName?: string;
+  } | null | undefined,
+  groupContentType?: TelegramGroupContentType,
+) {
+  const resolvedType: TelegramGroupContentType = groupContentType === "paid" ? "paid" : "free";
+  const chatId = normalizeTelegramSingleLine(
+    resolvedType === "paid" ? archive?.boundTelegramPaidGroupId || "" : archive?.boundTelegramFreeGroupId || "",
+  );
+  const groupName = normalizeTelegramSingleLine(
+    resolvedType === "paid" ? archive?.boundTelegramPaidGroupName || "" : archive?.boundTelegramFreeGroupName || "",
+  ) || (chatId ? resolveKnownTelegramGroupName(chatId, resolvedType) : "");
+  return { groupContentType: resolvedType, chatId, groupName };
 }
 for (const seed of WORKFLOW_PERSONA_SEEDS) {
   void seed;
@@ -2756,8 +2797,23 @@ async function advanceGeneratePostAfterMemorySelection(
   await sendGenerateTimeSlotPicker(bot, chatId, messageId, nextState);
 }
 const TOOL_R18_PUBLIC_URL = (process.env.TOOL_R18_PUBLIC_URL || process.env.PUBLIC_BASE_URL || "http://47.250.188.76/r18").replace(new RegExp("/+$"), "");
-const TOOL_R18_UPLOAD_HOST_DIR = process.env.TOOL_R18_UPLOAD_HOST_DIR || "/opt/apps/workflow_delivery_package-R18/webapp_data/tool_r18_uploads";
-const TOOL_R18_UPLOAD_CONTAINER_DIR = process.env.TOOL_R18_UPLOAD_CONTAINER_DIR || "/app/webapp_data/tool_r18_uploads";
+function defaultToolR18UploadHostDir() {
+  if (process.platform !== "win32") return "/opt/apps/workflow_delivery_package-R18/webapp_data/tool_r18_uploads";
+  const projectRoot = path.basename(process.cwd()).toLowerCase() === "tool_r18"
+    ? process.cwd()
+    : fs.existsSync(path.join(process.cwd(), "tool_r18", "package.json"))
+      ? path.join(process.cwd(), "tool_r18")
+      : process.cwd();
+  return path.join(path.dirname(projectRoot), "webapp_data", "tool_r18_uploads");
+}
+
+function defaultToolR18UploadContainerDir(hostDir: string) {
+  if (process.platform === "win32") return hostDir.replace(/\\/g, "/");
+  return "/app/webapp_data/tool_r18_uploads";
+}
+
+const TOOL_R18_UPLOAD_HOST_DIR = process.env.TOOL_R18_UPLOAD_HOST_DIR || defaultToolR18UploadHostDir();
+const TOOL_R18_UPLOAD_CONTAINER_DIR = process.env.TOOL_R18_UPLOAD_CONTAINER_DIR || defaultToolR18UploadContainerDir(TOOL_R18_UPLOAD_HOST_DIR);
 
 const TOOL_R18_TASKS: Array<{ type: ToolR18TaskType; label: string; hint: string }> = [
   { type: "text_to_image", label: "文生圖", hint: "發送圖片生成提示詞。" },
@@ -3252,6 +3308,7 @@ function buildToolR18VideoI2vAudioKeyboard(params: Record<string, any>) {
 
 function buildToolR18VideoI2vPromptModeKeyboard() {
   return [
+    [{ text: "AI 自由發揮", callback_data: "toolr18_i2v_prompt_free" }],
     [{ text: "讓 Grok 生成提示詞", callback_data: "toolr18_i2v_prompt_grok" }],
     [{ text: "輸入自定義提示詞提交", callback_data: "toolr18_i2v_prompt_custom" }],
     [{ text: "◀️ 上一步", callback_data: "toolr18_i2v_back_audio" }],
@@ -3313,7 +3370,7 @@ async function sendToolR18VideoI2vPromptModeStep(bot: TelegramBot, chatId: numbe
   const state = pendingToolR18Tasks.get(chatId);
   const params = toolR18VideoI2vParams(state);
   pendingToolR18Tasks.set(chatId, { ...(state || { taskType: "video_i2v", taskLabel: "圖生視頻" }), stage: "video_i2v_prompt_mode", taskType: "video_i2v", taskLabel: "圖生視頻", params });
-  await safeEditOrSend(bot, chatId, messageId, toolR18VideoI2vStatusText("5/5 選擇提示詞方式", params) + String.fromCharCode(10) + String.fromCharCode(10) + "請選擇讓 Grok 生成提示詞，或輸入自定義提示詞提交。", {
+  await safeEditOrSend(bot, chatId, messageId, toolR18VideoI2vStatusText("5/5 選擇提示詞方式", params) + String.fromCharCode(10) + String.fromCharCode(10) + "請選擇 AI 自由發揮、讓 Grok 生成提示詞，或輸入自定義提示詞提交。", {
     reply_markup: { inline_keyboard: buildToolR18VideoI2vPromptModeKeyboard() },
   });
 }
@@ -3999,6 +4056,20 @@ function buildToolR18PromptReviewKeyboard(taskType?: ToolR18TaskType, params?: R
   ];
 }
 
+function toolR18PromptBackCallback(taskType?: ToolR18TaskType) {
+  if (taskType === "video_i2v") return "toolr18_i2v_back_prompt_mode";
+  if (taskType === "single_image_edit" || taskType === "get_nano_banana") return "toolr18_imgedit_back_prompt_mode";
+  if (taskType === "face_swap") return "toolr18_faceswap_back_prompt_mode";
+  return "toolr18_t2i_back_before_prompt";
+}
+
+function buildToolR18PromptFailureKeyboard(state: PendingToolR18TaskState) {
+  return [
+    [{ text: "🔁 重試生成提示詞", callback_data: "toolr18_prompt_regen" }],
+    [{ text: "◀️ 返回上一步", callback_data: toolR18PromptBackCallback(state.taskType) }],
+  ];
+}
+
 function toolR18TextToImageInputGuidance(state: PendingToolR18TaskState) {
   const params = state.params || {};
   const profile = String(params.text_to_image_workflow_profile || "zit_final");
@@ -4037,7 +4108,7 @@ function toolR18PendingInputGuidance(state: PendingToolR18TaskState, hasMedia: b
     return { text: "請先點擊按鈕選擇視頻分辨率。", keyboard: buildToolR18VideoI2vResolutionKeyboard() };
   }
   if (state.stage === "video_i2v_prompt_mode") {
-    return { text: "請先點擊按鈕選擇提示詞方式：讓 Grok 生成提示詞，或輸入自定義提示詞提交。", keyboard: buildToolR18VideoI2vPromptModeKeyboard() };
+    return { text: "請先點擊按鈕選擇提示詞方式：AI 自由發揮、讓 Grok 生成提示詞，或輸入自定義提示詞提交。", keyboard: buildToolR18VideoI2vPromptModeKeyboard() };
   }
   if (state.stage === "image_edit_prompt_mode") {
     const meta = toolR18ImageEditMeta(state.taskType);
@@ -4152,6 +4223,22 @@ async function sendToolR18PromptPreview(bot: TelegramBot, chatId: number, state:
       "請確認提示詞是否合適，確認後再提交 R18 任務。",
     ].filter(Boolean);
     await bot.sendMessage(chatId, lines.join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: buildToolR18PromptReviewKeyboard(state.taskType, nextState.params) } });
+  } catch (error: any) {
+    const failedState: PendingToolR18TaskState = {
+      ...state,
+      stage: state.stage || "await_task_input",
+      text: requestText,
+      originalRequest: state.originalRequest || requestText,
+    };
+    pendingToolR18Tasks.set(chatId, failedState);
+    await bot.sendMessage(chatId, [
+      "❌ Grok 生成提示詞失敗。",
+      "原因：" + formatUserFacingError(error, "請稍後重試，或返回上一步改用自定義提示詞。"),
+      "",
+      "目前流程已保留，可以重試或返回上一步，不需要從頭開始。",
+    ].join(String.fromCharCode(10)), {
+      reply_markup: { inline_keyboard: buildToolR18PromptFailureKeyboard(failedState) },
+    });
   } finally {
     bot.deleteMessage(chatId, waitMessage.message_id).catch(() => undefined);
   }
@@ -4306,6 +4393,14 @@ function buildToolR18PendingKeyboard(state: PendingToolR18TaskState) {
   const rows: any[] = [];
   if (enoughFiles && hasText) rows.push([{ text: "提交R18任務", callback_data: "toolr18_submit" }]);
   rows.push([{ text: "清空重來", callback_data: "toolr18_clear" }, { text: "取消", callback_data: toolR18FlowCancelCallback(state.params, "toolr18_entry") }]);
+  return rows;
+}
+
+function buildToolR18SubmitFailureKeyboard(state: PendingToolR18TaskState) {
+  const rows = buildToolR18PendingKeyboard(state);
+  if (toolR18RequiresPromptPreview(state.taskType)) {
+    rows.unshift([{ text: "◀️ 返回上一步", callback_data: toolR18PromptBackCallback(state.taskType) }]);
+  }
   return rows;
 }
 
@@ -4817,6 +4912,98 @@ async function handlePendingToolR18Input(bot: TelegramBot, msg: TelegramBot.Mess
   await bot.sendMessage(chatId, buildToolR18PendingSummary(nextState), {
     reply_markup: { inline_keyboard: buildToolR18PendingKeyboard(nextState) },
   });
+}
+
+function buildCustomPersonaPostBackKeyboard(state: {
+  archiveId: string;
+  contentBranch?: GeneratePostContentBranch;
+}) {
+  const modeBack = state.contentBranch === "r18"
+    ? `genpost_r18_${state.archiveId}`
+    : state.contentBranch === "nonr18"
+      ? `genpost_nonr18_${state.archiveId}`
+      : `genpost_branch_${state.archiveId}`;
+  return {
+    inline_keyboard: [
+      [{ text: "◀️ 返回生成模式", callback_data: modeBack }],
+      [{ text: "◀️ 返回人設詳情", callback_data: `pd_${state.archiveId}` }],
+    ],
+  };
+}
+
+async function handlePendingCustomPersonaPostInput(
+  bot: TelegramBot,
+  chatId: number,
+  state: NonNullable<ReturnType<typeof pendingCustomPersonaPosts.get>>,
+  text: string,
+  media: any,
+  mediaKind?: "photo" | "video" | "document",
+) {
+  const nextState = { ...state };
+  if (text) nextState.text = text;
+  if (media?.file_id) {
+    const mediaUrl = await resolveTelegramMediaUrl(bot, media.file_id).catch(() => null);
+    if (!mediaUrl) {
+      await bot.sendMessage(chatId, "❌ 媒體讀取失敗，請重新上傳一次。", {
+        reply_markup: buildCustomPersonaPostBackKeyboard(state),
+      });
+      return true;
+    }
+    nextState.mediaUrl = mediaUrl;
+    nextState.mediaKind = mediaKind;
+  }
+  pendingCustomPersonaPosts.set(chatId, nextState);
+  if (!nextState.text && !nextState.mediaUrl) {
+    await bot.sendMessage(chatId, [
+      "🧩 自訂新建推文",
+      "",
+      "目前步驟：等待推文內容",
+      "",
+      "請發送純文字推文，或發送圖片/視頻並附帶文案。",
+    ].join(String.fromCharCode(10)), {
+      reply_markup: buildCustomPersonaPostBackKeyboard(nextState),
+    });
+    return true;
+  }
+  if (nextState.mediaUrl && !nextState.text) {
+    await bot.sendMessage(chatId, [
+      "✅ 已收到媒體。",
+      "",
+      "目前步驟：等待文案",
+      "",
+      "請再補一條文案，我會把媒體和文案一起寫入待發佈推文庫。",
+    ].join(String.fromCharCode(10)), {
+      reply_markup: buildCustomPersonaPostBackKeyboard(nextState),
+    });
+    return true;
+  }
+  const saved = await appendCustomPersonaArchivePost({
+    archiveId: nextState.archiveId,
+    content: nextState.text || "",
+    mediaUrl: nextState.mediaUrl,
+    telegramGroupContentType: contentBranchToTelegramGroupContentType(nextState.contentBranch),
+  }).catch(() => null);
+  pendingCustomPersonaPosts.delete(chatId);
+  if (!saved) {
+    await bot.sendMessage(chatId, "❌ 儲存失敗，請稍後重試。", {
+      reply_markup: buildCustomPersonaPostBackKeyboard(nextState),
+    });
+    return true;
+  }
+  await bot.sendMessage(
+    chatId,
+    `✅ 已寫入推文庫\n人設：${nextState.archiveName}\n內容類型：${generatePostContentBranchLabel(nextState.contentBranch)}\n類型：${nextState.mediaUrl ? "圖文/視頻文案" : "純文字"}\n目前待發佈：${saved.posts.length} 篇`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📝 查看推文列表", callback_data: buildStoredPostsPageCallback(nextState.archiveId, 0, contentBranchToTelegramGroupContentType(nextState.contentBranch)) }],
+          [{ text: "🧩 繼續自訂新建", callback_data: buildGeneratePostCustomCallback(nextState.archiveId, nextState.contentBranch) }],
+          [{ text: "◀️ 返回人設詳情", callback_data: `pd_${nextState.archiveId}` }],
+        ],
+      },
+    },
+  );
+  return true;
 }
 
 // ─── Bot 主体 ──────────────────────────────────────────────────────────────────
@@ -5776,7 +5963,7 @@ function buildPaidR18PostFromImageInstruction(args: {
     imageAnalysis ? "必須優先根據【Grok 看圖結果】寫文案；提交提示詞只作為補充，不可蓋過圖片實際內容。" : "必須根據使用者提交的提示詞要點寫文案。",
     "文案必須直接引用圖片中的服裝與暴露/視覺重點，這兩項權重最高；姿勢、場景、光線或情緒只作輔助，不要寫成通用模板。",
     "第一句必須同時包含「服裝」與「暴露/視覺焦點」，不能只寫場景或情緒。",
-    "只寫 10-20 個中文字左右的短文案；口語、直白、有成人付費群福利感。",
+    "只寫 10-20 個中文字左右的短文案；口語、直白、色情、裸露、有成人付費群福利感。",
     "不要固定開頭，不要寫新聞、故事、日常長文、免費內容預覽。",
     "如果有固定連結，固定連結放最後一行。",
     "",
@@ -5790,8 +5977,8 @@ function buildPaidR18PostFromImageInstruction(args: {
     args.contentTimeSlot ? `本次文案時段：${generatePostTimeSlotLabel(args.contentTimeSlot)}。` : "",
     prompt ? `使用者主題/要求（最高優先級）：${prompt}` : "使用者未提供本次提示詞，請根據人設和已生成圖片自由發展。",
     "本次流程是先生成 R18 付費群配圖，再依照圖片內容生成文案；文案必須服務已生成圖片，不要反過來改圖、不要寫成新聞、泛話題、免費群預覽或免費內容格式。",
-    "付費群文案方向：依照照片內容生成文案，文案用詞必須直白、色情、誘惑、帶付費群福利感；只寫短句，不要鋪陳新聞、故事或日常長文。",
-    "短文案只要 10-20 個中文字，口語化；服裝與暴露/視覺焦點必須出現，姿勢、場景、光線或情緒降低權重。",
+    "付費群文案方向：依照照片內容生成文案，文案用詞必須直白、色情、誘惑、暴露性器官、帶付費群福利感；只寫短句，不要鋪陳新聞、故事或日常長文。",
+    "短文案只要 10-20 個中文字，口語化；服裝與色情暴露部位/視覺裸露焦點必須出現，姿勢、場景、光線或情緒降低權重。",
     "如果人設有固定連結，固定連結仍放最後一行。",
     "不要固定開頭，不要自動加入「哥哥們～早安安」或「深夜福利來了」這類固定句。",
     "格式只能是：10-20 字短文案；最後一行固定連結（如果有）。",
@@ -8539,6 +8726,34 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     repo.releasePadLock(padCode, key);
   };
 
+  const customPublishBackToMethodButton = (state: PendingCustomPublish) => ({
+    text: "◀️ 返回发布方式",
+    callback_data: state.archiveId ? `custom_publish_platform_${state.platform || effectiveDefaultPublishPlatform}` : "custom_publish",
+  });
+
+  const customPublishResetButton = { text: "♻️ 清除并重发内容", callback_data: "custom_publish_clear_content" };
+
+  const customPublishContentSummary = (state: PendingCustomPublish) => {
+    const lines = [
+      `人設：${state.archiveName || state.archiveId || "未命名人設"}`,
+      `平台：${state.platform || effectiveDefaultPublishPlatform}`,
+      `云机：${state.padCode || defaultPadCode}`,
+    ];
+    if (state.fileId) {
+      const kind = state.fileKind === "video" ? "視頻" : state.fileKind === "document" ? "文件" : "圖片";
+      lines.push(`媒體：已收到${kind}`);
+    } else {
+      lines.push("媒體：未附加");
+    }
+    if (state.text?.trim()) {
+      const preview = state.text.trim().slice(0, 120);
+      lines.push(`文字：${preview}${state.text.trim().length > 120 ? "..." : ""}`);
+    } else {
+      lines.push("文字：未收到");
+    }
+    return lines.join("\n");
+  };
+
   const executeCustomPublish = async (chatId: number, state: PendingCustomPublish) => {
     const archive = state.archiveId ? await loadPersonaForThisBot(state.archiveId).catch(() => null) : null;
     let padBinding: { padCode: string; padName?: string; autoBound: boolean };
@@ -8613,6 +8828,17 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       }
     }
 
+    const telegramTarget = state.platform === "telegram"
+      ? resolveTelegramTargetForGroupContent(archive, state.groupContentType)
+      : null;
+    if (state.platform === "telegram" && !telegramTarget?.chatId && !telegramTarget?.groupName) {
+      await bot.sendMessage(chatId, `❌ 未配置 Telegram ${telegramTarget?.groupContentType === "paid" ? "付費群" : "免費群"} ID，為避免發錯群組已停止發布。\n\n請先進入「人設設定」綁定 TG 群 ID。`, {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設設定", callback_data: state.archiveId ? `settings_${state.archiveId}` : "list_personas" }]] },
+      });
+      releasePublishCommand(chatId, publishLockKey, publishScopeKey);
+      return;
+    }
+
     const padOperationKey = `publish:${padCode}:${publishLockKey}`;
     if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "自定义发布"))) {
       releasePublishCommand(chatId, publishLockKey, publishScopeKey);
@@ -8631,6 +8857,9 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
           caption,
           mediaUrl: mediaUrl || undefined,
           telegramChatId: chatId,
+          telegramTargetChatId: telegramTarget?.chatId || undefined,
+          telegramTargetGroupName: telegramTarget?.groupName || undefined,
+          telegramGroupContentType: telegramTarget?.groupContentType,
         },
         (progress) => {
           assertPadOperationNotCancelled(padOperationKey);
@@ -9108,13 +9337,11 @@ function buildManualPostChoiceRows(
     const media = describePostMedia(post);
     return { text: `發第${number}篇 · ${media}`, callback_data: `mpick_${number}` };
   }), 2));
-  if (totalPages > 1) {
-    rows.push([
-      { text: safePage > 0 ? "上一頁" : "第一頁", callback_data: `mpage_${Math.max(0, safePage - 1)}` },
-      { text: `${safePage + 1}/${totalPages}`, callback_data: `mpage_${safePage}` },
-      { text: safePage < totalPages - 1 ? "下一頁" : "最後頁", callback_data: `mpage_${Math.min(totalPages - 1, safePage + 1)}` },
-    ]);
-  }
+  rows.push(...buildListPaginationRows({
+    page: safePage,
+    totalPages,
+    callbackForPage: (targetPage) => `mpage_${targetPage}`,
+  }));
   return rows;
 }
 
@@ -9244,17 +9471,12 @@ function buildQueuePlatformRows(args: { status: "pending" | "failed"; archiveId?
   ];
 }
 
-function buildQueuePaginationRows(args: { status: "pending" | "failed"; archiveId?: string; scheduledOnly?: boolean; platform?: TelegramPublishPlatform; page: number; hasPrev: boolean; hasNext: boolean }) {
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-  const nav: Array<{ text: string; callback_data: string }> = [];
-  if (args.hasPrev) {
-    nav.push({ text: "⬅️ 上一頁", callback_data: buildQueueViewCallback({ ...args, page: args.page - 1 }) });
-  }
-  if (args.hasNext) {
-    nav.push({ text: "下一頁 ➡️", callback_data: buildQueueViewCallback({ ...args, page: args.page + 1 }) });
-  }
-  if (nav.length) rows.push(nav);
-  return rows;
+function buildQueuePaginationRows(args: { status: "pending" | "failed"; archiveId?: string; scheduledOnly?: boolean; platform?: TelegramPublishPlatform; page: number; totalPages: number }) {
+  return buildListPaginationRows({
+    page: args.page,
+    totalPages: args.totalPages,
+    callbackForPage: (targetPage) => buildQueueViewCallback({ ...args, page: targetPage }),
+  });
 }
 
 function queueBackTarget(status: "pending" | "failed", archiveId?: string) {
@@ -10318,16 +10540,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data.startsWith("genpost_branch_")) {
+      pendingCustomPersonaPosts.delete(chatId);
       await sendGeneratePostBranchPickerForArchive(bot, chatId, data.slice("genpost_branch_".length), msgId);
       return;
     }
 
     if (data.startsWith("genpost_nonr18_")) {
+      pendingCustomPersonaPosts.delete(chatId);
       await sendGeneratePostModePickerForArchive(bot, chatId, data.slice("genpost_nonr18_".length), msgId, "nonr18");
       return;
     }
 
     if (data.startsWith("genpost_r18_")) {
+      pendingCustomPersonaPosts.delete(chatId);
       await sendGeneratePostModePickerForArchive(bot, chatId, data.slice("genpost_r18_".length), msgId, "r18");
       return;
     }
@@ -10389,7 +10614,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await submitPendingToolR18Task(bot, chatId, pending);
       } catch (error: any) {
         await safeEditOrSend(bot, chatId, msgId, "R18 提交失敗：" + formatUserFacingError(error, "請檢查素材和參數後重試。"), {
-          reply_markup: { inline_keyboard: buildToolR18PendingKeyboard(pending) },
+          reply_markup: { inline_keyboard: buildToolR18SubmitFailureKeyboard(pending) },
         });
       }
       return;
@@ -10416,7 +10641,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data === "toolr18_prompt_submit") {
       const pending = pendingToolR18Tasks.get(chatId);
       if (!pending) { await sendToolR18ContextOrMenu(bot, chatId, msgId); return; }
-      await submitToolR18PromptReview(bot, chatId, pending);
+      try {
+        await submitToolR18PromptReview(bot, chatId, pending);
+      } catch (error: any) {
+        pendingToolR18Tasks.set(chatId, pending);
+        await safeEditOrSend(bot, chatId, msgId, "R18 提交失敗：" + formatUserFacingError(error, "請檢查素材和參數後重試。"), {
+          reply_markup: { inline_keyboard: buildToolR18SubmitFailureKeyboard(pending) },
+        });
+      }
       return;
     }
 
@@ -10573,6 +10805,40 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (data === "toolr18_i2v_audio_skip") params.audio_local_path = "";
       pendingToolR18Tasks.set(chatId, { ...(state || { taskType: "video_i2v", taskLabel: "圖生視頻" }), stage: "video_i2v_prompt_mode", taskType: "video_i2v", taskLabel: "圖生視頻", params });
       await sendToolR18VideoI2vPromptModeStep(bot, chatId, msgId);
+      return;
+    }
+
+    if (data === "toolr18_i2v_prompt_free") {
+      const state = pendingToolR18Tasks.get(chatId);
+      const params = toolR18VideoI2vParams(state);
+      if (!String(params.image_local_path || "").trim()) {
+        await safeEditOrSend(bot, chatId, msgId, "請先上傳一張參考圖，再使用 AI 自由發揮生成圖生視頻提示詞。", {
+          reply_markup: { inline_keyboard: buildToolR18VideoI2vImageKeyboard(params) },
+        });
+        return;
+      }
+      params.use_grok = true;
+      params.prompt_mode_selected = true;
+      params.prompt_mode_label = "AI 自由發揮";
+      params.tg_use_llm_prompt = true;
+      params.tg_latest_prompt_only = true;
+      const requestText = [
+        "AI 自由發揮：根據已上傳的參考圖和圖生視頻規範生成完整視頻提示詞。",
+        "把參考圖作為第一幀，保持人物、構圖、場景、光線、服裝與鏡頭比例一致。",
+        "自行補齊合理的鏡頭運動、人物動作、表情變化、環境氛圍和轉場節奏。",
+        "分辨率：" + String(params.resolution || "720p") + "；時長：" + String(params.duration_seconds || params.mulerouter_wan_i2v_duration || 2) + "秒。",
+        params.audio_local_path ? "本次有音頻，動作節奏需要配合音頻。" : "本次無音頻，請以畫面動作節奏為主。",
+      ].join(String.fromCharCode(10));
+      const promptState: PendingToolR18TaskState = {
+        ...(state || { stage: "await_task_input", taskType: "video_i2v", taskLabel: "圖生視頻" }),
+        stage: "await_task_input",
+        taskType: "video_i2v",
+        taskLabel: state?.taskLabel || "圖生視頻",
+        text: requestText,
+        originalRequest: requestText,
+        params,
+      };
+      await sendToolR18PromptPreview(bot, chatId, promptState, requestText);
       return;
     }
 
@@ -10841,6 +11107,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archiveId = parsedCustom?.archiveId || "";
       const archive = await loadPersonaArchive(archiveId).catch(() => null);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
+      deletePendingGeneratePost(chatId);
       pendingCustomPersonaPosts.set(chatId, {
         archiveId,
         archiveName: archive.name,
@@ -10851,10 +11118,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         bot,
         chatId,
         msgId,
-        `🧩 *自訂新建推文*\n\n人設：${archive.name}\n內容類型：${generatePostContentBranchLabel(parsedCustom?.contentBranch)}\n\n請直接發送以下任一內容：\n1) 純文字推文\n2) 圖片/視頻 + 文案（caption 或下一條文字）\n\n收到後我會直接寫入該內容類型的推文庫。`,
+        `🧩 *自訂新建推文*\n\n人設：${archive.name}\n內容類型：${generatePostContentBranchLabel(parsedCustom?.contentBranch)}\n\n目前步驟：等待推文內容\n\n請直接發送以下任一內容：\n1) 純文字推文\n2) 圖片/視頻 + 文案（caption 或下一條文字）\n\n收到完整內容後，我會寫入該內容類型的待發佈推文庫。`,
         {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設詳情", callback_data: `pd_${archiveId}` }]] },
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "◀️ 返回生成模式", callback_data: parsedCustom?.contentBranch === "r18" ? `genpost_r18_${archiveId}` : parsedCustom?.contentBranch === "nonr18" ? `genpost_nonr18_${archiveId}` : `genpost_branch_${archiveId}` }],
+              [{ text: "◀️ 返回人設詳情", callback_data: `pd_${archiveId}` }],
+            ],
+          },
         },
       );
       return;
@@ -11326,7 +11598,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("history_")) {
+    if (data.startsWith("history_") && !data.startsWith("history_branch_")) {
       const parsedHistory = parsePersonaScopedCallback(data, "history_");
       const id = parsedHistory?.archiveId || "";
       const archive = await loadPersonaForThisBot(id);
@@ -11345,21 +11617,31 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const visibleHistory = history.slice(0, 5);
+      const pageSize = STORED_POSTS_PAGE_SIZE;
+      const totalPages = Math.max(1, Math.ceil(history.length / pageSize));
+      const safePage = Math.min(Math.max(0, parsedHistory?.page || 0), totalPages - 1);
+      const start = safePage * pageSize;
+      const visibleHistory = history.slice(start, start + pageSize);
       const lines = visibleHistory.map((item: any, idx: number) => {
+        const displayIndex = start + idx + 1;
         const when = item.publishedAt ? String(item.publishedAt).slice(0, 16).replace("T", " ") : "-";
         const content = String(item.content || item.caption || "\uFF08\u7121\u5167\u5BB9\uFF09");
         const preview = content.slice(0, 100) + (content.length > 100 ? "..." : "");
-        return `<b>\u3010${idx + 1}\u3011</b>${escapeHtmlText(when)} \u00B7 ${escapeHtmlText(String(item.platform || "-"))}\n${escapeHtmlText(preview)}`;
+        return `<b>\u3010${displayIndex}\u3011</b>${escapeHtmlText(when)} \u00B7 ${escapeHtmlText(String(item.platform || "-"))}\n${escapeHtmlText(preview)}`;
       });
       const keyboard = visibleHistory.map((item: any, idx: number) => {
         const itemId = String(item.id || item.archivePostId || idx);
         const key = rememberPublishHistoryRequeueAction({ archiveId: id, recordId: itemId, groupContentType: parsedHistory?.groupContentType });
-        return [{ text: `\uD83D\uDD01 \u91CD\u5165\u968A\u7B2C${idx + 1}\u689D`, callback_data: buildPublishHistoryRequeueCallback(key) }];
+        return [{ text: `\uD83D\uDD01 \u91CD\u5165\u968A\u7B2C${start + idx + 1}\u689D`, callback_data: buildPublishHistoryRequeueCallback(key) }];
       });
+      keyboard.push(...buildListPaginationRows({
+        page: safePage,
+        totalPages,
+        callbackForPage: (targetPage) => buildPersonaHistoryCallback(id, parsedHistory?.groupContentType, targetPage),
+      }));
       keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: parsedHistory?.groupContentType ? `history_branch_${id}` : `pd_${id}` }]);
       const branchTitle = parsedHistory?.groupContentType === "paid" ? "付費內容" : parsedHistory?.groupContentType === "free" ? "免費內容" : "";
-      await safeEditOrSend(bot, chatId, msgId, `<b>\uD83D\uDD58 \u767C\u5E03\u6B77\u53F2${branchTitle ? ` - ${branchTitle}` : ""}</b>\uFF08\u5171 ${history.length} \u689D\uFF0C\u986F\u793A\u6700\u8FD1 ${Math.min(history.length, 5)} \u689D\uFF09\n\n${lines.join("\n\n")}`, {
+      await safeEditOrSend(bot, chatId, msgId, `<b>\uD83D\uDD58 \u767C\u5E03\u6B77\u53F2${branchTitle ? ` - ${branchTitle}` : ""}</b>\uFF08\u5171 ${history.length} \u689D\uFF0C\u7B2C ${safePage + 1}/${totalPages} \u9801\uFF09\n\n${lines.join("\n\n")}`, {
         parse_mode: "HTML",
         reply_markup: { inline_keyboard: keyboard },
       });
@@ -12642,6 +12924,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId: id,
         archiveName: archive.name,
         padCode: archive.boundPadCode || defaultPadCode,
+        groupContentType: parsedPublish?.groupContentType,
         stage: "choose_persona",
       });
       pendingManualPublishes.set(chatId, {
@@ -13139,6 +13422,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId,
         archiveName: archive?.name || "未命名人設",
         padCode: archive?.boundPadCode || defaultPadCode,
+        groupContentType: prev?.groupContentType,
         source: prev?.source || "persona_detail",
         sourceArchiveId: prev?.sourceArchiveId || archiveId,
         text: prev?.text,
@@ -13166,7 +13450,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const nextState = { ...prev, stage: "confirm_pad" as const, platform };
       pendingCustomPublishes.set(chatId, nextState);
-      await safeEditOrSend(bot, chatId, msgId, `🛰 已选择平台：${platform}\n\n请确认发布云机：${nextState.padCode || defaultPadCode}`, {
+      const telegramTarget = platform === "telegram"
+        ? resolveTelegramTargetForGroupContent(await loadPersonaForThisBot(nextState.archiveId || "").catch(() => null), nextState.groupContentType)
+        : null;
+      const telegramTargetLine = telegramTarget
+        ? `\n目標群：${telegramTarget.groupName || "未識別群名"}${telegramTarget.chatId ? `（ID：${telegramTarget.chatId}）` : ""}`
+        : "";
+      await safeEditOrSend(bot, chatId, msgId, `🛰 已选择平台：${platform}\n\n请确认发布云机：${nextState.padCode || defaultPadCode}${telegramTargetLine}`, {
         reply_markup: {
           inline_keyboard: [
             [{ text: "✅ 图/视频/文字推文直发", callback_data: "custom_publish_confirm_pad" }],
@@ -13185,9 +13475,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
         sendMainMenu(chatId, msgId);
         return;
       }
-      pendingCustomPublishes.set(chatId, { ...prev, stage: "ready_to_publish", publishWithGeneratedImage: false });
-      await safeEditOrSend(bot, chatId, msgId, `✅ 已确认\n人設：${prev.archiveName || prev.archiveId}\n平台：${prev.platform}\n云机：${prev.padCode || defaultPadCode}\n\n⭐ 请发送要直发的内容 ⭐\n　　支持純文字、图片+文字、视频+文字。\n　　可以一条消息带媒体和 caption，也可以先发文字再补图/视频，或先发图/视频再补文字。`, {
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `custom_publish_persona_${prev.archiveId}` }]] },
+      const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: false, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
+      pendingCustomPublishes.set(chatId, nextState);
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已確認直發模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送內容\n\n請發送其中一種：\n1) 純文字推文\n2) 圖片/視頻 + caption\n3) 先發圖片/視頻，下一步再補文字\n4) 先發文字，下一步再補圖片/視頻\n\n收到完整內容後會先讓你確認，不會直接發布。`, {
+        reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
       });
       return;
     }
@@ -13198,9 +13489,24 @@ function sendMainMenu(chatId: number, msgId?: number) {
         sendMainMenu(chatId, msgId);
         return;
       }
-      pendingCustomPublishes.set(chatId, { ...prev, stage: "ready_to_publish", publishWithGeneratedImage: true });
-      await safeEditOrSend(bot, chatId, msgId, `🖼 已确认\n人設：${prev.archiveName || prev.archiveId}\n平台：${prev.platform}\n云机：${prev.padCode || defaultPadCode}\n\n⭐ 请发送要发布的推文文案 ⭐\n　　我会先生成配图，再图文一起发布。`, {
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `custom_publish_persona_${prev.archiveId}` }]] },
+      const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: true, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
+      pendingCustomPublishes.set(chatId, nextState);
+      await safeEditOrSend(bot, chatId, msgId, `🖼 已確認配圖發布模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送文字文案\n\n請只發送純文字推文內容。我會根據文字生成配圖，下一步再讓你確認發布。\n如果此時發圖片或視頻，會被攔截，不會誤發布。`, {
+        reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
+      });
+      return;
+    }
+
+    if (data === "custom_publish_clear_content") {
+      const prev = pendingCustomPublishes.get(chatId);
+      if (!prev) {
+        sendMainMenu(chatId, msgId);
+        return;
+      }
+      const nextState = { ...prev, stage: "ready_to_publish" as const, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
+      pendingCustomPublishes.set(chatId, nextState);
+      await safeEditOrSend(bot, chatId, msgId, `${nextState.publishWithGeneratedImage ? "🖼" : "✅"} 已清除上一輪內容\n${customPublishContentSummary(nextState)}\n\n請重新發送${nextState.publishWithGeneratedImage ? "純文字推文內容" : "文字、圖片/視頻+文字，或先發媒體再補文字"}。`, {
+        reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
       });
       return;
     }
@@ -13330,7 +13636,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         text: platformButtons[platform].text,
         callback_data: buildQueueViewCallback({ status: queueView.status, archiveId: queueView.archiveId, scheduledOnly: queueView.scheduledOnly, platform, page: 0 }),
       })), 2));
-      keyboard.push(...buildQueuePaginationRows({ ...queueView, page: pageInfo.page, hasPrev: pageInfo.hasPrev, hasNext: pageInfo.hasNext }));
+      keyboard.push(...buildQueuePaginationRows({ ...queueView, page: pageInfo.page, totalPages: pageInfo.totalPages }));
       keyboard.push([{ text: queueView.archiveId ? "◀️ 返回篩選页" : "◀️ 返回狀態页", callback_data: queueView.archiveId ? "queue_filter_persona" : "menu_status" }]);
       const title = queueView.archiveId
         ? `📋 人設佇列（${archivesById.get(queueView.archiveId) || queueView.archiveId}）`
@@ -13846,6 +14152,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    const customPersonaPost = pendingCustomPersonaPosts.get(chatId);
+    if (customPersonaPost?.stage === "await_input") {
+      await handlePendingCustomPersonaPostInput(
+        bot,
+        chatId,
+        customPersonaPost,
+        text,
+        media,
+        photo ? "photo" : video ? "video" : documentMedia ? "document" : undefined,
+      );
+      return;
+    }
+
     const generatePostState = pendingGeneratePosts.get(chatId);
     if (generatePostState) {
       if (!text) {
@@ -14156,58 +14475,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    const customPersonaPost = pendingCustomPersonaPosts.get(chatId);
-    if (customPersonaPost?.stage === "await_input") {
-      const nextState = { ...customPersonaPost };
-      if (text) nextState.text = text;
-      if (media?.file_id) {
-        const mediaUrl = await resolveTelegramMediaUrl(bot, media.file_id).catch(() => null);
-        if (!mediaUrl) {
-          await bot.sendMessage(chatId, "❌ 媒體讀取失敗，請重新上傳一次。", {
-            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設詳情", callback_data: `pd_${customPersonaPost.archiveId}` }]] },
-          });
-          return;
-        }
-        nextState.mediaUrl = mediaUrl;
-        nextState.mediaKind = photo ? "photo" : video ? "video" : "document";
-      }
-      pendingCustomPersonaPosts.set(chatId, nextState);
-      if (!nextState.text && !nextState.mediaUrl) {
-        await bot.sendMessage(chatId, "請發送文字，或發送圖片/視頻並附帶文案。");
-        return;
-      }
-      if (nextState.mediaUrl && !nextState.text) {
-        await bot.sendMessage(chatId, "已收到媒體，請再補一條文案後我會入庫。");
-        return;
-      }
-      const saved = await appendCustomPersonaArchivePost({
-        archiveId: nextState.archiveId,
-        content: nextState.text || "",
-        mediaUrl: nextState.mediaUrl,
-        telegramGroupContentType: contentBranchToTelegramGroupContentType(nextState.contentBranch),
-      }).catch(() => null);
-      pendingCustomPersonaPosts.delete(chatId);
-      if (!saved) {
-        await bot.sendMessage(chatId, "❌ 儲存失敗，請稍後重試。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設詳情", callback_data: `pd_${nextState.archiveId}` }]] },
-        });
-        return;
-      }
-      await bot.sendMessage(
-        chatId,
-        `✅ 已寫入推文庫\n人設：${nextState.archiveName}\n類型：${nextState.mediaUrl ? "圖文/視頻文案" : "純文字"}\n目前待發佈：${saved.posts.length} 篇`,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "📝 查看推文列表", callback_data: buildStoredPostsPageCallback(nextState.archiveId, 0, contentBranchToTelegramGroupContentType(nextState.contentBranch)) }],
-              [{ text: "◀️ 返回人設詳情", callback_data: `pd_${nextState.archiveId}` }],
-            ],
-          },
-        },
-      );
-      return;
-    }
-
     const customPublish = pendingCustomPublishes.get(chatId);
     const looksLikeCustomPublishIntent = Boolean(media) && (!text || /自定义发布|自訂發布|发布推文|发布推文|发到threads|發布到threads|用这个图发布|用這個圖发布|用這張圖发布|配图发布|配圖發布|发视频|發視頻|上传视频|上傳視頻|发布视频|發布視頻/i.test(text));
     if (!customPublish && looksLikeCustomPublishIntent) {
@@ -14258,32 +14525,49 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
       if (nextState.publishWithGeneratedImage) {
         if (media?.file_id) {
-          await bot.sendMessage(chatId, "📝 这个入口只需要純文字内容。我会根据文字生成配图，不使用手动上传的图片或视频。", {
-            reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+          await bot.sendMessage(chatId, "⚠️ 当前是「根据文字生成配图再发布」阶段，只接收純文字文案。\n\n你刚发送的是图片/视频，不会被使用。请发送要发布的文字，或返回发布方式改用直发。", {
+            reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)], [customPublishResetButton]] },
           });
           return;
         }
         if (!nextState.text) {
-          await bot.sendMessage(chatId, "📝 请发送純文字推文内容，我会根据文字生成配图后发布。", {
-            reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+          await bot.sendMessage(chatId, "📝 目前步驟：1/2 發送文字文案\n\n請發送純文字推文內容，我會根據文字生成配圖，下一步再讓你確認發布。", {
+            reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
           });
           return;
         }
-        await executeCustomPublish(chatId, nextState);
+        await bot.sendMessage(chatId, `📝 目前步驟：2/2 確認配圖發布\n\n${customPublishContentSummary(nextState)}\n\n確認後會先生成配圖，再發布圖文。`, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🚀 生成配圖並發布", callback_data: "custom_publish_publish_now" }],
+              [customPublishResetButton],
+              [customPublishBackToMethodButton(nextState)],
+            ],
+          },
+        });
         return;
       }
 
       if (nextState.text && nextState.fileId) {
-        await executeCustomPublish(chatId, nextState);
+        await bot.sendMessage(chatId, `🧾 目前步驟：2/2 確認直發內容\n\n${customPublishContentSummary(nextState)}\n\n確認後會把這條媒體和文字一起發布。`, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🚀 確認發布", callback_data: "custom_publish_publish_now" }],
+              [customPublishResetButton],
+              [customPublishBackToMethodButton(nextState)],
+            ],
+          },
+        });
         return;
       }
 
       if (nextState.text && !nextState.fileId) {
-        await bot.sendMessage(chatId, "📝 已收到文字。可以继续发送图片/视频一起发布，也可以现在直接发布純文字。", {
+        await bot.sendMessage(chatId, `📝 已收到文字\n\n${customPublishContentSummary(nextState)}\n\n你可以繼續發圖片/視頻一起發布，也可以直接發布純文字。`, {
           reply_markup: {
             inline_keyboard: [
-              [{ text: "🚀 直接发布文字", callback_data: "custom_publish_publish_now" }],
-              [{ text: "🏠 主選單", callback_data: "back_main" }],
+              [{ text: "🚀 直接發布文字", callback_data: "custom_publish_publish_now" }],
+              [customPublishResetButton],
+              [customPublishBackToMethodButton(nextState)],
             ],
           },
         });
@@ -14291,14 +14575,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
 
       if (nextState.fileId) {
-        await bot.sendMessage(chatId, "📝 已收到媒体，请继续发送要配套发布的文字。", {
-          reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+        await bot.sendMessage(chatId, `🖼 已收到媒體\n\n${customPublishContentSummary(nextState)}\n\n目前步驟：等待配套文字\n請繼續發送要和這個媒體一起發布的文字。`, {
+          reply_markup: { inline_keyboard: [[customPublishResetButton], [customPublishBackToMethodButton(nextState)]] },
         });
         return;
       }
 
-      await bot.sendMessage(chatId, "📝 请发送文字，或发送图片/视频并在 caption 里写文案。", {
-        reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+      await bot.sendMessage(chatId, "📝 目前步驟：1/2 發送內容\n\n請發送文字，或發送圖片/視頻並在 caption 裡寫文案。", {
+        reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
       });
       return;
     }
