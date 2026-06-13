@@ -462,11 +462,13 @@ async function findTelegramTargetGroupPointByVision(
             `Target group name: ${groupName}`,
             `Screen context: ${screenContext}`,
             "Count only clickable chat/group rows. Do not count the search input, section titles, or plain message preview text.",
-            "On Telegram search screens, prefer the 'Recent visits/最近访问' section above the 'Messages/消息' section when the exact group appears there.",
-            "Return the visible row number containing the exact target group. The first clickable chat/group row is row 1.",
+            "Do not prefer Recent visits. Choose the row whose visible title is exactly the target group name.",
+            "Return the visible row number of the clickable row containing the exact target group. Include x/y only if you are confident.",
             "If there are similar names, choose only the exact group name. Do not choose AG- prefixed or otherwise longer fake names.",
+            "Do not choose any visible row whose title is not exactly the target group, even if it appears above the target row.",
+            "matchedName is required and must be the exact visible title you chose.",
             "If the exact group is not visible, return {\"found\":false}.",
-            "Return one short minified JSON line only. Example: {\"found\":true,\"row\":1,\"matchedName\":\"TG fufei qun\"}",
+            "Return one short minified JSON line only. Example: {\"found\":true,\"matchedName\":\"TG fufei qun\",\"row\":1}",
           ].join("\n"),
         },
         { inlineData: { mimeType: inline.mimeType || "image/png", data: inline.data } },
@@ -476,22 +478,23 @@ async function findTelegramTargetGroupPointByVision(
   );
   const text = extractText(data).trim();
   onProgress?.({ step: `Telegram 視覺識別返回：${text.slice(0, 420) || "空"}`, done: false });
-  const parsed = parseModelJson(text);
+  const parsed = parseTelegramVisionPointJson(text);
   if (!parsed?.found) return null;
   const matchedName = String(parsed.matchedName || "").trim();
-  if (matchedName && normalizeTelegramGroupLabel(matchedName) !== normalizeTelegramGroupLabel(groupName)) return null;
+  if (!matchedName || normalizeTelegramGroupLabel(matchedName) !== normalizeTelegramGroupLabel(groupName)) return null;
   const row = Number(parsed.row ?? parsed.rowIndex);
   if (Number.isFinite(row) && row >= 1 && row <= 8) {
     const rowIndex = Math.floor(row);
     const baseY = /搜索|search/i.test(screenContext) ? 320 : 220;
-    const rowGap = /搜索|search/i.test(screenContext) ? 130 : 115;
+    const rowGap = /搜索|search/i.test(screenContext) ? 205 : 115;
     return { x: 270, y: Math.min(1420, baseY + (rowIndex - 1) * rowGap) };
   }
-  const x = Number(parsed.x);
-  const y = Number(parsed.y);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  if (x < 0 || x > 720 || y < 240 || y > 1500) return null;
-  return { x: Math.round(x), y: Math.round(y) };
+  const x = Number(parsed.x ?? parsed.centerX);
+  const y = Number(parsed.y ?? parsed.centerY);
+  if (Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= 720 && y >= 180 && y <= 1500) {
+    return { x: Math.round(x), y: Math.round(y) };
+  }
+  return null;
 }
 
 function parseModelJson(text: string): any | null {
@@ -501,6 +504,24 @@ function parseModelJson(text: string): any | null {
   } catch {
     return null;
   }
+}
+
+function parseTelegramVisionPointJson(text: string): any | null {
+  const parsed = parseModelJson(text);
+  if (parsed) return parsed;
+  if (!/"?found"?\s*:\s*true/i.test(text)) return null;
+  const x = text.match(/"?(?:x|centerX)"?\s*:\s*(-?\d+(?:\.\d+)?)/i)?.[1];
+  const y = text.match(/"?(?:y|centerY)"?\s*:\s*(-?\d+(?:\.\d+)?)/i)?.[1];
+  const row = text.match(/"?(?:row|rowIndex)"?\s*:\s*(-?\d+(?:\.\d+)?)/i)?.[1];
+  const matchedName = text.match(/"?matchedName"?\s*:\s*"([^"]+)"/i)?.[1];
+  if ((!x || !y) && !row) return null;
+  return {
+    found: true,
+    ...(x ? { x: Number(x) } : {}),
+    ...(y ? { y: Number(y) } : {}),
+    ...(row ? { row: Number(row) } : {}),
+    ...(matchedName ? { matchedName } : {}),
+  };
 }
 
 function looksLikeTelegramShareChatPicker(uiXml: string): boolean {
