@@ -572,6 +572,7 @@ function shellDecodedTextArg(text: string): string {
 
 function telegramSearchTextForTarget(groupName: string, groupContentType?: "free" | "paid"): string {
   if (groupContentType === "paid" && isPaidTelegramGroupName(groupName)) return "TG fufei qun";
+  if (/[^\x00-\x7F]/.test(groupName)) return groupName;
   const asciiTokens = groupName.match(/[A-Za-z0-9][A-Za-z0-9 _.-]{1,}/g)
     ?.map((item) => item.trim())
     .filter(Boolean)

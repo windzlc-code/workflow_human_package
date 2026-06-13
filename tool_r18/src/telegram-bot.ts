@@ -16,7 +16,6 @@ import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { publishPost, queryThreadsAccount, loginThreadsAccount, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona } from "@/lib/vmos-publisher";
-import { identifyTelegramGroupById } from "@/lib/telegram-group-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
@@ -1359,15 +1358,6 @@ function resolveTelegramGroupContentTypeForPost(
   return fallbackGroupContentType;
 }
 
-function resolveTelegramTargetChatIdForPost(
-  archive: { boundTelegramFreeGroupId?: string; boundTelegramPaidGroupId?: string } | null | undefined,
-  post?: { telegramGroupContentType?: "free" | "paid" } | null,
-  fallbackGroupContentType?: TelegramGroupContentType,
-) {
-  const groupType: TelegramGroupContentType = resolveTelegramGroupContentTypeForPost(post, fallbackGroupContentType) || "free";
-  return groupType === "paid" ? archive?.boundTelegramPaidGroupId : archive?.boundTelegramFreeGroupId;
-}
-
 function resolveTelegramTargetGroupNameForPost(
   archive: {
     boundTelegramFreeGroupId?: string;
@@ -1379,9 +1369,8 @@ function resolveTelegramTargetGroupNameForPost(
   fallbackGroupContentType?: TelegramGroupContentType,
 ) {
   const groupType: TelegramGroupContentType = resolveTelegramGroupContentTypeForPost(post, fallbackGroupContentType) || "free";
-  const id = groupType === "paid" ? archive?.boundTelegramPaidGroupId : archive?.boundTelegramFreeGroupId;
-  const knownName = id ? resolveKnownTelegramGroupName(id, groupType) : "";
-  return (groupType === "paid" ? archive?.boundTelegramPaidGroupName : archive?.boundTelegramFreeGroupName) || knownName;
+  const name = groupType === "paid" ? archive?.boundTelegramPaidGroupName : archive?.boundTelegramFreeGroupName;
+  return normalizeTelegramSingleLine(name || "");
 }
 for (const seed of WORKFLOW_PERSONA_SEEDS) {
   void seed;
@@ -2251,8 +2240,8 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
     ],
     [{ text: "📱 绑定云机", callback_data: `bindpad_${id}` }],
     [
-      { text: "TG免費群ID", callback_data: `bindtg_free_${id}` },
-      { text: "TG付費群ID", callback_data: `bindtg_paid_${id}` },
+      { text: "TG免費群", callback_data: `bindtg_free_${id}` },
+      { text: "TG付費群", callback_data: `bindtg_paid_${id}` },
     ],
   ];
 
@@ -9806,19 +9795,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const boundPadName = await resolvePadBindingDisplayName(archive.boundPadCode, archive.boundPadName, defaultPadCode, await listPadsForThisBot());
       const tgFreeGroupName = normalizeTelegramSingleLine(archive.boundTelegramFreeGroupName || "") || "未綁定";
       const tgPaidGroupName = normalizeTelegramSingleLine(archive.boundTelegramPaidGroupName || "") || "未綁定";
-      const tgFreeGroupId = normalizeTelegramSingleLine(archive.boundTelegramFreeGroupId || "") || "未綁定";
-      const tgPaidGroupId = normalizeTelegramSingleLine(archive.boundTelegramPaidGroupId || "") || "未綁定";
       const settingsRows = buildPersonaSettingsRows(archive);
-      console.log(`[telegram][settings_group_binding] archive=${id} free="${tgFreeGroupName}" freeId="${tgFreeGroupId}" paid="${tgPaidGroupName}" paidId="${tgPaidGroupId}"`);
+      console.log(`[telegram][settings_group_binding] archive=${id} free="${tgFreeGroupName}" paid="${tgPaidGroupName}"`);
       await safeEditOrSend(bot, chatId, msgId, [
         "⚙️ *人設設定*",
         "",
         `人設：${archive.name}`,
         `綁定雲機：${boundPadName}`,
         `TG免費群：${tgFreeGroupName}`,
-        `TG免費群ID：${tgFreeGroupId}`,
         `TG付費群：${tgPaidGroupName}`,
-        `TG付費群ID：${tgPaidGroupId}`,
         `待發布推文：${archive.posts.length} 篇`,
         `已發布：${archive.publishHistory?.length || 0} 篇`,
       ].join("\n"), {
@@ -11191,7 +11176,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 caption: post.content,
                 mediaUrl: post.imageUrl,
                 telegramChatId: chatId,
-                telegramTargetChatId: platform === "telegram" ? resolveTelegramTargetChatIdForPost(archive, post, state.groupContentType) : undefined,
                 telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, state.groupContentType) : undefined,
                 telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, state.groupContentType) : undefined,
               },
@@ -11899,8 +11883,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const current = groupContentType === "paid"
-        ? formatTelegramGroupBindingDisplay(archive.boundTelegramPaidGroupName, archive.boundTelegramPaidGroupId)
-        : formatTelegramGroupBindingDisplay(archive.boundTelegramFreeGroupName, archive.boundTelegramFreeGroupId);
+        ? formatTelegramGroupBindingDisplay(archive.boundTelegramPaidGroupName)
+        : formatTelegramGroupBindingDisplay(archive.boundTelegramFreeGroupName);
       pendingActions.set(chatId, {
         type: "set-telegram-group-binding",
         archiveId: id,
@@ -11908,11 +11892,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       });
       const groupLabel = groupContentType === "paid" ? "TG付費群" : "TG免費群";
       await safeEditOrSend(bot, chatId, msgId, [
-        `請輸入「${archive.name}」的 ${groupLabel} 群組 ID。`,
+        `請輸入「${archive.name}」的 ${groupLabel} 群組名稱。`,
         "",
         `目前：${current}`,
         "",
-        "保存後會用綁定雲機的 Telegram 帳號發送；請確認該雲機帳號已加入該群組。",
+        "保存後會用綁定雲機的 Telegram 帳號搜尋該群並發送；請確認該雲機帳號已加入該群組。",
       ].join("\n"), {
         reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `settings_${id}` }]] },
       });
@@ -12226,8 +12210,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         groupContentType,
         stage: "choose_post",
       });
-      await safeEditOrSend(bot, chatId, msgId, `🚀 *人工发布推文*\n\n人設：${archive.name}\n平台：${platform}\n待发布：${scopedPosts.length} 篇\n\n${buildManualPostChoiceIntro(scopedPosts.length)}\n\n${buildManualPostChoicePreview(scopedPosts, 0)}`, {
-        parse_mode: "Markdown",
+      await safeEditOrSend(bot, chatId, msgId, `🚀 人工发布推文\n\n人設：${archive.name}\n平台：${platform}\n待发布：${scopedPosts.length} 篇\n\n${buildManualPostChoiceIntro(scopedPosts.length)}\n\n${buildManualPostChoicePreview(scopedPosts, 0)}`, {
         reply_markup: {
           inline_keyboard: [
             ...buildManualPostChoiceRows(scopedPosts, 0),
@@ -12259,8 +12242,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         page,
         stage: "choose_post",
       });
-      await safeEditOrSend(bot, chatId, msgId, `🚀 *人工发布推文*\n\n人設：${archive.name}\n平台：${platform}\n待发布：${scopedPosts.length} 篇\n\n${buildManualPostChoiceIntro(scopedPosts.length)}\n\n${buildManualPostChoicePreview(scopedPosts, page)}`, {
-        parse_mode: "Markdown",
+      await safeEditOrSend(bot, chatId, msgId, `🚀 人工发布推文\n\n人設：${archive.name}\n平台：${platform}\n待发布：${scopedPosts.length} 篇\n\n${buildManualPostChoiceIntro(scopedPosts.length)}\n\n${buildManualPostChoicePreview(scopedPosts, page)}`, {
         reply_markup: {
           inline_keyboard: [
             ...buildManualPostChoiceRows(scopedPosts, page),
@@ -12434,7 +12416,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
               caption: post.content,
               mediaUrl: post.imageUrl,
               telegramChatId: chatId,
-              telegramTargetChatId: platform === "telegram" ? resolveTelegramTargetChatIdForPost(archive, post, groupContentType) : undefined,
               telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, groupContentType) : undefined,
               telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, groupContentType) : undefined,
             },
@@ -12542,7 +12523,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
             caption: post.content,
             mediaUrl: post.imageUrl,
             telegramChatId: chatId,
-            telegramTargetChatId: platform === "telegram" ? resolveTelegramTargetChatIdForPost(archive, post) : undefined,
             telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
             telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined,
           },
@@ -13084,7 +13064,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
             caption: post.content,
             mediaUrl: post.imageUrl,
             telegramChatId: chatId,
-            telegramTargetChatId: platform === "telegram" ? resolveTelegramTargetChatIdForPost(archive, post) : undefined,
             telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
             telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined,
           },
@@ -14029,9 +14008,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (pending?.type === "set-telegram-group-binding") {
       pendingActions.delete(chatId);
-      const groupId = normalizeTelegramChatIdInput(text || "");
-      if (!pending.groupContentType || !groupId) {
-        await bot.sendMessage(chatId, "❌ 請輸入正確的 Telegram 群組 ID（例如 -1001234567890）。", {
+      const groupName = normalizeTelegramSingleLine(text || "");
+      if (!pending.groupContentType || !groupName) {
+        await bot.sendMessage(chatId, "❌ 請輸入正確的 Telegram 群組名稱。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
         });
         return;
@@ -14043,81 +14022,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const pads = await listPadsForThisBot();
-      const padBinding = await resolvePublishPadBinding(archive, undefined, defaultPadCode, pads).catch((error: any) => {
-        console.error("[telegram][group_binding_pad_error]", error?.message || error);
-        return null;
-      });
-      if (!padBinding) {
-        await bot.sendMessage(chatId, "❌ 無法取得這個人設綁定的雲機，請先在人設設定中重新綁定可用雲機。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
-        });
-        return;
-      }
       const groupLabel = pending.groupContentType === "paid" ? "TG付費群" : "TG免費群";
-      const statusMsg = await bot.sendMessage(
-        chatId,
-        [
-          `🔎 正在通過雲機 Telegram 識別 ${groupLabel}`,
-          "",
-          `人設：${archive.name}`,
-          `雲機：${padBinding.padName || padBinding.padCode}`,
-          `ID：${groupId}`,
-        ].join("\n"),
-      );
-      let groupName = "";
-      try {
-        const creds = resolveVmosCredentials();
-        const identified = await identifyTelegramGroupById(
-          creds,
-          {
-            padCode: padBinding.padCode,
-            telegramTargetChatId: groupId,
-            telegramGroupContentType: pending.groupContentType,
-          },
-          (progress) => {
-            bot.editMessageText([
-              `🔎 正在通過雲機 Telegram 識別 ${groupLabel}`,
-              "",
-              `人設：${archive.name}`,
-              `雲機：${padBinding.padName || padBinding.padCode}`,
-              `ID：${groupId}`,
-              "",
-              `${progress.done ? "✅" : "⏳"} ${progress.step}`,
-            ].join("\n"), {
-              chat_id: chatId,
-              message_id: statusMsg.message_id,
-            }).catch(() => undefined);
-          },
-        );
-        groupName = identified.groupName;
-      } catch (error: any) {
-        await bot.editMessageText([
-          `❌ ${groupLabel} ID 識別失敗`,
-          "",
-          `人設：${archive.name}`,
-          `雲機：${padBinding.padName || padBinding.padCode}`,
-          `ID：${groupId}`,
-          "",
-          `原因：${formatUserFacingError(error, "雲機 Telegram 無法識別這個群組 ID。")}`,
-          "",
-          "請確認該人設綁定的雲機 Telegram 帳號已加入這個群，並且能在 Telegram 內打開該群。",
-        ].join("\n"), {
-          chat_id: chatId,
-          message_id: statusMsg.message_id,
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
-        }).catch(() => undefined);
-        return;
-      }
       await updatePersonaArchivePadBinding(pending.archiveId, pending.groupContentType === "paid"
-        ? { telegramPaidGroupId: groupId, telegramPaidGroupName: groupName }
-        : { telegramFreeGroupId: groupId, telegramFreeGroupName: groupName }).catch(() => null);
+        ? { telegramPaidGroupId: undefined, telegramPaidGroupName: groupName }
+        : { telegramFreeGroupId: undefined, telegramFreeGroupName: groupName }).catch(() => null);
       invalidatePersonaListCache();
-      await bot.editMessageText(`✅ 已保存 ${groupLabel}：${groupName}\nID：${groupId}\n雲機：${padBinding.padName || padBinding.padCode}`, {
-        chat_id: chatId,
-        message_id: statusMsg.message_id,
+      await bot.sendMessage(chatId, `✅ 已保存 ${groupLabel}：${groupName}`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回設定", callback_data: `settings_${pending.archiveId}` }]] },
-      }).catch(() => undefined);
+      });
       return;
     }
 
