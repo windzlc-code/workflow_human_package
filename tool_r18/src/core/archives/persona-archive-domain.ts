@@ -53,6 +53,7 @@ export interface PersonaPublishRecord {
   padCode?: string;
   padName?: string;
   imageUrl?: string;
+  screenshotUrl?: string;
   telegramGroupContentType?: "free" | "paid";
 }
 
@@ -62,6 +63,7 @@ export interface PersonaPublishMeta {
   padName?: string;
   mediaUrl?: string;
   imageUrl?: string;
+  screenshotUrl?: string;
 }
 
 export interface PersonaArchive {

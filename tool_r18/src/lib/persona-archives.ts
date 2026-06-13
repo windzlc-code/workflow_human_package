@@ -280,6 +280,7 @@ function normalizePublishRecord(raw: any, fallbackIndex: number): PersonaPublish
       : typeof raw?.mediaUrl === "string"
         ? raw.mediaUrl
         : undefined,
+    screenshotUrl: typeof raw?.screenshotUrl === "string" ? raw.screenshotUrl : undefined,
     telegramGroupContentType: raw?.telegramGroupContentType === "paid" ? "paid" : raw?.telegramGroupContentType === "free" ? "free" : undefined,
   };
 }
@@ -619,6 +620,7 @@ function stripLargeMediaForLocalCache(archive: PersonaArchive): PersonaArchive {
     publishHistory: archive.publishHistory?.map((record) => ({
       ...record,
       imageUrl: record.imageUrl?.startsWith("data:") ? undefined : record.imageUrl,
+      screenshotUrl: record.screenshotUrl?.startsWith("data:") ? undefined : record.screenshotUrl,
     })),
     // Keep personaReferenceSheet — it's the primary identity reference, worth the storage cost
     // Keep personaImageLibrary image URLs as-is
@@ -1180,6 +1182,7 @@ export async function markArchiveEpisodesPublished(
         padCode: meta.padCode,
         padName: meta.padName,
         imageUrl: meta.mediaUrl || meta.imageUrl || post.imageUrl,
+        screenshotUrl: meta.screenshotUrl,
         telegramGroupContentType: post.telegramGroupContentType,
       }, (archive.publishHistory?.length || 0) + index);
     })

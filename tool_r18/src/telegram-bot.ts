@@ -617,6 +617,18 @@ type PendingPaidR18FallbackPostAction = {
   createdAt: number;
 };
 
+type PendingPaidR18VideoPostAction = {
+  archiveId: string;
+  archiveName: string;
+  videoUrl: string;
+  prompt: string;
+  contentTimeSlot?: GeneratePostTimeSlot;
+  selectedMemoryEntryIds?: string[];
+  selectedMemorySummaries?: string[];
+  taskId?: string;
+  createdAt: number;
+};
+
 type PendingGeneratedPostImageGroupFlow = {
   archiveId: string;
   archiveName: string;
@@ -641,12 +653,15 @@ type PendingPublishHistoryRequeueAction = {
 const POST_IMAGE_REGEN_CALLBACK_PREFIX = "pimgregen_";
 const POST_IMAGE_SELECT_CALLBACK_PREFIX = "pimgpick_";
 const PAID_R18_FALLBACK_POST_CALLBACK_PREFIX = "pr18fb_";
+const PAID_R18_VIDEO_POST_CALLBACK_PREFIX = "pr18v_";
 const PUBLISH_HISTORY_REQUEUE_CALLBACK_PREFIX = "rh_";
 const POST_IMAGE_REGEN_ACTION_TTL_MS = 6 * 60 * 60_000;
 const POST_IMAGE_REGEN_ACTION_MAX = 500;
 const pendingPostImageRegenerationActions = new Map<string, PendingPostImageRegenerationAction>();
 const pendingPostImageCandidateSelectionActions = new Map<string, PendingPostImageCandidateSelectionAction>();
 const pendingPaidR18FallbackPostActions = new Map<string, PendingPaidR18FallbackPostAction>();
+const pendingPaidR18VideoPostActions = new Map<string, PendingPaidR18VideoPostAction>();
+const pendingPaidR18VideoCustomInputs = new Map<number, { actionKey: string; createdAt: number }>();
 const pendingGeneratedPostImageGroupFlows = new Map<number, PendingGeneratedPostImageGroupFlow>();
 const pendingPublishHistoryRequeueActions = new Map<string, PendingPublishHistoryRequeueAction>();
 
@@ -678,6 +693,18 @@ function parsePaidR18FallbackPostCallback(data: string): string | null {
   return data.startsWith(PAID_R18_FALLBACK_POST_CALLBACK_PREFIX)
     ? data.slice(PAID_R18_FALLBACK_POST_CALLBACK_PREFIX.length)
     : null;
+}
+
+function buildPaidR18VideoPostCallback(action: "ai" | "custom" | "save", actionKey: string): string {
+  return `${PAID_R18_VIDEO_POST_CALLBACK_PREFIX}${action}_${actionKey}`;
+}
+
+function parsePaidR18VideoPostCallback(data: string): { action: "ai" | "custom" | "save"; key: string } | null {
+  if (!data.startsWith(PAID_R18_VIDEO_POST_CALLBACK_PREFIX)) return null;
+  const payload = data.slice(PAID_R18_VIDEO_POST_CALLBACK_PREFIX.length);
+  const match = payload.match(/^(ai|custom|save)_(.+)$/);
+  if (!match) return null;
+  return { action: match[1] as "ai" | "custom" | "save", key: match[2] };
 }
 
 function buildPublishHistoryRequeueCallback(actionKey: string): string {
@@ -721,6 +748,21 @@ function cleanupPostImageRegenerationActions() {
     const firstKey = pendingPaidR18FallbackPostActions.keys().next().value;
     if (!firstKey) break;
     pendingPaidR18FallbackPostActions.delete(firstKey);
+  }
+  for (const [key, action] of pendingPaidR18VideoPostActions.entries()) {
+    if (now - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
+      pendingPaidR18VideoPostActions.delete(key);
+    }
+  }
+  while (pendingPaidR18VideoPostActions.size > POST_IMAGE_REGEN_ACTION_MAX * 4) {
+    const firstKey = pendingPaidR18VideoPostActions.keys().next().value;
+    if (!firstKey) break;
+    pendingPaidR18VideoPostActions.delete(firstKey);
+  }
+  for (const [chatId, action] of pendingPaidR18VideoCustomInputs.entries()) {
+    if (now - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
+      pendingPaidR18VideoCustomInputs.delete(chatId);
+    }
   }
   for (const [key, action] of pendingPublishHistoryRequeueActions.entries()) {
     if (now - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
@@ -801,6 +843,24 @@ function getPaidR18FallbackPostAction(key: string): PendingPaidR18FallbackPostAc
   if (!action) return null;
   if (Date.now() - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
     pendingPaidR18FallbackPostActions.delete(key);
+    return null;
+  }
+  return action;
+}
+
+function rememberPaidR18VideoPostAction(args: Omit<PendingPaidR18VideoPostAction, "createdAt">): string {
+  cleanupPostImageRegenerationActions();
+  const key = `pv${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  pendingPaidR18VideoPostActions.set(key, { ...args, createdAt: Date.now() });
+  return key;
+}
+
+function getPaidR18VideoPostAction(key: string): PendingPaidR18VideoPostAction | null {
+  cleanupPostImageRegenerationActions();
+  const action = pendingPaidR18VideoPostActions.get(key);
+  if (!action) return null;
+  if (Date.now() - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
+    pendingPaidR18VideoPostActions.delete(key);
     return null;
   }
   return action;
@@ -1110,6 +1170,32 @@ function releasePadOperation(padCode: string, key: string) {
   const active = activePadOperations.get(padCode);
   if (active?.key === key) activePadOperations.delete(padCode);
   cancelledPadOperationKeys.delete(key);
+}
+
+function listActiveRuntimeOperationsForChat(chatId: number) {
+  purgeExpiredPublishCommands();
+  purgeExpiredPadOperations();
+  const padOperations = Array.from(activePadOperations.entries())
+    .filter(([, active]) => active.chatId === chatId)
+    .map(([padCode, active]) => ({
+      type: "pad" as const,
+      scope: padCode,
+      padCode,
+      label: active.label,
+      startedAt: active.startedAt,
+    }));
+  const padKeys = new Set(padOperations.map((item) => item.padCode));
+  const publishOperations = Array.from(activePublishCommands.entries())
+    .filter(([, active]) => active.chatId === chatId)
+    .map(([scope, active]) => ({
+      type: "publish" as const,
+      scope,
+      padCode: scope.startsWith(`${chatId}:pad:`) ? scope.slice(`${chatId}:pad:`.length) : undefined,
+      label: active.label,
+      startedAt: active.startedAt,
+    }))
+    .filter((item) => !item.padCode || !padKeys.has(item.padCode));
+  return [...padOperations, ...publishOperations].sort((a, b) => a.startedAt - b.startedAt);
 }
 
 function assertPadOperationNotCancelled(key: string) {
@@ -1443,6 +1529,23 @@ function resolveTelegramTargetGroupNameForPost(
   const groupType: TelegramGroupContentType = resolveTelegramGroupContentTypeForPost(post, fallbackGroupContentType) || "free";
   const name = groupType === "paid" ? archive?.boundTelegramPaidGroupName : archive?.boundTelegramFreeGroupName;
   return normalizeTelegramSingleLine(name || "");
+}
+
+function buildTelegramPublishPreviewTargetLine(
+  platform: TelegramPublishPlatform | undefined,
+  archive: {
+    boundTelegramFreeGroupId?: string;
+    boundTelegramPaidGroupId?: string;
+    boundTelegramFreeGroupName?: string;
+    boundTelegramPaidGroupName?: string;
+  } | null | undefined,
+  post?: { telegramGroupContentType?: "free" | "paid" } | null,
+  fallbackGroupContentType?: TelegramGroupContentType,
+) {
+  if (platform !== "telegram") return "";
+  const groupType = resolveTelegramGroupContentTypeForPost(post, fallbackGroupContentType) || "free";
+  const groupName = resolveTelegramTargetGroupNameForPost(archive, post, groupType);
+  return `\n\u76EE\u6A19\u7FA4\uFF1A${groupName || "\u672A\u8A2D\u5B9A"}`;
 }
 
 function resolveTelegramTargetForGroupContent(
@@ -4301,8 +4404,9 @@ async function submitToolR18PromptReview(bot: TelegramBot, chatId: number, state
   pendingToolR18Tasks.delete(chatId);
   const taskId = String(result.id || "").trim();
   const linkedToGeneratedPost = state.taskType === "text_to_image" && scheduleToolR18GeneratedPostAttachment(bot, chatId, taskId, params, finalPrompt);
+  const linkedToPaidVideoPost = state.taskType === "video_i2v" && hasPaidR18ImageFlowContext(params) && schedulePaidR18VideoPostOptions(bot, chatId, taskId, params, finalPrompt);
   const submittedKeyboard = buildToolR18SubmittedKeyboard(chatId, taskId, params);
-  await bot.sendMessage(chatId, ["\u2705 R18 \u4EFB\u52D9\u5DF2\u63D0\u4EA4", "\u985E\u578B\uFF1A" + state.taskLabel, "ID\uFF1A" + taskId, linkedToGeneratedPost ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\u4E26\u5BEB\u5165\u63A8\u6587\u3002" : ""].filter(Boolean).join(String.fromCharCode(10)), {
+  await bot.sendMessage(chatId, ["\u2705 R18 \u4EFB\u52D9\u5DF2\u63D0\u4EA4", "\u985E\u578B\uFF1A" + state.taskLabel, "ID\uFF1A" + taskId, linkedToGeneratedPost ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\u4E26\u5BEB\u5165\u63A8\u6587\u3002" : "", linkedToPaidVideoPost ? "正在等待視頻完成，完成後會提供付費推文保存選項。" : ""].filter(Boolean).join(String.fromCharCode(10)), {
     reply_markup: { inline_keyboard: submittedKeyboard },
   });
 }
@@ -4683,8 +4787,9 @@ async function submitPendingToolR18Task(bot: TelegramBot, chatId: number, state:
   const taskId = String(result.id || "").trim();
   const finalPrompt = String(params.prompt_text || params.prompt || params.message || text || "");
   const linkedToGeneratedPost = state.taskType === "text_to_image" && scheduleToolR18GeneratedPostAttachment(bot, chatId, taskId, params, finalPrompt);
+  const linkedToPaidVideoPost = state.taskType === "video_i2v" && hasPaidR18ImageFlowContext(params) && schedulePaidR18VideoPostOptions(bot, chatId, taskId, params, finalPrompt);
   const submittedKeyboard = buildToolR18SubmittedKeyboard(chatId, taskId, params);
-  await bot.sendMessage(chatId, ["\u2705 R18 \u4EFB\u52D9\u5DF2\u63D0\u4EA4", "\u985E\u578B\uFF1A" + state.taskLabel, "ID\uFF1A" + taskId, linkedToGeneratedPost ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\u4E26\u5BEB\u5165\u63A8\u6587\u3002" : ""].filter(Boolean).join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: submittedKeyboard } });
+  await bot.sendMessage(chatId, ["\u2705 R18 \u4EFB\u52D9\u5DF2\u63D0\u4EA4", "\u985E\u578B\uFF1A" + state.taskLabel, "ID\uFF1A" + taskId, linkedToGeneratedPost ? "\u6B63\u5728\u7B49\u5F85\u5716\u7247\u5B8C\u6210\u4E26\u5BEB\u5165\u63A8\u6587\u3002" : "", linkedToPaidVideoPost ? "正在等待視頻完成，完成後會提供付費推文保存選項。" : ""].filter(Boolean).join(String.fromCharCode(10)), { reply_markup: { inline_keyboard: submittedKeyboard } });
 }
 async function handlePendingToolR18Input(bot: TelegramBot, msg: TelegramBot.Message, state: PendingToolR18TaskState, media: any, text: string) {
   const chatId = msg.chat.id;
@@ -6189,6 +6294,184 @@ async function saveAndSendPaidR18SelectedImagePost(args: {
     });
   }
   return { postId: post?.id || postId, content: args.finalContent };
+}
+
+async function generatePaidR18VideoPostContent(args: {
+  prompt: string;
+  archiveName: string;
+  contentTimeSlot?: GeneratePostTimeSlot;
+  linkPresentation: { url: string; text: string } | null;
+}) {
+  const instruction = [
+    "請生成 Telegram 付費群短文案。",
+    "素材類型：已生成的付費群視頻。",
+    "文案要根據視頻生成提示詞中的服裝、姿勢、場景、光線、動作和氛圍來寫，不要寫成免費內容或一般日常推文。",
+    "只寫 10-20 個中文字左右的短句；口語、直白、付費群導向。",
+    "不要固定開頭，不要輸出說明、編號、JSON 或 Markdown。",
+    "如果有固定連結，固定連結放最後一行。",
+    args.contentTimeSlot ? `本次文案時段：${generatePostTimeSlotLabel(args.contentTimeSlot)}。` : "",
+    `人設：${args.archiveName}`,
+    `視頻生成提示詞：${args.prompt || "未提供，請按付費群視頻素材方向生成。"}`,
+  ].filter(Boolean).join("\n");
+  const { data } = await callTextUnderstandingModelWithFallback(
+    "xai/grok-4.3",
+    [{ role: "user", parts: [{ text: instruction }] }],
+    { temperature: 0.65, maxOutputTokens: 180 },
+    undefined,
+    {
+      isUsableResponse: (data) => Boolean(extractText(data).trim()),
+      isRetryableError: isTextModelFallbackError,
+      onFallback: (event) => {
+        console.warn("[telegram][paid_r18_video_post_grok_fallback]", `${event.from}->${event.to}: ${event.error}`);
+      },
+    },
+  );
+  const normalized = normalizePaidR18PostContent(extractText(data), args.linkPresentation);
+  if (!normalized) throw new Error("Grok 未返回可用付費群視頻文案");
+  return normalized;
+}
+
+function buildPaidR18VideoFallbackPostContent(args: {
+  prompt: string;
+  linkPresentation: { url: string; text: string } | null;
+}) {
+  const source = String(args.prompt || "");
+  const scene = firstPaidR18PromptMatch(source, [
+    [/夜景|深夜|窗邊|窗边|night/i, "這段夜感很明顯"],
+    [/床|臥室|卧室|房間|房间/i, "房間裡這段很會"],
+    [/浴室|浴缸|淋浴/i, "浴室這段太撩"],
+    [/跳舞|舞|扭|動作|动作/i, "這段動起來更撩"],
+  ], "這段太會撩");
+  const focus = firstPaidR18PromptMatch(source, [
+    [/透明|半透|透視/i, "透感"],
+    [/低胸|深V|胸口/i, "胸口線條"],
+    [/短裙|包臀|裙/i, "裙裝曲線"],
+    [/腿|大腿|絲襪|丝袜|黑絲|黑丝/i, "腿部線條"],
+    [/浴袍|睡袍|襯衫|衬衫|吊帶|吊带/i, "這身衣服"],
+  ], "畫面細節");
+  const lines = [`${focus}${scene}`, "想看完整視頻就進來"];
+  const linkUrl = args.linkPresentation?.url?.trim();
+  if (linkUrl) lines.push(linkUrl);
+  return lines.join("\n").trim();
+}
+
+async function saveAndSendPaidR18VideoPost(args: {
+  bot: TelegramBot;
+  chatId: number;
+  action: PendingPaidR18VideoPostAction;
+  finalContent: string;
+}) {
+  const saved = await appendCustomPersonaArchivePost({
+    archiveId: args.action.archiveId,
+    content: args.finalContent,
+    mediaUrl: args.action.videoUrl,
+    title: "付費群視頻文案",
+    telegramGroupContentType: "paid",
+  });
+  invalidatePersonaListCache();
+  const latestPost = saved?.posts?.at(-1);
+  const postId = latestPost?.id || "";
+  if (!saved || !postId) throw new Error("付費群視頻文案已生成，但寫入歸檔失敗");
+  await markPersonaArchivePostTelegramGroupContentType(args.action.archiveId, postId, "paid").catch((error) => {
+    console.warn("[telegram][paid_r18_video_mark_group_type_failed]", error?.message || error);
+  });
+  const archive = await loadPersonaArchive(args.action.archiveId).catch(() => null);
+  const post = archive?.posts.find((item) => item.id === postId) || latestPost;
+  const archiveIndex = archive?.posts.findIndex((item) => post?.id && item.id === post.id) ?? -1;
+  const displayIndex = post?.orderIndex !== undefined ? post.orderIndex + 1 : (archiveIndex >= 0 ? archiveIndex + 1 : saved.posts.length);
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: "📝 查看付費推文列表", callback_data: buildStoredPostsPageCallback(args.action.archiveId, 0, "paid") }],
+      [{ text: "◀️ 返回人設詳情", callback_data: `pd_${args.action.archiveId}` }],
+    ],
+  };
+  const caption = [
+    "✅ 已寫入付費群視頻推文",
+    "",
+    `📝 第 ${displayIndex} 篇推文`,
+    "",
+    args.finalContent,
+  ].join("\n");
+  const mediaInput = resolveTelegramMediaInput(args.action.videoUrl);
+  await args.bot.sendVideo(args.chatId, mediaInput, {
+    caption: caption.length <= 950 ? caption : `✅ 已寫入付費群視頻推文\n\n📝 第 ${displayIndex} 篇推文`,
+    reply_markup: keyboard,
+  }).catch(async () => {
+    await args.bot.sendMessage(args.chatId, buildPostDetailTextWithArchive(displayIndex, args.finalContent, args.action.videoUrl, archive), {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  });
+  return { postId, content: args.finalContent };
+}
+
+function schedulePaidR18VideoPostOptions(bot: TelegramBot, chatId: number, taskId: string, params: Record<string, any>, finalPrompt: string) {
+  const context = (params || {}).r18_paid_post_context || {};
+  const archiveId = String(context.archiveId || "").trim();
+  if (!archiveId || !taskId) return false;
+  void (async () => {
+    try {
+      const waited = await waitForToolR18GeneratedTaskDownloadPath(chatId, taskId, 30 * 60 * 1000);
+      const videoUrl = String(waited.downloadPath || "").trim();
+      if (!videoUrl) throw new Error("視頻任務已完成，但沒有返回可保存的視頻路徑。ID：" + taskId);
+      const actionKey = rememberPaidR18VideoPostAction({
+        archiveId,
+        archiveName: String(context.archiveName || "").trim() || "R18",
+        videoUrl,
+        prompt: finalPrompt,
+        contentTimeSlot: context.contentTimeSlot === "morning" || context.contentTimeSlot === "night" ? context.contentTimeSlot : undefined,
+        selectedMemoryEntryIds: Array.isArray(context.selectedMemoryEntryIds) ? context.selectedMemoryEntryIds.map(String) : undefined,
+        selectedMemorySummaries: Array.isArray(context.selectedMemorySummaries) ? context.selectedMemorySummaries.map(String) : undefined,
+        taskId,
+      });
+      const mediaInput = resolveTelegramMediaInput(videoUrl);
+      await bot.sendVideo(chatId, mediaInput, {
+        caption: [
+          "✅ 付費內容視頻已生成",
+          "任務ID：" + taskId,
+          "",
+          "請選擇是否寫入付費推文記錄：",
+          "1) 讓 Grok 根據視頻提示詞生成付費文案",
+          "2) 輸入自定義文案",
+          "3) 僅保存視頻到付費推文庫",
+        ].join("\n"),
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "📝 生成付費文案並保存", callback_data: buildPaidR18VideoPostCallback("ai", actionKey) }],
+            [{ text: "✍️ 輸入自定義文案保存", callback_data: buildPaidR18VideoPostCallback("custom", actionKey) }],
+            [{ text: "🎬 僅保存視頻", callback_data: buildPaidR18VideoPostCallback("save", actionKey) }],
+            [{ text: "📝 查看付費推文列表", callback_data: buildStoredPostsPageCallback(archiveId, 0, "paid") }],
+          ],
+        },
+      }).catch(async () => {
+        await bot.sendMessage(chatId, [
+          "✅ 付費內容視頻已生成",
+          "任務ID：" + taskId,
+          "視頻：" + videoUrl,
+          "",
+          "請選擇是否寫入付費推文記錄：",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "📝 生成付費文案並保存", callback_data: buildPaidR18VideoPostCallback("ai", actionKey) }],
+              [{ text: "✍️ 輸入自定義文案保存", callback_data: buildPaidR18VideoPostCallback("custom", actionKey) }],
+              [{ text: "🎬 僅保存視頻", callback_data: buildPaidR18VideoPostCallback("save", actionKey) }],
+              [{ text: "📝 查看付費推文列表", callback_data: buildStoredPostsPageCallback(archiveId, 0, "paid") }],
+            ],
+          },
+        });
+      });
+    } catch (error) {
+      await bot.sendMessage(chatId, [
+        "⚠️ 付費內容視頻任務已提交，但尚未寫入推文記錄。",
+        "任務ID：" + taskId,
+        "原因：" + formatUserFacingError(error, "請稍後在任務詳情查看視頻結果。"),
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "查看任務", callback_data: "toolr18_detail_" + taskId }], [{ text: "📝 查看付費推文列表", callback_data: buildStoredPostsPageCallback(archiveId, 0, "paid") }]] },
+      });
+    }
+  })();
+  return true;
 }
 
 async function advancePaidR18ImageFirstFlowAfterPost(args: {
@@ -7885,6 +8168,7 @@ async function handleStableTextCommand(
     const posts = archive.posts.slice(startIndex, startIndex + count);
     if (!posts.length) return "❌ 起始篇次超出了当前推文库范围。";
     const selection = summarizeManualPublishSelection(archive.posts, startIndex, posts.length);
+    const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, posts[0]);
     pendingManualPublishes.set(chatId, {
       archiveId: archive.id,
       archiveName: archive.name,
@@ -7893,7 +8177,7 @@ async function handleStableTextCommand(
       count: posts.length,
       stage: "preview_confirm",
     });
-    return `👀 已为你准备人工发布预览\n\n人設：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${posts.length} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}\n\n请點擊按钮确认开始发布。`;
+    return `👀 已为你准备人工发布预览\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${posts.length} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}\n\n请點擊按钮确认开始发布。`;
   }
 
   const wantsGeneratePosts = /生成.*推文|创建推文|新建推文|写推文/.test(text) || (Boolean(mediaUrl) && /推文|文案|根据这张图|参考这张图/.test(text));
@@ -11876,7 +12160,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           const displayIndex = archive.posts.findIndex((item) => item.id === post.id) + 1;
           return `【第${displayIndex}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`;
         }).join("\n\n");
-        await safeEditOrSend(bot, chatId, msgId, `👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${platform}\n云机：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
+        const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, selectedPosts[0], state.groupContentType);
+        await safeEditOrSend(bot, chatId, msgId, `👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n云机：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
@@ -11940,7 +12225,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const stopTyping = startTelegramTyping(bot, chatId);
         const publishedIds: string[] = [];
         const publishedOriginals: Record<string, string> = {};
-        const publishMeta: Record<string, { platform: TelegramPublishPlatform; padCode: string; imageUrl?: string }> = {};
+        const publishMeta: Record<string, { platform: TelegramPublishPlatform; padCode: string; imageUrl?: string; screenshotUrl?: string }> = {};
         const logs: string[] = [];
         try {
           for (let i = 0; i < selectedPosts.length; i += 1) {
@@ -11967,9 +12252,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
             );
             publishedIds.push(post.id);
             publishedOriginals[post.id] = post.content;
-            publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl };
-            if (result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl) {
-              await bot.sendPhoto(chatId, resolveTelegramPhotoInput(result.screenshotUrl), {
+            const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
+            publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
+            if (publishScreenshotUrl) {
+              await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
                 caption: `📸 发布验证截图（${platform}，第 ${i + 1}/${selectedPosts.length} 篇）`,
               }).catch(() => undefined);
             }
@@ -12056,6 +12342,62 @@ function sendMainMenu(chatId: number, msgId?: number) {
     const postImageRegenerateKey = parsePostImageRegenerateCallback(data);
     const postImageCandidateSelectKey = parsePostImageCandidateSelectCallback(data);
     const paidR18FallbackPostKey = parsePaidR18FallbackPostCallback(data);
+    const paidR18VideoPostAction = parsePaidR18VideoPostCallback(data);
+    if (paidR18VideoPostAction) {
+      const action = getPaidR18VideoPostAction(paidR18VideoPostAction.key);
+      if (!action?.archiveId || !action.videoUrl) {
+        await safeEditOrSend(bot, chatId, msgId, "付費視頻保存入口已過期，請從任務詳情重新查看結果。", {
+          reply_markup: { inline_keyboard: [[{ text: "👤 我的人設", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      if (paidR18VideoPostAction.action === "custom") {
+        pendingPaidR18VideoCustomInputs.set(chatId, { actionKey: paidR18VideoPostAction.key, createdAt: Date.now() });
+        await safeEditOrSend(bot, chatId, msgId, [
+          "✍️ 請輸入這支付費視頻要保存的推文文案。",
+          "",
+          "下一條文字會和視頻一起寫入付費推文庫。",
+        ].join(String.fromCharCode(10)), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "📝 改用 Grok 生成", callback_data: buildPaidR18VideoPostCallback("ai", paidR18VideoPostAction.key) }],
+              [{ text: "🎬 僅保存視頻", callback_data: buildPaidR18VideoPostCallback("save", paidR18VideoPostAction.key) }],
+              [{ text: "📝 查看付費推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, "paid") }],
+            ],
+          },
+        });
+        return;
+      }
+      try {
+        const archive = await loadPersonaArchive(action.archiveId).catch(() => null);
+        const linkPresentation = getTweetStyleLinkPresentation(archive?.setup);
+        let finalContent = "";
+        if (paidR18VideoPostAction.action === "save") {
+          finalContent = buildPaidR18VideoFallbackPostContent({ prompt: action.prompt, linkPresentation });
+        } else {
+          try {
+            finalContent = await generatePaidR18VideoPostContent({
+              prompt: action.prompt,
+              archiveName: action.archiveName,
+              contentTimeSlot: action.contentTimeSlot,
+              linkPresentation,
+            });
+          } catch (error) {
+            console.warn("[telegram][paid_r18_video_post_ai_failed]", rawErrorMessage(error));
+            finalContent = buildPaidR18VideoFallbackPostContent({ prompt: action.prompt, linkPresentation });
+          }
+        }
+        const result = await saveAndSendPaidR18VideoPost({ bot, chatId, action, finalContent });
+        if (result.postId) pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: result.postId, groupContentType: "paid" });
+        pendingPaidR18VideoPostActions.delete(paidR18VideoPostAction.key);
+        pendingPaidR18VideoCustomInputs.delete(chatId);
+      } catch (error) {
+        await bot.sendMessage(chatId, `❌ 付費視頻寫入推文失敗：${formatUserFacingError(error, "請稍後重試。")}`, {
+          reply_markup: { inline_keyboard: [[{ text: "📝 查看付費推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, "paid") }]] },
+        });
+      }
+      return;
+    }
     if (paidR18FallbackPostKey) {
       const fallbackAction = getPaidR18FallbackPostAction(paidR18FallbackPostKey);
       if (!fallbackAction?.selectionAction?.archiveId || !fallbackAction.fallbackContent.trim()) {
@@ -13059,6 +13401,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const selection = summarizeManualPublishSelection(scopedPosts, startIndex, 1);
+      const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, scopedPosts[startIndex], prevManual?.groupContentType);
       pendingManualPublishes.set(chatId, {
         archiveId,
         archiveName: archive.name,
@@ -13069,7 +13412,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         groupContentType: prevManual?.groupContentType,
         stage: "preview_confirm",
       });
-      await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}\n选择编号：第 ${startIndex + 1} 篇\n发布數量：1 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
+      await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n选择编号：第 ${startIndex + 1} 篇\n发布數量：1 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
         reply_markup: {
           inline_keyboard: buildManualPreviewRows(archiveId, platform, startIndex, 1),
         },
@@ -13128,6 +13471,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const selection = summarizeManualPublishSelection(scopedPosts, startIndex, count);
+      const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, scopedPosts[startIndex], prevManual?.groupContentType);
       pendingManualPublishes.set(chatId, {
         archiveId,
         archiveName: archive.name,
@@ -13137,7 +13481,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         groupContentType: prevManual?.groupContentType,
         stage: "preview_confirm",
       });
-      await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${count} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
+      await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${count} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
         reply_markup: {
           inline_keyboard: buildManualPreviewRows(archiveId, platform, startIndex, count),
         },
@@ -13192,6 +13536,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       try {
         const logs: string[] = [selection.hint];
         const publishedIds: string[] = [];
+        const publishMeta: Record<string, { platform: TelegramPublishPlatform; padCode: string; imageUrl?: string; screenshotUrl?: string }> = {};
         const publishWarnings: string[] = [];
         for (let index = 0; index < posts.length; index += 1) {
           assertPadOperationNotCancelled(padOperationKey);
@@ -13223,17 +13568,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
           );
           if (isPublishWarning(result)) publishWarnings.push(`第 ${startIndex + index + 1} 篇：${result.detail}`);
           publishedIds.push(post.id);
+          const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
+          publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
         }
         stopTyping();
         await markArchiveEpisodesPublished(
           archiveId,
           publishedIds,
           Object.fromEntries(posts.map((post) => [post.id, post.content])),
-          Object.fromEntries(posts.map((post) => [post.id, {
-                platform,
-                padCode,
-                imageUrl: post.imageUrl,
-          }])),
+          publishMeta,
         ).catch(() => null);
         invalidatePersonaListCache();
         pendingManualPublishes.delete(chatId);
@@ -13325,6 +13668,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
         );
         stopTyping();
+        const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
         await markArchiveEpisodesPublished(
           id,
           [post.id],
@@ -13334,6 +13678,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               platform,
               padCode,
               imageUrl: post.imageUrl,
+              screenshotUrl: publishScreenshotUrl,
             },
           },
         ).catch(() => null);
@@ -13342,8 +13687,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
         });
-        if (result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl) {
-          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(result.screenshotUrl), {
+        if (publishScreenshotUrl) {
+          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
             caption: `📸 发布验证截图（${platform}）`,
           }).catch(() => undefined);
         }
@@ -13549,15 +13894,28 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const publishing = repo.listTasks({ status: "publishing", limit: 20, telegram_chat_id: String(chatId) });
       const failed = repo.listTasks({ status: "failed", limit: 20, telegram_chat_id: String(chatId) });
       const scheduledPending = filterScheduledOnly(pending);
+      const activeRuntimeOperations = listActiveRuntimeOperationsForChat(chatId);
+      const runningCount = publishing.length + activeRuntimeOperations.length;
       const lines: string[] = [
         `📊 *排程狀態*`,
         "",
         `⏳ 待發佈: ${pending.length}`,
         `⏰ 定時任務: ${scheduledPending.length}`,
         `⚡ 立即任務: ${pending.length - scheduledPending.length}`,
-        `🔄 執行中: ${publishing.length}`,
+        `🔄 執行中: ${runningCount}`,
         `❌ 失敗: ${failed.length}`,
       ];
+      if (activeRuntimeOperations.length > 0) {
+        lines.push("", "*正在執行：*");
+        for (const item of activeRuntimeOperations.slice(0, 5)) {
+          const minutes = Math.max(1, Math.ceil((Date.now() - item.startedAt) / 60_000));
+          const target = item.padCode ? ` · ${item.padCode}` : "";
+          lines.push(`• ${item.label}${target} · 約 ${minutes} 分鐘`);
+        }
+        if (activeRuntimeOperations.length > 5) {
+          lines.push(`• 其餘 ${activeRuntimeOperations.length - 5} 個執行中操作略過`);
+        }
+      }
       if (scheduledPending.length > 0) {
         lines.push("", "*最近定時任務：*");
         for (const t of scheduledPending.slice(0, 3)) {
@@ -13889,6 +14247,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
         );
         stopTyping();
+        const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
         await markArchiveEpisodesPublished(
           archiveId,
           [postId],
@@ -13898,6 +14257,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               platform,
               padCode,
               imageUrl: post.imageUrl,
+              screenshotUrl: publishScreenshotUrl,
             },
           },
         ).catch(() => null);
@@ -13906,8 +14266,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: `posts_${archiveId}` }]] },
         });
-        if (result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl) {
-          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(result.screenshotUrl), {
+        if (publishScreenshotUrl) {
+          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
             caption: `📸 發佈验证截图（${platform}）`,
           }).catch(() => undefined);
         }
@@ -14493,6 +14853,52 @@ function sendMainMenu(chatId: number, msgId?: number) {
           ],
         },
       });
+      return;
+    }
+
+    const paidR18VideoCustomInput = pendingPaidR18VideoCustomInputs.get(chatId);
+    if (paidR18VideoCustomInput) {
+      const action = getPaidR18VideoPostAction(paidR18VideoCustomInput.actionKey);
+      if (!action?.archiveId || !action.videoUrl) {
+        pendingPaidR18VideoCustomInputs.delete(chatId);
+        await bot.sendMessage(chatId, "付費視頻保存入口已過期，請從任務詳情重新查看結果。", {
+          reply_markup: { inline_keyboard: [[{ text: "👤 我的人設", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      if (media?.file_id) {
+        await bot.sendMessage(chatId, "⚠️ 目前步驟只接收文字文案；視頻已經生成完成，不需要再上傳媒體。\n\n請直接輸入要保存的推文文案。", {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "📝 改用 Grok 生成", callback_data: buildPaidR18VideoPostCallback("ai", paidR18VideoCustomInput.actionKey) }],
+              [{ text: "🎬 僅保存視頻", callback_data: buildPaidR18VideoPostCallback("save", paidR18VideoCustomInput.actionKey) }],
+            ],
+          },
+        });
+        return;
+      }
+      const finalContent = String(text || "").trim();
+      if (!finalContent) {
+        await bot.sendMessage(chatId, "請輸入要和這支付費視頻一起保存的文字文案。", {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "📝 改用 Grok 生成", callback_data: buildPaidR18VideoPostCallback("ai", paidR18VideoCustomInput.actionKey) }],
+              [{ text: "🎬 僅保存視頻", callback_data: buildPaidR18VideoPostCallback("save", paidR18VideoCustomInput.actionKey) }],
+            ],
+          },
+        });
+        return;
+      }
+      try {
+        const result = await saveAndSendPaidR18VideoPost({ bot, chatId, action, finalContent });
+        if (result.postId) pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: result.postId, groupContentType: "paid" });
+        pendingPaidR18VideoCustomInputs.delete(chatId);
+        pendingPaidR18VideoPostActions.delete(paidR18VideoCustomInput.actionKey);
+      } catch (error) {
+        await bot.sendMessage(chatId, `❌ 自定義付費視頻文案寫入失敗：${formatUserFacingError(error, "請稍後重試。")}`, {
+          reply_markup: { inline_keyboard: [[{ text: "📝 查看付費推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, "paid") }]] },
+        });
+      }
       return;
     }
 

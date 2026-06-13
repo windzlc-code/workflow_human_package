@@ -7,6 +7,7 @@ import { resolveVmosCredentials } from "@/runtime/node/config";
 import { publishPost, type PublishCancellationToken } from "@/lib/vmos-publisher";
 import { startTelegramBot, stopTelegramPolling, type TelegramBotInstanceOptions } from "@/telegram-bot";
 import { markArchiveEpisodesPublished } from "@/lib/persona-archives";
+import { screenshot as captureVmosScreenshot } from "@/lib/vmos-client";
 import fs from "node:fs";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 
@@ -297,6 +298,7 @@ async function main() {
       if (result && typeof result === "object" && "state" in result) {
         if (result.state === "verified") {
           if (task.archive_id && task.archive_post_id) {
+            const screenshotUrl = result.screenshotUrl || await captureVmosScreenshot(credentials, task.pad_code).catch(() => undefined);
             await markArchiveEpisodesPublished(
               task.archive_id,
               [task.archive_post_id],
@@ -306,6 +308,7 @@ async function main() {
                   platform: task.platform,
                   padCode: task.pad_code,
                   mediaUrl: task.media_url,
+                  screenshotUrl,
                 },
               },
             ).catch(() => null);
@@ -321,6 +324,9 @@ async function main() {
         }
       }
       if (task.archive_id && task.archive_post_id) {
+        const screenshotUrl = result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl
+          ? result.screenshotUrl
+          : await captureVmosScreenshot(credentials, task.pad_code).catch(() => undefined);
         await markArchiveEpisodesPublished(
           task.archive_id,
           [task.archive_post_id],
@@ -330,6 +336,7 @@ async function main() {
               platform: task.platform,
               padCode: task.pad_code,
               mediaUrl: task.media_url,
+              screenshotUrl,
             },
           },
         ).catch(() => null);
