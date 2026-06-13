@@ -51,6 +51,7 @@ STATIC_DIR = WEBAPP_DIR / "static"
 DATA_DIR = Path(os.getenv("WEBAPP_DATA_DIR", str(ROOT_DIR / "webapp_data"))).resolve()
 UPLOAD_ROOT = DATA_DIR / "uploads"
 OUTPUT_ROOT = DATA_DIR / "outputs"
+TOOL_R18_UPLOAD_ROOT = Path(os.getenv("TOOL_R18_UPLOAD_HOST_DIR", str(DATA_DIR / "tool_r18_uploads"))).resolve()
 RUNTIME_CONFIG_PATH = Path(os.getenv("APP_RUNTIME_CONFIG_PATH", str(DATA_DIR / "runtime_config.json"))).resolve()
 TG_WORKBENCH_DB_PATH = Path(os.getenv("TG_WORKBENCH_DB_PATH", str(ROOT_DIR / "data" / "workbench.db"))).resolve()
 CLOSED_IMAGE_WORKFLOW_STAGE_PREFIX = "closed_image_model:"
@@ -463,6 +464,7 @@ def _ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    TOOL_R18_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -14853,6 +14855,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Workflow WebApp", version="1.0.0")
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+    app.mount("/tool_r18_uploads", StaticFiles(directory=str(TOOL_R18_UPLOAD_ROOT)), name="tool_r18_uploads")
 
     @app.get("/", include_in_schema=False)
     def root(request: Request) -> RedirectResponse:

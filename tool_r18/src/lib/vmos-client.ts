@@ -557,7 +557,7 @@ export async function uploadFileByUrl(
     return ipc.uploadFileByUrl({ padCode, fileUrl, targetPath });
   }
 
-  const data = await vmosRequest<{ taskId: string }>(
+  const data = await vmosRequest<{ taskId?: string | number } | Array<{ taskId?: string | number }>>(
     config,
     "/vcpcloud/api/padApi/uploadFileV3",
     {
@@ -566,7 +566,11 @@ export async function uploadFileByUrl(
       customizeFilePath: targetPath,
     }
   );
-  return data.taskId;
+  const taskId = Array.isArray(data) ? data[0]?.taskId : data.taskId;
+  if (taskId === undefined || taskId === null || taskId === "") {
+    throw new Error("VMOSCloud uploadFileV3 未返回 taskId，无法确认文件上传任务");
+  }
+  return String(taskId);
 }
 
 export interface TaskResult {

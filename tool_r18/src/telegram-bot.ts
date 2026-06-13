@@ -3556,10 +3556,6 @@ async function sendToolR18ImageEditPromptModeStep(bot: TelegramBot, chatId: numb
   params.prompt_mode_selected = false;
   const nextState: PendingToolR18TaskState = { ...state, stage: "image_edit_prompt_mode", taskType: meta.taskType, taskLabel: meta.label, params };
   pendingToolR18Tasks.set(chatId, nextState);
-  if (hasPaidR18ImageFlowContext(params) && !paidR18PostCountFromParams(params)) {
-    await promptPaidR18PostCountBeforePromptMode(bot, chatId, nextState, "image_edit", messageId);
-    return;
-  }
   await safeEditOrSend(bot, chatId, messageId, [
     toolR18ImageEditStatusText(meta.label, (meta.totalSteps - 1) + "/" + meta.totalSteps + " 選擇提示詞方式", params),
     buildPaidR18PromptProgressText(params),
@@ -3647,10 +3643,6 @@ async function sendToolR18FaceSwapPromptModeStep(bot: TelegramBot, chatId: numbe
   const params = toolR18FaceSwapParams(state);
   const nextState: PendingToolR18TaskState = { ...state, stage: "face_swap_prompt_mode", taskType: "face_swap", taskLabel: "人物換臉", params };
   pendingToolR18Tasks.set(chatId, nextState);
-  if (hasPaidR18ImageFlowContext(params) && !paidR18PostCountFromParams(params)) {
-    await promptPaidR18PostCountBeforePromptMode(bot, chatId, nextState, "face_swap", messageId);
-    return;
-  }
   await safeEditOrSend(bot, chatId, messageId, [
     toolR18FaceSwapStatusText("3/4 選擇換臉要求", params),
     buildPaidR18PromptProgressText(params),
@@ -4514,7 +4506,7 @@ function toolR18RequiresPromptPreview(taskType?: ToolR18TaskType) {
 
 function isPaidR18ImageFirstTask(state: PendingToolR18TaskState, params?: Record<string, any>) {
   return hasPaidR18ImageFlowContext(params || state.params)
-    && ["text_to_image", "single_image_edit", "get_nano_banana", "face_swap"].includes(String(state.taskType || ""));
+    && String(state.taskType || "") === "text_to_image";
 }
 
 async function promptPaidR18ImageFirstPostCount(bot: TelegramBot, chatId: number, state: PendingToolR18TaskState, finalPrompt: string, params: Record<string, any>, messageId?: number) {
@@ -8438,6 +8430,37 @@ function startTelegramTyping(bot: TelegramBot, chatId: number) {
 const TELEGRAM_STATUS_UPDATE_MIN_INTERVAL_MS = 1400;
 const telegramStatusEditState = new Map<string, { lastAt: number; inFlight: boolean; lastText?: string }>();
 
+function normalizePublishStatusBucket(line: string): string | null {
+  const raw = String(line || "").trim();
+  if (!raw || !/%/.test(raw)) return null;
+  const normalized = raw
+    .replace(/[\uFF08(]\s*\d+\s*\/\s*\d+\s*[\uFF0C,]\s*\d+\s*%\s*[\uFF09)]/g, "(#/#,#%)")
+    .replace(/\d+\s*\/\s*\d+/g, "#/#")
+    .replace(/\d+\s*%/g, "#%");
+  return normalized === raw ? null : normalized;
+}
+
+function pushPublishStatusLog(logs: string[], line: string) {
+  const key = normalizePublishStatusBucket(line);
+  if (!key) {
+    logs.push(line);
+    return;
+  }
+  for (let i = logs.length - 1; i >= 0; i -= 1) {
+    if (normalizePublishStatusBucket(logs[i]) === key) {
+      logs[i] = line;
+      return;
+    }
+  }
+  logs.push(line);
+}
+
+function compactPublishStatusLogs(logs: string[]): string[] {
+  const compacted: string[] = [];
+  for (const line of logs) pushPublishStatusLog(compacted, line);
+  return compacted;
+}
+
 async function sendTelegramPublishStatusMessage(
   bot: TelegramBot,
   chatId: number,
@@ -8456,10 +8479,11 @@ async function updateTelegramPublishStatus(
   logs: string[],
   currentStep?: string,
 ) {
+  const displayLogs = compactPublishStatusLogs(logs);
   const lines = [
     `⏳ 正在发布到 ${platform}...`,
     currentStep ? `当前狀態：${currentStep}` : "",
-    ...logs.slice(-6),
+    ...displayLogs.slice(-6),
   ].filter(Boolean);
   const text = `[#${TELEGRAM_INSTANCE_TAG}] ` + lines.join("\n");
   const key = `${chatId}:${messageId}`;
@@ -9159,8 +9183,11 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       await bot.sendMessage(chatId, `${publishFinalTitle(result, "已完成自定义发布")}\n人設：${archive?.name || state.archiveName || "未命名人設"}\n平台：${state.platform || effectiveDefaultPublishPlatform}\n云机：${padName}\n\n${logs.slice(-5).join("\n")}`, {
         reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
       });
-      if (result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl) {
-        await bot.sendPhoto(chatId, resolveTelegramPhotoInput(result.screenshotUrl), {
+      const publishScreenshotUrl = result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl
+        ? result.screenshotUrl
+        : await screenshot(credentials, padCode).catch(() => undefined);
+      if (publishScreenshotUrl) {
+        await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
           caption: `📸 发布验证截图（${state.platform || effectiveDefaultPublishPlatform}）`,
         })
           .then(() => console.log(`[telegram][publish_evidence_screenshot_sent] chat=${chatId} platform=${state.platform || effectiveDefaultPublishPlatform} source=custom_publish`))
@@ -9583,7 +9610,7 @@ function summarizeManualPublishSelection(posts: Array<{ content: string; imageUr
   const hint = mediaKinds.size > 1
     ? "⚠️ 本次發佈包含純文字 / 圖文 / 視頻混合內容，雲機發佈過程中頁面形態可能变化，請留意每篇的發佈控制項。"
     : mediaKinds.has("視頻")
-      ? "ℹ️ 本次發佈為視頻内容，請留意上傳与轉碼耗時会更長。"
+      ? "ℹ️ 本次發佈為視頻内容，請留意原片上傳耗時会更長。"
       : mediaKinds.has("圖文")
         ? "ℹ️ 本次發佈為圖文内容。"
         : "ℹ️ 本次發佈為純文字内容。";
@@ -13570,6 +13597,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
           publishedIds.push(post.id);
           const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
           publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
+          if (publishScreenshotUrl) {
+            await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
+              caption: `📸 发布验证截图（${platform}，第 ${index + 1}/${posts.length} 篇）`,
+            }).catch(() => undefined);
+          }
         }
         stopTyping();
         await markArchiveEpisodesPublished(

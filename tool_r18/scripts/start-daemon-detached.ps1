@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent $ProjectRoot
 $RuntimeDir = Join-Path $ProjectRoot ".runtime\automatic-script"
 $LogDir = Join-Path $RuntimeDir "logs"
 $LockFile = Join-Path $RuntimeDir "telegram_bot.lock"
@@ -13,6 +14,74 @@ $LogFile = Join-Path $LogDir "daemon.log"
 $ErrorLogFile = Join-Path $LogDir "daemon.error.log"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+$EnvFile = Join-Path $ProjectRoot ".runtime\local-bot.env"
+if (Test-Path -LiteralPath $EnvFile) {
+  foreach ($line in Get-Content -LiteralPath $EnvFile -Encoding UTF8) {
+    $trimmed = $line.Trim()
+    if (-not $trimmed -or $trimmed.StartsWith("#")) { continue }
+    $eq = $trimmed.IndexOf("=")
+    if ($eq -le 0) { continue }
+    $key = $trimmed.Substring(0, $eq).Trim()
+    $value = $trimmed.Substring($eq + 1).Trim()
+    if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+      $value = $value.Substring(1, $value.Length - 2)
+    }
+    if (-not [Environment]::GetEnvironmentVariable($key, "Process")) {
+      [Environment]::SetEnvironmentVariable($key, $value, "Process")
+    }
+  }
+}
+
+$UploadHostDir = Join-Path $RepoRoot "webapp_data\tool_r18_uploads"
+$UploadContainerDir = $UploadHostDir.Replace("\", "/")
+New-Item -ItemType Directory -Force -Path $UploadHostDir | Out-Null
+
+if (-not $env:TOOL_R18_PROJECT_ROOT) { $env:TOOL_R18_PROJECT_ROOT = $ProjectRoot }
+if (-not $env:AUTO_TWEET_PROJECT_ROOT) { $env:AUTO_TWEET_PROJECT_ROOT = $ProjectRoot }
+if (-not $env:TOOL_R18_RUNTIME_DIR) { $env:TOOL_R18_RUNTIME_DIR = $RuntimeDir }
+if (-not $env:AUTO_TWEET_RUNTIME_DIR) { $env:AUTO_TWEET_RUNTIME_DIR = $RuntimeDir }
+if (-not $env:TOOL_R18_UPLOAD_HOST_DIR) { $env:TOOL_R18_UPLOAD_HOST_DIR = $UploadHostDir }
+if (-not $env:TOOL_R18_UPLOAD_CONTAINER_DIR) { $env:TOOL_R18_UPLOAD_CONTAINER_DIR = $UploadContainerDir }
+if (-not $env:VMOS_MEDIA_STAGING_DIR) { $env:VMOS_MEDIA_STAGING_DIR = $UploadHostDir }
+if (-not $env:VMOS_MEDIA_STAGING_PUBLIC_BASE_URL -and $env:TOOL_R18_PUBLIC_URL) {
+  $env:VMOS_MEDIA_STAGING_PUBLIC_BASE_URL = $env:TOOL_R18_PUBLIC_URL
+}
+
+function Start-PublicUploadTunnel {
+  if ([string]::IsNullOrWhiteSpace($env:REVERSE_TUNNEL_SSH_PASSWORD)) { return }
+
+  $tunnelScript = Join-Path $RepoRoot "scripts\local_reverse_http_tunnel.py"
+  if (-not (Test-Path -LiteralPath $tunnelScript)) { return }
+
+  if (-not $env:REVERSE_TUNNEL_SSH_HOST) { $env:REVERSE_TUNNEL_SSH_HOST = "47.250.188.76" }
+  if (-not $env:REVERSE_TUNNEL_SSH_USER) { $env:REVERSE_TUNNEL_SSH_USER = "root" }
+  if (-not $env:REVERSE_TUNNEL_REMOTE_HOST) { $env:REVERSE_TUNNEL_REMOTE_HOST = "0.0.0.0" }
+  if (-not $env:REVERSE_TUNNEL_REMOTE_PORT) { $env:REVERSE_TUNNEL_REMOTE_PORT = "19198" }
+  if (-not $env:REVERSE_TUNNEL_LOCAL_HOST) { $env:REVERSE_TUNNEL_LOCAL_HOST = "127.0.0.1" }
+  if (-not $env:REVERSE_TUNNEL_LOCAL_PORT) { $env:REVERSE_TUNNEL_LOCAL_PORT = "8098" }
+
+  $existing = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "python*.exe" -and $_.CommandLine -like "*local_reverse_http_tunnel.py*" } |
+    Select-Object -First 1
+  if ($existing) { return }
+
+  $pythonExe = Join-Path $RepoRoot ".venv-codex-run\Scripts\python.exe"
+  if (-not (Test-Path -LiteralPath $pythonExe)) { $pythonExe = "python" }
+
+  $tunnelLogDir = Join-Path $RepoRoot ".runtime\public-upload-tunnel"
+  New-Item -ItemType Directory -Force -Path $tunnelLogDir | Out-Null
+  $tunnelOut = Join-Path $tunnelLogDir "reverse-19198.out.log"
+  $tunnelErr = Join-Path $tunnelLogDir "reverse-19198.err.log"
+  Start-Process -FilePath $pythonExe `
+    -ArgumentList @("scripts\local_reverse_http_tunnel.py") `
+    -WorkingDirectory $RepoRoot `
+    -WindowStyle Hidden `
+    -RedirectStandardOutput $tunnelOut `
+    -RedirectStandardError $tunnelErr | Out-Null
+}
+
+Start-PublicUploadTunnel
 
 function Stop-ExistingDaemon {
   $pids = @()

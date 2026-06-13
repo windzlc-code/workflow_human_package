@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Instagram / Threads 自動發文流程
  * 透過 VMOSCloud asyncCmd (ADB) 控制雲機 UI 完成發文
  *
@@ -15,7 +15,6 @@
  */
 
 import { callGemini, extractText, getGeminiEndpoint, getInlineData } from "./gemini-client";
-import { compressImage } from "./image-compress";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "./media-utils";
 import { publishTelegramGroupPost } from "./telegram-group-publisher";
 import { registerThreadsPublishSample } from "./threads-sample-registry";
@@ -34,8 +33,6 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import sharp from "sharp";
 
 export type Platform = "instagram" | "threads" | "twitter" | "rednote" | "telegram";
@@ -250,7 +247,6 @@ const THREADS_IMAGE_PROFILE_RETRY_DELAYS_MS = [5000, 12000];
 const THREADS_VIDEO_PROFILE_RETRY_DELAYS_MS = [8000, 15000, 30000];
 const THREADS_PROFILE_VERIFY_TIMEOUT_MS = 30000;
 const THREADS_TEXT_TOAST_SETTLE_DELAY_MS = 1200;
-const execFileAsync = promisify(execFile);
 
 export function getThreadsLauncherIconFallbackPoints(width = BASE_SCREEN.width, height = BASE_SCREEN.height) {
   const scale = width / BASE_SCREEN.width;
@@ -557,20 +553,7 @@ function inferMediaExtension(mediaUrl: string): string {
   return getMediaExtension(mediaUrl);
 }
 
-const REMOTE_IMAGE_COMPRESS_THRESHOLD_BYTES = 256 * 1024;
-const STAGED_IMAGE_TARGET_BYTES = 96 * 1024;
-const STAGED_VIDEO_TRANSCODE_THRESHOLD_BYTES = positiveEnvInt("VMOS_VIDEO_TRANSCODE_THRESHOLD_BYTES", 5 * 1024 * 1024);
-const STAGED_VIDEO_TRANSCODE_TARGET_BITRATE = process.env.VMOS_VIDEO_TRANSCODE_BITRATE || "320k";
-const STAGED_VIDEO_TRANSCODE_AUDIO_BITRATE = process.env.VMOS_VIDEO_TRANSCODE_AUDIO_BITRATE || "48k";
-function positiveEnvInt(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
-
-const FAST_IMAGE_BASE64_CHUNK_SIZE = positiveEnvInt("VMOS_IMAGE_BASE64_CHUNK_SIZE", 10000);
-const FAST_IMAGE_BASE64_CHUNKS_PER_COMMAND = positiveEnvInt("VMOS_IMAGE_BASE64_CHUNKS_PER_COMMAND", 1);
-const FAST_VIDEO_BASE64_CHUNK_SIZE = positiveEnvInt("VMOS_VIDEO_BASE64_CHUNK_SIZE", 4000);
-const FAST_VIDEO_BASE64_CHUNKS_PER_COMMAND = positiveEnvInt("VMOS_VIDEO_BASE64_CHUNKS_PER_COMMAND", 1);
+const VMOS_MEDIA_STAGING_ROUTE = (process.env.VMOS_MEDIA_STAGING_ROUTE || "/tool_r18_uploads").replace(/\/+$/, "") || "/tool_r18_uploads";
 const DEVICE_MEDIA_STAGING_CACHE_FILE = path.join(
   process.cwd(),
   ".runtime",
@@ -628,11 +611,126 @@ function inferLocalMediaMimeType(filePath: string): string {
   return isVideoMediaUrl(filePath) ? "video/mp4" : "image/jpeg";
 }
 
-function materializeLocalMediaFileForStaging(mediaUrl: string): string | null {
-  const filePath = resolveLocalMediaFilePath(mediaUrl);
-  if (!filePath) return null;
-  const buffer = fs.readFileSync(filePath);
-  return `data:${inferLocalMediaMimeType(filePath)};base64,${buffer.toString("base64")}`;
+function getVmosMediaStagingDir(): string {
+  const configured = process.env.VMOS_MEDIA_STAGING_DIR || process.env.TOOL_R18_UPLOAD_HOST_DIR;
+  if (configured) return path.resolve(configured);
+  const projectRoot = path.basename(process.cwd()).toLowerCase() === "tool_r18"
+    ? process.cwd()
+    : fs.existsSync(path.join(process.cwd(), "tool_r18", "package.json"))
+      ? path.join(process.cwd(), "tool_r18")
+      : process.cwd();
+  return path.resolve(path.dirname(projectRoot), "webapp_data", "tool_r18_uploads");
+}
+
+function getVmosMediaStagingPublicBaseUrl(): string {
+  const base = (process.env.VMOS_MEDIA_STAGING_PUBLIC_BASE_URL || process.env.TOOL_R18_PUBLIC_URL || process.env.PUBLIC_BASE_URL || "").trim();
+  return base.replace(/\/+$/, "");
+}
+
+function isUsableVmosMediaStagingBaseUrl(baseUrl: string): boolean {
+  if (!baseUrl) return false;
+  try {
+    const parsed = new URL(baseUrl);
+    if (!/^https?:$/i.test(parsed.protocol)) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (process.env.VMOS_MEDIA_STAGING_ALLOW_LOCALHOST === "1") return true;
+    return !["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(host);
+  } catch {
+    return false;
+  }
+}
+
+function buildVmosStagingPublicUrl(fileName: string): string | null {
+  const baseUrl = getVmosMediaStagingPublicBaseUrl();
+  if (!isUsableVmosMediaStagingBaseUrl(baseUrl)) return null;
+  return `${baseUrl}${VMOS_MEDIA_STAGING_ROUTE}/${encodeURIComponent(fileName)}`;
+}
+
+async function checkPublicMediaReachability(publicUrl: string): Promise<{ ok: boolean; detail: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const head = await fetch(publicUrl, { method: "HEAD", signal: controller.signal });
+    if (head.ok) return { ok: true, detail: `HEAD ${head.status}` };
+    const response = await fetch(publicUrl, { method: "GET", signal: controller.signal });
+    await response.body?.cancel();
+    if (response.ok) return { ok: true, detail: `GET ${response.status}` };
+    return { ok: false, detail: `HEAD ${head.status}; GET ${response.status}` };
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isPublicHttpMediaUrl(mediaUrl: string): boolean {
+  if (!/^https?:\/\//i.test(mediaUrl)) return false;
+  return isUsableVmosMediaStagingBaseUrl(mediaUrl);
+}
+
+async function requirePublicMediaUrlForVmosUpload(
+  mediaUrl: string,
+  mediaLabel: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<string> {
+  if (isPublicHttpMediaUrl(mediaUrl)) {
+    const reachable = await checkPublicMediaReachability(mediaUrl);
+    if (!reachable.ok) {
+      throw new Error(`${mediaLabel}公网 URL 不可达，已停止发布，未回退慢速通道：${reachable.detail}`);
+    }
+    onProgress?.({
+      step: `已确认${mediaLabel}公网 URL 可访问，使用云机直传...`,
+      done: false,
+    });
+    return mediaUrl;
+  }
+
+  const publicBaseUrl = getVmosMediaStagingPublicBaseUrl();
+  if (!isUsableVmosMediaStagingBaseUrl(publicBaseUrl)) {
+    throw new Error(`${mediaLabel}公网上传未配置可用 PUBLIC URL，已停止发布，未回退慢速通道`);
+  }
+
+  const stagingDir = getVmosMediaStagingDir();
+  fs.mkdirSync(stagingDir, { recursive: true });
+
+  let fileName: string;
+  let targetPath: string;
+  if (mediaUrl.startsWith("data:")) {
+    const parsed = parseDataUrlMedia(mediaUrl);
+    if (!parsed) throw new Error(`${mediaLabel} data URL 解析失败，无法生成公网直传 URL`);
+    const ext = inferMediaExtension(mediaUrl);
+    fileName = `${hashString(parsed.base64, 24)}.${ext}`;
+    targetPath = path.join(stagingDir, fileName);
+    if (!fs.existsSync(targetPath)) {
+      fs.writeFileSync(targetPath, Buffer.from(parsed.base64, "base64"));
+    }
+  } else {
+    const localPath = resolveLocalMediaFilePath(mediaUrl);
+    if (!localPath) {
+      throw new Error(`${mediaLabel}不是公网 URL，也不是可读取的本地文件，已停止发布，未回退慢速通道`);
+    }
+    const stat = fs.statSync(localPath);
+    const ext = path.extname(localPath) || `.${inferMediaExtension(localPath)}`;
+    fileName = `${hashString(`${localPath}:${stat.size}:${stat.mtimeMs}`, 24)}${ext}`;
+    targetPath = path.join(stagingDir, fileName);
+    if (!fs.existsSync(targetPath)) {
+      fs.copyFileSync(localPath, targetPath);
+    }
+  }
+
+  const publicUrl = buildVmosStagingPublicUrl(fileName);
+  if (!publicUrl) {
+    throw new Error(`${mediaLabel}公网上传 URL 生成失败，已停止发布，未回退慢速通道`);
+  }
+  const reachable = await checkPublicMediaReachability(publicUrl);
+  if (!reachable.ok) {
+    throw new Error(`${mediaLabel}公网 staging 文件不可达，已停止发布，未回退慢速通道：${publicUrl}；${reachable.detail}`);
+  }
+  onProgress?.({
+    step: "已準備可直傳媒體 URL，改用雲機直傳以加快上傳...",
+    done: false,
+  });
+  return publicUrl;
 }
 
 function readDeviceMediaStagingCache(): Record<string, DeviceMediaStagingCacheEntry> {
@@ -730,127 +828,6 @@ function rememberStagedMediaPath(
     updatedAt: new Date().toISOString(),
   };
   writeDeviceMediaStagingCache(cache);
-}
-
-async function getRemoteImageContentLength(url: string): Promise<number | undefined> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  try {
-    const resp = await fetch(url, { method: "HEAD", signal: controller.signal });
-    if (!resp.ok) return undefined;
-    const contentType = resp.headers.get("content-type") || "";
-    if (contentType && !/^image\//i.test(contentType)) return undefined;
-    const raw = resp.headers.get("content-length");
-    const size = raw ? Number(raw) : NaN;
-    return Number.isFinite(size) && size > 0 ? size : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function maybeCompressRemoteImageForStaging(
-  mediaUrl: string,
-  onProgress?: (p: PublishProgress) => void,
-): Promise<string> {
-  if (!/^https?:\/\//i.test(mediaUrl) || isVideoMediaUrl(mediaUrl)) return mediaUrl;
-  const contentLength = await getRemoteImageContentLength(mediaUrl);
-  if (!contentLength || contentLength <= REMOTE_IMAGE_COMPRESS_THRESHOLD_BYTES) return mediaUrl;
-
-  try {
-    onProgress?.({ step: "遠端圖片較大，正在壓縮後再寫入雲機...", done: false });
-    const inline = await getInlineData(mediaUrl);
-    if (!inline?.mimeType || !/^image\//i.test(inline.mimeType)) return mediaUrl;
-    const sourceBytes = Buffer.byteLength(inline.data, "base64");
-    if (sourceBytes <= REMOTE_IMAGE_COMPRESS_THRESHOLD_BYTES) return mediaUrl;
-    const compressed = await compressImage(`data:${inline.mimeType};base64,${inline.data}`, {
-      targetBytes: STAGED_IMAGE_TARGET_BYTES,
-      maxDim: 960,
-      minQuality: 0.24,
-    });
-    const compressedParsed = parseDataUrlMedia(compressed);
-    const compressedBytes = compressedParsed ? Buffer.byteLength(compressedParsed.base64, "base64") : Infinity;
-    return compressedParsed && compressedBytes < sourceBytes ? compressed : mediaUrl;
-  } catch {
-    return mediaUrl;
-  }
-}
-
-async function maybeTranscodeVideoDataUrlForStaging(
-  mediaUrl: string,
-  onProgress?: (p: PublishProgress) => void,
-): Promise<string> {
-  if (!mediaUrl.startsWith("data:video/")) return mediaUrl;
-  const parsed = parseDataUrlMedia(mediaUrl);
-  if (!parsed) return mediaUrl;
-  const sourceBytes = Buffer.byteLength(parsed.base64, "base64");
-  if (sourceBytes <= STAGED_VIDEO_TRANSCODE_THRESHOLD_BYTES) return mediaUrl;
-
-  const mediaHash = hashString(mediaUrl, 24);
-  const workDir = path.join(process.cwd(), ".runtime", "automatic-script", "video-staging");
-  const inputPath = path.join(workDir, `${mediaHash}.${inferMediaExtension(mediaUrl) || "mp4"}`);
-  const outputVariant = `${STAGED_VIDEO_TRANSCODE_TARGET_BITRATE}-${STAGED_VIDEO_TRANSCODE_AUDIO_BITRATE}`.replace(/[^A-Za-z0-9_-]+/g, "_");
-  const outputPath = path.join(workDir, `${mediaHash}.${outputVariant}.mp4`);
-
-  try {
-    fs.mkdirSync(workDir, { recursive: true });
-    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size <= 0) {
-      onProgress?.({
-        step: `影片較大（${Math.round(sourceBytes / 1024 / 1024)}MB），正在轉成較快上傳版本...`,
-        done: false,
-      });
-      if (!fs.existsSync(inputPath)) {
-        fs.writeFileSync(inputPath, Buffer.from(parsed.base64, "base64"));
-      }
-      await execFileAsync("ffmpeg", [
-        "-y",
-        "-i",
-        inputPath,
-        "-vf",
-        "scale='min(540,iw)':-2",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-b:v",
-        STAGED_VIDEO_TRANSCODE_TARGET_BITRATE,
-        "-maxrate",
-        "520k",
-        "-bufsize",
-        "1040k",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        STAGED_VIDEO_TRANSCODE_AUDIO_BITRATE,
-        "-movflags",
-        "+faststart",
-        outputPath,
-      ], {
-        timeout: 180_000,
-        windowsHide: true,
-        maxBuffer: 2 * 1024 * 1024,
-      });
-    }
-
-    const output = fs.readFileSync(outputPath);
-    if (output.length > 0 && output.length < sourceBytes) {
-      onProgress?.({
-        step: `影片已壓縮至 ${Math.max(1, Math.round(output.length / 1024 / 1024))}MB，準備寫入雲機...`,
-        done: false,
-      });
-      return `data:video/mp4;base64,${output.toString("base64")}`;
-    }
-  } catch (error) {
-    onProgress?.({
-      step: `影片轉碼加速不可用，改用原始影片寫入：${error instanceof Error ? error.message.slice(0, 80) : String(error).slice(0, 80)}`,
-      done: false,
-    });
-  }
-
-  return mediaUrl;
 }
 
 function platformKeepsInlineMedia(platform: Platform): boolean {
@@ -8799,9 +8776,9 @@ async function stageMediaOnDevice(
 ): Promise<string> {
   const mediaLabel = getDeviceMediaLabel(mediaUrl);
   const isVideoMedia = isVideoMediaUrl(mediaUrl);
-  const localMediaDataUrl = materializeLocalMediaFileForStaging(mediaUrl);
-  if (options.reuse !== false && !localMediaDataUrl) {
-    const reusableRemotePath = await getReusableStagedMediaPath(config, padCode, mediaUrl, remotePath);
+  const publicMediaUrl = await requirePublicMediaUrlForVmosUpload(mediaUrl, mediaLabel, onProgress);
+  if (options.reuse !== false) {
+    const reusableRemotePath = await getReusableStagedMediaPath(config, padCode, publicMediaUrl, remotePath);
     if (reusableRemotePath) {
       onProgress?.({
         step: `复用已写入云机的${mediaLabel}，跳过重复上传...`,
@@ -8811,170 +8788,40 @@ async function stageMediaOnDevice(
     }
   }
 
-  const sourceMediaUrl = localMediaDataUrl || mediaUrl;
-  const stagingMediaUrl = isVideoMedia
-    ? await maybeTranscodeVideoDataUrlForStaging(sourceMediaUrl, onProgress)
-    : await maybeCompressRemoteImageForStaging(sourceMediaUrl, onProgress);
-  if (!stagingMediaUrl.startsWith("data:")) {
-    const beforeVideoMediaId = isVideoMedia ? await queryLatestVideoMediaId(config, padCode) : undefined;
-    const beforeDownloadPaths = await listRecentDownloadMediaPaths(config, padCode, isVideoMedia);
-    onProgress?.({
-      step: `直傳${mediaLabel}到雲機...`,
-      done: false,
-    });
-    const taskId = await uploadFileByUrl(config, padCode, stagingMediaUrl, remotePath);
-    const numericTaskId = Number(taskId);
-    if (Number.isFinite(numericTaskId)) {
-      await waitTask(config, numericTaskId, 90000, 1500);
-    } else {
-      await delay(5000);
-    }
-    const actualRemotePath = await resolveUploadedDeviceMediaPath(
-      config,
-      padCode,
-      remotePath,
-      isVideoMedia,
-      beforeDownloadPaths,
-    );
-    await execAdbAndWait(
-      config,
-      padCode,
-      `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://${actualRemotePath}`
-    );
-    const indexed = await waitForMediaIndexed(
-      config,
-      padCode,
-      actualRemotePath,
-      isVideoMedia,
-      isVideoMedia ? 45000 : 20000,
-      beforeVideoMediaId,
-    );
-    if (isVideoMedia && !indexed) {
-      throw new Error("影片已寫入雲機，但尚未被系統圖庫索引，請稍後重試");
-    }
-    await delay(600);
-    rememberStagedMediaPath(padCode, mediaUrl, actualRemotePath);
-    return actualRemotePath;
-  }
-
-  const parsed = isVideoMedia
-    ? parseDataUrlMedia(stagingMediaUrl)
-    : parseDataUrlMedia(await compressImage(stagingMediaUrl, {
-      targetBytes: STAGED_IMAGE_TARGET_BYTES,
-      maxDim: 960,
-      minQuality: 0.24,
-    }));
-  if (!parsed) {
-    throw new Error(`${mediaLabel} data URL 解析失敗`);
-  }
-
-  const remoteBase64Path = `${remotePath}.b64`;
-
-  await execAdbAndWait(
-    config,
-    padCode,
-    `rm -f ${remotePath} ${remoteBase64Path}; : > ${remoteBase64Path}`
-  );
-
-  const writeBase64Chunks = async (
-    chunkSize: number,
-    chunksPerCommand: number,
-    pollIntervalMs: number,
-    progressEveryPercent = 10,
-  ) => {
-    const totalChunks = Math.ceil(parsed.base64.length / chunkSize);
-    const totalWrites = Math.ceil(totalChunks / chunksPerCommand);
-    let lastReportedPercent = -1;
-    await execAdbAndWait(
-      config,
-      padCode,
-      `rm -f ${remoteBase64Path}; : > ${remoteBase64Path}`,
-    );
-
-    for (let writeIndex = 0; writeIndex < totalWrites; writeIndex += 1) {
-      const percent = Math.floor(((writeIndex + 1) / totalWrites) * 100);
-      const shouldReport = writeIndex === 0
-        || writeIndex === totalWrites - 1
-        || percent - lastReportedPercent >= progressEveryPercent;
-      if (shouldReport) {
-        lastReportedPercent = percent;
-        onProgress?.({
-          step: `寫入${mediaLabel}到雲機（${writeIndex + 1}/${totalWrites}，${percent}%）...`,
-          done: false,
-        });
-      }
-      const startChunk = writeIndex * chunksPerCommand;
-      const chunk = Array.from({ length: chunksPerCommand }, (_, offset) => {
-        const chunkIndex = startChunk + offset;
-        if (chunkIndex >= totalChunks) return "";
-        return parsed.base64.slice(chunkIndex * chunkSize, (chunkIndex + 1) * chunkSize);
-      }).join("");
-      let lastWriteError: unknown;
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        try {
-          await execAdbAndWait(
-            config,
-            padCode,
-            `printf %s '${chunk}' >> ${remoteBase64Path}`,
-            isVideoMedia ? 45000 : 25000,
-            pollIntervalMs,
-          );
-          lastWriteError = undefined;
-          break;
-        } catch (error) {
-          lastWriteError = error;
-          if (attempt < 3) {
-            await delay(isVideoMedia ? 900 : 500);
-          }
-        }
-      }
-      if (lastWriteError) throw lastWriteError;
-    }
-  };
-
-  if (isVideoMedia) {
-    try {
-      await writeBase64Chunks(FAST_VIDEO_BASE64_CHUNK_SIZE, FAST_VIDEO_BASE64_CHUNKS_PER_COMMAND, 450);
-    } catch {
-      onProgress?.({
-        step: `${mediaLabel}快速寫入失敗，正在切換更穩定的分段方式...`,
-        done: false,
-      });
-      await writeBase64Chunks(4000, 1, 550);
-    }
-  } else {
-    try {
-      await writeBase64Chunks(FAST_IMAGE_BASE64_CHUNK_SIZE, FAST_IMAGE_BASE64_CHUNKS_PER_COMMAND, 350);
-    } catch {
-      onProgress?.({
-        step: `${mediaLabel}快速寫入失敗，正在切換更穩定的分段方式...`,
-        done: false,
-      });
-      await writeBase64Chunks(2200, 1, 550);
-    }
-  }
-
+  const beforeVideoMediaId = isVideoMedia ? await queryLatestVideoMediaId(config, padCode) : undefined;
+  const beforeDownloadPaths = await listRecentDownloadMediaPaths(config, padCode, isVideoMedia);
   onProgress?.({
-    step: `解碼${mediaLabel}並寫入圖庫...`,
+    step: `直傳${mediaLabel}到雲機...`,
     done: false,
   });
+  const taskId = await uploadFileByUrl(config, padCode, publicMediaUrl, remotePath);
+  await waitTask(config, Number(taskId), 90000, 1500);
+  const actualRemotePath = await resolveUploadedDeviceMediaPath(
+    config,
+    padCode,
+    remotePath,
+    isVideoMedia,
+    beforeDownloadPaths,
+  );
   await execAdbAndWait(
     config,
     padCode,
-    [
-      `base64 -d ${remoteBase64Path} > ${remotePath}`,
-      `rm -f ${remoteBase64Path}`,
-      `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://${remotePath}`,
-    ].join("; "),
-    90000
+    `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://${actualRemotePath}`
   );
-  const indexed = await waitForMediaIndexed(config, padCode, remotePath, isVideoMedia, isVideoMedia ? 45000 : 25000);
+  const indexed = await waitForMediaIndexed(
+    config,
+    padCode,
+    actualRemotePath,
+    isVideoMedia,
+    isVideoMedia ? 45000 : 20000,
+    beforeVideoMediaId,
+  );
   if (isVideoMedia && !indexed) {
     throw new Error("影片已寫入雲機，但尚未被系統圖庫索引，請稍後重試");
   }
-  await delay(800);
-  rememberStagedMediaPath(padCode, mediaUrl, remotePath);
-  return remotePath;
+  await delay(600);
+  rememberStagedMediaPath(padCode, publicMediaUrl, actualRemotePath);
+  return actualRemotePath;
 }
 
 type PendingDeviceMediaStaging = {
