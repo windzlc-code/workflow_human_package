@@ -601,6 +601,40 @@ function buildStableDeviceMediaRemotePath(prefix: string, mediaUrl: string): str
   return `/sdcard/Download/${prefix}_${mediaHash}.${ext}`;
 }
 
+function resolveLocalMediaFilePath(mediaUrl: string): string | null {
+  if (!mediaUrl || /^(https?:\/\/|data:)/i.test(mediaUrl)) return null;
+  const candidates = [
+    mediaUrl,
+    path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(process.cwd(), mediaUrl),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Ignore inaccessible candidates and try the next one.
+    }
+  }
+  return null;
+}
+
+function inferLocalMediaMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".mp4" || ext === ".m4v") return "video/mp4";
+  if (ext === ".webm") return "video/webm";
+  if (ext === ".mov") return "video/quicktime";
+  return isVideoMediaUrl(filePath) ? "video/mp4" : "image/jpeg";
+}
+
+function materializeLocalMediaFileForStaging(mediaUrl: string): string | null {
+  const filePath = resolveLocalMediaFilePath(mediaUrl);
+  if (!filePath) return null;
+  const buffer = fs.readFileSync(filePath);
+  return `data:${inferLocalMediaMimeType(filePath)};base64,${buffer.toString("base64")}`;
+}
+
 function readDeviceMediaStagingCache(): Record<string, DeviceMediaStagingCacheEntry> {
   try {
     if (!fs.existsSync(DEVICE_MEDIA_STAGING_CACHE_FILE)) return {};
@@ -637,6 +671,11 @@ async function getReusableStagedMediaPath(
   const entry = cache[getDeviceMediaStagingKey(padCode, mediaUrl)];
   const remotePath = entry?.remotePath || fallbackRemotePath;
   if (!remotePath) return null;
+  if (entry?.remotePath && fallbackRemotePath && entry.remotePath !== fallbackRemotePath) {
+    delete cache[entry.key];
+    writeDeviceMediaStagingCache(cache);
+    return null;
+  }
   const isVideoMedia = isVideoMediaUrl(mediaUrl);
   try {
     const exists = await execAdbForText(
@@ -8660,7 +8699,6 @@ async function resolveUploadedDeviceMediaPath(
     const afterPaths = await listRecentDownloadMediaPaths(config, padCode, isVideoMedia);
     const newPath = afterPaths.find((path) => !beforeSet.has(path));
     if (newPath) return newPath;
-    if (afterPaths[0]) return afterPaths[0];
     await delay(1200);
   }
 
@@ -8761,7 +8799,8 @@ async function stageMediaOnDevice(
 ): Promise<string> {
   const mediaLabel = getDeviceMediaLabel(mediaUrl);
   const isVideoMedia = isVideoMediaUrl(mediaUrl);
-  if (options.reuse !== false) {
+  const localMediaDataUrl = materializeLocalMediaFileForStaging(mediaUrl);
+  if (options.reuse !== false && !localMediaDataUrl) {
     const reusableRemotePath = await getReusableStagedMediaPath(config, padCode, mediaUrl, remotePath);
     if (reusableRemotePath) {
       onProgress?.({
@@ -8772,9 +8811,10 @@ async function stageMediaOnDevice(
     }
   }
 
+  const sourceMediaUrl = localMediaDataUrl || mediaUrl;
   const stagingMediaUrl = isVideoMedia
-    ? await maybeTranscodeVideoDataUrlForStaging(mediaUrl, onProgress)
-    : await maybeCompressRemoteImageForStaging(mediaUrl, onProgress);
+    ? await maybeTranscodeVideoDataUrlForStaging(sourceMediaUrl, onProgress)
+    : await maybeCompressRemoteImageForStaging(sourceMediaUrl, onProgress);
   if (!stagingMediaUrl.startsWith("data:")) {
     const beforeVideoMediaId = isVideoMedia ? await queryLatestVideoMediaId(config, padCode) : undefined;
     const beforeDownloadPaths = await listRecentDownloadMediaPaths(config, padCode, isVideoMedia);
