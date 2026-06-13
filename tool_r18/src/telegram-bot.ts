@@ -12277,8 +12277,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         groupContentType: prevManual?.groupContentType,
         stage: "preview_confirm",
       });
-      await safeEditOrSend(bot, chatId, msgId, `👀 *发布前预览*\n\n人設：${archive.name}\n平台：${platform}\n选择编号：第 ${startIndex + 1} 篇\n发布數量：1 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
-        parse_mode: "Markdown",
+      await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}\n选择编号：第 ${startIndex + 1} 篇\n发布數量：1 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
         reply_markup: {
           inline_keyboard: buildManualPreviewRows(archiveId, platform, startIndex, 1),
         },
@@ -12346,8 +12345,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         groupContentType: prevManual?.groupContentType,
         stage: "preview_confirm",
       });
-      await safeEditOrSend(bot, chatId, msgId, `👀 *发布前预览*\n\n人設：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${count} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
-        parse_mode: "Markdown",
+      await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${count} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
         reply_markup: {
           inline_keyboard: buildManualPreviewRows(archiveId, platform, startIndex, count),
         },
