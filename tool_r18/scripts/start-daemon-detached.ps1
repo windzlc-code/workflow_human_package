@@ -44,35 +44,67 @@ if (-not $env:AUTO_TWEET_RUNTIME_DIR) { $env:AUTO_TWEET_RUNTIME_DIR = $RuntimeDi
 if (-not $env:TOOL_R18_UPLOAD_HOST_DIR) { $env:TOOL_R18_UPLOAD_HOST_DIR = $UploadHostDir }
 if (-not $env:TOOL_R18_UPLOAD_CONTAINER_DIR) { $env:TOOL_R18_UPLOAD_CONTAINER_DIR = $UploadContainerDir }
 if (-not $env:VMOS_MEDIA_STAGING_DIR) { $env:VMOS_MEDIA_STAGING_DIR = $UploadHostDir }
-if (-not $env:VMOS_MEDIA_STAGING_PUBLIC_BASE_URL -and $env:TOOL_R18_PUBLIC_URL) {
-  $env:VMOS_MEDIA_STAGING_PUBLIC_BASE_URL = $env:TOOL_R18_PUBLIC_URL
-}
+if (-not $env:TOOL_R18_PUBLIC_URL) { $env:TOOL_R18_PUBLIC_URL = "http://43.167.237.120" }
+if (-not $env:VMOS_MEDIA_STAGING_PUBLIC_BASE_URL) { $env:VMOS_MEDIA_STAGING_PUBLIC_BASE_URL = "http://43.167.237.120:19198" }
 
 function Start-PublicUploadTunnel {
-  if ([string]::IsNullOrWhiteSpace($env:REVERSE_TUNNEL_SSH_PASSWORD)) { return }
-
-  $tunnelScript = Join-Path $RepoRoot "scripts\local_reverse_http_tunnel.py"
-  if (-not (Test-Path -LiteralPath $tunnelScript)) { return }
-
-  if (-not $env:REVERSE_TUNNEL_SSH_HOST) { $env:REVERSE_TUNNEL_SSH_HOST = "47.250.188.76" }
-  if (-not $env:REVERSE_TUNNEL_SSH_USER) { $env:REVERSE_TUNNEL_SSH_USER = "root" }
+  if (-not $env:REVERSE_TUNNEL_SSH_HOST) { $env:REVERSE_TUNNEL_SSH_HOST = "43.167.237.120" }
+  if (-not $env:REVERSE_TUNNEL_SSH_USER) { $env:REVERSE_TUNNEL_SSH_USER = "ubuntu" }
   if (-not $env:REVERSE_TUNNEL_REMOTE_HOST) { $env:REVERSE_TUNNEL_REMOTE_HOST = "0.0.0.0" }
   if (-not $env:REVERSE_TUNNEL_REMOTE_PORT) { $env:REVERSE_TUNNEL_REMOTE_PORT = "19198" }
   if (-not $env:REVERSE_TUNNEL_LOCAL_HOST) { $env:REVERSE_TUNNEL_LOCAL_HOST = "127.0.0.1" }
   if (-not $env:REVERSE_TUNNEL_LOCAL_PORT) { $env:REVERSE_TUNNEL_LOCAL_PORT = "8098" }
+  if (-not $env:REVERSE_TUNNEL_SSH_KEY) {
+    $defaultKey = Join-Path $env:USERPROFILE ".ssh\tx_key.pem"
+    if (Test-Path -LiteralPath $defaultKey) { $env:REVERSE_TUNNEL_SSH_KEY = $defaultKey }
+  }
+
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "python*.exe" -and $_.CommandLine -like "*local_reverse_http_tunnel.py*" } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
   $existing = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like "python*.exe" -and $_.CommandLine -like "*local_reverse_http_tunnel.py*" } |
+    Where-Object {
+      $_.Name -ieq "ssh.exe" -and $_.CommandLine -like "*$($env:REVERSE_TUNNEL_REMOTE_PORT):$($env:REVERSE_TUNNEL_LOCAL_HOST):$($env:REVERSE_TUNNEL_LOCAL_PORT)*"
+    } |
     Select-Object -First 1
   if ($existing) { return }
-
-  $pythonExe = Join-Path $RepoRoot ".venv-codex-run\Scripts\python.exe"
-  if (-not (Test-Path -LiteralPath $pythonExe)) { $pythonExe = "python" }
 
   $tunnelLogDir = Join-Path $RepoRoot ".runtime\public-upload-tunnel"
   New-Item -ItemType Directory -Force -Path $tunnelLogDir | Out-Null
   $tunnelOut = Join-Path $tunnelLogDir "reverse-19198.out.log"
   $tunnelErr = Join-Path $tunnelLogDir "reverse-19198.err.log"
+  $sshExe = (Get-Command ssh.exe -ErrorAction SilentlyContinue).Source
+  if ($sshExe) {
+    $sshArgs = @(
+      "-N",
+      "-T",
+      "-o", "ExitOnForwardFailure=yes",
+      "-o", "ServerAliveInterval=30",
+      "-o", "ServerAliveCountMax=3",
+      "-o", "StrictHostKeyChecking=accept-new"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($env:REVERSE_TUNNEL_SSH_KEY) -and (Test-Path -LiteralPath $env:REVERSE_TUNNEL_SSH_KEY)) {
+      $sshArgs += @("-i", $env:REVERSE_TUNNEL_SSH_KEY)
+    }
+    $sshArgs += @(
+      "-R", "$($env:REVERSE_TUNNEL_REMOTE_HOST):$($env:REVERSE_TUNNEL_REMOTE_PORT):$($env:REVERSE_TUNNEL_LOCAL_HOST):$($env:REVERSE_TUNNEL_LOCAL_PORT)",
+      "$($env:REVERSE_TUNNEL_SSH_USER)@$($env:REVERSE_TUNNEL_SSH_HOST)"
+    )
+    Start-Process -FilePath $sshExe `
+      -ArgumentList $sshArgs `
+      -WorkingDirectory $RepoRoot `
+      -WindowStyle Hidden `
+      -RedirectStandardOutput $tunnelOut `
+      -RedirectStandardError $tunnelErr | Out-Null
+    return
+  }
+
+  if ([string]::IsNullOrWhiteSpace($env:REVERSE_TUNNEL_SSH_PASSWORD)) { return }
+  $tunnelScript = Join-Path $RepoRoot "scripts\local_reverse_http_tunnel.py"
+  if (-not (Test-Path -LiteralPath $tunnelScript)) { return }
+  $pythonExe = Join-Path $RepoRoot ".venv-codex-run\Scripts\python.exe"
+  if (-not (Test-Path -LiteralPath $pythonExe)) { $pythonExe = "python" }
   Start-Process -FilePath $pythonExe `
     -ArgumentList @("scripts\local_reverse_http_tunnel.py") `
     -WorkingDirectory $RepoRoot `
@@ -133,11 +165,21 @@ if ($Restart) {
 }
 
 $nodeArgs = @("--import", "tsx", "src/daemon.ts")
-if ([string]::IsNullOrWhiteSpace($env:TELEGRAM_PROXY_URL)) {
-  $localTelegramProxy = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 9974 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($localTelegramProxy) {
-    $env:TELEGRAM_PROXY_URL = "http://127.0.0.1:9974"
+function Test-LocalProxyUrl {
+  param([string]$Url)
+  if ([string]::IsNullOrWhiteSpace($Url) -or $Url -eq "direct") { return $true }
+  if ($Url -match '^https?://127\.0\.0\.1:(\d+)') {
+    $port = [int]$Matches[1]
+    return [bool](Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
   }
+  return $true
+}
+if (-not (Test-LocalProxyUrl $env:TELEGRAM_PROXY_URL)) {
+  $env:TELEGRAM_PROXY_URL = ""
+}
+if ([string]::IsNullOrWhiteSpace($env:TELEGRAM_PROXY_URL)) {
+  $systemProxy = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 7890 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  $env:TELEGRAM_PROXY_URL = if ($systemProxy) { "http://127.0.0.1:7890" } else { "direct" }
 }
 $proc = Start-Process -FilePath "node" -ArgumentList $nodeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $LogFile -RedirectStandardError $ErrorLogFile -PassThru
 Write-Output "started daemon pid=$($proc.Id) log=$LogFile errorLog=$ErrorLogFile"

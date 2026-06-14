@@ -33,6 +33,7 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import sharp from "sharp";
 
 export type Platform = "instagram" | "threads" | "twitter" | "rednote" | "telegram";
@@ -61,6 +62,9 @@ export interface PublishProgress {
   done: boolean;
   error?: string;
   warning?: string;
+  screenshotUrl?: string;
+  samplePath?: string;
+  manualIntervention?: boolean;
 }
 
 export interface PublishResult {
@@ -219,7 +223,7 @@ export async function buildRednoteTextCardDataUrl(caption: string): Promise<stri
   return `data:image/png;base64,${png.toString("base64")}`;
 }
 
-const PUBLISH_VERIFY_MODEL = "gemini-3-flash-preview";
+const PUBLISH_VERIFY_MODEL = "xai/grok-4.3";
 const FIXED_VMOS_SCREEN = { width: 720, height: 1600 };
 const BASE_SCREEN = FIXED_VMOS_SCREEN;
 const THREADS_TALL_REFERENCE_SCREEN = FIXED_VMOS_SCREEN;
@@ -441,6 +445,10 @@ function appendSamplePath(message: string, samplePath: string | null): string {
   return samplePath ? `${message}｜sample=${samplePath}` : message;
 }
 
+function extractSamplePathFromPublishMessage(message: string): string | undefined {
+  return message.match(/[｜|]sample=([^｜\s]+)/)?.[1];
+}
+
 function buildThreadsBlockedError(reason: string, screenshotUrl?: string | null): string {
   const savedPath = screenshotUrl ? saveThreadsDebugScreenshot(screenshotUrl, "blocked") : null;
   const debugTarget = savedPath || screenshotUrl || "";
@@ -623,7 +631,7 @@ function getVmosMediaStagingDir(): string {
 }
 
 function getVmosMediaStagingPublicBaseUrl(): string {
-  const base = (process.env.VMOS_MEDIA_STAGING_PUBLIC_BASE_URL || process.env.TOOL_R18_PUBLIC_URL || process.env.PUBLIC_BASE_URL || "").trim();
+  const base = (process.env.VMOS_MEDIA_STAGING_PUBLIC_BASE_URL || process.env.TOOL_R18_PUBLIC_URL || process.env.PUBLIC_BASE_URL || "http://43.167.237.120:19198").trim();
   return base.replace(/\/+$/, "");
 }
 
@@ -646,26 +654,176 @@ function buildVmosStagingPublicUrl(fileName: string): string | null {
   return `${baseUrl}${VMOS_MEDIA_STAGING_ROUTE}/${encodeURIComponent(fileName)}`;
 }
 
-async function checkPublicMediaReachability(publicUrl: string): Promise<{ ok: boolean; detail: string }> {
+type SshMediaStagingConfig = {
+  host: string;
+  user: string;
+  password: string;
+  remoteDir: string;
+  python: string;
+};
+
+function getDefaultSshMediaStagingPython(): string {
+  const repoRoot = path.resolve(process.cwd(), "..");
+  const windowsPython = path.join(repoRoot, ".venv-codex-run", "Scripts", "python.exe");
+  if (fs.existsSync(windowsPython)) return windowsPython;
+  return process.platform === "win32" ? "python" : "python3";
+}
+
+function getSshMediaStagingConfig(): SshMediaStagingConfig | null {
+  const host = (process.env.VMOS_MEDIA_STAGING_SSH_HOST || process.env.REVERSE_TUNNEL_SSH_HOST || "").trim();
+  const user = (process.env.VMOS_MEDIA_STAGING_SSH_USER || process.env.REVERSE_TUNNEL_SSH_USER || "").trim();
+  const password = process.env.VMOS_MEDIA_STAGING_SSH_PASSWORD || process.env.REVERSE_TUNNEL_SSH_PASSWORD || "";
+  const remoteDir = (process.env.VMOS_MEDIA_STAGING_REMOTE_DIR || "").trim();
+  if (!host || !user || !password || !remoteDir) return null;
+  return {
+    host,
+    user,
+    password,
+    remoteDir: remoteDir.replace(/\/+$/, ""),
+    python: (process.env.VMOS_MEDIA_STAGING_SSH_PYTHON || getDefaultSshMediaStagingPython()).trim(),
+  };
+}
+
+function uploadVmosStagedFileBySsh(localPath: string, fileName: string): void {
+  const config = getSshMediaStagingConfig();
+  if (!config) return;
+
+  const script = String.raw`
+import os
+import posixpath
+import sys
+import paramiko
+
+local_path, remote_dir, file_name = sys.argv[1:4]
+host = os.environ["VMOS_MEDIA_STAGING_SSH_HOST"]
+user = os.environ["VMOS_MEDIA_STAGING_SSH_USER"]
+password = os.environ["VMOS_MEDIA_STAGING_SSH_PASSWORD"]
+
+client = paramiko.SSHClient()
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+client.connect(
+    hostname=host,
+    username=user,
+    password=password,
+    timeout=20,
+    banner_timeout=20,
+    auth_timeout=20,
+    look_for_keys=False,
+    allow_agent=False,
+)
+try:
+    sftp = client.open_sftp()
+    try:
+        current = ""
+        for part in remote_dir.strip("/").split("/"):
+            if not part:
+                continue
+            current += "/" + part
+            try:
+                sftp.mkdir(current)
+            except OSError:
+                pass
+        remote_path = posixpath.join(remote_dir, file_name)
+        sftp.put(local_path, remote_path)
+        try:
+            sftp.chmod(remote_path, 0o644)
+        except OSError:
+            pass
+        print(remote_path)
+    finally:
+        sftp.close()
+finally:
+    client.close()
+`;
+
+  const result = spawnSync(config.python, ["-c", script, localPath, config.remoteDir, fileName], {
+    encoding: "utf8",
+    timeout: Number(process.env.VMOS_MEDIA_STAGING_SSH_TIMEOUT_MS || "120000"),
+    env: {
+      ...process.env,
+      VMOS_MEDIA_STAGING_SSH_HOST: config.host,
+      VMOS_MEDIA_STAGING_SSH_USER: config.user,
+      VMOS_MEDIA_STAGING_SSH_PASSWORD: config.password,
+    },
+  });
+  if (result.error) {
+    throw new Error(`SSH 上傳媒體失敗：${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || `exit ${result.status}`).trim();
+    throw new Error(`SSH 上傳媒體失敗：${detail}`);
+  }
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const head = await fetch(publicUrl, { method: "HEAD", signal: controller.signal });
-    if (head.ok) return { ok: true, detail: `HEAD ${head.status}` };
-    const response = await fetch(publicUrl, { method: "GET", signal: controller.signal });
-    await response.body?.cancel();
-    if (response.ok) return { ok: true, detail: `GET ${response.status}` };
-    return { ok: false, detail: `HEAD ${head.status}; GET ${response.status}` };
-  } catch (error) {
-    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+    return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
 }
 
+async function checkPublicMediaReachability(publicUrl: string): Promise<{ ok: boolean; detail: string }> {
+  const failures: string[] = [];
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const head = await fetchWithTimeout(publicUrl, { method: "HEAD" }, 8000);
+      if (head.ok) return { ok: true, detail: `HEAD ${head.status}` };
+      failures.push(`attempt ${attempt} HEAD ${head.status}`);
+    } catch (error) {
+      failures.push(`attempt ${attempt} HEAD ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    try {
+      const response = await fetchWithTimeout(publicUrl, {
+        method: "GET",
+        headers: { Range: "bytes=0-1023" },
+      }, 10000);
+      await response.body?.cancel();
+      if (response.ok || response.status === 206) return { ok: true, detail: `GET ${response.status}` };
+      failures.push(`attempt ${attempt} GET ${response.status}`);
+    } catch (error) {
+      failures.push(`attempt ${attempt} GET ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (attempt < 3) await sleep(600 * attempt);
+  }
+  return { ok: false, detail: failures.join("; ") || "unknown error" };
+}
+
 function isPublicHttpMediaUrl(mediaUrl: string): boolean {
   if (!/^https?:\/\//i.test(mediaUrl)) return false;
   return isUsableVmosMediaStagingBaseUrl(mediaUrl);
+}
+
+function estimateVmosMediaUploadWaitMs(mediaUrl: string, isVideoMedia: boolean): number {
+  const fallback = isVideoMedia ? 300000 : 90000;
+  let size = 0;
+  if (mediaUrl.startsWith("data:")) {
+    const parsed = parseDataUrlMedia(mediaUrl);
+    if (parsed?.base64) size = Math.ceil(parsed.base64.length * 0.75);
+  } else {
+    const localPath = resolveLocalMediaFilePath(mediaUrl);
+    if (localPath) {
+      try {
+        size = fs.statSync(localPath).size;
+      } catch {
+        size = 0;
+      }
+    }
+  }
+  if (!size) return fallback;
+
+  const conservativeBytesPerSecond = isVideoMedia ? 300 * 1024 : 200 * 1024;
+  const estimated = Math.ceil(size / conservativeBytesPerSecond * 1000) + 60000;
+  const maxWait = isVideoMedia ? 900000 : 180000;
+  return Math.max(fallback, Math.min(maxWait, estimated));
 }
 
 async function requirePublicMediaUrlForVmosUpload(
@@ -722,6 +880,7 @@ async function requirePublicMediaUrlForVmosUpload(
   if (!publicUrl) {
     throw new Error(`${mediaLabel}公网上传 URL 生成失败，已停止发布，未回退慢速通道`);
   }
+  uploadVmosStagedFileBySsh(targetPath, fileName);
   const reachable = await checkPublicMediaReachability(publicUrl);
   if (!reachable.ok) {
     throw new Error(`${mediaLabel}公网 staging 文件不可达，已停止发布，未回退慢速通道：${publicUrl}；${reachable.detail}`);
@@ -7996,8 +8155,22 @@ async function tapThreadsComposerPublishButton(
   padCode: string,
   composerShotUrl?: string,
 ) {
+  const isStillPossiblyComposer = (page?: string | null) =>
+    !page || page === "compose_editor" || page === "reply_composer" || page === "unknown";
   let currentShotUrl = composerShotUrl ? await freezeScreenshotUrl(composerShotUrl).catch(() => composerShotUrl) : await freezeScreenshotUrl(await screenshot(config, padCode));
   const currentImage = await getImageDimensions(currentShotUrl).catch(() => null);
+  const keyboardVisible = isUsableScreenshotSize(currentImage)
+    ? await detectAndroidKeyboardVisibleLocally(currentShotUrl).catch(() => false)
+    : false;
+  if (isAcpPad(padCode) && !keyboardVisible) {
+    await execAdb(config, padCode, "input tap 612 1518");
+    await delay(4200);
+    const afterFixedTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (!isStillPossiblyComposer(afterFixedTap?.page)) {
+      return;
+    }
+    currentShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => currentShotUrl);
+  }
   const initialPublishButton = currentShotUrl
     ? await locateThreadsComposerPublishButton(currentShotUrl).catch(() => null)
     : null;
@@ -8009,27 +8182,35 @@ async function tapThreadsComposerPublishButton(
   ) {
     await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, initialPublishButton, 4200);
     const afterDetectedTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
-    if (afterDetectedTap?.page !== "compose_editor" && afterDetectedTap?.page !== "reply_composer") {
+    if (!isStillPossiblyComposer(afterDetectedTap?.page)) {
       return;
     }
   }
   if (
     isUsableScreenshotSize(currentImage)
-    && await detectAndroidKeyboardVisibleLocally(currentShotUrl).catch(() => false)
+    && keyboardVisible
   ) {
     if (isAcpPad(padCode)) {
       await tapViaAdbReferencePoint(config, padCode, { x: 625, y: 815 }, 2200);
       const afterFirstTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
-      if (afterFirstTap?.page !== "compose_editor" && afterFirstTap?.page !== "reply_composer") {
+      if (!isStillPossiblyComposer(afterFirstTap?.page)) {
         return;
       }
       await tapViaAdbReferencePoint(config, padCode, { x: 625, y: 815 }, 4200);
-      return;
+      const afterSecondTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (!isStillPossiblyComposer(afterSecondTap?.page)) {
+        return;
+      }
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 900).catch(() => "");
+      currentShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => currentShotUrl);
     }
     const keyboardPublishButton = await locateThreadsComposerPublishButton(currentShotUrl).catch(() => null);
     if (keyboardPublishButton) {
       await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, keyboardPublishButton, 4200);
-      return;
+      const afterKeyboardButtonTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (!isStillPossiblyComposer(afterKeyboardButtonTap?.page)) {
+        return;
+      }
     }
     await tapScreenshotPointViaAdb(config, padCode, currentShotUrl, {
       x: Math.round(currentImage.width * 0.07),
@@ -8055,7 +8236,7 @@ async function tapThreadsComposerPublishButton(
   if (isAcpPad(padCode)) {
     await tapViaAdbReferencePoint(config, padCode, { x: 625, y: 1516 }, 4200);
     const afterBottomTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
-    if (afterBottomTap?.page !== "compose_editor" && afterBottomTap?.page !== "reply_composer") {
+    if (!isStillPossiblyComposer(afterBottomTap?.page)) {
       return;
     }
   }
@@ -8063,14 +8244,20 @@ async function tapThreadsComposerPublishButton(
   const semanticPublishButton = await locateThreadsComposerPublishButtonTarget(config, padCode);
   if (semanticPublishButton) {
     await tapViaAdbReferencePoint(config, padCode, semanticPublishButton, 1800, THREADS_TALL_REFERENCE_SCREEN);
-    return;
+    const afterSemanticTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (!isStillPossiblyComposer(afterSemanticTap?.page)) {
+      return;
+    }
   }
 
   const shotUrl = currentShotUrl;
   const detectedPublishButton = initialPublishButton || await locateThreadsComposerPublishButton(shotUrl);
   if (detectedPublishButton) {
     await tapScreenshotPointViaAdb(config, padCode, shotUrl, detectedPublishButton, 1800);
-    return;
+    const afterDetectedButtonTap = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    if (!isStillPossiblyComposer(afterDetectedButtonTap?.page)) {
+      return;
+    }
   }
 
   const screen = await getScreenSize(config, padCode).catch(() => ({
@@ -8795,7 +8982,7 @@ async function stageMediaOnDevice(
     done: false,
   });
   const taskId = await uploadFileByUrl(config, padCode, publicMediaUrl, remotePath);
-  await waitTask(config, Number(taskId), 90000, 1500);
+  await waitTask(config, Number(taskId), estimateVmosMediaUploadWaitMs(mediaUrl, isVideoMedia), 1500);
   const actualRemotePath = await resolveUploadedDeviceMediaPath(
     config,
     padCode,
@@ -15887,7 +16074,7 @@ async function classifyThreadsPage(
 {"page": "<枚举值>", "confidence": 0.0-1.0, "evidence": "判断依据简述"}`;
 
   const raw = await callGemini(
-    "gemini-3-flash-preview",
+    PUBLISH_VERIFY_MODEL,
     [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
     { maxOutputTokens: 200, temperature: 0 },
   );
@@ -15935,7 +16122,7 @@ async function findButtonOnScreen(
 {"found": true/false, "x": 整数, "y": 整数, "note": "短描述"}`;
 
     const raw = await callGemini(
-      "gemini-3-flash-preview",
+      PUBLISH_VERIFY_MODEL,
       [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
       { maxOutputTokens: 80, temperature: 0 },
     );
@@ -17575,7 +17762,7 @@ export async function queryThreadsAccount(
     if (!inlineData) throw new Error("截图获取失败");
 
     const raw = await callGemini(
-      "gemini-3-flash-preview",
+      PUBLISH_VERIFY_MODEL,
       [{
         role: "user",
         parts: [
@@ -17697,7 +17884,13 @@ export async function publishPost(
       });
       msg = appendSamplePath(msg, samplePath);
     }
-    onProgress({ step: "發布失敗", done: true, error: msg });
+    onProgress({
+      step: "發布失敗",
+      done: true,
+      error: msg,
+      samplePath: extractSamplePathFromPublishMessage(msg),
+      manualIntervention: !cancelled,
+    });
     if (err instanceof Error && msg !== err.message) {
       throw new Error(msg);
     }
@@ -20145,7 +20338,7 @@ async function warmupExtractPostPreview(
   const request = createTimeoutSignal(7000);
   try {
     const raw = await callGemini(
-      "gemini-3-flash-preview",
+      PUBLISH_VERIFY_MODEL,
       [{
         role: "user",
         parts: [
