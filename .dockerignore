@@ -1,8 +1,17 @@
 .git
 .venv*
+node_modules
+**/node_modules
 __pycache__
+**/__pycache__
 *.pyc
 *.log
+.runtime
+**/.runtime
+.runtime_logs
+.codex_tmp_py
+.codex_runtime_logs
+.DS_Store
 webapp_data
 webapp_data_*
 logs
@@ -12,6 +21,9 @@ build
 .serena
 .codex-run-logs
 .playwright-mcp
+qa_task_*
+tmp_*
+runninghub_batch_test
 .env
 .env.*
 *.pem
