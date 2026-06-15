@@ -27,9 +27,7 @@ if (Test-Path -LiteralPath $EnvFile) {
     if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
       $value = $value.Substring(1, $value.Length - 2)
     }
-    if (-not [Environment]::GetEnvironmentVariable($key, "Process")) {
-      [Environment]::SetEnvironmentVariable($key, $value, "Process")
-    }
+    [Environment]::SetEnvironmentVariable($key, $value, "Process")
   }
 }
 
@@ -170,7 +168,7 @@ function Test-LocalProxyUrl {
   if ([string]::IsNullOrWhiteSpace($Url) -or $Url -eq "direct") { return $true }
   if ($Url -match '^https?://127\.0\.0\.1:(\d+)') {
     $port = [int]$Matches[1]
-    return [bool](Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
+    return [bool](Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
   }
   return $true
 }
@@ -178,7 +176,7 @@ if (-not (Test-LocalProxyUrl $env:TELEGRAM_PROXY_URL)) {
   $env:TELEGRAM_PROXY_URL = ""
 }
 if ([string]::IsNullOrWhiteSpace($env:TELEGRAM_PROXY_URL)) {
-  $systemProxy = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 7890 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  $systemProxy = Get-NetTCPConnection -LocalPort 7890 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
   $env:TELEGRAM_PROXY_URL = if ($systemProxy) { "http://127.0.0.1:7890" } else { "direct" }
 }
 $proc = Start-Process -FilePath "node" -ArgumentList $nodeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $LogFile -RedirectStandardError $ErrorLogFile -PassThru

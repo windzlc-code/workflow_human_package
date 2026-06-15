@@ -11202,13 +11202,27 @@ function sendMainMenu(chatId: number, msgId?: number) {
         if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, opKey, "Telegram 登入"))) return;
         const stopTyping = startTelegramTyping(bot, chatId);
         try {
-          await safeEditOrSend(bot, chatId, msgId, `⏳ 正在打開 Telegram 並提交手機號...\n\n人設：${archive.name}\n雲機：${boundPad.padName}`, {
+          const renderTelegramLoginProgress = (step: string) => [
+            "⏳ 正在執行 Telegram 自動登入...",
+            "",
+            `人設：${archive.name}`,
+            `雲機：${boundPad.padName}`,
+            `手機：${maskAccountSecret(telegram.phone)}`,
+            `Email：${telegram.email ? maskAccountSecret(telegram.email) : "未設定，若遇到 Email 頁會要求人工介入"}`,
+            "",
+            step,
+          ].join("\n");
+          await safeEditOrSend(bot, chatId, msgId, renderTelegramLoginProgress("当前步骤 0/4：准备启动登录流程。"), {
             reply_markup: { inline_keyboard: rows },
           });
           const result = await startTelegramAccountLoginSession(resolveVmosCredentials(), boundPad.padCode, {
             phone: telegram.phone,
             email: telegram.email,
             password: telegram.password,
+          }, async (progress) => {
+            await safeEditOrSend(bot, chatId, msgId, renderTelegramLoginProgress(progress), {
+              reply_markup: { inline_keyboard: rows },
+            });
           });
           stopTyping();
           if (result.state === "challenge_otp") {
@@ -11221,7 +11235,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
               returnCallback: `acctplatform_telegram_${id}`,
             });
           }
-          await bot.sendMessage(chatId, `${result.ok ? "✅" : "📲"} ${result.message}`, {
+          await safeEditOrSend(bot, chatId, msgId, [
+            `${result.ok ? "✅" : "📲"} Telegram 登入流程已返回狀態`,
+            "",
+            `人設：${archive.name}`,
+            `雲機：${boundPad.padName}`,
+            `手機：${maskAccountSecret(telegram.phone)}`,
+            `Email：${telegram.email ? maskAccountSecret(telegram.email) : "未設定"}`,
+            "",
+            result.message,
+          ].join("\n"), {
             reply_markup: {
               inline_keyboard: [
                 [{ text: "🔍 檢測 Telegram 登入狀態", callback_data: `acctquery_telegram_${id}` }],
@@ -11390,16 +11413,24 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const id = data.slice("acctset_threads_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const current = getPersonaAccountManagement(archive).threads;
       pendingPersonaAccountActions.set(chatId, { archiveId: id, platform: "threads", stage: "await_threads_handle" });
       await safeEditOrSend(bot, chatId, msgId, [
         "🔐 *Threads 登入資料*",
         "",
         `人設：${archive.name}`,
+        current?.handle ? `目前帳號：${maskAccountSecret(current.handle)}` : "目前帳號：未設定",
         "",
         "步驟 1/2：請輸入 Threads 使用者名、信箱或手機號。",
+        current?.handle ? "也可以直接沿用目前已保存的帳號。" : "",
       ].join("\n"), {
         parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_threads_${id}` }]] },
+        reply_markup: {
+          inline_keyboard: [
+            ...(current?.handle ? [[{ text: "⏭ 沿用目前帳號", callback_data: `acctuse_threadhandle_${id}` }]] : []),
+            [{ text: "✖️ 取消", callback_data: `acctplatform_threads_${id}` }],
+          ],
+        },
       });
       return;
     }
@@ -11408,17 +11439,178 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const id = data.slice("acctset_telegram_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const current = getPersonaAccountManagement(archive).telegram;
       pendingPersonaAccountActions.set(chatId, { archiveId: id, platform: "telegram", stage: "await_telegram_phone" });
       await safeEditOrSend(bot, chatId, msgId, [
         "🔐 *Telegram 登入資料*",
         "",
         `人設：${archive.name}`,
+        current?.phone ? `目前手機：${maskAccountSecret(current.phone)}` : "目前手機：未設定",
         "",
-        "步驟 1/2：請輸入 Telegram 手機號。",
+        "步驟 1/3：請輸入 Telegram 手機號。",
         "例如：+886912345678",
+        current?.phone ? "也可以直接沿用目前已保存的手機號。" : "",
       ].join("\n"), {
         parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${id}` }]] },
+        reply_markup: {
+          inline_keyboard: [
+            ...(current?.phone ? [[{ text: "⏭ 沿用目前手機號", callback_data: `acctuse_tgphone_${id}` }]] : []),
+            [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${id}` }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctuse_threadhandle_")) {
+      const id = data.slice("acctuse_threadhandle_".length);
+      const archive = await loadPersonaForThisBot(id);
+      const current = archive ? getPersonaAccountManagement(archive).threads : undefined;
+      if (!archive || !current?.handle) {
+        await safeEditOrSend(bot, chatId, msgId, "沒有可沿用的 Threads 帳號，請重新設定。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+        });
+        return;
+      }
+      pendingPersonaAccountActions.set(chatId, { archiveId: id, platform: "threads", stage: "await_threads_password", handle: current.handle });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔐 *Threads 登入資料*",
+        "",
+        `人設：${archive.name}`,
+        `帳號：${maskAccountSecret(current.handle)}`,
+        current.passwordSet ? "密碼：已保存，可直接沿用。" : "密碼：未設定",
+        "",
+        "步驟 2/2：請輸入 Threads 密碼。",
+      ].join("\n"), {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            ...(current.passwordSet && current.password ? [[{ text: "⏭ 沿用目前密碼", callback_data: `acctuse_threadpass_${id}` }]] : []),
+            [{ text: "✖️ 取消", callback_data: `acctplatform_threads_${id}` }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctuse_threadpass_")) {
+      const id = data.slice("acctuse_threadpass_".length);
+      const pendingAccount = pendingPersonaAccountActions.get(chatId);
+      const archive = await loadPersonaForThisBot(id);
+      const current = archive ? getPersonaAccountManagement(archive).threads : undefined;
+      if (!archive || !current?.password || !pendingAccount || pendingAccount.archiveId !== id || pendingAccount.platform !== "threads" || pendingAccount.stage !== "await_threads_password" || !pendingAccount.handle) {
+        await safeEditOrSend(bot, chatId, msgId, "Threads 账号设置步骤已过期，请重新进入账号管理。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+        });
+        return;
+      }
+      pendingPersonaAccountActions.delete(chatId);
+      await updatePersonaArchiveProfile(id, {
+        setup: {
+          ...archive.setup,
+          accountManagement: {
+            ...getPersonaAccountManagement(archive),
+            threads: { handle: pendingAccount.handle, password: current.password, passwordSet: true, updatedAt: new Date().toISOString() },
+          },
+        },
+      }).catch(() => null);
+      invalidatePersonaListCache();
+      await safeEditOrSend(bot, chatId, msgId, `✅ Threads 登入資料已保存\n帳號：${maskAccountSecret(pendingAccount.handle)}\n密碼：沿用目前已保存密碼`, {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctuse_tgphone_")) {
+      const id = data.slice("acctuse_tgphone_".length);
+      const archive = await loadPersonaForThisBot(id);
+      const current = archive ? getPersonaAccountManagement(archive).telegram : undefined;
+      if (!archive || !current?.phone) {
+        await safeEditOrSend(bot, chatId, msgId, "沒有可沿用的 Telegram 手機號，請重新設定。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+        });
+        return;
+      }
+      pendingPersonaAccountActions.set(chatId, { archiveId: id, platform: "telegram", stage: "await_telegram_email", phone: current.phone });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔐 *Telegram 登入資料*",
+        "",
+        `人設：${archive.name}`,
+        `手機：${maskAccountSecret(current.phone)}`,
+        current.email ? `登入 Email：${maskAccountSecret(current.email)}（可沿用）` : "登入 Email：未設定/可跳過",
+        "",
+        "步驟 2/3：如 Telegram 要求登入 Email，請輸入 Email。",
+      ].join("\n"), {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            ...(current.email ? [[{ text: "⏭ 沿用目前 Email", callback_data: `acctuse_tgemail_${id}` }]] : []),
+            [{ text: "⏭ 跳過登入 Email", callback_data: `acctskip_tgemail_${id}` }],
+            [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${id}` }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctuse_tgemail_")) {
+      const id = data.slice("acctuse_tgemail_".length);
+      const pendingAccount = pendingPersonaAccountActions.get(chatId);
+      const archive = await loadPersonaForThisBot(id);
+      const current = archive ? getPersonaAccountManagement(archive).telegram : undefined;
+      if (!archive || !current?.email || !pendingAccount || pendingAccount.archiveId !== id || pendingAccount.platform !== "telegram" || pendingAccount.stage !== "await_telegram_email" || !pendingAccount.phone) {
+        await safeEditOrSend(bot, chatId, msgId, "Telegram 账号设置步骤已过期，请重新进入账号管理。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+        });
+        return;
+      }
+      pendingPersonaAccountActions.set(chatId, { ...pendingAccount, email: current.email, stage: "await_telegram_password" });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔐 *Telegram 登入資料*",
+        "",
+        `人設：${archive.name}`,
+        `手機：${maskAccountSecret(pendingAccount.phone)}`,
+        `登入 Email：${maskAccountSecret(current.email)}`,
+        current.passwordSet ? "二級密碼：已保存，可直接沿用。" : "二級密碼：未設定/不需要",
+        "",
+        "步驟 3/3：如 Telegram 有二級密碼，請輸入二級密碼。",
+      ].join("\n"), {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            ...(current.passwordSet && current.password ? [[{ text: "⏭ 沿用目前二級密碼", callback_data: `acctuse_tgpass_${id}` }]] : []),
+            [{ text: "⏭ 跳過二級密碼", callback_data: `acctskip_tgpass_${id}` }],
+            [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${id}` }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctuse_tgpass_")) {
+      const id = data.slice("acctuse_tgpass_".length);
+      const pendingAccount = pendingPersonaAccountActions.get(chatId);
+      const archive = await loadPersonaForThisBot(id);
+      const current = archive ? getPersonaAccountManagement(archive).telegram : undefined;
+      if (!archive || !current?.password || !pendingAccount || pendingAccount.archiveId !== id || pendingAccount.platform !== "telegram" || pendingAccount.stage !== "await_telegram_password" || !pendingAccount.phone) {
+        await safeEditOrSend(bot, chatId, msgId, "Telegram 账号设置步骤已过期，请重新进入账号管理。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+        });
+        return;
+      }
+      pendingPersonaAccountActions.delete(chatId);
+      await updatePersonaArchiveProfile(id, {
+        setup: {
+          ...archive.setup,
+          accountManagement: {
+            ...getPersonaAccountManagement(archive),
+            telegram: { phone: pendingAccount.phone, email: pendingAccount.email || "", password: current.password, passwordSet: true, updatedAt: new Date().toISOString() },
+          },
+        },
+      }).catch(() => null);
+      invalidatePersonaListCache();
+      await safeEditOrSend(bot, chatId, msgId, `✅ Telegram 登入資料已保存\n手機：${maskAccountSecret(pendingAccount.phone)}\n登入 Email：${pendingAccount.email ? maskAccountSecret(pendingAccount.email) : "未設定/已跳過"}\n二級密碼：沿用目前已保存密碼`, {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
       });
       return;
     }
@@ -15836,14 +16028,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
           await execAdbForText(
             creds,
             loginState.padCode,
-            `input text ${otp}; input keyevent KEYCODE_ENTER`,
+            `input tap 128 560; sleep 0.2; input text ${otp}; input keyevent KEYCODE_ENTER`,
             15000,
             1000,
           ).catch(() => "");
-          await new Promise((r) => setTimeout(r, 4000));
+          await new Promise((r) => setTimeout(r, 8000));
           // 截图验证
-          const { screenshot: screenshotFn } = await import("@/lib/vmos-client");
-          const shotUrl = await screenshotFn(creds, loginState.padCode).catch(() => undefined);
+          const session = await queryTelegramAccountSession(creds, loginState.padCode).catch(() => null);
+          const shotUrl = session?.screenshotUrl;
           stopTyping();
           pendingLoginActions.delete(chatId);
           await bot.sendMessage(chatId, `✅ 验证码已提交，请查看截图确认登录状态。`, {
@@ -15887,11 +16079,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "",
           `人設：${archive.name}`,
           `帳號：${maskAccountSecret(value)}`,
+          getPersonaAccountManagement(archive).threads?.passwordSet ? "密碼：已保存，可直接沿用。" : "密碼：未設定",
           "",
           "步驟 2/2：請輸入 Threads 密碼。",
           "密碼會保存到本地人設配置，顯示時只會使用掩碼。",
         ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }]] },
+          reply_markup: {
+            inline_keyboard: [
+              ...(getPersonaAccountManagement(archive).threads?.passwordSet && getPersonaAccountManagement(archive).threads?.password ? [[{ text: "⏭ 沿用目前密碼", callback_data: `acctuse_threadpass_${pendingPersonaAccount.archiveId}` }]] : []),
+              [{ text: "✖️ 取消", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }],
+            ],
+          },
         });
         return;
       }
@@ -15932,17 +16130,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return;
         }
         pendingPersonaAccountActions.set(chatId, { ...pendingPersonaAccount, phone: value, stage: "await_telegram_email" });
+        const currentTelegram = getPersonaAccountManagement(archive).telegram;
         await bot.sendMessage(chatId, [
           "🔐 Telegram 登入資料",
           "",
           `人設：${archive.name}`,
           `手機：${maskAccountSecret(value)}`,
+          currentTelegram?.email ? `登入 Email：${maskAccountSecret(currentTelegram.email)}（可沿用）` : "登入 Email：未設定/可跳過",
           "",
           "步驟 2/3：如 Telegram 要求登入 Email，請輸入 Email。",
           "如果目前不確定或不想保存，點擊「跳過登入 Email」。",
         ].join("\n"), {
           reply_markup: {
             inline_keyboard: [
+              ...(currentTelegram?.email ? [[{ text: "⏭ 沿用目前 Email", callback_data: `acctuse_tgemail_${pendingPersonaAccount.archiveId}` }]] : []),
               [{ text: "⏭ 跳過登入 Email", callback_data: `acctskip_tgemail_${pendingPersonaAccount.archiveId}` }],
               [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${pendingPersonaAccount.archiveId}` }],
             ],
@@ -15963,18 +16164,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return;
         }
         pendingPersonaAccountActions.set(chatId, { ...pendingPersonaAccount, email: value, stage: "await_telegram_password" });
+        const currentTelegram = getPersonaAccountManagement(archive).telegram;
         await bot.sendMessage(chatId, [
           "🔐 Telegram 登入資料",
           "",
           `人設：${archive.name}`,
           `手機：${maskAccountSecret(pendingPersonaAccount.phone)}`,
           `登入 Email：${maskAccountSecret(value)}`,
+          currentTelegram?.passwordSet ? "二級密碼：已保存，可直接沿用。" : "二級密碼：未設定/不需要",
           "",
           "步驟 3/3：如 Telegram 有二級密碼，請輸入二級密碼。",
           "如果沒有二級密碼，點擊「跳過二級密碼」。",
         ].join("\n"), {
           reply_markup: {
             inline_keyboard: [
+              ...(currentTelegram?.passwordSet && currentTelegram?.password ? [[{ text: "⏭ 沿用目前二級密碼", callback_data: `acctuse_tgpass_${pendingPersonaAccount.archiveId}` }]] : []),
               [{ text: "⏭ 跳過二級密碼", callback_data: `acctskip_tgpass_${pendingPersonaAccount.archiveId}` }],
               [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${pendingPersonaAccount.archiveId}` }],
             ],
