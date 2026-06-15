@@ -15,6 +15,10 @@ export interface PublishTask {
   pause_expires_at?: string;
   attempts: number;
   last_error?: string;
+  failure_step?: string;
+  failure_screenshot_url?: string;
+  failure_sample_path?: string;
+  manual_intervention_required?: number;
   scheduled_at: string;
   started_at?: string;
   finished_at?: string;
@@ -64,6 +68,10 @@ CREATE TABLE IF NOT EXISTS publish_tasks (
   pause_expires_at TEXT,
   attempts         INTEGER NOT NULL DEFAULT 0,
   last_error       TEXT,
+  failure_step     TEXT,
+  failure_screenshot_url TEXT,
+  failure_sample_path TEXT,
+  manual_intervention_required INTEGER NOT NULL DEFAULT 0,
   scheduled_at     TEXT NOT NULL,
   started_at       TEXT,
   finished_at      TEXT,
@@ -101,6 +109,10 @@ export interface NodePublishQueueRepository {
     status: PublishTask["status"],
     opts?: {
       last_error?: string;
+      failure_step?: string;
+      failure_screenshot_url?: string;
+      failure_sample_path?: string;
+      manual_intervention_required?: number;
       started_at?: string;
       finished_at?: string;
       pause_type?: string;
@@ -129,6 +141,18 @@ export function createNodePublishQueueRepository(dbPath = resolveRuntimeFile("pu
   } catch {}
   try {
     db.prepare("ALTER TABLE publish_tasks ADD COLUMN telegram_group_content_type TEXT").run();
+  } catch {}
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN failure_step TEXT").run();
+  } catch {}
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN failure_screenshot_url TEXT").run();
+  } catch {}
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN failure_sample_path TEXT").run();
+  } catch {}
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN manual_intervention_required INTEGER NOT NULL DEFAULT 0").run();
   } catch {}
 
   return {
@@ -198,6 +222,10 @@ export function createNodePublishQueueRepository(dbPath = resolveRuntimeFile("pu
       const sets: string[] = ["status = @status"];
       const params: any = { id, status };
       if (opts.last_error !== undefined) { sets.push("last_error = @last_error"); params.last_error = opts.last_error; }
+      if (opts.failure_step !== undefined) { sets.push("failure_step = @failure_step"); params.failure_step = opts.failure_step; }
+      if (opts.failure_screenshot_url !== undefined) { sets.push("failure_screenshot_url = @failure_screenshot_url"); params.failure_screenshot_url = opts.failure_screenshot_url; }
+      if (opts.failure_sample_path !== undefined) { sets.push("failure_sample_path = @failure_sample_path"); params.failure_sample_path = opts.failure_sample_path; }
+      if (opts.manual_intervention_required !== undefined) { sets.push("manual_intervention_required = @manual_intervention_required"); params.manual_intervention_required = opts.manual_intervention_required; }
       if (opts.started_at !== undefined) { sets.push("started_at = @started_at"); params.started_at = opts.started_at; }
       if (opts.finished_at !== undefined) { sets.push("finished_at = @finished_at"); params.finished_at = opts.finished_at; }
       if (opts.pause_type !== undefined) { sets.push("pause_type = @pause_type"); params.pause_type = opts.pause_type; }

@@ -464,6 +464,11 @@ const INSTAGRAM_PACKAGE = "com.instagram.android";
 const THREADS_PACKAGE = "com.instagram.barcelona";
 const REDNOTE_PACKAGE = "com.xingin.xhs";
 const TELEGRAM_PACKAGE = "org.telegram.messenger";
+const TELEGRAM_LAUNCH_ACTIVITY = `${TELEGRAM_PACKAGE}/org.telegram.ui.LaunchActivity`;
+const TELEGRAM_FALLBACK_LAUNCH_ACTIVITIES = [
+  `${TELEGRAM_PACKAGE}/.DefaultIcon`,
+  TELEGRAM_LAUNCH_ACTIVITY,
+];
 const REDNOTE_SHARE_ACTIVITY = `${REDNOTE_PACKAGE}/.routers.RouterPageActivity`;
 const GOOGLE_PLAY_PACKAGE = "com.android.vending";
 const THREADS_SHARE_HANDLER = `${THREADS_PACKAGE}/.handleractivity.BarcelonaShareHandlerActivity`;
@@ -16042,6 +16047,83 @@ export interface ThreadsLoginResult {
   screenshotUrl?: string;
 }
 
+export interface AccountSessionResult {
+  ok: boolean;
+  state: "logged_in" | "logged_out" | "not_installed" | "unknown" | "failed" | "challenge_otp" | "challenge_manual";
+  message: string;
+  screenshotUrl?: string;
+}
+
+function isTelegramLoginPageText(text: string): boolean {
+  return /Start Messaging|Log in|Your phone|Phone number|Country|Code|login email|Your email|Google|验证码|驗證碼|登入|登录|Sign in|您的手機號碼|您的手机号码|手機號碼|手机号码|國家\/地區|国家\/地区|請確認您的國際電話區號|请确认您的国际电话区号/i.test(text);
+}
+
+function classifyTelegramLoginChallengeText(text: string, savedEmail?: string): { state: AccountSessionResult["state"]; message: string } {
+  const normalized = String(text || "").replace(/\s+/g, " ");
+  if (/verification code|login code|code was sent|enter code|验证码|驗證碼|登入碼|登录码|代碼|代码/i.test(normalized)) {
+    return {
+      state: "challenge_otp",
+      message: "Telegram 已進入一次性驗證碼頁。請直接在 Bot 輸入收到的驗證碼；驗證碼不會預先保存。",
+    };
+  }
+  if (/two-step|two step|cloud password|password|二級密碼|两步验证|兩步驗證|雲端密碼|云端密码/i.test(normalized)) {
+    return {
+      state: "challenge_manual",
+      message: "Telegram 需要二級密碼/雲端密碼。若已保存二級密碼仍未通過，請按截圖人工輸入或重新設定登入資料。",
+    };
+  }
+  if (/login email|choose a login email|your email|email address|sign in with google|google|登入 Email|登入信箱|登录邮箱/i.test(normalized)) {
+    return {
+      state: "challenge_manual",
+      message: savedEmail
+        ? `Telegram 要求設定或選擇登入 Email/Google。已保存登入 Email：${savedEmail}；請按截圖在雲機內人工完成後再檢測登入狀態。`
+        : "Telegram 要求設定或選擇登入 Email/Google。尚未保存登入 Email；請按截圖在雲機內人工完成，或返回帳號管理補充 Email 後再重試。",
+    };
+  }
+  if (/start messaging|your phone|phone number|country|國家|国家|手機號碼|手机号码/i.test(normalized)) {
+    return {
+      state: "logged_out",
+      message: "Telegram 仍停留在手機號登入頁，手機號可能未提交成功，請檢查截圖後重試。",
+    };
+  }
+  if (/too many attempts|flood|try again later|error|錯誤|错误/i.test(normalized)) {
+    return {
+      state: "failed",
+      message: "Telegram 登入被平台限制或出現錯誤，請按截圖處理後再重試。",
+    };
+  }
+  return {
+    state: "challenge_manual",
+    message: "Telegram 登入流程停在需要人工確認的頁面。請查看截圖完成當前步驟，完成後再檢測登入狀態。",
+  };
+}
+
+function normalizeTelegramPhoneForInput(phone: string): string {
+  const compact = String(phone || "").replace(/[^\d+]/g, "");
+  if (/^\+?886\d{8,10}$/.test(compact)) return compact.replace(/^\+?886/, "").replace(/^0+/, "");
+  return compact;
+}
+
+function splitTelegramPhoneForLogin(phone: string): { countryCode: string; localNumber: string } {
+  const compact = normalizeTelegramPhoneForInput(phone);
+  if (/^\+?86\d{11}$/.test(compact)) return { countryCode: "86", localNumber: compact.replace(/^\+?86/, "") };
+  if (/^\+?886\d{8,10}$/.test(compact)) return { countryCode: "886", localNumber: compact.replace(/^\+?886/, "").replace(/^0+/, "") };
+  const withoutPlus = compact.replace(/^\+/, "");
+  return { countryCode: "", localNumber: withoutPlus };
+}
+
+function adbDigitKeySequence(value: string): string {
+  return String(value || "")
+    .replace(/\D/g, "")
+    .split("")
+    .map((digit) => `input keyevent KEYCODE_${digit}`)
+    .join("; ");
+}
+
+function adbBackspaceSequence(count: number): string {
+  return Array.from({ length: Math.max(0, count) }, () => "input keyevent KEYCODE_DEL").join("; ");
+}
+
 const PKG_THREADS = "com.instagram.barcelona";
 
 async function classifyThreadsPage(
@@ -16401,6 +16483,214 @@ export async function loginThreadsAccount(
     ok: false,
     state: "failed",
     message: `登录后 4 轮未稳定，最后页面: ${page}，evidence: ${evidence}`,
+    screenshotUrl: shotUrl,
+  };
+}
+
+export async function clearThreadsAccountSession(
+  config: VmosConfig,
+  padCode: string,
+): Promise<AccountSessionResult> {
+  await login_clearAppData(config, padCode);
+  await login_launchThreads(config, padCode).catch(() => undefined);
+  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  return {
+    ok: true,
+    state: "logged_out",
+    message: "已清除 Threads App 数据。若要继续使用，请重新登录。",
+    screenshotUrl: shotUrl,
+  };
+}
+
+export async function queryTelegramAccountSession(
+  config: VmosConfig,
+  padCode: string,
+): Promise<AccountSessionResult> {
+  const installed = await execAdbForText(
+    config,
+    padCode,
+    `pm list packages ${TELEGRAM_PACKAGE} 2>&1 || true`,
+    12_000,
+    1_000,
+  ).catch((error) => String(error?.message || error || ""));
+  if (!installed.includes(TELEGRAM_PACKAGE)) {
+    const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+    return {
+      ok: false,
+      state: "not_installed",
+      message: "這台雲機未檢測到 Telegram App，請先安裝並登入 Telegram。",
+      screenshotUrl: shotUrl,
+    };
+  }
+  let launchOutput = await execAdbForText(
+    config,
+    padCode,
+    `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p ${TELEGRAM_PACKAGE} 2>&1; sleep 2; dumpsys window | grep -E "mCurrentFocus|mFocusedApp" || true`,
+    25_000,
+    1_000,
+  ).catch((error) => String(error?.message || error || ""));
+  const isTelegramFocused = (text: string) => text
+    .split(/\r?\n/)
+    .some((line) => /mCurrentFocus|mFocusedApp/i.test(line) && line.includes(TELEGRAM_PACKAGE));
+  if (!isTelegramFocused(launchOutput)) {
+    for (const activity of TELEGRAM_FALLBACK_LAUNCH_ACTIVITIES) {
+      const fallbackOutput = await execAdbForText(
+        config,
+        padCode,
+        `am start -W -n ${activity} 2>&1; sleep 2; dumpsys window | grep -E "mCurrentFocus|mFocusedApp" || true`,
+        25_000,
+        1_000,
+      ).catch((error) => String(error?.message || error || ""));
+      launchOutput = `${launchOutput}\n${fallbackOutput}`;
+      if (isTelegramFocused(fallbackOutput)) break;
+    }
+  }
+  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const combined = `${launchOutput}\n${uiXml}`;
+  const focusLines = launchOutput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /mCurrentFocus|mFocusedApp/i.test(line));
+  const focusSummary = focusLines.slice(-2).join("；") || "未取得前台焦點";
+  const focusPackage = focusSummary.match(/\bu0\s+([A-Za-z0-9_.]+)\//)?.[1]
+    || focusSummary.match(/\b([A-Za-z0-9_.]+)\/[A-Za-z0-9_.]+/)?.[1]
+    || "";
+  const isTelegramForeground = focusLines.some((line) => line.includes(TELEGRAM_PACKAGE))
+    || new RegExp(`package="${TELEGRAM_PACKAGE.replace(/\./g, "\\.")}"`).test(uiXml);
+  if (!isTelegramForeground) {
+    return {
+      ok: false,
+      state: "unknown",
+      message: `已嘗試打開 Telegram，但目前前台是 ${focusPackage || "其他應用"}，不是 Telegram。`,
+      screenshotUrl: shotUrl,
+    };
+  }
+  if (isTelegramLoginPageText(combined)) {
+    return {
+      ok: false,
+      state: "logged_out",
+      message: "Telegram 已打開，但畫面停留在登入/驗證頁，尚未確認為已登入狀態。",
+      screenshotUrl: shotUrl,
+    };
+  }
+  return {
+    ok: false,
+    state: "unknown",
+    message: "Telegram App 已打開，但目前無法從畫面確認是否已登入；請使用登入流程或直接用發布通道驗證。",
+    screenshotUrl: shotUrl,
+  };
+}
+
+export async function startTelegramAccountLoginSession(
+  config: VmosConfig,
+  padCode: string,
+  input: { phone: string; email?: string; password?: string },
+): Promise<AccountSessionResult> {
+  const phone = normalizeTelegramPhoneForInput(input.phone);
+  const phoneParts = splitTelegramPhoneForLogin(input.phone);
+  if (!/^\+?\d{6,15}$/.test(phone) || !/^\d{6,15}$/.test(phoneParts.localNumber)) {
+    const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+    return {
+      ok: false,
+      state: "failed",
+      message: "Telegram 手機號格式無效，請先重新設定登入資料。",
+      screenshotUrl: shotUrl,
+    };
+  }
+  await execAdbForText(
+    config,
+    padCode,
+    [
+      "am force-stop com.huangkai.autotakeoff",
+      phoneParts.countryCode === "86"
+        ? "setprop country CN; setprop gsm.operator.iso-country cn,cn; setprop gsm.sim.operator.iso-country cn,cn; setprop persist.sys.locale zh-CN; pm disable-user --user 0 com.huangkai.autotakeoff >/dev/null 2>&1 || true"
+        : "",
+      "sleep 0.4",
+    ].filter(Boolean).join("; "),
+    12_000,
+    800,
+  ).catch(() => "");
+  await execAdbForText(
+    config,
+    padCode,
+    `am start -W -n ${TELEGRAM_PACKAGE}/.DefaultIcon 2>&1; sleep 2`,
+    25_000,
+    1_000,
+  ).catch(() => "");
+  const launchCheck = await queryTelegramAccountSession(config, padCode);
+  if (launchCheck.ok) return launchCheck;
+  await execAdbForText(
+    config,
+    padCode,
+    "input tap 360 1128; sleep 1.6",
+    10_000,
+    800,
+  ).catch(() => "");
+  const digitsForTelegram = phoneParts.countryCode === "86"
+    ? `${phoneParts.countryCode}${phoneParts.localNumber}`
+    : phoneParts.localNumber;
+  const digitSequence = adbDigitKeySequence(digitsForTelegram);
+  await execAdbForText(
+    config,
+    padCode,
+    [
+      "input tap 430 665",
+      "sleep 0.4",
+      "input keyevent KEYCODE_MOVE_END",
+      adbBackspaceSequence(24),
+      "sleep 0.2",
+      digitSequence,
+      "sleep 0.5",
+    ].join("; "),
+    15_000,
+    800,
+  ).catch(() => "");
+  await execAdbForText(
+    config,
+    padCode,
+    [
+      "sleep 0.6",
+      "input tap 610 675",
+      "sleep 2",
+      "input tap 580 480",
+      "sleep 2",
+      "input tap 550 1215",
+      "sleep 2",
+      "input tap 360 920",
+      "sleep 8",
+    ].join("; "),
+    20_000,
+    1_000,
+  ).catch(() => "");
+  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const challenge = classifyTelegramLoginChallengeText(uiXml, input.email);
+  return {
+    ok: false,
+    state: challenge.state,
+    message: `已執行 Telegram 手機號提交動作。\n\n${challenge.message}`,
+    screenshotUrl: shotUrl,
+  };
+}
+
+export async function clearTelegramAccountSession(
+  config: VmosConfig,
+  padCode: string,
+): Promise<AccountSessionResult> {
+  await execAdbForText(config, padCode, `pm clear ${TELEGRAM_PACKAGE}`, 30_000, 1_000).catch(() => "");
+  await execAdbForText(
+    config,
+    padCode,
+    `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p ${TELEGRAM_PACKAGE} 2>&1; sleep 2`,
+    20_000,
+    1_000,
+  ).catch(() => "");
+  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  return {
+    ok: true,
+    state: "logged_out",
+    message: "已清除 Telegram App 数据。若要继续使用 Telegram 发布，请先在云机内重新登录。",
     screenshotUrl: shotUrl,
   };
 }

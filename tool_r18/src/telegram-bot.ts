@@ -15,7 +15,7 @@ import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
-import { publishPost, queryThreadsAccount, loginThreadsAccount, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona } from "@/lib/vmos-publisher";
+import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
@@ -416,13 +416,15 @@ const TELEGRAM_WEBHOOK_PATH = `/telegram/webhook/${TELEGRAM_WEBHOOK_SECRET}`;
 const TELEGRAM_WEBHOOK_URL = process.env.TELEGRAM_WEBHOOK_URL || `http://127.0.0.1:${TELEGRAM_WEBHOOK_PORT}${TELEGRAM_WEBHOOK_PATH}`;
 const TELEGRAM_INSTANCE_TAG = process.env.TELEGRAM_INSTANCE_TAG || `A-${process.pid}`;
 const TELEGRAM_REQUEST_MODE = TELEGRAM_PROXY_URL ? `proxy ${TELEGRAM_PROXY_URL}` : "direct";
+const TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query"] as const;
+const TELEGRAM_ALLOWED_UPDATES_JSON = JSON.stringify(TELEGRAM_ALLOWED_UPDATES);
 
 export async function stopTelegramPolling(token: string): Promise<void> {
   try {
     const bot = new TelegramBot(token, { request: buildTelegramProxyRequestOptions() as any, polling: false });
     await bot.stopPolling().catch(() => undefined);
     await bot.deleteWebHook({ drop_pending_updates: true } as any).catch(() => undefined);
-    await bot.getUpdates({ offset: -1, limit: 1, timeout: 0 } as any).catch(() => undefined);
+    await bot.getUpdates({ offset: -1, limit: 1, timeout: 0, allowed_updates: TELEGRAM_ALLOWED_UPDATES_JSON } as any).catch(() => undefined);
   } catch {}
 }
 
@@ -444,12 +446,24 @@ const pendingActions = new Map<number, {
   groupContentType?: TelegramGroupContentType;
 }>();
 
+type PersonaAccountPlatform = "threads" | "telegram";
+
+const pendingPersonaAccountActions = new Map<number, {
+  archiveId: string;
+  platform: PersonaAccountPlatform;
+  stage: "await_threads_handle" | "await_threads_password" | "await_telegram_phone" | "await_telegram_email" | "await_telegram_password";
+  handle?: string;
+  phone?: string;
+  email?: string;
+}>();
+
 const pendingLoginActions = new Map<number, {
   padCode: string;
   padName?: string;
   stage: "await_username" | "await_password" | "await_otp";
   username?: string;
   password?: string;
+  returnCallback?: string;
 }>();
 
 const pendingThreadsProfileActions = new Map<number, {
@@ -1393,9 +1407,34 @@ function buildStoredPostPreviewHtml(
   return formatPostContentForTelegramHtml(preview, linkPresentation);
 }
 
+type StoredPostListItem = {
+  id: string;
+  content: string;
+  telegramGroupContentType?: "free" | "paid";
+  imageUrl?: string;
+  imageHistory?: Array<{ imageUrl?: string | null }>;
+};
+
+function getStoredPostMediaUrlForList(post: StoredPostListItem) {
+  const direct = String(post.imageUrl || "").trim();
+  if (direct) return direct;
+  const history = Array.isArray(post.imageHistory) ? post.imageHistory : [];
+  const latest = history.length ? String(history[history.length - 1]?.imageUrl || "").trim() : "";
+  return latest;
+}
+
+function getStoredPostTypeLabelForList(post: StoredPostListItem) {
+  const mediaUrl = getStoredPostMediaUrlForList(post);
+  if (!mediaUrl) return "純文字";
+  const kind = inferStoredPostMediaKind(mediaUrl);
+  if (kind === "video") return "視頻";
+  if (kind === "image") return "圖片";
+  return "媒體";
+}
+
 export function buildStoredPostsListView(
   archiveId: string,
-  posts: Array<{ id: string; content: string; telegramGroupContentType?: "free" | "paid" }>,
+  posts: StoredPostListItem[],
   page = 0,
   pageSize = STORED_POSTS_PAGE_SIZE,
   linkPresentation: { url: string; text: string } | null = null,
@@ -1408,15 +1447,17 @@ export function buildStoredPostsListView(
   const visiblePosts = scopedPosts.slice(start, start + pageSize);
   const lines = visiblePosts.map((post, idx) => {
     const displayIndex = start + idx + 1;
+    const typeLabel = getStoredPostTypeLabelForList(post);
     const preview = buildStoredPostPreviewHtml(post.content, linkPresentation);
-    return `<b>\u3010${displayIndex}\u3011</b>${preview}`;
+    return `<b>\u3010${displayIndex}\u3011</b> <b>類型：${escapeHtmlText(typeLabel)}</b>\n${preview}`;
   });
   const keyboard = visiblePosts.flatMap((post, idx) => {
     const postIndex = start + idx;
     const displayIndex = start + idx + 1;
+    const typeLabel = getStoredPostTypeLabelForList(post);
     return [
       [
-        { text: `\uD83D\uDC41 \u67E5\u770B\u7B2C${displayIndex}\u7BC7`, callback_data: `vp_${postIndex}` },
+        { text: `\uD83D\uDC41 \u67E5\u770B\u7B2C${displayIndex}\u7BC7\uFF08${typeLabel}\uFF09`, callback_data: `vp_${postIndex}` },
       ],
     ];
   });
@@ -2433,6 +2474,7 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
       { text: "\uD83E\uDDFE \u63A8\u6587\u98A8\u683C", callback_data: `tweetstyle_${id}` },
     ],
     [{ text: "📱 绑定云机", callback_data: `bindpad_${id}` }],
+    [{ text: "🔐 账号管理", callback_data: `acctmgmt_${id}` }],
     [
       { text: "TG免費群", callback_data: `bindtg_free_${id}` },
       { text: "TG付費群", callback_data: `bindtg_paid_${id}` },
@@ -2451,6 +2493,150 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
 
   rows.push([{ text: "◀️ 返回人設詳情", callback_data: `pd_${id}` }]);
   return rows;
+}
+
+function getPersonaAccountManagement(archive: PersonaArchive | null | undefined) {
+  return archive?.setup?.accountManagement || {};
+}
+
+function maskAccountSecret(value?: string | null) {
+  const raw = String(value || "").trim();
+  if (!raw) return "未設定";
+  if (raw.length <= 4) return "•".repeat(raw.length);
+  return `${raw.slice(0, 2)}•••${raw.slice(-2)}`;
+}
+
+function formatPersonaAccountStatus(archive: PersonaArchive) {
+  const accounts = getPersonaAccountManagement(archive);
+  const threads = accounts.threads;
+  const telegram = accounts.telegram;
+  return [
+    `Threads：${threads?.handle ? `已設定（${maskAccountSecret(threads.handle)}）` : "未設定"}`,
+    `Telegram：${telegram?.phone ? `已設定（${maskAccountSecret(telegram.phone)}）` : "未設定"}`,
+  ].join("\n");
+}
+
+function buildPersonaAccountManagementText(archive: PersonaArchive) {
+  return [
+    "🔐 账号管理",
+    "",
+    `人設：${archive.name}`,
+    "",
+    formatPersonaAccountStatus(archive),
+    "",
+    "請選擇要設定的平台。",
+  ].join("\n");
+}
+
+function buildPersonaAccountManagementRows(archiveId: string): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [
+      { text: "Threads", callback_data: `acctplatform_threads_${archiveId}` },
+      { text: "Telegram", callback_data: `acctplatform_telegram_${archiveId}` },
+    ],
+    [{ text: "◀️ 返回人設設定", callback_data: `settings_${archiveId}` }],
+  ];
+}
+
+type PersonaAccountRuntimeStatus = {
+  state: "unchecked" | "checking" | "not_bound" | "logged_in" | "logged_out" | "unknown" | "error";
+  message: string;
+};
+
+function formatPersonaAccountRuntimeStatus(status?: PersonaAccountRuntimeStatus) {
+  if (!status) return "狀態：等待檢測";
+  const icon = status.state === "logged_in"
+    ? "✅"
+    : status.state === "logged_out" || status.state === "not_bound"
+      ? "⚠️"
+      : status.state === "error"
+        ? "❌"
+        : "🔍";
+  return `${icon} 狀態：${status.message}`;
+}
+
+function buildPersonaPlatformAccountText(archive: PersonaArchive, platform: PersonaAccountPlatform, status?: PersonaAccountRuntimeStatus) {
+  const accounts = getPersonaAccountManagement(archive);
+  const padLine = archive.boundPadCode
+    ? `綁定雲機：${archive.boundPadName ? `${archive.boundPadName}（${archive.boundPadCode}）` : archive.boundPadCode}`
+    : "綁定雲機：未綁定";
+  if (platform === "threads") {
+    const current = accounts.threads;
+    return [
+      "🔐 Threads 账号设置",
+      "",
+      `人設：${archive.name}`,
+      padLine,
+      `目前帳號：${current?.handle ? maskAccountSecret(current.handle) : "未設定"}`,
+      `密碼：${current?.passwordSet ? "已設定" : "未設定"}`,
+      formatPersonaAccountRuntimeStatus(status),
+      "",
+      "必填資料：Threads 使用者名/信箱/手機號 + 密碼。",
+      "可跳過資料：验证码、安全驗證、設備確認。這些不會預存；登入遇到時會返回截圖，請人工完成後再檢測。",
+    ].join("\n");
+  }
+  const current = accounts.telegram;
+  return [
+    "🔐 Telegram 账号设置",
+    "",
+    `人設：${archive.name}`,
+    padLine,
+    `目前手機：${current?.phone ? maskAccountSecret(current.phone) : "未設定"}`,
+    `登入 Email：${current?.email ? maskAccountSecret(current.email) : "未設定/可跳過"}`,
+    `二級密碼：${current?.passwordSet ? "已設定" : "未設定/不需要"}`,
+    formatPersonaAccountRuntimeStatus(status),
+    "",
+    "必填資料：Telegram 手機號。",
+    "可選資料：登入 Email、二級密碼/雲端密碼（帳號有開啟才需要）。",
+    "可跳過資料：一次性验证码、Google、設備確認。這些不會預存；登入遇到時會返回截圖，請人工完成後再檢測。",
+  ].join("\n");
+}
+
+function buildPersonaPlatformAccountRows(archiveId: string, platform: PersonaAccountPlatform, status?: PersonaAccountRuntimeStatus): Array<Array<{ text: string; callback_data: string }>> {
+  const platformLabel = platform === "threads" ? "Threads" : "Telegram";
+  const actionRows: Array<Array<{ text: string; callback_data: string }>> = [
+    [{ text: `🔍 检测 ${platformLabel} 登录状态`, callback_data: `acctquery_${platform}_${archiveId}` }],
+  ];
+  if (status?.state === "logged_in") {
+    actionRows.push([{ text: `🚪 登出 ${platformLabel}`, callback_data: `acctlogout_${platform}_${archiveId}` }]);
+  } else if (status && status.state !== "checking") {
+    actionRows.push([{ text: `🔐 登录 ${platformLabel}`, callback_data: `acctlogin_${platform}_${archiveId}` }]);
+  }
+  return [
+    [{ text: platform === "threads" ? "✍️ 設定 Threads 登入資料" : "✍️ 設定 Telegram 登入資料", callback_data: `acctset_${platform}_${archiveId}` }],
+    [{ text: "🧹 清除已保存登录资料", callback_data: `acctclear_${platform}_${archiveId}` }],
+    ...actionRows,
+    [{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${archiveId}` }],
+  ];
+}
+
+async function withPersonaAccountDetectionTimeout<T>(promise: Promise<T>, timeoutMs = 45_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`自動檢測超時（${Math.round(timeoutMs / 1000)} 秒）`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function resolvePersonaBoundPadForAccountAction(archive: PersonaArchive, pads: Array<{ padCode: string; padName?: string; padGrade?: string; padType?: string }>) {
+  const padCode = archive.boundPadCode;
+  if (!padCode) return null;
+  const pad = pads.find((item) => item.padCode === padCode);
+  if (!pad) return null;
+  return { padCode, padName: padDisplayName(pad) };
+}
+
+function buildPersonaAccountPlatformRowsForResult(archiveId: string, platform: PersonaAccountPlatform) {
+  return [
+    [{ text: `◀️ 返回${platform === "threads" ? "Threads" : "Telegram"}账号`, callback_data: `acctplatform_${platform}_${archiveId}` }],
+    [{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${archiveId}` }],
+  ];
 }
 
 
@@ -6994,6 +7180,20 @@ async function loadTelegramImageBuffer(imageUrl: string): Promise<Buffer> {
   return fs.readFileSync(localPath);
 }
 
+async function loadTelegramMediaBuffer(mediaUrl: string): Promise<Buffer> {
+  const input = resolveTelegramMediaInput(mediaUrl);
+  if (Buffer.isBuffer(input)) return input;
+  const source = String(input || "").trim();
+  if (!source) throw new Error("empty media source");
+  if (/^https?:\/\//i.test(source)) {
+    const response = await fetch(source);
+    if (!response.ok) throw new Error(`download media failed ${response.status}`);
+    return Buffer.from(await response.arrayBuffer());
+  }
+  const localPath = resolveExistingLocalMediaPath(source) || source;
+  return fs.readFileSync(localPath);
+}
+
 function candidateGridLabelSvg(index: number, width: number, height: number) {
   const label = String(index);
   return Buffer.from(`
@@ -7372,7 +7572,8 @@ async function sendPostPhotoDetail(
     inlineKeyboard: Array<Array<{ text: string; callback_data: string }>>;
   },
 ) {
-  if (inferStoredPostMediaKind(args.imageUrl) !== "image") return false;
+  const mediaKind = inferStoredPostMediaKind(args.imageUrl);
+  if (mediaKind !== "image" && mediaKind !== "video") return false;
   const caption = buildPostPhotoDetailCaption(args.displayIndex, args.content, args.linkPresentation || null);
   if (!caption) return false;
   const mediaInput = resolveTelegramMediaInput(args.imageUrl);
@@ -7380,14 +7581,39 @@ async function sendPostPhotoDetail(
     if (previousMessageId) {
       await bot.deleteMessage(chatId, previousMessageId).catch(() => undefined);
     }
-    await bot.sendPhoto(chatId, mediaInput, {
-      caption,
-      parse_mode: "HTML",
-      reply_markup: { inline_keyboard: args.inlineKeyboard },
-    });
+    if (mediaKind === "video") {
+      try {
+        await bot.sendVideo(chatId, mediaInput, {
+          caption,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: args.inlineKeyboard },
+        });
+      } catch (videoError) {
+        const buffer = await loadTelegramMediaBuffer(args.imageUrl);
+        try {
+          await bot.sendVideo(chatId, buffer, {
+            caption,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: args.inlineKeyboard },
+          });
+        } catch {
+          await bot.sendDocument(chatId, buffer, {
+            caption,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: args.inlineKeyboard },
+          });
+        }
+      }
+    } else {
+      await bot.sendPhoto(chatId, mediaInput, {
+        caption,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: args.inlineKeyboard },
+      });
+    }
     return true;
   } catch (error) {
-    console.warn("[telegram][post_photo_detail_failed]", error instanceof Error ? error.message : error);
+    console.warn("[telegram][post_media_detail_failed]", error instanceof Error ? error.message : error);
     return false;
   }
 }
@@ -7403,18 +7629,30 @@ async function sendPostImagePreviewFallback(
   const mediaInput = resolveTelegramMediaInput(imageUrl);
   try {
     if (mediaKind === "video") {
-      await bot.sendVideo(chatId, mediaInput, { caption: `🎬 第 ${displayIndex} 篇视频预览` });
+      try {
+        await bot.sendVideo(chatId, mediaInput, { caption: `🎬 第 ${displayIndex} 篇視頻預覽` });
+      } catch (videoError) {
+        const buffer = await loadTelegramMediaBuffer(imageUrl);
+        await bot.sendVideo(chatId, buffer, { caption: `🎬 第 ${displayIndex} 篇視頻預覽` });
+      }
       return;
     }
     if (mediaKind === "image") {
       await bot.sendPhoto(chatId, mediaInput, { caption: `🖼 第 ${displayIndex} 篇配圖預覽` });
       return;
     }
-    await bot.sendDocument(chatId, mediaInput, { caption: `📎 第 ${displayIndex} 篇媒体预览` });
+    await bot.sendDocument(chatId, mediaInput, { caption: `📎 第 ${displayIndex} 篇媒體預覽` });
   } catch (error) {
     console.warn("[telegram][post_media_preview_fallback_failed]", error instanceof Error ? error.message : error);
+    try {
+      const buffer = await loadTelegramMediaBuffer(imageUrl);
+      await bot.sendDocument(chatId, buffer, { caption: `📎 第 ${displayIndex} 篇媒體文件預覽` });
+      return;
+    } catch (documentError) {
+      console.warn("[telegram][post_media_document_fallback_failed]", documentError instanceof Error ? documentError.message : documentError);
+    }
     if (/^https?:\/\//i.test(imageUrl)) {
-      await bot.sendMessage(chatId, `📎 第 ${displayIndex} 篇媒体链接：\n\u8BF7\u70B9\u4E0B\u65B9\u6309\u94AE\u9009\u62E9\u5199\u5165\u63A8\u6587\u3002`).catch(() => undefined);
+      await bot.sendMessage(chatId, `📎 第 ${displayIndex} 篇媒體連結：\n${imageUrl}`).catch(() => undefined);
     }
   }
 }
@@ -8591,6 +8829,23 @@ async function safeEditOrSend(
   }
 }
 
+async function sendTemporaryLoadingMessage(
+  bot: TelegramBot,
+  chatId: number,
+  text = "⏳ 正在載入內容，請稍候...",
+): Promise<TelegramBot.Message | undefined> {
+  return bot.sendMessage(chatId, text).catch(() => undefined);
+}
+
+async function deleteTemporaryMessage(
+  bot: TelegramBot,
+  chatId: number,
+  message?: TelegramBot.Message,
+) {
+  if (!message?.message_id) return;
+  await bot.deleteMessage(chatId, message.message_id).catch(() => undefined);
+}
+
 const TELEGRAM_MENU_DUPLICATE_SKIP_MS = 1200;
 const telegramLastEditPayload = new Map<string, { key: string; at: number }>();
 const telegramRecentSendPayload = new Map<string, { at: number; message?: TelegramBot.Message }>();
@@ -8983,7 +9238,14 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   };
   const bot = new TelegramBot(token, {
     request: buildTelegramProxyRequestOptions() as any,
-    polling: false,
+    polling: {
+      autoStart: false,
+      interval: TELEGRAM_POLLING_INTERVAL_MS,
+      params: {
+        timeout: TELEGRAM_POLLING_TIMEOUT_SECONDS,
+        allowed_updates: TELEGRAM_ALLOWED_UPDATES_JSON,
+      },
+    } as any,
   });
   void ensureTelegramCommandMenu(bot).catch((error) => {
     console.warn("[telegram][command_menu_error]", error?.message || error);
@@ -9309,6 +9571,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   console.log(`[telegram:${instanceName}] Defaults: pad=${defaultPadCode} publish=${effectiveDefaultPublishPlatform} warmup=${effectiveDefaultWarmupPlatform} allowed=${allowedPublishPlatforms.join(",")} vmosAccounts=${Array.from(allowedVmosAccountNames).join(",") || "all"}`);
   console.log(`[telegram:${instanceName}] Request mode: ${TELEGRAM_REQUEST_MODE}`);
   console.log(`[telegram] Polling interval: ${TELEGRAM_POLLING_INTERVAL_MS}ms`);
+  console.log("[telegram] Polling allowed_updates: message,callback_query");
   console.log("[telegram] Bot 已启动，等待指令...");
   setInterval(purgeExpiredPublishCommands, 10 * 60 * 1000).unref?.();
   setInterval(purgeExpiredPadOperations, 10 * 60 * 1000).unref?.();
@@ -9702,12 +9965,14 @@ function parseShortPostPlatform(data: string, prefix: string): TelegramPublishPl
   return null;
 }
 
-function buildScheduledQueueLines(tasks: Array<{ id: string; platform: string; caption: string; scheduled_at: string; archive_id?: string; created_at?: string; last_error?: string }>, archivesById: Map<string, string>) {
+function buildScheduledQueueLines(tasks: Array<{ id: string; platform: string; caption: string; scheduled_at: string; archive_id?: string; created_at?: string; last_error?: string; failure_step?: string; manual_intervention_required?: number }>, archivesById: Map<string, string>) {
   return tasks.map((t, idx) => {
     const archiveName = t.archive_id ? (archivesById.get(t.archive_id) || t.archive_id) : "未綁定人設";
     const tag = isScheduledTask(t) ? "[定時]" : "[立即]";
     const errorLine = t.last_error ? `\n失敗原因：${formatUserFacingError(t.last_error, "任務執行失敗，請稍后重試。")}` : "";
-    return `【${idx + 1}】${tag} ${t.id.slice(0, 8)} · ${t.platform} · ${formatScheduledTaskTime(t.scheduled_at)}\n人設：${archiveName}\n${t.caption.slice(0, 100)}${t.caption.length > 100 ? "..." : ""}${errorLine}`;
+    const failureStepLine = t.failure_step ? `\n失敗步驟：${t.failure_step}` : "";
+    const manualLine = t.manual_intervention_required ? "\n狀態：需要人工介入" : "";
+    return `【${idx + 1}】${tag} ${t.id.slice(0, 8)} · ${t.platform} · ${formatScheduledTaskTime(t.scheduled_at)}\n人設：${archiveName}\n${t.caption.slice(0, 100)}${t.caption.length > 100 ? "..." : ""}${failureStepLine}${errorLine}${manualLine}`;
   });
 }
 
@@ -10687,10 +10952,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const loginReturnCallback = loginState.returnCallback || `pad_detail_${padCode}`;
       const padName = loginState.padName || padCode;
       await safeEditOrSend(bot, chatId, msgId, `🔄 *正在登录 Threads*\n\n雲機：${padName}\n帳號：${loginState.username}\n\n⏳ 正在清除旧数据并启动登录流程，請稍候（约 30-60 秒）...`, {
         parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `pad_detail_${padCode}` }]] },
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
       });
       const padOperationKey = `login:${padCode}:${chatId}:${Date.now()}`;
       if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "切换登录帳號"))) return;
@@ -10708,7 +10974,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         if (result.ok) {
           await bot.sendMessage(chatId, `✅ *Threads 登录成功*\n\n雲機：${padName}\n帳號：${loginState.username}\n\n${result.message}`, {
             parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[{ text: "🔍 验证帳號", callback_data: `pad_query_account_${padCode}` }], [{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+            reply_markup: { inline_keyboard: [[{ text: "🔍 验证帳號", callback_data: `pad_query_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
           });
           if (result.screenshotUrl) {
             await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 登录后截图" }).catch(() => undefined);
@@ -10717,7 +10983,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           pendingLoginActions.set(chatId, { ...loginState, stage: "await_otp" });
           await bot.sendMessage(chatId, `📱 *需要驗證碼*\n\n雲機：${padName}\n\n${result.message}\n\n⭐ 請直接回复 6 位驗證碼 ⭐\n　　　只需要發送數字即可。`, {
             parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: `pad_detail_${padCode}` }]] },
+            reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: loginReturnCallback }]] },
           });
           if (result.screenshotUrl) {
             await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 当前截图" }).catch(() => undefined);
@@ -10725,7 +10991,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         } else {
           await bot.sendMessage(chatId, `❌ *登录失败*\n\n云机：${padName}\n\n${result.message}`, {
             parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[{ text: "🔄 重试", callback_data: `pad_switch_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: `pad_detail_${padCode}` }]] },
+            reply_markup: { inline_keyboard: [[{ text: "🔄 重试", callback_data: `pad_switch_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
           });
           if (result.screenshotUrl) {
             await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 失败截图" }).catch(() => undefined);
@@ -10739,7 +11005,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return;
         }
         await bot.sendMessage(chatId, `❌ 登录异常: ${formatUserFacingError(error, "登录流程异常，请稍后重试。")}`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `pad_detail_${padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
         });
       } finally {
         releaseRuntimePadOperation(padCode, padOperationKey);
@@ -10814,6 +11080,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data.startsWith("settings_")) {
+      pendingPersonaAccountActions.delete(chatId);
       const id = data.slice("settings_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
@@ -10829,12 +11096,388 @@ function sendMainMenu(chatId: number, msgId?: number) {
         `綁定雲機：${boundPadName}`,
         `TG免費群：${tgFreeGroupName}`,
         `TG付費群：${tgPaidGroupName}`,
+        `账号管理：${formatPersonaAccountStatus(archive).replace(/\n/g, "；")}`,
         `待發布推文：${archive.posts.length} 篇`,
         `已發布：${archive.publishHistory?.length || 0} 篇`,
       ].join("\n"), {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: settingsRows,
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctmgmt_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      const id = data.slice("acctmgmt_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      await safeEditOrSend(bot, chatId, msgId, buildPersonaAccountManagementText(archive), {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: buildPersonaAccountManagementRows(id) },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctplatform_threads_") || data.startsWith("acctplatform_telegram_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      const platform: PersonaAccountPlatform = data.startsWith("acctplatform_threads_") ? "threads" : "telegram";
+      const id = data.slice((platform === "threads" ? "acctplatform_threads_" : "acctplatform_telegram_").length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform), {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform) },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctclear_threads_") || data.startsWith("acctclear_telegram_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      const platform: PersonaAccountPlatform = data.startsWith("acctclear_threads_") ? "threads" : "telegram";
+      const id = data.slice((platform === "threads" ? "acctclear_threads_" : "acctclear_telegram_").length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const current = getPersonaAccountManagement(archive);
+      const nextAccounts = { ...current };
+      delete nextAccounts[platform];
+      await updatePersonaArchiveProfile(id, {
+        setup: {
+          ...archive.setup,
+          accountManagement: nextAccounts,
+        },
+      }).catch(() => null);
+      invalidatePersonaListCache();
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已清除 ${platform === "threads" ? "Threads" : "Telegram"} 已保存登录资料。\n\n這只會清除本地保存的帳號/密碼，不會登出雲機 App。`, {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回平台设置", callback_data: `acctplatform_${platform}_${id}` }], [{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+      });
+      return;
+    }
+
+    const accountActionMatch = data.match(/^acct(query|login|logout)_(threads|telegram)_(.+)$/);
+    if (accountActionMatch) {
+      pendingPersonaAccountActions.delete(chatId);
+      const action = accountActionMatch[1] as "query" | "login" | "logout";
+      const platform = accountActionMatch[2] as PersonaAccountPlatform;
+      const id = accountActionMatch[3];
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const platformLabel = platform === "threads" ? "Threads" : "Telegram";
+      const rows = buildPersonaAccountPlatformRowsForResult(id, platform);
+      const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
+      if (!boundPad) {
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：${platformLabel}\n\n請先在人設設定中綁定雲機，再執行登入/登出/檢測。`, {
+          reply_markup: { inline_keyboard: rows },
+        });
+        return;
+      }
+
+      if (false && action === "login" && platform === "telegram") {
+        await safeEditOrSend(bot, chatId, msgId, [
+          "⚠️ Telegram 自動登入尚未接入底層腳本。",
+          "",
+          `人設：${archive.name}`,
+          `雲機：${boundPad.padName}`,
+          "",
+          "目前可保存 Telegram 登入資料、檢測 Telegram App 狀態，或清除 Telegram 會話。",
+          "如果需要登入，請先在 VMOS 雲機內手動完成 Telegram 登入，之後再使用檢測/發布功能。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: rows },
+        });
+        await sendCurrentPadScreenshot(bot, chatId, boundPad.padCode, "📸 当前 Telegram 登录画面").catch(() => undefined);
+        return;
+      }
+
+      if (action === "login" && platform === "telegram") {
+        const accounts = getPersonaAccountManagement(archive);
+        const telegram = accounts.telegram;
+        if (!telegram?.phone) {
+          await safeEditOrSend(bot, chatId, msgId, "尚未設定 Telegram 手機號，請先點「設定 Telegram 登入資料」。", {
+            reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, "telegram") },
+          });
+          return;
+        }
+        const opKey = `account:login:telegram:${boundPad.padCode}:${chatId}:${Date.now()}`;
+        if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, opKey, "Telegram 登入"))) return;
+        const stopTyping = startTelegramTyping(bot, chatId);
+        try {
+          await safeEditOrSend(bot, chatId, msgId, `⏳ 正在打開 Telegram 並提交手機號...\n\n人設：${archive.name}\n雲機：${boundPad.padName}`, {
+            reply_markup: { inline_keyboard: rows },
+          });
+          const result = await startTelegramAccountLoginSession(resolveVmosCredentials(), boundPad.padCode, {
+            phone: telegram.phone,
+            email: telegram.email,
+            password: telegram.password,
+          });
+          stopTyping();
+          if (result.state === "challenge_otp") {
+            pendingLoginActions.set(chatId, {
+              padCode: boundPad.padCode,
+              padName: boundPad.padName,
+              stage: "await_otp",
+              username: telegram.phone,
+              password: telegram.password,
+              returnCallback: `acctplatform_telegram_${id}`,
+            });
+          }
+          await bot.sendMessage(chatId, `${result.ok ? "✅" : "📲"} ${result.message}`, {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🔍 檢測 Telegram 登入狀態", callback_data: `acctquery_telegram_${id}` }],
+                [{ text: "◀️ 返回 Telegram 帳號", callback_data: `acctplatform_telegram_${id}` }],
+              ],
+            },
+          });
+          if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 Telegram 登入畫面" }).catch(() => undefined);
+        } catch (error: any) {
+          stopTyping();
+          await bot.sendMessage(chatId, `❌ Telegram 登入啟動失敗：${formatUserFacingError(error, "請查看截圖後重試。")}`, {
+            reply_markup: { inline_keyboard: rows },
+          });
+          await sendCurrentPadScreenshot(bot, chatId, boundPad.padCode, "📸 Telegram 失敗畫面").catch(() => undefined);
+        } finally {
+          releaseRuntimePadOperation(boundPad.padCode, opKey);
+        }
+        return;
+      }
+
+      const opLabel = `${platformLabel}${action === "query" ? "状态检测" : action === "login" ? "登录" : "登出"}`;
+      const opKey = `account:${action}:${platform}:${boundPad.padCode}:${chatId}:${Date.now()}`;
+      if (action === "query") {
+        await safeEditOrSend(bot, chatId, msgId, `🔍 正在檢測 ${platformLabel} 登录状态，請稍候...`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回平台设置", callback_data: `acctplatform_${platform}_${id}` }]] },
+        });
+      } else {
+        await safeEditOrSend(bot, chatId, msgId, `⏳ 正在執行 ${opLabel}...\n\n人設：${archive.name}\n雲機：${boundPad.padName}`, {
+          reply_markup: { inline_keyboard: rows },
+        });
+      }
+      if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, opKey, opLabel))) return;
+      const stopTyping = startTelegramTyping(bot, chatId);
+      try {
+        const creds = resolveVmosCredentials();
+        if (platform === "threads") {
+          if (action === "query") {
+            const result = await queryThreadsAccount(creds, boundPad.padCode).catch((e: any) => ({
+              padCode: boundPad.padCode,
+              platform: "threads" as const,
+              method: "failed" as const,
+              error: e?.message || String(e),
+            }));
+            stopTyping();
+            let status: PersonaAccountRuntimeStatus;
+            if (result.method === "failed" || (!result.username && !result.email)) {
+              status = {
+                state: "logged_out",
+                message: result.error ? `未確認已登入；${formatUserFacingError(result.error, "目前页面沒有识别到 Threads 帳號信息。")}` : "未確認已登入。",
+              };
+            } else {
+              status = {
+                state: "logged_in",
+                message: `已登入${result.username ? ` @${result.username}` : result.email ? ` ${result.email}` : ""}。`,
+              };
+            }
+            await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform, status), {
+              parse_mode: "Markdown",
+              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
+            });
+            await sendCurrentPadScreenshot(bot, chatId, boundPad.padCode, "📸 Threads 当前画面").catch(() => undefined);
+            return;
+          }
+
+          if (action === "logout") {
+            const result = await clearThreadsAccountSession(creds, boundPad.padCode);
+            stopTyping();
+            await bot.sendMessage(chatId, `🚪 *Threads 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.ok ? "✅" : "❌"} ${result.message}`, {
+              parse_mode: "Markdown",
+              reply_markup: { inline_keyboard: rows },
+            });
+            if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 清会话后截图" }).catch(() => undefined);
+            return;
+          }
+
+          const accounts = getPersonaAccountManagement(archive);
+          const threads = accounts.threads;
+          if (!threads?.handle || !threads?.password) {
+            stopTyping();
+            await bot.sendMessage(chatId, `❌ 尚未設定 Threads 登入資料。\n\n請先點「設定 Threads 登入資料」保存帳號與密碼。`, {
+              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, "threads") },
+            });
+            return;
+          }
+          const result = await loginThreadsAccount(creds, boundPad.padCode, { username: threads.handle, password: threads.password });
+          stopTyping();
+          if (result.ok) {
+            await bot.sendMessage(chatId, `✅ *Threads 登录成功*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}`, {
+              parse_mode: "Markdown",
+              reply_markup: { inline_keyboard: [[{ text: "🔍 检测 Threads 状态", callback_data: `acctquery_threads_${id}` }], ...rows] },
+            });
+            if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 登录后截图" }).catch(() => undefined);
+            return;
+          }
+          if (result.state === "challenge_otp") {
+            pendingLoginActions.set(chatId, {
+              padCode: boundPad.padCode,
+              padName: boundPad.padName,
+              stage: "await_otp",
+              username: threads.handle,
+              password: threads.password,
+              returnCallback: `acctplatform_threads_${id}`,
+            });
+            await bot.sendMessage(chatId, `📱 *Threads 需要验证码*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}\n\n請直接回复 6 位验证码，系统会继续提交。`, {
+              parse_mode: "Markdown",
+              reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: `acctplatform_threads_${id}` }]] },
+            });
+            if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 当前验证码画面" }).catch(() => undefined);
+            return;
+          }
+          if (result.state === "challenge_manual") {
+            await bot.sendMessage(chatId, `🧩 *Threads 需要人工處理*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}\n\n請依截圖完成平台要求，完成後再點擊檢測登入狀態。`, {
+              parse_mode: "Markdown",
+              reply_markup: { inline_keyboard: [[{ text: "🔍 檢測 Threads 狀態", callback_data: `acctquery_threads_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: `acctplatform_threads_${id}` }]] },
+            });
+            if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 Threads 人工處理畫面" }).catch(() => undefined);
+            return;
+          }
+          await bot.sendMessage(chatId, `❌ *Threads 登录未完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}`, {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [[{ text: "🔄 重试登录", callback_data: `acctlogin_threads_${id}` }], ...rows] },
+          });
+          if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 当前登录画面" }).catch(() => undefined);
+          return;
+        }
+
+        if (action === "query") {
+          const result = await queryTelegramAccountSession(creds, boundPad.padCode);
+          stopTyping();
+          const status: PersonaAccountRuntimeStatus = {
+            state: result.ok ? "logged_in" : result.state === "logged_out" || result.state === "not_installed" ? "logged_out" : "unknown",
+            message: result.message,
+          };
+          await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform, status), {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
+          });
+          if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 Telegram 当前画面" }).catch(() => undefined);
+          return;
+        }
+
+        const result = await clearTelegramAccountSession(creds, boundPad.padCode);
+        stopTyping();
+        await bot.sendMessage(chatId, `🚪 *Telegram 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.ok ? "✅" : "❌"} ${result.message}`, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: rows },
+        });
+        if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 清会话后截图" }).catch(() => undefined);
+      } catch (error: any) {
+        stopTyping();
+        if (isTelegramTaskCancelledError(error)) {
+          await bot.sendMessage(chatId, `🛑 已中止 ${opLabel}\n\n雲機：${boundPad.padName}`);
+          return;
+        }
+        await bot.sendMessage(chatId, `❌ ${opLabel}失败：${formatUserFacingError(error, "流程执行失败，请稍后重试。")}`, {
+          reply_markup: { inline_keyboard: rows },
+        });
+        await sendCurrentPadScreenshot(bot, chatId, boundPad.padCode, "📸 失败时当前界面截图").catch(() => undefined);
+      } finally {
+        releaseRuntimePadOperation(boundPad.padCode, opKey);
+      }
+      return;
+    }
+
+    if (data.startsWith("acctset_threads_")) {
+      const id = data.slice("acctset_threads_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      pendingPersonaAccountActions.set(chatId, { archiveId: id, platform: "threads", stage: "await_threads_handle" });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔐 *Threads 登入資料*",
+        "",
+        `人設：${archive.name}`,
+        "",
+        "步驟 1/2：請輸入 Threads 使用者名、信箱或手機號。",
+      ].join("\n"), {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_threads_${id}` }]] },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctset_telegram_")) {
+      const id = data.slice("acctset_telegram_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      pendingPersonaAccountActions.set(chatId, { archiveId: id, platform: "telegram", stage: "await_telegram_phone" });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔐 *Telegram 登入資料*",
+        "",
+        `人設：${archive.name}`,
+        "",
+        "步驟 1/2：請輸入 Telegram 手機號。",
+        "例如：+886912345678",
+      ].join("\n"), {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${id}` }]] },
+      });
+      return;
+    }
+
+      if (data.startsWith("acctskip_tgpass_")) {
+      const id = data.slice("acctskip_tgpass_".length);
+      const pendingAccount = pendingPersonaAccountActions.get(chatId);
+      if (!pendingAccount || pendingAccount.archiveId !== id || pendingAccount.platform !== "telegram" || pendingAccount.stage !== "await_telegram_password" || !pendingAccount.phone) {
+        await safeEditOrSend(bot, chatId, msgId, "Telegram 账号设置步骤已过期，请重新进入账号管理。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+        });
+        return;
+      }
+      pendingPersonaAccountActions.delete(chatId);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      await updatePersonaArchiveProfile(id, {
+        setup: {
+          ...archive.setup,
+          accountManagement: {
+            ...getPersonaAccountManagement(archive),
+            telegram: { phone: pendingAccount.phone, email: pendingAccount.email || "", password: "", passwordSet: false, updatedAt: new Date().toISOString() },
+          },
+        },
+      }).catch(() => null);
+      invalidatePersonaListCache();
+      await safeEditOrSend(bot, chatId, msgId, `✅ Telegram 登入資料已保存\n手機：${maskAccountSecret(pendingAccount.phone)}\n登入 Email：${pendingAccount.email ? maskAccountSecret(pendingAccount.email) : "未設定/已跳過"}\n二級密碼：未設定/不需要`, {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctskip_tgemail_")) {
+      const id = data.slice("acctskip_tgemail_".length);
+      const pendingAccount = pendingPersonaAccountActions.get(chatId);
+      if (!pendingAccount || pendingAccount.archiveId !== id || pendingAccount.platform !== "telegram" || pendingAccount.stage !== "await_telegram_email" || !pendingAccount.phone) {
+        await safeEditOrSend(bot, chatId, msgId, "Telegram 账号设置步骤已过期，请重新进入账号管理。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
+        });
+        return;
+      }
+      pendingPersonaAccountActions.set(chatId, { ...pendingAccount, email: "", stage: "await_telegram_password" });
+      const archive = await loadPersonaForThisBot(id);
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔐 *Telegram 登入資料*",
+        "",
+        `人設：${archive?.name || "未命名人設"}`,
+        `手機：${maskAccountSecret(pendingAccount.phone)}`,
+        "登入 Email：已跳過",
+        "",
+        "步驟 3/3：如 Telegram 有二級密碼，請輸入二級密碼。",
+        "如果沒有二級密碼，點擊「跳過二級密碼」。",
+      ].join("\n"), {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "⏭ 跳過二級密碼", callback_data: `acctskip_tgpass_${id}` }],
+            [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${id}` }],
+          ],
         },
       });
       return;
@@ -12324,9 +12967,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const [, legacyArchiveId, legacyPostId] = data.startsWith("viewpost_") ? data.split("_") : [];
       const archiveId = selected?.archiveId || legacyArchiveId;
       const postId = selected?.postId || legacyPostId;
+      const loadingMessage = await sendTemporaryLoadingMessage(bot, chatId);
       const archive = await loadPersonaForThisBot(archiveId);
       const post = archive?.posts.find((p) => p.id === postId);
       if (!post) {
+        await deleteTemporaryMessage(bot, chatId, loadingMessage);
         await safeEditOrSend(bot, chatId, msgId, "没有找到这篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: `posts_${archiveId}` }]] },
         });
@@ -12354,6 +12999,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         linkPresentation: getTweetStyleLinkPresentation(archive.setup),
         inlineKeyboard: detailRows,
       })) {
+        await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
       await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive), {
@@ -12363,6 +13009,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inline_keyboard: detailRows,
         },
       });
+      await deleteTemporaryMessage(bot, chatId, loadingMessage);
       return;
     }
 
@@ -12689,9 +13336,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const loadingMessage = await sendTemporaryLoadingMessage(bot, chatId);
       const archive = await loadPersonaForThisBot(action.archiveId);
       const post = archive?.posts.find((item) => item.id === action.postId);
       if (!archive || !post) {
+        await deleteTemporaryMessage(bot, chatId, loadingMessage);
         await safeEditOrSend(bot, chatId, msgId, "没有找到这篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
         });
@@ -12703,12 +13352,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const postImageUrl = String(post.imageUrl || latestHistoryImage || "").trim();
       if (data === "post_media_preview") {
         if (!postImageUrl) {
+          await deleteTemporaryMessage(bot, chatId, loadingMessage);
           await bot.sendMessage(chatId, "这篇推文没有可预览的配图或视频。", {
             reply_markup: { inline_keyboard: [[{ text: "👁 查看这篇", callback_data: "post_action_view" }]] },
           });
           return;
         }
         await sendPostImagePreviewFallback(bot, chatId, postImageUrl, displayIndex);
+        await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
       const detailRows = buildPostDetailActionRows({
@@ -12725,6 +13376,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         linkPresentation: getTweetStyleLinkPresentation(archive.setup),
         inlineKeyboard: detailRows,
       })) {
+        await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
       await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive), {
@@ -12734,6 +13386,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inline_keyboard: detailRows,
         },
       });
+      await deleteTemporaryMessage(bot, chatId, loadingMessage);
       return;
     }
 
@@ -15145,11 +15798,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
     // ── 登录流程文本输入处理 ──
     const loginState = pendingLoginActions.get(chatId);
     if (loginState && text) {
+      const loginReturnCallback = loginState.returnCallback || `pad_detail_${loginState.padCode}`;
       if (loginState.stage === "await_username") {
         const username = text.replace(/^@/, "").trim();
         pendingLoginActions.set(chatId, { ...loginState, stage: "await_password", username });
         await bot.sendMessage(chatId, `✅ 用户名：${username}\n\n⭐ 请输入密码 ⭐`, {
-          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${loginState.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: loginReturnCallback }]] },
         });
         return;
       }
@@ -15160,7 +15814,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: {
             inline_keyboard: [
               [{ text: "✅ 确认登录", callback_data: `pad_login_confirm_${loginState.padCode}` }],
-              [{ text: "❌ 取消", callback_data: `pad_detail_${loginState.padCode}` }],
+              [{ text: "❌ 取消", callback_data: loginReturnCallback }],
             ],
           },
         });
@@ -15170,7 +15824,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const otp = text.trim().replace(/\s/g, "");
         if (!/^\d{6}$/.test(otp)) {
           await bot.sendMessage(chatId, "❌ 验证码格式不对。\n\n⭐ 请输入 6 位数字 ⭐\n　　　只需要發送數字即可。", {
-            reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: `pad_detail_${loginState.padCode}` }]] },
+            reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: loginReturnCallback }]] },
           });
           return;
         }
@@ -15193,7 +15847,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           stopTyping();
           pendingLoginActions.delete(chatId);
           await bot.sendMessage(chatId, `✅ 验证码已提交，请查看截图确认登录状态。`, {
-            reply_markup: { inline_keyboard: [[{ text: "🔍 验证账号", callback_data: `pad_query_account_${loginState.padCode}` }], [{ text: "◀️ 返回", callback_data: `pad_detail_${loginState.padCode}` }]] },
+            reply_markup: { inline_keyboard: [[{ text: "🔍 验证账号", callback_data: `pad_query_account_${loginState.padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
           });
           if (shotUrl) {
             await bot.sendPhoto(chatId, shotUrl, { caption: "📸 提交验证码后截图" }).catch(() => undefined);
@@ -15202,9 +15856,165 @@ function sendMainMenu(chatId: number, msgId?: number) {
           stopTyping();
           pendingLoginActions.delete(chatId);
           await bot.sendMessage(chatId, `❌ 提交验证码失败: ${formatUserFacingError(error, "验证码提交失败，请稍后重试。")}`, {
-            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `pad_detail_${loginState.padCode}` }]] },
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
           });
         }
+        return;
+      }
+    }
+
+    const pendingPersonaAccount = pendingPersonaAccountActions.get(chatId);
+    if (pendingPersonaAccount) {
+      const archive = await loadPersonaForThisBot(pendingPersonaAccount.archiveId).catch(() => null);
+      if (!archive) {
+        pendingPersonaAccountActions.delete(chatId);
+        await bot.sendMessage(chatId, "❌ 當前 Bot 不能讀取這個人設。", {
+          reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+        });
+        return;
+      }
+      const value = normalizeTelegramSingleLine(text || "");
+      if (pendingPersonaAccount.stage === "await_threads_handle") {
+        if (!value || value.length < 3) {
+          await bot.sendMessage(chatId, "❌ 請輸入有效的 Threads 使用者名、信箱或手機號。", {
+            reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }]] },
+          });
+          return;
+        }
+        pendingPersonaAccountActions.set(chatId, { ...pendingPersonaAccount, handle: value, stage: "await_threads_password" });
+        await bot.sendMessage(chatId, [
+          "🔐 Threads 登入資料",
+          "",
+          `人設：${archive.name}`,
+          `帳號：${maskAccountSecret(value)}`,
+          "",
+          "步驟 2/2：請輸入 Threads 密碼。",
+          "密碼會保存到本地人設配置，顯示時只會使用掩碼。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }]] },
+        });
+        return;
+      }
+      if (pendingPersonaAccount.stage === "await_threads_password") {
+        await bot.deleteMessage(chatId, msg.message_id).catch(() => undefined);
+        if (!value || value.length < 4) {
+          await bot.sendMessage(chatId, "❌ 密碼太短，請重新輸入 Threads 密碼。", {
+            reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }]] },
+          });
+          return;
+        }
+        pendingPersonaAccountActions.delete(chatId);
+        await updatePersonaArchiveProfile(pendingPersonaAccount.archiveId, {
+          setup: {
+            ...archive.setup,
+            accountManagement: {
+              ...getPersonaAccountManagement(archive),
+              threads: {
+                handle: pendingPersonaAccount.handle,
+                password: value,
+                passwordSet: true,
+                updatedAt: new Date().toISOString(),
+            },
+          },
+        },
+        }).catch(() => null);
+        invalidatePersonaListCache();
+        await bot.sendMessage(chatId, `✅ Threads 登入資料已保存\n帳號：${maskAccountSecret(pendingPersonaAccount.handle)}`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${pendingPersonaAccount.archiveId}` }]] },
+        });
+        return;
+      }
+      if (pendingPersonaAccount.stage === "await_telegram_phone") {
+        if (!/^\+?\d[\d\s-]{5,}$/.test(value)) {
+          await bot.sendMessage(chatId, "❌ 請輸入有效的 Telegram 手機號，例如：+886912345678。", {
+            reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${pendingPersonaAccount.archiveId}` }]] },
+          });
+          return;
+        }
+        pendingPersonaAccountActions.set(chatId, { ...pendingPersonaAccount, phone: value, stage: "await_telegram_email" });
+        await bot.sendMessage(chatId, [
+          "🔐 Telegram 登入資料",
+          "",
+          `人設：${archive.name}`,
+          `手機：${maskAccountSecret(value)}`,
+          "",
+          "步驟 2/3：如 Telegram 要求登入 Email，請輸入 Email。",
+          "如果目前不確定或不想保存，點擊「跳過登入 Email」。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "⏭ 跳過登入 Email", callback_data: `acctskip_tgemail_${pendingPersonaAccount.archiveId}` }],
+              [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${pendingPersonaAccount.archiveId}` }],
+            ],
+          },
+        });
+        return;
+      }
+      if (pendingPersonaAccount.stage === "await_telegram_email") {
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) {
+          await bot.sendMessage(chatId, "❌ 請輸入有效的 Email，或點擊「跳過登入 Email」。", {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "⏭ 跳過登入 Email", callback_data: `acctskip_tgemail_${pendingPersonaAccount.archiveId}` }],
+                [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${pendingPersonaAccount.archiveId}` }],
+              ],
+            },
+          });
+          return;
+        }
+        pendingPersonaAccountActions.set(chatId, { ...pendingPersonaAccount, email: value, stage: "await_telegram_password" });
+        await bot.sendMessage(chatId, [
+          "🔐 Telegram 登入資料",
+          "",
+          `人設：${archive.name}`,
+          `手機：${maskAccountSecret(pendingPersonaAccount.phone)}`,
+          `登入 Email：${maskAccountSecret(value)}`,
+          "",
+          "步驟 3/3：如 Telegram 有二級密碼，請輸入二級密碼。",
+          "如果沒有二級密碼，點擊「跳過二級密碼」。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "⏭ 跳過二級密碼", callback_data: `acctskip_tgpass_${pendingPersonaAccount.archiveId}` }],
+              [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${pendingPersonaAccount.archiveId}` }],
+            ],
+          },
+        });
+        return;
+      }
+      if (pendingPersonaAccount.stage === "await_telegram_password") {
+        await bot.deleteMessage(chatId, msg.message_id).catch(() => undefined);
+        if (!value) {
+          await bot.sendMessage(chatId, "❌ 請輸入二級密碼，或點擊「跳過二級密碼」。", {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "⏭ 跳過二級密碼", callback_data: `acctskip_tgpass_${pendingPersonaAccount.archiveId}` }],
+                [{ text: "✖️ 取消", callback_data: `acctplatform_telegram_${pendingPersonaAccount.archiveId}` }],
+              ],
+            },
+          });
+          return;
+        }
+        pendingPersonaAccountActions.delete(chatId);
+        await updatePersonaArchiveProfile(pendingPersonaAccount.archiveId, {
+          setup: {
+            ...archive.setup,
+            accountManagement: {
+              ...getPersonaAccountManagement(archive),
+              telegram: {
+                phone: pendingPersonaAccount.phone,
+                email: pendingPersonaAccount.email || "",
+                password: value,
+                passwordSet: true,
+                updatedAt: new Date().toISOString(),
+            },
+          },
+        },
+        }).catch(() => null);
+        invalidatePersonaListCache();
+        await bot.sendMessage(chatId, `✅ Telegram 登入資料已保存\n手機：${maskAccountSecret(pendingPersonaAccount.phone)}\n登入 Email：${pendingPersonaAccount.email ? maskAccountSecret(pendingPersonaAccount.email) : "未設定/已跳過"}\n二級密碼：已設定`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${pendingPersonaAccount.archiveId}` }]] },
+        });
         return;
       }
     }
@@ -15497,7 +16307,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     interval: TELEGRAM_POLLING_INTERVAL_MS,
     params: {
       timeout: TELEGRAM_POLLING_TIMEOUT_SECONDS,
-      allowed_updates: ["message", "callback_query"],
+      allowed_updates: TELEGRAM_ALLOWED_UPDATES_JSON,
     },
   }).catch(async (error) => {
     const code = error?.code || "unknown";

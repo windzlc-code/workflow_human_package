@@ -7,7 +7,7 @@ import {
   isTextModelFallbackError,
 } from "@/lib/gemini-client";
 
-const MEMORY_TEXT_MODEL = "gemini-3.1-pro-preview";
+const MEMORY_TEXT_MODEL = "xai/grok-4.3";
 const CONSOLIDATED_MEMORY_MAX_LEN = 700;
 
 function isTestRuntime(): boolean {
@@ -32,7 +32,7 @@ function ensureUsefulPostSummary(summary: string, original: string): string {
 }
 
 async function callMemoryModel(prompt: string, maxOutputTokens = 512): Promise<string> {
-  const endpoint = getProtocolEndpoint("gemini");
+  const endpoint = getProtocolEndpoint("openai");
   if (!endpoint.apiKey || isTestRuntime()) return "";
   const result = await callTextUnderstandingModelWithFallback(
     MEMORY_TEXT_MODEL,

@@ -12,6 +12,21 @@ export type ArchiveSetup = Partial<DramaSetup> & {
   tweetStyleLinkUrl?: string;
   tweetStyleLinkText?: string;
   tweetStyleUpdatedAt?: string;
+  accountManagement?: {
+    threads?: {
+      handle?: string;
+      password?: string;
+      passwordSet?: boolean;
+      updatedAt?: string;
+    };
+    telegram?: {
+      phone?: string;
+      email?: string;
+      password?: string;
+      passwordSet?: boolean;
+      updatedAt?: string;
+    };
+  };
 };
 
 export interface PersonaArchivePost {

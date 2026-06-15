@@ -2300,6 +2300,13 @@ function bindActions() {
     location.href = "/index.html#app-generate";
   });
 
+  if (el("btnQuickSetup")) {
+    el("btnQuickSetup").textContent = "快速配置";
+    el("btnQuickSetup").addEventListener("click", () => {
+      location.href = "/quick-setup.html";
+    });
+  }
+
   if (el("btnTaskRefresh")) {
     el("btnTaskRefresh").addEventListener("click", async () => {
       try {

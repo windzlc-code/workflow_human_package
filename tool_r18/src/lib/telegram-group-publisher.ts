@@ -55,7 +55,7 @@ const TELEGRAM_CHAT_LIST_FREE_FALLBACK_POINT = { x: 250, y: 660 };
 const TELEGRAM_SHARE_TARGET_CHAT_POINT = { x: 230, y: 665 };
 const TELEGRAM_SHARE_SEND_POINT = { x: 640, y: 1535 };
 const TELEGRAM_CLEAR_DRAFT_KEY_EVENTS = 80;
-const TELEGRAM_GROUP_VISION_MODEL = "gemini-3-flash-preview";
+const TELEGRAM_GROUP_VISION_MODEL = "xai/grok-4.3";
 let lastTelegramTargetGroupName = "";
 
 function delay(ms: number) {

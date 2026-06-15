@@ -10,8 +10,23 @@ const MAX_CONCURRENT_PUBLISH_TASKS = 3;
 
 export type PublishTaskRunResult =
   | { status: "done" }
-  | { status: "failed"; error: string }
-  | { status: "paused"; pauseType: string; durationMs?: number; error?: string };
+  | ({
+      status: "failed";
+      error: string;
+    } & PublishTaskFailureEvidence)
+  | ({
+      status: "paused";
+      pauseType: string;
+      durationMs?: number;
+      error?: string;
+    } & PublishTaskFailureEvidence);
+
+export interface PublishTaskFailureEvidence {
+  failureStep?: string;
+  screenshotUrl?: string;
+  samplePath?: string;
+  manualInterventionRequired?: boolean;
+}
 
 export type PublishTaskRunner = (task: PublishTask) => Promise<PublishTaskRunResult>;
 
@@ -255,22 +270,36 @@ export class PublishSchedulerService {
         pause_type: string;
         pause_expires_at?: string;
         last_error?: string;
+        failure_step?: string;
+        failure_screenshot_url?: string;
+        failure_sample_path?: string;
+        manual_intervention_required?: number;
       } = {
         pause_type: result.pauseType,
       };
       if (expiresAt) update.pause_expires_at = expiresAt;
       if (result.error) update.last_error = result.error;
+      if (result.failureStep) update.failure_step = result.failureStep;
+      if (result.screenshotUrl) update.failure_screenshot_url = result.screenshotUrl;
+      if (result.samplePath) update.failure_sample_path = result.samplePath;
+      if (result.manualInterventionRequired !== undefined) {
+        update.manual_intervention_required = result.manualInterventionRequired ? 1 : 0;
+      }
       this.repo.updateTaskStatus(task.id, "paused", update);
-      this.hooks.onTaskStatusChange?.(task.id, "paused", { pauseType: result.pauseType, expiresAt });
+      this.hooks.onTaskStatusChange?.(task.id, "paused", { pauseType: result.pauseType, expiresAt, error: result.error, failureStep: result.failureStep, screenshotUrl: result.screenshotUrl, samplePath: result.samplePath, manualInterventionRequired: result.manualInterventionRequired });
       return;
     }
 
     if (task.attempts >= MAX_ATTEMPTS) {
       this.repo.updateTaskStatus(task.id, "failed", {
         last_error: result.error,
+        failure_step: result.failureStep,
+        failure_screenshot_url: result.screenshotUrl,
+        failure_sample_path: result.samplePath,
+        manual_intervention_required: result.manualInterventionRequired === false ? 0 : 1,
         finished_at: new Date().toISOString(),
       });
-      this.hooks.onTaskStatusChange?.(task.id, "failed", { error: result.error });
+      this.hooks.onTaskStatusChange?.(task.id, "failed", { error: result.error, failureStep: result.failureStep, screenshotUrl: result.screenshotUrl, samplePath: result.samplePath, manualInterventionRequired: result.manualInterventionRequired === false ? false : true });
       return;
     }
 
@@ -278,8 +307,12 @@ export class PublishSchedulerService {
     const retryAt = new Date(Date.now() + delay).toISOString();
     this.repo.updateTaskStatus(task.id, "pending", {
       last_error: result.error,
+      failure_step: result.failureStep,
+      failure_screenshot_url: result.screenshotUrl,
+      failure_sample_path: result.samplePath,
+      manual_intervention_required: result.manualInterventionRequired === false ? 0 : 1,
       scheduled_at: retryAt,
     });
-    this.hooks.onTaskStatusChange?.(task.id, "pending", { error: result.error, retryAt });
+    this.hooks.onTaskStatusChange?.(task.id, "pending", { error: result.error, retryAt, failureStep: result.failureStep, screenshotUrl: result.screenshotUrl, samplePath: result.samplePath, manualInterventionRequired: result.manualInterventionRequired === false ? false : true });
   }
 }

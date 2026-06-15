@@ -4,7 +4,7 @@ import { ensureRuntimeSecrets } from "@/runtime/node/ensure-runtime-secrets";
 import { PublishSchedulerService, recoverInterruptedPublishQueue, type PublishTaskRunResult } from "@/core/publish/publish-scheduler";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { resolveVmosCredentials } from "@/runtime/node/config";
-import { publishPost, type PublishCancellationToken } from "@/lib/vmos-publisher";
+import { publishPost, type PublishCancellationToken, type PublishProgress } from "@/lib/vmos-publisher";
 import { startTelegramBot, stopTelegramPolling, type TelegramBotInstanceOptions } from "@/telegram-bot";
 import { markArchiveEpisodesPublished } from "@/lib/persona-archives";
 import { screenshot as captureVmosScreenshot } from "@/lib/vmos-client";
@@ -78,6 +78,86 @@ function readLocalTelegramBotConfigs(): TelegramBotRuntimeConfig[] {
 let activeTelegramBots: Array<{ config: TelegramBotRuntimeConfig; bot: ReturnType<typeof startTelegramBot> }> = [];
 let activeTelegramBotSignature = "";
 let telegramBotLockClaimed = false;
+const manualInterventionNotifiedTaskIds = new Set<string>();
+
+interface PublishFailureEvidence {
+  failureStep?: string;
+  screenshotUrl?: string;
+  samplePath?: string;
+  manualInterventionRequired?: boolean;
+}
+
+function normalizeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || "Unknown error");
+}
+
+function extractEvidencePathFromMessage(message: string, key: "sample" | "debug"): string | undefined {
+  return message.match(new RegExp(`[｜|]${key}=([^｜\\s]+)`))?.[1];
+}
+
+function resolveSampleScreenshotPath(samplePath?: string): string | undefined {
+  if (!samplePath) return undefined;
+  try {
+    if (/\.(png|jpe?g|webp)$/i.test(samplePath) && fs.existsSync(samplePath)) return samplePath;
+    if (/\.json$/i.test(samplePath) && fs.existsSync(samplePath)) {
+      const parsed = JSON.parse(fs.readFileSync(samplePath, "utf-8"));
+      const screenshotPath = String(parsed?.screenshotPath || "").trim();
+      if (screenshotPath && fs.existsSync(screenshotPath)) return screenshotPath;
+    }
+  } catch {}
+  return undefined;
+}
+
+async function buildPublishFailureEvidence(
+  credentials: any,
+  task: any,
+  error: unknown,
+  lastProgressStep?: string,
+  progressEvidence: PublishFailureEvidence = {},
+): Promise<PublishFailureEvidence> {
+  const message = normalizeErrorMessage(error);
+  const samplePath = progressEvidence.samplePath
+    || extractEvidencePathFromMessage(message, "sample")
+    || extractEvidencePathFromMessage(message, "debug");
+  const screenshotUrl = progressEvidence.screenshotUrl
+    || await captureVmosScreenshot(credentials, task.pad_code).catch(() => undefined);
+  return {
+    failureStep: progressEvidence.failureStep || lastProgressStep || "自动化执行异常",
+    screenshotUrl,
+    samplePath,
+    manualInterventionRequired: progressEvidence.manualInterventionRequired ?? true,
+  };
+}
+
+async function notifyPublishManualIntervention(task: any, error: unknown, evidence: PublishFailureEvidence): Promise<void> {
+  const chatId = task.telegram_chat_id;
+  if (!chatId || manualInterventionNotifiedTaskIds.has(task.id)) return;
+  const bot = activeTelegramBots[0]?.bot;
+  if (!bot) return;
+  manualInterventionNotifiedTaskIds.add(task.id);
+
+  const reason = normalizeErrorMessage(error);
+  const lines = [
+    "⚠️ 需要人工介入",
+    "",
+    `任务：${task.id}`,
+    `平台：${task.platform || "-"}`,
+    `云机：${task.pad_code || "-"}`,
+    `失败步骤：${evidence.failureStep || "自动化执行异常"}`,
+    `失败原因：${reason}`,
+    "",
+    "系统已停止继续误操作，并已保存失败截图/证据。请人工检查当前云机界面后再重试。",
+  ];
+  await bot.sendMessage(chatId, lines.join("\n")).catch(() => undefined);
+
+  const screenshotPath = resolveSampleScreenshotPath(evidence.samplePath);
+  const photoInput = screenshotPath || evidence.screenshotUrl;
+  if (photoInput) {
+    await bot.sendPhoto(chatId, photoInput, { caption: "📸 自动化失败截图" }).catch(() => undefined);
+  } else {
+    await bot.sendMessage(chatId, "⚠️ 未能取得当前云机截图，请直接进入云机查看失败停留页面。").catch(() => undefined);
+  }
+}
 const TELEGRAM_LOCK_FILE = resolveRuntimeFile("telegram_bot.lock");
 const DAEMON_HEARTBEAT_FILE = resolveRuntimeFile("daemon.heartbeat.json");
 const DAEMON_HEARTBEAT_STALE_MS = 90_000;
@@ -251,12 +331,20 @@ async function main() {
 
   const runner = async (task: any): Promise<PublishTaskRunResult> => {
     if (!credentials.ak || !credentials.sk) {
-      return { status: "failed", error: "VMOS 凭据未配置" };
+      const error = "VMOS 凭据未配置";
+      const evidence = { failureStep: "启动前检查", manualInterventionRequired: true };
+      await notifyPublishManualIntervention(task, error, evidence);
+      return { status: "failed", error, ...evidence };
     }
     if (!isAllowedScheduledPublishPlatform(task.platform)) {
-      return { status: "failed", error: `Unsupported publish platform: ${task.platform || "(empty)"}` };
+      const error = `Unsupported publish platform: ${task.platform || "(empty)"}`;
+      const evidence = { failureStep: "启动前检查", manualInterventionRequired: true };
+      await notifyPublishManualIntervention(task, error, evidence);
+      return { status: "failed", error, ...evidence };
     }
     let postPublishVerificationStarted = false;
+    let lastProgressStep = "准备开始";
+    let progressEvidence: PublishFailureEvidence = {};
     try {
       const cancellationToken: PublishCancellationToken = {
         throwIfCancelled: () => {
@@ -280,6 +368,15 @@ async function main() {
         },
         (progress) => {
           cancellationToken.throwIfCancelled?.();
+          lastProgressStep = progress.step || lastProgressStep;
+          if (progress.error || progress.warning || progress.manualIntervention) {
+            progressEvidence = {
+              failureStep: progress.step || lastProgressStep,
+              screenshotUrl: progress.screenshotUrl || progressEvidence.screenshotUrl,
+              samplePath: progress.samplePath || progressEvidence.samplePath,
+              manualInterventionRequired: progress.manualIntervention ?? progressEvidence.manualInterventionRequired,
+            };
+          }
           const icon = progress.error ? "✗" : progress.warning ? "⚠" : progress.done ? "✓" : "→";
           log(`  ${icon} [${task.id}] ${progress.step}`);
           if (
@@ -316,10 +413,19 @@ async function main() {
           return { status: "done" };
         }
         if (result.state === "warning") {
+          const evidence = await buildPublishFailureEvidence(
+            credentials,
+            task,
+            result.detail || "发布动作已执行但自动校验未能确认",
+            lastProgressStep,
+            { ...progressEvidence, screenshotUrl: result.screenshotUrl || progressEvidence.screenshotUrl },
+          );
+          await notifyPublishManualIntervention(task, result.detail || "发布动作已执行但自动校验未能确认", evidence);
           return {
             status: "paused",
             pauseType: "post_publish_verification",
             error: result.detail || "发布动作已执行但自动校验未能确认，已暂停以避免重复发布",
+            ...evidence,
           };
         }
       }
@@ -343,14 +449,17 @@ async function main() {
       }
       return { status: "done" };
     } catch (error: any) {
+      const evidence = await buildPublishFailureEvidence(credentials, task, error, lastProgressStep, progressEvidence);
+      await notifyPublishManualIntervention(task, error, evidence);
       if (postPublishVerificationStarted) {
         return {
           status: "paused",
           pauseType: "post_publish_verification",
           error: `发布动作已执行但结果校验失败，已停止自动重试以避免重复发布：${error?.message || String(error)}`,
+          ...evidence,
         };
       }
-      return { status: "failed", error: error?.message || String(error) };
+      return { status: "failed", error: error?.message || String(error), ...evidence };
     }
   };
 

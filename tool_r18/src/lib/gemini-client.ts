@@ -14,7 +14,9 @@ function getApiConfig() {
     gptKey: config.gptKey || "",
     gptEndpoint: config.gptEndpoint || "",
     modelMappings: config.modelMappings || {
-      "gemini-3-flash-preview": { modelId: "gemini-3-flash-preview", protocol: "gemini-text" },
+      "gemini-3-flash-preview": { modelId: "xai/grok-4.3", protocol: "openai" },
+      "gemini-3-pro-preview": { modelId: "xai/grok-4.3", protocol: "openai" },
+      "gemini-3.1-pro-preview": { modelId: "xai/grok-4.3", protocol: "openai" },
       "gemini-3.1-flash-image-preview": { modelId: "gemini-3.1-flash-image-preview", protocol: "gemini" },
       "gpt-image-2": { modelId: "gpt-image-2", protocol: "openai" },
     },
@@ -42,20 +44,30 @@ function resolveTextModelMapping(model: string, mappings?: any): { modelId: stri
       protocol: typeof mapped.protocol === "string" ? mapped.protocol : undefined,
     };
   }
+  if (/^gemini-3(?:\.1)?-(?:pro|flash)-preview$/i.test(model)) {
+    return { modelId: "xai/grok-4.3", protocol: "openai" };
+  }
   return { modelId: model };
 }
 
 export const DEFAULT_GEMINI_BASE_URL = DEFAULT_API_BASE_URL;
 const DEFAULT_REQUEST_TIMEOUT_MS = 90_000;
 export const TEXT_UNDERSTANDING_MODEL_FALLBACKS = [
-  "gemini-3.1-pro-preview",
-  "gemini-3-pro-preview",
-  "gemini-3-flash-preview",
+  "xai/grok-4.3",
+  "grok-4.2",
 ] as const;
 
+function parseTextModelList(value?: string): string[] {
+  return String(value || "")
+    .split(/[,\n]/)
+    .map((model) => model.trim())
+    .filter(Boolean);
+}
+
 export function getTextUnderstandingModelFallbacks(primaryModel?: string): string[] {
-  const ordered = primaryModel
-    ? [primaryModel, ...TEXT_UNDERSTANDING_MODEL_FALLBACKS]
+  const primaryModels = parseTextModelList(primaryModel);
+  const ordered = primaryModels.length
+    ? [...primaryModels, ...TEXT_UNDERSTANDING_MODEL_FALLBACKS]
     : [...TEXT_UNDERSTANDING_MODEL_FALLBACKS];
   return Array.from(new Set(ordered.map((model) => model.trim()).filter(Boolean)));
 }

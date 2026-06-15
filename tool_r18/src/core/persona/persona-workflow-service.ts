@@ -14,11 +14,27 @@ import {
   type MemoryEntryPreview,
 } from "@/lib/persona-memory-v2";
 import { fetchPersonaTrendIntelForNode } from "@/lib/persona-trend-intel-node";
+import { readRuntimeApiConfig } from "@/runtime/node/config";
 import fs from "node:fs";
 import type { DramaSetup, EpisodeScript } from "@/types/drama";
 
-const PERSONA_TEXT_MODEL = "gemini-3.1-pro-preview";
+const PERSONA_TEXT_MODEL = "xai/grok-4.3";
 const PERSONA_TEXT_MAX_RETRIES = 3;
+
+function resolvePersonaTextModelPreference(): string {
+  const config = readRuntimeApiConfig() as Record<string, unknown>;
+  const configured = [
+    config.llmModelPriorityOrder,
+    config.llm_model_priority_order,
+    config.llmDefaultModelGpt,
+    config.llm_default_model_gpt,
+    config.llmDefaultModel,
+    config.llm_default_model,
+  ]
+    .map((value) => String(value || "").trim())
+    .find(Boolean);
+  return configured || PERSONA_TEXT_MODEL;
+}
 
 function memorySummaryForPrompt(summary: string): string {
   const raw = String(summary || "").replace(/\s+/g, " ").trim();
@@ -143,7 +159,7 @@ async function generateTextWithGemini(prompt: string, count: number): Promise<st
   for (let attempt = 0; attempt <= PERSONA_TEXT_MAX_RETRIES; attempt += 1) {
     try {
       const result = await callTextUnderstandingModelWithFallback(
-        PERSONA_TEXT_MODEL,
+        resolvePersonaTextModelPreference(),
         [{ role: "user", parts: [{ text: finalPrompt }] }],
         {
           maxOutputTokens: Math.max(4096, count * 1200),

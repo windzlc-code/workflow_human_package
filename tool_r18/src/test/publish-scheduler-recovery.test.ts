@@ -129,6 +129,35 @@ describe("publish scheduler recovery", () => {
     expect(repo.getTask(task.id)?.attempts).toBe(1);
   });
 
+  it("persists failure evidence for manual intervention", async () => {
+    const repo = createNodePublishQueueRepository(tempDbPath());
+    const task = repo.enqueueTask({
+      pad_code: "PAD-EVIDENCE",
+      platform: "threads",
+      caption: "needs evidence",
+      scheduled_at: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const scheduler = new PublishSchedulerService(repo, async () => ({
+      status: "failed",
+      error: "button not found",
+      failureStep: "点击发布按钮",
+      screenshotUrl: "https://example.test/failure.jpg",
+      samplePath: ".runtime/automatic-script/publish-samples/failure.json",
+      manualInterventionRequired: true,
+    }));
+
+    await scheduler.pollOnce();
+    await scheduler.waitForIdle();
+
+    const recovered = repo.getTask(task.id);
+    expect(recovered?.status).toBe("pending");
+    expect(recovered?.last_error).toBe("button not found");
+    expect(recovered?.failure_step).toBe("点击发布按钮");
+    expect(recovered?.failure_screenshot_url).toBe("https://example.test/failure.jpg");
+    expect(recovered?.failure_sample_path).toBe(".runtime/automatic-script/publish-samples/failure.json");
+    expect(recovered?.manual_intervention_required).toBe(1);
+  });
+
   it("runs at most three different pad codes concurrently and skips duplicate pad codes", async () => {
     const repo = createNodePublishQueueRepository(tempDbPath());
     const baseTime = Date.now() - 60_000;

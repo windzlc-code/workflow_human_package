@@ -11,8 +11,10 @@ import os
 import queue
 import re
 import shutil
+import signal
 import sqlite3
 import stat
+import subprocess
 import threading
 import time
 import uuid
@@ -1234,6 +1236,30 @@ def _tool_r18_bot_token_file() -> Path:
     return Path(os.getenv("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", str(_tool_r18_runtime_dir() / "telegram_bot_token.txt"))).resolve()
 
 
+def _tool_r18_api_config_file() -> Path:
+    return Path(os.getenv("AUTO_TWEET_API_CONFIG_PATH", str(_tool_r18_runtime_dir() / "api_config.json"))).resolve()
+
+
+def _tool_r18_process_control_file() -> Path:
+    return Path(os.getenv("TOOL_R18_PROCESS_CONTROL_FILE", str(_tool_r18_runtime_dir() / "process-control.json"))).resolve()
+
+
+def _tool_r18_process_status_file() -> Path:
+    return Path(os.getenv("TOOL_R18_PROCESS_STATUS_FILE", str(_tool_r18_runtime_dir() / "process-status.json"))).resolve()
+
+
+def _tool_r18_stop_responder_offset_file() -> Path:
+    return Path(os.getenv("TOOL_R18_STOP_RESPONDER_OFFSET_FILE", str(_tool_r18_runtime_dir() / "stop-responder-offset.json"))).resolve()
+
+
+def _tool_r18_daemon_heartbeat_file() -> Path:
+    return Path(os.getenv("TOOL_R18_DAEMON_HEARTBEAT_FILE", str(_tool_r18_runtime_dir() / "daemon.heartbeat.json"))).resolve()
+
+
+def _tool_r18_project_dir() -> Path:
+    return Path(os.getenv("TOOL_R18_PROJECT_DIR", str(ROOT_DIR / "tool_r18"))).resolve()
+
+
 def _runtime_config_tg_bot_token() -> str:
     try:
         with db() as conn:
@@ -2449,6 +2475,319 @@ def _write_tool_r18_bot_token_files(token: str) -> None:
         local_env.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
     except Exception as exc:
         logger.warning("Failed to update local bot env token file: %s", exc)
+
+
+def _clear_tool_r18_bot_token_files() -> None:
+    token_file = _tool_r18_bot_token_file()
+    try:
+        if token_file.exists():
+            token_file.unlink()
+    except Exception as exc:
+        logger.warning("Failed to delete bot token file: %s", exc)
+    try:
+        local_env = _tool_r18_local_bot_env_path()
+        if local_env.exists():
+            lines = local_env.read_text(encoding="utf-8", errors="ignore").splitlines()
+            next_lines = [line for line in lines if not line.strip().startswith("TELEGRAM_BOT_TOKEN=")]
+            local_env.write_text("\n".join(next_lines).rstrip() + ("\n" if next_lines else ""), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to clear local bot env token: %s", exc)
+
+
+def _read_tool_r18_api_config() -> dict[str, Any]:
+    path = _tool_r18_api_config_file()
+    try:
+        if not path.exists():
+            return {}
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_tool_r18_api_config(raw: dict[str, Any]) -> None:
+    path = _tool_r18_api_config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(raw if isinstance(raw, dict) else {}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: dict[str, Any]) -> None:
+    updates: dict[str, Any] = {}
+    if any(key in explicit for key in ("llm_api_key", "llm_api_key_gpt", "llm_base_url", "llm_model_priority_order", "llm_default_model_gpt", "llm_default_model")):
+        llm_key = str(runtime.get("llm_api_key_gpt") or runtime.get("llm_api_key") or "").strip()
+        llm_base = str(runtime.get("llm_base_url") or "").strip()
+        if llm_key:
+            updates["gptKey"] = llm_key
+            updates["geminiTextKey"] = llm_key
+        if llm_base:
+            updates["gptEndpoint"] = llm_base
+            updates["geminiTextEndpoint"] = llm_base
+        llm_models = _ordered_model_list(
+            parse_model_list(runtime.get("llm_model_priority_order")),
+            parse_model_list(runtime.get("llm_default_model_gpt")),
+            parse_model_list(runtime.get("llm_default_model")),
+            fallback=["grok-4.2"],
+        )
+        if llm_models:
+            model_order = ", ".join(llm_models)
+            updates["llmModelPriorityOrder"] = model_order
+            updates["llmDefaultModelGpt"] = model_order
+            updates["llmDefaultModel"] = model_order
+            updates["llm_model_priority_order"] = model_order
+            updates["llm_default_model_gpt"] = model_order
+            updates["llm_default_model"] = model_order
+    if not updates:
+        return
+    api_config = _read_tool_r18_api_config()
+    api_config.update(updates)
+    _write_tool_r18_api_config(api_config)
+
+
+def _read_small_json_file(path: Path) -> dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_small_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _tool_r18_process_snapshot() -> dict[str, Any]:
+    control = _read_small_json_file(_tool_r18_process_control_file())
+    status = _read_small_json_file(_tool_r18_process_status_file())
+    heartbeat_path = _tool_r18_daemon_heartbeat_file()
+    desired = str(control.get("desired") or "running").strip().lower()
+    if desired not in {"running", "stopped"}:
+        desired = "running"
+    heartbeat_age_seconds: float | None = None
+    running = False
+    if heartbeat_path.exists():
+        try:
+            heartbeat_age_seconds = max(time.time() - heartbeat_path.stat().st_mtime, 0.0)
+            running = heartbeat_age_seconds <= 30
+        except Exception:
+            running = False
+    if desired == "stopped":
+        running = False
+    return {
+        "desired": desired,
+        "running": running,
+        "status": str(status.get("state") or ("running" if running else "stopped")),
+        "pid": status.get("pid"),
+        "updated_at": status.get("updated_at") or status.get("updatedAt") or "",
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+    }
+
+
+def _write_tool_r18_process_desired(desired: str) -> dict[str, Any]:
+    value = "stopped" if str(desired).strip().lower() == "stopped" else "running"
+    _write_small_json_file(
+        _tool_r18_process_control_file(),
+        {"desired": value, "updated_at": int(time.time())},
+    )
+    return _tool_r18_process_snapshot()
+
+
+def _quick_setup_public_url() -> str:
+    explicit = str(os.getenv("QUICK_SETUP_PUBLIC_URL") or "").strip()
+    if explicit:
+        return explicit
+    public_base = str(os.getenv("PUBLIC_BASE_URL") or os.getenv("TOOL_R18_PUBLIC_URL") or "").strip().rstrip("/")
+    if public_base:
+        return f"{public_base}/quick-setup.html"
+    return "http://43.167.237.120/quick-setup.html"
+
+
+def _terminate_tool_r18_daemon_processes() -> None:
+    patterns = [
+        "src/daemon.ts",
+        "src\\daemon.ts",
+        "tool_r18",
+    ]
+    try:
+        status = _read_small_json_file(_tool_r18_process_status_file())
+        pid = str(status.get("pid") or "").strip()
+        if pid.isdigit():
+            os.kill(int(pid), signal.SIGTERM)
+            time.sleep(1)
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    except Exception as exc:
+        logger.warning("Failed to stop Tool_R18 daemon by status pid: %s", exc)
+    if os.name == "nt":
+        return
+    for pattern in patterns:
+        try:
+            subprocess.run(["pkill", "-TERM", "-f", pattern], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    time.sleep(1)
+    for pattern in patterns[:2]:
+        try:
+            subprocess.run(["pkill", "-KILL", "-f", pattern], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    _write_small_json_file(
+        _tool_r18_process_status_file(),
+        {"state": "stopped", "pid": "", "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")},
+    )
+
+
+def _tool_r18_external_supervisor_available() -> bool:
+    # In the Docker image, PID 1 is docker/entrypoint.sh and owns the desired-state loop.
+    # Local portable/webapp runs do not have that loop, so webapp must start the daemon itself.
+    if os.name == "nt":
+        return False
+    try:
+        cmdline = Path("/proc/1/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "ignore")
+    except Exception:
+        return False
+    return "entrypoint.sh" in cmdline and "/app/docker/entrypoint.sh" in cmdline
+
+
+def _start_tool_r18_daemon_process() -> None:
+    if _tool_r18_external_supervisor_available():
+        return
+    snapshot = _tool_r18_process_snapshot()
+    if snapshot.get("running"):
+        return
+    token = _tg_bot_token()
+    if not token:
+        raise RuntimeError("Telegram Bot Token 尚未配置，無法啟動 Bot。")
+    project_dir = _tool_r18_project_dir()
+    daemon_path = project_dir / "src" / "daemon.ts"
+    if not daemon_path.exists():
+        raise RuntimeError(f"找不到 Tool_R18 daemon：{daemon_path}")
+    env = os.environ.copy()
+    local_env_path = _tool_r18_local_bot_env_path()
+    if local_env_path.exists():
+        try:
+            for line in local_env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, value = stripped.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip("\"'")
+                if key and value and not env.get(key):
+                    env[key] = value
+        except Exception as exc:
+            logger.warning("Failed to load Tool_R18 local env for daemon: %s", exc)
+    env.setdefault("TOOL_R18_RUNTIME_DIR", str(_tool_r18_runtime_dir()))
+    env.setdefault("AUTO_TWEET_RUNTIME_DIR", str(_tool_r18_runtime_dir()))
+    env.setdefault("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", str(_tool_r18_bot_token_file()))
+    env.setdefault("TOOL_R18_LOCAL_BOT_ENV_PATH", str(local_env_path))
+    env.setdefault("TOOL_R18_INTERNAL_WEBAPP_BASE_URL", "http://127.0.0.1:8098")
+    env.setdefault("TOOL_R18_UPLOAD_HOST_DIR", str(TOOL_R18_UPLOAD_ROOT))
+    env.setdefault("VMOS_MEDIA_STAGING_DIR", str(TOOL_R18_UPLOAD_ROOT))
+    env.setdefault("TOOL_R18_PUBLIC_URL", "http://43.167.237.120")
+    env.setdefault("VMOS_MEDIA_STAGING_PUBLIC_BASE_URL", "http://43.167.237.120:19198")
+    env.setdefault("TELEGRAM_PROXY_URL", "direct")
+    env["TELEGRAM_BOT_TOKEN"] = token
+    _terminate_tool_r18_daemon_processes()
+    stdout_path = _tool_r18_runtime_dir() / "daemon.stdout.log"
+    stderr_path = _tool_r18_runtime_dir() / "daemon.stderr.log"
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout = stdout_path.open("ab")
+    stderr = stderr_path.open("ab")
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(
+        ["node", "--import", "tsx", "src/daemon.ts"],
+        cwd=str(project_dir),
+        env=env,
+        stdout=stdout,
+        stderr=stderr,
+        stdin=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+    _write_small_json_file(
+        _tool_r18_process_status_file(),
+        {"state": "running", "pid": str(process.pid), "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")},
+    )
+
+
+_TOOL_R18_STOP_RESPONDER_STARTED = False
+_TOOL_R18_STOP_RESPONDER_LOCK = threading.Lock()
+
+
+def _tool_r18_stop_responder_loop() -> None:
+    logger.info("Tool_R18 stop-state /start responder started")
+    while True:
+        try:
+            snapshot = _tool_r18_process_snapshot()
+            if snapshot.get("desired") != "stopped":
+                time.sleep(2)
+                continue
+            token = _tg_bot_token()
+            if not token:
+                time.sleep(5)
+                continue
+            offset_state = _read_small_json_file(_tool_r18_stop_responder_offset_file())
+            offset = int(offset_state.get("offset") or 0)
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getUpdates",
+                params={"timeout": 5, "offset": offset, "allowed_updates": json.dumps(["message", "callback_query"])},
+                timeout=10,
+            )
+            data = resp.json() if resp.ok else {}
+            if not data.get("ok"):
+                time.sleep(3)
+                continue
+            max_update_id = offset - 1
+            for update in data.get("result") or []:
+                try:
+                    update_id = int(update.get("update_id") or 0)
+                    max_update_id = max(max_update_id, update_id)
+                    message = update.get("message") or {}
+                    text = str(message.get("text") or "").strip()
+                    chat = message.get("chat") or {}
+                    chat_id = chat.get("id")
+                    if not chat_id or text.split(maxsplit=1)[0].lower() != "/start":
+                        continue
+                    setup_url = _quick_setup_public_url()
+                    reply_text = (
+                        "Bot 目前已在簡易配置頁停止，完整功能不會被調用。\n\n"
+                        "請點擊下方連結完成 Bot Token / Grok Key 設定，然後點擊「啟動 Bot 進程」。\n"
+                        f"{setup_url}"
+                    )
+                    requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": reply_text,
+                            "reply_markup": {"inline_keyboard": [[{"text": "打開簡易配置", "url": setup_url}]]},
+                        },
+                        timeout=10,
+                    )
+                except Exception as exc:
+                    logger.warning("Tool_R18 stop responder update failed: %s", exc)
+            if max_update_id >= offset:
+                _write_small_json_file(_tool_r18_stop_responder_offset_file(), {"offset": max_update_id + 1})
+        except Exception as exc:
+            logger.warning("Tool_R18 stop responder loop error: %s", exc)
+            time.sleep(5)
+
+
+def _ensure_tool_r18_stop_responder_started() -> None:
+    global _TOOL_R18_STOP_RESPONDER_STARTED
+    with _TOOL_R18_STOP_RESPONDER_LOCK:
+        if _TOOL_R18_STOP_RESPONDER_STARTED:
+            return
+        thread = threading.Thread(target=_tool_r18_stop_responder_loop, name="tool-r18-stop-responder", daemon=True)
+        thread.start()
+        _TOOL_R18_STOP_RESPONDER_STARTED = True
 
 
 def _runtime_comfy_gpu_max_concurrency() -> int:
@@ -14747,6 +15086,10 @@ class RuntimeConfigPayload(BaseModel):
     cleanup_retention_days: int = 7
 
 
+class QuickSetupProcessPayload(BaseModel):
+    action: str
+
+
 class LlmModelsPayload(BaseModel):
     llm_base_url: str = ""
     llm_api_key: str = ""
@@ -14857,6 +15200,10 @@ def create_app() -> FastAPI:
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
     app.mount("/tool_r18_uploads", StaticFiles(directory=str(TOOL_R18_UPLOAD_ROOT)), name="tool_r18_uploads")
 
+    @app.on_event("startup")
+    def start_tool_r18_stop_responder() -> None:
+        _ensure_tool_r18_stop_responder_started()
+
     @app.get("/", include_in_schema=False)
     def root(request: Request) -> RedirectResponse:
         token = str(request.cookies.get(SESSION_COOKIE) or "").strip()
@@ -14910,9 +15257,133 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/quick-setup.html", include_in_schema=False)
+    def page_quick_setup() -> HTMLResponse:
+        return _html_response_with_versions(
+            "quick-setup.html",
+            replacements={
+                "__STYLE_VERSION__": _asset_version("assets", "style.css"),
+                "__QUICK_SETUP_JS_VERSION__": _asset_version("assets", "quick-setup.js"),
+            },
+        )
+
     @app.get("/batch.html", include_in_schema=False)
     def page_batch() -> FileResponse:
         return FileResponse(str(STATIC_DIR / "batch.html"))
+
+    @app.get("/api/quick_setup/status")
+    def api_quick_setup_status():
+        try:
+            with db() as conn:
+                runtime = _get_runtime_config(conn)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        token = _tg_bot_token()
+        llm_key = str(runtime.get("llm_api_key_gpt") or runtime.get("llm_api_key") or "").strip()
+        public_runtime = {
+            "telegram_bot_token": "",
+            "telegram_bot_token_configured": bool(token),
+            "telegram_bot_token_masked": _mask_secret(token) if token else "",
+            "llm_base_url": str(runtime.get("llm_base_url") or "").strip(),
+            "llm_api_key": "",
+            "llm_api_key_configured": bool(llm_key),
+            "llm_api_key_masked": _mask_secret(llm_key) if llm_key else "",
+            "llm_api_key_gpt": "",
+            "llm_api_key_gpt_configured": bool(llm_key),
+            "llm_api_key_gpt_masked": _mask_secret(llm_key) if llm_key else "",
+            "llm_default_model": str(runtime.get("llm_default_model") or "").strip(),
+            "llm_default_model_gpt": str(runtime.get("llm_default_model_gpt") or "").strip(),
+            "llm_model_priority_order": str(runtime.get("llm_model_priority_order") or "").strip(),
+        }
+        return {
+            "ok": True,
+            "public_setup": True,
+            "runtime_config": public_runtime,
+            "process": _tool_r18_process_snapshot(),
+        }
+
+    @app.post("/api/quick_setup/runtime_config")
+    def api_quick_setup_update_runtime_config(payload: RuntimeConfigPayload):
+        try:
+            with db() as conn:
+                current_runtime = _get_runtime_config(conn)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        explicit = payload.model_dump(exclude_unset=True)
+        secret_keys = {
+            "telegram_bot_token",
+            "remote_comfy_gateway_token",
+            "local_comfy_gateway_token",
+            "llm_api_key",
+            "llm_api_key_gpt",
+            "llm_api_key_gemini",
+            "mulerouter_api_key",
+            "image_model_provider_api_key_gemini",
+            "image_model_provider_api_key_gpt",
+            "upload_file_api_key",
+        }
+        for key in list(secret_keys):
+            if key in explicit and not str(explicit.get(key) or "").strip():
+                explicit.pop(key, None)
+
+        merged = dict(DEFAULT_RUNTIME_CONFIG)
+        if isinstance(current_runtime, dict):
+            merged.update(current_runtime)
+        merged.update({k: str(v).strip() if isinstance(v, str) else v for k, v in explicit.items()})
+
+        try:
+            merged = _normalize_runtime_config(merged)
+            with _RUNTIME_CONFIG_LOCK:
+                _write_runtime_config_file(merged)
+            new_token = str(explicit.get("telegram_bot_token") or "").strip()
+            if new_token:
+                _write_tool_r18_bot_token_files(new_token)
+            _sync_tool_r18_api_config_from_runtime(merged, explicit)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return api_quick_setup_status()
+
+    @app.delete("/api/quick_setup/telegram_bot_token")
+    def api_quick_setup_clear_telegram_bot_token():
+        try:
+            with db() as conn:
+                current_runtime = _get_runtime_config(conn)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        merged = dict(DEFAULT_RUNTIME_CONFIG)
+        if isinstance(current_runtime, dict):
+            merged.update(current_runtime)
+        merged["telegram_bot_token"] = ""
+        try:
+            merged = _normalize_runtime_config(merged)
+            with _RUNTIME_CONFIG_LOCK:
+                _write_runtime_config_file(merged)
+            _clear_tool_r18_bot_token_files()
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return api_quick_setup_status()
+
+    @app.post("/api/quick_setup/process")
+    def api_quick_setup_process(payload: QuickSetupProcessPayload):
+        action = str(payload.action or "").strip().lower()
+        if action not in {"start", "stop"}:
+            raise HTTPException(status_code=400, detail="action 必須是 start 或 stop")
+        process = _write_tool_r18_process_desired("running" if action == "start" else "stopped")
+        if action == "stop":
+            _terminate_tool_r18_daemon_processes()
+            process = _tool_r18_process_snapshot()
+        elif not _tool_r18_external_supervisor_available():
+            try:
+                _start_tool_r18_daemon_process()
+                time.sleep(1)
+                process = _tool_r18_process_snapshot()
+            except Exception as exc:
+                _write_tool_r18_process_desired("stopped")
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        status = api_quick_setup_status()
+        status["process"] = process
+        return status
 
     @app.post("/api/auth/register")
     def api_register(payload: RegisterPayload):
