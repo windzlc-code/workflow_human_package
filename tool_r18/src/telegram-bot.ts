@@ -5838,7 +5838,7 @@ async function rewritePersonaIntroWithCodex(archive: any, userText: string, mode
 }
 
 const GENERATED_POST_IMAGE_TARGET_COUNT = 4;
-const GENERATED_POST_IMAGE_MAX_ATTEMPTS = 1;
+const GENERATED_POST_IMAGE_MAX_ATTEMPTS = 6;
 
 function buildGeneratedPostImageVisualBrief(archiveName: string, postContent: string, userVisualInstruction?: string) {
   const cleanPost = String(postContent || "")
