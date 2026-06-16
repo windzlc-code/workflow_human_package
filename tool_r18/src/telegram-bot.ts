@@ -7340,19 +7340,30 @@ async function regenerateArchivePostImage(args: {
   if (!archive) throw new Error("人设不存在");
   const post = archive.posts.find((item) => item.id === args.postId);
   if (!post) throw new Error("推文不存在");
-  const image = args.chatId
-    ? await submitGeneratedPostImageCandidateTask({
+  const hasExplicitPersonaReference = Boolean(getExplicitPersonaReferenceImageUrl(archive));
+  if (!isWorkflowPersonaListItem(archive) && !hasExplicitPersonaReference) {
+    throw new Error("此人設尚未生成人設圖，請先生成人設圖後再生成推文配圖。");
+  }
+  const image = !isWorkflowPersonaListItem(archive) && hasExplicitPersonaReference
+    ? await generateClosedPersonaPostImage({
+      archiveId: args.archiveId,
+      archiveName: archive.name,
+      post,
+      prompt: post.content,
+    }).then((result) => ({ ok: result.ok, imageUrl: result.imageUrl, error: result.error }))
+    : args.chatId
+      ? await submitGeneratedPostImageCandidateTask({
       chatId: args.chatId,
       archiveId: args.archiveId,
       archiveName: archive.name,
       post,
       prompt: post.content,
-      hasPersonaReferenceImage: Boolean(getExplicitPersonaReferenceImageUrl(archive)),
-    }).then((result) => ({ ok: result.ok, imageUrl: result.imageUrl, error: result.error }))
-    : await generatePersonaImageForArchive(args.archiveId, post.content).catch((error) => ({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    }));
+      hasPersonaReferenceImage: hasExplicitPersonaReference,
+      }).then((result) => ({ ok: result.ok, imageUrl: result.imageUrl, error: result.error }))
+      : await generatePersonaImageForArchive(args.archiveId, post.content).catch((error) => ({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
   if (!image?.ok || !image.imageUrl) {
     throw new Error(image?.error || "图片生成失败");
   }
@@ -7376,6 +7387,10 @@ async function generateArchivePostImageCandidates(args: {
   if (!archive) throw new Error("\u4EBA\u8A2D\u4E0D\u5B58\u5728");
   const post = archive.posts.find((item) => item.id === args.postId);
   if (!post) throw new Error("\u63A8\u6587\u4E0D\u5B58\u5728");
+  const hasExplicitPersonaReference = Boolean(getExplicitPersonaReferenceImageUrl(archive));
+  if (!isWorkflowPersonaListItem(archive) && !hasExplicitPersonaReference) {
+    throw new Error("此人設尚未生成人設圖，請先生成人設圖後再生成推文配圖。");
+  }
   const imageUrls: string[] = [];
   const errors: string[] = [];
   for (let attemptIndex = 1; imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT && attemptIndex <= GENERATED_POST_IMAGE_MAX_ATTEMPTS; attemptIndex += 1) {
@@ -7386,24 +7401,34 @@ async function generateArchivePostImageCandidates(args: {
       "If the tweet mentions clothes, wardrobe, closet, teacher clothes, school clothes, outfit try-on, or sorting clothes, the image must show the persona with those clothes/outfit and a matching wardrobe/room context, not a generic portrait.",
       `Candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: keep the same persona identity and tweet context, but vary composition, distance, pose, lighting, or scene details from the other candidates.`,
     ].join("\n");
-    const image = args.chatId
-      ? await submitGeneratedPostImageCandidateTask({
+    const image = !isWorkflowPersonaListItem(archive) && hasExplicitPersonaReference
+      ? await generateClosedPersonaPostImage({
+        archiveId: args.archiveId,
+        archiveName: archive.name,
+        post,
+        prompt,
+      }).catch((error) => ({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }))
+      : args.chatId
+        ? await submitGeneratedPostImageCandidateTask({
         chatId: args.chatId,
         archiveId: args.archiveId,
         archiveName: archive.name,
         post,
         prompt,
-        hasPersonaReferenceImage: Boolean(getExplicitPersonaReferenceImageUrl(archive)),
-      }).catch((error) => ({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      }))
-      : await generatePersonaImageForArchive(args.archiveId, post.content, {
-        customVisualInstruction: prompt,
-      }).catch((error) => ({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      }));
+        hasPersonaReferenceImage: hasExplicitPersonaReference,
+        }).catch((error) => ({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }))
+        : await generatePersonaImageForArchive(args.archiveId, post.content, {
+          customVisualInstruction: prompt,
+        }).catch((error) => ({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }));
     const urls = collectGeneratedImageUrls(image);
     if (urls.length) {
       for (const url of urls) {
@@ -13930,6 +13955,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      if (!isWorkflowPersonaListItem(archive) && !getExplicitPersonaReferenceImageUrl(archive)) {
+        await safeEditOrSend(bot, chatId, msgId, [
+          "⚠️ 此人設尚未生成人設圖。",
+          "推文配圖必須先使用人設圖鎖定人物長相，請先生成人設圖後再繼續。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🎨 生成人設圖", callback_data: `genimg_${action.archiveId}` }],
+              [{ text: "◀️ 返回推文列表", callback_data: `posts_${action.archiveId}` }],
+            ],
+          },
+        });
+        return;
+      }
       const displayIndex = action.displayIndex || (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
       pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: action.postId });
       await safeEditOrSend(bot, chatId, msgId, `🖼 正在重新生成第 ${displayIndex} 篇配图候选，共 4 张...`, {
@@ -13939,31 +13978,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       try {
         const result = await generateArchivePostImageCandidates({ ...action, chatId });
         stopTyping();
-        for (let candidateIndex = 0; candidateIndex < result.imageUrls.length; candidateIndex += 1) {
-          const imageUrl = result.imageUrls[candidateIndex];
-          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(imageUrl), {
-            caption: `🖼 第 ${displayIndex} 篇候选配图 ${candidateIndex + 1}/${result.imageUrls.length}\n请点下方按钮选择写入推文。`,
-            reply_markup: buildPostImageCandidateKeyboard({
-              archiveId: action.archiveId,
-              postId: action.postId,
-              content: result.content,
-              imageUrl,
-              displayIndex,
-              candidateIndex: candidateIndex + 1,
-            }),
-          }).catch(async () => {
-            await bot.sendMessage(chatId, `🖼 第 ${displayIndex} 篇候选配图 ${candidateIndex + 1}/${result.imageUrls.length}\n\u8BF7\u70B9\u4E0B\u65B9\u6309\u94AE\u9009\u62E9\u5199\u5165\u63A8\u6587\u3002`, {
-              reply_markup: buildPostImageCandidateKeyboard({
-                archiveId: action.archiveId,
-                postId: action.postId,
-                content: result.content,
-                imageUrl,
-                displayIndex,
-                candidateIndex: candidateIndex + 1,
-              }),
-            });
-          });
-        }
+        await sendPostImageCandidateGroupMessage(bot, chatId, {
+          archiveId: action.archiveId,
+          postId: action.postId,
+          content: result.content,
+          imageUrls: result.imageUrls,
+          displayIndex,
+          totalPosts: archive.posts.length || 1,
+        });
       } catch (error) {
         stopTyping();
         await bot.sendMessage(chatId, `❌ 图片生成失敗：${formatUserFacingError(error, "图片生成失败，请稍后重试。")}`, {
@@ -13990,6 +14012,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const isImageOnly = data === "post_img_regen";
+      if (isImageOnly && !isWorkflowPersonaListItem(archive) && !getExplicitPersonaReferenceImageUrl(archive)) {
+        await safeEditOrSend(bot, chatId, msgId, [
+          "⚠️ 此人設尚未生成人設圖。",
+          "推文配圖必須先使用人設圖鎖定人物長相，請先生成人設圖後再繼續。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🎨 生成人設圖", callback_data: `genimg_${action.archiveId}` }],
+              [{ text: "◀️ 返回推文列表", callback_data: `posts_${action.archiveId}` }],
+            ],
+          },
+        });
+        return;
+      }
       await safeEditOrSend(
         bot,
         chatId,
@@ -14005,31 +14041,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
           const result = await generateArchivePostImageCandidates({ ...action, chatId });
           stopTyping();
           const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
-          for (let candidateIndex = 0; candidateIndex < result.imageUrls.length; candidateIndex += 1) {
-            const imageUrl = result.imageUrls[candidateIndex];
-            await bot.sendPhoto(chatId, resolveTelegramPhotoInput(imageUrl), {
-              caption: `🖼 这篇推文候选配图 ${candidateIndex + 1}/${result.imageUrls.length}\n请点下方按钮选择写入推文。`,
-              reply_markup: buildPostImageCandidateKeyboard({
-                archiveId: action.archiveId,
-                postId: action.postId,
-                content: result.content,
-                imageUrl,
-                displayIndex,
-                candidateIndex: candidateIndex + 1,
-              }),
-            }).catch(async () => {
-              await bot.sendMessage(chatId, `🖼 这篇推文候选配图 ${candidateIndex + 1}/${result.imageUrls.length}\n\u8BF7\u70B9\u4E0B\u65B9\u6309\u94AE\u9009\u62E9\u5199\u5165\u63A8\u6587\u3002`, {
-                reply_markup: buildPostImageCandidateKeyboard({
-                  archiveId: action.archiveId,
-                  postId: action.postId,
-                  content: result.content,
-                  imageUrl,
-                  displayIndex,
-                  candidateIndex: candidateIndex + 1,
-                }),
-              });
-            });
-          }
+          await sendPostImageCandidateGroupMessage(bot, chatId, {
+            archiveId: action.archiveId,
+            postId: action.postId,
+            content: result.content,
+            imageUrls: result.imageUrls,
+            displayIndex,
+            totalPosts: archive.posts.length || 1,
+          });
         } else {
           const updated = await regenerateArchivePostContent(action);
           stopTyping();
