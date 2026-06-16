@@ -10,6 +10,7 @@ import {
   buildPostDetailActionRows,
   buildStoredPostsListView,
   derivePersonaSpecFromPrompt,
+  filterPersonaMenuList,
   formatCloudAccountStateNotice,
   formatUserFacingError,
   inferStoredPostMediaKind,
@@ -128,6 +129,20 @@ describe("buildPersonaSettingsRows", () => {
     expect(texts).not.toContain("🎨 生成人设图");
     expect(texts).toContain("👁 查看人设图");
     expect(texts).toContain("🔄 重新生成人设图");
+  });
+});
+
+describe("filterPersonaMenuList", () => {
+  it("keeps newly created personas visible even when workflow personas exist", () => {
+    const list = filterPersonaMenuList([
+      { id: "c452e276-cc6c-40c0-855b-00e1a32a68bf", name: "高校讲台老师", postCount: 0 },
+      { id: "workflow-persona-jinjunya", name: "金君雅", imageWorkflow: true, postCount: 38 },
+    ]);
+
+    expect(list.map((item) => item.id)).toEqual([
+      "c452e276-cc6c-40c0-855b-00e1a32a68bf",
+      "workflow-persona-jinjunya",
+    ]);
   });
 });
 

@@ -2760,9 +2760,8 @@ function formatPersonaSummaryLine(persona: any, index: number) {
     : `【${index + 1}】${name}：${count} 篇待發佈`;
 }
 
-function filterPersonaMenuList(list: PersonaListSummary[]) {
-  const workflowList = list.filter(isWorkflowPersonaListItem);
-  return workflowList.length ? workflowList : list;
+export function filterPersonaMenuList(list: PersonaListSummary[]) {
+  return list;
 }
 
 type PersonaListSummary = {
