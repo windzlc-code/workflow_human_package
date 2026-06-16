@@ -16554,6 +16554,82 @@ async function submitSavedTelegramEmailAndInspect(
 
 const PKG_THREADS = "com.instagram.barcelona";
 
+async function detectThreadsLoginActivityInFocus(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string | null> {
+  const focusText = await execAdbForText(
+    config,
+    padCode,
+    "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | head -n 8",
+    20000,
+    1000,
+  ).catch(() => "");
+  if (/com\.instagram\.barcelona\/\.login\.activity\.LoginActivity/i.test(focusText)) {
+    return focusText.trim();
+  }
+  return null;
+}
+
+async function detectThreadsModalActivityInFocus(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string | null> {
+  const focusText = await execAdbForText(
+    config,
+    padCode,
+    "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | head -n 8",
+    20000,
+    1000,
+  ).catch(() => "");
+  if (/com\.instagram\.barcelona\/com\.instagram\.modal\.ModalActivity/i.test(focusText)) {
+    return focusText.trim();
+  }
+  return null;
+}
+
+async function detectThreadsMainActivityInFocus(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string | null> {
+  const focusText = await execAdbForText(
+    config,
+    padCode,
+    "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | head -n 8",
+    20000,
+    1000,
+  ).catch(() => "");
+  if (/com\.instagram\.barcelona\/\.mainactivity\.BarcelonaActivity/i.test(focusText)) {
+    return focusText.trim();
+  }
+  return null;
+}
+
+async function getThreadsWindowText(config: VmosConfig, padCode: string): Promise<string> {
+  return execAdbForText(
+    config,
+    padCode,
+    "uiautomator dump /sdcard/window.xml >/dev/null 2>&1; cat /sdcard/window.xml",
+    30000,
+    1000,
+  ).catch(() => "");
+}
+
+async function fallbackThreadsLoginActivityClassification(
+  config: VmosConfig,
+  padCode: string,
+  current: { page: string; confidence: number; evidence: string },
+): Promise<{ page: string; confidence: number; evidence: string }> {
+  if (current.page !== "unknown") return current;
+  const focusText = await detectThreadsLoginActivityInFocus(config, padCode);
+  if (!focusText) return current;
+  return {
+    page: "login_account_picker",
+    confidence: Math.max(current.confidence, 0.82),
+    evidence: `前台是 Threads LoginActivity，视觉模型误判为 unknown；${current.evidence || focusText.slice(0, 80)}`,
+  };
+}
+
 async function classifyThreadsPage(
   config: VmosConfig,
   padCode: string,
@@ -16568,7 +16644,7 @@ async function classifyThreadsPage(
 类型枚举：
 - home_feed              主页 feed（已登录，看到他人帖子流）
 - profile_page           个人主页（看到自己头像 + 用户名）
-- login_account_picker   登录-账号选择页（历史 IG 账号卡片 + 「使用其他帳號」链接，无输入框）
+- login_account_picker   登录入口/账号选择页（Threads 欢迎页中只有「使用 Instagram 帳號登入 / Log in with Instagram」白色卡片，或历史 IG 账号卡片 +「使用其他帳號」链接，无输入框）
 - login_username_form    登录-用户名表单（单一文本输入框 + 「下一步」按钮）
 - login_password_form    登录-密码表单（有密码输入框 + 「登入/Log in」按钮）
 - login_2fa_choice       登录-2FA 验证方式选择页
@@ -16590,18 +16666,36 @@ async function classifyThreadsPage(
   );
   const text = (extractText(raw) || "").trim().replace(/^```json\s*/i, "").replace(/```\s*$/, "");
   // 用更宽松的正则匹配 JSON 对象（允许 evidence 里有引号）
-  const jsonMatch = text.match(/\{[\s\S]*?\}/);
-  if (!jsonMatch) return { page: "unknown", confidence: 0, evidence: text.slice(0, 80) };
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    return fallbackThreadsLoginActivityClassification(config, padCode, {
+      page: "unknown",
+      confidence: 0,
+      evidence: text.slice(0, 80),
+    });
+  }
   try {
     const json = JSON.parse(jsonMatch[0]);
-    return { page: json.page || "unknown", confidence: json.confidence || 0, evidence: json.evidence || "" };
+    return fallbackThreadsLoginActivityClassification(config, padCode, {
+      page: json.page || "unknown",
+      confidence: json.confidence || 0,
+      evidence: json.evidence || "",
+    });
   } catch {
     // 尝试直接解析整个 text
     try {
       const json = JSON.parse(text);
-      return { page: json.page || "unknown", confidence: json.confidence || 0, evidence: json.evidence || "" };
+      return fallbackThreadsLoginActivityClassification(config, padCode, {
+        page: json.page || "unknown",
+        confidence: json.confidence || 0,
+        evidence: json.evidence || "",
+      });
     } catch {
-      return { page: "unknown", confidence: 0, evidence: text.slice(0, 80) };
+      return fallbackThreadsLoginActivityClassification(config, padCode, {
+        page: "unknown",
+        confidence: 0,
+        evidence: text.slice(0, 80),
+      });
     }
   }
 }
@@ -16678,7 +16772,7 @@ async function login_launchThreads(config: VmosConfig, padCode: string) {
   await execAdbForText(
     config,
     padCode,
-    `am start -n ${PKG_THREADS}/.activity.MainActivity 2>/dev/null`,
+    `monkey -p ${PKG_THREADS} -c android.intent.category.LAUNCHER 1`,
     15000,
     1000,
   ).catch(() => "");
@@ -16690,6 +16784,69 @@ async function login_dismissKeyboard(config: VmosConfig, padCode: string) {
   if (out.includes("mInputShown=true")) {
     await login_pressBack(config, padCode);
   }
+}
+
+async function login_fillInstagramCombinedFormByCoordinates(
+  config: VmosConfig,
+  padCode: string,
+  handle: string,
+  password: string,
+) {
+  // ADB 的实际触控坐标是 720x1280；VMOS 截图会拉成 720x1600。
+  // 这里使用实测物理坐标，避免视觉模型误点或键盘遮挡导致输入错位。
+  await execAdbAndWait(config, padCode, "input tap 360 600", 8000, 500);
+  await login_inputText(config, padCode, handle);
+
+  await login_dismissKeyboard(config, padCode);
+  await execAdbAndWait(config, padCode, "input tap 360 760", 8000, 500);
+  await login_inputText(config, padCode, password);
+
+  await login_dismissKeyboard(config, padCode);
+  await execAdbAndWait(config, padCode, "input tap 360 895; sleep 8", 20000, 1000);
+}
+
+async function login_completeThreadsFirstRunScreens(config: VmosConfig, padCode: string) {
+  // 登录成功后 Threads 可能出现「储存登录资料」和首次使用体验设置页。
+  // 这些页面在 MainActivity 内，视觉分类容易返回 unknown；用已验证坐标推进。
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (await detectThreadsModalActivityInFocus(config, padCode)) return false;
+    if (!await detectThreadsMainActivityInFocus(config, padCode)) return false;
+
+    const windowText = await getThreadsWindowText(config, padCode);
+    if (/你已登出|您已登出|已登出|請重新登入|请重新登录|Log in again|logged out/i.test(windowText)) return false;
+    if (/有什麼新鮮事|有什么新鲜事|首頁|主页|首頁|Home|搜尋|搜索|Search|通知|Notifications/i.test(windowText)) return true;
+
+    const result = await classifyThreadsPage(config, padCode).catch(() => null);
+    if (result?.page === "home_feed" || result?.page === "profile_page") return true;
+    if (result?.page === "login_username_form" || result?.page === "login_password_form" || result?.page === "login_account_picker") return false;
+    if (result?.page === "otp_input" || result?.page === "login_2fa_choice" || result?.page === "login_2fa_device_push" || result?.page === "challenge_other" || result?.page === "account_disabled") return false;
+
+    if (/儲存.*登入|储存.*登录|保存.*登录|Save.*login|登入資料|登录资料/i.test(windowText)) {
+      await execAdbAndWait(config, padCode, "input tap 360 1085; sleep 3", 12000, 500).catch(() => undefined);
+      continue;
+    }
+
+    if (/設定你的使用體驗|设定你的使用体验|使用體驗|使用体验|公開個人檔案|公开个人档案|Public profile/i.test(windowText)) {
+      await execAdbAndWait(config, padCode, "input tap 360 1180; sleep 3", 12000, 500).catch(() => undefined);
+      continue;
+    }
+
+    await delay(1500);
+  }
+  return false;
+}
+
+async function openThreadsInstagramLoginModalFromWelcome(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string | null> {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const modalFocus = await detectThreadsModalActivityInFocus(config, padCode);
+    if (modalFocus) return modalFocus;
+
+    await execAdbAndWait(config, padCode, "input tap 605 780; sleep 3", 20000, 1000);
+  }
+  return detectThreadsModalActivityInFocus(config, padCode);
 }
 
 export async function loginThreadsAccount(
@@ -16707,9 +16864,32 @@ export async function loginThreadsAccount(
   // Step 2: 关闭系统 autofill
   await execAdbForText(config, padCode, "settings put secure autofill_service null", 5000, 500).catch(() => "");
 
+  // Threads 首屏是自绘欢迎页，UIAutomator/视觉模型会偶发误判为桌面。
+  // 先等欢迎页稳定，再无害点击一次「使用 Instagram 帳號登入」卡片的物理坐标。
+  await delay(3000);
+  const openedModalFocus = await openThreadsInstagramLoginModalFromWelcome(config, padCode);
+
   // Step 3: 识别当前页面（等待 Threads 完全启动，最多 30 秒）
   let { page, evidence } = { page: "unknown", evidence: "" };
+  const initialModalFocus = openedModalFocus || await detectThreadsModalActivityInFocus(config, padCode);
+  if (initialModalFocus) {
+    page = "login_password_form";
+    evidence = `前台是 Instagram ModalActivity，按账号密码同页表单继续；${initialModalFocus.slice(0, 80)}`;
+  }
   for (let attempt = 0; attempt < 6; attempt++) {
+    if (page !== "unknown") break;
+    const modalFocus = await detectThreadsModalActivityInFocus(config, padCode);
+    if (modalFocus) {
+      page = "login_password_form";
+      evidence = `前台是 Instagram ModalActivity，按账号密码同页表单继续；${modalFocus.slice(0, 80)}`;
+      break;
+    }
+    const loginFocus = await detectThreadsLoginActivityInFocus(config, padCode);
+    if (loginFocus) {
+      page = "login_account_picker";
+      evidence = `前台是 Threads LoginActivity，按登录入口页继续；${loginFocus.slice(0, 80)}`;
+      break;
+    }
     const classified = await classifyThreadsPage(config, padCode);
     page = classified.page;
     evidence = classified.evidence;
@@ -16720,25 +16900,64 @@ export async function loginThreadsAccount(
     if (attempt === 2) await login_launchThreads(config, padCode);
   }
 
-  // 如果是账号选择页，点「使用其他帳號」
+  // 如果是账号选择页，优先点「使用 Instagram 帳號登入」入口；历史账号页再点「使用其他帳號」。
   if (page === "login_account_picker") {
-    const otherPos = await findButtonOnScreen(
+    const modalFocus = await openThreadsInstagramLoginModalFromWelcome(config, padCode);
+    if (modalFocus) {
+      page = "login_password_form";
+      evidence = `前台是 Instagram ModalActivity，按账号密码同页表单继续；${modalFocus.slice(0, 80)}`;
+    } else {
+      const classified = await classifyThreadsPage(config, padCode);
+      page = classified.page;
+      evidence = classified.evidence;
+    }
+  }
+
+  if (page === "login_account_picker") {
+    const instagramLoginPos = await findButtonOnScreen(
+      config,
+      padCode,
+      "Threads 欢迎页中间的「使用 Instagram 帳號登入 / Log in with Instagram」白色卡片或其右侧箭头",
+      10000,
+    );
+    if (instagramLoginPos) {
+      await login_tapAndWait(config, padCode, instagramLoginPos.x, instagramLoginPos.y, 3000);
+    } else {
+      const otherPos = await findButtonOnScreen(
+        config,
+        padCode,
+        "Threads 登录页底部的「使用其他帳號 / Use another account / 使用其他账号」灰色文字链接",
+        15000,
+      );
+      if (!otherPos) {
+        return { ok: false, state: "failed", message: `账号选择页找不到 Instagram 登录入口或「使用其他帳號」链接，evidence: ${evidence}` };
+      }
+      await login_tapAndWait(config, padCode, otherPos.x, otherPos.y, 3000);
+    }
+    const classified = await classifyThreadsPage(config, padCode);
+    page = classified.page;
+    evidence = classified.evidence;
+    if (page === "login_account_picker") {
+      const otherPos = await findButtonOnScreen(
       config,
       padCode,
       "Threads 登录页底部的「使用其他帳號 / Use another account / 使用其他账号」灰色文字链接",
       15000,
-    );
-    if (!otherPos) {
-      return { ok: false, state: "failed", message: `账号选择页找不到「使用其他帳號」链接，evidence: ${evidence}` };
+      );
+      if (otherPos) {
+        await login_tapAndWait(config, padCode, otherPos.x, otherPos.y, 3000);
+        const afterOther = await classifyThreadsPage(config, padCode);
+        page = afterOther.page;
+        evidence = afterOther.evidence;
+      }
     }
-    await login_tapAndWait(config, padCode, otherPos.x, otherPos.y, 3000);
-    const classified = await classifyThreadsPage(config, padCode);
-    page = classified.page;
-    evidence = classified.evidence;
   }
 
   // Step 4: 填写登录表单
   if (page === "login_username_form" || page === "login_password_form" || page === "login_account_picker") {
+    if (page === "login_password_form" && await detectThreadsModalActivityInFocus(config, padCode)) {
+      await login_fillInstagramCombinedFormByCoordinates(config, padCode, handle, password);
+    } else {
     // 找用户名输入框
     const uPos = await findButtonOnScreen(
       config,
@@ -16832,12 +17051,18 @@ export async function loginThreadsAccount(
       }
       await login_tapAndWait(config, padCode, loginPos2.x, loginPos2.y, 6000);
     }
+    }
   } else {
     return { ok: false, state: "failed", message: `登录前页面异常: ${page}，evidence: ${evidence}` };
   }
 
   // Step 5: 验证登录结果（最多 4 轮）
   for (let round = 0; round < 4; round++) {
+    if (await login_completeThreadsFirstRunScreens(config, padCode)) {
+      const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+      return { ok: true, state: "logged_in", message: "登录成功，当前已进入 Threads", screenshotUrl: shotUrl };
+    }
+
     const result = await classifyThreadsPage(config, padCode);
     page = result.page;
     evidence = result.evidence;
@@ -16848,17 +17073,8 @@ export async function loginThreadsAccount(
     }
 
     if (page === "save_login_info") {
-      // 自动点「暫不 / Not now」
-      const notNowPos = await findButtonOnScreen(
-        config,
-        padCode,
-        "「儲存您的登入資料？」提示页中的「暫不 / Not now / 稍後」按钮（灰色或白色边框，不是蓝色的「儲存」）",
-        10000,
-      );
-      if (notNowPos) {
-        await login_tapAndWait(config, padCode, notNowPos.x, notNowPos.y, 2000);
-        continue;
-      }
+      await execAdbAndWait(config, padCode, "input tap 360 1085; sleep 3", 12000, 500).catch(() => undefined);
+      continue;
     }
 
     if (page === "system_dialog") {
