@@ -5667,8 +5667,28 @@ async function runCodexJsonInstruction(instruction: string): Promise<any> {
     });
     return extractJsonObject(raw);
   } catch (error: any) {
-    console.error("[telegram][ai_json_parse_error]", error?.message || error, normalizeErrorForLog(raw).slice(0, 500));
-    throw error;
+    const message = error?.message || String(error);
+    console.warn("[telegram][codex_json_fallback]", normalizeErrorForLog(message).slice(0, 500));
+    try {
+      const result = await callTextUnderstandingModelWithFallback(
+        "xai/grok-4.3",
+        [{ role: "user", parts: [{ text: instruction }] }],
+        {
+          maxOutputTokens: 4096,
+          temperature: 0.35,
+        },
+        undefined,
+        {
+          isUsableResponse: (data) => Boolean(extractText(data).trim()),
+          isRetryableError: isTextModelFallbackError,
+        },
+      );
+      raw = extractText(result.data).trim();
+      return extractJsonObject(raw);
+    } catch (fallbackError: any) {
+      console.error("[telegram][ai_json_parse_error]", fallbackError?.message || fallbackError, normalizeErrorForLog(raw).slice(0, 500));
+      throw fallbackError;
+    }
   } finally {
     removeTempFile(promptFile);
     removeTempFile(outputFile);
