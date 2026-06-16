@@ -21,7 +21,7 @@ import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
-import { WORKFLOW_PERSONA_SEEDS } from "@/lib/workflow-personas";
+import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
 import type { DramaSetup, EpisodeScript } from "@/types/drama";
@@ -1295,7 +1295,35 @@ function buildStoredPostsPageCallback(archiveId: string, page: number, groupCont
   return `posts_${archiveId}${suffix}_p${Math.max(0, page)}`;
 }
 
-function buildListPaginationRows(args: {
+const PERSONA_LIST_PAGE_SIZE = 8;
+
+export function buildSimplePagedCallback(root: string, page: number) {
+  const safePage = Math.max(0, Math.floor(page || 0));
+  return safePage > 0 ? `${root}_p${safePage}` : root;
+}
+
+export function parseSimplePagedCallback(data: string, root: string): number | null {
+  if (data === root) return 0;
+  const prefix = `${root}_p`;
+  if (!data.startsWith(prefix)) return null;
+  const page = Number(data.slice(prefix.length));
+  if (!Number.isFinite(page) || page < 0) return null;
+  return Math.floor(page);
+}
+
+function paginateListItems<T>(items: T[], page: number, pageSize = PERSONA_LIST_PAGE_SIZE) {
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(Math.max(0, Math.floor(page || 0)), totalPages - 1);
+  const start = safePage * pageSize;
+  return {
+    page: safePage,
+    totalPages,
+    totalItems: items.length,
+    items: items.slice(start, start + pageSize),
+  };
+}
+
+export function buildListPaginationRows(args: {
   page: number;
   totalPages: number;
   callbackForPage: (page: number) => string;
@@ -1318,6 +1346,60 @@ function buildListPaginationRows(args: {
     ]);
   }
   return rows;
+}
+
+function buildPagedPersonaSelectorPayload(args: {
+  title: string;
+  list: PersonaListSummary[];
+  page?: number;
+  itemCallback: (persona: PersonaListSummary) => string;
+  pageCallbackRoot: string;
+  topRows?: Array<Array<{ text: string; callback_data: string }>>;
+  footerRows?: Array<Array<{ text: string; callback_data: string }>>;
+  emptyText: string;
+  emptyRows?: Array<Array<{ text: string; callback_data: string }>>;
+  buttonText?: (persona: PersonaListSummary) => string;
+  parseMode?: "Markdown";
+  summaryLines?: (visible: PersonaListSummary[], pageInfo: { page: number; totalPages: number; totalItems: number }) => string[];
+}): TelegramMenuPayload {
+  const pageInfo = paginateListItems(args.list, args.page || 0, PERSONA_LIST_PAGE_SIZE);
+  if (args.list.length === 0) {
+    return {
+      text: args.emptyText,
+      options: {
+        ...(args.parseMode ? { parse_mode: args.parseMode } : {}),
+        ...(args.emptyRows?.length ? { reply_markup: { inline_keyboard: args.emptyRows } } : {}),
+      },
+    };
+  }
+  const titleLines = [args.title];
+  if (pageInfo.totalPages > 1) {
+    titleLines.push("", `第 ${pageInfo.page + 1}/${pageInfo.totalPages} 頁`);
+  }
+  const summaries = args.summaryLines?.(pageInfo.items, pageInfo) || [];
+  if (summaries.length) {
+    titleLines.push("", ...summaries);
+  }
+  const keyboard = [
+    ...(args.topRows || []),
+    ...pageInfo.items.map((persona) => ([{
+      text: args.buttonText ? args.buttonText(persona) : formatPersonaButtonText(persona),
+      callback_data: args.itemCallback(persona),
+    }])),
+    ...buildListPaginationRows({
+      page: pageInfo.page,
+      totalPages: pageInfo.totalPages,
+      callbackForPage: (page) => buildSimplePagedCallback(args.pageCallbackRoot, page),
+    }),
+    ...(args.footerRows || []),
+  ];
+  return {
+    text: titleLines.join("\n"),
+    options: {
+      ...(args.parseMode ? { parse_mode: args.parseMode } : {}),
+      reply_markup: { inline_keyboard: keyboard },
+    },
+  };
 }
 
 function buildPersonaHistoryCallback(archiveId: string, groupContentType?: TelegramGroupContentType, page = 0) {
@@ -2188,10 +2270,13 @@ function getCodexExecutable(): string {
   const configured = process.env.CODEX_CLI_PATH?.trim();
   if (configured) return configured;
   if (process.platform === "win32") {
-    const globalCodex = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "npm", "codex.cmd");
-    if (fs.existsSync(globalCodex)) return globalCodex;
-    const localLegacy = path.join(PROJECT_ROOT, "node_modules", ".bin", "codex.cmd");
-    if (fs.existsSync(localLegacy)) return localLegacy;
+    const candidates = [
+      process.env.APPDATA ? path.join(process.env.APPDATA, "npm", "codex.cmd") : "",
+      path.join(os.homedir(), "AppData", "Roaming", "npm", "codex.cmd"),
+      path.join(PROJECT_ROOT, "node_modules", ".bin", "codex.cmd"),
+    ].filter(Boolean);
+    const found = candidates.find((candidate) => fs.existsSync(candidate));
+    if (found) return found;
     return "codex";
   }
   return "codex";
@@ -2238,6 +2323,12 @@ function runCodexDirect(promptFile: string, outputFile: string, env: NodeJS.Proc
   const profile = resolveCodexConfigProfile(childEnv);
   if (profile) {
     args.splice(2, 0, "-p", profile);
+  } else {
+    const botModel = String(childEnv.CODEX_BOT_MODEL || process.env.CODEX_BOT_MODEL || "gpt-5.4-mini").trim();
+    if (botModel) {
+      args.splice(2, 0, "-m", botModel);
+    }
+    args.splice(2, 0, "-c", 'service_tier="fast"');
   }
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
@@ -2508,6 +2599,47 @@ function maskAccountSecret(value?: string | null) {
   if (!raw) return "未設定";
   if (raw.length <= 4) return "•".repeat(raw.length);
   return `${raw.slice(0, 2)}•••${raw.slice(-2)}`;
+}
+
+function normalizeAccountIdentityForCompare(value?: string | null): string {
+  return String(value || "")
+    .trim()
+    .replace(/^@+/, "")
+    .toLowerCase();
+}
+
+function buildComparableAccountIdentities(value?: string | null): string[] {
+  const normalized = normalizeAccountIdentityForCompare(value);
+  if (!normalized) return [];
+  const values = new Set<string>([normalized]);
+  if (normalized.includes("@")) {
+    const localPart = normalized.split("@")[0]?.trim();
+    if (localPart) values.add(localPart);
+  }
+  return [...values].filter(Boolean);
+}
+
+function formatThreadsDetectedAccount(result: { username?: string; email?: string }): string {
+  if (result.username) return `@${normalizeAccountIdentityForCompare(result.username)}`;
+  if (result.email) return normalizeAccountIdentityForCompare(result.email);
+  return "";
+}
+
+function threadsQueryMatchesSavedAccount(result: { username?: string; email?: string }, expected?: string | null): boolean {
+  const expectedIdentities = buildComparableAccountIdentities(expected);
+  if (expectedIdentities.length === 0) return Boolean(result.username || result.email);
+  const candidates = new Set<string>([
+    ...buildComparableAccountIdentities(result.username),
+    ...buildComparableAccountIdentities(result.email),
+  ]);
+  if (candidates.size === 0) return false;
+  return expectedIdentities.some((expectedIdentity) =>
+    [...candidates].some((candidate) =>
+      candidate === expectedIdentity ||
+      candidate.includes(expectedIdentity) ||
+      expectedIdentity.includes(candidate),
+    ),
+  );
 }
 
 function formatPersonaAccountStatus(archive: PersonaArchive) {
@@ -2910,7 +3042,7 @@ async function listPersonasCached(options: { force?: boolean } = {}): Promise<Pe
   return list;
 }
 
-async function sendGeneratePostPersonaList(bot: TelegramBot, chatId: number, messageId?: number) {
+async function sendGeneratePostPersonaList(bot: TelegramBot, chatId: number, messageId?: number, page = 0) {
   const list = filterPersonaMenuList(await listPersonasCached());
   if (!list.length) {
     await safeEditOrSend(bot, chatId, messageId, "目前還沒有人設，請先新建人設。", {
@@ -2918,20 +3050,24 @@ async function sendGeneratePostPersonaList(bot: TelegramBot, chatId: number, mes
     });
     return;
   }
-  await safeEditOrSend(bot, chatId, messageId, "✍️ *新建推文*\n\n請選擇要為哪個人設生成推文：", {
-    parse_mode: "Markdown",
-    reply_markup: {
-      inline_keyboard: [
-        ...chunk(list.map((p: any) => ({ text: formatPersonaButtonText(p), callback_data: "genpost_branch_" + p.id })), 1),
-        [{ text: "◀️ 返回", callback_data: "back_main" }],
-        [{ text: "🏠 主選單", callback_data: "back_main" }],
-      ],
-    },
+  const payload = buildPagedPersonaSelectorPayload({
+    title: "✍️ *新建推文*\n\n請選擇要為哪個人設生成推文：",
+    list,
+    page,
+    itemCallback: (persona) => `genpost_branch_${persona.id}`,
+    pageCallbackRoot: "newpost_branch_picker",
+    footerRows: [
+      [{ text: "◀️ 返回", callback_data: "back_main" }],
+      [{ text: "🏠 主選單", callback_data: "back_main" }],
+    ],
+    emptyText: "目前還沒有人設。",
+    parseMode: "Markdown",
   });
+  await safeEditOrSend(bot, chatId, messageId, payload.text, payload.options);
 }
 
-async function sendGeneratePostPersonaPicker(bot: TelegramBot, chatId: number, messageId?: number) {
-  await sendGeneratePostPersonaList(bot, chatId, messageId);
+async function sendGeneratePostPersonaPicker(bot: TelegramBot, chatId: number, messageId?: number, page = 0) {
+  await sendGeneratePostPersonaList(bot, chatId, messageId, page);
 }
 
 function buildGeneratePostModeCallback(archiveId: string, mode: "textonly" | "withimage", contentBranch?: GeneratePostContentBranch) {
@@ -7419,6 +7555,47 @@ async function sendCurrentPadScreenshot(
   return true;
 }
 
+async function sendAccountActionScreenshot(
+  bot: TelegramBot,
+  chatId: number,
+  padCode: string,
+  screenshotUrl: string | undefined,
+  caption: string,
+) {
+  let lastErrorMessage = "";
+  const trySendPhoto = async (photoUrl: string, source: string) => {
+    try {
+      await Promise.race([
+        bot.sendPhoto(chatId, resolveTelegramPhotoInput(photoUrl), { caption }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("sendPhoto timeout")), 45_000)),
+      ]);
+      console.log(`[telegram][account_screenshot_sent] chat=${chatId} pad=${padCode} source=${source}`);
+      return true;
+    } catch (error: any) {
+      lastErrorMessage = error?.message || String(error);
+      console.warn(`[telegram][account_screenshot_failed] chat=${chatId} pad=${padCode} source=${source} error=${lastErrorMessage}`);
+      return false;
+    }
+  };
+
+  if (
+    screenshotUrl
+    && await trySendPhoto(screenshotUrl, /^data:image\//i.test(screenshotUrl) ? "buffer" : "url")
+  ) {
+    return true;
+  }
+
+  const fallbackUrl = await screenshot(resolveVmosCredentials(), padCode).catch(() => "");
+  if (fallbackUrl && fallbackUrl !== screenshotUrl && await trySendPhoto(fallbackUrl, "fresh")) {
+    return true;
+  }
+
+  await bot.sendMessage(
+    chatId,
+    `${caption}\n截图发送失败：${formatUserFacingError(lastErrorMessage || "没有可用截图", "截图发送失败。")}`,
+  ).catch(() => undefined);
+  return false;
+}
 async function sendManualInterventionFailure(
   bot: TelegramBot,
   chatId: number,
@@ -7688,22 +7865,33 @@ function buildGeneratePostInstruction(args: {
   batchSize?: number;
   contentBranch?: GeneratePostContentBranch;
   contentTimeSlot?: GeneratePostTimeSlot;
+  setup?: Partial<DramaSetup> | null;
 }) {
   const prompt = args.prompt.trim();
   const groupLabel = args.contentBranch ? generatePostContentBranchLabel(args.contentBranch) : "";
   const timeLabel = args.contentTimeSlot ? generatePostTimeSlotLabel(args.contentTimeSlot) : "";
-  const fixedOpening = args.contentTimeSlot === "morning" ? "\u54E5\u54E5\u5011\uFF5E\u65E9\u5B89\u5B89\u2764\uFE0F" : args.contentTimeSlot === "night" ? "\u6DF1\u591C\u798F\u5229\u4F86\u4E86\u3299\uFE0F" : "";
+  const useJinjunyaFreeStyle = args.contentBranch === "nonr18" && usesJinjunyaFreeContentStyle(args.setup);
+  const fixedOpening = useJinjunyaFreeStyle
+    ? (args.contentTimeSlot === "morning" ? "\u54E5\u54E5\u5011\uFF5E\u65E9\u5B89\u5B89\u2764\uFE0F" : args.contentTimeSlot === "night" ? "\u6DF1\u591C\u798F\u5229\u4F86\u4E86\u3299\uFE0F" : "")
+    : "";
   const groupContentInstruction = groupLabel ? [
     `\u672C\u6B21\u751F\u6210\u985E\u578B\uFF1A${groupLabel}\u3002\u9019\u4E0D\u662F\u4E00\u822C\u63A8\u6587\uFF0C\u5FC5\u9808\u751F\u6210 Telegram \u7FA4\u5C0E\u6D41\u6587\u6848\u3002`,
     timeLabel ? `\u672C\u6B21\u6587\u6848\u6642\u6BB5\uFF1A${timeLabel}\u3002` : "",
     args.contentBranch === "nonr18" && fixedOpening ? `\u6BCF\u7BC7\u958B\u982D\u5FC5\u9808\u56FA\u5B9A\u4F7F\u7528\uFF1A${fixedOpening}` : "",
-    args.contentBranch === "nonr18" ? "\u514D\u8CBB\u7FA4\u5167\u5BB9\u65B9\u5411\uFF1A\u514D\u8CBB\u7FA4\u9810\u89BD\u3001\u8F15\u8A98\u5C0E\u3001\u65E5\u5E38\u611F\u3001\u597D\u5947\u5FC3\u9264\u5B50\uFF0C\u4FDD\u6301\u5E73\u53F0\u5B89\u5168\uFF0C\u4E0D\u8981\u9732\u9AA8\u3002" : "",
+    args.contentBranch === "nonr18" && useJinjunyaFreeStyle ? "\u514D\u8CBB\u7FA4\u5167\u5BB9\u65B9\u5411\uFF1A\u514D\u8CBB\u7FA4\u9810\u89BD\u3001\u8F15\u8A98\u5C0E\u3001\u65E5\u5E38\u611F\u3001\u597D\u5947\u5FC3\u9264\u5B50\uFF0C\u4FDD\u6301\u5E73\u53F0\u5B89\u5168\uFF0C\u4E0D\u8981\u9732\u9AA8\u3002" : "",
+    args.contentBranch === "nonr18" && !useJinjunyaFreeStyle ? "\u514D\u8CBB\u7FA4\u5167\u5BB9\u65B9\u5411\uFF1A\u4FDD\u6301\u7576\u524D\u4EBA\u8A2D\u539F\u672C\u7684\u4E3B\u984C\u3001\u8EAB\u4EFD\u3001\u8A9E\u6C23\u548C\u7BC7\u5E45\u7BC0\u594F\uff0c\u53EA\u9700\u78BA\u4FDD\u5E73\u53F0\u5B89\u5168\u3001\u9069\u5408\u514D\u8CBB\u7FA4\u9810\u89BD\u3002\u4E0D\u8981\u5957\u7528\u91D1\u541B\u96C5\u5C08\u7528\u7684\u56FA\u5B9A\u958B\u982D\u3001\u6492\u5B0C\u798F\u5229\u53E3\u543B\u3001\u9EDE\u5FC3\u9580\u6ABB\u53E5\u5F0F\u6216 10-20 \u5B57\u77ED\u9264\u5B50\u6A21\u677F\u3002\u82E5\u8A18\u61B6\u3001\u6B77\u53F2\u63A8\u6587\u6216\u7BC4\u4F8B\u88E1\u51FA\u73FE\u300C\u54E5\u54E5\u5011\uFF5E\u65E9\u5B89\u5B89\u2764\uFE0F\u300D\u300C\u6DF1\u591C\u798F\u5229\u4F86\u4E86\u3299\uFE0F\u300D\u300Cgy_night_flight_bot\u300D\u9019\u985E\u91D1\u541B\u96C5\u6A23\u672C\uff0c\u4E00\u5F8B\u8996\u70BA\u820A\u6C61\u67D3\u7BC4\u4F8B\uff0c\u4E0D\u53EF\u6CBF\u7528\u3001\u4E0D\u53EF\u6A21\u4EFF\u3002" : "",
     args.contentBranch === "r18" ? "\u4ED8\u8CBB\u7FA4\u5167\u5BB9\u65B9\u5411\uFF1A\u4ED8\u8CBB\u7FA4\u9810\u89BD\u3001\u798F\u5229\u611F\u3001\u9650\u5B9A\u611F\u3001\u8F49\u5316\u5C0E\u5411\uFF0C\u6587\u5B57\u53EF\u4EE5\u66F4\u6709\u8A98\u60D1\u4F46\u5FC5\u9808\u4FDD\u6301\u5E73\u53F0\u5B89\u5168\uFF0C\u4E0D\u4F7F\u7528\u9732\u9AA8\u9055\u898F\u8A5E\u3002" : "",
-    "\u6BCF\u7BC7\u4E2D\u9593\u6587\u6848\u7531 AI \u751F\u6210\uFF0C\u53E3\u8A9E\u5316\uFF0C10-20 \u500B\u4E2D\u6587\u5B57\u5373\u53EF\uFF0C\u5FC5\u9808\u80FD\u548C\u5F8C\u7E8C\u914D\u5716\u5167\u5BB9\u4E92\u76F8\u547C\u61C9\uFF1B\u53EF\u4EE5\u6697\u793A\u670D\u88DD\u3001\u59FF\u614B\u3001\u5834\u666F\u6216\u60C5\u7DD2\uFF0C\u4F46\u4E0D\u8981\u5BEB\u6210\u9577\u7BC7\u65B0\u805E\u6216\u6CDB\u8A71\u984C\u3002",
+    useJinjunyaFreeStyle
+      ? "\u6BCF\u7BC7\u4E2D\u9593\u6587\u6848\u7531 AI \u751F\u6210\uFF0C\u53E3\u8A9E\u5316\uFF0C10-20 \u500B\u4E2D\u6587\u5B57\u5373\u53EF\uFF0C\u5FC5\u9808\u80FD\u548C\u5F8C\u7E8C\u914D\u5716\u5167\u5BB9\u4E92\u76F8\u547C\u61C9\uFF1B\u53EF\u4EE5\u6697\u793A\u670D\u88DD\u3001\u59FF\u614B\u3001\u5834\u666F\u6216\u60C5\u7DD2\uFF0C\u4F46\u4E0D\u8981\u5BEB\u6210\u9577\u7BC7\u65B0\u805E\u6216\u6CDB\u8A71\u984C\u3002"
+      : "\u6B63\u6587\u5FC5\u9808\u5148\u670D\u5F9E\u4F7F\u7528\u8005\u4E3B\u984C\u548C\u7576\u524D\u4EBA\u8A2D\u7684\u539F\u672C\u5BEB\u6CD5\uff0c\u5982\u679C\u662F\u7F8E\u599D\u3001\u6587\u9752\u3001\u904A\u6232\u3001\u7642\u7652\u3001\u751F\u6D3B\u89C0\u5BDF\u6216\u5C08\u696D\u5E33\u865F\uff0c\u5C31\u6309\u5C0D\u61C9\u4EBA\u8A2D\u53BB\u5BEB\uff0c\u4E0D\u8981\u5F37\u884C\u5BEB\u6210\u91D1\u541B\u96C5\u5F0F\u798F\u5229\u77ED\u9264\u5B50\u3002",
     "\u5982\u679C\u4EBA\u8A2D\u6709\u56FA\u5B9A\u9023\u7D50\uFF0C\u9023\u7D50\u5FC5\u9808\u653E\u5728\u6574\u7BC7\u6700\u5F8C\u4E00\u884C\uFF1B\u9023\u7D50\u5F8C\u9762\u4E0D\u80FD\u518D\u52A0\u6B63\u6587\u3001\u63D0\u554F\u3001emoji \u6216\u6A19\u9EDE\u3002",
     args.contentBranch === "r18"
       ? "\u4ED8\u8CBB\u7FA4\u683C\u5F0F\uFF1A\u4E0D\u8981\u56FA\u5B9A\u958B\u982D\uFF0C\u76F4\u63A5\u751F\u6210 10-20 \u5B57\u76F4\u767D\u3001\u8272\u60C5\u3001\u8A98\u60D1\u7684\u77ED\u6587\u6848\uFF1B\u5982\u679C\u6709\u56FA\u5B9A\u9023\u7D50\uFF0C\u9023\u7D50\u653E\u6700\u5F8C\u4E00\u884C\u3002"
-      : "\u683C\u5F0F\u5EFA\u8B70\uFF1A\u56FA\u5B9A\u958B\u982D + 10-20 \u5B57\u4E2D\u9593\u6587\u6848 + \u6700\u5F8C\u4E00\u884C\u56FA\u5B9A\u9023\u7D50\u3002",
+      : useJinjunyaFreeStyle
+        ? "\u683C\u5F0F\u5EFA\u8B70\uFF1A\u56FA\u5B9A\u958B\u982D + 10-20 \u5B57\u4E2D\u9593\u6587\u6848 + \u6700\u5F8C\u4E00\u884C\u56FA\u5B9A\u9023\u7D50\u3002"
+        : args.contentBranch === "nonr18"
+          ? "\u683C\u5F0F\u898F\u5247\uFF1A\u4FDD\u6301\u8A72\u4EBA\u8A2D\u539F\u672C\u7684\u5BEB\u4F5C\u7BC7\u5E45\u8207\u8868\u9054\u7D50\u69CB\uff0c\u4E0D\u8981\u5F37\u52A0\u56FA\u5B9A\u958B\u982D\u6216\u56FA\u5B9A CTA \u6A21\u677F\u3002"
+          : "",
   ].filter(Boolean).join("\n") : "";
   const lines = [
     prompt ? `\u672C\u6B21\u4F7F\u7528\u8005\u4E3B\u984C\u002F\u8981\u6C42\uFF08\u6700\u9AD8\u512A\u5148\u7D1A\uFF09\uFF1A${prompt}` : "\u4F7F\u7528\u8005\u672A\u63D0\u4F9B\u672C\u6B21\u63D0\u793A\u8A5E\uFF0C\u8ACB\u6839\u64DA\u4EBA\u8A2D\u81EA\u7531\u767C\u5C55\u4E3B\u984C\u3002",
@@ -7837,11 +8025,11 @@ function buildGenerateMemorySelectionKeyboard(state: PendingGeneratePostState) {
     return [{ text: label, callback_data: `genmem_toggle_${index}` }];
   });
   if (pageInfo.totalPages > 1) {
-    rows.push([
-      { text: pageInfo.page > 0 ? "\u25C0\uFE0F \u4E0A\u4E00\u9801" : "\u23EE \u7B2C\u4E00\u9801", callback_data: `genmem_page_${Math.max(0, pageInfo.page - 1)}` },
-      { text: `${pageInfo.page + 1}/${pageInfo.totalPages}`, callback_data: `genmem_page_${pageInfo.page}` },
-      { text: pageInfo.page < pageInfo.totalPages - 1 ? "\u4E0B\u4E00\u9801 \u25B6\uFE0F" : "\u6700\u5F8C\u4E00\u9801 \u23ED", callback_data: `genmem_page_${Math.min(pageInfo.totalPages - 1, pageInfo.page + 1)}` },
-    ]);
+    rows.push(...buildListPaginationRows({
+      page: pageInfo.page,
+      totalPages: pageInfo.totalPages,
+      callbackForPage: (targetPage) => `genmem_page_${targetPage}`,
+    }));
   }
   if (options.length > 0) {
     const allSelected = options.every((entry) => selected.has(entry.id));
@@ -8033,9 +8221,17 @@ function buildGeneratedPostsPreviewHtml(
 
 async function executePendingGeneratePostWithFixedWords(bot: TelegramBot, chatId: number, pending: PendingGeneratePostState, prompt: string, messageId?: number) {
   deletePendingGeneratePost(chatId);
+  const archive = await loadPersonaArchive(pending.archiveId).catch(() => null);
+  const useJinjunyaFreeStyle = pending.contentBranch === "nonr18"
+    && usesJinjunyaFreeContentStyle(archive?.setup as Partial<DramaSetup> | null | undefined);
+  const resolvedTargetWords = pending.contentBranch === "nonr18"
+    ? resolvePersonaFreeContentTargetWords(archive?.setup as Partial<DramaSetup> | null | undefined)
+    : 20;
   const receivedText = pending.contentBranch === "r18" && !pending.textOnly
     ? "\u2705 \u5DF2\u6536\u5230\u5716\u7247\u751F\u6210\u8981\u6C42\uFF0C\u5C07\u5148\u751F\u6210\u4ED8\u8CBB R18 \u5019\u9078\u5716\u3002\u9078\u4E2D\u5716\u7247\u5F8C\u624D\u6703\u751F\u6210\u63A8\u6587\u6587\u6848\u3002"
-    : "\u2705 \u5DF2\u6536\u5230\u63D0\u793A\u8A5E\uFF0C\u5C07\u6309 10-20 \u500B\u4E2D\u6587\u5B57\u7684\u7FA4\u5167\u5BB9\u898F\u5247\u76F4\u63A5\u751F\u6210\u3002";
+    : useJinjunyaFreeStyle
+      ? "\u2705 \u5DF2\u6536\u5230\u63D0\u793A\u8A5E\uFF0C\u5C07\u6309 10-20 \u500B\u4E2D\u6587\u5B57\u7684\u7FA4\u5167\u5BB9\u898F\u5247\u76F4\u63A5\u751F\u6210\u3002"
+      : "\u2705 \u5DF2\u6536\u5230\u63D0\u793A\u8A5E\uFF0C\u5C07\u6309\u7576\u524D\u4EBA\u8A2D\u539F\u672C\u98A8\u683C\u76F4\u63A5\u751F\u6210\u3002";
   await safeEditOrSend(bot, chatId, messageId, receivedText, {
     reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE\u4EBA\u8A2D\u8A73\u60C5", callback_data: `pd_${pending.archiveId}` }]] },
   });
@@ -8047,7 +8243,7 @@ async function executePendingGeneratePostWithFixedWords(bot: TelegramBot, chatId
     count: pending.count,
     textOnly: pending.textOnly,
     prompt,
-    targetWords: 20,
+    targetWords: resolvedTargetWords,
     selectedMemoryEntryIds: pending.selectedMemoryEntryIds,
     selectedMemorySummaries: selectedMemorySummariesFromState(pending),
     contentBranch: pending.contentBranch,
@@ -8078,6 +8274,9 @@ async function executeGeneratePostsFromTelegram(args: {
   imageRatioLabel?: string;
 }) {
   const selectedMemoryCount = args.selectedMemoryEntryIds?.length || 0;
+  const initialArchive = await loadPersonaArchive(args.archiveId).catch(() => null);
+  const useJinjunyaFreeStyle = args.contentBranch === "nonr18"
+    && usesJinjunyaFreeContentStyle(initialArchive?.setup as Partial<DramaSetup> | null | undefined);
   if (args.contentBranch === "r18" && !args.textOnly) {
     await sendPaidR18EntryPicker(args.bot, args.chatId, undefined, {
       archiveId: args.archiveId,
@@ -8092,7 +8291,7 @@ async function executeGeneratePostsFromTelegram(args: {
     } as PendingGeneratePostState);
     return;
   }
-  const wordRuleLine = args.contentBranch
+  const wordRuleLine = args.contentBranch === "r18" || useJinjunyaFreeStyle
     ? "\u7FA4\u5167\u5BB9\u898F\u5247\uFF1A10-20 \u500B\u4E2D\u6587\u5B57/\u7BC7"
     : `\u76EE\u6A19\u5B57\u6578\uFF1A\u7D04 ${args.targetWords} \u5B57/\u7BC7`;
   await telegramBestEffort("generatePosts.start", args.bot.sendMessage(
@@ -8102,7 +8301,6 @@ async function executeGeneratePostsFromTelegram(args: {
   ));
   const stopTyping = startTelegramTyping(args.bot, args.chatId);
   try {
-    const initialArchive = await loadPersonaArchive(args.archiveId).catch(() => null);
     const initialPostCount = initialArchive?.posts?.length || 0;
     const batches = planPersonaPostGenerationBatches(args.count, args.targetWords);
     const posts: Array<{ id?: string; content?: string; memorySummary?: string }> = [];
@@ -8138,6 +8336,7 @@ async function executeGeneratePostsFromTelegram(args: {
           batchSize,
           contentBranch: args.contentBranch,
           contentTimeSlot: args.contentTimeSlot,
+          setup: initialArchive?.setup as Partial<DramaSetup> | null | undefined,
         }),
       } as any);
       const batchPosts = (result as any)?.posts || [];
@@ -8175,6 +8374,7 @@ async function executeGeneratePostsFromTelegram(args: {
           batchSize,
           contentBranch: args.contentBranch,
           contentTimeSlot: args.contentTimeSlot,
+          setup: initialArchive?.setup as Partial<DramaSetup> | null | undefined,
         }),
       } as any);
       const batchPosts = (result as any)?.posts || [];
@@ -9812,7 +10012,6 @@ function buildScheduledTimePickerKeyboard(state: {
 
 async function showScheduledTimePicker(chatId: number, msgId: number | undefined, state: NonNullable<ReturnType<typeof pendingScheduledPublishes.get>>) {
   await safeEditOrSend(bot, chatId, msgId, buildScheduledTimePickerText(state), {
-    parse_mode: "Markdown",
     reply_markup: { inline_keyboard: buildScheduledTimePickerKeyboard(state) },
   });
 }
@@ -10180,7 +10379,7 @@ function saveControlPanelMessageCache() {
 loadControlPanelMessageCache();
 
 type TelegramMenuPayload = { text: string; options: Record<string, any> };
-let _personaListMenuPayloadCache: { at: number; mtimeMs: number; payload: TelegramMenuPayload } | null = null;
+let _personaListMenuPayloadCache: { at: number; mtimeMs: number; page: number; payload: TelegramMenuPayload } | null = null;
 let _padMenuPayloadCache: { at: number; padCount: number; payload: TelegramMenuPayload } | null = null;
 const TELEGRAM_MENU_PAYLOAD_CACHE_TTL_MS = 60_000;
 
@@ -10245,12 +10444,14 @@ async function renderControlPanel(
   }
 }
 
-async function getPersonaListMenuPayload(options: { force?: boolean } = {}): Promise<TelegramMenuPayload> {
+async function getPersonaListMenuPayload(options: { force?: boolean; page?: number } = {}): Promise<TelegramMenuPayload> {
   const now = Date.now();
   const mtimeMs = getPersonaStoreMtimeMs();
+  const page = Math.max(0, Math.floor(options.page || 0));
   if (
     !options.force &&
     _personaListMenuPayloadCache &&
+    _personaListMenuPayloadCache.page === page &&
     _personaListMenuPayloadCache.mtimeMs === mtimeMs &&
     now - _personaListMenuPayloadCache.at < TELEGRAM_MENU_PAYLOAD_CACHE_TTL_MS
   ) {
@@ -10266,26 +10467,24 @@ async function getPersonaListMenuPayload(options: { force?: boolean } = {}): Pro
         reply_markup: { inline_keyboard: [[{ text: "➕ 新建人設", callback_data: "create_persona_entry" }]] },
       },
     };
-    _personaListMenuPayloadCache = { at: now, mtimeMs, payload };
+    _personaListMenuPayloadCache = { at: now, mtimeMs, page, payload };
     return payload;
   }
 
   const header = list.some(isWorkflowPersonaListItem)
     ? "📋 *我的人設*\n\n⭐ 工作流人設"
     : "📋 *我的人設*";
-  const payload = {
-    text: header,
-    options: {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "➕ 新建人設", callback_data: "create_persona_entry" }],
-          ...chunk(list.map((p: any) => ({ text: formatPersonaButtonText(p), callback_data: `pd_${p.id}` })), 1),
-        ],
-      },
-    },
-  };
-  _personaListMenuPayloadCache = { at: now, mtimeMs, payload };
+  const payload = buildPagedPersonaSelectorPayload({
+    title: header,
+    list,
+    page,
+    itemCallback: (persona) => `pd_${persona.id}`,
+    pageCallbackRoot: "list_personas",
+    topRows: [[{ text: "➕ 新建人設", callback_data: "create_persona_entry" }]],
+    emptyText: "暫無人設。",
+    parseMode: "Markdown",
+  });
+  _personaListMenuPayloadCache = { at: now, mtimeMs, page, payload };
   return payload;
 }
 
@@ -11055,10 +11254,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     // ── 人设列表 ──
-    if (data === "list_personas") {
+    const personaListPage = parseSimplePagedCallback(data, "list_personas");
+    if (personaListPage !== null) {
       deletePendingGeneratePost(chatId);
       pendingCustomPersonaPosts.delete(chatId);
-      const payload = await getPersonaListMenuPayload();
+      const payload = await getPersonaListMenuPayload({ page: personaListPage });
       await renderControlPanel(chatId, payload.text, payload.options, msgId);
       return;
     }
@@ -11158,7 +11358,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform), {
-        parse_mode: "Markdown",
         reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform) },
       });
       return;
@@ -11283,7 +11482,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               ],
             },
           });
-          if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 Telegram 登入畫面" }).catch(() => undefined);
+          await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, result.ok ? "📸 Telegram 登入後確認畫面" : "📸 Telegram 登入當前畫面");
         } catch (error: any) {
           stopTyping();
           await bot.sendMessage(chatId, `❌ Telegram 登入啟動失敗：${formatUserFacingError(error, "請查看截圖後重試。")}`, {
@@ -11321,35 +11520,49 @@ function sendMainMenu(chatId: number, msgId?: number) {
             }));
             stopTyping();
             let status: PersonaAccountRuntimeStatus;
+            const expectedThreads = getPersonaAccountManagement(archive).threads?.handle;
+            const matchedSavedAccount = Boolean(result.loggedIn && threadsQueryMatchesSavedAccount(result, expectedThreads));
+            const detectedAccount = formatThreadsDetectedAccount(result);
             if (!result.loggedIn && (result.method === "failed" || (!result.username && !result.email))) {
               status = {
                 state: "logged_out",
-                message: result.error ? `未確認已登入；${formatUserFacingError(result.error, "目前页面沒有识别到 Threads 帳號信息。")}` : "未確認已登入。",
+                message: result.error
+                  ? `未确认已登录：${formatUserFacingError(result.error, "当前页面没有识别到 Threads 账号信息。")}`
+                  : "未确认已登录。",
               };
-            } else {
+            } else if (matchedSavedAccount) {
               status = {
                 state: "logged_in",
-                message: `已登入${result.username ? ` @${result.username}` : result.email ? ` ${result.email}` : ""}。`,
+                message: `已确认登录${detectedAccount ? `：${detectedAccount}` : ""}。`,
+              };
+            } else {
+              const mismatchMessage = result.loggedIn && detectedAccount && expectedThreads
+                ? `已打开 Threads，但当前识别账号 ${detectedAccount} 与保存账号 ${maskAccountSecret(expectedThreads)} 不一致。`
+                : result.loggedIn
+                  ? "已打开 Threads，但当前页面未识别到可核对的账号信息。"
+                  : undefined;
+              status = {
+                state: result.loggedIn ? "unknown" : "logged_out",
+                message: mismatchMessage || (result.error
+                  ? `未确认已登录：${formatUserFacingError(result.error, "当前页面没有识别到 Threads 账号信息。")}`
+                  : "未确认已登录。"),
               };
             }
             await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform, status), {
-              parse_mode: "Markdown",
               reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
             });
-            if (status.state !== "logged_in") {
-              await sendCurrentPadScreenshot(bot, chatId, boundPad.padCode, "📸 Threads 当前画面").catch(() => undefined);
-            }
+            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, status.state === "logged_in" ? "📸 Threads 已登录确认画面" : "📸 Threads 当前画面");
             return;
           }
 
           if (action === "logout") {
             const result = await clearThreadsAccountSession(creds, boundPad.padCode);
             stopTyping();
-            await bot.sendMessage(chatId, `🚪 *Threads 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.ok ? "✅" : "❌"} ${result.message}`, {
+            await bot.sendMessage(chatId, `🚪 *Threads 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.ok ? "✅ 已二次确认登出" : "❌ 未能确认登出"}\n${result.message}`, {
               parse_mode: "Markdown",
               reply_markup: { inline_keyboard: rows },
             });
-            if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 清会话后截图" }).catch(() => undefined);
+            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, result.ok ? "📸 Threads 登出后确认画面" : "📸 Threads 登出失败画面");
             return;
           }
 
@@ -11365,11 +11578,24 @@ function sendMainMenu(chatId: number, msgId?: number) {
           const result = await loginThreadsAccount(creds, boundPad.padCode, { username: threads.handle, password: threads.password });
           stopTyping();
           if (result.ok) {
-            await bot.sendMessage(chatId, `✅ *Threads 登录成功*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}`, {
+            const verifyResult = await queryThreadsAccount(creds, boundPad.padCode).catch((error: any) => ({
+              padCode: boundPad.padCode,
+              platform: "threads" as const,
+              method: "failed" as const,
+              error: error?.message || String(error),
+            }));
+            const verifiedLogin = Boolean(verifyResult.loggedIn && threadsQueryMatchesSavedAccount(verifyResult, threads.handle));
+            const detectedAccount = verifyResult.username ? ` @${verifyResult.username}` : verifyResult.email ? ` ${verifyResult.email}` : "";
+            const verifyDetail = verifiedLogin
+              ? ""
+              : detectedAccount
+                ? `\n\n二次检测：当前识别账号${detectedAccount}，与保存账号 ${maskAccountSecret(threads.handle)} 不一致。请查看截图确认。`
+                : `\n\n二次检测：${formatUserFacingError(verifyResult.error || "未识别到可核对的 Threads 账号", "未识别到可核对的 Threads 账号。请查看截图确认当前页面。")}`;
+            await bot.sendMessage(chatId, `${verifiedLogin ? "✅" : "⚠️"} *Threads 登录${verifiedLogin ? "成功并已确认" : "流程完成但未确认"}*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}${verifyDetail}`, {
               parse_mode: "Markdown",
               reply_markup: { inline_keyboard: [[{ text: "🔍 检测 Threads 状态", callback_data: `acctquery_threads_${id}` }], ...rows] },
             });
-            if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 登录后截图" }).catch(() => undefined);
+            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, verifyResult.screenshotUrl || result.screenshotUrl, verifiedLogin ? "📸 Threads 登录成功确认画面" : "📸 Threads 登录后未确认画面");
             return;
           }
           if (result.state === "challenge_otp") {
@@ -11385,7 +11611,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               parse_mode: "Markdown",
               reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: `acctplatform_threads_${id}` }]] },
             });
-            if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 当前验证码画面" }).catch(() => undefined);
+            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 当前验证码画面");
             return;
           }
           if (result.state === "challenge_manual") {
@@ -11393,14 +11619,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
               parse_mode: "Markdown",
               reply_markup: { inline_keyboard: [[{ text: "🔍 檢測 Threads 狀態", callback_data: `acctquery_threads_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: `acctplatform_threads_${id}` }]] },
             });
-            if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 Threads 人工處理畫面" }).catch(() => undefined);
+            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 人工處理畫面");
             return;
           }
           await bot.sendMessage(chatId, `❌ *Threads 登录未完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}`, {
             parse_mode: "Markdown",
             reply_markup: { inline_keyboard: [[{ text: "🔄 重试登录", callback_data: `acctlogin_threads_${id}` }], ...rows] },
           });
-          if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 当前登录画面" }).catch(() => undefined);
+          await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 登录失败画面");
           return;
         }
 
@@ -11412,20 +11638,26 @@ function sendMainMenu(chatId: number, msgId?: number) {
             message: result.message,
           };
           await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform, status), {
-            parse_mode: "Markdown",
             reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
           });
-          if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 Telegram 当前画面" }).catch(() => undefined);
+          await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, status.state === "logged_in" ? "📸 Telegram 已登录确认画面" : "📸 Telegram 当前画面");
           return;
         }
 
         const result = await clearTelegramAccountSession(creds, boundPad.padCode);
+        const verifyResult = await queryTelegramAccountSession(creds, boundPad.padCode).catch((error: any) => ({
+          ok: false,
+          state: "unknown",
+          message: formatUserFacingError(error, "登出后状态检测失败。"),
+          screenshotUrl: result.screenshotUrl,
+        }));
+        const verifiedLogout = !verifyResult.ok && (verifyResult.state === "logged_out" || verifyResult.state === "not_installed" || verifyResult.state === "unknown");
         stopTyping();
-        await bot.sendMessage(chatId, `🚪 *Telegram 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.ok ? "✅" : "❌"} ${result.message}`, {
+        await bot.sendMessage(chatId, `🚪 *Telegram 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${verifiedLogout ? "✅ 已二次确认登出" : "❌ 未能确认登出"}\n${result.message}\n\n二次检测：${verifyResult.message}`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: rows },
         });
-        if (result.screenshotUrl) await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 清会话后截图" }).catch(() => undefined);
+        await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, verifyResult.screenshotUrl || result.screenshotUrl, verifiedLogout ? "📸 Telegram 登出后确认画面" : "📸 Telegram 登出未确认画面");
       } catch (error: any) {
         stopTyping();
         if (isTelegramTaskCancelledError(error)) {
@@ -11708,8 +11940,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "newpost_branch_picker") {
-      await sendGeneratePostPersonaPicker(bot, chatId, msgId);
+    const newPostPersonaPage = parseSimplePagedCallback(data, "newpost_branch_picker");
+    if (newPostPersonaPage !== null) {
+      await sendGeneratePostPersonaPicker(bot, chatId, msgId, newPostPersonaPage);
       return;
     }
 
@@ -14640,7 +14873,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "custom_publish_pick_persona") {
+    const customPublishPersonaPage = parseSimplePagedCallback(data, "custom_publish_pick_persona");
+    if (customPublishPersonaPage !== null) {
       const list = await listPersonasForThisBot();
       if (!list.length) {
         await safeEditOrSend(bot, chatId, msgId, "当前没有人设，请先创建新人设。", {
@@ -14648,15 +14882,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, "👤 *选择要发布到的人设*", {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            ...list.slice(0, 10).map((p: any) => ([{ text: `${p.name}`, callback_data: `custom_publish_persona_${p.id}` }])),
-            [{ text: "◀️ 返回", callback_data: "custom_publish" }],
-          ],
-        },
+      const payload = buildPagedPersonaSelectorPayload({
+        title: "👤 *选择要发布到的人设*",
+        list,
+        page: customPublishPersonaPage,
+        itemCallback: (persona) => `custom_publish_persona_${persona.id}`,
+        pageCallbackRoot: "custom_publish_pick_persona",
+        footerRows: [[{ text: "◀️ 返回", callback_data: "custom_publish" }]],
+        emptyText: "当前没有人设，请先创建新人设。",
+        emptyRows: [[{ text: "➕ 创建新人设", callback_data: "custom_publish_create_persona" }], [{ text: "◀️ 返回", callback_data: "custom_publish" }]],
+        parseMode: "Markdown",
+        buttonText: (persona) => persona.name,
       });
+      await safeEditOrSend(bot, chatId, msgId, payload.text, payload.options);
       return;
     }
 
@@ -14862,7 +15100,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "queue_filter_persona") {
+    const queueFilterPersonaPage = parseSimplePagedCallback(data, "queue_filter_persona");
+    if (queueFilterPersonaPage !== null) {
       const list = await listPersonasForThisBot();
       if (!list.length) {
         await safeEditOrSend(bot, chatId, msgId, "目前沒有人設可用于篩選。", {
@@ -14870,15 +15109,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, "👤 *按人設篩選定時佇列*\n\n請選擇要查看的人設：", {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            ...list.slice(0, 10).map((p: any) => ([{ text: p.name, callback_data: buildQueueViewCallback({ status: "pending", archiveId: p.id, scheduledOnly: true, page: 0 }) }])),
-            [{ text: "◀️ 返回狀態页", callback_data: "menu_status" }],
-          ],
-        },
+      const payload = buildPagedPersonaSelectorPayload({
+        title: "👤 *按人設篩選定時佇列*\n\n請選擇要查看的人設：",
+        list,
+        page: queueFilterPersonaPage,
+        itemCallback: (persona) => buildQueueViewCallback({ status: "pending", archiveId: persona.id, scheduledOnly: true, page: 0 }),
+        pageCallbackRoot: "queue_filter_persona",
+        footerRows: [[{ text: "◀️ 返回狀態页", callback_data: "menu_status" }]],
+        emptyText: "目前沒有人設可用于篩選。",
+        emptyRows: [[{ text: "◀️ 返回狀態页", callback_data: "menu_status" }]],
+        parseMode: "Markdown",
+        buttonText: (persona) => persona.name,
       });
+      await safeEditOrSend(bot, chatId, msgId, payload.text, payload.options);
       return;
     }
 
@@ -14958,7 +15201,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "schedule_publish") {
+    const schedulePublishPersonaPage = parseSimplePagedCallback(data, "schedule_publish");
+    if (schedulePublishPersonaPage !== null) {
       deletePendingGeneratePost(chatId);
       pendingScheduledPublishes.set(chatId, { stage: "choose_persona" });
       const list = await listPersonasForThisBot();
@@ -14968,15 +15212,18 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const summaryLines = list.slice(0, 10).map(formatPersonaSummaryLine);
-      await safeEditOrSend(bot, chatId, msgId, `⏰ *定時發佈*\n\n請選擇要定時發佈的人設：\n\n${summaryLines.join("\n")}`, {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            ...list.slice(0, 10).map((p: any) => ([{ text: formatPersonaButtonText(p), callback_data: `sched_persona_${p.id}` }])),
-          ],
-        },
+      const payload = buildPagedPersonaSelectorPayload({
+        title: "⏰ *定時發佈*\n\n請選擇要定時發佈的人設：",
+        list,
+        page: schedulePublishPersonaPage,
+        itemCallback: (persona) => `sched_persona_${persona.id}`,
+        pageCallbackRoot: "schedule_publish",
+        emptyText: "目前沒有可定時發佈的人設，請先建立並生成推文。",
+        emptyRows: [[{ text: "➕ 建立人設", callback_data: "create_persona_entry" }]],
+        parseMode: "Markdown",
+        summaryLines: (visible) => visible.map(formatPersonaSummaryLine),
       });
+      await safeEditOrSend(bot, chatId, msgId, payload.text, payload.options);
       return;
     }
 
@@ -14998,8 +15245,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         postPreview: `${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`,
         padCode: archive.boundPadCode || defaultPadCode,
       });
-      await safeEditOrSend(bot, chatId, msgId, `⏰ *定時發佈*\n\n已選擇人設：${archive.name}\n推文：${post.content.slice(0, 80)}${post.content.length > 80 ? "..." : ""}\n\n請選擇發佈平台：`, {
-        parse_mode: "Markdown",
+      await safeEditOrSend(bot, chatId, msgId, `⏰ 定時發佈\n\n已選擇人設：${archive.name}\n推文：${post.content.slice(0, 80)}${post.content.length > 80 ? "..." : ""}\n\n請選擇發佈平台：`, {
         reply_markup: {
           inline_keyboard: [
             ...buildAllowedPublishPlatformRows("sched_platform_"),

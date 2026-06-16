@@ -1695,6 +1695,15 @@ export async function detectThreadsProfilePageLocally(screenshotUrl: string | un
   ) {
     return false;
   }
+  const ownRootProfileModern = backArrow > 0.080
+    && topRightActions > 0.035
+    && nameArea > 0.040
+    && profileHeader > 0.025
+    && ownProfileButtons > 0.030
+    && bottomProfileTab > 0.045
+    && composerPublishPill < 0.120
+    && keyboardComposerToolbar < 0.060;
+  if (ownRootProfileModern) return true;
   const publicProfileLike = backArrow > 0.025
     && homeLogo < 0.085
     && topRightActions > 0.035
@@ -1793,6 +1802,57 @@ async function detectThreadsPhoneVerificationLocally(screenshotUrl: string | und
   const inputBorderGray = regionRatio(0.04, 0.25, 0.96, 0.34, (r, g, b) => isLightGray(r, g, b));
   const centerTextDark = regionRatio(0.08, 0.12, 0.92, 0.24, (r, g, b) => isDark(r, g, b));
   return pageWhite > 0.82 && bottomBlackButton > 0.55 && inputBorderGray > 0.025 && centerTextDark > 0.006;
+}
+
+async function detectThreadsLoginLandingLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const regionRatio = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.min(width - 1, Math.round(width * x1)));
+    const top = Math.max(0, Math.min(height - 1, Math.round(height * y1)));
+    const right = Math.max(left + 1, Math.min(width, Math.round(width * x2)));
+    const bottom = Math.max(top + 1, Math.min(height, Math.round(height * y2)));
+    let matched = 0;
+    let total = 0;
+    for (let y = top; y < bottom; y += 2) {
+      for (let x = left; x < right; x += 2) {
+        const index = (y * width + x) * 4;
+        const alpha = data[index + 3];
+        if (alpha < 80) continue;
+        total += 1;
+        if (predicate(data[index], data[index + 1], data[index + 2], alpha)) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+
+  const isWhite = (r: number, g: number, b: number) => r > 238 && g > 238 && b > 238;
+  const isDark = (r: number, g: number, b: number) => (r + g + b) / 3 < 75;
+  const isLightButton = (r: number, g: number, b: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return avg > 175 && avg < 245 && spread < 32;
+  };
+
+  const pageWhite = regionRatio(0, 0.05, 1, 0.95, (r, g, b) => isWhite(r, g, b));
+  const largeLogo = regionRatio(0.32, 0.09, 0.68, 0.28, (r, g, b) => isDark(r, g, b));
+  const centerCopy = regionRatio(0.08, 0.20, 0.92, 0.38, (r, g, b) => isDark(r, g, b));
+  const loginButton = regionRatio(0.04, 0.48, 0.96, 0.66, (r, g, b) => isLightButton(r, g, b));
+  const bottomNav = regionRatio(0.04, 0.88, 0.96, 0.99, (r, g, b) => isDark(r, g, b));
+
+  return pageWhite > 0.62
+    && largeLogo > 0.25
+    && centerCopy > 0.12
+    && loginButton > 0.25
+    && bottomNav < 0.08;
 }
 
 async function detectAndroidLauncherLocally(screenshotUrl: string | undefined): Promise<boolean> {
@@ -4256,6 +4316,12 @@ export async function detectThreadsSideDrawerLocally(screenshotUrl: string | und
   const leftTitleDark = ratio(0.05, 0.07, 0.38, 0.18, (r, g, b) => isDark(r, g, b));
   const activityCards = ratio(0.04, 0.20, 0.72, 0.72, (r, g, b) => isLightCard(r, g, b));
   const bottomNotWhite = ratio(0, 0.70, 1, 0.99, (r, g, b) => !isWhite(r, g, b));
+  const profileLikePage = ratio(0.045, 0.055, 0.12, 0.115, (r, g, b) => isDark(r, g, b)) > 0.080
+    && ratio(0.78, 0.055, 0.97, 0.13, (r, g, b) => isDark(r, g, b)) > 0.035
+    && ratio(0.04, 0.10, 0.45, 0.24, (r, g, b) => isDark(r, g, b)) > 0.040
+    && ratio(0.04, 0.35, 0.96, 0.43, (r, g, b) => isDark(r, g, b)) > 0.030
+    && ratio(0.78, 0.91, 0.96, 0.99, (r, g, b) => isDark(r, g, b)) > 0.045;
+  if (profileLikePage) return false;
   if (bottomNotWhite > 0.20) return false;
   if (classicSideDrawer && leftPanelWhite > 0.78) return true;
 
@@ -8078,10 +8144,17 @@ async function dumpUiXml(
   config: VmosConfig,
   padCode: string,
 ): Promise<string> {
+  await execAdbForText(
+    config,
+    padCode,
+    "rm -f /data/local/tmp/vmos_window.xml; uiautomator dump /data/local/tmp/vmos_window.xml 2>&1; chmod 644 /data/local/tmp/vmos_window.xml 2>/dev/null",
+    30000,
+    1000,
+  ).catch(() => "");
   return execAdbForText(
     config,
     padCode,
-    "rm -f /data/local/tmp/vmos_window.xml; uiautomator dump /data/local/tmp/vmos_window.xml 2>&1; chmod 644 /data/local/tmp/vmos_window.xml 2>/dev/null; if [ -f /data/local/tmp/vmos_window.xml ]; then cat /data/local/tmp/vmos_window.xml | head -c 60000 2>&1; fi",
+    "cat /data/local/tmp/vmos_window.xml | head -c 60000 2>&1",
     30000,
     1000,
   );
@@ -9886,6 +9959,9 @@ async function classifyThreadsPageOnDevice(
 
   if (await detectThreadsPhoneVerificationLocally(screenshotUrl)) {
     return { page: "login_required", reason: "LOCAL_PHONE_VERIFICATION_PAGE", screenshotUrl };
+  }
+  if (await detectThreadsLoginLandingLocally(screenshotUrl)) {
+    return { page: "login_required", reason: "LOCAL_THREADS_LOGIN_LANDING", screenshotUrl };
   }
   if (await detectThreadsInAppBrowserLocally(screenshotUrl)) {
     return { page: "unknown", reason: "LOCAL_THREADS_INAPP_BROWSER", screenshotUrl };
@@ -17538,6 +17614,7 @@ export interface PadAccountInfo {
   loggedIn?: boolean;
   method: "adb" | "vision" | "failed";
   error?: string;
+  screenshotUrl?: string;
 }
 
 export interface ThreadsProfileLinkResult {
@@ -17693,6 +17770,26 @@ async function openThreadsProfileForAccountQuery(
     };
   }
 
+  if (before.reason === "LOCAL_THREADS_SIDE_DRAWER") {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
+    await delay(1200);
+    const recovered = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+      page: "unknown" as ThreadsPageState,
+      reason: error instanceof Error ? error.message : String(error),
+      screenshotUrl: before.screenshotUrl,
+    }));
+    if (recovered.page === "login_required" || recovered.page === "challenge") {
+      return {
+        ok: false,
+        error: `Threads 当前不是已登录个人页：${recovered.page} ${recovered.reason || ""}`.trim(),
+        screenshotUrl: recovered.screenshotUrl,
+      };
+    }
+    before.page = recovered.page;
+    before.reason = recovered.reason;
+    before.screenshotUrl = recovered.screenshotUrl;
+  }
+
   let after = before;
   for (let attempt = 0; attempt < 3 && after.page !== "profile_page"; attempt += 1) {
     if (after.page === "system_dialog") {
@@ -17718,6 +17815,16 @@ async function openThreadsProfileForAccountQuery(
     }
 
     if (after.page === "unknown" && after.screenshotUrl) {
+      if (/LOCAL_THREADS_SIDE_DRAWER/i.test(after.reason)) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
+        await delay(1200);
+        after = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+          page: "unknown" as ThreadsPageState,
+          reason: error instanceof Error ? error.message : String(error),
+          screenshotUrl: after.screenshotUrl,
+        }));
+        continue;
+      }
       if (/LOCAL_THREADS_INAPP_BROWSER/i.test(after.reason)) {
         await dismissThreadsSystemCrashDialogIfPossible(config, padCode, after.screenshotUrl).catch(() => false);
         await delay(500);
@@ -17758,12 +17865,14 @@ async function openThreadsProfileForAccountQuery(
       }
     }
 
-    const profileTarget = after.screenshotUrl
-      ? await locateThreadsButtonByVision(
-          after.screenshotUrl,
-          "Threads 底部导航栏最右侧的个人主页/Profile/人像标签按钮中心点；不要选 Home、Search、Create、Activity、分享或设置",
-        ).catch(() => null)
-      : null;
+    const profileTarget = after.page === "home_feed"
+      ? null
+      : after.screenshotUrl
+        ? await locateThreadsButtonByVision(
+            after.screenshotUrl,
+            "Threads 底部导航栏最右侧的个人主页/Profile/人像标签按钮中心点；不要选 Home、Search、Create、Activity、分享或设置",
+          ).catch(() => null)
+        : null;
     if (profileTarget) {
       await tapViaAdbAbsolute(config, padCode, profileTarget.x, profileTarget.y, 3200);
     } else {
@@ -18911,21 +19020,16 @@ export async function queryThreadsAccount(
   config: VmosConfig,
   padCode: string,
 ): Promise<PadAccountInfo> {
-  const cachedAccount = getCachedThreadsAccountQuery(padCode);
-  if (cachedAccount) return cachedAccount;
-
-  const quickAccount = await queryThreadsAccountFromAndroidAccountManager(config, padCode).catch(() => null);
-  if (quickAccount) {
-    rememberThreadsAccountQuery(padCode, quickAccount);
-    return quickAccount;
-  }
-
+  // Explicit status checks must verify the real VMOS foreground state.
+  // Android AccountManager can retain old Instagram/Threads accounts after app
+  // data is cleared, so it is only usable as metadata after the profile page is
+  // confirmed below. Trusting it first creates false "logged in" states.
   const profilePage = await openThreadsProfileForAccountQuery(config, padCode).catch((error) => ({
     ok: false as const,
     error: error instanceof Error ? error.message : String(error),
   }));
   if (!profilePage.ok) {
-    return { padCode, platform: "threads", method: "failed", error: profilePage.error };
+    return { padCode, platform: "threads", method: "failed", error: profilePage.error, screenshotUrl: profilePage.screenshotUrl };
   }
 
   let uiProfileCue = false;
@@ -18938,19 +19042,19 @@ export async function queryThreadsAccount(
     uiProfileCue = uiXml ? hasThreadsProfileUiCue(uiXml) : false;
     const username = uiXml ? extractThreadsProfileUsernameFromUiXml(uiXml) : null;
     if (username) {
-      const result = { padCode, platform: "threads" as const, username, loggedIn: true, method: "adb" as const };
+      const result = { padCode, platform: "threads" as const, username, loggedIn: true, method: "adb" as const, screenshotUrl: profilePage.screenshotUrl };
       rememberThreadsAccountQuery(padCode, result);
       return result;
     }
     if (uiXmlHadNodes && !uiProfileCue && !profilePage.profileLikely) {
-      return { padCode, platform: "threads", method: "failed", error: "未能确认当前画面是 Threads 个人页，已停止账号猜测" };
+      return { padCode, platform: "threads", method: "failed", error: "未能确认当前画面是 Threads 个人页，已停止账号猜测", screenshotUrl: profilePage.screenshotUrl };
     }
   } catch {}
 
   // ── 方案二：仅在已打开个人页后使用截图辅助识别 ───────────────────────────
   try {
     if (!profilePage.profileLikely && !uiProfileCue && uiXmlHadNodes) {
-      return { padCode, platform: "threads", method: "failed", error: "未能确认当前画面是 Threads 个人页，已停止视觉识别" };
+      return { padCode, platform: "threads", method: "failed", error: "未能确认当前画面是 Threads 个人页，已停止视觉识别", screenshotUrl: profilePage.screenshotUrl };
     }
     const { callGemini, extractText, getInlineData } = await import("./gemini-client");
 
@@ -18990,7 +19094,7 @@ export async function queryThreadsAccount(
             : undefined;
           const email = json.email && json.email !== "null" ? json.email : undefined;
           if (username || email) {
-            const result = { padCode, platform: "threads" as const, username, email, loggedIn: true, method: "vision" as const };
+            const result = { padCode, platform: "threads" as const, username, email, loggedIn: true, method: "vision" as const, screenshotUrl: shotUrl };
             rememberThreadsAccountQuery(padCode, result);
             return result;
           }
@@ -18999,6 +19103,23 @@ export async function queryThreadsAccount(
     }
   } catch {}
 
+  const accountManagerAccount = profilePage.profileLikely || uiProfileCue
+    ? await queryThreadsAccountFromAndroidAccountManager(config, padCode, 8_000).catch(() => null)
+    : null;
+  if (accountManagerAccount?.username || accountManagerAccount?.email) {
+    const result = {
+      padCode,
+      platform: "threads" as const,
+      username: accountManagerAccount.username,
+      email: accountManagerAccount.email,
+      loggedIn: true,
+      method: "adb" as const,
+      screenshotUrl: profilePage.screenshotUrl,
+    };
+    rememberThreadsAccountQuery(padCode, result);
+    return result;
+  }
+
   if (profilePage.profileLikely || uiProfileCue) {
     const result = {
       padCode,
@@ -19006,19 +19127,13 @@ export async function queryThreadsAccount(
       loggedIn: true,
       method: "adb" as const,
       error: "已确认进入 Threads 个人页，但未识别到可读用户名",
+      screenshotUrl: profilePage.screenshotUrl,
     };
     rememberThreadsAccountQuery(padCode, result);
     return result;
   }
 
-  // ── 方案三：AccountManager 数字 ID（至少能确认已登录）────────────────────
-  const fallbackAccount = await queryThreadsAccountFromAndroidAccountManager(config, padCode, 15_000).catch(() => null);
-  if (fallbackAccount) {
-    rememberThreadsAccountQuery(padCode, fallbackAccount);
-    return fallbackAccount;
-  }
-
-  return { padCode, platform: "threads", method: "failed", error: "未识别到账号" };
+  return { padCode, platform: "threads", method: "failed", error: "未识别到账号", screenshotUrl: profilePage.screenshotUrl };
 }
 
 export async function publishPost(

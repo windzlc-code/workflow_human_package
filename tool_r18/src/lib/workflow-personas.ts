@@ -48,6 +48,7 @@ export const WORKFLOW_PERSONA_SEEDS: WorkflowPersonaSeed[] = [
       totalEpisodes: 50,
       isMemePersona: false,
       isGirlPersona: true,
+      freePostTemplate: "jinjunya-hook",
       personaAppearance: "23 歲台韓混血女性，韓系甜感娃娃臉，小巧 V 臉，大眼臥蠶，眼妝乾淨但有放大感，粉紫棕眼影、細緻眼線、根根分明睫毛，下眼瞼微亮，鼻尖與臉頰有明顯粉色腮紅，偏油亮的水光肌、額頭鼻樑與臉頰高光明顯，水潤玫瑰豆沙唇妝、唇峰柔和飽滿，冷調深巧克力棕蓬鬆披散長髮，眉毛也是同色系冷深棕，明顯有畫過的韓系精修眉，眉型偏平直微弧、眉峰柔和、眉尾乾淨拉長，眉毛邊緣修飾整齊但不要太粗，髮色與眉色一致，不要黑髮配淺眉，髮根蓬鬆、有幾縷碎髮落在額前，奶油色與蜜桃粉調性，親和笑容，日常手機照片感。",
       tweetStyleLinkUrl: "https://t.me/gy_night_flight_bot",
       tweetStyleLinkText: "\u5feb\u9ede\u6211\u770b\u66f4\u591a\u5427\u2764\ufe0f",
@@ -233,3 +234,24 @@ export const WORKFLOW_PERSONA_SEEDS: WorkflowPersonaSeed[] = [
     },
   },
 ];
+
+export function usesJinjunyaFreeContentStyle(setup?: Partial<DramaSetup> | null): boolean {
+  const explicit = String(setup?.freePostTemplate || "").trim().toLowerCase();
+  if (explicit) return explicit === "jinjunya-hook";
+  const rawMarkers = [
+    String(setup?.personaName || ""),
+    String(setup?.personaDescription || ""),
+    String(setup?.contentTheme || ""),
+    String(setup?.tweetStyleLinkUrl || ""),
+    String(setup?.imageWorkflow?.personaKey || ""),
+    String(setup?.imageWorkflow?.workflowFile || ""),
+  ].join(" ");
+  const normalized = rawMarkers.toLowerCase();
+  return rawMarkers.includes("金君雅")
+    || normalized.includes("jinjunya")
+    || normalized.includes("gy_night_flight_bot");
+}
+
+export function resolvePersonaFreeContentTargetWords(setup?: Partial<DramaSetup> | null): number {
+  return usesJinjunyaFreeContentStyle(setup) ? 20 : 120;
+}

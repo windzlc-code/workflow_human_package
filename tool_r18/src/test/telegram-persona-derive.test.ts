@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildListPaginationRows,
   buildManualConfirmCallback,
+  buildSimplePagedCallback,
   buildPersonaContentTypeCallback,
   buildPersonaContentTypePickerRows,
   buildPostDetailText,
@@ -15,6 +17,7 @@ import {
   formatUserFacingError,
   inferStoredPostMediaKind,
   normalizeThreadsProfileLinkInput,
+  parseSimplePagedCallback,
   parsePersonaContentTypeCallback,
   parseStoredPostsCallback,
 } from "@/telegram-bot";
@@ -143,6 +146,33 @@ describe("filterPersonaMenuList", () => {
       "c452e276-cc6c-40c0-855b-00e1a32a68bf",
       "workflow-persona-jinjunya",
     ]);
+  });
+});
+
+describe("generic list pagination", () => {
+  it("builds first/prev/next/last controls for middle pages", () => {
+    const rows = buildListPaginationRows({
+      page: 1,
+      totalPages: 3,
+      callbackForPage: (page) => buildSimplePagedCallback("list_personas", page),
+    });
+    const buttons = rows.flat();
+
+    expect(buttons.map((button) => button.text)).toEqual([
+      "⏮ 首頁",
+      "◀️ 上一頁",
+      "2/3",
+      "下一頁 ▶️",
+      "尾頁 ⏭",
+    ]);
+    expect(buttons.find((button) => button.text === "⏮ 首頁")?.callback_data).toBe("list_personas");
+    expect(buttons.find((button) => button.text === "尾頁 ⏭")?.callback_data).toBe("list_personas_p2");
+  });
+
+  it("parses simple paged callbacks", () => {
+    expect(parseSimplePagedCallback("list_personas", "list_personas")).toBe(0);
+    expect(parseSimplePagedCallback("list_personas_p3", "list_personas")).toBe(3);
+    expect(parseSimplePagedCallback("list_personas_px", "list_personas")).toBeNull();
   });
 });
 

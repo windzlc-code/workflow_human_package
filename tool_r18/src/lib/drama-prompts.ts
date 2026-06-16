@@ -2,6 +2,7 @@
 // 從 short-drama 倉庫提取並最佳化
 
 import type { DramaSetup, EpisodeEntry } from "@/types/drama";
+import { usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
 
 /** 目標市場描述與創作語言指令 */
 function getMarketDirective(setup: DramaSetup): string {
@@ -1660,6 +1661,7 @@ export function buildSocialPostsPrompt(
 
   const personaTypes = setup.genres?.join(" + ") || "";
   const isPersonaMode = !!setup.personaName;
+  const useJinjunyaFreeHookStyle = usesJinjunyaFreeContentStyle(setup);
 
   // Language directive based on target market
   const market = setup.targetMarket || "cn";
@@ -1858,7 +1860,7 @@ ${customInstruction ? `- 本次方向：${customInstruction}` : ""}
 
 **【重要】必須輸出恰好 ${count} 條，不多不少，用 --- 分隔。即使內容重複也要湊滿 ${count} 條。**
 
-請直接輸出 ${count} 條：` : (setup as any).isGirlPersona ? `
+請直接輸出 ${count} 條：` : ((setup as any).isGirlPersona && useJinjunyaFreeHookStyle) ? `
 這是一個**福利/美女傳播型人設**，核心是用圖片吸引互動，文字是勾起好奇心的"鉤子"。
 
 ${memeImageItems && memeImageItems.length > 0 ? `

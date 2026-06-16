@@ -50,6 +50,55 @@ describe("buildSocialPostsPrompt", () => {
     expect(prompt).toContain("50~150字");
   });
 
+  it("keeps 金君雅 on the short free-content hook template", () => {
+    const prompt = buildSocialPostsPrompt(
+      {
+        genres: ["飛行日常"],
+        personaPersonality: "迷糊軟萌",
+        personaGender: "女性",
+        personaStyle: "繁體中文、台灣口語、甜感碎碎念、生活感強",
+        personaName: "金君雅",
+        contentTheme: "飛行日常、外站旅行、甜點、可愛穿搭",
+        tweetStyleLinkUrl: "https://t.me/gy_night_flight_bot",
+        freePostTemplate: "jinjunya-hook",
+        totalEpisodes: 50,
+        targetMarket: "cn",
+        chineseScript: "traditional",
+        isGirlPersona: true,
+      },
+      "金君雅人設",
+      1,
+    );
+
+    expect(prompt).toContain("福利/美女傳播型人設");
+    expect(prompt).toContain("剛洗完澡");
+    expect(prompt).toContain("這條裙子穿出去");
+  });
+
+  it("does not force non-金君雅 girl personas into the short hook template", () => {
+    const prompt = buildSocialPostsPrompt(
+      {
+        genres: ["瑜伽"],
+        personaPersonality: "溫柔體貼",
+        personaGender: "女性",
+        personaStyle: "繁體中文、台灣口語、溫柔、自律、療癒但不雞湯",
+        personaName: "瑜伽老師",
+        contentTheme: "瑜伽、伸展、體態管理、飲食、晨間習慣",
+        totalEpisodes: 50,
+        targetMarket: "cn",
+        chineseScript: "traditional",
+        isGirlPersona: true,
+      },
+      "瑜伽老師人設",
+      1,
+    );
+
+    expect(prompt).not.toContain("福利/美女傳播型人設");
+    expect(prompt).not.toContain("剛洗完澡");
+    expect(prompt).not.toContain("這條裙子穿出去");
+    expect(prompt).toContain("請生成 **1 篇**獨立完整的短文");
+  });
+
   it("adds hard Taiwan locale guardrails when the persona is set to Taiwan", () => {
     const prompt = buildSocialPostsPrompt(
       {

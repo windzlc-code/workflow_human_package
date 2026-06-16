@@ -243,6 +243,11 @@ export interface DramaSetup {
   postFormat?: string;
   contentTheme?: string;
   trendTopics?: string[];
+  tweetStyleProfile?: string;
+  tweetStyleSample?: string;
+  tweetStyleLinkUrl?: string;
+  tweetStyleLinkText?: string;
+  freePostTemplate?: "jinjunya-hook" | "default";
   // Persona image consistency
   personaAvatarUrl?: string;   // base64 data URL of uploaded reference image
   personaAppearance?: string;  // AI-extracted appearance description for image generation/search
