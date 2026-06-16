@@ -9,6 +9,7 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { resolveVmosCredentials, readRuntimeApiConfig } from "@/runtime/node/config";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
@@ -396,7 +397,8 @@ async function listPadsCached(options: { force?: boolean } = {}) {
     return fallback;
   }
 }
-const PROJECT_ROOT = process.env.TOOL_R18_PROJECT_ROOT || process.env.AUTO_TWEET_PROJECT_ROOT || (process.platform === "win32" ? "D:\GitHub\Automatic-script" : "/opt/Automatic-script");
+const SOURCE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const PROJECT_ROOT = process.env.TOOL_R18_PROJECT_ROOT || process.env.AUTO_TWEET_PROJECT_ROOT || SOURCE_ROOT;
 const RUNTIME_DIR = process.env.TOOL_R18_RUNTIME_DIR || path.join(PROJECT_ROOT, ".runtime", "automatic-script");
 const PAD_NAME_CACHE_FILE = path.join(RUNTIME_DIR, "pad-name-map.json");
 const PAD_LIST_CACHE_FILE = path.join(RUNTIME_DIR, "pad-list-cache.json");
@@ -8958,7 +8960,7 @@ async function generatePersonaImageForArchive(
       fs.writeFileSync(payloadFile, payload, "utf8");
       payloadArg = `@${payloadFile}`;
     }
-    execFile(process.execPath, ["--import", "tsx", "scripts/skills/generate-persona-images.ts", payloadArg], {
+    execFile(process.execPath, ["--import", "tsx", path.join(PROJECT_ROOT, "scripts", "skills", "generate-persona-images.ts"), payloadArg], {
       cwd: PROJECT_ROOT,
       timeout: 600000,
       maxBuffer: 80 * 1024 * 1024,
