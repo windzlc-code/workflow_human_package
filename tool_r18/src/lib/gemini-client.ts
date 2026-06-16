@@ -6,8 +6,8 @@ import { buildApiHeaders, buildApiUrl, DEFAULT_API_BASE_URL } from "@/lib/api-en
 import type { ApiProtocol } from "@/lib/api-endpoints";
 
 const DEFAULT_TEXT_MODEL_MAPPINGS = {
-  "xai/grok-4.3": { modelId: "gemini-3-pro-preview", protocol: "gemini-text" },
-  "grok-4.2": { modelId: "gemini-3-flash-preview", protocol: "gemini-text" },
+  "xai/grok-4.3": { modelId: "xai/grok-4.3", protocol: "openai" },
+  "grok-4.2": { modelId: "grok-4.2", protocol: "openai" },
   "gemini-3-flash-preview": { modelId: "gemini-3-flash-preview", protocol: "gemini-text" },
   "gemini-3-pro-preview": { modelId: "gemini-3-pro-preview", protocol: "gemini-text" },
   "gemini-3.1-pro-preview": { modelId: "gemini-3.1-pro-preview", protocol: "gemini-text" },

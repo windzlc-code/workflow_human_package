@@ -406,7 +406,16 @@ export async function generatePersonaImage(
   }
 
   const { prompt, mode, withAvatar } = buildPersonaImagePrompt(content, setup, requestedMode, referenceMode);
-  const finalPrompt = [prompt, customPrompt?.trim() || ""].filter(Boolean).join(", ");
+  const customCue = customPrompt?.trim();
+  const finalPrompt = withAvatar
+    ? [
+        "The attached persona reference image is the identity anchor. Keep the same recognizable face: face shape, eyes, nose, mouth, age impression, hairline/hairstyle, skin tone, and overall temperament. Do not create a different person.",
+        "Only the face identity must remain locked. Clothing, pose, scene, action, camera angle, lighting, and props should follow the current user/post visual request instead of copying the reference sheet outfit or background.",
+        customCue ? `Highest priority current visual request: ${customCue}` : "",
+        "If the base persona description conflicts with the current visual request, obey the current visual request for scene/outfit/action, while preserving the reference face identity.",
+        prompt,
+      ].filter(Boolean).join("\n")
+    : [prompt, customCue || ""].filter(Boolean).join(", ");
 
   const avatarSource = withAvatar ? route.referenceUrl : undefined;
   const avatarBase64 = avatarSource ? avatarSource.replace(/^data:[^;]+;base64,/, "") : undefined;

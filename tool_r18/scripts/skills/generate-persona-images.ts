@@ -7,7 +7,7 @@ import {
 } from "@/lib/persona-image-production";
 import { compressImage } from "@/lib/image-compress";
 import { generateWorkflowPersonaImage } from "@/runtime/node/comfyui-workflow-client";
-import { generateRunningHubAiAppImage } from "@/runtime/node/runninghub-workflow-image";
+import { generateClosedModelImage } from "@/runtime/node/image-generator";
 import { parseDataUrlMedia } from "@/lib/media-utils";
 import type { DramaSetup } from "@/types/drama";
 
@@ -38,12 +38,21 @@ function readPositiveIntEnv(name: string, fallback: number): number {
 
 const CLOSED_IMAGE_TIMEOUT_MS = readPositiveIntEnv("PERSONA_IMAGE_CLOSED_TIMEOUT_MS", 180_000);
 const GENERATED_DATA_URL_TARGET_BYTES = readPositiveIntEnv("PERSONA_IMAGE_DATA_URL_TARGET_BYTES", 512 * 1024);
-const RUNNINGHUB_IMAGE_WEBAPP_ID = process.env.RUNNINGHUB_IMAGE_WEBAPP_ID || "2034899011521482754";
 
 function dataUrlBytes(url?: string): number | undefined {
   if (!url?.startsWith("data:")) return undefined;
   const parsed = parseDataUrlMedia(url);
   return parsed ? Buffer.byteLength(parsed.base64, "base64") : undefined;
+}
+
+function uniqueModels(models: Array<string | undefined>): string[] {
+  return Array.from(new Set(models.map((model) => String(model || "").trim()).filter(Boolean)));
+}
+
+function shouldTryNextClosedModel(result: any): boolean {
+  if (result?.ok && result?.url) return false;
+  const text = `${result?.reasonCode || ""} ${result?.error || ""}`;
+  return /model_unavailable|auth_missing|network_error|timeout|upstream_error|NOT_FOUND|model_not_found|未返回圖片|未返回图片|未返回图|API 返回业务错误/i.test(text);
 }
 
 async function compressGeneratedDataUrl(url?: string): Promise<{ url?: string; bytesBefore?: number; bytesAfter?: number; compressed?: boolean }> {
@@ -89,25 +98,44 @@ const unsupportedImageApi = {
         },
       };
     }
-    const result = await generateRunningHubAiAppImage({
-      prompt: payload.prompt,
-      webappId: payload.webappId || RUNNINGHUB_IMAGE_WEBAPP_ID,
-      aspectRatio: payload.aspectRatio,
-      timeoutMs: payload.timeoutMs || CLOSED_IMAGE_TIMEOUT_MS,
-    }, {
-      configPath: payload.configPath,
-      dataDir: payload.dataDir,
-    });
+    const models = uniqueModels([
+      payload.model,
+      process.env.PERSONA_IMAGE_MODEL,
+      "gemini-3.1-flash-image-preview",
+      "gpt-image-2",
+    ]);
+    let result: any;
+    const fallbackAttempts: Array<{ model: string; ok: boolean; reasonCode?: string; error?: string }> = [];
+    for (const model of models) {
+      result = await generateClosedModelImage({
+        prompt: payload.prompt,
+        model,
+        aspectRatio: payload.aspectRatio,
+        avatarBase64: payload.avatarBase64,
+        avatarMimeType: payload.avatarMimeType,
+        timeoutMs: payload.timeoutMs || CLOSED_IMAGE_TIMEOUT_MS,
+        configPath: payload.configPath,
+        dataDir: payload.dataDir,
+      });
+      fallbackAttempts.push({
+        model,
+        ok: Boolean(result?.ok && result?.url),
+        reasonCode: result?.reasonCode,
+        error: result?.error ? String(result.error).slice(0, 240) : undefined,
+      });
+      if (!shouldTryNextClosedModel(result)) break;
+    }
     const normalized = await compressGeneratedDataUrl(result.url);
     return {
       ...result,
       url: normalized.url,
       timings: {
-        provider: "runninghub-ai-app",
-        webappId: payload.webappId || RUNNINGHUB_IMAGE_WEBAPP_ID,
+        ...((result as any)?.timings || {}),
+        provider: "closed-model-image",
+        model: fallbackAttempts[fallbackAttempts.length - 1]?.model || payload.model || process.env.PERSONA_IMAGE_MODEL || "gpt-image-2",
+        fallbackAttempts,
         elapsedMs: Date.now() - startedAt,
         timeoutMs: payload.timeoutMs || CLOSED_IMAGE_TIMEOUT_MS,
-        taskId: result.taskId,
         dataUrlBytesBefore: normalized.bytesBefore,
         dataUrlBytesAfter: normalized.bytesAfter,
         dataUrlCompressed: normalized.compressed,

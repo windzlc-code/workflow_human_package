@@ -24,6 +24,7 @@ import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/mem
 import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
+import { generateClosedModelImage } from "@/runtime/node/image-generator";
 import type { DramaSetup, EpisodeScript } from "@/types/drama";
 import type { PersonaArchive } from "@/core/archives/persona-archive-domain";
 
@@ -5961,6 +5962,86 @@ async function sendPostImageCandidateGroupMessage(bot: TelegramBot, chatId: numb
   }), 45_000);
 }
 
+async function generateClosedPersonaPostImage(args: {
+  archiveId: string;
+  archiveName: string;
+  post: { id?: string; content: string };
+  prompt: string;
+  imageAspectRatio?: string;
+}): Promise<{ ok: boolean; imageUrl?: string; error?: string; timings?: unknown }> {
+  const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
+  const referenceUrl = getExplicitPersonaReferenceImageUrl(archive);
+  if (!referenceUrl) return { ok: false, error: "此人設尚未生成人設圖，無法鎖定同一張臉。" };
+
+  let avatarBase64 = "";
+  let avatarMimeType = "image/jpeg";
+  const parsed = parseDataUrlMedia(referenceUrl);
+  if (parsed) {
+    avatarBase64 = parsed.base64;
+    avatarMimeType = parsed.mimeType || avatarMimeType;
+  } else {
+    const buffer = await loadTelegramImageBuffer(referenceUrl);
+    avatarBase64 = buffer.toString("base64");
+    const ext = getMediaExtension(referenceUrl);
+    avatarMimeType = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+  }
+  if (!avatarBase64) return { ok: false, error: "人設圖讀取失敗，無法鎖定同一張臉。" };
+
+  const visualContext = [
+    args.prompt,
+    cleanGeneratedCopyForImagePrompt(args.post.content) ? `Tweet/copy context: ${cleanGeneratedCopyForImagePrompt(args.post.content)}` : "",
+  ].filter(Boolean).join("\n");
+  const prompt = [
+    "Use the attached persona reference image only as the face identity anchor.",
+    "Keep the same recognizable face and age impression. Do not copy the reference outfit, body pose, or background unless the current request asks for them.",
+    "Only face identity is locked. Clothing, pose, scene, action, camera angle, lighting, props, and mood must follow the current request and generated tweet context.",
+    `Persona/archive name: ${args.archiveName}`,
+    "Current visual request:",
+    visualContext,
+    "Important: obey concrete user requirements such as color, clothing type, object, location, action, and atmosphere. The image should match the current tweet, not an old persona template.",
+  ].filter(Boolean).join("\n");
+
+  const modelCandidates = Array.from(new Set([
+    process.env.PERSONA_POST_IMAGE_MODEL,
+    "gemini-3.1-flash-image-preview",
+    process.env.PERSONA_IMAGE_MODEL,
+    "gpt-image-2",
+  ].map((model) => String(model || "").trim()).filter(Boolean)));
+  const attempts: Array<{ model: string; ok: boolean; error?: string; reasonCode?: string; elapsedMs: number }> = [];
+  for (const model of modelCandidates) {
+    const startedAt = Date.now();
+    const result = await generateClosedModelImage({
+      prompt,
+      model,
+      aspectRatio: args.imageAspectRatio || "1:1",
+      avatarBase64,
+      avatarMimeType,
+      timeoutMs: Number(process.env.PERSONA_POST_IMAGE_TIMEOUT_MS || 180_000),
+    });
+    attempts.push({
+      model,
+      ok: Boolean(result.ok && result.url),
+      error: result.error ? String(result.error).slice(0, 240) : undefined,
+      reasonCode: (result as any).reasonCode,
+      elapsedMs: Date.now() - startedAt,
+    });
+    if (result.ok && result.url) {
+      return {
+        ok: true,
+        imageUrl: result.url,
+        timings: { provider: "closed-persona-post-image", model, attempts },
+      };
+    }
+    const errorText = `${(result as any).reasonCode || ""} ${result.error || ""}`;
+    if (!/auth_missing|network_error|timeout|upstream_error|model_unavailable|not_found|未返回|未返回圖片|未返回图片|5\d\d|429/i.test(errorText)) break;
+  }
+  return {
+    ok: false,
+    error: attempts.map((attempt) => `${attempt.model}: ${attempt.error || attempt.reasonCode || "failed"}`).join("; "),
+    timings: { provider: "closed-persona-post-image", attempts },
+  };
+}
+
 async function generateImagesForGeneratedPosts(args: {
   bot?: TelegramBot;
   chatId?: number;
@@ -5996,22 +6077,30 @@ async function generateImagesForGeneratedPosts(args: {
         cleanGeneratedCopyForImagePrompt(post.content) ? `Generated copy context: ${cleanGeneratedCopyForImagePrompt(post.content)}` : "",
         `Candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: match the safe visual prompt and generated copy context, ${args.hasPersonaReferenceImage ? "keep persona identity consistent when available" : "keep only the written persona style consistent"}, and vary composition, distance, pose, lighting, or scene details from the other candidates.`,
       ].filter(Boolean).join("\n");
-      const image = args.chatId
-        ? await submitGeneratedPostImageCandidateTask({
-          chatId: args.chatId,
-          archiveId: args.archiveId,
-          archiveName: args.archiveName,
-          post,
-          prompt: instruction,
-          imageAspectRatio: args.imageAspectRatio,
-          imageWidth: args.imageWidth,
-          imageHeight: args.imageHeight,
-          imageRatioLabel: args.imageRatioLabel,
-          hasPersonaReferenceImage: args.hasPersonaReferenceImage,
-        }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
-        : await generatePersonaImageForArchive(args.archiveId, instruction, {
-          customVisualInstruction: instruction,
-        }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      const image = args.hasPersonaReferenceImage
+        ? await generateClosedPersonaPostImage({
+            archiveId: args.archiveId,
+            archiveName: args.archiveName,
+            post,
+            prompt: instruction,
+            imageAspectRatio: args.imageAspectRatio,
+          }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+        : args.chatId
+          ? await submitGeneratedPostImageCandidateTask({
+              chatId: args.chatId,
+              archiveId: args.archiveId,
+              archiveName: args.archiveName,
+              post,
+              prompt: instruction,
+              imageAspectRatio: args.imageAspectRatio,
+              imageWidth: args.imageWidth,
+              imageHeight: args.imageHeight,
+              imageRatioLabel: args.imageRatioLabel,
+              hasPersonaReferenceImage: args.hasPersonaReferenceImage,
+            }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+          : await generatePersonaImageForArchive(args.archiveId, instruction, {
+              customVisualInstruction: instruction,
+            }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
       if (image?.ok && image.imageUrl) {
         const urls = Array.isArray((image as any).imageUrls) && (image as any).imageUrls.length
           ? (image as any).imageUrls
@@ -8260,7 +8349,7 @@ async function promptGeneratePostCount(bot: TelegramBot, chatId: number, msgId: 
 function buildGeneratedPostsPreviewHtml(
   posts: Array<{ content?: string }>,
   linkPresentation: { url: string; text: string } | null,
-  maxChars = 2600,
+  maxChars = 3900,
   header = `\u2705 \u5DF2\u751F\u6210 ${posts.length} \u7BC7\u63A8\u6587`,
 ) {
   const lines: string[] = [header];
@@ -8514,7 +8603,7 @@ async function executeGeneratePostsFromTelegram(args: GeneratePostsTelegramArgs)
       await telegramBestEffort("generatePosts.textOnlyDone", args.bot.sendMessage(args.chatId, buildGeneratedPostsPreviewHtml(
         imageTargets,
         linkPresentation,
-        2600,
+        3900,
         `\u2705 \u63A8\u6587\u751F\u6210\u5B8C\u6210\uFF1A${posts.length} \u7BC7`,
       ), {
         parse_mode: "HTML",
@@ -8525,7 +8614,7 @@ async function executeGeneratePostsFromTelegram(args: GeneratePostsTelegramArgs)
     await telegramBestEffort("generatePosts.preview", args.bot.sendMessage(args.chatId, buildGeneratedPostsPreviewHtml(
       imageTargets,
       linkPresentation,
-      2600,
+      3900,
       `\u2705 \u5DF2\u751F\u6210 ${posts.length} \u7BC7\u63A8\u6587\uFF0C\u6B63\u5728\u9010\u7BC7\u751F\u6210\u914D\u5716...`,
     ), {
       parse_mode: "HTML",
@@ -13124,9 +13213,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      if (pending.contentBranch) {
+      if (pending.contentBranch === "r18") {
         await executePendingGeneratePostWithFixedWords(bot, chatId, pending, "", msgId);
         return;
+      }
+      if (pending.contentBranch === "nonr18") {
+        const archive = await loadPersonaArchive(pending.archiveId).catch(() => null);
+        if (usesJinjunyaFreeContentStyle(archive?.setup as Partial<DramaSetup> | null | undefined)) {
+          await executePendingGeneratePostWithFixedWords(bot, chatId, pending, "", msgId);
+          return;
+        }
       }
       setPendingGeneratePost(chatId, { ...pending, prompt: "", stage: "await_word_count" });
       await safeEditOrSend(bot, chatId, msgId, "✅ 已選擇讓 AI 自動生成提示詞。\n\n⭐ 請輸入每篇推文的目標字數 ⭐\n只需要發送數字即可。\n\n例如：120");
@@ -15965,9 +16061,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       if (generatePostState.stage === "await_prompt") {
-        if (generatePostState.contentBranch) {
+        if (generatePostState.contentBranch === "r18") {
           await executePendingGeneratePostWithFixedWords(bot, chatId, generatePostState, text);
           return;
+        }
+        if (generatePostState.contentBranch === "nonr18") {
+          const archive = await loadPersonaArchive(generatePostState.archiveId).catch(() => null);
+          if (usesJinjunyaFreeContentStyle(archive?.setup as Partial<DramaSetup> | null | undefined)) {
+            await executePendingGeneratePostWithFixedWords(bot, chatId, generatePostState, text);
+            return;
+          }
         }
         setPendingGeneratePost(chatId, {
           ...generatePostState,
