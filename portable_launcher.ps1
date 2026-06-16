@@ -268,7 +268,11 @@ function Get-SavedBotInfoText {
   if (Test-Path -LiteralPath $InfoFile) {
     try {
       $savedInfo = Get-Content -LiteralPath $InfoFile -Raw -Encoding UTF8 | ConvertFrom-Json
-      if ($savedInfo.username) { return "@" + $savedInfo.username }
+      $parts = @()
+      if ($savedInfo.username) { $parts += ("@" + $savedInfo.username) }
+      if ($savedInfo.first_name) { $parts += ("名稱：" + $savedInfo.first_name) }
+      if ($savedInfo.id) { $parts += ("ID：" + $savedInfo.id) }
+      if ($parts.Count -gt 0) { return ($parts -join "，") }
     } catch {
       return "已保存 Token，但 Bot 資訊檔無法讀取"
     }
@@ -373,8 +377,8 @@ function Configure-GrokTextModel {
     return
   }
 
-  $defaultBaseUrl = $currentBaseUrl
-  if (-not $defaultBaseUrl) { $defaultBaseUrl = "https://llm.runninghub.ai/v1" }
+  $exampleBaseUrl = $currentBaseUrl
+  if (-not $exampleBaseUrl) { $exampleBaseUrl = "https://llm.runninghub.ai/v1" }
   $defaultModels = $currentModels
   if (-not $defaultModels) { $defaultModels = "xai/grok-4.3, grok-4.2" }
 
@@ -383,14 +387,14 @@ function Configure-GrokTextModel {
   } else {
     Write-Host "首次使用需要設定 Grok 文字模型 API Key。"
   }
-  Write-Host ("預設 Base URL：" + $defaultBaseUrl)
+  Write-Host ("Grok API Base URL 範例：" + $exampleBaseUrl)
   Write-Host ("預設模型順序：" + $defaultModels)
   Write-Host ""
 
   $apiKey = (Read-Host "請貼上 Grok 文字模型 API Key 後按 Enter").Trim()
   if (-not $apiKey) { throw "未輸入 Grok 文字模型 API Key。" }
-  $baseUrlInput = (Read-Host "請輸入 Grok API Base URL，直接 Enter 使用預設值").Trim()
-  if (-not $baseUrlInput) { $baseUrlInput = $defaultBaseUrl }
+  $baseUrlInput = (Read-Host "請輸入 Grok API Base URL 後按 Enter").Trim()
+  if (-not $baseUrlInput) { throw "未輸入 Grok API Base URL。" }
   $modelsInput = (Read-Host "請輸入 Grok 文字模型名稱/順序，直接 Enter 使用預設值").Trim()
   if (-not $modelsInput) { $modelsInput = $defaultModels }
 

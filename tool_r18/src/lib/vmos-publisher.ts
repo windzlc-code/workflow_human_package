@@ -1719,6 +1719,14 @@ export async function detectThreadsProfilePageLocally(screenshotUrl: string | un
     && suggestedForYouTitle > 0.014
     && suggestionCards > 0.018;
   if (publicProfileSuggestionsOnly) return true;
+  const ownRootProfileLike = topRightActions > 0.025
+    && nameArea > 0.030
+    && (editProfileButtons > 0.012 || profileTabRow > 0.100)
+    && bottomProfileTab > 0.025
+    && (publicProfileStats > 0.020 || lowerProfileTabs > 0.080 || suggestedForYouTitle > 0.018)
+    && composerPublishPill < 0.120
+    && keyboardComposerToolbar < 0.060;
+  if (ownRootProfileLike) return true;
   return backArrow > 0.025 && homeLogo < 0.035 && (
     (followButton > 0.018 && profileTabs > 0.012)
     || (midFollowButtons > 0.055 && lowerProfileTabs > 0.012)
@@ -5047,6 +5055,37 @@ function parsePhysicalScreenSizeFromWmSize(output?: string): { width: number; he
   return width > 0 && height > 0 ? { width, height } : null;
 }
 
+function clampPointToScreen(
+  screen: { width: number; height: number },
+  point: { x: number; y: number },
+) {
+  return {
+    x: Math.max(0, Math.min(screen.width - 1, Math.round(point.x))),
+    y: Math.max(0, Math.min(screen.height - 1, Math.round(point.y))),
+  };
+}
+
+export function scalePointBetweenScreens(
+  point: { x: number; y: number },
+  from: { width: number; height: number },
+  to: { width: number; height: number },
+) {
+  const scaleX = to.width / from.width;
+  const scaleY = to.height / from.height;
+  return clampPointToScreen(to, {
+    x: point.x * scaleX,
+    y: point.y * scaleY,
+  });
+}
+
+export function scaleScreenshotPointToAdbPointForSizes(
+  point: { x: number; y: number },
+  screenshotSize: { width: number; height: number },
+  adbSize: { width: number; height: number },
+) {
+  return scalePointBetweenScreens(point, screenshotSize, adbSize);
+}
+
 function normalizeVmosScreenSize(size: { width: number; height: number } | null): { width: number; height: number } | null {
   return size;
 }
@@ -5089,18 +5128,18 @@ async function getScreenSize(
   return BASE_SCREEN;
 }
 
-async function getPhysicalTapScreenSize(
+async function getScreenshotCoordinateScreenSize(
   config: VmosConfig,
   padCode: string,
 ): Promise<{ width: number; height: number }> {
-  const fromAdb = await execAdbForText(config, padCode, "wm size", 15_000, 500)
+  const fromPhysicalWm = await execAdbForText(config, padCode, "wm size", 15_000, 500)
     .then(parsePhysicalScreenSizeFromWmSize)
     .catch(() => null);
-  if (fromAdb) return fromAdb;
+  if (fromPhysicalWm) return fromPhysicalWm;
   const fromScreenshot = await screenshot(config, padCode)
     .then(parseScreenSizeFromScreenshotUrl)
     .catch(() => null);
-  return fromScreenshot || getScreenSize(config, padCode);
+  return fromScreenshot || FIXED_VMOS_SCREEN;
 }
 
 async function scaleUiXmlPointToPhysicalTap(
@@ -5118,9 +5157,9 @@ async function scaleScreenshotPointToAdbTap(
   padCode: string,
   point: { x: number; y: number },
 ): Promise<{ x: number; y: number }> {
-  const screenshotSize = await getPhysicalTapScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
+  const screenshotSize = await getScreenshotCoordinateScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
   const adbSize = await getScreenSize(config, padCode).catch(() => screenshotSize);
-  return scalePointFromReferenceScreen(adbSize, point, screenshotSize);
+  return scaleScreenshotPointToAdbPointForSizes(point, screenshotSize, adbSize);
 }
 
 async function scaleReferencePointToPhysicalTap(
@@ -5147,12 +5186,7 @@ export function scalePointFromReferenceScreen(
   point: { x: number; y: number },
   reference: { width: number; height: number } = THREADS_TALL_REFERENCE_SCREEN,
 ) {
-  const scaleX = screen.width / reference.width;
-  const scaleY = screen.height / reference.height;
-  return {
-    x: Math.max(0, Math.min(screen.width - 1, Math.round(point.x * scaleX))),
-    y: Math.max(0, Math.min(screen.height - 1, Math.round(point.y * scaleY))),
-  };
+  return scalePointBetweenScreens(point, reference, screen);
 }
 
 async function captureInstagramProfileGridScreenshot(
@@ -16763,6 +16797,39 @@ async function login_pressBack(config: VmosConfig, padCode: string) {
   await delay(800);
 }
 
+function adbTapScript(point: { x: number; y: number }, sleepSeconds?: number) {
+  const tap = `input tap ${Math.round(point.x)} ${Math.round(point.y)}`;
+  return typeof sleepSeconds === "number" ? `${tap}; sleep ${sleepSeconds}` : tap;
+}
+
+async function login_tapAdbPoint(
+  config: VmosConfig,
+  padCode: string,
+  point: { x: number; y: number },
+  waitMs = 2500,
+) {
+  await tapViaAdbAbsolute(config, padCode, point.x, point.y, waitMs);
+}
+
+const THREADS_LOGIN_ADB_POINTS = {
+  usernameField: { x: 360, y: 600 },
+  passwordField: { x: 360, y: 760 },
+  submitButton: { x: 360, y: 895 },
+  saveLoginButton: { x: 360, y: 1085 },
+  setupContinueButton: { x: 360, y: 1180 },
+  instagramLoginCard: { x: 605, y: 780 },
+} as const;
+
+const TELEGRAM_LOGIN_ADB_POINTS = {
+  welcomeStart: { x: 360, y: 1128 },
+  phoneFieldAfterStart: { x: 360, y: 736 },
+  phoneField: { x: 430, y: 665 },
+  phoneSubmitArrow: { x: 610, y: 675 },
+  confirmationYes: { x: 580, y: 480 },
+  smsFeeContinue: { x: 550, y: 952 },
+  fallbackContinue: { x: 360, y: 736 },
+} as const;
+
 async function login_clearAppData(config: VmosConfig, padCode: string) {
   await execAdbForText(config, padCode, `pm clear ${PKG_THREADS}`, 30000, 1000).catch(() => "");
   await delay(2000);
@@ -16793,16 +16860,16 @@ async function login_fillInstagramCombinedFormByCoordinates(
   password: string,
 ) {
   // ADB 的实际触控坐标是 720x1280；VMOS 截图会拉成 720x1600。
-  // 这里使用实测物理坐标，避免视觉模型误点或键盘遮挡导致输入错位。
-  await execAdbAndWait(config, padCode, "input tap 360 600", 8000, 500);
+  // 这里明确使用 ADB 坐标，避免把截图坐标直接拿来点击。
+  await login_tapAdbPoint(config, padCode, THREADS_LOGIN_ADB_POINTS.usernameField, 500);
   await login_inputText(config, padCode, handle);
 
   await login_dismissKeyboard(config, padCode);
-  await execAdbAndWait(config, padCode, "input tap 360 760", 8000, 500);
+  await login_tapAdbPoint(config, padCode, THREADS_LOGIN_ADB_POINTS.passwordField, 500);
   await login_inputText(config, padCode, password);
 
   await login_dismissKeyboard(config, padCode);
-  await execAdbAndWait(config, padCode, "input tap 360 895; sleep 8", 20000, 1000);
+  await execAdbAndWait(config, padCode, adbTapScript(THREADS_LOGIN_ADB_POINTS.submitButton, 8), 20000, 1000);
 }
 
 async function login_completeThreadsFirstRunScreens(config: VmosConfig, padCode: string) {
@@ -16822,12 +16889,12 @@ async function login_completeThreadsFirstRunScreens(config: VmosConfig, padCode:
     if (result?.page === "otp_input" || result?.page === "login_2fa_choice" || result?.page === "login_2fa_device_push" || result?.page === "challenge_other" || result?.page === "account_disabled") return false;
 
     if (/儲存.*登入|储存.*登录|保存.*登录|Save.*login|登入資料|登录资料/i.test(windowText)) {
-      await execAdbAndWait(config, padCode, "input tap 360 1085; sleep 3", 12000, 500).catch(() => undefined);
+      await execAdbAndWait(config, padCode, adbTapScript(THREADS_LOGIN_ADB_POINTS.saveLoginButton, 3), 12000, 500).catch(() => undefined);
       continue;
     }
 
     if (/設定你的使用體驗|设定你的使用体验|使用體驗|使用体验|公開個人檔案|公开个人档案|Public profile/i.test(windowText)) {
-      await execAdbAndWait(config, padCode, "input tap 360 1180; sleep 3", 12000, 500).catch(() => undefined);
+      await execAdbAndWait(config, padCode, adbTapScript(THREADS_LOGIN_ADB_POINTS.setupContinueButton, 3), 12000, 500).catch(() => undefined);
       continue;
     }
 
@@ -16844,7 +16911,7 @@ async function openThreadsInstagramLoginModalFromWelcome(
     const modalFocus = await detectThreadsModalActivityInFocus(config, padCode);
     if (modalFocus) return modalFocus;
 
-    await execAdbAndWait(config, padCode, "input tap 605 780; sleep 3", 20000, 1000);
+    await execAdbAndWait(config, padCode, adbTapScript(THREADS_LOGIN_ADB_POINTS.instagramLoginCard, 3), 20000, 1000);
   }
   return detectThreadsModalActivityInFocus(config, padCode);
 }
@@ -16854,6 +16921,7 @@ export async function loginThreadsAccount(
   padCode: string,
   credential: ThreadsLoginInput,
 ): Promise<ThreadsLoginResult> {
+  clearThreadsAccountQueryCache(padCode);
   const handle = credential.username;
   const password = credential.password;
 
@@ -17060,6 +17128,8 @@ export async function loginThreadsAccount(
   for (let round = 0; round < 4; round++) {
     if (await login_completeThreadsFirstRunScreens(config, padCode)) {
       const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+      const username = normalizeThreadsProfileUsername(handle) || undefined;
+      rememberThreadsAccountQuery(padCode, { padCode, platform: "threads", username, loggedIn: true, method: "adb" });
       return { ok: true, state: "logged_in", message: "登录成功，当前已进入 Threads", screenshotUrl: shotUrl };
     }
 
@@ -17069,11 +17139,13 @@ export async function loginThreadsAccount(
 
     if (page === "home_feed" || page === "profile_page") {
       const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+      const username = normalizeThreadsProfileUsername(handle) || undefined;
+      rememberThreadsAccountQuery(padCode, { padCode, platform: "threads", username, loggedIn: true, method: "adb" });
       return { ok: true, state: "logged_in", message: `登录成功，当前页面: ${page}`, screenshotUrl: shotUrl };
     }
 
     if (page === "save_login_info") {
-      await execAdbAndWait(config, padCode, "input tap 360 1085; sleep 3", 12000, 500).catch(() => undefined);
+      await execAdbAndWait(config, padCode, adbTapScript(THREADS_LOGIN_ADB_POINTS.saveLoginButton, 3), 12000, 500).catch(() => undefined);
       continue;
     }
 
@@ -17135,13 +17207,27 @@ export async function clearThreadsAccountSession(
   config: VmosConfig,
   padCode: string,
 ): Promise<AccountSessionResult> {
+  clearThreadsAccountQueryCache(padCode);
   await login_clearAppData(config, padCode);
   await login_launchThreads(config, padCode).catch(() => undefined);
-  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  const state = await classifyThreadsPageOnDevice(config, padCode).catch((error) => ({
+    page: "unknown" as ThreadsPageState,
+    reason: error instanceof Error ? error.message : String(error),
+    screenshotUrl: "",
+  }));
+  const shotUrl = state.screenshotUrl || await screenshot(config, padCode).catch(() => undefined);
+  if (state.page === "profile_page" || state.page === "home_feed") {
+    return {
+      ok: false,
+      state: "failed",
+      message: `已执行清除数据，但 Threads 仍显示已登录页面：${state.page}。请重试登出或人工检查云机。`,
+      screenshotUrl: shotUrl,
+    };
+  }
   return {
     ok: true,
     state: "logged_out",
-    message: "已清除 Threads App 数据。若要继续使用，请重新登录。",
+    message: `已清除 Threads App 数据，并确认不在已登录页面。当前页面：${state.page}。若要继续使用，请重新登录。`,
     screenshotUrl: shotUrl,
   };
 }
@@ -17341,7 +17427,10 @@ export async function startTelegramAccountLoginSession(
   await execAdbForText(
     config,
     padCode,
-    "input tap 360 1128; sleep 2; input tap 360 736; sleep 1",
+    [
+      adbTapScript(TELEGRAM_LOGIN_ADB_POINTS.welcomeStart, 2),
+      adbTapScript(TELEGRAM_LOGIN_ADB_POINTS.phoneFieldAfterStart, 1),
+    ].join("; "),
     10_000,
     800,
   ).catch(() => "");
@@ -17350,7 +17439,7 @@ export async function startTelegramAccountLoginSession(
     config,
     padCode,
     [
-      "input tap 430 665",
+      adbTapScript(TELEGRAM_LOGIN_ADB_POINTS.phoneField),
       "sleep 0.4",
       "input keyevent KEYCODE_MOVE_END",
       adbTapBackspaceSequence(24),
@@ -17366,13 +17455,13 @@ export async function startTelegramAccountLoginSession(
     padCode,
     [
       "sleep 0.6",
-      "input tap 610 675",
+      adbTapScript(TELEGRAM_LOGIN_ADB_POINTS.phoneSubmitArrow),
       "sleep 7",
-      "input tap 580 480",
+      adbTapScript(TELEGRAM_LOGIN_ADB_POINTS.confirmationYes),
       "sleep 2",
-      "input tap 550 952",
+      adbTapScript(TELEGRAM_LOGIN_ADB_POINTS.smsFeeContinue),
       "sleep 2",
-      "input tap 360 736",
+      adbTapScript(TELEGRAM_LOGIN_ADB_POINTS.fallbackContinue),
       "sleep 8",
     ].join("; "),
     20_000,
@@ -17446,6 +17535,7 @@ export interface PadAccountInfo {
   platform: "threads";
   username?: string;
   email?: string;
+  loggedIn?: boolean;
   method: "adb" | "vision" | "failed";
   error?: string;
 }
@@ -17470,6 +17560,70 @@ export interface ThreadsProfileSettingsSnapshot {
   bio: string;
   screenshotUrl?: string;
   uiXml?: string;
+}
+
+const THREADS_ACCOUNT_QUERY_CACHE_TTL_MS = 20_000;
+const threadsAccountQueryCache = new Map<string, { expiresAt: number; result: PadAccountInfo }>();
+
+function getCachedThreadsAccountQuery(padCode: string): PadAccountInfo | null {
+  const cached = threadsAccountQueryCache.get(padCode);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    threadsAccountQueryCache.delete(padCode);
+    return null;
+  }
+  return cached.result;
+}
+
+function rememberThreadsAccountQuery(padCode: string, result: PadAccountInfo) {
+  threadsAccountQueryCache.set(padCode, {
+    expiresAt: Date.now() + THREADS_ACCOUNT_QUERY_CACHE_TTL_MS,
+    result,
+  });
+}
+
+function clearThreadsAccountQueryCache(padCode: string) {
+  threadsAccountQueryCache.delete(padCode);
+}
+
+async function queryThreadsAccountFromAndroidAccountManager(
+  config: VmosConfig,
+  padCode: string,
+  timeoutMs = 10_000,
+): Promise<PadAccountInfo | null> {
+  const accountResult = await execAdbForText(
+    config,
+    padCode,
+    "dumpsys account 2>/dev/null | grep 'Account {name='",
+    timeoutMs,
+    500,
+  ).catch(() => "");
+  if (!accountResult) return null;
+
+  const accountLines = [...accountResult.matchAll(/Account \{name=([^,}]+), type=([^,}]+)\}/g)]
+    .map((match) => ({
+      name: match[1]?.trim() || "",
+      type: match[2]?.trim() || "",
+    }))
+    .filter((account) => account.name);
+
+  const threadsAccount = accountLines.find((account) => /instagram\.barcelona/i.test(account.type));
+  if (!threadsAccount) return null;
+
+  const username = normalizeThreadsProfileUsername(threadsAccount.name);
+  if (username) {
+    return { padCode, platform: "threads", username, loggedIn: true, method: "adb" };
+  }
+  if (/@/.test(threadsAccount.name)) {
+    return { padCode, platform: "threads", email: threadsAccount.name, loggedIn: true, method: "adb" };
+  }
+  return {
+    padCode,
+    platform: "threads",
+    loggedIn: true,
+    method: "adb",
+    error: `已登录（内部ID：${threadsAccount.name}，未识别到可读用户名）`,
+  };
 }
 
 async function openThreadsProfileForAccountQuery(
@@ -18757,7 +18911,14 @@ export async function queryThreadsAccount(
   config: VmosConfig,
   padCode: string,
 ): Promise<PadAccountInfo> {
-  let numericAccountId: string | undefined;
+  const cachedAccount = getCachedThreadsAccountQuery(padCode);
+  if (cachedAccount) return cachedAccount;
+
+  const quickAccount = await queryThreadsAccountFromAndroidAccountManager(config, padCode).catch(() => null);
+  if (quickAccount) {
+    rememberThreadsAccountQuery(padCode, quickAccount);
+    return quickAccount;
+  }
 
   const profilePage = await openThreadsProfileForAccountQuery(config, padCode).catch((error) => ({
     ok: false as const,
@@ -18777,7 +18938,9 @@ export async function queryThreadsAccount(
     uiProfileCue = uiXml ? hasThreadsProfileUiCue(uiXml) : false;
     const username = uiXml ? extractThreadsProfileUsernameFromUiXml(uiXml) : null;
     if (username) {
-      return { padCode, platform: "threads", username, method: "adb" };
+      const result = { padCode, platform: "threads" as const, username, loggedIn: true, method: "adb" as const };
+      rememberThreadsAccountQuery(padCode, result);
+      return result;
     }
     if (uiXmlHadNodes && !uiProfileCue && !profilePage.profileLikely) {
       return { padCode, platform: "threads", method: "failed", error: "未能确认当前画面是 Threads 个人页，已停止账号猜测" };
@@ -18827,39 +18990,32 @@ export async function queryThreadsAccount(
             : undefined;
           const email = json.email && json.email !== "null" ? json.email : undefined;
           if (username || email) {
-            return { padCode, platform: "threads", username, email, method: "vision" };
+            const result = { padCode, platform: "threads" as const, username, email, loggedIn: true, method: "vision" as const };
+            rememberThreadsAccountQuery(padCode, result);
+            return result;
           }
         } catch {}
       }
     }
   } catch {}
 
-  // ── 方案三：AccountManager 数字 ID（至少能确认已登录）────────────────────
-  try {
-    const accountResult = await execAdbForText(
-      config,
+  if (profilePage.profileLikely || uiProfileCue) {
+    const result = {
       padCode,
-      "dumpsys account 2>/dev/null | grep 'Account {name='",
-      15000,
-      1000,
-    ).catch(() => "");
-
-    if (accountResult) {
-      const matches = [...accountResult.matchAll(/Account \{name=([^,}]+)/g)];
-      const accountName = matches[0]?.[1]?.trim();
-      if (accountName && /^\d+$/.test(accountName)) {
-        numericAccountId = accountName;
-      }
-    }
-  } catch {}
-
-  if (numericAccountId) {
-    return {
-      padCode,
-      platform: "threads",
-      method: "adb",
-      error: `已登录（内部ID：${numericAccountId}，未识别到可读用户名）`,
+      platform: "threads" as const,
+      loggedIn: true,
+      method: "adb" as const,
+      error: "已确认进入 Threads 个人页，但未识别到可读用户名",
     };
+    rememberThreadsAccountQuery(padCode, result);
+    return result;
+  }
+
+  // ── 方案三：AccountManager 数字 ID（至少能确认已登录）────────────────────
+  const fallbackAccount = await queryThreadsAccountFromAndroidAccountManager(config, padCode, 15_000).catch(() => null);
+  if (fallbackAccount) {
+    rememberThreadsAccountQuery(padCode, fallbackAccount);
+    return fallbackAccount;
   }
 
   return { padCode, platform: "threads", method: "failed", error: "未识别到账号" };

@@ -10519,7 +10519,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         error: e?.message || String(e),
       }));
       let msg: string;
-      if (result.method === "failed" || (!result.username && !result.email)) {
+      if (!result.loggedIn && (result.method === "failed" || (!result.username && !result.email))) {
         const accountState = formatCloudAccountStateNotice(result.error || "", { action: "帳號查詢", padName, padCode });
         msg = accountState
           ? `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n⚠️ ${accountState.status}\n\n請先進入雲機处理帳號狀態，再回来重試查詢或操作。`
@@ -11320,7 +11320,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             }));
             stopTyping();
             let status: PersonaAccountRuntimeStatus;
-            if (result.method === "failed" || (!result.username && !result.email)) {
+            if (!result.loggedIn && (result.method === "failed" || (!result.username && !result.email))) {
               status = {
                 state: "logged_out",
                 message: result.error ? `未確認已登入；${formatUserFacingError(result.error, "目前页面沒有识别到 Threads 帳號信息。")}` : "未確認已登入。",
@@ -11335,7 +11335,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
               parse_mode: "Markdown",
               reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
             });
-            await sendCurrentPadScreenshot(bot, chatId, boundPad.padCode, "📸 Threads 当前画面").catch(() => undefined);
+            if (status.state !== "logged_in") {
+              await sendCurrentPadScreenshot(bot, chatId, boundPad.padCode, "📸 Threads 当前画面").catch(() => undefined);
+            }
             return;
           }
 
@@ -14122,7 +14124,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         error: e?.message || String(e),
       }));
       let msg: string;
-      if (result.method === "failed" || (!result.username && !result.email)) {
+      if (!result.loggedIn && (result.method === "failed" || (!result.username && !result.email))) {
         const accountState = formatCloudAccountStateNotice(result.error || "", { action: "账号查询", padName, padCode });
         msg = accountState
           ? `🔍 *云机账号查询*\n\n云机：${padName}\n平台：Threads\n\n⚠️ ${accountState.status}\n\n请先进入云机处理账号状态，再回来重试查询或操作。`

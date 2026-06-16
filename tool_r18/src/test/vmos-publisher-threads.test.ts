@@ -49,7 +49,9 @@ import {
   parsePublishVisionResult,
   planRiskManagedWarmupConfig,
   sanitizeWarmupComment,
+  scalePointBetweenScreens,
   scalePointFromReferenceScreen,
+  scaleScreenshotPointToAdbPointForSizes,
   shouldUseThreadsShareIntentPath,
 } from "@/lib/vmos-publisher";
 
@@ -195,6 +197,23 @@ describe("Threads publish verification", () => {
       { width: 540, height: 1200 },
       { x: 360, y: 610 },
     )).toEqual({ x: 270, y: 458 });
+  });
+
+  it("maps VMOS screenshot coordinates onto the ADB tap coordinate grid", () => {
+    const screenshotSize = { width: 720, height: 1600 };
+    const adbSize = { width: 720, height: 1280 };
+
+    expect(scaleScreenshotPointToAdbPointForSizes(
+      { x: 360, y: 1000 },
+      screenshotSize,
+      adbSize,
+    )).toEqual({ x: 360, y: 800 });
+
+    expect(scalePointBetweenScreens(
+      { x: 720, y: 1600 },
+      screenshotSize,
+      adbSize,
+    )).toEqual({ x: 719, y: 1279 });
   });
 
   it("builds warmup interest keywords from persona content", () => {
