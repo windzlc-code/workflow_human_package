@@ -17100,6 +17100,7 @@ export async function startTelegramAccountLoginSession(
   ).catch(() => "");
   const launchCheck = await queryTelegramAccountSession(config, padCode);
   if (launchCheck.ok) return launchCheck;
+  if (launchCheck.state === "challenge_otp") return launchCheck;
   const launchIsEmailPage =
     launchCheck.state === "challenge_manual" &&
     /Email 登入頁|Email 登录页|Email\/Google 登入頁/i.test(launchCheck.message || "");
