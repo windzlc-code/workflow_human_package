@@ -223,7 +223,7 @@ export async function buildRednoteTextCardDataUrl(caption: string): Promise<stri
   return `data:image/png;base64,${png.toString("base64")}`;
 }
 
-const PUBLISH_VERIFY_MODEL = "xai/grok-4.3";
+const PUBLISH_VERIFY_MODEL = "grok-4.2";
 const FIXED_VMOS_SCREEN = { width: 720, height: 1600 };
 const BASE_SCREEN = FIXED_VMOS_SCREEN;
 const THREADS_TALL_REFERENCE_SCREEN = FIXED_VMOS_SCREEN;
@@ -16067,6 +16067,18 @@ function classifyTelegramLoginChallengeText(text: string, savedEmail?: string): 
   const normalized = String(text || "")
     .replace(/\s+password="(?:true|false)"/gi, "")
     .replace(/\s+/g, " ");
+  if (/EMAIL_NOT_ALLOWED|email domain is not allowed/i.test(normalized)) {
+    return {
+      state: "challenge_manual",
+      message: "Telegram 返回 Email 不可用，平台拒絕目前 Email 網域或登入方式。自動流程已停止在此步；請依截圖人工更換 Email/Google 登入方式後，再檢測登入狀態。",
+    };
+  }
+  if (/\bSorry\b/i.test(normalized)) {
+    return {
+      state: "challenge_manual",
+      message: "Telegram 登入頁返回錯誤彈窗。自動流程已停止在此步，避免繼續誤操作；請依截圖查看具體錯誤短語後人工處理，再檢測登入狀態。",
+    };
+  }
   if (/SMS Fee|High SMS Costs|Verification Required|Support via Telegram Premium|Sign up for US\$|Telegram Premium|短信費|簡訊費|短信验证|簡訊驗證/i.test(normalized)) {
     return {
       state: "challenge_manual",
@@ -16124,7 +16136,7 @@ async function classifyTelegramSmsFeeScreenshot(screenshotUrl?: string): Promise
     const raw = await callGemini(
       PUBLISH_VERIFY_MODEL,
       [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
-      { maxOutputTokens: 120, temperature: 0 },
+      { maxOutputTokens: 300, temperature: 0 },
     );
     const text = (extractText(raw) || "").trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "");
     const jsonMatch = text.match(/\{[\s\S]*?\}/);
@@ -16142,16 +16154,16 @@ async function classifyTelegramSmsFeeScreenshot(screenshotUrl?: string): Promise
   }
 }
 
-async function isTelegramEmailLoginScreenshot(screenshotUrl?: string): Promise<boolean> {
-  if (!screenshotUrl) return false;
+async function classifyTelegramBlockingErrorScreenshot(screenshotUrl?: string): Promise<AccountSessionResult | null> {
+  if (!screenshotUrl) return null;
   try {
     const { callGemini, extractText, getInlineData } = await import("./gemini-client");
     const inlineData = await getInlineData(screenshotUrl).catch(() => null);
-    if (!inlineData) return false;
-    const prompt = `看這張 Telegram Android 截圖，只判斷是否停在「Choose a login email / Your email / Sign in with Google」這類登入 Email 頁面。
+    if (!inlineData) return null;
+    const prompt = `看這張 Telegram Android 截圖，只判斷是否有阻斷自動登入的錯誤彈窗，例如「EMAIL_NOT_ALLOWED」、「This email domain is not allowed」或「Sorry / An error occurred」。
 
 嚴格只返回 JSON：
-{"is_email_login": true/false, "evidence": "一句話依據"}`;
+{"blocker": "email_not_allowed"|"error_dialog"|"none", "evidence": "一句話依據"}`;
     const raw = await callGemini(
       PUBLISH_VERIFY_MODEL,
       [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
@@ -16159,9 +16171,39 @@ async function isTelegramEmailLoginScreenshot(screenshotUrl?: string): Promise<b
     );
     const text = (extractText(raw) || "").trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "");
     const jsonMatch = text.match(/\{[\s\S]*?\}/);
-    if (!jsonMatch) return false;
+    if (!jsonMatch) return null;
     const parsed = JSON.parse(jsonMatch[0]);
-    return Boolean(parsed?.is_email_login);
+    const blocker = String(parsed?.blocker || "none");
+    if (blocker === "none") return null;
+    const message = blocker === "email_not_allowed"
+      ? "Telegram 返回 Email 不可用，平台拒絕目前 Email 網域或登入方式。自動流程已停止在此步；請依截圖人工更換 Email/Google 登入方式後，再檢測登入狀態。"
+      : "Telegram 登入頁返回錯誤彈窗。自動流程已停止在此步，避免繼續誤操作；請依截圖人工處理後再檢測登入狀態。";
+    return {
+      ok: false,
+      state: "challenge_manual",
+      message: `${message}${parsed.evidence ? `\n\n識別依據：${String(parsed.evidence).slice(0, 160)}` : ""}`,
+      screenshotUrl,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function isTelegramEmailLoginScreenshot(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  try {
+    const { callGemini, extractText, getInlineData } = await import("./gemini-client");
+    const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+    if (!inlineData) return false;
+    const prompt = `看這張 Telegram Android 截圖，判斷是否停在「Choose a login email / Your email / Sign in with Google」這類登入 Email 頁面。
+只輸出 YES 或 NO，不要輸出 JSON，不要輸出解釋。`;
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
+      { maxOutputTokens: 40, temperature: 0 },
+    );
+    const text = (extractText(raw) || "").trim();
+    return /\bYES\b/i.test(text) && !/\bNO\b/i.test(text);
   } catch {
     return false;
   }
@@ -16311,6 +16353,13 @@ function adbTapBackspaceSequence(count: number): string {
   return Array.from({ length: Math.max(0, count) }, () => "input tap 594 1194; sleep 0.08").join("; ");
 }
 
+function adbSelectAllTextSequence(): string {
+  return [
+    "input keycombination KEYCODE_CTRL_LEFT KEYCODE_A",
+    "sleep 0.2",
+  ].join("; ");
+}
+
 function adbSafePhoneText(value: string): string {
   const compact = String(value || "").replace(/[^\d+]/g, "");
   const full = compact.startsWith("+") ? compact : `+${compact}`;
@@ -16324,99 +16373,183 @@ function adbSafeAsciiText(value: string): string {
     .replace(/'/g, "\\'");
 }
 
+function adbSafeEmailText(value: string): string {
+  return String(value || "")
+    .trim()
+    .replace(/\\/g, "\\\\")
+    .replace(/ /g, "%s")
+    .replace(/@/g, "\\@")
+    .replace(/'/g, "\\'");
+}
+
+function maskInlineSecret(value?: string | null): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (raw.includes("@")) {
+    const [name, domain] = raw.split("@");
+    return `${name.slice(0, 2)}***@${domain || "***"}`;
+  }
+  if (raw.length <= 4) return "***";
+  return `${raw.slice(0, 2)}***${raw.slice(-2)}`;
+}
+
 async function isTelegramEmailLoginPage(config: VmosConfig, padCode: string): Promise<boolean> {
   const uiXml = await dumpUiXml(config, padCode).catch(() => "");
   return /choose a login email|your email|email address|sign in with google|google|login codes via email/i.test(uiXml);
 }
 
-function adbKeyboardEmailSequence(value: string): string[] {
-  const keyPoints: Record<string, [number, number]> = {
-    q: [37, 900],
-    w: [111, 900],
-    e: [183, 900],
-    r: [255, 900],
-    t: [329, 900],
-    y: [400, 900],
-    u: [473, 900],
-    i: [545, 900],
-    o: [616, 900],
-    p: [687, 900],
-    a: [75, 1000],
-    s: [148, 1000],
-    d: [219, 1000],
-    f: [289, 1000],
-    g: [362, 1000],
-    h: [434, 1000],
-    j: [506, 1000],
-    k: [577, 1000],
-    l: [648, 1000],
-    z: [146, 1112],
-    x: [218, 1112],
-    c: [289, 1112],
-    v: [363, 1112],
-    b: [435, 1112],
-    n: [506, 1112],
-    m: [578, 1112],
-    "@": [145, 1224],
-    ".": [573, 1224],
-  };
-  const commands: string[] = [];
-  for (const raw of String(value || "").trim().toLowerCase()) {
-    const point = keyPoints[raw];
-    if (point) {
-      commands.push(`input tap ${point[0]} ${point[1]}`);
-    } else if (/[0-9]/.test(raw)) {
-      commands.push(`input keyevent KEYCODE_${raw}`);
-    } else if (raw === "_") {
-      commands.push("input keyevent KEYCODE_MINUS", "input keyevent KEYCODE_DEL", "input text _");
-    } else if (raw === "-") {
-      commands.push("input keyevent KEYCODE_MINUS");
-    }
-    commands.push("sleep 0.04");
+async function verifyTelegramEmailInputScreenshot(
+  screenshotUrl: string | undefined,
+  expectedEmail: string,
+): Promise<{ matches: boolean | null; visibleText?: string; evidence?: string }> {
+  if (!screenshotUrl) return { matches: null };
+  try {
+    const { callGemini, extractText, getInlineData } = await import("./gemini-client");
+    const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+    if (!inlineData) return { matches: null };
+    const expected = String(expectedEmail || "").trim();
+    const prompt = `看這張 Telegram Android「Choose a login email」截圖，讀取 Email 輸入框中的內容，並判斷它是否與期望 Email 完全一致。
+
+期望 Email：${expected}
+
+嚴格只返回 JSON：
+{"matches": true/false, "visible_text": "你看到的輸入框文字，沒有就空字串", "evidence": "一句話依據"}`;
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
+      { maxOutputTokens: 300, temperature: 0 },
+    );
+    const text = (extractText(raw) || "").trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "");
+    const jsonMatch = text.match(/\{[\s\S]*?\}/);
+    if (!jsonMatch) return { matches: null, evidence: text.slice(0, 120) };
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      matches: typeof parsed?.matches === "boolean" ? parsed.matches : null,
+      visibleText: typeof parsed?.visible_text === "string" ? parsed.visible_text.slice(0, 120) : undefined,
+      evidence: typeof parsed?.evidence === "string" ? parsed.evidence.slice(0, 180) : undefined,
+    };
+  } catch {
+    return { matches: null };
   }
-  return commands;
 }
 
-async function inputTelegramEmailViaKeyboard(config: VmosConfig, padCode: string, email: string): Promise<void> {
+async function inputTelegramEmailViaKeyboard(
+  config: VmosConfig,
+  padCode: string,
+  email: string,
+): Promise<{ ok: boolean; screenshotUrl?: string; message?: string }> {
   const value = String(email || "").trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return;
-  const emailCommands = adbKeyboardEmailSequence(value);
-  if (!emailCommands.length) return;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    return { ok: false, message: "已保存的 Telegram Email 格式無效，請重新設定登入資料。" };
+  }
+  let lastShotUrl: string | undefined;
+  let lastEvidence = "";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await execAdbForText(
+      config,
+      padCode,
+      [
+        // Telegram login pages are rendered on a 720x1600 screenshot, but ADB input
+        // coordinates use the 720x1280 VMOS override space on ACP pads. The
+        // points below are ADB coordinates, not screenshot coordinates.
+        "input tap 360 500",
+        "sleep 0.3",
+        adbSelectAllTextSequence(),
+        "sleep 0.2",
+        `input text ${adbSafeEmailText(value)}`,
+        "sleep 0.8",
+      ].join("; "),
+      30_000,
+      1_000,
+    ).catch(() => "");
+
+    lastShotUrl = await screenshot(config, padCode).catch(() => lastShotUrl);
+    const verified = await verifyTelegramEmailInputScreenshot(lastShotUrl, value);
+    if (verified.matches === true || verified.matches === null) break;
+    lastEvidence = verified.visibleText
+      ? `第 ${attempt} 次自檢看到輸入框為「${maskInlineSecret(verified.visibleText)}」，不是已保存 Email。`
+      : verified.evidence || `第 ${attempt} 次 Email 輸入自檢未通過。`;
+    if (attempt < 3) await delay(500);
+    if (attempt === 3) {
+      return {
+        ok: false,
+        screenshotUrl: lastShotUrl,
+        message: `Telegram Email 自動輸入自檢失敗，系統已停止提交，避免錯誤 Email 送出。\n${lastEvidence}`,
+      };
+    }
+  }
+
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK; sleep 0.8; input tap 612 1160; sleep 8", 20_000, 1_000).catch(() => "");
+  if (!(await isTelegramEmailLoginPage(config, padCode))) return { ok: true, screenshotUrl: lastShotUrl };
+
+  await execAdbForText(config, padCode, "input tap 612 1160; sleep 8", 20_000, 1_000).catch(() => "");
+  if (!(await isTelegramEmailLoginPage(config, padCode))) return { ok: true, screenshotUrl: lastShotUrl };
+
   await execAdbForText(
     config,
     padCode,
-    [
-      // Telegram login pages are rendered on a 720x1600 screenshot, but ADB input
-      // coordinates use the VMOS override space. These points were verified on
-      // ACP250430WZA6JZL.
-      "input tap 360 524",
-      "sleep 0.3",
-      "input keyevent KEYCODE_MOVE_END",
-      adbTapBackspaceSequence(80),
-      "sleep 0.2",
-      ...emailCommands,
-      "sleep 1",
-    ].join("; "),
-    30_000,
-    1_000,
-  ).catch(() => "");
-
-  await execAdbForText(config, padCode, "input tap 665 1224; sleep 6", 15_000, 1_000).catch(() => "");
-  if (!(await isTelegramEmailLoginPage(config, padCode))) return;
-
-  await execAdbForText(config, padCode, "input keyevent KEYCODE_ENTER; sleep 4", 15_000, 1_000).catch(() => "");
-  if (!(await isTelegramEmailLoginPage(config, padCode))) return;
-
-  await execAdbForText(
-    config,
-    padCode,
-    "input keyevent KEYCODE_BACK; sleep 0.8; input tap 613 1205; sleep 6",
+    "input tap 612 1160; sleep 8",
     20_000,
     1_000,
   ).catch(() => "");
-  if (!(await isTelegramEmailLoginPage(config, padCode))) return;
+  if (!(await isTelegramEmailLoginPage(config, padCode))) return { ok: true, screenshotUrl: lastShotUrl };
 
   await execAdbForText(config, padCode, "input tap 613 1175; sleep 6", 20_000, 1_000).catch(() => "");
+  return { ok: true, screenshotUrl: lastShotUrl };
+}
+
+async function submitSavedTelegramEmailAndInspect(
+  config: VmosConfig,
+  padCode: string,
+  email: string,
+  fallbackShotUrl?: string,
+  successPrefix = "已嘗試填入已保存登入 Email。",
+): Promise<AccountSessionResult> {
+  const emailInputResult = await inputTelegramEmailViaKeyboard(config, padCode, email);
+  if (!emailInputResult.ok) {
+    return {
+      ok: false,
+      state: "challenge_manual",
+      message: emailInputResult.message || "Telegram Email 自動輸入自檢失敗，請查看截圖後人工處理。",
+      screenshotUrl: emailInputResult.screenshotUrl || fallbackShotUrl,
+    };
+  }
+
+  const afterEmailShotUrl = await screenshot(config, padCode).catch(() => fallbackShotUrl);
+  const afterEmailUiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const afterEmailChallenge = classifyTelegramLoginChallengeText(afterEmailUiXml, email);
+  const afterEmailBlockingErrorResult = await classifyTelegramBlockingErrorScreenshot(afterEmailShotUrl);
+  if (afterEmailBlockingErrorResult) return afterEmailBlockingErrorResult;
+  const afterEmailSmsFeeResult = await classifyTelegramSmsFeeScreenshot(afterEmailShotUrl);
+  if (afterEmailSmsFeeResult) return afterEmailSmsFeeResult;
+  const afterEmailOtpResult = await classifyTelegramOtpScreenshot(afterEmailShotUrl);
+  if (afterEmailOtpResult) {
+    return {
+      ...afterEmailOtpResult,
+      message: `${successPrefix}\n\n${afterEmailOtpResult.message}`,
+    };
+  }
+  const afterEmailLoggedInResult = await classifyTelegramLoggedInScreenshot(afterEmailShotUrl);
+  if (afterEmailLoggedInResult) return afterEmailLoggedInResult;
+  const stillEmailLoginPage =
+    /login email|choose a login email|your email|email address|sign in with google|google|登入 Email|登入信箱|登录邮箱/i.test(afterEmailUiXml.replace(/\s+password="(?:true|false)"/gi, "")) ||
+    await isTelegramEmailLoginScreenshot(afterEmailShotUrl);
+  if (afterEmailChallenge.state === "challenge_manual") {
+    return {
+      ok: false,
+      state: "challenge_manual",
+      message: stillEmailLoginPage
+        ? `${successPrefix}\n\n目前仍停在 Email/Google 登入頁。請按截圖人工完成，完成後再點「檢測 Telegram 登入狀態」。`
+        : `${successPrefix}\n\n${afterEmailChallenge.message}`,
+      screenshotUrl: afterEmailShotUrl,
+    };
+  }
+  return {
+    ok: false,
+    state: afterEmailChallenge.state,
+    message: `${successPrefix}\n\n${afterEmailChallenge.message}`,
+    screenshotUrl: afterEmailShotUrl,
+  };
 }
 
 const PKG_THREADS = "com.instagram.barcelona";
@@ -16870,10 +17003,29 @@ export async function queryTelegramAccountSession(
     };
   }
   if (isTelegramLoginPageText(combined)) {
+    const hardChallenge = classifyTelegramLoginChallengeText(combined);
+    if (hardChallenge.state === "challenge_manual" || hardChallenge.state === "failed") {
+      return {
+        ok: false,
+        state: hardChallenge.state,
+        message: hardChallenge.message,
+        screenshotUrl: shotUrl,
+      };
+    }
+    const blockingErrorResult = await classifyTelegramBlockingErrorScreenshot(shotUrl);
+    if (blockingErrorResult) return blockingErrorResult;
     const smsFeeResult = await classifyTelegramSmsFeeScreenshot(shotUrl);
     if (smsFeeResult) return smsFeeResult;
     const otpResult = await classifyTelegramOtpScreenshot(shotUrl);
     if (otpResult) return otpResult;
+    if (await isTelegramEmailLoginScreenshot(shotUrl).catch(() => false)) {
+      return {
+        ok: false,
+        state: "challenge_manual",
+        message: "Telegram 目前停在 Email 登入頁，請使用登入流程自動填入已保存 Email；若自動流程仍停在此頁，請依截圖人工處理後再檢測登入狀態。",
+        screenshotUrl: shotUrl,
+      };
+    }
     const loggedInResult = await classifyTelegramLoggedInScreenshot(shotUrl);
     if (loggedInResult) return loggedInResult;
     return {
@@ -16883,10 +17035,20 @@ export async function queryTelegramAccountSession(
       screenshotUrl: shotUrl,
     };
   }
+  const blockingErrorResult = await classifyTelegramBlockingErrorScreenshot(shotUrl);
+  if (blockingErrorResult) return blockingErrorResult;
   const smsFeeResult = await classifyTelegramSmsFeeScreenshot(shotUrl);
   if (smsFeeResult) return smsFeeResult;
   const otpResult = await classifyTelegramOtpScreenshot(shotUrl);
   if (otpResult) return otpResult;
+  if (await isTelegramEmailLoginScreenshot(shotUrl).catch(() => false)) {
+    return {
+      ok: false,
+      state: "challenge_manual",
+      message: "Telegram 目前停在 Email 登入頁，請使用登入流程自動填入已保存 Email；若自動流程仍停在此頁，請依截圖人工處理後再檢測登入狀態。",
+      screenshotUrl: shotUrl,
+    };
+  }
   const loggedInResult = await classifyTelegramLoggedInScreenshot(shotUrl);
   if (loggedInResult) return loggedInResult;
   return {
@@ -16938,6 +17100,27 @@ export async function startTelegramAccountLoginSession(
   ).catch(() => "");
   const launchCheck = await queryTelegramAccountSession(config, padCode);
   if (launchCheck.ok) return launchCheck;
+  const launchIsEmailPage =
+    launchCheck.state === "challenge_manual" &&
+    /Email 登入頁|Email 登录页|Email\/Google 登入頁/i.test(launchCheck.message || "");
+  if (launchIsEmailPage) {
+    if (!input.email) return launchCheck;
+    await onProgress?.("当前步骤 4/4：Telegram 已停在 Email 登录页，正在填入已保存 Email。").catch(() => undefined);
+    return await submitSavedTelegramEmailAndInspect(
+      config,
+      padCode,
+      input.email,
+      launchCheck.screenshotUrl,
+      "Telegram 已停在 Email 登入頁，已嘗試填入已保存登入 Email。",
+    );
+  }
+  if (
+    launchCheck.state === "failed" ||
+    (
+      launchCheck.state === "challenge_manual" &&
+      !/Email 登入頁|Email 登录页|Email\/Google 登入頁/i.test(launchCheck.message || "")
+    )
+  ) return launchCheck;
   await execAdbForText(
     config,
     padCode,
@@ -16983,6 +17166,8 @@ export async function startTelegramAccountLoginSession(
   const uiXml = await dumpUiXml(config, padCode).catch(() => "");
   const uiXmlText = uiXml.replace(/\s+password="(?:true|false)"/gi, "");
   const challenge = classifyTelegramLoginChallengeText(uiXml, input.email);
+  const blockingErrorResult = await classifyTelegramBlockingErrorScreenshot(shotUrl);
+  if (blockingErrorResult) return blockingErrorResult;
   const smsFeeResult = await classifyTelegramSmsFeeScreenshot(shotUrl);
   if (smsFeeResult) return smsFeeResult;
   const otpResult = await classifyTelegramOtpScreenshot(shotUrl);
@@ -17000,40 +17185,13 @@ export async function startTelegramAccountLoginSession(
     );
   if (shouldTrySavedEmail && input.email) {
     await onProgress?.("当前步骤 4/4：检测到可能需要登录 Email，正在尝试填入已保存 Email。").catch(() => undefined);
-    await inputTelegramEmailViaKeyboard(config, padCode, input.email);
-    const afterEmailShotUrl = await screenshot(config, padCode).catch(() => shotUrl);
-    const afterEmailUiXml = await dumpUiXml(config, padCode).catch(() => "");
-    const afterEmailChallenge = classifyTelegramLoginChallengeText(afterEmailUiXml, input.email);
-    const afterEmailSmsFeeResult = await classifyTelegramSmsFeeScreenshot(afterEmailShotUrl);
-    if (afterEmailSmsFeeResult) return afterEmailSmsFeeResult;
-    const afterEmailOtpResult = await classifyTelegramOtpScreenshot(afterEmailShotUrl);
-    if (afterEmailOtpResult) {
-      return {
-        ...afterEmailOtpResult,
-        message: `已執行 Telegram 手機號提交動作，並嘗試填入已保存登入 Email。\n\n${afterEmailOtpResult.message}`,
-      };
-    }
-    const afterEmailLoggedInResult = await classifyTelegramLoggedInScreenshot(afterEmailShotUrl);
-    if (afterEmailLoggedInResult) return afterEmailLoggedInResult;
-    const stillEmailLoginPage =
-      /login email|choose a login email|your email|email address|sign in with google|google|登入 Email|登入信箱|登录邮箱/i.test(afterEmailUiXml.replace(/\s+password="(?:true|false)"/gi, "")) ||
-      await isTelegramEmailLoginScreenshot(afterEmailShotUrl);
-    if (afterEmailChallenge.state === "challenge_manual") {
-      return {
-        ok: false,
-        state: "challenge_manual",
-        message: stillEmailLoginPage
-          ? "已執行 Telegram 手機號提交動作，並嘗試使用已保存 Gmail 走 Google 授權，但目前仍停在 Email/Google 登入頁。請按截圖人工完成，完成後再點「檢測 Telegram 登入狀態」。"
-          : `已執行 Telegram 手機號提交動作，並嘗試處理已保存登入 Email。\n\n${afterEmailChallenge.message}`,
-        screenshotUrl: afterEmailShotUrl,
-      };
-    }
-    return {
-      ok: false,
-      state: afterEmailChallenge.state,
-      message: `已執行 Telegram 手機號提交動作，並嘗試填入已保存登入 Email。\n\n${afterEmailChallenge.message}`,
-      screenshotUrl: afterEmailShotUrl,
-    };
+    return await submitSavedTelegramEmailAndInspect(
+      config,
+      padCode,
+      input.email,
+      shotUrl,
+      "已執行 Telegram 手機號提交動作，並嘗試填入已保存登入 Email。",
+    );
   }
   return {
     ok: false,

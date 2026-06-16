@@ -5,6 +5,16 @@ import { getRuntimeApiConfigForProtocol, readRuntimeApiConfig, resolveModelProto
 import { buildApiHeaders, buildApiUrl, DEFAULT_API_BASE_URL } from "@/lib/api-endpoints";
 import type { ApiProtocol } from "@/lib/api-endpoints";
 
+const DEFAULT_TEXT_MODEL_MAPPINGS = {
+  "xai/grok-4.3": { modelId: "gemini-3-pro-preview", protocol: "gemini-text" },
+  "grok-4.2": { modelId: "gemini-3-flash-preview", protocol: "gemini-text" },
+  "gemini-3-flash-preview": { modelId: "gemini-3-flash-preview", protocol: "gemini-text" },
+  "gemini-3-pro-preview": { modelId: "gemini-3-pro-preview", protocol: "gemini-text" },
+  "gemini-3.1-pro-preview": { modelId: "gemini-3.1-pro-preview", protocol: "gemini-text" },
+  "gemini-3.1-flash-image-preview": { modelId: "gemini-3.1-flash-image-preview", protocol: "gemini" },
+  "gpt-image-2": { modelId: "gpt-image-2", protocol: "openai" },
+} as const;
+
 // Shim getApiConfig / getApiConfigForProtocol for modules that still reference them
 function getApiConfig() {
   const config = readRuntimeApiConfig();
@@ -13,13 +23,7 @@ function getApiConfig() {
     endpoint: config.geminiTextEndpoint || config.geminiEndpoint || config.zhanhuEndpoint || DEFAULT_API_BASE_URL,
     gptKey: config.gptKey || "",
     gptEndpoint: config.gptEndpoint || "",
-    modelMappings: config.modelMappings || {
-      "gemini-3-flash-preview": { modelId: "xai/grok-4.3", protocol: "openai" },
-      "gemini-3-pro-preview": { modelId: "xai/grok-4.3", protocol: "openai" },
-      "gemini-3.1-pro-preview": { modelId: "xai/grok-4.3", protocol: "openai" },
-      "gemini-3.1-flash-image-preview": { modelId: "gemini-3.1-flash-image-preview", protocol: "gemini" },
-      "gpt-image-2": { modelId: "gpt-image-2", protocol: "openai" },
-    },
+    modelMappings: { ...DEFAULT_TEXT_MODEL_MAPPINGS, ...(config.modelMappings || {}) },
   };
 }
 function getApiConfigForProtocol(protocol: string) {
@@ -43,9 +47,6 @@ function resolveTextModelMapping(model: string, mappings?: any): { modelId: stri
       modelId: String(mapped.modelId || model || "").trim() || model,
       protocol: typeof mapped.protocol === "string" ? mapped.protocol : undefined,
     };
-  }
-  if (/^gemini-3(?:\.1)?-(?:pro|flash)-preview$/i.test(model)) {
-    return { modelId: "xai/grok-4.3", protocol: "openai" };
   }
   return { modelId: model };
 }

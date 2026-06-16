@@ -448,6 +448,15 @@ const pendingActions = new Map<number, {
 
 type PersonaAccountPlatform = "threads" | "telegram";
 
+type PendingLoginAction = {
+  padCode: string;
+  padName?: string;
+  stage: "await_username" | "await_password" | "await_otp";
+  username?: string;
+  password?: string;
+  returnCallback?: string;
+};
+
 const pendingPersonaAccountActions = new Map<number, {
   archiveId: string;
   platform: PersonaAccountPlatform;
@@ -457,14 +466,7 @@ const pendingPersonaAccountActions = new Map<number, {
   email?: string;
 }>();
 
-const pendingLoginActions = new Map<number, {
-  padCode: string;
-  padName?: string;
-  stage: "await_username" | "await_password" | "await_otp";
-  username?: string;
-  password?: string;
-  returnCallback?: string;
-}>();
+const pendingLoginActions = new Map<number, PendingLoginAction>();
 
 const pendingThreadsProfileActions = new Map<number, {
   padCode: string;
@@ -9185,6 +9187,34 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     const archive = await loadPersonaArchive(archiveId).catch(() => null);
     return isArchiveOwnedByThisBot(archive) ? archive : null;
   };
+  const inferTelegramOtpLoginStateForChat = async (chatId: number): Promise<PendingLoginAction | null> => {
+    const archives = await listPersonasForThisBot().catch(() => []);
+    const hasTelegramLoginInfo = (archive: any) => {
+      const accounts = getPersonaAccountManagement(archive);
+      return Boolean(archive.boundPadCode) && Boolean(accounts.telegram?.phone);
+    };
+    const directCandidates = archives.filter((archive) =>
+      String(archive.boundTelegramChatId || "") === String(chatId) && hasTelegramLoginInfo(archive),
+    );
+    const candidates = directCandidates.length ? directCandidates : archives.filter(hasTelegramLoginInfo);
+    const creds = resolveVmosCredentials();
+    for (const archive of candidates) {
+      const padCode = String(archive.boundPadCode || "").trim();
+      if (!padCode) continue;
+      const session = await queryTelegramAccountSession(creds, padCode).catch(() => null);
+      if (session?.state !== "challenge_otp") continue;
+      const telegram = getPersonaAccountManagement(archive).telegram;
+      return {
+        padCode,
+        padName: archive.boundPadName || await resolvePadBindingDisplayName(padCode, archive.boundPadName, defaultPadCode).catch(() => padCode),
+        stage: "await_otp",
+        username: telegram?.phone,
+        password: telegram?.password,
+        returnCallback: `acctplatform_telegram_${archive.id}`,
+      };
+    }
+    return null;
+  };
   const assignArchiveToThisBot = async (archiveId: string, chatId?: number) => {
     const archive = await loadPersonaArchive(archiveId).catch(() => null);
     if (!archive) return null;
@@ -15989,6 +16019,62 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     // ── 登录流程文本输入处理 ──
     const loginState = pendingLoginActions.get(chatId);
+    const submitOtpForLoginState = async (state: PendingLoginAction, otp: string, inferred = false) => {
+      const loginReturnCallback = state.returnCallback || `pad_detail_${state.padCode}`;
+      await bot.sendMessage(chatId, inferred
+        ? `🔎 已識別目前 Telegram 停在驗證碼頁，正在提交驗證碼...`
+        : `⏳ 正在提交驗證碼...`);
+      const stopTyping = startTelegramTyping(bot, chatId);
+      try {
+        const creds = resolveVmosCredentials();
+        // 提交 OTP：用 ADB 輸入到當前焦點框。
+        await execAdbForText(
+          creds,
+          state.padCode,
+          `input tap 128 560; sleep 0.2; input text ${otp}; input keyevent KEYCODE_ENTER`,
+          15000,
+          1000,
+        ).catch(() => "");
+        await new Promise((r) => setTimeout(r, 8000));
+        const session = await queryTelegramAccountSession(creds, state.padCode).catch(() => null);
+        const shotUrl = session?.screenshotUrl;
+        stopTyping();
+        pendingLoginActions.delete(chatId);
+        const statusLine = session?.state === "challenge_otp"
+          ? "Telegram 仍停在驗證碼頁，可能是驗證碼錯誤或已過期，請重新取得後再發送 6 位驗證碼。"
+          : session?.ok
+            ? "Telegram 已確認登入成功。"
+            : session?.message || "驗證碼已提交，請查看截圖確認登入狀態。";
+        const telegramArchiveId = state.returnCallback?.startsWith("acctplatform_telegram_")
+          ? state.returnCallback.slice("acctplatform_telegram_".length)
+          : "";
+        const threadsArchiveId = state.returnCallback?.startsWith("acctplatform_threads_")
+          ? state.returnCallback.slice("acctplatform_threads_".length)
+          : "";
+        const queryButton = telegramArchiveId
+          ? { text: "🔍 檢測 Telegram 登入狀態", callback_data: `acctquery_telegram_${telegramArchiveId}` }
+          : threadsArchiveId
+            ? { text: "🔍 檢測 Threads 登入狀態", callback_data: `acctquery_threads_${threadsArchiveId}` }
+            : { text: "🔍 驗證帳號", callback_data: `pad_query_account_${state.padCode}` };
+        const otpSubmitTitle = session?.ok
+          ? "✅ Telegram 登入已確認"
+          : session?.state === "challenge_manual" || session?.state === "failed"
+            ? "⚠️ Telegram 登入需要人工介入"
+            : "✅ 驗證碼已提交";
+        await bot.sendMessage(chatId, `${otpSubmitTitle}\n\n${statusLine}`, {
+          reply_markup: { inline_keyboard: [[queryButton], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
+        });
+        if (shotUrl) {
+          await bot.sendPhoto(chatId, shotUrl, { caption: "📸 提交驗證碼後截圖" }).catch(() => undefined);
+        }
+      } catch (error: any) {
+        stopTyping();
+        pendingLoginActions.delete(chatId);
+        await bot.sendMessage(chatId, `❌ 提交驗證碼失敗：${formatUserFacingError(error, "驗證碼提交失敗，請稍後重試。")}`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
+        });
+      }
+    };
     if (loginState && text) {
       const loginReturnCallback = loginState.returnCallback || `pad_detail_${loginState.padCode}`;
       if (loginState.stage === "await_username") {
@@ -16020,38 +16106,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
           });
           return;
         }
-        await bot.sendMessage(chatId, `⏳ 正在提交验证码 ${otp}...`);
-        const stopTyping = startTelegramTyping(bot, chatId);
-        try {
-          const creds = resolveVmosCredentials();
-          // 提交 OTP：用 ADB 输入到当前焦點框
-          await execAdbForText(
-            creds,
-            loginState.padCode,
-            `input tap 128 560; sleep 0.2; input text ${otp}; input keyevent KEYCODE_ENTER`,
-            15000,
-            1000,
-          ).catch(() => "");
-          await new Promise((r) => setTimeout(r, 8000));
-          // 截图验证
-          const session = await queryTelegramAccountSession(creds, loginState.padCode).catch(() => null);
-          const shotUrl = session?.screenshotUrl;
-          stopTyping();
-          pendingLoginActions.delete(chatId);
-          await bot.sendMessage(chatId, `✅ 验证码已提交，请查看截图确认登录状态。`, {
-            reply_markup: { inline_keyboard: [[{ text: "🔍 验证账号", callback_data: `pad_query_account_${loginState.padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
-          });
-          if (shotUrl) {
-            await bot.sendPhoto(chatId, shotUrl, { caption: "📸 提交验证码后截图" }).catch(() => undefined);
-          }
-        } catch (error: any) {
-          stopTyping();
-          pendingLoginActions.delete(chatId);
-          await bot.sendMessage(chatId, `❌ 提交验证码失败: ${formatUserFacingError(error, "验证码提交失败，请稍后重试。")}`, {
-            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
-          });
-        }
+        await submitOtpForLoginState(loginState, otp);
         return;
+      }
+    }
+    if (!loginState && text) {
+      const otp = text.trim().replace(/\s/g, "");
+      if (/^\d{6}$/.test(otp)) {
+        const inferredLoginState = await inferTelegramOtpLoginStateForChat(chatId).catch(() => null);
+        if (inferredLoginState) {
+          pendingLoginActions.set(chatId, inferredLoginState);
+          await submitOtpForLoginState(inferredLoginState, otp, true);
+          return;
+        }
       }
     }
 
