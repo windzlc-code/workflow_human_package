@@ -405,7 +405,13 @@ const PAD_LIST_CACHE_FILE = path.join(RUNTIME_DIR, "pad-list-cache.json");
 const CONTROL_PANEL_MESSAGE_CACHE_FILE = path.join(RUNTIME_DIR, "telegram-control-panel-message-cache.json");
 const WARMUP_PROGRESS_LOG_FILE = path.join(RUNTIME_DIR, "warmup-progress.log");
 const PUBLISH_PROGRESS_LOG_FILE = path.join(RUNTIME_DIR, "publish-progress.log");
-const RAW_TELEGRAM_PROXY_URL = String(process.env.TELEGRAM_PROXY_URL || (process.platform === "win32" ? "http://127.0.0.1:9974" : "")).trim();
+const RAW_TELEGRAM_PROXY_URL = String(
+  process.env.TELEGRAM_PROXY_URL
+  || process.env.HTTPS_PROXY
+  || process.env.HTTP_PROXY
+  || process.env.ALL_PROXY
+  || (process.platform === "win32" ? "http://127.0.0.1:9974" : ""),
+).trim();
 const TELEGRAM_PROXY_URL = RAW_TELEGRAM_PROXY_URL.toLowerCase() === "direct" ? "" : RAW_TELEGRAM_PROXY_URL;
 const TELEGRAM_KEEPALIVE_AGENT = new https.Agent({ keepAlive: true, timeout: 30000, keepAliveMsecs: 5000 });
 const TELEGRAM_POLLING_INTERVAL_MS = Number(process.env.TELEGRAM_POLLING_INTERVAL_MS || 100);
@@ -444,6 +450,8 @@ interface PersonaLocal {
 const pendingActions = new Map<number, {
   type: "bind-pad" | "edit-persona-name" | "edit-persona-content" | "create-persona" | "set-persona-tweet-style" | "set-telegram-group-binding";
   archiveId: string;
+  stage?: "await_name" | "await_prompt";
+  personaName?: string;
   mode?: "patch" | "replace";
   groupContentType?: TelegramGroupContentType;
 }>();
@@ -658,6 +666,7 @@ type PendingGeneratedPostImageGroupFlow = {
   imageWidth?: number;
   imageHeight?: number;
   imageRatioLabel?: string;
+  hasPersonaReferenceImage?: boolean;
   startedAt: number;
 };
 
@@ -681,6 +690,7 @@ const pendingPaidR18FallbackPostActions = new Map<string, PendingPaidR18Fallback
 const pendingPaidR18VideoPostActions = new Map<string, PendingPaidR18VideoPostAction>();
 const pendingPaidR18VideoCustomInputs = new Map<number, { actionKey: string; createdAt: number }>();
 const pendingGeneratedPostImageGroupFlows = new Map<number, PendingGeneratedPostImageGroupFlow>();
+const pendingNoPersonaReferenceGenerates = new Map<number, PendingNoPersonaReferenceGenerate>();
 const pendingPublishHistoryRequeueActions = new Map<string, PendingPublishHistoryRequeueAction>();
 
 export function buildPostImageRegenerateCallback(actionKey: string): string {
@@ -2533,16 +2543,8 @@ export function isWorkflowPersonaListItem(persona: any) {
 }
 
 export function getStoredPersonaReferenceImageUrl(archive: Pick<PersonaArchive, "personaReferenceSheet" | "setup" | "personaImageLibrary" | "posts"> | null | undefined): string | undefined {
-  const referenceSheet = archive?.personaReferenceSheet?.trim();
-  const setupReference = typeof (archive?.setup as any)?.personaImageReferenceUrl === "string"
-    ? (archive?.setup as any).personaImageReferenceUrl.trim()
-    : "";
-  if (referenceSheet || setupReference) return referenceSheet || setupReference || undefined;
-  const libraryReference = [...(archive?.personaImageLibrary || [])]
-    .reverse()
-    .map((item) => String(item.imageUrl || "").trim())
-    .find(Boolean);
-  if (libraryReference) return libraryReference;
+  const explicitReference = getExplicitPersonaReferenceImageUrl(archive);
+  if (explicitReference) return explicitReference;
   const postImages: Array<{ imageUrl: string; updatedAt: string }> = [];
   for (const post of archive?.posts || []) {
     const imageUrl = String(post.imageUrl || "").trim();
@@ -2559,10 +2561,24 @@ export function getStoredPersonaReferenceImageUrl(archive: Pick<PersonaArchive, 
     .find(Boolean);
 }
 
+export function getExplicitPersonaReferenceImageUrl(archive: Pick<PersonaArchive, "personaReferenceSheet" | "setup" | "personaImageLibrary"> | null | undefined): string | undefined {
+  const referenceSheet = archive?.personaReferenceSheet?.trim();
+  const setupReference = typeof (archive?.setup as any)?.personaImageReferenceUrl === "string"
+    ? (archive?.setup as any).personaImageReferenceUrl.trim()
+    : "";
+  if (referenceSheet || setupReference) return referenceSheet || setupReference || undefined;
+  const libraryReference = [...(archive?.personaImageLibrary || [])]
+    .reverse()
+    .map((item) => String(item.imageUrl || "").trim())
+    .find(Boolean);
+  if (libraryReference) return libraryReference;
+  return undefined;
+}
+
 export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{ text: string; callback_data: string }>> {
   const id = archive.id;
   const isWorkflow = isWorkflowPersonaListItem(archive);
-  const referenceImageUrl = getStoredPersonaReferenceImageUrl(archive);
+  const referenceImageUrl = getExplicitPersonaReferenceImageUrl(archive);
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
     [
       { text: "✏️ 改名称", callback_data: `editname_${id}` },
@@ -3071,8 +3087,9 @@ async function sendGeneratePostPersonaPicker(bot: TelegramBot, chatId: number, m
 }
 
 function buildGeneratePostModeCallback(archiveId: string, mode: "textonly" | "withimage", contentBranch?: GeneratePostContentBranch) {
-  const suffix = contentBranch ? `_ct_${contentBranch}` : "";
-  return `genpost_mode_${archiveId}_${mode}${suffix}`;
+  const modeToken = mode === "withimage" ? "i" : "t";
+  const branchToken = contentBranch === "r18" ? "r" : contentBranch === "nonr18" ? "n" : "";
+  return ["gpm", archiveId, modeToken, branchToken].filter((part) => part !== "").join("_");
 }
 
 function parseGeneratePostModeCallback(data: string): {
@@ -3080,6 +3097,18 @@ function parseGeneratePostModeCallback(data: string): {
   mode: "textonly" | "withimage";
   contentBranch?: GeneratePostContentBranch;
 } | null {
+  if (data.startsWith("gpm_")) {
+    const match = data.match(/^gpm_(.+)_(t|i)(?:_(n|r))?$/);
+    const archiveId = match?.[1] || "";
+    const mode = match?.[2] === "i" ? "withimage" : match?.[2] === "t" ? "textonly" : "";
+    const contentBranch = match?.[3] === "r" ? "r18" : match?.[3] === "n" ? "nonr18" : undefined;
+    if (!archiveId || !mode) return null;
+    return {
+      archiveId,
+      mode,
+      ...(contentBranch ? { contentBranch } : {}),
+    };
+  }
   if (!data.startsWith("genpost_mode_")) return null;
   const payload = data.slice("genpost_mode_".length);
   const match = payload.match(/^(.*)_(textonly|withimage)(?:_ct_(nonr18|r18))?$/);
@@ -5923,6 +5952,7 @@ async function generateImagesForGeneratedPosts(args: {
   imageWidth?: number;
   imageHeight?: number;
   imageRatioLabel?: string;
+  hasPersonaReferenceImage?: boolean;
 }) {
   const results: Array<{ id?: string; content: string; imageUrls: string[]; ok: boolean; error?: string }> = [];
   for (const post of args.posts) {
@@ -5939,9 +5969,12 @@ async function generateImagesForGeneratedPosts(args: {
         "If the user request mentions a role or scene such as nurse, teacher, office, room, travel, cafe, or outfit, the image must show that role/scene naturally instead of a generic portrait.",
         "Free content must stay public-safe and logically match the tweet scene. Do not borrow paid/R18 prompt style.",
         "The public tweet can stay short; the image prompt must be more detailed and visually specific without changing the scene.",
+        args.hasPersonaReferenceImage
+          ? "A persona reference image exists; keep the same recognizable person when the backend can use the reference."
+          : "No persona reference image has been generated for this archive. Do not assume a fixed face or reuse old post images as identity reference; follow the written persona only.",
         args.visualInstruction ? `User request to obey: ${args.visualInstruction}` : "",
         cleanGeneratedCopyForImagePrompt(post.content) ? `Generated copy context: ${cleanGeneratedCopyForImagePrompt(post.content)}` : "",
-        `Candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: match the safe visual prompt and generated copy context, keep persona identity consistent when available, and vary composition, distance, pose, lighting, or scene details from the other candidates.`,
+        `Candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: match the safe visual prompt and generated copy context, ${args.hasPersonaReferenceImage ? "keep persona identity consistent when available" : "keep only the written persona style consistent"}, and vary composition, distance, pose, lighting, or scene details from the other candidates.`,
       ].filter(Boolean).join("\n");
       const image = args.chatId
         ? await submitGeneratedPostImageCandidateTask({
@@ -5954,6 +5987,7 @@ async function generateImagesForGeneratedPosts(args: {
           imageWidth: args.imageWidth,
           imageHeight: args.imageHeight,
           imageRatioLabel: args.imageRatioLabel,
+          hasPersonaReferenceImage: args.hasPersonaReferenceImage,
         }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
         : await generatePersonaImageForArchive(args.archiveId, instruction, {
           customVisualInstruction: instruction,
@@ -6017,10 +6051,13 @@ async function submitGeneratedPostImageCandidateTask(args: {
   imageWidth?: number;
   imageHeight?: number;
   imageRatioLabel?: string;
+  hasPersonaReferenceImage?: boolean;
 }): Promise<{ ok: boolean; imageUrl?: string; imageUrls?: string[]; error?: string }> {
   const requestText = [
     "為這篇推文生成 4 張候選配圖，圖片必須服務推文內容，不要脫離人設和推文語境。",
-    "保留同一個人設身份、臉部特徵、年齡感、身形比例、髮型和整體氣質。",
+    args.hasPersonaReferenceImage
+      ? "保留同一個人設身份、臉部特徵、年齡感、身形比例、髮型和整體氣質。"
+      : "此人設尚未生成人設圖，不要使用舊推文圖片或歷史配圖作為人像參考；只根據文字人設、推文內容和本次要求生成。",
     "需要先分析推文和使用者要求，再補齊服裝結構、顏色材質、場景、姿勢、情緒、鏡頭和光線。",
     "人設：" + args.archiveName,
     "推文內容：" + args.post.content,
@@ -6036,6 +6073,9 @@ async function submitGeneratedPostImageCandidateTask(args: {
       tg_generation_context: "Generated-post image candidates for archive " + args.archiveId + ", post " + (args.post.id || ""),
       tg_generated_post_content: args.post.content,
       tg_generated_post_visual_instruction: args.prompt,
+      tg_persona_reference_available: Boolean(args.hasPersonaReferenceImage),
+      tg_no_persona_reference_image: !args.hasPersonaReferenceImage,
+      persona_reference_available: Boolean(args.hasPersonaReferenceImage),
       tg_use_llm_prompt: true,
       tg_latest_prompt_only: true,
       tg_prompt_confirmed: false,
@@ -6129,6 +6169,7 @@ async function generateCurrentFreeGeneratedPostImageGroup(bot: TelegramBot, chat
     imageWidth: flow.imageWidth,
     imageHeight: flow.imageHeight,
     imageRatioLabel: flow.imageRatioLabel,
+    hasPersonaReferenceImage: flow.hasPersonaReferenceImage,
   });
   const image = results[0];
   if (!image?.ok || image.imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT) {
@@ -7187,6 +7228,7 @@ async function regenerateArchivePostImage(args: {
       archiveName: archive.name,
       post,
       prompt: post.content,
+      hasPersonaReferenceImage: Boolean(getExplicitPersonaReferenceImageUrl(archive)),
     }).then((result) => ({ ok: result.ok, imageUrl: result.imageUrl, error: result.error }))
     : await generatePersonaImageForArchive(args.archiveId, post.content).catch((error) => ({
       ok: false,
@@ -7232,6 +7274,7 @@ async function generateArchivePostImageCandidates(args: {
         archiveName: archive.name,
         post,
         prompt,
+        hasPersonaReferenceImage: Boolean(getExplicitPersonaReferenceImageUrl(archive)),
       }).catch((error) => ({
         ok: false,
         error: error instanceof Error ? error.message : String(error),
@@ -8255,7 +8298,7 @@ async function executePendingGeneratePostWithFixedWords(bot: TelegramBot, chatId
   });
 }
 
-async function executeGeneratePostsFromTelegram(args: {
+type GeneratePostsTelegramArgs = {
   bot: TelegramBot;
   chatId: number;
   archiveId: string;
@@ -8272,11 +8315,19 @@ async function executeGeneratePostsFromTelegram(args: {
   imageWidth?: number;
   imageHeight?: number;
   imageRatioLabel?: string;
-}) {
+  skipPersonaReferenceWarning?: boolean;
+};
+
+type PendingNoPersonaReferenceGenerate = Omit<GeneratePostsTelegramArgs, "bot"> & {
+  createdAt: number;
+};
+
+async function executeGeneratePostsFromTelegram(args: GeneratePostsTelegramArgs) {
   const selectedMemoryCount = args.selectedMemoryEntryIds?.length || 0;
   const initialArchive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const useJinjunyaFreeStyle = args.contentBranch === "nonr18"
     && usesJinjunyaFreeContentStyle(initialArchive?.setup as Partial<DramaSetup> | null | undefined);
+  const hasPersonaReferenceImage = Boolean(getExplicitPersonaReferenceImageUrl(initialArchive));
   if (args.contentBranch === "r18" && !args.textOnly) {
     await sendPaidR18EntryPicker(args.bot, args.chatId, undefined, {
       archiveId: args.archiveId,
@@ -8289,6 +8340,38 @@ async function executeGeneratePostsFromTelegram(args: {
       selectedMemorySummaries: args.selectedMemorySummaries,
       stage: "await_time_slot",
     } as PendingGeneratePostState);
+    return;
+  }
+  if (!args.skipPersonaReferenceWarning && !args.textOnly && !hasPersonaReferenceImage && !isWorkflowPersonaListItem(initialArchive)) {
+    const skipped = Boolean(initialArchive?.setup?.personaImageSkipped);
+    pendingNoPersonaReferenceGenerates.set(args.chatId, {
+      chatId: args.chatId,
+      archiveId: args.archiveId,
+      archiveName: args.archiveName,
+      count: args.count,
+      textOnly: args.textOnly,
+      prompt: args.prompt,
+      targetWords: args.targetWords,
+      selectedMemoryEntryIds: args.selectedMemoryEntryIds,
+      selectedMemorySummaries: args.selectedMemorySummaries,
+      contentBranch: args.contentBranch,
+      contentTimeSlot: args.contentTimeSlot,
+      imageAspectRatio: args.imageAspectRatio,
+      imageWidth: args.imageWidth,
+      imageHeight: args.imageHeight,
+      imageRatioLabel: args.imageRatioLabel,
+      skipPersonaReferenceWarning: true,
+      createdAt: Date.now(),
+    });
+    await telegramBestEffort("generatePosts.noPersonaReferenceNotice", args.bot.sendMessage(
+      args.chatId,
+      [
+        skipped ? "⚠️ 此人設已跳過生成人設圖。" : "⚠️ 此人設尚未生成人設圖。",
+        "本次配圖不會傳入人設人像參考圖，只會根據文字人設、推文內容和本次圖片要求生成。",
+        "因此圖片人物長相不會固定；需要固定人物時，請先到人設設定生成人設圖。",
+      ].join("\n"),
+      { reply_markup: { inline_keyboard: [[{ text: "🎨 生成人設圖", callback_data: `genimg_${args.archiveId}` }], [{ text: "繼續目前生成", callback_data: "gpnoref_continue" }], [{ text: "◀️ 返回人設詳情", callback_data: `pd_${args.archiveId}` }]] } },
+    ), 45_000);
     return;
   }
   const wordRuleLine = args.contentBranch === "r18" || useJinjunyaFreeStyle
@@ -8439,6 +8522,7 @@ async function executeGeneratePostsFromTelegram(args: {
       imageWidth: args.imageWidth,
       imageHeight: args.imageHeight,
       imageRatioLabel: args.imageRatioLabel,
+      hasPersonaReferenceImage,
       startedAt: Date.now(),
     });
     await telegramBestEffort("generatePosts.imageGroupIntro", args.bot.sendMessage(args.chatId, `\uD83D\uDDBC \u63A5\u4E0B\u4F86\u6703\u6309\u63A8\u6587\u9806\u5E8F\u9010\u7D44\u751F\u6210\u914D\u5716\u3002\n\n\u6BCF\u7D44\u751F\u6210 ${GENERATED_POST_IMAGE_TARGET_COUNT} \u5F35\u5019\u9078\u5716\uFF0C\u8ACB\u5148\u9078\u64C7\u5176\u4E2D 1 \u5F35\uFF0C\u518D\u9EDE\u64CA\u751F\u6210\u4E0B\u4E00\u7D44\u3002`, {
@@ -8832,6 +8916,7 @@ export async function generatePostsByMatchedPersona(
     posts: imageTargets.length
       ? imageTargets
       : posts.map((post: any) => ({ id: post.id, content: String(post.content || "") })).filter((post: any) => post.content.trim()),
+    hasPersonaReferenceImage: Boolean(getExplicitPersonaReferenceImageUrl(initialArchive)),
   });
 
   const rendered = [
@@ -9137,7 +9222,7 @@ async function generatePersonaImageForArchive(
   const archive = await loadPersonaArchive(archiveId).catch(() => null);
   if (!archive?.setup) return { ok: false, error: "人设不存在或缺少设定" };
   const imageContent = customPrompt?.trim() || archive.content;
-  const referenceSheetUrl = getStoredPersonaReferenceImageUrl(archive);
+  const referenceSheetUrl = getExplicitPersonaReferenceImageUrl(archive);
   const startedAt = Date.now();
   console.log(`[telegram][persona_image_start] archive=${archiveId} reference=${Boolean(options.generateReferenceSheet)} mode=${options.mode || "auto"}`);
   return new Promise((resolve) => {
@@ -9205,6 +9290,15 @@ async function generateAndPersistPersonaReferenceImage(
   if (!result.ok || !result.imageUrl) return result;
 
   await savePersonaReferenceSheet(archiveId, result.imageUrl);
+  const latestArchive = await loadPersonaArchive(archiveId).catch(() => null);
+  if (latestArchive?.setup?.personaImageSkipped) {
+    await updatePersonaArchiveProfile(archiveId, {
+      setup: {
+        ...latestArchive.setup,
+        personaImageSkipped: false,
+      },
+    }).catch(() => null);
+  }
   await appendPersonaArchiveImage(archiveId, {
     imageUrl: result.imageUrl,
     prompt: `人设图：${archiveName}`,
@@ -9605,6 +9699,15 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
         });
         releasePublishCommand(chatId, publishLockKey, publishScopeKey);
         return;
+      }
+      if (!getExplicitPersonaReferenceImageUrl(archive) && !isWorkflowPersonaListItem(archive)) {
+        await bot.sendMessage(chatId, [
+          archive.setup?.personaImageSkipped ? "⚠️ 此人設已跳過生成人設圖。" : "⚠️ 此人設尚未生成人設圖。",
+          "本次配圖不會傳入人設人像參考圖，只會根據文字人設和推文內容生成。",
+          "因此圖片人物長相不會固定；需要固定人物時，請先到人設設定生成人設圖。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "🎨 生成人設圖", callback_data: `genimg_${state.archiveId}` }]] },
+        }).catch(() => undefined);
       }
       const imageResult = await generatePersonaImageForArchive(state.archiveId, caption).catch((error: any) => ({
         ok: false,
@@ -11969,6 +12072,40 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data === "gpnoref_continue") {
+      const pending = pendingNoPersonaReferenceGenerates.get(chatId);
+      pendingNoPersonaReferenceGenerates.delete(chatId);
+      if (!pending || Date.now() - pending.createdAt > 30 * 60 * 1000) {
+        await safeEditOrSend(bot, chatId, msgId, "生成狀態已失效，請重新進入「新建推文」選擇生成。", {
+          reply_markup: { inline_keyboard: [[{ text: "👤 我的人設", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      await safeEditOrSend(bot, chatId, msgId, "✅ 已確認繼續生成，正在開始推文與配圖流程...", {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設詳情", callback_data: `pd_${pending.archiveId}` }]] },
+      });
+      await executeGeneratePostsFromTelegram({
+        bot,
+        chatId,
+        archiveId: pending.archiveId,
+        archiveName: pending.archiveName,
+        count: pending.count,
+        textOnly: pending.textOnly,
+        prompt: pending.prompt,
+        targetWords: pending.targetWords,
+        selectedMemoryEntryIds: pending.selectedMemoryEntryIds,
+        selectedMemorySummaries: pending.selectedMemorySummaries,
+        contentBranch: pending.contentBranch,
+        contentTimeSlot: pending.contentTimeSlot,
+        imageAspectRatio: pending.imageAspectRatio,
+        imageWidth: pending.imageWidth,
+        imageHeight: pending.imageHeight,
+        imageRatioLabel: pending.imageRatioLabel,
+        skipPersonaReferenceWarning: true,
+      });
+      return;
+    }
+
     if (data === "toolr18_entry_root") {
       clearToolR18TransientState(chatId);
       await sendToolR18Menu(bot, chatId, msgId, "newpost_branch_picker");
@@ -12544,7 +12681,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("genpost_mode_")) {
+    if (data.startsWith("genpost_mode_") || data.startsWith("gpm_")) {
       const parsedMode = parseGeneratePostModeCallback(data);
       const archiveId = parsedMode?.archiveId || "";
       const mode = parsedMode?.mode;
@@ -13932,7 +14069,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("viewimg_")) {
       const archiveId = data.slice("viewimg_".length);
       const archive = await loadPersonaArchive(archiveId).catch(() => null);
-      const imageUrl = getStoredPersonaReferenceImageUrl(archive);
+      const imageUrl = getExplicitPersonaReferenceImageUrl(archive);
       if (!archive || !imageUrl) {
         await safeEditOrSend(bot, chatId, msgId, "❌ 这个非工作流人設还没有人设图，请先生成。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${archiveId}` }]] },
@@ -13977,6 +14114,40 @@ function sendMainMenu(chatId: number, msgId?: number) {
         caption: `✅ 已重新生成人设「${archive.name}」参考图\n模式：${result.mode || "unknown"}`,
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${archiveId}` }]] },
       }).catch(() => undefined);
+      return;
+    }
+
+    if (data.startsWith("skipimg_")) {
+      const archiveId = data.slice("skipimg_".length);
+      const archive = await loadPersonaArchive(archiveId).catch(() => null);
+      if (!archive) {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 没有找到这个人设。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      await updatePersonaArchiveProfile(archiveId, {
+        setup: {
+          ...(archive.setup || {}),
+          personaImageSkipped: true,
+        },
+      }).catch(() => null);
+      invalidatePersonaListCache();
+      await safeEditOrSend(bot, chatId, msgId, [
+        `⏭ 已跳过人设图：${archive.name}`,
+        "",
+        "后续生成推文配图时，只会使用文字人设、推文内容和本次图片要求。",
+        "不会传入人设人像参考图，因此生成出来的人物长相不会固定为当前人设。",
+        "",
+        "之后可以随时进入人设设置，再点击「生成人设图」。",
+      ].join("\n"), {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🧾 查看人設詳情", callback_data: `pd_${archiveId}` }],
+            [{ text: "🎨 稍後生成人設圖", callback_data: `settings_${archiveId}` }],
+          ],
+        },
+      });
       return;
     }
 
@@ -14866,8 +15037,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     // ── 快速发布 ──
     if (data === "create_persona_entry") {
-      pendingActions.set(chatId, { type: "create-persona", archiveId: "" });
-      await safeEditOrSend(bot, chatId, msgId, "⭐ 请输入新的人设名称或一句简介 ⭐\n　　我会先帮你创建基础人设。", {
+      pendingActions.set(chatId, { type: "create-persona", archiveId: "", stage: "await_name" });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "⭐ 新建人設",
+        "",
+        "步驟 1/3：請先輸入角色名稱。",
+        "",
+        "例如：林一",
+      ].join("\n"), {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "list_personas" }]] },
       });
       return;
@@ -16644,10 +16821,46 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (pending?.type === "create-persona" && text) {
+      const value = text.trim();
+      if (pending.stage === "await_name") {
+        if (value.length < 2) {
+          await bot.sendMessage(chatId, "❌ 角色名稱太短，請重新輸入 2 個字以上的名稱。", {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設列表", callback_data: "list_personas" }]] },
+          });
+          return;
+        }
+        const personaName = normalizeTelegramSingleLine(value).slice(0, 40);
+        pendingActions.set(chatId, {
+          type: "create-persona",
+          archiveId: "",
+          stage: "await_prompt",
+          personaName,
+        });
+        await bot.sendMessage(chatId, [
+          "⭐ 新建人設",
+          "",
+          `角色名稱：${personaName}`,
+          "",
+          "步驟 2/3：請輸入人設提示詞。",
+          "我會沿用原來正常的人設生成流程，根據你的提示詞生成人設卡片與後續推文設定。",
+          "",
+          "可以描述身份、性格、內容方向、語氣、受眾、圖片風格等。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回重新輸入名稱", callback_data: "create_persona_entry" }]] },
+        });
+        return;
+      }
+
       pendingActions.delete(chatId);
       const thinking = await bot.sendMessage(chatId, `[#${TELEGRAM_INSTANCE_TAG}] 🧠 正在理解用户意图...`);
       let specError = "";
-      const spec = await derivePersonaSpecWithCodex(text).catch((error: any) => {
+      const personaName = pending.personaName || value.slice(0, 40);
+      const personaPrompt = [
+        `角色名稱：${personaName}`,
+        "",
+        value,
+      ].join("\n");
+      const spec = await derivePersonaSpecWithCodex(personaPrompt).catch((error: any) => {
         specError = error?.message || String(error);
         console.error("[telegram][codex_create_persona_error]", error?.message || error);
         return null;
@@ -16661,6 +16874,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }).catch(() => undefined);
         return;
       }
+      spec.name = personaName;
+      spec.setup = {
+        ...spec.setup,
+        personaName,
+        customTopic: value,
+      } as DramaSetup;
       const created = await createPersonaBySpec({
         name: spec.name,
         content: spec.content,
@@ -16682,10 +16901,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const archive = await loadPersonaArchive(created.archiveId).catch(() => null);
-      await bot.editMessageText(`[#${TELEGRAM_INSTANCE_TAG}] ✅ 已新建人設：${created.name}\n\n${archive?.content || spec.content}`, {
+      await bot.editMessageText(`[#${TELEGRAM_INSTANCE_TAG}] ✅ 已新建人設：${created.name}\n\n${archive?.content || spec.content}\n\n步驟 3/3：可以現在生成人設圖，也可以跳過。跳過後，後續生成推文配圖不會傳入人設人像參考圖，人物長相不會固定。`, {
         chat_id: chatId,
         message_id: thinking.message_id,
-        reply_markup: { inline_keyboard: [[{ text: "🧾 查看人設詳情", callback_data: `pd_${created.archiveId}` }], [{ text: "🏠 主選單", callback_data: "back_main" }]] },
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🎨 生成人設圖", callback_data: `genimg_${created.archiveId}` }],
+            [{ text: "⏭ 跳過人設圖", callback_data: `skipimg_${created.archiveId}` }],
+            [{ text: "🧾 查看人設詳情", callback_data: `pd_${created.archiveId}` }],
+          ],
+        },
       }).catch(() => undefined);
       return;
     }

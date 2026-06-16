@@ -7,6 +7,7 @@ export type ArchiveSetup = Partial<DramaSetup> & {
   isGirlPersona?: boolean;
   imageWorkflow?: DramaSetup["imageWorkflow"];
   personaImageReferenceUrl?: string;
+  personaImageSkipped?: boolean;
   tweetStyleProfile?: string;
   tweetStyleSample?: string;
   tweetStyleLinkUrl?: string;
