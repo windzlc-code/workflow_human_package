@@ -3315,7 +3315,7 @@ function getQuickSetupMissingConfigItems(): string[] {
   return missing;
 }
 
-async function sendQuickSetupEntryForStart(chatId: number) {
+async function sendQuickSetupEntryForStart(bot: TelegramBot, chatId: number) {
   const setupUrl = resolveQuickSetupPublicUrl();
   const missing = getQuickSetupMissingConfigItems();
   const text = missing.length
@@ -16384,7 +16384,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       clearTelegramNavigationTransientState(chatId);
       sendMainMenu(chatId);
       if (isStartCommand) {
-        await sendQuickSetupEntryForStart(chatId);
+        await sendQuickSetupEntryForStart(bot, chatId);
       }
       return;
     }
