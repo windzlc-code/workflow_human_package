@@ -271,12 +271,32 @@
                     </div>
                     <div id="rtLlmGrokModelPicker" class="admin-model-picker" hidden></div>
                   </div>
-                  <label>调用顺序</label>
-                  <div class="admin-model-list-editor">
-                    <div id="rtLlmPriorityModelList" class="admin-model-priority-list"></div>
-                    <div class="admin-model-list-input-row">
-                      <input id="rtLlmPriorityModelInput" type="text" placeholder="输入模型名后回车或点击添加">
-                      <button id="btnAddLlmPriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                  <div class="admin-content-model-tabs" aria-label="文字模型内容类型">
+                    <button class="admin-content-model-tab is-active" type="button" data-text-model-tab="free">免费内容</button>
+                    <button class="admin-content-model-tab" type="button" data-text-model-tab="paid">付费内容</button>
+                  </div>
+                  <div class="admin-content-model-panels">
+                    <div class="admin-content-model-panel is-active" data-text-model-panel="free">
+                      <label>免费内容调用顺序</label>
+                      <div class="small">用于免费群推文、非 R18 提示词与常规内容生成。</div>
+                      <div class="admin-model-list-editor">
+                        <div id="rtLlmFreePriorityModelList" class="admin-model-priority-list"></div>
+                        <div class="admin-model-list-input-row">
+                          <input id="rtLlmFreePriorityModelInput" type="text" placeholder="输入模型名后回车或点击添加">
+                          <button id="btnAddLlmFreePriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="admin-content-model-panel" data-text-model-panel="paid">
+                      <label>付费内容调用顺序</label>
+                      <div class="small">用于付费群推文、R18 提示词、R18 文案润色与确认前预览。</div>
+                      <div class="admin-model-list-editor">
+                        <div id="rtLlmPaidPriorityModelList" class="admin-model-priority-list"></div>
+                        <div class="admin-model-list-input-row">
+                          <input id="rtLlmPaidPriorityModelInput" type="text" placeholder="输入模型名后回车或点击添加">
+                          <button id="btnAddLlmPaidPriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                   <div id="rtLlmModelSummary" class="admin-model-summary small"></div>

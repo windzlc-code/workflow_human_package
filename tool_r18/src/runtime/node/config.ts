@@ -36,6 +36,16 @@ export interface RuntimeApiConfig {
   personaWorkflowGatewayToken?: string;
   retryCount?: number;
   retryDelayMs?: number;
+  llmModelPriorityOrder?: string;
+  llm_model_priority_order?: string;
+  llmFreeModelPriorityOrder?: string;
+  llm_free_model_priority_order?: string;
+  llmPaidModelPriorityOrder?: string;
+  llm_paid_model_priority_order?: string;
+  llmDefaultModelGpt?: string;
+  llm_default_model_gpt?: string;
+  llmDefaultModel?: string;
+  llm_default_model?: string;
   modelMappings?: Record<string, { modelId?: string; protocol?: SupportedApiProtocol | "auto" }>;
   vmosAk?: string;
   vmosSk?: string;

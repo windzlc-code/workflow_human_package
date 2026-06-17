@@ -160,6 +160,8 @@ function writeModelDraft() {
       llmGeminiModels: [],
       llmGptModels: grokModelItems(adminState.llmGptModels),
       llmPriorityModels: grokModelItems(adminState.llmPriorityModels),
+      llmFreePriorityModels: grokModelItems(adminState.llmFreePriorityModels),
+      llmPaidPriorityModels: grokModelItems(adminState.llmPaidPriorityModels),
       imageGeminiModels: imageModelItems(adminState.imageGeminiModels),
       imagePriorityModels: imageModelItems(adminState.imagePriorityModels),
     }));
@@ -180,7 +182,7 @@ function mergeModelDraft() {
   const draft = readModelDraft();
   if (!draft) return false;
   let changed = false;
-  ["llmGptModels", "llmPriorityModels", "imageGeminiModels", "imagePriorityModels"].forEach((key) => {
+  ["llmGptModels", "llmPriorityModels", "llmFreePriorityModels", "llmPaidPriorityModels", "imageGeminiModels", "imagePriorityModels"].forEach((key) => {
     const before = uniqueItems(adminState[key]);
     const after = key.startsWith("llm")
       ? grokModelItems([...before, ...(Array.isArray(draft[key]) ? draft[key] : [])])
@@ -282,16 +284,21 @@ function syncPriorityModelsFromCatalog(type) {
     );
     return;
   }
-  const explicitPriority = grokModelItems(adminState.llmPriorityModels);
-  adminState.llmPriorityModels = normalizePriorityList(
-    explicitPriority.length ? explicitPriority : llmModelOptions(),
-    [],
-    ["grok-4.2"],
-  );
+  const normalizeLlmPriorityKey = (key) => {
+    const explicitPriority = grokModelItems(adminState[key]);
+    adminState[key] = normalizePriorityList(
+      explicitPriority.length ? explicitPriority : llmModelOptions(),
+      [],
+      ["grok-4.2"],
+    );
+  };
+  normalizeLlmPriorityKey("llmPriorityModels");
+  normalizeLlmPriorityKey("llmFreePriorityModels");
+  normalizeLlmPriorityKey("llmPaidPriorityModels");
 }
 
-function defaultClosedLlmModel() {
-  const priority = grokModelItems(adminState.llmPriorityModels);
+function defaultClosedLlmModel(priorityKey = "llmPriorityModels") {
+  const priority = grokModelItems(adminState[priorityKey]);
   return priority[0] || llmModelOptions()[0] || "grok-4.2";
 }
 
@@ -345,7 +352,8 @@ function renderAllModelLists() {
   syncPriorityModelsFromCatalog("llm");
   syncPriorityModelsFromCatalog("image");
   renderModelList("llmGptModels", "rtLlmGptModelList");
-  renderPriorityModelList("llmPriorityModels", "rtLlmPriorityModelList");
+  renderPriorityModelList("llmFreePriorityModels", "rtLlmFreePriorityModelList");
+  renderPriorityModelList("llmPaidPriorityModels", "rtLlmPaidPriorityModelList");
   renderModelList("imageGeminiModels", "rtImageGeminiModelList");
   renderPriorityModelList("imagePriorityModels", "rtImagePriorityModelList");
   renderModelSummaries();
@@ -369,8 +377,11 @@ function buildModelSummary(geminiListKey, gptListKey, label) {
 }
 
 function buildLlmModelSummary() {
-  const priority = grokModelItems(adminState.llmPriorityModels);
-  if (priority.length > 0) return `当前文字执行模型：${priority[0]}`;
+  const freePriority = grokModelItems(adminState.llmFreePriorityModels);
+  const paidPriority = grokModelItems(adminState.llmPaidPriorityModels);
+  if (freePriority.length || paidPriority.length) {
+    return `免费内容首选：${freePriority[0] || "未配置"}；付费内容首选：${paidPriority[0] || "未配置"}`;
+  }
   const grokModel = llmModelOptions()[0] || "";
   if (grokModel) return `当前文字执行模型：${grokModel}`;
   return "当前未配置文字模型";
@@ -514,8 +525,12 @@ function addLlmModelFromPicker(model) {
   if (!value) return;
   if (!Array.isArray(adminState.llmGptModels)) adminState.llmGptModels = [];
   if (!Array.isArray(adminState.llmPriorityModels)) adminState.llmPriorityModels = [];
+  if (!Array.isArray(adminState.llmFreePriorityModels)) adminState.llmFreePriorityModels = [];
+  if (!Array.isArray(adminState.llmPaidPriorityModels)) adminState.llmPaidPriorityModels = [];
   if (!adminState.llmGptModels.includes(value)) adminState.llmGptModels.push(value);
   if (!adminState.llmPriorityModels.includes(value)) adminState.llmPriorityModels.push(value);
+  if (!adminState.llmFreePriorityModels.includes(value)) adminState.llmFreePriorityModels.push(value);
+  if (!adminState.llmPaidPriorityModels.includes(value)) adminState.llmPaidPriorityModels.push(value);
   syncPriorityModelsFromCatalog("llm");
   writeModelDraft();
   renderAllModelLists();
@@ -732,6 +747,20 @@ function bindModelTabs() {
   activate(tabs.find((tab) => tab.classList.contains("is-active"))?.dataset.modelTab || "text");
 }
 
+function bindTextModelContentTabs() {
+  const tabs = Array.from(document.querySelectorAll("[data-text-model-tab]"));
+  const panels = Array.from(document.querySelectorAll("[data-text-model-panel]"));
+  if (!tabs.length || !panels.length) return;
+  const activate = (name) => {
+    tabs.forEach((tab) => tab.classList.toggle("is-active", tab.dataset.textModelTab === name));
+    panels.forEach((panel) => panel.classList.toggle("is-active", panel.dataset.textModelPanel === name));
+  };
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => activate(tab.dataset.textModelTab || "free"));
+  });
+  activate(tabs.find((tab) => tab.classList.contains("is-active"))?.dataset.textModelTab || "free");
+}
+
 function closeModelPickersOnOutsideClick(target) {
   const pickerPairs = [
     ["rtLlmGrokModelPicker", "btnBrowseLlmGrokModels"],
@@ -757,6 +786,8 @@ const adminState = {
   llmGeminiModels: [],
   llmGptModels: [],
   llmPriorityModels: [],
+  llmFreePriorityModels: [],
+  llmPaidPriorityModels: [],
   imageGeminiModels: [],
   imagePriorityModels: [],
   workflowChains: {},
@@ -1869,10 +1900,14 @@ function runtimeFormToPayload() {
   adminState.llmGeminiModels = [];
   adminState.llmGptModels = grokModelItems(adminState.llmGptModels);
   adminState.llmPriorityModels = grokModelItems(adminState.llmPriorityModels);
+  adminState.llmFreePriorityModels = grokModelItems(adminState.llmFreePriorityModels);
+  adminState.llmPaidPriorityModels = grokModelItems(adminState.llmPaidPriorityModels);
   adminState.imageGeminiModels = imageModelItems(adminState.imageGeminiModels);
   adminState.imagePriorityModels = imageModelItems(adminState.imagePriorityModels);
   const llmGrokModels = stringifyModelList(adminState.llmGptModels);
   const llmPriorityModels = stringifyModelList(adminState.llmPriorityModels);
+  const llmFreePriorityModels = stringifyModelList(adminState.llmFreePriorityModels);
+  const llmPaidPriorityModels = stringifyModelList(adminState.llmPaidPriorityModels);
   const imageGeminiModels = stringifyModelList(adminState.imageGeminiModels);
   const imagePriorityModels = stringifyModelList(adminState.imagePriorityModels);
   return {
@@ -1902,6 +1937,8 @@ function runtimeFormToPayload() {
     llm_default_model_gpt: llmGrokModels,
     llm_default_model: llmGrokModels,
     llm_model_priority_order: llmPriorityModels || llmGrokModels,
+    llm_free_model_priority_order: llmFreePriorityModels || llmPriorityModels || llmGrokModels,
+    llm_paid_model_priority_order: llmPaidPriorityModels || llmPriorityModels || llmGrokModels,
     image_model_provider_base_url: el("rtImageBaseUrl").value.trim(),
     image_model_provider_api_key_gemini: el("rtImageGeminiApiKey").value.trim(),
     image_model_default_model_gemini: imageGeminiModels,
@@ -1950,9 +1987,13 @@ function fillRuntimeForm(data) {
   adminState.llmGptModels = grokModelItems([
     ...parseModelList(v.llm_default_model_gpt || ""),
     ...parseModelList(v.llm_model_priority_order || ""),
+    ...parseModelList(v.llm_free_model_priority_order || ""),
+    ...parseModelList(v.llm_paid_model_priority_order || ""),
     ...parseModelList(v.llm_default_model || ""),
   ]);
   adminState.llmPriorityModels = grokModelItems(v.llm_model_priority_order ? parseModelList(v.llm_model_priority_order) : adminState.llmGptModels);
+  adminState.llmFreePriorityModels = grokModelItems(v.llm_free_model_priority_order ? parseModelList(v.llm_free_model_priority_order) : adminState.llmPriorityModels);
+  adminState.llmPaidPriorityModels = grokModelItems(v.llm_paid_model_priority_order ? parseModelList(v.llm_paid_model_priority_order) : adminState.llmPriorityModels);
   el("rtImageBaseUrl").value = v.image_model_provider_base_url || "http://202.90.21.53:3008";
   el("rtImageGeminiApiKey").value = v.image_model_provider_api_key_gemini || "";
   adminState.imageGeminiModels = imageModelItems([
@@ -2338,6 +2379,7 @@ async function submitRecharge() {
 
 function bindActions() {
   bindModelTabs();
+  bindTextModelContentTabs();
   el("btnSaveRuntime").addEventListener("click", async () => {
     setMsg("runtimeMsg", "");
     try {
@@ -2507,7 +2549,8 @@ function bindActions() {
   }
 
   [
-    ["btnAddLlmPriorityModel", "rtLlmPriorityModelInput", "llmPriorityModels", "llm"],
+    ["btnAddLlmFreePriorityModel", "rtLlmFreePriorityModelInput", "llmFreePriorityModels", "llm"],
+    ["btnAddLlmPaidPriorityModel", "rtLlmPaidPriorityModelInput", "llmPaidPriorityModels", "llm"],
     ["btnAddImagePriorityModel", "rtImagePriorityModelInput", "imagePriorityModels", "image"],
   ].forEach(([buttonId, inputId, listKey, type]) => {
     if (el(buttonId)) {
@@ -2744,7 +2787,7 @@ function bindActions() {
       const list = adminState[listName];
       if (idx >= 0 && Array.isArray(list)) {
         list.splice(idx, 1);
-        if (listName === "llmGptModels" || listName === "llmPriorityModels") {
+        if (listName === "llmGptModels" || listName === "llmPriorityModels" || listName === "llmFreePriorityModels" || listName === "llmPaidPriorityModels") {
           syncPriorityModelsFromCatalog("llm");
         } else if (listName === "imageGeminiModels" || listName === "imagePriorityModels") {
           syncPriorityModelsFromCatalog("image");
@@ -2769,7 +2812,7 @@ function bindActions() {
         list[idx] = list[idx + 1];
         list[idx + 1] = item;
       }
-      if (listName === "llmPriorityModels") syncPriorityModelsFromCatalog("llm");
+      if (listName === "llmPriorityModels" || listName === "llmFreePriorityModels" || listName === "llmPaidPriorityModels") syncPriorityModelsFromCatalog("llm");
       if (listName === "imagePriorityModels") syncPriorityModelsFromCatalog("image");
       writeModelDraft();
       renderAllModelLists();

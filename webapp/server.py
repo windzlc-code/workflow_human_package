@@ -116,6 +116,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "llm_default_model_gemini": "",
     "llm_default_model_gpt": "grok-4.2",
     "llm_model_priority_order": "grok-4.2",
+    "llm_free_model_priority_order": "grok-4.2",
+    "llm_paid_model_priority_order": "grok-4.2",
     "text_to_image_auto_qa_enabled": False,
     "text_to_image_auto_qa_max_attempts": 3,
     "persona_body_profiles": {},
@@ -2578,6 +2580,20 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         fallback=llm_gpt_models or ["grok-4.2"],
     )
     merged["llm_model_priority_order"] = ", ".join(llm_priority_models)
+    llm_free_models = _grok_llm_models(
+        parse_model_list(current.get("llm_free_model_priority_order")),
+        llm_priority_models,
+        llm_gpt_models,
+        fallback=llm_priority_models or llm_gpt_models or ["grok-4.2"],
+    )
+    llm_paid_models = _grok_llm_models(
+        parse_model_list(current.get("llm_paid_model_priority_order")),
+        llm_priority_models,
+        llm_gpt_models,
+        fallback=llm_priority_models or llm_gpt_models or ["grok-4.2"],
+    )
+    merged["llm_free_model_priority_order"] = ", ".join(llm_free_models)
+    merged["llm_paid_model_priority_order"] = ", ".join(llm_paid_models)
     merged["text_to_image_auto_qa_enabled"] = _to_bool(merged.get("text_to_image_auto_qa_enabled"), False)
     merged["text_to_image_auto_qa_max_attempts"] = min(
         max(_to_int(merged.get("text_to_image_auto_qa_max_attempts"), 3), 1),
@@ -2720,7 +2736,7 @@ def _write_tool_r18_api_config(raw: dict[str, Any]) -> None:
 
 def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: dict[str, Any]) -> None:
     updates: dict[str, Any] = {}
-    if any(key in explicit for key in ("llm_api_key", "llm_api_key_gpt", "llm_base_url", "llm_model_priority_order", "llm_default_model_gpt", "llm_default_model")):
+    if any(key in explicit for key in ("llm_api_key", "llm_api_key_gpt", "llm_base_url", "llm_model_priority_order", "llm_free_model_priority_order", "llm_paid_model_priority_order", "llm_default_model_gpt", "llm_default_model")):
         llm_key = str(runtime.get("llm_api_key_gpt") or runtime.get("llm_api_key") or "").strip()
         llm_base = str(runtime.get("llm_base_url") or "").strip()
         if llm_key:
@@ -2743,6 +2759,22 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             updates["llm_model_priority_order"] = model_order
             updates["llm_default_model_gpt"] = model_order
             updates["llm_default_model"] = model_order
+        free_models = _ordered_model_list(
+            parse_model_list(runtime.get("llm_free_model_priority_order")),
+            parse_model_list(runtime.get("llm_model_priority_order")),
+            fallback=llm_models or ["grok-4.2"],
+        )
+        paid_models = _ordered_model_list(
+            parse_model_list(runtime.get("llm_paid_model_priority_order")),
+            parse_model_list(runtime.get("llm_model_priority_order")),
+            fallback=llm_models or ["grok-4.2"],
+        )
+        if free_models:
+            updates["llmFreeModelPriorityOrder"] = ", ".join(free_models)
+            updates["llm_free_model_priority_order"] = ", ".join(free_models)
+        if paid_models:
+            updates["llmPaidModelPriorityOrder"] = ", ".join(paid_models)
+            updates["llm_paid_model_priority_order"] = ", ".join(paid_models)
     if any(
         key in explicit
         for key in (
@@ -15322,6 +15354,8 @@ class RuntimeConfigPayload(BaseModel):
     llm_default_model_gemini: str = ""
     llm_default_model_gpt: str = "grok-4.2"
     llm_model_priority_order: str = "grok-4.2"
+    llm_free_model_priority_order: str = "grok-4.2"
+    llm_paid_model_priority_order: str = "grok-4.2"
     mulerouter_api_name: str = ""
     mulerouter_api_key: str = ""
     mulerouter_base_url: str = "https://api.mulerouter.ai"

@@ -35,6 +35,29 @@ const DEFAULT_WARMUP_PLATFORM: TelegramWarmupPlatform = "threads";
 const TELEGRAM_POLLING_STALL_CHECK_MS = 60_000;
 const TELEGRAM_POLLING_STALL_IDLE_MS = 60_000;
 type TelegramGroupContentType = "free" | "paid";
+type TextContentModelBranch = "free" | "paid";
+
+function resolveTelegramTextModelPreference(branch: TextContentModelBranch = "free"): string {
+  const config = readRuntimeApiConfig() as Record<string, unknown>;
+  const branchCandidates = branch === "paid"
+    ? [config.llmPaidModelPriorityOrder, config.llm_paid_model_priority_order]
+    : [config.llmFreeModelPriorityOrder, config.llm_free_model_priority_order];
+  return [
+    ...branchCandidates,
+    config.llmModelPriorityOrder,
+    config.llm_model_priority_order,
+    config.llmDefaultModelGpt,
+    config.llm_default_model_gpt,
+    config.llmDefaultModel,
+    config.llm_default_model,
+  ]
+    .map((value) => String(value || "").trim())
+    .find(Boolean) || "xai/grok-4.3";
+}
+
+function contentBranchToTextModelBranch(branch?: GeneratePostContentBranch): TextContentModelBranch {
+  return branch === "r18" ? "paid" : "free";
+}
 
 // ─── listPads TTL 缓存（60 秒）────────────────────────────────────────────────
 type PadListItem = { padCode: string; padName?: string; padStatus: number; padGrade?: string; padType?: string; vmosAccountName?: string };
@@ -5727,7 +5750,7 @@ async function runCodexJsonInstruction(instruction: string): Promise<any> {
     console.warn("[telegram][codex_json_fallback]", normalizeErrorForLog(message).slice(0, 500));
     try {
       const result = await callTextUnderstandingModelWithFallback(
-        "xai/grok-4.3",
+        resolveTelegramTextModelPreference("free"),
         [{ role: "user", parts: [{ text: instruction }] }],
         {
           maxOutputTokens: 4096,
@@ -6543,7 +6566,7 @@ async function describePaidR18SelectedImageWithGrok(args: {
   const prompt = String(args.prompt || "").trim();
   const imageDirection = String(args.imageDirection || "").trim();
   const { data, model } = await callTextUnderstandingModelWithFallback(
-    "xai/grok-4.3",
+    resolveTelegramTextModelPreference("paid"),
     [
       {
         role: "user",
@@ -6711,7 +6734,7 @@ async function rewritePaidR18CaptionAsNaturalLanguage(args: {
     `Original caption: ${args.content}`,
   ].filter(Boolean).join("\n");
   const { data } = await callTextUnderstandingModelWithFallback(
-    "xai/grok-4.3",
+    resolveTelegramTextModelPreference("paid"),
     [{ role: "user", parts: [{ text: instruction }] }],
     { temperature: 0.55, maxOutputTokens: 120 },
     undefined,
@@ -6741,7 +6764,7 @@ async function rewritePaidR18CaptionAsNaturalLanguage(args: {
     `Bad version to fix: ${rewritten || args.content}`,
   ].filter(Boolean).join("\n");
   const retry = await callTextUnderstandingModelWithFallback(
-    "xai/grok-4.3",
+    resolveTelegramTextModelPreference("paid"),
     [{ role: "user", parts: [{ text: retryInstruction }] }],
     { temperature: 0.6, maxOutputTokens: 120 },
     undefined,
@@ -6792,7 +6815,7 @@ async function generatePaidR18PostContentFromSelectedImage(args: {
   const parts: any[] = [{ text: instruction }];
   if (inline) parts.push({ inlineData: inline });
   const { data } = await callTextUnderstandingModelWithFallback(
-    "xai/grok-4.3",
+    resolveTelegramTextModelPreference("paid"),
     [{ role: "user", parts }],
     { temperature: 0.65, maxOutputTokens: 180 },
     undefined,
@@ -6990,7 +7013,7 @@ async function generatePaidR18VideoPostContent(args: {
     `\u8996\u983b\u63d0\u793a\u8a5e\uff1a${args.prompt || "\u672a\u63d0\u4f9b\uff0c\u8acb\u6309\u8996\u983b\u756b\u9762\u65b9\u5411\u751f\u6210\u3002"}`,
   ].filter(Boolean).join("\n");
   const { data } = await callTextUnderstandingModelWithFallback(
-    "xai/grok-4.3",
+    resolveTelegramTextModelPreference("paid"),
     [{ role: "user", parts: [{ text: instruction }] }],
     { temperature: 0.65, maxOutputTokens: 180 },
     undefined,
@@ -7499,6 +7522,7 @@ async function regenerateArchivePostContent(args: {
     action: "generate-posts",
     archiveId: args.archiveId,
     count: 1,
+    textModelBranch: original.telegramGroupContentType === "paid" ? "paid" : "free",
     customInstruction: [
       "重新生成下面这 1 篇待發佈推文。",
       "要求：",
@@ -8762,6 +8786,7 @@ async function executeGeneratePostsFromTelegram(args: GeneratePostsTelegramArgs)
         action: "generate-posts",
         archiveId: args.archiveId,
         count: batchSize,
+        textModelBranch: contentBranchToTextModelBranch(args.contentBranch),
         selectedMemoryEntryIds: args.selectedMemoryEntryIds,
         selectedMemorySummaries: args.selectedMemorySummaries,
         customInstruction: buildGeneratePostInstruction({
@@ -8800,6 +8825,7 @@ async function executeGeneratePostsFromTelegram(args: GeneratePostsTelegramArgs)
         action: "generate-posts",
         archiveId: args.archiveId,
         count: batchSize,
+        textModelBranch: contentBranchToTextModelBranch(args.contentBranch),
         selectedMemoryEntryIds: args.selectedMemoryEntryIds,
         selectedMemorySummaries: args.selectedMemorySummaries,
         customInstruction: buildGeneratePostInstruction({

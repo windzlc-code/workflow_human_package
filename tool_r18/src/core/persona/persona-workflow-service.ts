@@ -20,10 +20,21 @@ import type { DramaSetup, EpisodeScript } from "@/types/drama";
 
 const PERSONA_TEXT_MODEL = "xai/grok-4.3";
 const PERSONA_TEXT_MAX_RETRIES = 3;
+type PersonaTextModelBranch = "free" | "paid";
 
-function resolvePersonaTextModelPreference(): string {
+function resolvePersonaTextModelPreference(branch: PersonaTextModelBranch = "free"): string {
   const config = readRuntimeApiConfig() as Record<string, unknown>;
+  const branchCandidates = branch === "paid"
+    ? [
+        config.llmPaidModelPriorityOrder,
+        config.llm_paid_model_priority_order,
+      ]
+    : [
+        config.llmFreeModelPriorityOrder,
+        config.llm_free_model_priority_order,
+      ];
   const configured = [
+    ...branchCandidates,
     config.llmModelPriorityOrder,
     config.llm_model_priority_order,
     config.llmDefaultModelGpt,
@@ -143,7 +154,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function generateTextWithGemini(prompt: string, count: number): Promise<string> {
+async function generateTextWithGemini(prompt: string, count: number, textModelBranch: PersonaTextModelBranch = "free"): Promise<string> {
   const finalPrompt = [
     prompt,
     "",
@@ -159,7 +170,7 @@ async function generateTextWithGemini(prompt: string, count: number): Promise<st
   for (let attempt = 0; attempt <= PERSONA_TEXT_MAX_RETRIES; attempt += 1) {
     try {
       const result = await callTextUnderstandingModelWithFallback(
-        resolvePersonaTextModelPreference(),
+        resolvePersonaTextModelPreference(textModelBranch),
         [{ role: "user", parts: [{ text: finalPrompt }] }],
         {
           maxOutputTokens: Math.max(4096, count * 1200),
@@ -276,7 +287,7 @@ export type PersonaWorkflowInput =
   | { action: "get"; archiveId: string }
   | { action: "update"; archiveId: string; name?: string; content?: string; setup?: Partial<DramaSetup> }
   | { action: "delete"; archiveId: string }
-  | { action: "generate-posts"; archiveId: string; count?: number; customInstruction?: string; selectedMemoryEntryIds?: string[]; selectedMemorySummaries?: string[] }
+  | { action: "generate-posts"; archiveId: string; count?: number; customInstruction?: string; selectedMemoryEntryIds?: string[]; selectedMemorySummaries?: string[]; textModelBranch?: PersonaTextModelBranch }
   | { action: "enqueue-posts"; archiveId: string; postIds?: string[]; padCode?: string; platform?: string; telegramChatId?: string }
   | { action: "finalize-published"; archiveId: string; postIds: string[]; publishedContentById?: Record<string, string>; publishedMetaById?: Record<string, any> };
 
@@ -391,7 +402,8 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
         input.customInstruction || "",
       );
 
-      const generated = await generateTextWithGemini(prompt, targetCount);
+      const textModelBranch = input.textModelBranch === "paid" ? "paid" : "free";
+      const generated = await generateTextWithGemini(prompt, targetCount, textModelBranch);
       let posts = ensurePostsContainTweetStyleLink(parsePosts(generated, targetCount), archive.setup);
 
       let attempts = 0;
@@ -405,7 +417,7 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
           trendIntel ? `必须继续自然结合以下今日人设时事情报，不要写成新闻摘要：\n${trendIntel.slice(0, 1200)}` : "",
           "不要输出思考过程、不要输出说明、不要输出检查文本、不要输出标题说明。",
         ].join("\n");
-        const retryGenerated = await generateTextWithGemini(retryPrompt, missing);
+        const retryGenerated = await generateTextWithGemini(retryPrompt, missing, textModelBranch);
         const retryPosts = ensurePostsContainTweetStyleLink(parsePosts(retryGenerated, missing), archive.setup).map((post, index) => ({
           ...post,
           number: posts.length + index + 1,

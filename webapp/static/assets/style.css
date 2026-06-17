@@ -4306,6 +4306,39 @@ body.page-admin {
   gap: 12px;
 }
 
+.page-admin .admin-content-model-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.page-admin .admin-content-model-tab {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.page-admin .admin-content-model-tab.is-active {
+  border-color: #159266;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.page-admin .admin-content-model-panel {
+  display: none;
+}
+
+.page-admin .admin-content-model-panel.is-active {
+  display: grid;
+  gap: 10px;
+}
+
 .page-admin .admin-model-list {
   display: flex;
   flex-wrap: wrap;
