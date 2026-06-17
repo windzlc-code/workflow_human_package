@@ -9134,7 +9134,7 @@ async function sendTelegramPublishStatusMessage(
   chatId: number,
   platform: string,
 ) {
-  return bot.sendMessage(chatId, `[#${TELEGRAM_INSTANCE_TAG}] ⏳ 正在发布到 ${platform}...\n当前狀態：准备开始`, {
+  return bot.sendMessage(chatId, `⏳ 正在发布到 ${platform}...\n当前狀態：准备开始`, {
     reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
   });
 }
@@ -9153,7 +9153,7 @@ async function updateTelegramPublishStatus(
     currentStep ? `当前狀態：${currentStep}` : "",
     ...displayLogs.slice(-6),
   ].filter(Boolean);
-  const text = `[#${TELEGRAM_INSTANCE_TAG}] ` + lines.join("\n");
+  const text = lines.join("\n");
   const key = `${chatId}:${messageId}`;
   const now = Date.now();
   const state = telegramStatusEditState.get(key) || { lastAt: 0, inFlight: false };
@@ -17019,7 +17019,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
 
       pendingActions.delete(chatId);
-      const thinking = await bot.sendMessage(chatId, `[#${TELEGRAM_INSTANCE_TAG}] 🧠 正在理解用户意图...`);
+      const thinking = await bot.sendMessage(chatId, "🧠 正在理解用户意图...");
       let specError = "";
       const personaName = pending.personaName || value.slice(0, 40);
       const personaPrompt = [
@@ -17034,7 +17034,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       });
       if (!spec) {
         const reason = specError ? `\n原因：${formatUserFacingAiError(specError)}` : "";
-        await bot.editMessageText(`[#${TELEGRAM_INSTANCE_TAG}] ❌ AI 未能解析这个人设，请稍后重试。${reason}`, {
+        await bot.editMessageText(`❌ AI 未能解析这个人设，请稍后重试。${reason}`, {
           chat_id: chatId,
           message_id: thinking.message_id,
           reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
@@ -17060,7 +17060,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return null;
       });
       if (!created?.archiveId) {
-        await bot.editMessageText(`[#${TELEGRAM_INSTANCE_TAG}] ❌ 新建人设失败，请稍后重试。`, {
+        await bot.editMessageText("❌ 新建人设失败，请稍后重试。", {
           chat_id: chatId,
           message_id: thinking.message_id,
           reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
@@ -17068,7 +17068,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const archive = await loadPersonaArchive(created.archiveId).catch(() => null);
-      await bot.editMessageText(`[#${TELEGRAM_INSTANCE_TAG}] ✅ 已新建人設：${created.name}\n\n${archive?.content || spec.content}\n\n步驟 3/3：請先生成人設圖。後續生成推文配圖會優先使用人設圖鎖定人物長相。`, {
+      await bot.editMessageText(`✅ 已新建人設：${created.name}\n\n${archive?.content || spec.content}\n\n步驟 3/3：請先生成人設圖。後續生成推文配圖會優先使用人設圖鎖定人物長相。`, {
         chat_id: chatId,
         message_id: thinking.message_id,
         reply_markup: {
@@ -17102,7 +17102,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const mode = pending.mode === "replace" ? "replace" : "patch";
-      const thinking = await bot.sendMessage(chatId, `[#${TELEGRAM_INSTANCE_TAG}] 🧠 ${mode === "replace" ? "正在重新生成人设简介..." : "正在编辑人设简介..."}`);
+      const thinking = await bot.sendMessage(chatId, `🧠 ${mode === "replace" ? "正在重新生成人设简介..." : "正在编辑人设简介..."}`);
       let rewriteError = "";
       const rewritten = await rewritePersonaIntroWithCodex(archive, text, mode).catch((error: any) => {
         rewriteError = error?.message || String(error);
@@ -17111,7 +17111,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       });
       if (!rewritten) {
         const reason = rewriteError ? `\n原因：${formatUserFacingAiError(rewriteError)}` : "";
-        await bot.editMessageText(`[#${TELEGRAM_INSTANCE_TAG}] ❌ AI 未能${mode === "replace" ? "重新生成" : "编辑"}简介，请稍后重试。${reason}`, {
+        await bot.editMessageText(`❌ AI 未能${mode === "replace" ? "重新生成" : "编辑"}简介，请稍后重试。${reason}`, {
           chat_id: chatId,
           message_id: thinking.message_id,
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${pending.archiveId}` }]] },
