@@ -14422,27 +14422,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const displayIndex = action.displayIndex || (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
       pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: action.postId });
-      await safeEditOrSend(bot, chatId, msgId, `🖼 正在重新生成第 ${displayIndex} 篇配图候选，共 4 张...`, {
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: `posts_${action.archiveId}` }]] },
+      await sendPostImageRatioPicker(bot, chatId, msgId, {
+        archiveId: action.archiveId,
+        postId: action.postId,
+        displayIndex,
+        source: "candidate_regen",
+        createdAt: Date.now(),
       });
-      const stopTyping = startTelegramTyping(bot, chatId);
-      try {
-        const result = await generateArchivePostImageCandidates({ ...action, chatId });
-        stopTyping();
-        await sendPostImageCandidateGroupMessage(bot, chatId, {
-          archiveId: action.archiveId,
-          postId: action.postId,
-          content: result.content,
-          imageUrls: result.imageUrls,
-          displayIndex,
-          totalPosts: archive.posts.length || 1,
-        });
-      } catch (error) {
-        stopTyping();
-        await bot.sendMessage(chatId, `❌ 图片生成失敗：${formatUserFacingError(error, "图片生成失败，请稍后重试。")}`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: `posts_${action.archiveId}` }]] },
-        });
-      }
       return;
     }
 
@@ -14474,6 +14460,18 @@ function sendMainMenu(chatId: number, msgId?: number) {
               [{ text: "◀️ 返回推文列表", callback_data: `posts_${action.archiveId}` }],
             ],
           },
+        });
+        return;
+      }
+      if (isImageOnly) {
+        const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+        await sendPostImageRatioPicker(bot, chatId, msgId, {
+          archiveId: action.archiveId,
+          postId: action.postId,
+          displayIndex,
+          groupContentType: action.groupContentType,
+          source: "post_detail",
+          createdAt: Date.now(),
         });
         return;
       }
