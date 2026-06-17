@@ -4421,7 +4421,7 @@ async function sendPostImageRatioPicker(bot: TelegramBot, chatId: number, msgId:
     "\uD83D\uDDBC \u8ACB\u9078\u64C7\u9019\u7D44\u914D\u5716\u7684\u756B\u9762\u6BD4\u4F8B",
     "",
     `\u63A8\u6587\uFF1A\u7B2C ${displayIndex} \u7BC7`,
-    `\u76EE\u6A19\uFF1A\u4 \u5F35\u5019\u9078\u5716`,
+    `\u76EE\u6A19\uFF1A4 \u5F35\u5019\u9078\u5716`,
   ].join("\n"), {
     reply_markup: buildPostImageRatioKeyboard(profile, buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType), qaEnabled),
   });
@@ -6263,6 +6263,7 @@ async function generateImagesForGeneratedPosts(args: {
             }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
           : await generatePersonaImageForArchive(args.archiveId, instruction, {
               customVisualInstruction: instruction,
+              aspectRatio: args.imageAspectRatio,
             }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
       const urls = collectGeneratedImageUrls(image);
       if (urls.length) {
@@ -7816,6 +7817,7 @@ async function generateArchivePostImageCandidates(args: {
         }))
         : await generatePersonaImageForArchive(args.archiveId, post.content, {
           customVisualInstruction: prompt,
+          aspectRatio: args.imageAspectRatio,
         }).catch((error) => ({
           ok: false,
           error: error instanceof Error ? error.message : String(error),
@@ -14486,19 +14488,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
       );
       const stopTyping = startTelegramTyping(bot, chatId);
       try {
-        if (isImageOnly) {
-          const result = await generateArchivePostImageCandidates({ ...action, chatId });
-          stopTyping();
-          const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
-          await sendPostImageCandidateGroupMessage(bot, chatId, {
-            archiveId: action.archiveId,
-            postId: action.postId,
-            content: result.content,
-            imageUrls: result.imageUrls,
-            displayIndex,
-            totalPosts: archive.posts.length || 1,
-          });
-        } else {
           const updated = await regenerateArchivePostContent(action);
           stopTyping();
           const displayIndex = (updated.orderIndex ?? archive.posts.findIndex((item) => item.id === updated.id)) + 1;
@@ -14515,7 +14504,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
               }),
             },
           });
-        }
       } catch (error) {
         stopTyping();
         await bot.sendMessage(chatId, `❌ ${isImageOnly ? "图片生成失败" : "重新生成推文失败"}：${formatUserFacingError(error, isImageOnly ? "图片生成失败，请稍后重试。" : "推文生成失敗，請稍後重試。")}`, {
