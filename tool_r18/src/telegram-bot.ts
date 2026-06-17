@@ -16379,7 +16379,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
     const video = msg.video || null;
     const documentMedia = msg.document || null;
     const media = photo || video || documentMedia;
-    const isStartCommand = text === "/start" || text === "/menu";
+    const commandHead = text.split(/\s+/, 1)[0]?.toLowerCase().split("@", 1)[0] || "";
+    const isStartCommand = commandHead === "/start" || commandHead === "/menu";
     if (isStartCommand || text === "主菜单" || text === "🏠 主選單") {
       clearTelegramNavigationTransientState(chatId);
       sendMainMenu(chatId);
