@@ -20,6 +20,7 @@ const ADMIN_PAGE_LABELS = {
 const SENSITIVE_RUNTIME_INPUT_IDS = [
   "rtTelegramBotToken",
   "rtLlmApiKeyGpt",
+  "rtImageGeminiApiKey",
   "rtRemoteComfyGatewayToken",
   "rtLocalComfyGatewayToken",
   "rtMuleRouterApiKey",
@@ -131,8 +132,16 @@ function isGrokModel(model) {
   return /grok/i.test(String(model || "").trim());
 }
 
+function isGeminiImageModel(model) {
+  return /(?:gemini|imagen|image)/i.test(String(model || "").trim());
+}
+
 function grokModelItems(items) {
-  return uniqueItems(items).filter(isGrokModel);
+  return uniqueItems(items);
+}
+
+function imageModelItems(items) {
+  return uniqueItems(items).filter(Boolean);
 }
 
 function readModelDraft() {
@@ -151,6 +160,8 @@ function writeModelDraft() {
       llmGeminiModels: [],
       llmGptModels: grokModelItems(adminState.llmGptModels),
       llmPriorityModels: grokModelItems(adminState.llmPriorityModels),
+      imageGeminiModels: imageModelItems(adminState.imageGeminiModels),
+      imagePriorityModels: imageModelItems(adminState.imagePriorityModels),
     }));
   } catch {
     // localStorage can be unavailable in private browsing; config save still works.
@@ -169,11 +180,11 @@ function mergeModelDraft() {
   const draft = readModelDraft();
   if (!draft) return false;
   let changed = false;
-  ["llmGptModels", "llmPriorityModels"].forEach((key) => {
+  ["llmGptModels", "llmPriorityModels", "imageGeminiModels", "imagePriorityModels"].forEach((key) => {
     const before = uniqueItems(adminState[key]);
     const after = key.startsWith("llm")
       ? grokModelItems([...before, ...(Array.isArray(draft[key]) ? draft[key] : [])])
-      : uniqueItems([...before, ...(Array.isArray(draft[key]) ? draft[key] : [])]);
+      : imageModelItems([...before, ...(Array.isArray(draft[key]) ? draft[key] : [])]);
     adminState[key] = after;
     if (after.length !== before.length) changed = true;
   });
@@ -235,7 +246,12 @@ function llmModelOptions() {
   return grokModelItems(adminState.llmGptModels);
 }
 
+function imageModelOptions() {
+  return imageModelItems(adminState.imageGeminiModels);
+}
+
 function modelCatalogForPriority(type) {
+  if (type === "image") return imageModelOptions();
   return llmModelOptions();
 }
 
@@ -257,12 +273,21 @@ function normalizePriorityList(priorityItems, catalogItems, fallbackItems) {
 }
 
 function syncPriorityModelsFromCatalog(type) {
+  if (type === "image") {
+    const explicitPriority = imageModelItems(adminState.imagePriorityModels);
+    adminState.imagePriorityModels = normalizePriorityList(
+      explicitPriority.length ? explicitPriority : imageModelOptions(),
+      [],
+      ["gemini-3-pro-image-preview"],
+    );
+    return;
+  }
   const explicitPriority = grokModelItems(adminState.llmPriorityModels);
   adminState.llmPriorityModels = normalizePriorityList(
     explicitPriority.length ? explicitPriority : llmModelOptions(),
     [],
     ["grok-4.2"],
-  ).filter(isGrokModel);
+  );
 }
 
 function defaultClosedLlmModel() {
@@ -318,8 +343,11 @@ function renderPriorityModelList(listKey, wrapId) {
 
 function renderAllModelLists() {
   syncPriorityModelsFromCatalog("llm");
+  syncPriorityModelsFromCatalog("image");
   renderModelList("llmGptModels", "rtLlmGptModelList");
   renderPriorityModelList("llmPriorityModels", "rtLlmPriorityModelList");
+  renderModelList("imageGeminiModels", "rtImageGeminiModelList");
+  renderPriorityModelList("imagePriorityModels", "rtImagePriorityModelList");
   renderModelSummaries();
 }
 
@@ -335,23 +363,31 @@ function buildModelSummary(geminiListKey, gptListKey, label) {
   if (priority.length > 0) return `当前默认执行：按优先级顺序依次尝试，当前首选 ${priority[0]}`;
   const geminiModel = firstModel(geminiListKey);
   const gptModel = firstModel(gptListKey);
-  if (geminiModel) return `当前默认执行：Gemini · ${label}优先使用 ${geminiModel}`;
-  if (gptModel) return `当前默认执行：GPT · ${label}回退使用 ${gptModel}`;
+  if (geminiModel) return `当前默认执行：${label}优先使用 ${geminiModel}`;
+  if (gptModel) return `当前默认执行：${label}回退使用 ${gptModel}`;
   return `当前默认执行：未配置 ${label}候选模型`;
 }
 
 function buildLlmModelSummary() {
   const priority = grokModelItems(adminState.llmPriorityModels);
-  if (priority.length > 0) return `当前 Grok 执行模型：${priority[0]}`;
+  if (priority.length > 0) return `当前文字执行模型：${priority[0]}`;
   const grokModel = llmModelOptions()[0] || "";
-  if (grokModel) return `当前 Grok 执行模型：${grokModel}`;
-  return "当前未配置 Grok 文字模型";
+  if (grokModel) return `当前文字执行模型：${grokModel}`;
+  return "当前未配置文字模型";
 }
 
 function renderModelSummaries() {
   const llmSummary = el("rtLlmModelSummary");
   if (llmSummary) {
     llmSummary.textContent = buildLlmModelSummary();
+  }
+  const imageSummary = el("rtImageModelSummary");
+  if (imageSummary) {
+    const priority = imageModelItems(adminState.imagePriorityModels);
+    const first = priority[0] || imageModelOptions()[0] || "";
+    imageSummary.textContent = first
+      ? `当前图片执行模型：${first}`
+      : "当前未配置图片模型";
   }
 }
 
@@ -360,10 +396,6 @@ function addModelFromInput(listKey, inputId) {
   if (!input) return;
   const value = String(input.value || "").trim();
   if (!value) return;
-  if (listKey === "llmGptModels" && !isGrokModel(value)) {
-    setMsg("runtimeMsg", "文字模型只支持 Grok，请输入 grok-* 模型名。", false);
-    return;
-  }
   if (!Array.isArray(adminState[listKey])) {
     adminState[listKey] = [];
   }
@@ -371,6 +403,8 @@ function addModelFromInput(listKey, inputId) {
     adminState[listKey].push(value);
     if (listKey === "llmGptModels") {
       syncPriorityModelsFromCatalog("llm");
+    } else if (listKey === "imageGeminiModels") {
+      syncPriorityModelsFromCatalog("image");
     }
     writeModelDraft();
     renderAllModelLists();
@@ -390,10 +424,94 @@ function hideLlmModelPicker() {
   if (picker) picker.hidden = true;
 }
 
+function modelVendor(model) {
+  const text = String(model || "").trim();
+  const lower = text.toLowerCase();
+  if (!text) return "其他";
+  if (lower.includes("openai") || lower.startsWith("gpt") || /^o[1345](?:[-_.]|$)/i.test(text)) return "OpenAI";
+  if (lower.includes("anthropic") || lower.includes("claude")) return "Anthropic";
+  if (lower.includes("google") || lower.includes("gemini") || lower.includes("imagen")) return "Google";
+  if (lower.includes("xai") || lower.includes("grok")) return "xAI";
+  if (lower.includes("qwen")) return "Qwen";
+  if (lower.includes("deepseek")) return "DeepSeek";
+  if (lower.includes("doubao") || lower.includes("bytedance") || lower.includes("seedream") || lower.includes("seedance")) return "ByteDance";
+  if (lower.includes("glm")) return "GLM";
+  if (lower.includes("minimax")) return "MiniMax";
+  if (lower.includes("mistral")) return "Mistral";
+  if (lower.includes("flux")) return "Flux";
+  if (lower.includes("dall-e")) return "DALL-E";
+  if (lower.includes("wan")) return "Wan";
+  if (lower.includes("kling")) return "Kling";
+  if (lower.includes("hailuo")) return "Hailuo";
+  if (lower.includes("veo")) return "Veo";
+  const first = text.split(/[/:_.-]/).find(Boolean) || text;
+  return first.slice(0, 24);
+}
+
+function renderSearchableModelPicker(picker, items, dataAttrName, emptyMessage, placeholder = "搜尋模型") {
+  if (!picker) return;
+  const options = uniqueItems(items).sort((a, b) => a.localeCompare(b));
+  picker.hidden = false;
+  if (!options.length) {
+    picker.innerHTML = `<div class="admin-model-picker-status">${escapeHtml(emptyMessage)}</div>`;
+    return;
+  }
+  const vendors = uniqueItems(options.map((model) => modelVendor(model))).sort((a, b) => a.localeCompare(b));
+  picker.innerHTML = `
+    <div class="admin-model-picker-toolbar">
+      <div class="admin-model-picker-count" data-model-picker-count>共 ${options.length} 个可用模型</div>
+      <select class="admin-model-picker-vendor" data-model-picker-vendor>
+        <option value="">全部厂商</option>
+        ${vendors.map((vendor) => `<option value="${escapeHtml(vendor)}">${escapeHtml(vendor)}</option>`).join("")}
+      </select>
+    </div>
+    <input class="admin-model-picker-search" type="search" placeholder="${escapeHtml(placeholder)}" data-model-picker-search>
+    <div class="admin-model-picker-options">
+      ${options
+        .map((model) => `<button type="button" class="ghost admin-model-picker-option" data-vendor="${escapeHtml(modelVendor(model))}" data-${dataAttrName}="${escapeHtml(model)}">${escapeHtml(model)}</button>`)
+        .join("")}
+    </div>
+  `;
+  filterModelPickerOptions(picker, "");
+}
+
+function filterModelPickerOptions(picker, query) {
+  if (!picker) return;
+  const normalized = String(query || "").trim().toLowerCase();
+  const selectedVendor = String(picker.querySelector("[data-model-picker-vendor]")?.value || "");
+  let visibleCount = 0;
+  picker.querySelectorAll(".admin-model-picker-option").forEach((button) => {
+    const text = String(button.textContent || "").toLowerCase();
+    const vendor = String(button.dataset.vendor || "");
+    const visible = !(normalized && !text.includes(normalized)) && !(selectedVendor && vendor !== selectedVendor);
+    button.hidden = !visible;
+    if (visible) visibleCount += 1;
+  });
+  const countNode = picker.querySelector("[data-model-picker-count]");
+  if (countNode) countNode.textContent = `显示 ${visibleCount} / ${picker.querySelectorAll(".admin-model-picker-option").length} 个可用模型`;
+}
+
+function bindModelPickerFilters(pickerId) {
+  const picker = el(pickerId);
+  if (!picker) return;
+  picker.addEventListener("input", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.dataset.modelPickerSearch !== undefined) {
+      filterModelPickerOptions(picker, target.value);
+    }
+  });
+  picker.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLSelectElement && target.dataset.modelPickerVendor !== undefined) {
+      const query = picker.querySelector("[data-model-picker-search]")?.value || "";
+      filterModelPickerOptions(picker, query);
+    }
+  });
+}
+
 function addLlmModelFromPicker(model) {
   const value = String(model || "").trim();
   if (!value) return;
-  if (!isGrokModel(value)) return;
   if (!Array.isArray(adminState.llmGptModels)) adminState.llmGptModels = [];
   if (!Array.isArray(adminState.llmPriorityModels)) adminState.llmPriorityModels = [];
   if (!adminState.llmGptModels.includes(value)) adminState.llmGptModels.push(value);
@@ -402,23 +520,13 @@ function addLlmModelFromPicker(model) {
   writeModelDraft();
   renderAllModelLists();
   hideLlmModelPicker();
-  setMsg("runtimeMsg", `已加入 Grok 模型：${value}`, true);
+  setMsg("runtimeMsg", `已加入文字模型：${value}`, true);
 }
 
 function renderAvailableLlmModels(models) {
   const picker = el("rtLlmGrokModelPicker");
   if (!picker) return;
-  const items = uniqueItems(Array.isArray(models) ? models : [])
-    .filter((model) => /grok/i.test(model))
-    .sort((a, b) => a.localeCompare(b));
-  picker.hidden = false;
-  if (!items.length) {
-    picker.innerHTML = `<div class="admin-model-picker-status">没有查询到 Grok 可用模型</div>`;
-    return;
-  }
-  picker.innerHTML = items
-    .map((model) => `<button type="button" class="ghost admin-model-picker-option" data-llm-model="${escapeHtml(model)}">${escapeHtml(model)}</button>`)
-    .join("");
+  renderSearchableModelPicker(picker, uniqueItems(Array.isArray(models) ? models : []), "llm-model", "没有查询到可用文字模型", "搜索文字模型");
 }
 
 async function toggleAvailableLlmModels() {
@@ -431,15 +539,15 @@ async function toggleAvailableLlmModels() {
   const baseUrl = el("rtLlmBaseUrl").value.trim();
   const apiKey = el("rtLlmApiKeyGpt").value.trim() || el("rtLlmApiKeyGemini").value.trim();
   if (!baseUrl || !apiKey) {
-    setLlmModelPickerStatus("请先填写 Grok API Base URL 和密钥", true);
+    setLlmModelPickerStatus("请先填写 API Base URL 和 API Key", true);
     return;
   }
-  setLlmModelPickerStatus("正在查询可用 Grok 模型...");
+  setLlmModelPickerStatus("正在识别当前 API 支持的文字模型...");
   try {
-    const resp = await api("/api/admin/llm_models", {
+    const resp = await api("/api/admin/models", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ llm_base_url: baseUrl, llm_api_key: apiKey }),
+      body: JSON.stringify({ type: "text", provider: "openai-compatible", base_url: baseUrl, api_key: apiKey }),
     });
     renderAvailableLlmModels(resp.models || []);
   } catch (err) {
@@ -452,10 +560,6 @@ function addPriorityModelFromInput(listKey, inputId, type) {
   if (!input) return;
   const value = String(input.value || "").trim();
   if (!value) return;
-  if (type === "llm" && !isGrokModel(value)) {
-    setMsg("runtimeMsg", "文字模型调用顺序只支持 Grok，请输入 grok-* 模型名。", false);
-    return;
-  }
   if (!Array.isArray(adminState[listKey])) {
     adminState[listKey] = [];
   }
@@ -466,6 +570,180 @@ function addPriorityModelFromInput(listKey, inputId, type) {
   writeModelDraft();
   renderAllModelLists();
   input.value = "";
+}
+
+function setImageModelPickerStatus(message, isError = false) {
+  const picker = el("rtImageGeminiModelPicker");
+  if (!picker) return;
+  picker.hidden = false;
+  picker.innerHTML = `<div class="admin-model-picker-status${isError ? " error" : ""}">${escapeHtml(message)}</div>`;
+}
+
+function hideImageModelPicker() {
+  const picker = el("rtImageGeminiModelPicker");
+  if (picker) picker.hidden = true;
+}
+
+function addImageModelFromPicker(model) {
+  const value = String(model || "").trim();
+  if (!value) return;
+  if (!Array.isArray(adminState.imageGeminiModels)) adminState.imageGeminiModels = [];
+  if (!Array.isArray(adminState.imagePriorityModels)) adminState.imagePriorityModels = [];
+  if (!adminState.imageGeminiModels.includes(value)) adminState.imageGeminiModels.push(value);
+  if (!adminState.imagePriorityModels.includes(value)) adminState.imagePriorityModels.push(value);
+  syncPriorityModelsFromCatalog("image");
+  writeModelDraft();
+  renderAllModelLists();
+  hideImageModelPicker();
+  setMsg("runtimeMsg", `已加入图片模型：${value}`, true);
+}
+
+function buildLlmModelSummary() {
+  const priority = grokModelItems(adminState.llmPriorityModels);
+  if (priority.length > 0) return `当前文字执行模型：${priority[0]}`;
+  const model = llmModelOptions()[0] || "";
+  if (model) return `当前文字执行模型：${model}`;
+  return "当前未配置文字模型";
+}
+
+function renderModelSummaries() {
+  const llmSummary = el("rtLlmModelSummary");
+  if (llmSummary) llmSummary.textContent = buildLlmModelSummary();
+  const imageSummary = el("rtImageModelSummary");
+  if (imageSummary) {
+    const priority = imageModelItems(adminState.imagePriorityModels);
+    const first = priority[0] || imageModelOptions()[0] || "";
+    imageSummary.textContent = first ? `当前图片执行模型：${first}` : "当前未配置图片模型";
+  }
+}
+
+function renderAvailableImageModels(models) {
+  const picker = el("rtImageGeminiModelPicker");
+  if (!picker) return;
+  renderSearchableModelPicker(
+    picker,
+    uniqueItems(Array.isArray(models) ? models : []),
+    "image-model",
+    "没有查询到可用图片模型",
+    "搜索图片模型",
+  );
+}
+
+async function toggleAvailableImageModels() {
+  const picker = el("rtImageGeminiModelPicker");
+  if (!picker) return;
+  if (!picker.hidden && picker.children.length > 0) {
+    hideImageModelPicker();
+    return;
+  }
+  const baseUrl = el("rtImageBaseUrl").value.trim();
+  const apiKey = el("rtImageGeminiApiKey").value.trim();
+  if (!baseUrl || !apiKey) {
+    setImageModelPickerStatus("请先填写 API Base URL 和 API Key", true);
+    return;
+  }
+  setImageModelPickerStatus("正在识别当前 API 支持的图片模型...");
+  try {
+    const resp = await api("/api/admin/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "image", provider: "openai-compatible", base_url: baseUrl, api_key: apiKey }),
+    });
+    renderAvailableImageModels(resp.models || []);
+  } catch (err) {
+    setImageModelPickerStatus(err.detail || err.message || String(err), true);
+  }
+}
+
+function setVideoModelPickerStatus(message, isError = false) {
+  const picker = el("rtVideoModelPicker");
+  if (!picker) return;
+  picker.hidden = false;
+  picker.innerHTML = `<div class="admin-model-picker-status${isError ? " error" : ""}">${escapeHtml(message)}</div>`;
+}
+
+function hideVideoModelPicker() {
+  const picker = el("rtVideoModelPicker");
+  if (picker) picker.hidden = true;
+}
+
+function renderAvailableVideoModels(models) {
+  const picker = el("rtVideoModelPicker");
+  if (!picker) return;
+  renderSearchableModelPicker(
+    picker,
+    uniqueItems(Array.isArray(models) ? models : []),
+    "video-model",
+    "没有查询到可用视频模型",
+    "搜索视频模型",
+  );
+}
+
+function applyVideoModel(model) {
+  const value = String(model || "").trim();
+  if (!value) return;
+  const input = el("rtMuleRouterWanI2vModelName");
+  if (input) input.value = value;
+  const endpointInput = el("rtMuleRouterWanI2vEndpoint");
+  if (endpointInput) {
+    const current = String(endpointInput.value || "").trim();
+    if (/\/vendors\/[^/]+\/v\d+\//i.test(current) && /\/generation(?:[/?#]|$)/i.test(current)) {
+      endpointInput.value = current.replace(/(\/vendors\/[^/]+\/v\d+\/)([^/?#]+)(\/generation.*)$/i, `$1${value}$3`);
+    }
+  }
+  hideVideoModelPicker();
+  setMsg("runtimeMsg", `已选择视频模型：${value}`, true);
+}
+
+async function toggleAvailableVideoModels() {
+  const picker = el("rtVideoModelPicker");
+  if (!picker) return;
+  if (!picker.hidden && picker.children.length > 0) {
+    hideVideoModelPicker();
+    return;
+  }
+  const baseUrl = el("rtMuleRouterBaseUrl").value.trim();
+  const apiKey = el("rtMuleRouterApiKey").value.trim();
+  const endpoint = el("rtMuleRouterWanI2vEndpoint").value.trim();
+  setVideoModelPickerStatus("正在识别当前 API 支持的视频模型...");
+  try {
+    const resp = await api("/api/admin/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "video", provider: "openai-compatible", base_url: baseUrl, api_key: apiKey, endpoint }),
+    });
+    renderAvailableVideoModels(resp.models || []);
+  } catch (err) {
+    setVideoModelPickerStatus(err.detail || err.message || String(err), true);
+  }
+}
+
+function bindModelTabs() {
+  const tabs = Array.from(document.querySelectorAll("[data-model-tab]"));
+  const panels = Array.from(document.querySelectorAll("[data-model-panel]"));
+  if (!tabs.length || !panels.length) return;
+  const activate = (name) => {
+    tabs.forEach((tab) => tab.classList.toggle("is-active", tab.dataset.modelTab === name));
+    panels.forEach((panel) => panel.classList.toggle("is-active", panel.dataset.modelPanel === name));
+  };
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => activate(tab.dataset.modelTab || "text"));
+  });
+  activate(tabs.find((tab) => tab.classList.contains("is-active"))?.dataset.modelTab || "text");
+}
+
+function closeModelPickersOnOutsideClick(target) {
+  const pickerPairs = [
+    ["rtLlmGrokModelPicker", "btnBrowseLlmGrokModels"],
+    ["rtImageGeminiModelPicker", "btnBrowseImageGeminiModels"],
+    ["rtVideoModelPicker", "btnBrowseVideoModels"],
+  ];
+  pickerPairs.forEach(([pickerId, triggerId]) => {
+    const picker = el(pickerId);
+    if (!picker || picker.hidden) return;
+    if (target.closest(`#${pickerId}`) || target.closest(`#${triggerId}`)) return;
+    picker.hidden = true;
+  });
 }
 
 const TASK_POLL_INTERVAL_MS = 10000;
@@ -479,6 +757,8 @@ const adminState = {
   llmGeminiModels: [],
   llmGptModels: [],
   llmPriorityModels: [],
+  imageGeminiModels: [],
+  imagePriorityModels: [],
   workflowChains: {},
   remoteComfyWorkflowMappings: {},
   remoteComfyWorkflows: [],
@@ -1589,8 +1869,12 @@ function runtimeFormToPayload() {
   adminState.llmGeminiModels = [];
   adminState.llmGptModels = grokModelItems(adminState.llmGptModels);
   adminState.llmPriorityModels = grokModelItems(adminState.llmPriorityModels);
+  adminState.imageGeminiModels = imageModelItems(adminState.imageGeminiModels);
+  adminState.imagePriorityModels = imageModelItems(adminState.imagePriorityModels);
   const llmGrokModels = stringifyModelList(adminState.llmGptModels);
   const llmPriorityModels = stringifyModelList(adminState.llmPriorityModels);
+  const imageGeminiModels = stringifyModelList(adminState.imageGeminiModels);
+  const imagePriorityModels = stringifyModelList(adminState.imagePriorityModels);
   return {
     telegram_bot_token: el("rtTelegramBotToken") ? el("rtTelegramBotToken").value.trim() : "",
     comfy_workflow_source: el("rtComfyWorkflowSource").value || "remote",
@@ -1618,9 +1902,15 @@ function runtimeFormToPayload() {
     llm_default_model_gpt: llmGrokModels,
     llm_default_model: llmGrokModels,
     llm_model_priority_order: llmPriorityModels || llmGrokModels,
+    image_model_provider_base_url: el("rtImageBaseUrl").value.trim(),
+    image_model_provider_api_key_gemini: el("rtImageGeminiApiKey").value.trim(),
+    image_model_default_model_gemini: imageGeminiModels,
+    image_model_default_model: imageGeminiModels,
+    image_model_priority_order: imagePriorityModels || imageGeminiModels,
     mulerouter_api_name: el("rtMuleRouterApiName").value.trim(),
     mulerouter_api_key: el("rtMuleRouterApiKey").value.trim(),
     mulerouter_base_url: el("rtMuleRouterBaseUrl").value.trim(),
+    mulerouter_wan_i2v_model: el("rtMuleRouterWanI2vModelName").value.trim(),
     mulerouter_wan_i2v_endpoint: el("rtMuleRouterWanI2vEndpoint").value.trim(),
     mulerouter_wan_i2v_negative_prompt: el("rtMuleRouterWanI2vNegativePrompt").value.trim(),
     create_video_app_id: "",
@@ -1663,9 +1953,17 @@ function fillRuntimeForm(data) {
     ...parseModelList(v.llm_default_model || ""),
   ]);
   adminState.llmPriorityModels = grokModelItems(v.llm_model_priority_order ? parseModelList(v.llm_model_priority_order) : adminState.llmGptModels);
+  el("rtImageBaseUrl").value = v.image_model_provider_base_url || "http://202.90.21.53:3008";
+  el("rtImageGeminiApiKey").value = v.image_model_provider_api_key_gemini || "";
+  adminState.imageGeminiModels = imageModelItems([
+    ...parseModelList(v.image_model_default_model_gemini || ""),
+    ...parseModelList(v.image_model_default_model || ""),
+  ]);
+  adminState.imagePriorityModels = imageModelItems(v.image_model_priority_order ? parseModelList(v.image_model_priority_order) : adminState.imageGeminiModels);
   el("rtMuleRouterApiName").value = v.mulerouter_api_name || "";
   el("rtMuleRouterApiKey").value = v.mulerouter_api_key || "";
   el("rtMuleRouterBaseUrl").value = v.mulerouter_base_url || "https://api.mulerouter.ai";
+  el("rtMuleRouterWanI2vModelName").value = v.mulerouter_wan_i2v_model || "wan2.7-i2v-spicy";
   el("rtMuleRouterWanI2vEndpoint").value = v.mulerouter_wan_i2v_endpoint || "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation";
   el("rtMuleRouterWanI2vNegativePrompt").value = v.mulerouter_wan_i2v_negative_prompt || "low quality, blurry, distorted, watermark, text, logo";
   syncPriorityModelsFromCatalog("llm");
@@ -2039,6 +2337,7 @@ async function submitRecharge() {
 }
 
 function bindActions() {
+  bindModelTabs();
   el("btnSaveRuntime").addEventListener("click", async () => {
     setMsg("runtimeMsg", "");
     try {
@@ -2152,6 +2451,7 @@ function bindActions() {
 
   [
     ["btnAddLlmGptModel", "rtLlmGptModelInput", "llmGptModels"],
+    ["btnAddImageGeminiModel", "rtImageGeminiModelInput", "imageGeminiModels"],
   ].forEach(([buttonId, inputId, listKey]) => {
     if (el(buttonId)) {
       el(buttonId).addEventListener("click", () => addModelFromInput(listKey, inputId));
@@ -2176,10 +2476,39 @@ function bindActions() {
       const model = target.dataset.llmModel || "";
       if (model) addLlmModelFromPicker(model);
     });
+    bindModelPickerFilters("rtLlmGrokModelPicker");
+  }
+  if (el("btnBrowseImageGeminiModels")) {
+    el("btnBrowseImageGeminiModels").addEventListener("click", toggleAvailableImageModels);
+  }
+  if (el("rtImageGeminiModelPicker")) {
+    el("rtImageGeminiModelPicker").addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const model = target.dataset.imageModel || "";
+      if (model) addImageModelFromPicker(model);
+    });
+    bindModelPickerFilters("rtImageGeminiModelPicker");
+  }
+  if (el("btnBrowseVideoModels")) {
+    el("btnBrowseVideoModels").addEventListener("click", toggleAvailableVideoModels);
+  }
+  if (el("btnApplyVideoModel")) {
+    el("btnApplyVideoModel").addEventListener("click", () => applyVideoModel(el("rtMuleRouterWanI2vModelName")?.value));
+  }
+  if (el("rtVideoModelPicker")) {
+    el("rtVideoModelPicker").addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const model = target.dataset.videoModel || "";
+      if (model) applyVideoModel(model);
+    });
+    bindModelPickerFilters("rtVideoModelPicker");
   }
 
   [
     ["btnAddLlmPriorityModel", "rtLlmPriorityModelInput", "llmPriorityModels", "llm"],
+    ["btnAddImagePriorityModel", "rtImagePriorityModelInput", "imagePriorityModels", "image"],
   ].forEach(([buttonId, inputId, listKey, type]) => {
     if (el(buttonId)) {
       el(buttonId).addEventListener("click", () => addPriorityModelFromInput(listKey, inputId, type));
@@ -2402,6 +2731,7 @@ function bindActions() {
   document.addEventListener("click", async (e) => {
     const target = e.target;
     if (!(target instanceof HTMLElement)) return;
+    closeModelPickersOnOutsideClick(target);
     const sensitiveToggle = target.closest(".sensitive-toggle-btn");
     if (sensitiveToggle instanceof HTMLElement) {
       toggleSensitiveInput(sensitiveToggle);
@@ -2416,6 +2746,8 @@ function bindActions() {
         list.splice(idx, 1);
         if (listName === "llmGptModels" || listName === "llmPriorityModels") {
           syncPriorityModelsFromCatalog("llm");
+        } else if (listName === "imageGeminiModels" || listName === "imagePriorityModels") {
+          syncPriorityModelsFromCatalog("image");
         }
         writeModelDraft();
         renderAllModelLists();
@@ -2438,6 +2770,7 @@ function bindActions() {
         list[idx + 1] = item;
       }
       if (listName === "llmPriorityModels") syncPriorityModelsFromCatalog("llm");
+      if (listName === "imagePriorityModels") syncPriorityModelsFromCatalog("image");
       writeModelDraft();
       renderAllModelLists();
       return;

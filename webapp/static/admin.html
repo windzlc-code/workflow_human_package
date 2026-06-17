@@ -247,55 +247,88 @@
                 <div class="small">把文字、图片和视频模型集中管理，避免和远程 ComfyUI 工作流混在一起。</div>
               </div>
             </div>
-            <div class="admin-runtime-grid admin-runtime-grid-models">
-              <div class="admin-runtime-column">
-                <div class="admin-runtime-block">
+            <div class="admin-model-tabs" role="tablist" aria-label="模型类型">
+              <button class="admin-model-tab is-active" type="button" data-model-tab="text">文字模型</button>
+              <button class="admin-model-tab" type="button" data-model-tab="image">图片模型</button>
+              <button class="admin-model-tab" type="button" data-model-tab="video">视频模型</button>
+            </div>
+            <div class="admin-model-tab-panels">
+                <div class="admin-runtime-block admin-model-tab-panel is-active" data-model-panel="text">
                   <div class="admin-config-card-title">文字模型</div>
                   <div class="small">用于自动生成口播文案、视频提示词、素材识别和错误分析。</div>
                   <label>API Base URL</label>
                   <input id="rtLlmBaseUrl" placeholder="http://202.90.21.53:3008">
                   <input id="rtLlmApiKeyGemini" type="hidden">
-                  <label>Grok 文字模型密钥</label>
-                  <input id="rtLlmApiKeyGpt" type="password" placeholder="Grok API Key">
-                  <label>Grok 候选模型</label>
+                  <label>API Key</label>
+                  <input id="rtLlmApiKeyGpt" type="password" placeholder="文字模型 API Key">
+                  <label>候选模型</label>
                   <div class="admin-model-list-editor">
                     <div id="rtLlmGptModelList" class="admin-model-list"></div>
                     <div class="admin-model-list-input-row admin-model-list-input-row-picker">
-                      <input id="rtLlmGptModelInput" type="text" placeholder="输入 Grok 文字模型后回车或点击添加">
-                      <button id="btnBrowseLlmGrokModels" type="button" class="ghost admin-model-picker-btn">可用模型</button>
+                      <input id="rtLlmGptModelInput" type="text" placeholder="输入文字模型后回车或点击添加">
+                      <button id="btnBrowseLlmGrokModels" type="button" class="ghost admin-model-picker-btn">识别模型</button>
                       <button id="btnAddLlmGptModel" type="button" class="ghost admin-model-add-btn">+</button>
                     </div>
                     <div id="rtLlmGrokModelPicker" class="admin-model-picker" hidden></div>
                   </div>
-                  <label>Grok 调用顺序</label>
+                  <label>调用顺序</label>
                   <div class="admin-model-list-editor">
                     <div id="rtLlmPriorityModelList" class="admin-model-priority-list"></div>
                     <div class="admin-model-list-input-row">
-                      <input id="rtLlmPriorityModelInput" type="text" placeholder="输入 Grok 模型名后回车或点击添加">
+                      <input id="rtLlmPriorityModelInput" type="text" placeholder="输入模型名后回车或点击添加">
                       <button id="btnAddLlmPriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
                     </div>
                   </div>
                   <div id="rtLlmModelSummary" class="admin-model-summary small"></div>
                 </div>
-              </div>
-              <div class="admin-runtime-column">
-                <div class="admin-runtime-block">
+                <div class="admin-runtime-block admin-model-tab-panel" data-model-panel="image">
+                  <div class="admin-config-card-title">图片模型</div>
+                  <div class="small">用于闭源图片、人设配图和推文配图；这里的 API、Key 和模型会同步到 Bot 实际生图配置。</div>
+                  <label>API Base URL</label>
+                  <input id="rtImageBaseUrl" placeholder="http://202.90.21.53:3008">
+                  <label>API Key</label>
+                  <input id="rtImageGeminiApiKey" type="password" placeholder="图片模型 API Key">
+                  <label>候选模型</label>
+                  <div class="admin-model-list-editor">
+                    <div id="rtImageGeminiModelList" class="admin-model-list"></div>
+                    <div class="admin-model-list-input-row admin-model-list-input-row-picker">
+                      <input id="rtImageGeminiModelInput" type="text" placeholder="输入图片模型后回车或点击添加">
+                      <button id="btnBrowseImageGeminiModels" type="button" class="ghost admin-model-picker-btn">识别模型</button>
+                      <button id="btnAddImageGeminiModel" type="button" class="ghost admin-model-add-btn">+</button>
+                    </div>
+                    <div id="rtImageGeminiModelPicker" class="admin-model-picker" hidden></div>
+                  </div>
+                  <label>调用顺序</label>
+                  <div class="admin-model-list-editor">
+                    <div id="rtImagePriorityModelList" class="admin-model-priority-list"></div>
+                    <div class="admin-model-list-input-row">
+                      <input id="rtImagePriorityModelInput" type="text" placeholder="输入图片模型名后回车或点击添加">
+                      <button id="btnAddImagePriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                    </div>
+                  </div>
+                  <div id="rtImageModelSummary" class="admin-model-summary small"></div>
+                </div>
+                <div class="admin-runtime-block admin-model-tab-panel" data-model-panel="video">
                   <div class="admin-config-card-title">视频模型</div>
-                  <div class="small">MuleRouter / Wan 2.7 图生视频，用于 Telegram「视频编辑」。请求记录会进入任务详情日志。</div>
-                  <label>模型名称</label>
-                  <input id="rtMuleRouterWanI2vModelName" type="text" value="wan2.7-i2v-spicy" readonly>
+                  <div class="small">用于图生视频和视频生成；请求记录会进入任务详情日志。</div>
+                  <label>候选模型</label>
+                  <div class="admin-model-list-input-row admin-model-list-input-row-picker">
+                    <input id="rtMuleRouterWanI2vModelName" type="text" value="wan2.7-i2v-spicy" placeholder="输入视频模型名称">
+                    <button id="btnBrowseVideoModels" type="button" class="ghost admin-model-picker-btn">识别模型</button>
+                    <button id="btnApplyVideoModel" type="button" class="ghost admin-model-add-btn">✓</button>
+                  </div>
+                  <div id="rtVideoModelPicker" class="admin-model-picker" hidden></div>
                   <label>API Name</label>
                   <input id="rtMuleRouterApiName" type="text" placeholder="api-key0526">
                   <label>API Key</label>
-                  <input id="rtMuleRouterApiKey" type="password" placeholder="MuleRouter API Key">
+                  <input id="rtMuleRouterApiKey" type="password" placeholder="视频模型 API Key">
                   <label>API Base URL</label>
                   <input id="rtMuleRouterBaseUrl" type="text" placeholder="https://api.mulerouter.ai">
-                  <label>Wan 2.7 I2V Endpoint</label>
+                  <label>图生视频 Endpoint</label>
                   <input id="rtMuleRouterWanI2vEndpoint" type="text" placeholder="/vendors/carrothub/v1/wan2.7-i2v-spicy/generation">
                   <label>默认负面提示词</label>
                   <textarea id="rtMuleRouterWanI2vNegativePrompt" rows="3" placeholder="low quality, blurry, distorted, watermark, text, logo"></textarea>
                 </div>
-              </div>
             </div>
           </div>
 

@@ -122,6 +122,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "mulerouter_api_name": "",
     "mulerouter_api_key": "",
     "mulerouter_base_url": "https://api.mulerouter.ai",
+    "mulerouter_wan_i2v_model": "wan2.7-i2v-spicy",
     "mulerouter_wan_i2v_endpoint": "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation",
     "mulerouter_wan_i2v_resolution": "720p",
     "mulerouter_wan_i2v_duration": 2,
@@ -716,16 +717,221 @@ def _fetch_openai_compatible_model_ids(*, base_url: str, api_key: str) -> list[s
         payload = resp.json()
     except Exception as exc:
         raise RuntimeError("查询可用模型失败: 响应不是有效 JSON") from exc
-    rows = payload.get("data") if isinstance(payload, dict) else None
+    rows: list[Any] = []
+    if isinstance(payload, dict):
+        for key_name in ("data", "models", "items"):
+            value = payload.get(key_name)
+            if isinstance(value, list):
+                rows = value
+                break
+    elif isinstance(payload, list):
+        rows = payload
     if not isinstance(rows, list):
         return []
     out: list[str] = []
     seen: set[str] = set()
     for item in rows:
-        model_id = str(item.get("id") if isinstance(item, dict) else item or "").strip()
+        model_id = _extract_model_id(item)
         if model_id and model_id not in seen:
             seen.add(model_id)
             out.append(model_id)
+    return out
+
+
+def _resolve_gemini_models_url(base_url: str) -> str:
+    cleaned = str(base_url or "").strip().strip("`'\"")
+    if not cleaned:
+        raise ValueError("缺少 Gemini 圖片模型 API Base URL")
+    if "://" not in cleaned:
+        cleaned = "https://" + cleaned.lstrip("/")
+    parsed = urlsplit(cleaned)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("Gemini 圖片模型 API Base URL 無效")
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/models"):
+        final_path = path
+    elif re.search(r"/v\d+(?:beta|alpha)?$", path):
+        final_path = f"{path}/models"
+    elif not path:
+        final_path = "/v1beta/models"
+    else:
+        final_path = f"{path}/v1beta/models"
+    return urlunsplit((parsed.scheme, parsed.netloc, final_path, parsed.query, parsed.fragment))
+
+
+def _gemini_image_model_headers(models_url: str, api_key: str) -> dict[str, str]:
+    key = str(api_key or "").strip()
+    if not key:
+        raise ValueError("缺少 Gemini 圖片模型 API Key")
+    headers = {"Accept": "application/json"}
+    host = urlsplit(models_url).netloc.lower()
+    if "generativelanguage.googleapis.com" in host:
+        headers["x-goog-api-key"] = key
+    else:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _extract_model_id(item: Any) -> str:
+    if isinstance(item, dict):
+        raw = item.get("id") or item.get("name") or item.get("model") or ""
+    else:
+        raw = item
+    text = str(raw or "").strip()
+    if text.startswith("models/"):
+        text = text.split("/", 1)[1]
+    return text
+
+
+def _fetch_gemini_image_model_ids(*, base_url: str, api_key: str) -> list[str]:
+    models_url = _resolve_gemini_models_url(base_url)
+    try:
+        resp = requests.get(
+            models_url,
+            headers=_gemini_image_model_headers(models_url, api_key),
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"查詢 Gemini 圖片模型失敗: {exc}") from exc
+    if resp.status_code >= 400:
+        raise RuntimeError(f"查詢 Gemini 圖片模型失敗: HTTP {resp.status_code}; {resp.text[:300]}")
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        raise RuntimeError("查詢 Gemini 圖片模型失敗: 回應不是有效 JSON") from exc
+    rows: list[Any] = []
+    if isinstance(payload, dict):
+        for key in ("models", "data", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                rows = value
+                break
+    elif isinstance(payload, list):
+        rows = payload
+    models: list[str] = []
+    seen: set[str] = set()
+    for item in rows:
+        model_id = _extract_model_id(item)
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            models.append(model_id)
+    image_models = [model for model in models if re.search(r"(?:gemini|imagen|image)", model, re.I)]
+    return image_models or models
+
+
+def _filter_models_for_type(models: list[str], model_type: str) -> list[str]:
+    typ = str(model_type or "").strip().lower()
+    items = [model for model in _ordered_model_list(models) if not _is_obsolete_model_name(model)]
+    if typ == "image":
+        return [model for model in items if _is_image_generation_model(model)]
+    if typ == "video":
+        return [model for model in items if _is_video_generation_model(model)]
+    return [model for model in items if _is_text_generation_model(model)]
+
+
+def _fallback_video_models(endpoint: str = "") -> list[str]:
+    text = str(endpoint or "").strip()
+    candidates = []
+    match = re.search(r"/([^/?#]*(?:i2v|t2v|video|wan)[^/?#]*)", text, re.I)
+    if match:
+        candidates.append(match.group(1))
+    candidates.append("wan2.7-i2v-spicy")
+    return _ordered_model_list(candidates)
+
+
+def _is_obsolete_model_name(model: str) -> bool:
+    text = str(model or "").strip().lower()
+    if not text:
+        return True
+    if re.search(r"(?:deprecated|legacy|obsolete|retired|disabled|offline|invalid|old)", text, re.I):
+        return True
+    date_match = re.search(r"(?:^|[-_/])((?:20)?(?:2[0-4])(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])?)(?:$|[-_/])", text)
+    if date_match:
+        return True
+    return False
+
+
+def _is_text_generation_model(model: str) -> bool:
+    text = str(model or "").strip().lower()
+    if _is_obsolete_model_name(text):
+        return False
+    if re.search(r"(?:image|imagen|dall|seedream|seededit|flux|stable-diffusion|sdxl|video|i2v|t2v|wan|kling|hailuo|veo|sora|tts|stt|audio|voice|suno|embedding|embed|rerank|moderation|whisper|transcrib)", text):
+        return False
+    if re.search(r"(?:gpt|o[1345](?:[-_.]|$)|claude|gemini|grok|qwen|deepseek|glm|doubao|minimax|llama|mistral|yi-|moonshot|kimi|command|chat|coder)", text):
+        return True
+    return "/" in text or "-" in text
+
+
+def _is_image_generation_model(model: str) -> bool:
+    text = str(model or "").strip().lower()
+    if _is_obsolete_model_name(text):
+        return False
+    if text.startswith("api-videos") or text.startswith("chat-video") or text.startswith("video-"):
+        return False
+    if text == "dall-e-2":
+        return False
+    if re.search(r"(?:video|i2v|t2v|wan|kling|hailuo|veo|sora|seedance|voice|audio|suno|embedding|rerank|moderation|vision|deepsearch|thinking)", text):
+        if not re.search(r"(?:image|images|imagen|gpt-image|seedream|seededit|flux|dall|nano)", text):
+            return False
+    return bool(
+        re.search(
+            r"(?:^api-images|image-generation|gpt-image|gpt-4o-image|dall-e|imagen|seedream|seededit|flux|nano-banana|midjourney|recraft|ideogram|playground|stable-diffusion|sdxl|kolors|jimeng|image-preview|flash-image)",
+            text,
+        )
+    )
+
+
+def _is_video_generation_model(model: str) -> bool:
+    text = str(model or "").strip().lower()
+    if _is_obsolete_model_name(text):
+        return False
+    if re.search(r"(?:embedding|rerank|moderation|tts|stt|audio|voice|suno)", text):
+        return False
+    return bool(re.search(r"(?:^api-videos|video|i2v|t2v|wan|kling|hailuo|veo|sora|seedance|runway|luma|pika|gen-\\d)", text))
+
+
+def _fetch_provider_model_ids(*, model_type: str, base_url: str, api_key: str, provider: str = "", endpoint: str = "") -> list[str]:
+    typ = str(model_type or "text").strip().lower()
+    if typ not in {"text", "image", "video"}:
+        raise ValueError("模型类型必须是 text、image 或 video")
+    if typ == "image":
+        provider_hint = str(provider or "").strip().lower()
+        host = urlsplit(str(base_url or "").strip() if "://" in str(base_url or "") else f"https://{str(base_url or '').strip().lstrip('/')}").netloc.lower()
+        prefer_gemini = provider_hint in {"gemini", "google"} or "generativelanguage.googleapis.com" in host or "googleapis.com" in host
+        if not prefer_gemini:
+            try:
+                models = _fetch_openai_compatible_model_ids(base_url=base_url, api_key=api_key)
+                return _filter_models_for_type(models, typ)
+            except (ValueError, RuntimeError):
+                pass
+        try:
+            return _filter_models_for_type(_fetch_gemini_image_model_ids(base_url=base_url, api_key=api_key), typ)
+        except (ValueError, RuntimeError):
+            models = _fetch_openai_compatible_model_ids(base_url=base_url, api_key=api_key)
+            return _filter_models_for_type(models, typ)
+    if typ == "video":
+        try:
+            models = _fetch_openai_compatible_model_ids(base_url=base_url, api_key=api_key)
+            return _filter_models_for_type(models, typ)
+        except Exception:
+            return _fallback_video_models(endpoint)
+    models = _fetch_openai_compatible_model_ids(base_url=base_url, api_key=api_key)
+    return _filter_models_for_type(models, typ)
+
+
+def _ordered_model_list(*groups: Any, fallback: list[str] | None = None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in (*groups, fallback or []):
+        if isinstance(group, (list, tuple, set)):
+            iterable = group
+        else:
+            iterable = [group]
+        for raw in iterable:
+            model = str(raw or "").strip()
+            if model and model not in seen:
+                seen.add(model)
+                out.append(model)
     return out
 
 
@@ -2382,6 +2588,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["mulerouter_api_name"] = str(merged.get("mulerouter_api_name") or "").strip()
     merged["mulerouter_api_key"] = str(merged.get("mulerouter_api_key") or "").strip()
     merged["mulerouter_base_url"] = str(merged.get("mulerouter_base_url") or "https://api.mulerouter.ai").strip().rstrip("/") or "https://api.mulerouter.ai"
+    merged["mulerouter_wan_i2v_model"] = str(merged.get("mulerouter_wan_i2v_model") or "wan2.7-i2v-spicy").strip() or "wan2.7-i2v-spicy"
     endpoint = str(merged.get("mulerouter_wan_i2v_endpoint") or "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation").strip()
     if not endpoint.startswith("/"):
         endpoint = "/" + endpoint
@@ -2536,6 +2743,60 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             updates["llm_model_priority_order"] = model_order
             updates["llm_default_model_gpt"] = model_order
             updates["llm_default_model"] = model_order
+    if any(
+        key in explicit
+        for key in (
+            "image_model_provider_base_url",
+            "image_model_provider_api_key_gemini",
+            "image_model_default_model",
+            "image_model_default_model_gemini",
+            "image_model_priority_order",
+        )
+    ):
+        image_key = str(runtime.get("image_model_provider_api_key_gemini") or "").strip()
+        image_base = str(runtime.get("image_model_provider_base_url") or "").strip()
+        if image_key:
+            updates["geminiKey"] = image_key
+        if image_base:
+            updates["geminiEndpoint"] = image_base
+        image_models = _ordered_model_list(
+            parse_model_list(runtime.get("image_model_priority_order")),
+            parse_model_list(runtime.get("image_model_default_model_gemini")),
+            parse_model_list(runtime.get("image_model_default_model")),
+            fallback=["gemini-3-pro-image-preview"],
+        )
+        if image_models:
+            model_order = ", ".join(image_models)
+            updates["imageModelPriorityOrder"] = model_order
+            updates["imageModelDefaultModelGemini"] = model_order
+            updates["imageModelDefaultModel"] = model_order
+            updates["image_model_priority_order"] = model_order
+            updates["image_model_default_model_gemini"] = model_order
+            updates["image_model_default_model"] = model_order
+    if any(
+        key in explicit
+        for key in (
+            "mulerouter_api_name",
+            "mulerouter_api_key",
+            "mulerouter_base_url",
+            "mulerouter_wan_i2v_model",
+            "mulerouter_wan_i2v_endpoint",
+            "mulerouter_wan_i2v_negative_prompt",
+        )
+    ):
+        for key in (
+            "mulerouter_api_name",
+            "mulerouter_base_url",
+            "mulerouter_wan_i2v_model",
+            "mulerouter_wan_i2v_endpoint",
+            "mulerouter_wan_i2v_negative_prompt",
+        ):
+            value = str(runtime.get(key) or "").strip()
+            if value:
+                updates[key] = value
+        video_key = str(runtime.get("mulerouter_api_key") or "").strip()
+        if video_key:
+            updates["mulerouter_api_key"] = video_key
     if not updates:
         return
     api_config = _read_tool_r18_api_config()
@@ -3505,6 +3766,7 @@ def _apply_runtime_defaults(task_type: str, payload: dict[str, Any]) -> dict[str
         "mulerouter_api_name",
         "mulerouter_api_key",
         "mulerouter_base_url",
+        "mulerouter_wan_i2v_model",
         "mulerouter_wan_i2v_endpoint",
         "mulerouter_wan_i2v_resolution",
         "mulerouter_wan_i2v_duration",
@@ -15063,6 +15325,7 @@ class RuntimeConfigPayload(BaseModel):
     mulerouter_api_name: str = ""
     mulerouter_api_key: str = ""
     mulerouter_base_url: str = "https://api.mulerouter.ai"
+    mulerouter_wan_i2v_model: str = "wan2.7-i2v-spicy"
     mulerouter_wan_i2v_endpoint: str = "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation"
     mulerouter_wan_i2v_resolution: str = "720p"
     mulerouter_wan_i2v_duration: int = 2
@@ -15093,6 +15356,20 @@ class QuickSetupProcessPayload(BaseModel):
 class LlmModelsPayload(BaseModel):
     llm_base_url: str = ""
     llm_api_key: str = ""
+
+
+class ImageModelsPayload(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    provider: str = "gemini"
+
+
+class ModelLookupPayload(BaseModel):
+    type: str = "text"
+    base_url: str = ""
+    api_key: str = ""
+    provider: str = ""
+    endpoint: str = ""
 
 
 class RemoteComfyGatewayPayload(BaseModel):
@@ -15294,6 +15571,21 @@ def create_app() -> FastAPI:
             "llm_default_model": str(runtime.get("llm_default_model") or "").strip(),
             "llm_default_model_gpt": str(runtime.get("llm_default_model_gpt") or "").strip(),
             "llm_model_priority_order": str(runtime.get("llm_model_priority_order") or "").strip(),
+            "image_model_provider_base_url": str(runtime.get("image_model_provider_base_url") or "").strip(),
+            "image_model_provider_api_key_gemini": "",
+            "image_model_provider_api_key_gemini_configured": bool(str(runtime.get("image_model_provider_api_key_gemini") or "").strip()),
+            "image_model_provider_api_key_gemini_masked": _mask_secret(str(runtime.get("image_model_provider_api_key_gemini") or "").strip()) if str(runtime.get("image_model_provider_api_key_gemini") or "").strip() else "",
+            "image_model_default_model": str(runtime.get("image_model_default_model") or "").strip(),
+            "image_model_default_model_gemini": str(runtime.get("image_model_default_model_gemini") or "").strip(),
+            "image_model_priority_order": str(runtime.get("image_model_priority_order") or "").strip(),
+            "mulerouter_api_name": str(runtime.get("mulerouter_api_name") or "").strip(),
+            "mulerouter_api_key": "",
+            "mulerouter_api_key_configured": bool(str(runtime.get("mulerouter_api_key") or "").strip()),
+            "mulerouter_api_key_masked": _mask_secret(str(runtime.get("mulerouter_api_key") or "").strip()) if str(runtime.get("mulerouter_api_key") or "").strip() else "",
+            "mulerouter_base_url": str(runtime.get("mulerouter_base_url") or "").strip(),
+            "mulerouter_wan_i2v_model": str(runtime.get("mulerouter_wan_i2v_model") or "").strip(),
+            "mulerouter_wan_i2v_endpoint": str(runtime.get("mulerouter_wan_i2v_endpoint") or "").strip(),
+            "mulerouter_wan_i2v_negative_prompt": str(runtime.get("mulerouter_wan_i2v_negative_prompt") or "").strip(),
         }
         return {
             "ok": True,
@@ -15420,13 +15712,62 @@ def create_app() -> FastAPI:
         if not base_url or not api_key:
             raise HTTPException(status_code=400, detail="請先配置 API Base URL 和 Grok Key")
         try:
-            models = _fetch_openai_compatible_model_ids(base_url=base_url, api_key=api_key)
+            models = _fetch_provider_model_ids(model_type="text", base_url=base_url, api_key=api_key, provider="openai-compatible")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        grok_models = [model for model in models if "grok" in model.lower()]
-        return {"ok": True, "models": grok_models or models}
+        return {"ok": True, "count": len(models), "models": models}
+
+    @app.post("/api/quick_setup/image_models")
+    def api_quick_setup_image_models(payload: ImageModelsPayload):
+        base_url = str(payload.base_url or "").strip()
+        api_key = str(payload.api_key or "").strip()
+        if "***" in api_key:
+            api_key = ""
+        if not base_url or not api_key:
+            try:
+                with db() as conn:
+                    runtime = _get_runtime_config(conn)
+            except RuntimeConfigFileError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            base_url = base_url or str(runtime.get("image_model_provider_base_url") or "").strip()
+            api_key = api_key or str(runtime.get("image_model_provider_api_key_gemini") or "").strip()
+        if not base_url or not api_key:
+            raise HTTPException(status_code=400, detail="請先配置 Gemini 圖片 API Base URL 和 API Key")
+        try:
+            models = _fetch_provider_model_ids(model_type="image", base_url=base_url, api_key=api_key, provider=str(payload.provider or "openai-compatible").strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": True, "count": len(models), "models": models}
+
+    @app.post("/api/quick_setup/video_models")
+    def api_quick_setup_video_models(payload: ModelLookupPayload):
+        base_url = str(payload.base_url or "").strip()
+        api_key = str(payload.api_key or "").strip()
+        endpoint = str(payload.endpoint or "").strip()
+        if "***" in api_key:
+            api_key = ""
+        if not base_url or not api_key:
+            try:
+                with db() as conn:
+                    runtime = _get_runtime_config(conn)
+            except RuntimeConfigFileError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            base_url = base_url or str(runtime.get("mulerouter_base_url") or "").strip()
+            api_key = api_key or str(runtime.get("mulerouter_api_key") or "").strip()
+            endpoint = endpoint or str(runtime.get("mulerouter_wan_i2v_endpoint") or "").strip()
+        if not base_url:
+            raise HTTPException(status_code=400, detail="請先配置視頻模型 API Base URL")
+        try:
+            models = _fetch_provider_model_ids(model_type="video", base_url=base_url, api_key=api_key, provider="openai-compatible", endpoint=endpoint)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": True, "count": len(models), "models": models}
 
     @app.post("/api/quick_setup/process")
     def api_quick_setup_process(payload: QuickSetupProcessPayload):
@@ -17042,6 +17383,7 @@ def create_app() -> FastAPI:
                 _write_runtime_config_file(merged)
             if new_telegram_bot_token:
                 _write_tool_r18_bot_token_files(new_telegram_bot_token)
+            _sync_tool_r18_api_config_from_runtime(merged, explicit_data)
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"ok": True, "runtime_config": merged}
@@ -17061,8 +17403,67 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        grok_models = [model for model in models if "grok" in model.lower()]
-        return {"ok": True, "models": grok_models or models}
+        return {"ok": True, "models": models}
+
+    @app.post("/api/admin/image_models")
+    def api_admin_image_models(payload: ImageModelsPayload, user: dict[str, Any] = Depends(require_admin)):
+        base_url = str(payload.base_url or "").strip()
+        api_key = str(payload.api_key or "").strip()
+        if "***" in api_key:
+            api_key = ""
+        if not base_url or not api_key:
+            with db() as conn:
+                runtime = _get_runtime_config(conn)
+            base_url = base_url or str(runtime.get("image_model_provider_base_url") or "").strip()
+            api_key = api_key or str(runtime.get("image_model_provider_api_key_gemini") or "").strip()
+        if not base_url or not api_key:
+            raise HTTPException(status_code=400, detail="請先配置 Gemini 圖片 API Base URL 和 API Key")
+        try:
+            models = _fetch_gemini_image_model_ids(base_url=base_url, api_key=api_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"ok": True, "models": models}
+
+    @app.post("/api/admin/models")
+    def api_admin_models(payload: ModelLookupPayload, user: dict[str, Any] = Depends(require_admin)):
+        typ = str(payload.type or "text").strip().lower()
+        base_url = str(payload.base_url or "").strip()
+        api_key = str(payload.api_key or "").strip()
+        endpoint = str(payload.endpoint or "").strip()
+        if "***" in api_key:
+            api_key = ""
+        if not base_url or not api_key:
+            with db() as conn:
+                runtime = _get_runtime_config(conn)
+            if typ == "image":
+                base_url = base_url or str(runtime.get("image_model_provider_base_url") or "").strip()
+                api_key = api_key or str(runtime.get("image_model_provider_api_key_gemini") or "").strip()
+            elif typ == "video":
+                base_url = base_url or str(runtime.get("mulerouter_base_url") or "").strip()
+                api_key = api_key or str(runtime.get("mulerouter_api_key") or "").strip()
+                endpoint = endpoint or str(runtime.get("mulerouter_wan_i2v_endpoint") or "").strip()
+            else:
+                base_url = base_url or str(runtime.get("llm_base_url") or "").strip()
+                api_key = api_key or str(runtime.get("llm_api_key_gpt") or runtime.get("llm_api_key") or "").strip()
+        if typ != "video" and (not base_url or not api_key):
+            raise HTTPException(status_code=400, detail="請先配置 API Base URL 和 API Key")
+        try:
+            models = _fetch_provider_model_ids(
+                model_type=typ,
+                base_url=base_url,
+                api_key=api_key,
+                provider=str(payload.provider or "").strip(),
+                endpoint=endpoint,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"識別模型失敗：{type(exc).__name__}: {str(exc)[:300]}") from exc
+        return {"ok": True, "type": typ, "count": len(models), "models": models}
 
     @app.post("/api/admin/remote_comfy/health")
     def api_admin_remote_comfy_health(payload: RemoteComfyGatewayPayload, user: dict[str, Any] = Depends(require_admin)):
