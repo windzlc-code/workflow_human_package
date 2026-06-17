@@ -25,7 +25,6 @@ import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinju
 import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
-import { generateClosedModelImage } from "@/runtime/node/image-generator";
 import type { DramaSetup, EpisodeScript } from "@/types/drama";
 import type { PersonaArchive } from "@/core/archives/persona-archive-domain";
 
@@ -6058,21 +6057,7 @@ async function generateClosedPersonaPostImage(args: {
 }): Promise<{ ok: boolean; imageUrl?: string; error?: string; timings?: unknown }> {
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const referenceUrl = getExplicitPersonaReferenceImageUrl(archive);
-  if (!referenceUrl) return { ok: false, error: "此人設尚未生成人設圖，無法鎖定同一張臉。" };
-
-  let avatarBase64 = "";
-  let avatarMimeType = "image/jpeg";
-  const parsed = parseDataUrlMedia(referenceUrl);
-  if (parsed) {
-    avatarBase64 = parsed.base64;
-    avatarMimeType = parsed.mimeType || avatarMimeType;
-  } else {
-    const buffer = await loadTelegramImageBuffer(referenceUrl);
-    avatarBase64 = buffer.toString("base64");
-    const ext = getMediaExtension(referenceUrl);
-    avatarMimeType = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
-  }
-  if (!avatarBase64) return { ok: false, error: "人設圖讀取失敗，無法鎖定同一張臉。" };
+  if (!referenceUrl) return { ok: false, error: "\u6b64\u4eba\u8a2d\u5c1a\u672a\u751f\u6210\u4eba\u8a2d\u5716\uff0c\u7121\u6cd5\u9396\u5b9a\u540c\u4e00\u5f35\u81c9\u3002" };
 
   const visualContext = [
     args.prompt,
@@ -6088,47 +6073,18 @@ async function generateClosedPersonaPostImage(args: {
     "Important: obey concrete user requirements such as color, clothing type, object, location, action, and atmosphere. The image should match the current tweet, not an old persona template.",
   ].filter(Boolean).join("\n");
 
-  const modelCandidates = Array.from(new Set([
-    process.env.PERSONA_POST_IMAGE_MODEL,
-    "gemini-3.1-flash-image-preview",
-    process.env.PERSONA_IMAGE_MODEL,
-    "gpt-image-2",
-  ].map((model) => String(model || "").trim()).filter(Boolean)));
-  const attempts: Array<{ model: string; ok: boolean; error?: string; reasonCode?: string; elapsedMs: number }> = [];
-  for (const model of modelCandidates) {
-    const startedAt = Date.now();
-    const result = await generateClosedModelImage({
-      prompt,
-      model,
-      aspectRatio: args.imageAspectRatio || "1:1",
-      avatarBase64,
-      avatarMimeType,
-      timeoutMs: Number(process.env.PERSONA_POST_IMAGE_TIMEOUT_MS || 180_000),
-    });
-    attempts.push({
-      model,
-      ok: Boolean(result.ok && result.url),
-      error: result.error ? String(result.error).slice(0, 240) : undefined,
-      reasonCode: (result as any).reasonCode,
-      elapsedMs: Date.now() - startedAt,
-    });
-    if (result.ok && result.url) {
-      return {
-        ok: true,
-        imageUrl: result.url,
-        timings: { provider: "closed-persona-post-image", model, attempts },
-      };
-    }
-    const errorText = `${(result as any).reasonCode || ""} ${result.error || ""}`;
-    if (!/auth_missing|network_error|timeout|upstream_error|model_unavailable|not_found|未返回|未返回圖片|未返回图片|5\d\d|429/i.test(errorText)) break;
-  }
+  const result = await generatePersonaImageForArchive(args.archiveId, args.post.content, {
+    mode: "person",
+    customVisualInstruction: prompt,
+    aspectRatio: args.imageAspectRatio || "1:1",
+  });
   return {
-    ok: false,
-    error: attempts.map((attempt) => `${attempt.model}: ${attempt.error || attempt.reasonCode || "failed"}`).join("; "),
-    timings: { provider: "closed-persona-post-image", attempts },
+    ok: Boolean(result.ok && result.imageUrl),
+    imageUrl: result.imageUrl,
+    error: result.error,
+    timings: { provider: "new-persona-runninghub-post-image", detail: result.timings, mode: result.mode },
   };
 }
-
 async function generateImagesForGeneratedPosts(args: {
   bot?: TelegramBot;
   chatId?: number;
@@ -9599,7 +9555,7 @@ function acknowledgeCallbackQueryFast(bot: TelegramBot, queryId: string) {
 async function generatePersonaImageForArchive(
   archiveId: string,
   customPrompt?: string,
-  options: { generateReferenceSheet?: boolean; mode?: "auto" | "person" | "pov" | "scene"; customVisualInstruction?: string } = {},
+  options: { generateReferenceSheet?: boolean; mode?: "auto" | "person" | "pov" | "scene"; customVisualInstruction?: string; aspectRatio?: string } = {},
 ): Promise<{ ok: boolean; imageUrl?: string; mode?: string; error?: string; referenceSheetUrl?: string; timings?: unknown }> {
   const archive = await loadPersonaArchive(archiveId).catch(() => null);
   if (!archive?.setup) return { ok: false, error: "人设不存在或缺少设定" };
@@ -9612,7 +9568,7 @@ async function generatePersonaImageForArchive(
       setup: archive.setup,
       content: imageContent,
       customPrompt: options.customVisualInstruction?.trim() || undefined,
-      aspectRatio: "1:1",
+      aspectRatio: options.aspectRatio || "1:1",
       mode: options.mode || "auto",
       referenceSheetUrl,
       generateReferenceSheet: Boolean(options.generateReferenceSheet),

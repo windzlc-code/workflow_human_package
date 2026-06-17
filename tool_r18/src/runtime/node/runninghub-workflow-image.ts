@@ -1,9 +1,11 @@
 import {
   createRunningHubAiAppTask,
+  createRunningHubStandardModelTask,
   createRunningHubTask,
   getRunningHubAiAppCallDemo,
   getRunningHubWorkflowJson,
   resolveRunningHubConfig,
+  waitRunningHubOpenApiV2TaskOutputs,
   waitRunningHubTaskOutputs,
   type RunningHubNodeInfo,
 } from "./runninghub-client";
@@ -28,6 +30,8 @@ type RunningHubImageResult = {
 
 const TEXT_INPUT_FIELDS = new Set(["text", "value", "prompt", "positive", "提示词文本", "user_prompt", "user_prompt_input"]);
 const DEFAULT_IMAGE_WEBAPP_ID = "2034899011521482754";
+const NEW_PERSONA_TEXT_TO_IMAGE_ENDPOINT = "/rhart-image-g-2/text-to-image";
+const NEW_PERSONA_IMAGE_TO_IMAGE_ENDPOINT = "/rhart-image-g-2/image-to-image";
 
 function parsePromptPayload(raw: any): RunningHubApiPrompt {
   const payload = raw?.data?.prompt ?? raw?.prompt ?? raw?.data ?? raw;
@@ -211,6 +215,67 @@ export async function generateRunningHubAiAppImage(
     const url = extractOutputUrl(outputs);
     if (!url) {
       return { ok: false, taskId, outputs, error: `RunningHub AI 应用任务完成但未返回图片 URL：${JSON.stringify(outputs).slice(0, 500)}`, retryable: true, reasonCode: "output_missing" };
+    }
+    return { ok: true, taskId, outputs, url };
+  } catch (error: any) {
+    const message = error?.message || String(error);
+    return { ok: false, error: message, ...classifyRunningHubError(message) };
+  }
+}
+
+function normalizeRunningHubAspectRatio(aspectRatio?: string): string {
+  const value = String(aspectRatio || "").trim();
+  if (!value) return "1:1";
+  if (["1:1", "2:3", "3:2", "4:5", "5:4", "9:16", "16:9", "3:4", "4:3", "21:9"].includes(value)) {
+    return value;
+  }
+  return "1:1";
+}
+
+function buildImageUrlInput(source?: string, mimeType?: string): string | undefined {
+  const value = String(source || "").trim();
+  if (!value) return undefined;
+  if (/^https?:\/\//i.test(value) || /^data:image\//i.test(value)) return value;
+  const type = String(mimeType || "image/jpeg").trim() || "image/jpeg";
+  return `data:${type};base64,${value}`;
+}
+
+export async function generateRunningHubNewPersonaStandardImage(
+  params: {
+    prompt: string;
+    mode: "text-to-image" | "image-to-image";
+    aspectRatio?: string;
+    referenceImage?: string;
+    referenceImageMimeType?: string;
+    timeoutMs?: number;
+  },
+  runtimeOptions: RuntimeConfigOptions = {},
+): Promise<RunningHubImageResult> {
+  const config = resolveRunningHubConfig(runtimeOptions);
+  const endpointPath = params.mode === "image-to-image"
+    ? NEW_PERSONA_IMAGE_TO_IMAGE_ENDPOINT
+    : NEW_PERSONA_TEXT_TO_IMAGE_ENDPOINT;
+  const payload: Record<string, unknown> = {
+    prompt: params.prompt,
+    aspectRatio: normalizeRunningHubAspectRatio(params.aspectRatio),
+    resolution: "1k",
+  };
+  if (params.mode === "image-to-image") {
+    const imageUrl = buildImageUrlInput(params.referenceImage, params.referenceImageMimeType);
+    if (!imageUrl) {
+      return { ok: false, error: "缺少图生图参考图", retryable: false, reasonCode: "reference_missing" };
+    }
+    payload.imageUrls = [imageUrl];
+  }
+
+  try {
+    const created = await createRunningHubStandardModelTask(config, endpointPath, payload);
+    const taskId = String(created?.taskId || created?.data?.taskId || created?.data?.task_id || created?.data || "");
+    if (!taskId) throw new Error(`RunningHub OpenAPI v2 未返回 taskId：${JSON.stringify(created).slice(0, 500)}`);
+    const outputs = await waitRunningHubOpenApiV2TaskOutputs(config, taskId, params.timeoutMs || 300_000, 5000);
+    const url = extractOutputUrl(outputs);
+    if (!url) {
+      return { ok: false, taskId, outputs, error: `RunningHub OpenAPI v2 任务完成但未返回图片 URL：${JSON.stringify(outputs).slice(0, 500)}`, retryable: true, reasonCode: "output_missing" };
     }
     return { ok: true, taskId, outputs, url };
   } catch (error: any) {

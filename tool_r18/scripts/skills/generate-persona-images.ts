@@ -7,8 +7,10 @@ import {
 } from "@/lib/persona-image-production";
 import { compressImage } from "@/lib/image-compress";
 import { generateWorkflowPersonaImage } from "@/runtime/node/comfyui-workflow-client";
+import { generateRunningHubNewPersonaStandardImage } from "@/runtime/node/runninghub-workflow-image";
 import { generateClosedModelImage } from "@/runtime/node/image-generator";
 import { parseDataUrlMedia } from "@/lib/media-utils";
+import { readRuntimeApiConfig } from "@/runtime/node/config";
 import type { DramaSetup } from "@/types/drama";
 
 export interface GeneratePersonaImagesInput {
@@ -47,6 +49,27 @@ function dataUrlBytes(url?: string): number | undefined {
 
 function uniqueModels(models: Array<string | undefined>): string[] {
   return Array.from(new Set(models.map((model) => String(model || "").trim()).filter(Boolean)));
+}
+
+function parseModelList(value: unknown): string[] {
+  if (Array.isArray(value)) return uniqueModels(value.map((item) => String(item || "")));
+  return String(value || "")
+    .replace(/\uFF0C/g, ",")
+    .split(/[,\r\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function configuredImageModels(runtimeOptions?: { configPath?: string; dataDir?: string }): string[] {
+  const config = readRuntimeApiConfig(runtimeOptions);
+  return uniqueModels([
+    ...parseModelList((config as any).imageModelPriorityOrder),
+    ...parseModelList((config as any).image_model_priority_order),
+    ...parseModelList((config as any).imageModelDefaultModelGemini),
+    ...parseModelList((config as any).image_model_default_model_gemini),
+    ...parseModelList((config as any).imageModelDefaultModel),
+    ...parseModelList((config as any).image_model_default_model),
+  ]);
 }
 
 function shouldTryNextClosedModel(result: any): boolean {
@@ -98,8 +121,32 @@ const unsupportedImageApi = {
         },
       };
     }
+    if (payload?.runningHubNewPersonaMode) {
+      const result = await generateRunningHubNewPersonaStandardImage({
+        prompt: payload.prompt,
+        mode: payload.runningHubNewPersonaMode,
+        aspectRatio: payload.aspectRatio,
+        referenceImage: payload.avatarSource || payload.avatarBase64,
+        referenceImageMimeType: payload.avatarMimeType,
+        timeoutMs: payload.timeoutMs,
+      }, {
+        configPath: payload.configPath,
+        dataDir: payload.dataDir,
+      });
+      return {
+        ...result,
+        timings: {
+          ...(result as any)?.timings,
+          provider: "runninghub-standard-model",
+          mode: payload.runningHubNewPersonaMode,
+          elapsedMs: Date.now() - startedAt,
+          timeoutMs: payload.timeoutMs || 300_000,
+        },
+      };
+    }
     const models = uniqueModels([
       payload.model,
+      ...configuredImageModels({ configPath: payload.configPath, dataDir: payload.dataDir }),
       process.env.PERSONA_IMAGE_MODEL,
       "gemini-3.1-flash-image-preview",
       "gpt-image-2",
@@ -157,8 +204,11 @@ async function main() {
     : rawArg;
 
   const input = JSON.parse(raw) as GeneratePersonaImagesInput;
-  const model = input.model || process.env.PERSONA_IMAGE_MODEL || "gpt-image-2";
   const runtimeOptions = { configPath: input.configPath, dataDir: input.dataDir };
+  const model = input.model
+    || configuredImageModels(runtimeOptions)[0]
+    || process.env.PERSONA_IMAGE_MODEL
+    || "gpt-image-2";
 
   let referenceSheetMs: number | undefined;
   const referenceSheet = input.generateReferenceSheet

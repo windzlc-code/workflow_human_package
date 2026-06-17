@@ -116,6 +116,7 @@ export function resolveModelProtocol(model: string, options: RuntimeConfigOption
   if (override && override !== "auto") return override;
   if (model.startsWith("claude")) return "anthropic";
   if (model.startsWith("xai/") || model.startsWith("grok-")) return "openai";
+  if (model.startsWith("google/")) return "openai";
   if (model.startsWith("gpt-") || /dall-e/i.test(model)) return "openai";
   return "gemini";
 }

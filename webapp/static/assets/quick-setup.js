@@ -16,6 +16,7 @@ const qsEl = (id) => document.getElementById(id);
 let maskedTokenValue = "";
 let maskedTextKeyValue = "";
 let maskedImageKeyValue = "";
+let maskedNewPersonaRunningHubKeyValue = "";
 let maskedVideoKeyValue = "";
 let operationInFlight = false;
 let quickTextModels = [];
@@ -61,6 +62,10 @@ function configuredText(runtime, key) {
     : "尚未配置";
 }
 
+function displayMaskedInput(maskedValue) {
+  return maskedValue ? "••••••••••••••••••••••••" : "";
+}
+
 function runtimeFromResponse(resp) {
   if (resp && resp.runtime_config && typeof resp.runtime_config === "object") return resp.runtime_config;
   return resp && typeof resp === "object" ? resp : {};
@@ -68,7 +73,7 @@ function runtimeFromResponse(resp) {
 
 function getRealInputValue(id, maskedValue) {
   const value = (qsEl(id)?.value || "").trim();
-  if (!value || value === maskedValue) return "";
+  if (!value || value === maskedValue || value === displayMaskedInput(maskedValue)) return "";
   return value;
 }
 
@@ -77,16 +82,11 @@ function setBusy(busy, activeButtonId = "") {
   [
     "btnSaveToken",
     "btnClearToken",
-    "btnSaveGrok",
     "btnClearGrokKey",
-    "btnBrowseQuickGrokModels",
-    "btnAddQuickModel",
-    "btnSaveImageModels",
-    "btnBrowseQuickImageModels",
-    "btnAddQuickImageModel",
-    "btnSaveVideoModels",
-    "btnBrowseQuickVideoModels",
-    "btnApplyQuickVideoModel",
+    "btnClearImageKey",
+    "btnClearRunningHubKey",
+    "btnClearVideoKey",
+    "btnSaveModelConfig",
     "btnStartProcess",
     "btnStopProcess",
     "btnReloadSetup",
@@ -183,62 +183,6 @@ function bindPickerFilters(pickerId) {
   });
 }
 
-function syncTextModelInputFromList() {
-  const input = qsEl("llmModelOrder");
-  if (input) input.value = quickTextModels.join(", ");
-}
-
-function syncImageModelInputFromList() {
-  const input = qsEl("imageModelOrder");
-  if (input) input.value = quickImageModels.join(", ");
-}
-
-function renderModelChips(wrapId, models, actionPrefix) {
-  const wrap = qsEl(wrapId);
-  if (!wrap) return;
-  if (!models.length) {
-    wrap.innerHTML = '<div class="admin-model-picker-status">尚未添加模型。</div>';
-    return;
-  }
-  wrap.innerHTML = models
-    .map(
-      (model, index) => `
-        <div class="admin-model-chip">
-          <span>${escapeHtml(model)}</span>
-          <div class="admin-model-chip-actions">
-            <button type="button" class="ghost admin-model-chip-order" data-${actionPrefix}-action="up" data-${actionPrefix}-index="${index}" aria-label="上移">↑</button>
-            <button type="button" class="ghost admin-model-chip-order" data-${actionPrefix}-action="down" data-${actionPrefix}-index="${index}" aria-label="下移">↓</button>
-            <button type="button" class="ghost admin-model-chip-remove" data-${actionPrefix}-action="remove" data-${actionPrefix}-index="${index}" aria-label="删除">×</button>
-          </div>
-        </div>`,
-    )
-    .join("");
-}
-
-function renderTextModels() {
-  renderModelChips("quickModelList", quickTextModels, "model");
-  syncTextModelInputFromList();
-}
-
-function renderImageModels() {
-  renderModelChips("quickImageModelList", quickImageModels, "image-model");
-  syncImageModelInputFromList();
-}
-
-function addTextModel(model) {
-  const value = String(model || "").trim();
-  if (!value) return;
-  if (!quickTextModels.includes(value)) quickTextModels.push(value);
-  renderTextModels();
-}
-
-function addImageModel(model) {
-  const value = String(model || "").trim();
-  if (!value) return;
-  if (!quickImageModels.includes(value)) quickImageModels.push(value);
-  renderImageModels();
-}
-
 function setPickerStatus(pickerId, message, isError = false) {
   const picker = qsEl(pickerId);
   if (!picker) return;
@@ -253,35 +197,33 @@ function fillSetupForm(resp) {
 
   maskedTokenValue = runtime.telegram_bot_token_masked || "";
   const tokenInput = qsEl("telegramBotToken");
-  if (tokenInput && document.activeElement !== tokenInput) tokenInput.value = maskedTokenValue;
+  if (tokenInput && document.activeElement !== tokenInput) tokenInput.value = displayMaskedInput(maskedTokenValue);
   qsEl("botTokenStatus").textContent = configuredText(runtime, "telegram_bot_token");
   qsEl("setupBotState").textContent = runtime.telegram_bot_token_configured ? "已配置" : "尚未配置";
 
   qsEl("llmBaseUrl").value = runtime.llm_base_url || "https://llm.runninghub.ai/v1";
   maskedTextKeyValue = runtime.llm_api_key_gpt_masked || runtime.llm_api_key_masked || "";
   const textKeyInput = qsEl("llmApiKey");
-  if (textKeyInput && document.activeElement !== textKeyInput) textKeyInput.value = maskedTextKeyValue;
+  if (textKeyInput && document.activeElement !== textKeyInput) textKeyInput.value = displayMaskedInput(maskedTextKeyValue);
   qsEl("grokKeyStatus").textContent = configuredText(runtime, "llm_api_key_gpt");
-  quickTextModels = parseModelList(runtime.llm_model_priority_order || runtime.llm_default_model_gpt || runtime.llm_default_model || "xai/grok-4.3, grok-4.2");
-  renderTextModels();
   qsEl("setupGrokState").textContent = runtime.llm_api_key_gpt_configured || runtime.llm_api_key_configured ? "已配置" : "尚未配置";
 
   qsEl("imageBaseUrl").value = runtime.image_model_provider_base_url || "http://202.90.21.53:3008";
   maskedImageKeyValue = runtime.image_model_provider_api_key_gemini_masked || "";
   const imageKeyInput = qsEl("imageApiKey");
-  if (imageKeyInput && document.activeElement !== imageKeyInput) imageKeyInput.value = maskedImageKeyValue;
+  if (imageKeyInput && document.activeElement !== imageKeyInput) imageKeyInput.value = displayMaskedInput(maskedImageKeyValue);
   qsEl("imageKeyStatus").textContent = configuredText(runtime, "image_model_provider_api_key_gemini");
-  quickImageModels = parseModelList(runtime.image_model_priority_order || runtime.image_model_default_model_gemini || runtime.image_model_default_model || "gemini-3-pro-image-preview");
-  renderImageModels();
+  if (qsEl("newPersonaRunningHubBaseUrl")) qsEl("newPersonaRunningHubBaseUrl").value = runtime.new_persona_runninghub_base_url || "https://www.runninghub.ai";
+  maskedNewPersonaRunningHubKeyValue = runtime.new_persona_runninghub_api_key_masked || "";
+  const runningHubKeyInput = qsEl("newPersonaRunningHubApiKey");
+  if (runningHubKeyInput && document.activeElement !== runningHubKeyInput) runningHubKeyInput.value = displayMaskedInput(maskedNewPersonaRunningHubKeyValue);
+  if (qsEl("newPersonaRunningHubKeyStatus")) qsEl("newPersonaRunningHubKeyStatus").textContent = configuredText(runtime, "new_persona_runninghub_api_key");
 
-  qsEl("videoApiName").value = runtime.mulerouter_api_name || "";
-  qsEl("videoBaseUrl").value = runtime.mulerouter_base_url || "https://api.mulerouter.ai";
-  qsEl("videoModelName").value = runtime.mulerouter_wan_i2v_model || "wan2.7-i2v-spicy";
-  qsEl("videoEndpoint").value = runtime.mulerouter_wan_i2v_endpoint || "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation";
-  qsEl("videoNegativePrompt").value = runtime.mulerouter_wan_i2v_negative_prompt || "low quality, blurry, distorted, watermark, text, logo";
+  if (qsEl("videoBaseUrl")) qsEl("videoBaseUrl").value = runtime.mulerouter_base_url || "https://api.mulerouter.ai";
   maskedVideoKeyValue = runtime.mulerouter_api_key_masked || "";
   const videoKeyInput = qsEl("videoApiKey");
-  if (videoKeyInput && document.activeElement !== videoKeyInput) videoKeyInput.value = maskedVideoKeyValue;
+  if (videoKeyInput && document.activeElement !== videoKeyInput) videoKeyInput.value = displayMaskedInput(maskedVideoKeyValue);
+  if (qsEl("videoKeyStatus")) qsEl("videoKeyStatus").textContent = configuredText(runtime, "mulerouter_api_key");
 
   const desired = processInfo.desired || "-";
   const running = processInfo.running ? "运行中" : "未运行";
@@ -314,6 +256,36 @@ async function savePartial(payload, successText) {
   return saved;
 }
 
+async function saveModelConfig() {
+  setBusy(true, "btnSaveModelConfig");
+  setSetupMsg("正在保存模型基础配置...", true);
+  try {
+    const payload = {
+      llm_base_url: qsEl("llmBaseUrl")?.value.trim() || "https://llm.runninghub.ai/v1",
+      image_model_provider_base_url: qsEl("imageBaseUrl")?.value.trim() || "http://202.90.21.53:3008",
+      new_persona_runninghub_base_url: qsEl("newPersonaRunningHubBaseUrl")?.value.trim() || "https://www.runninghub.ai",
+      mulerouter_base_url: qsEl("videoBaseUrl")?.value.trim() || "https://api.mulerouter.ai",
+    };
+    const textKey = getRealInputValue("llmApiKey", maskedTextKeyValue);
+    const imageKey = getRealInputValue("imageApiKey", maskedImageKeyValue);
+    const runningHubKey = getRealInputValue("newPersonaRunningHubApiKey", maskedNewPersonaRunningHubKeyValue);
+    const videoKey = getRealInputValue("videoApiKey", maskedVideoKeyValue);
+    if (textKey) {
+      payload.llm_api_key = textKey;
+      payload.llm_api_key_gpt = textKey;
+    }
+    if (imageKey) payload.image_model_provider_api_key_gemini = imageKey;
+    if (runningHubKey) payload.new_persona_runninghub_api_key = runningHubKey;
+    if (videoKey) payload.mulerouter_api_key = videoKey;
+    await savePartial(payload, "模型基础配置已保存。留空的 Key 已保留原配置。");
+  } catch (err) {
+    setSetupMsg(err.detail || err.message || String(err), false);
+  } finally {
+    setBusy(false);
+    loadSetup(true);
+  }
+}
+
 async function saveToken() {
   setBusy(true, "btnSaveToken");
   setSetupMsg("正在保存 Bot Token...", true);
@@ -344,168 +316,6 @@ async function clearToken() {
   }
 }
 
-async function saveTextModels() {
-  setBusy(true, "btnSaveGrok");
-  try {
-    const manualModels = parseModelList(qsEl("llmModelOrder").value);
-    quickTextModels = manualModels.length ? manualModels : quickTextModels;
-    const models = quickTextModels.length ? quickTextModels.join(", ") : "xai/grok-4.3, grok-4.2";
-    const payload = {
-      llm_base_url: qsEl("llmBaseUrl").value.trim() || "https://llm.runninghub.ai/v1",
-      llm_default_model: models,
-      llm_default_model_gpt: models,
-      llm_model_priority_order: models,
-    };
-    const key = getRealInputValue("llmApiKey", maskedTextKeyValue);
-    if (key) {
-      payload.llm_api_key = key;
-      payload.llm_api_key_gpt = key;
-    }
-    await savePartial(payload, key ? "文字模型配置和新 Key 已保存。" : "文字模型配置已保存，Key 保持原配置。");
-  } catch (err) {
-    setSetupMsg(err.detail || err.message || String(err), false);
-  } finally {
-    setBusy(false);
-    loadSetup(true);
-  }
-}
-
-async function saveImageModels() {
-  setBusy(true, "btnSaveImageModels");
-  try {
-    const manualModels = parseModelList(qsEl("imageModelOrder").value);
-    quickImageModels = manualModels.length ? manualModels : quickImageModels;
-    const models = quickImageModels.length ? quickImageModels.join(", ") : "gemini-3-pro-image-preview";
-    const payload = {
-      image_model_provider_base_url: qsEl("imageBaseUrl").value.trim() || "http://202.90.21.53:3008",
-      image_model_default_model: models,
-      image_model_default_model_gemini: models,
-      image_model_priority_order: models,
-    };
-    const key = getRealInputValue("imageApiKey", maskedImageKeyValue);
-    if (key) payload.image_model_provider_api_key_gemini = key;
-    await savePartial(payload, key ? "图片模型配置和新 Key 已保存。" : "图片模型配置已保存，Key 保持原配置。");
-  } catch (err) {
-    setSetupMsg(err.detail || err.message || String(err), false);
-  } finally {
-    setBusy(false);
-    loadSetup(true);
-  }
-}
-
-function applyVideoModel(model) {
-  const value = String(model || "").trim();
-  if (!value) return;
-  qsEl("videoModelName").value = value;
-  const endpointInput = qsEl("videoEndpoint");
-  const current = String(endpointInput.value || "").trim();
-  if (/\/vendors\/[^/]+\/v\d+\//i.test(current) && /\/generation(?:[/?#]|$)/i.test(current)) {
-    endpointInput.value = current.replace(/(\/vendors\/[^/]+\/v\d+\/)([^/?#]+)(\/generation.*)$/i, `$1${value}$3`);
-  }
-}
-
-async function saveVideoModels() {
-  setBusy(true, "btnSaveVideoModels");
-  try {
-    const payload = {
-      mulerouter_api_name: qsEl("videoApiName").value.trim(),
-      mulerouter_base_url: qsEl("videoBaseUrl").value.trim() || "https://api.mulerouter.ai",
-      mulerouter_wan_i2v_model: qsEl("videoModelName").value.trim() || "wan2.7-i2v-spicy",
-      mulerouter_wan_i2v_endpoint: qsEl("videoEndpoint").value.trim() || "/vendors/carrothub/v1/wan2.7-i2v-spicy/generation",
-      mulerouter_wan_i2v_negative_prompt: qsEl("videoNegativePrompt").value.trim(),
-    };
-    const key = getRealInputValue("videoApiKey", maskedVideoKeyValue);
-    if (key) payload.mulerouter_api_key = key;
-    await savePartial(payload, key ? "视频模型配置和新 Key 已保存。" : "视频模型配置已保存，Key 保持原配置。");
-  } catch (err) {
-    setSetupMsg(err.detail || err.message || String(err), false);
-  } finally {
-    setBusy(false);
-    loadSetup(true);
-  }
-}
-
-async function browseTextModels() {
-  const picker = qsEl("quickAvailableModelPicker");
-  if (!picker) return;
-  if (!picker.hidden && picker.children.length > 0) {
-    picker.hidden = true;
-    return;
-  }
-  setBusy(true, "btnBrowseQuickGrokModels");
-  setPickerStatus("quickAvailableModelPicker", "正在识别当前 API 支持的文字模型...");
-  try {
-    const resp = await qsApi("/api/quick_setup/llm_models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        llm_base_url: qsEl("llmBaseUrl").value.trim(),
-        llm_api_key: getRealInputValue("llmApiKey", maskedTextKeyValue),
-      }),
-    });
-    renderSearchableModelPicker(picker, resp.models || [], "quick-model", "没有查询到可用文字模型", "搜索文字模型");
-  } catch (err) {
-    setPickerStatus("quickAvailableModelPicker", err.detail || err.message || String(err), true);
-  } finally {
-    setBusy(false);
-  }
-}
-
-async function browseImageModels() {
-  const picker = qsEl("quickAvailableImageModelPicker");
-  if (!picker) return;
-  if (!picker.hidden && picker.children.length > 0) {
-    picker.hidden = true;
-    return;
-  }
-  setBusy(true, "btnBrowseQuickImageModels");
-  setPickerStatus("quickAvailableImageModelPicker", "正在识别当前 API 支持的图片模型...");
-  try {
-    const resp = await qsApi("/api/quick_setup/image_models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        base_url: qsEl("imageBaseUrl").value.trim(),
-        api_key: getRealInputValue("imageApiKey", maskedImageKeyValue),
-        provider: "openai-compatible",
-      }),
-    });
-    renderSearchableModelPicker(picker, resp.models || [], "quick-image-model", "没有查询到可用图片模型", "搜索图片模型");
-  } catch (err) {
-    setPickerStatus("quickAvailableImageModelPicker", err.detail || err.message || String(err), true);
-  } finally {
-    setBusy(false);
-  }
-}
-
-async function browseVideoModels() {
-  const picker = qsEl("quickAvailableVideoModelPicker");
-  if (!picker) return;
-  if (!picker.hidden && picker.children.length > 0) {
-    picker.hidden = true;
-    return;
-  }
-  setBusy(true, "btnBrowseQuickVideoModels");
-  setPickerStatus("quickAvailableVideoModelPicker", "正在识别当前 API 支持的视频模型...");
-  try {
-    const resp = await qsApi("/api/quick_setup/video_models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type: "video",
-        base_url: qsEl("videoBaseUrl").value.trim(),
-        api_key: getRealInputValue("videoApiKey", maskedVideoKeyValue),
-        endpoint: qsEl("videoEndpoint").value.trim(),
-      }),
-    });
-    renderSearchableModelPicker(picker, resp.models || [], "quick-video-model", "没有查询到可用视频模型", "搜索视频模型");
-  } catch (err) {
-    setPickerStatus("quickAvailableVideoModelPicker", err.detail || err.message || String(err), true);
-  } finally {
-    setBusy(false);
-  }
-}
-
 async function clearTextKey() {
   if (!confirm("确定清空文字模型 Key？")) return;
   setBusy(true, "btnClearGrokKey");
@@ -515,6 +325,25 @@ async function clearTextKey() {
     qsEl("llmApiKey").value = "";
     fillSetupForm(saved);
     setSetupMsg("文字模型 Key 已清空。", true);
+  } catch (err) {
+    setSetupMsg(err.detail || err.message || String(err), false);
+  } finally {
+    setBusy(false);
+    loadSetup(true);
+  }
+}
+
+async function clearRuntimeKey(kind, buttonId, inputId, message) {
+  if (!confirm(message)) return;
+  setBusy(true, buttonId);
+  try {
+    const saved = await qsApi(`/api/quick_setup/${kind}_key`, { method: "DELETE" });
+    if (inputId && qsEl(inputId)) qsEl(inputId).value = "";
+    if (kind === "image") maskedImageKeyValue = "";
+    if (kind === "runninghub") maskedNewPersonaRunningHubKeyValue = "";
+    if (kind === "video") maskedVideoKeyValue = "";
+    fillSetupForm(saved);
+    setSetupMsg("Key 已清空。", true);
   } catch (err) {
     setSetupMsg(err.detail || err.message || String(err), false);
   } finally {
@@ -544,13 +373,6 @@ async function controlProcess(action) {
   }
 }
 
-function moveModelItem(list, index, action) {
-  if (!Number.isInteger(index) || index < 0 || index >= list.length) return;
-  if (action === "remove") list.splice(index, 1);
-  if (action === "up" && index > 0) [list[index - 1], list[index]] = [list[index], list[index - 1]];
-  if (action === "down" && index < list.length - 1) [list[index], list[index + 1]] = [list[index + 1], list[index]];
-}
-
 function bindTabs() {
   const tabs = Array.from(document.querySelectorAll("[data-quick-model-tab]"));
   const panels = Array.from(document.querySelectorAll("[data-quick-model-panel]"));
@@ -563,101 +385,60 @@ function bindTabs() {
   });
 }
 
-function bindOutsideClickToCloseModelPickers() {
-  const pickerPairs = [
-    ["quickAvailableModelPicker", "btnBrowseQuickGrokModels"],
-    ["quickAvailableImageModelPicker", "btnBrowseQuickImageModels"],
-    ["quickAvailableVideoModelPicker", "btnBrowseQuickVideoModels"],
-  ];
-  document.addEventListener("click", (event) => {
-    const target = event.target instanceof HTMLElement ? event.target : null;
-    if (!target) return;
-    pickerPairs.forEach(([pickerId, triggerId]) => {
-      const picker = qsEl(pickerId);
-      if (!picker || picker.hidden) return;
-      if (target.closest(`#${pickerId}`) || target.closest(`#${triggerId}`)) return;
-      picker.hidden = true;
-    });
+function initQuickSensitiveInputToggles() {
+  [
+    "telegramBotToken",
+    "llmApiKey",
+    "imageApiKey",
+    "newPersonaRunningHubApiKey",
+    "videoApiKey",
+  ].forEach((id) => {
+    const input = qsEl(id);
+    if (!input || input.closest(".sensitive-input-wrap")) return;
+    input.type = "password";
+    input.autocomplete = "off";
+    input.setAttribute("spellcheck", "false");
+    const wrapper = document.createElement("div");
+    wrapper.className = "sensitive-input-wrap";
+    input.parentNode.insertBefore(wrapper, input);
+    wrapper.appendChild(input);
+    input.classList.add("sensitive-input");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost sensitive-toggle-btn";
+    button.dataset.target = id;
+    button.innerHTML = '<span class="sensitive-eye-icon" aria-hidden="true"></span>';
+    button.setAttribute("aria-label", "显示密钥内容");
+    button.title = "显示";
+    button.setAttribute("aria-pressed", "false");
+    wrapper.appendChild(button);
   });
+}
+
+function toggleQuickSensitiveInput(button) {
+  const input = qsEl(button.dataset.target || "");
+  if (!input) return;
+  const willShow = input.type === "password";
+  input.type = willShow ? "text" : "password";
+  button.classList.toggle("is-visible", willShow);
+  button.setAttribute("aria-label", willShow ? "隐藏密钥内容" : "显示密钥内容");
+  button.title = willShow ? "隐藏" : "显示";
+  button.setAttribute("aria-pressed", willShow ? "true" : "false");
+  input.focus();
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   bindTabs();
-  bindPickerFilters("quickAvailableModelPicker");
-  bindPickerFilters("quickAvailableImageModelPicker");
-  bindPickerFilters("quickAvailableVideoModelPicker");
-  bindOutsideClickToCloseModelPickers();
+  initQuickSensitiveInputToggles();
 
   qsEl("btnReloadSetup")?.addEventListener("click", () => loadSetup(false));
   qsEl("btnSaveToken")?.addEventListener("click", saveToken);
   qsEl("btnClearToken")?.addEventListener("click", clearToken);
-  qsEl("btnSaveGrok")?.addEventListener("click", saveTextModels);
+  qsEl("btnSaveModelConfig")?.addEventListener("click", saveModelConfig);
   qsEl("btnClearGrokKey")?.addEventListener("click", clearTextKey);
-  qsEl("btnBrowseQuickGrokModels")?.addEventListener("click", browseTextModels);
-  qsEl("btnSaveImageModels")?.addEventListener("click", saveImageModels);
-  qsEl("btnBrowseQuickImageModels")?.addEventListener("click", browseImageModels);
-  qsEl("btnSaveVideoModels")?.addEventListener("click", saveVideoModels);
-  qsEl("btnBrowseQuickVideoModels")?.addEventListener("click", browseVideoModels);
-  qsEl("btnApplyQuickVideoModel")?.addEventListener("click", () => applyVideoModel(qsEl("videoModelName")?.value));
-
-  qsEl("btnAddQuickModel")?.addEventListener("click", () => {
-    addTextModel(qsEl("quickModelInput")?.value);
-    if (qsEl("quickModelInput")) qsEl("quickModelInput").value = "";
-  });
-  qsEl("btnAddQuickImageModel")?.addEventListener("click", () => {
-    addImageModel(qsEl("quickImageModelInput")?.value);
-    if (qsEl("quickImageModelInput")) qsEl("quickImageModelInput").value = "";
-  });
-  qsEl("quickModelInput")?.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    addTextModel(qsEl("quickModelInput")?.value);
-    qsEl("quickModelInput").value = "";
-  });
-  qsEl("quickImageModelInput")?.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    addImageModel(qsEl("quickImageModelInput")?.value);
-    qsEl("quickImageModelInput").value = "";
-  });
-  qsEl("llmModelOrder")?.addEventListener("change", () => {
-    quickTextModels = parseModelList(qsEl("llmModelOrder").value);
-    renderTextModels();
-  });
-  qsEl("imageModelOrder")?.addEventListener("change", () => {
-    quickImageModels = parseModelList(qsEl("imageModelOrder").value);
-    renderImageModels();
-  });
-  qsEl("quickModelList")?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-model-action]");
-    if (!button) return;
-    moveModelItem(quickTextModels, Number(button.dataset.modelIndex), button.dataset.modelAction);
-    renderTextModels();
-  });
-  qsEl("quickImageModelList")?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-image-model-action]");
-    if (!button) return;
-    moveModelItem(quickImageModels, Number(button.dataset.imageModelIndex), button.dataset.imageModelAction);
-    renderImageModels();
-  });
-  qsEl("quickAvailableModelPicker")?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-quick-model]");
-    if (!button) return;
-    addTextModel(button.dataset.quickModel);
-    qsEl("quickAvailableModelPicker").hidden = true;
-  });
-  qsEl("quickAvailableImageModelPicker")?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-quick-image-model]");
-    if (!button) return;
-    addImageModel(button.dataset.quickImageModel);
-    qsEl("quickAvailableImageModelPicker").hidden = true;
-  });
-  qsEl("quickAvailableVideoModelPicker")?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-quick-video-model]");
-    if (!button) return;
-    applyVideoModel(button.dataset.quickVideoModel);
-    qsEl("quickAvailableVideoModelPicker").hidden = true;
-  });
+  qsEl("btnClearImageKey")?.addEventListener("click", () => clearRuntimeKey("image", "btnClearImageKey", "imageApiKey", "确定清空图片模型 Key？"));
+  qsEl("btnClearRunningHubKey")?.addEventListener("click", () => clearRuntimeKey("runninghub", "btnClearRunningHubKey", "newPersonaRunningHubApiKey", "确定清空 RunningHub Key？"));
+  qsEl("btnClearVideoKey")?.addEventListener("click", () => clearRuntimeKey("video", "btnClearVideoKey", "videoApiKey", "确定清空视频模型 Key？"));
 
   qsEl("btnStartProcess")?.addEventListener("click", () => controlProcess("start"));
   qsEl("btnStopProcess")?.addEventListener("click", () => controlProcess("stop"));
@@ -665,11 +446,19 @@ document.addEventListener("DOMContentLoaded", () => {
     ["telegramBotToken", () => maskedTokenValue],
     ["llmApiKey", () => maskedTextKeyValue],
     ["imageApiKey", () => maskedImageKeyValue],
+    ["newPersonaRunningHubApiKey", () => maskedNewPersonaRunningHubKeyValue],
     ["videoApiKey", () => maskedVideoKeyValue],
   ].forEach(([id, getter]) => {
     qsEl(id)?.addEventListener("focus", () => {
-      if (qsEl(id).value === getter()) qsEl(id).value = "";
+      const masked = getter();
+      if (qsEl(id).value === masked || qsEl(id).value === displayMaskedInput(masked)) qsEl(id).value = "";
     });
+  });
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const sensitiveToggle = target?.closest(".sensitive-toggle-btn");
+    if (!sensitiveToggle) return;
+    toggleQuickSensitiveInput(sensitiveToggle);
   });
 
   loadSetup();

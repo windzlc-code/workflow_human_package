@@ -171,6 +171,7 @@ function callClosedModel(
   avatarBase64?: string,
   avatarMimeType?: string,
   runtimeOptions?: PersonaImageRuntimeOptions,
+  options?: { runningHubNewPersonaMode?: "text-to-image" | "image-to-image"; avatarSource?: string },
 ): Promise<{ ok: boolean; url?: string; error?: string; timings?: unknown }> {
   return imageAPI.generate({
     prompt,
@@ -178,6 +179,8 @@ function callClosedModel(
     avatarBase64,
     avatarMimeType,
     aspectRatio,
+    runningHubNewPersonaMode: options?.runningHubNewPersonaMode,
+    avatarSource: options?.avatarSource,
     configPath: runtimeOptions?.configPath,
     dataDir: runtimeOptions?.dataDir,
   });
@@ -344,7 +347,10 @@ export async function generateReferenceSheet(
   const avatarMimeType = setup.personaAvatarUrl
     ? ((setup.personaAvatarUrl.match(/^data:([^;]+);/) || [])[1] || "image/jpeg")
     : undefined;
-  return callClosedModel(imageAPI, prompt, model, "1:1", avatarBase64, avatarMimeType, runtimeOptions);
+  return callClosedModel(imageAPI, prompt, model, "1:1", avatarBase64, avatarMimeType, runtimeOptions, {
+    runningHubNewPersonaMode: "text-to-image",
+    avatarSource: setup.personaAvatarUrl,
+  });
 }
 
 export async function generatePersonaImage(
@@ -423,7 +429,10 @@ export async function generatePersonaImage(
     ? ((avatarSource.match(/^data:([^;]+);/) || [])[1] || "image/jpeg")
     : undefined;
 
-  const result = await callClosedModel(imageAPI, finalPrompt, model, aspectRatio, avatarBase64, avatarMimeType, runtimeOptions);
+  const result = await callClosedModel(imageAPI, finalPrompt, model, aspectRatio, avatarBase64, avatarMimeType, runtimeOptions, {
+    runningHubNewPersonaMode: withAvatar ? "image-to-image" : undefined,
+    avatarSource,
+  });
   if (!result?.ok && hasWorkflowImage(setup) && ((result as any)?.retryable || /timeout|超時|超时|未返回|5\d\d|429|network|fetch failed/i.test(String(result?.error || "")))) {
     const fallbackPrompt = [
       buildWorkflowPersonaPrompt(content, setup),

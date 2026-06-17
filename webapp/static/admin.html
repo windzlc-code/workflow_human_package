@@ -250,6 +250,7 @@
             <div class="admin-model-tabs" role="tablist" aria-label="模型类型">
               <button class="admin-model-tab is-active" type="button" data-model-tab="text">文字模型</button>
               <button class="admin-model-tab" type="button" data-model-tab="image">图片模型</button>
+              <button class="admin-model-tab" type="button" data-model-tab="runninghub">RunningHub 链路</button>
               <button class="admin-model-tab" type="button" data-model-tab="video">视频模型</button>
             </div>
             <div class="admin-model-tab-panels">
@@ -264,10 +265,8 @@
                   <label>候选模型</label>
                   <div class="admin-model-list-editor">
                     <div id="rtLlmGptModelList" class="admin-model-list"></div>
-                    <div class="admin-model-list-input-row admin-model-list-input-row-picker">
-                      <input id="rtLlmGptModelInput" type="text" placeholder="输入文字模型后回车或点击添加">
+                    <div class="admin-model-list-input-row">
                       <button id="btnBrowseLlmGrokModels" type="button" class="ghost admin-model-picker-btn">识别模型</button>
-                      <button id="btnAddLlmGptModel" type="button" class="ghost admin-model-add-btn">+</button>
                     </div>
                     <div id="rtLlmGrokModelPicker" class="admin-model-picker" hidden></div>
                   </div>
@@ -282,8 +281,7 @@
                       <div class="admin-model-list-editor">
                         <div id="rtLlmFreePriorityModelList" class="admin-model-priority-list"></div>
                         <div class="admin-model-list-input-row">
-                          <input id="rtLlmFreePriorityModelInput" type="text" placeholder="输入模型名后回车或点击添加">
-                          <button id="btnAddLlmFreePriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                          <button id="btnAddLlmFreePriorityModel" type="button" class="ghost admin-model-add-btn" title="从候选模型添加" aria-label="从候选模型添加">+</button>
                         </div>
                       </div>
                     </div>
@@ -293,8 +291,7 @@
                       <div class="admin-model-list-editor">
                         <div id="rtLlmPaidPriorityModelList" class="admin-model-priority-list"></div>
                         <div class="admin-model-list-input-row">
-                          <input id="rtLlmPaidPriorityModelInput" type="text" placeholder="输入模型名后回车或点击添加">
-                          <button id="btnAddLlmPaidPriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                          <button id="btnAddLlmPaidPriorityModel" type="button" class="ghost admin-model-add-btn" title="从候选模型添加" aria-label="从候选模型添加">+</button>
                         </div>
                       </div>
                     </div>
@@ -312,9 +309,7 @@
                   <div class="admin-model-list-editor">
                     <div id="rtImageGeminiModelList" class="admin-model-list"></div>
                     <div class="admin-model-list-input-row admin-model-list-input-row-picker">
-                      <input id="rtImageGeminiModelInput" type="text" placeholder="输入图片模型后回车或点击添加">
                       <button id="btnBrowseImageGeminiModels" type="button" class="ghost admin-model-picker-btn">识别模型</button>
-                      <button id="btnAddImageGeminiModel" type="button" class="ghost admin-model-add-btn">+</button>
                     </div>
                     <div id="rtImageGeminiModelPicker" class="admin-model-picker" hidden></div>
                   </div>
@@ -322,11 +317,18 @@
                   <div class="admin-model-list-editor">
                     <div id="rtImagePriorityModelList" class="admin-model-priority-list"></div>
                     <div class="admin-model-list-input-row">
-                      <input id="rtImagePriorityModelInput" type="text" placeholder="输入图片模型名后回车或点击添加">
-                      <button id="btnAddImagePriorityModel" type="button" class="ghost admin-model-add-btn">+</button>
+                      <button id="btnAddImagePriorityModel" type="button" class="ghost admin-model-add-btn" title="从候选图片模型添加" aria-label="从候选图片模型添加">+</button>
                     </div>
                   </div>
                   <div id="rtImageModelSummary" class="admin-model-summary small"></div>
+                </div>
+                <div class="admin-runtime-block admin-model-tab-panel" data-model-panel="runninghub">
+                  <div class="admin-config-card-title">RunningHub 链路</div>
+                  <div class="small">用于新建人设参考图和人设推文图生图。这里调用 RunningHub 标准模型 API，和普通图片模型分开保存。</div>
+                  <label>RunningHub API 基础地址</label>
+                  <input id="rtNewPersonaRunningHubBaseUrl" type="text" placeholder="https://www.runninghub.ai">
+                  <label>RunningHub 企业共享 API 密钥</label>
+                  <input id="rtNewPersonaRunningHubApiKey" type="password" placeholder="留空则保留当前密钥">
                 </div>
                 <div class="admin-runtime-block admin-model-tab-panel" data-model-panel="video">
                   <div class="admin-config-card-title">视频模型</div>

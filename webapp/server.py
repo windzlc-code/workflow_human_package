@@ -108,6 +108,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "image_model_default_model_gemini": "gemini-3-pro-image-preview",
     "image_model_default_model_gpt": "gpt-image-1",
     "image_model_priority_order": "gemini-3-pro-image-preview, gpt-image-1",
+    "new_persona_runninghub_base_url": "https://www.runninghub.ai",
+    "new_persona_runninghub_api_key": "",
     "llm_base_url": "http://202.90.21.53:3008",
     "llm_api_key": "",
     "llm_api_key_gemini": "",
@@ -518,7 +520,9 @@ def _mask_secret(value: Any) -> str:
     text = str(value or "")
     if len(text) <= 8:
         return "***"
-    return f"{text[:4]}***{text[-4:]}"
+    visible = 6 if len(text) >= 16 else 4
+    masked_len = min(max(len(text) - (visible * 2), 8), 24)
+    return f"{text[:visible]}{'•' * masked_len}{text[-visible:]}"
 
 
 def _read_dotenv_values(path: Path | None = None) -> dict[str, str]:
@@ -971,6 +975,10 @@ def _grok_llm_models(*groups: list[str], fallback: list[str] | None = None) -> l
     return models
 
 
+def _llm_models(*groups: list[str], fallback: list[str] | None = None) -> list[str]:
+    return _ordered_model_list(*groups, fallback=fallback if fallback is not None else ["grok-4.2"])
+
+
 def _detect_image_model_provider(model: str) -> str:
     text = str(model or "").strip().lower()
     if text.startswith("gpt-") or "gpt-image" in text or text.startswith("chatgpt"):
@@ -1045,7 +1053,7 @@ def _resolve_llm_fallback_candidates(source: dict[str, Any] | None, *, allow_bui
         legacy_models=legacy_models,
         builtin_model=str(BUILTIN_LLM_DEFAULT_MODEL).strip(),
     )
-    model_priority = _grok_llm_models(
+    model_priority = _llm_models(
         model_priority,
         gpt_models,
         priority_models,
@@ -2431,9 +2439,11 @@ def _load_runtime_config_file(conn) -> dict[str, Any]:
         except FileNotFoundError:
             raw = _load_legacy_runtime_config(conn) or dict(DEFAULT_RUNTIME_CONFIG)
             merged = _normalize_runtime_config(raw)
+            _merge_runninghub_config_from_tool_r18(merged)
             _write_runtime_config_file(merged)
             return merged
         merged = _normalize_runtime_config(raw)
+        _merge_runninghub_config_from_tool_r18(merged)
         fallback_path = (DATA_DIR / "runtime_config.json").resolve()
         if fallback_path != RUNTIME_CONFIG_PATH and fallback_path.exists():
             try:
@@ -2540,8 +2550,8 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     if merged["image_generate_mode_default"] not in {"closed_model_api", "remote_comfy"}:
         merged["image_generate_mode_default"] = "closed_model_api"
     merged["image_model_provider_base_url"] = str(merged.get("image_model_provider_base_url") or BUILTIN_IMAGE_MODEL_PROVIDER_BASE_URL).strip() or BUILTIN_IMAGE_MODEL_PROVIDER_BASE_URL
-    merged["image_model_provider_api_key_gemini"] = str(merged.get("image_model_provider_api_key_gemini") or BUILTIN_IMAGE_MODEL_PROVIDER_API_KEY_GEMINI).strip()
-    merged["image_model_provider_api_key_gpt"] = str(merged.get("image_model_provider_api_key_gpt") or BUILTIN_IMAGE_MODEL_PROVIDER_API_KEY_GPT).strip()
+    merged["image_model_provider_api_key_gemini"] = str(merged.get("image_model_provider_api_key_gemini") or "").strip()
+    merged["image_model_provider_api_key_gpt"] = str(merged.get("image_model_provider_api_key_gpt") or "").strip()
     merged["image_model_default_model"] = str(merged.get("image_model_default_model") or "gemini-3-pro-image-preview").strip() or "gemini-3-pro-image-preview"
     image_model_default_model_gemini = current.get("image_model_default_model_gemini") if "image_model_default_model_gemini" in current else None
     image_model_default_model_gpt = current.get("image_model_default_model_gpt") if "image_model_default_model_gpt" in current else None
@@ -2565,7 +2575,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     llm_default_model_gpt = current.get("llm_default_model_gpt") if "llm_default_model_gpt" in current else None
     llm_model_priority_order = current.get("llm_model_priority_order") if "llm_model_priority_order" in current else None
     llm_gemini_models: list[str] = []
-    llm_gpt_models = _grok_llm_models(
+    llm_gpt_models = _llm_models(
         parse_model_list(llm_model_priority_order),
         parse_model_list(llm_default_model_gpt),
         parse_model_list(merged.get("llm_default_model")),
@@ -2574,23 +2584,23 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["llm_default_model_gemini"] = str(llm_default_model_gemini or "").strip()
     merged["llm_default_model_gpt"] = ", ".join(llm_gpt_models)
     merged["llm_default_model"] = ", ".join(llm_gpt_models)
-    llm_priority_models = _grok_llm_models(
+    llm_priority_models = _llm_models(
         parse_model_list(llm_model_priority_order),
         llm_gpt_models,
         fallback=llm_gpt_models or ["grok-4.2"],
     )
     merged["llm_model_priority_order"] = ", ".join(llm_priority_models)
-    llm_free_models = _grok_llm_models(
-        parse_model_list(current.get("llm_free_model_priority_order")),
-        llm_priority_models,
-        llm_gpt_models,
-        fallback=llm_priority_models or llm_gpt_models or ["grok-4.2"],
+    free_models_present = "llm_free_model_priority_order" in current
+    paid_models_present = "llm_paid_model_priority_order" in current
+    raw_free_models = parse_model_list(current.get("llm_free_model_priority_order"))
+    raw_paid_models = parse_model_list(current.get("llm_paid_model_priority_order"))
+    llm_free_models = _llm_models(
+        raw_free_models if free_models_present else llm_priority_models,
+        fallback=[] if free_models_present else (llm_priority_models or llm_gpt_models or ["grok-4.2"]),
     )
-    llm_paid_models = _grok_llm_models(
-        parse_model_list(current.get("llm_paid_model_priority_order")),
-        llm_priority_models,
-        llm_gpt_models,
-        fallback=llm_priority_models or llm_gpt_models or ["grok-4.2"],
+    llm_paid_models = _llm_models(
+        raw_paid_models if paid_models_present else llm_priority_models,
+        fallback=[] if paid_models_present else (llm_priority_models or llm_gpt_models or ["grok-4.2"]),
     )
     merged["llm_free_model_priority_order"] = ", ".join(llm_free_models)
     merged["llm_paid_model_priority_order"] = ", ".join(llm_paid_models)
@@ -2728,6 +2738,14 @@ def _read_tool_r18_api_config() -> dict[str, Any]:
         return {}
 
 
+def _merge_runninghub_config_from_tool_r18(runtime: dict[str, Any]) -> None:
+    api_config = _read_tool_r18_api_config()
+    if not api_config:
+        return
+    if not str(runtime.get("new_persona_runninghub_base_url") or "").strip():
+        endpoint = str(api_config.get("runningHubEndpoint") or "").strip()
+        if endpoint:
+            runtime["new_persona_runninghub_base_url"] = endpoint
 def _write_tool_r18_api_config(raw: dict[str, Any]) -> None:
     path = _tool_r18_api_config_file()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2739,7 +2757,10 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
     if any(key in explicit for key in ("llm_api_key", "llm_api_key_gpt", "llm_base_url", "llm_model_priority_order", "llm_free_model_priority_order", "llm_paid_model_priority_order", "llm_default_model_gpt", "llm_default_model")):
         llm_key = str(runtime.get("llm_api_key_gpt") or runtime.get("llm_api_key") or "").strip()
         llm_base = str(runtime.get("llm_base_url") or "").strip()
-        if llm_key:
+        if "llm_api_key" in explicit or "llm_api_key_gpt" in explicit:
+            updates["gptKey"] = llm_key
+            updates["geminiTextKey"] = llm_key
+        elif llm_key:
             updates["gptKey"] = llm_key
             updates["geminiTextKey"] = llm_key
         if llm_base:
@@ -2759,20 +2780,22 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             updates["llm_model_priority_order"] = model_order
             updates["llm_default_model_gpt"] = model_order
             updates["llm_default_model"] = model_order
+        free_models_present = "llm_free_model_priority_order" in runtime
+        paid_models_present = "llm_paid_model_priority_order" in runtime
+        raw_free_models = parse_model_list(runtime.get("llm_free_model_priority_order"))
+        raw_paid_models = parse_model_list(runtime.get("llm_paid_model_priority_order"))
         free_models = _ordered_model_list(
-            parse_model_list(runtime.get("llm_free_model_priority_order")),
-            parse_model_list(runtime.get("llm_model_priority_order")),
-            fallback=llm_models or ["grok-4.2"],
+            raw_free_models if free_models_present else parse_model_list(runtime.get("llm_model_priority_order")),
+            fallback=[] if free_models_present else (llm_models or ["grok-4.2"]),
         )
         paid_models = _ordered_model_list(
-            parse_model_list(runtime.get("llm_paid_model_priority_order")),
-            parse_model_list(runtime.get("llm_model_priority_order")),
-            fallback=llm_models or ["grok-4.2"],
+            raw_paid_models if paid_models_present else parse_model_list(runtime.get("llm_model_priority_order")),
+            fallback=[] if paid_models_present else (llm_models or ["grok-4.2"]),
         )
-        if free_models:
+        if free_models_present or free_models:
             updates["llmFreeModelPriorityOrder"] = ", ".join(free_models)
             updates["llm_free_model_priority_order"] = ", ".join(free_models)
-        if paid_models:
+        if paid_models_present or paid_models:
             updates["llmPaidModelPriorityOrder"] = ", ".join(paid_models)
             updates["llm_paid_model_priority_order"] = ", ".join(paid_models)
     if any(
@@ -2783,11 +2806,15 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             "image_model_default_model",
             "image_model_default_model_gemini",
             "image_model_priority_order",
+            "new_persona_runninghub_base_url",
+            "new_persona_runninghub_api_key",
         )
     ):
         image_key = str(runtime.get("image_model_provider_api_key_gemini") or "").strip()
         image_base = str(runtime.get("image_model_provider_base_url") or "").strip()
-        if image_key:
+        if "image_model_provider_api_key_gemini" in explicit:
+            updates["geminiKey"] = image_key
+        elif image_key:
             updates["geminiKey"] = image_key
         if image_base:
             updates["geminiEndpoint"] = image_base
@@ -2805,6 +2832,14 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             updates["image_model_priority_order"] = model_order
             updates["image_model_default_model_gemini"] = model_order
             updates["image_model_default_model"] = model_order
+        runninghub_base = str(runtime.get("new_persona_runninghub_base_url") or "").strip()
+        runninghub_key = str(runtime.get("new_persona_runninghub_api_key") or "").strip()
+        if runninghub_base:
+            updates["runningHubEndpoint"] = runninghub_base
+        if "new_persona_runninghub_api_key" in explicit:
+            updates["runningHubKey"] = runninghub_key
+        elif runninghub_key:
+            updates["runningHubKey"] = runninghub_key
     if any(
         key in explicit
         for key in (
@@ -2827,7 +2862,9 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             if value:
                 updates[key] = value
         video_key = str(runtime.get("mulerouter_api_key") or "").strip()
-        if video_key:
+        if "mulerouter_api_key" in explicit:
+            updates["mulerouter_api_key"] = video_key
+        elif video_key:
             updates["mulerouter_api_key"] = video_key
     if not updates:
         return
@@ -15346,6 +15383,8 @@ class RuntimeConfigPayload(BaseModel):
     image_model_default_model_gemini: str = "gemini-3-pro-image-preview"
     image_model_default_model_gpt: str = "gpt-image-1"
     image_model_priority_order: str = "gemini-3-pro-image-preview, gpt-image-1"
+    new_persona_runninghub_base_url: str = "https://www.runninghub.ai"
+    new_persona_runninghub_api_key: str = ""
     llm_base_url: str = "http://202.90.21.53:3008"
     llm_api_key: str = ""
     llm_api_key_gemini: str = ""
@@ -15612,6 +15651,9 @@ def create_app() -> FastAPI:
             "image_model_default_model": str(runtime.get("image_model_default_model") or "").strip(),
             "image_model_default_model_gemini": str(runtime.get("image_model_default_model_gemini") or "").strip(),
             "image_model_priority_order": str(runtime.get("image_model_priority_order") or "").strip(),
+            "new_persona_runninghub_base_url": str(runtime.get("new_persona_runninghub_base_url") or "").strip(),
+            "new_persona_runninghub_api_key_configured": bool(str(runtime.get("new_persona_runninghub_api_key") or "").strip()),
+            "new_persona_runninghub_api_key_masked": _mask_secret(str(runtime.get("new_persona_runninghub_api_key") or "").strip()) if str(runtime.get("new_persona_runninghub_api_key") or "").strip() else "",
             "mulerouter_api_name": str(runtime.get("mulerouter_api_name") or "").strip(),
             "mulerouter_api_key": "",
             "mulerouter_api_key_configured": bool(str(runtime.get("mulerouter_api_key") or "").strip()),
@@ -15647,6 +15689,7 @@ def create_app() -> FastAPI:
             "mulerouter_api_key",
             "image_model_provider_api_key_gemini",
             "image_model_provider_api_key_gpt",
+            "new_persona_runninghub_api_key",
             "upload_file_api_key",
         }
         for key in list(secret_keys):
@@ -15728,6 +15771,43 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return api_quick_setup_status()
+
+    def _clear_quick_setup_runtime_keys(keys: list[str]):
+        try:
+            with db() as conn:
+                current_runtime = _get_runtime_config(conn)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        merged = dict(DEFAULT_RUNTIME_CONFIG)
+        if isinstance(current_runtime, dict):
+            merged.update(current_runtime)
+        explicit = {key: "" for key in keys}
+        for key in keys:
+            merged[key] = ""
+        try:
+            merged = _normalize_runtime_config(merged)
+            for key in keys:
+                merged[key] = ""
+            with _RUNTIME_CONFIG_LOCK:
+                _write_runtime_config_file(merged)
+            _sync_tool_r18_api_config_from_runtime(merged, explicit)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return api_quick_setup_status()
+
+    @app.delete("/api/quick_setup/image_key")
+    def api_quick_setup_clear_image_key():
+        return _clear_quick_setup_runtime_keys(["image_model_provider_api_key_gemini"])
+
+    @app.delete("/api/quick_setup/runninghub_key")
+    def api_quick_setup_clear_runninghub_key():
+        return _clear_quick_setup_runtime_keys(["new_persona_runninghub_api_key"])
+
+    @app.delete("/api/quick_setup/video_key")
+    def api_quick_setup_clear_video_key():
+        return _clear_quick_setup_runtime_keys(["mulerouter_api_key"])
 
     @app.post("/api/quick_setup/llm_models")
     def api_quick_setup_llm_models(payload: LlmModelsPayload):
@@ -17410,6 +17490,12 @@ def create_app() -> FastAPI:
             current_value = explicit_data.get(key)
             saved_value = current_runtime.get(key) if isinstance(current_runtime, dict) else None
             if (key not in explicit_data or current_value in (None, "", {})) and saved_value not in (None, "", {}):
+                merged[key] = saved_value
+        secret_preserve_keys = ("new_persona_runninghub_api_key",)
+        for key in secret_preserve_keys:
+            current_value = explicit_data.get(key)
+            saved_value = current_runtime.get(key) if isinstance(current_runtime, dict) else None
+            if (key not in explicit_data or not str(current_value or "").strip()) and saved_value:
                 merged[key] = saved_value
         try:
             merged = _normalize_runtime_config(merged)
