@@ -4414,7 +4414,7 @@ async function sendPostImageRatioPicker(bot: TelegramBot, chatId: number, msgId:
   pendingPostImageRatioActions.set(chatId, { ...action, createdAt: Date.now() });
   const profile = await freeGeneratedPostImageRatioProfile();
   const qaEnabled = await toolR18GlobalTextToImageQaEnabled();
-  const archive = await loadPersonaForThisBot(action.archiveId).catch(() => null);
+  const archive = await loadPersonaArchive(action.archiveId).catch(() => null);
   const post = archive?.posts.find((item) => item.id === action.postId);
   const displayIndex = action.displayIndex || (post ? (post.orderIndex ?? archive?.posts.findIndex((item) => item.id === post.id) ?? 0) + 1 : 1);
   await safeEditOrSend(bot, chatId, msgId, [
@@ -5719,7 +5719,7 @@ export function derivePersonaSpecFromPrompt(text: string) {
       personaGender: female,
       personaStyle: style,
       targetMarket: "cn",
-      chineseScript: "simplified",
+      chineseScript: "traditional",
       totalEpisodes: 50,
       personaName: name,
       personaDescription: content,
@@ -5829,7 +5829,7 @@ function normalizeCodexPersonaSpec(raw: any, originalText: string): { name: stri
     personaStyle: pickString(setupRaw.personaStyle, "真实口语表达，先讲具体场景再给反应"),
     totalEpisodes: Number(setupRaw.totalEpisodes) || 50,
     targetMarket: pickString(setupRaw.targetMarket, "cn"),
-    chineseScript: (setupRaw.chineseScript === "traditional" ? "traditional" : "simplified") as DramaSetup["chineseScript"],
+    chineseScript: "traditional" as DramaSetup["chineseScript"],
     personaName: pickString(setupRaw.personaName, name),
     personaDescription: pickString(setupRaw.personaDescription, content),
     contentTheme: pickString(setupRaw.contentTheme, genres.join("、")),
@@ -5858,6 +5858,8 @@ async function derivePersonaSpecWithCodex(text: string): Promise<{ name: string;
     "7. 如果没有明确人设名称，必须根据核心主题自动起一个具体名称。",
     "8. 只输出 JSON 对象，不要 Markdown，不要解释。",
     "",
+    "Output language: all JSON string values must use Traditional Chinese for Taiwan. Do not output Simplified Chinese.",
+    "Force setup.targetMarket = \"cn\" and setup.chineseScript = \"traditional\".",
     "JSON schema:",
     JSON.stringify({
       name: "人设名称",
@@ -5869,7 +5871,7 @@ async function derivePersonaSpecWithCodex(text: string): Promise<{ name: string;
         personaStyle: "表达方式",
         totalEpisodes: 50,
         targetMarket: "cn",
-        chineseScript: "simplified",
+        chineseScript: "traditional",
         personaName: "人设名称",
         personaDescription: "同 content 或更短描述",
         contentTheme: "内容主题和图片视觉倾向",
@@ -8423,13 +8425,17 @@ export function buildPostDetailActionRows(args: {
   publishCallback: string;
   deleteCallback: string;
   archiveId: string;
+  postIndex?: number;
   groupContentType?: TelegramGroupContentType;
 }) {
+  const imageRegenCallback = typeof args.postIndex === "number"
+    ? `post_img_regen_${args.archiveId}_${args.postIndex}`
+    : "post_img_regen";
   return [
     [{ text: "🚀 发布这篇", callback_data: args.publishCallback }],
     ...(args.hasImage ? [[{ text: "🖼 查看配圖/視頻", callback_data: "post_media_preview" }]] : []),
     [{ text: "🔄 重新生成推文", callback_data: "post_regen" }],
-    [{ text: args.hasImage ? "🖼 重新生成图片" : "🖼 单独生成图片", callback_data: "post_img_regen" }],
+    [{ text: args.hasImage ? "🖼 重新生成图片" : "🖼 单独生成图片", callback_data: imageRegenCallback }],
     [{ text: "🗑 删除这篇", callback_data: args.deleteCallback }],
     [{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(args.archiveId, 0, args.groupContentType) }],
   ];
@@ -14196,6 +14202,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         publishCallback: selected ? `pp_${selected.index}` : `pubpost_${archiveId}_${postId}`,
         deleteCallback: selected ? `dp_${selected.index}` : `delpost_${archiveId}_${postId}`,
         archiveId,
+        postIndex: archiveIndex,
         groupContentType: selected?.groupContentType,
       });
       if (postImageUrl && await sendPostPhotoDetail(bot, chatId, msgId, {
@@ -14434,23 +14441,35 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_regen" || data === "post_img_regen") {
-      const action = pendingPostActions.get(chatId);
-      if (!action?.archiveId || !action.postId) {
-        await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
-          reply_markup: { inline_keyboard: [[{ text: "📋 人设列表", callback_data: "list_personas" }]] },
+    if (data === "post_regen" || data === "post_img_regen" || data.startsWith("post_img_regen_")) {
+      let action = pendingPostActions.get(chatId);
+      let explicitPostIndex: number | null = null;
+      if (data.startsWith("post_img_regen_")) {
+        const payload = data.slice("post_img_regen_".length);
+        const sep = payload.lastIndexOf("_");
+        const archiveId = sep > 0 ? payload.slice(0, sep) : "";
+        const index = sep > 0 ? Number(payload.slice(sep + 1)) : NaN;
+        if (archiveId && Number.isInteger(index) && index >= 0) {
+          explicitPostIndex = index;
+          action = { archiveId, postId: "", groupContentType: action?.groupContentType };
+        }
+      }
+      if (!action?.archiveId || (!action.postId && explicitPostIndex === null)) {
+        await safeEditOrSend(bot, chatId, msgId, "\u8acb\u5148\u5f9e\u63a8\u6587\u5217\u8868\u6253\u958b\u4e00\u7bc7\u63a8\u6587\u3002", {
+          reply_markup: { inline_keyboard: [[{ text: "\ud83d\udccb \u4eba\u8a2d\u5217\u8868", callback_data: "list_personas" }]] },
         });
         return;
       }
       const archive = await loadPersonaForThisBot(action.archiveId);
-      const post = archive?.posts.find((item) => item.id === action.postId);
+      const post = explicitPostIndex !== null ? archive?.posts[explicitPostIndex] : archive?.posts.find((item) => item.id === action.postId);
       if (!archive || !post) {
-        await safeEditOrSend(bot, chatId, msgId, "没有找到这篇推文。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: `posts_${action.archiveId}` }]] },
+        await safeEditOrSend(bot, chatId, msgId, "\u6c92\u6709\u627e\u5230\u9019\u7bc7\u63a8\u6587\u3002", {
+          reply_markup: { inline_keyboard: [[{ text: "\u25c0\ufe0f \u8fd4\u56de\u63a8\u6587\u5217\u8868", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
         });
         return;
       }
-      const isImageOnly = data === "post_img_regen";
+      if (!action.postId) action.postId = post.id;
+      const isImageOnly = data === "post_img_regen" || data.startsWith("post_img_regen_");
       if (isImageOnly && !isWorkflowPersonaListItem(archive) && !getExplicitPersonaReferenceImageUrl(archive)) {
         await safeEditOrSend(bot, chatId, msgId, [
           "⚠️ 此人設尚未生成人設圖。",
@@ -14500,6 +14519,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 publishCallback: "post_action",
                 deleteCallback: "post_delete_action",
                 archiveId: action.archiveId,
+                postIndex: archive.posts.findIndex((item) => item.id === updated.id),
                 groupContentType: action.groupContentType,
               }),
             },
@@ -14552,6 +14572,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         publishCallback: "post_action",
         deleteCallback: "post_delete_action",
         archiveId: action.archiveId,
+        postIndex: archive.posts.findIndex((item) => item.id === post.id),
         groupContentType: action.groupContentType,
       });
       if (postImageUrl && await sendPostPhotoDetail(bot, chatId, msgId, {
