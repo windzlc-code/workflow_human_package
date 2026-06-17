@@ -1,5 +1,7 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+try { $Host.UI.RawUI.WindowTitle = "Workflow Delivery Package 便攜啟動器" } catch {}
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WebappDataDir = Join-Path $Root "webapp_data"
@@ -306,6 +308,7 @@ function Configure-TelegramBot {
   Write-Host "============================================================"
   Write-Host "請貼上 BotFather 給你的 Telegram Bot Token。"
   Write-Host "格式範例：1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  Write-Host "首次打開便攜包時必須重新輸入 Token；本工具會驗證並顯示 Bot 詳細資訊。"
   Write-Host ""
 
   if ((-not $Force) -and (Test-Path -LiteralPath $TokenFile)) {
@@ -351,9 +354,17 @@ function Configure-TelegramBot {
 
   Write-Host ""
   Write-Host "Telegram Bot 連線成功。"
+  Write-Host "------------------------------------------------------------"
+  Write-Host "Bot 詳細資訊"
   Write-Host ("Bot ID：" + $response.result.id)
   Write-Host ("使用者名稱：@" + $response.result.username)
   Write-Host ("Bot 名稱：" + $response.result.first_name)
+  Write-Host ("是否 Bot：" + $response.result.is_bot)
+  if ($null -ne $response.result.can_join_groups) { Write-Host ("可加入群組：" + $response.result.can_join_groups) }
+  if ($null -ne $response.result.can_read_all_group_messages) { Write-Host ("可讀取群組所有訊息：" + $response.result.can_read_all_group_messages) }
+  if ($null -ne $response.result.supports_inline_queries) { Write-Host ("支援 Inline Query：" + $response.result.supports_inline_queries) }
+  Write-Host ("Token 掩碼：" + (Mask-Secret $token))
+  Write-Host "------------------------------------------------------------"
 }
 
 function Configure-GrokTextModel {
@@ -387,6 +398,7 @@ function Configure-GrokTextModel {
   } else {
     Write-Host "首次使用需要設定 Grok 文字模型 API Key。"
   }
+  Write-Host "首次打開便攜包時必須重新輸入 API Base URL 與 API Key。"
   Write-Host ("Grok API Base URL 範例：" + $exampleBaseUrl)
   Write-Host ("預設模型順序：" + $defaultModels)
   Write-Host ""
