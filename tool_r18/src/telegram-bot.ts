@@ -694,6 +694,15 @@ type PendingGeneratedPostImageGroupFlow = {
   startedAt: number;
 };
 
+type PendingPostImageRatioAction = {
+  archiveId: string;
+  postId: string;
+  displayIndex?: number;
+  groupContentType?: TelegramGroupContentType;
+  source: "post_detail" | "candidate_regen";
+  createdAt: number;
+};
+
 type PendingPublishHistoryRequeueAction = {
   archiveId: string;
   recordId: string;
@@ -708,6 +717,7 @@ const PAID_R18_VIDEO_POST_CALLBACK_PREFIX = "pr18v_";
 const PUBLISH_HISTORY_REQUEUE_CALLBACK_PREFIX = "rh_";
 const POST_IMAGE_REGEN_ACTION_TTL_MS = 6 * 60 * 60_000;
 const POST_IMAGE_REGEN_ACTION_MAX = 500;
+const pendingPostImageRatioActions = new Map<number, PendingPostImageRatioAction>();
 const pendingPostImageRegenerationActions = new Map<string, PendingPostImageRegenerationAction>();
 const pendingPostImageCandidateSelectionActions = new Map<string, PendingPostImageCandidateSelectionAction>();
 const pendingPaidR18FallbackPostActions = new Map<string, PendingPaidR18FallbackPostAction>();
@@ -4386,6 +4396,37 @@ function buildFreeGeneratedPostImageRatioKeyboard(profile: string, qaEnabled = f
   return { inline_keyboard: rows };
 }
 
+function buildPostImageRatioKeyboard(profile: string, backCallback: string, qaEnabled = false) {
+  const options = toolR18TextToImageRatioOptions(profile);
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < options.length; i += 2) {
+    rows.push(options.slice(i, i + 2).map((item) => ({
+      text: item.label,
+      callback_data: "post_img_ratio_" + item.id,
+    })));
+  }
+  rows.push([{ text: qaEnabled ? "\u2705 QA \u5BE9\u67E5\uFF1A\u958B\u555F" : "\u2611\uFE0F QA \u5BE9\u67E5\uFF1A\u95DC\u9589", callback_data: "genpost_toggle_qa" }]);
+  rows.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE\u63A8\u6587\u5217\u8868", callback_data: backCallback }]);
+  return { inline_keyboard: rows };
+}
+
+async function sendPostImageRatioPicker(bot: TelegramBot, chatId: number, msgId: number | undefined, action: PendingPostImageRatioAction) {
+  pendingPostImageRatioActions.set(chatId, { ...action, createdAt: Date.now() });
+  const profile = await freeGeneratedPostImageRatioProfile();
+  const qaEnabled = await toolR18GlobalTextToImageQaEnabled();
+  const archive = await loadPersonaForThisBot(action.archiveId).catch(() => null);
+  const post = archive?.posts.find((item) => item.id === action.postId);
+  const displayIndex = action.displayIndex || (post ? (post.orderIndex ?? archive?.posts.findIndex((item) => item.id === post.id) ?? 0) + 1 : 1);
+  await safeEditOrSend(bot, chatId, msgId, [
+    "\uD83D\uDDBC \u8ACB\u9078\u64C7\u9019\u7D44\u914D\u5716\u7684\u756B\u9762\u6BD4\u4F8B",
+    "",
+    `\u63A8\u6587\uFF1A\u7B2C ${displayIndex} \u7BC7`,
+    `\u76EE\u6A19\uFF1A\u4 \u5F35\u5019\u9078\u5716`,
+  ].join("\n"), {
+    reply_markup: buildPostImageRatioKeyboard(profile, buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType), qaEnabled),
+  });
+}
+
 function shouldSelectFreeGeneratedPostImageRatio(state: PendingGeneratePostState) {
   return state.contentBranch === "nonr18" && !state.textOnly;
 }
@@ -6103,6 +6144,85 @@ async function generateImagesForGeneratedPosts(args: {
     const imageUrls: string[] = [];
     const errors: string[] = [];
     const visualBrief = buildGeneratedPostImageVisualBrief(args.archiveName, post.content, args.visualInstruction);
+    if (args.hasPersonaReferenceImage) {
+      const images = await Promise.all(
+        Array.from({ length: GENERATED_POST_IMAGE_TARGET_COUNT }, async (_, index) => {
+          const candidateIndex = index + 1;
+          const instruction = [
+            `Free-group public-safe visual prompt: ${visualBrief}`,
+            `Archive/persona name: ${args.archiveName}`,
+            args.imageAspectRatio ? `Selected image aspect ratio: ${args.imageAspectRatio}${args.imageWidth && args.imageHeight ? `, base resolution ${args.imageWidth} x ${args.imageHeight}` : ""}${args.imageRatioLabel ? `, ${args.imageRatioLabel}` : ""}. Compose the image for this ratio.` : "",
+            "Extract and expand visual requirements before generating: clothing category, safe cut/structure, color, fabric/texture, role styling, room/location, props, action, mood, camera framing, and lighting.",
+            "If the user request mentions a role or scene such as nurse, teacher, office, room, travel, cafe, or outfit, the image must show that role/scene naturally instead of a generic portrait.",
+            "Free content must stay public-safe and logically match the tweet scene. Do not borrow paid/R18 prompt style.",
+            "The public tweet can stay short; the image prompt must be more detailed and visually specific without changing the scene.",
+            "A persona reference image exists; keep the same recognizable person when the backend can use the reference.",
+            args.visualInstruction ? `User request to obey: ${args.visualInstruction}` : "",
+            cleanGeneratedCopyForImagePrompt(post.content) ? `Generated copy context: ${cleanGeneratedCopyForImagePrompt(post.content)}` : "",
+            `Candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: match the safe visual prompt and generated copy context, keep persona identity consistent when available, and vary composition, distance, pose, lighting, or scene details from the other candidates.`,
+          ].filter(Boolean).join("\n");
+          return generateClosedPersonaPostImage({
+            archiveId: args.archiveId,
+            archiveName: args.archiveName,
+            post,
+            prompt: instruction,
+            imageAspectRatio: args.imageAspectRatio,
+          }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+        }),
+      );
+      for (let index = 0; index < images.length; index += 1) {
+        const image = images[index];
+        const urls = collectGeneratedImageUrls(image);
+        if (urls.length) {
+          for (const url of urls) {
+            if (imageUrls.length >= GENERATED_POST_IMAGE_TARGET_COUNT) break;
+            if (url && !imageUrls.includes(url)) imageUrls.push(url);
+          }
+        } else {
+          errors.push(`attempt ${index + 1}: ${image?.error || "image generation failed"}`);
+        }
+      }
+      if (imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT) {
+        const missing = GENERATED_POST_IMAGE_TARGET_COUNT - imageUrls.length;
+        for (let retryIndex = 1; imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT && retryIndex <= missing; retryIndex += 1) {
+          const candidateIndex = imageUrls.length + 1;
+          const instruction = [
+            `Free-group public-safe visual prompt: ${visualBrief}`,
+            args.imageAspectRatio ? `Selected image aspect ratio: ${args.imageAspectRatio}${args.imageWidth && args.imageHeight ? `, base resolution ${args.imageWidth} x ${args.imageHeight}` : ""}${args.imageRatioLabel ? `, ${args.imageRatioLabel}` : ""}. Compose the image for this ratio.` : "",
+            cleanGeneratedCopyForImagePrompt(post.content) ? `Generated copy context: ${cleanGeneratedCopyForImagePrompt(post.content)}` : "",
+            `Retry candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: keep persona identity and vary composition from existing candidates.`,
+          ].filter(Boolean).join("\n");
+          const image = await generateClosedPersonaPostImage({
+            archiveId: args.archiveId,
+            archiveName: args.archiveName,
+            post,
+            prompt: instruction,
+            imageAspectRatio: args.imageAspectRatio,
+          }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+          const urls = collectGeneratedImageUrls(image);
+          if (urls.length) {
+            for (const url of urls) {
+              if (imageUrls.length >= GENERATED_POST_IMAGE_TARGET_COUNT) break;
+              if (url && !imageUrls.includes(url)) imageUrls.push(url);
+            }
+          } else {
+            errors.push(`retry ${retryIndex}: ${image?.error || "image generation failed"}`);
+          }
+        }
+      }
+      if (imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT) {
+        const message = `only ${imageUrls.length}/${GENERATED_POST_IMAGE_TARGET_COUNT} images generated; ${errors.join("; ")}`;
+        console.warn(`[telegram][generate_image_error] archive=${args.archiveId} post=${post.id} error=${message}`);
+      }
+      results.push({
+        id: post.id,
+        content: post.content,
+        imageUrls,
+        ok: imageUrls.length >= GENERATED_POST_IMAGE_TARGET_COUNT,
+        error: imageUrls.length >= GENERATED_POST_IMAGE_TARGET_COUNT ? undefined : `only ${imageUrls.length}/${GENERATED_POST_IMAGE_TARGET_COUNT} images generated; ${errors.join("; ")}`,
+      });
+      continue;
+    }
     for (let attemptIndex = 1; imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT && attemptIndex <= GENERATED_POST_IMAGE_MAX_ATTEMPTS; attemptIndex += 1) {
       const candidateIndex = imageUrls.length + 1;
       const instruction = [
@@ -7576,6 +7696,10 @@ async function generateArchivePostImageCandidates(args: {
   archiveId: string;
   postId: string;
   chatId?: number;
+  imageAspectRatio?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  imageRatioLabel?: string;
 }) {
   const archive = await loadPersonaArchive(args.archiveId);
   if (!archive) throw new Error("\u4EBA\u8A2D\u4E0D\u5B58\u5728");
@@ -7587,6 +7711,75 @@ async function generateArchivePostImageCandidates(args: {
   }
   const imageUrls: string[] = [];
   const errors: string[] = [];
+  if (!isWorkflowPersonaListItem(archive) && hasExplicitPersonaReference) {
+    const images = await Promise.all(
+      Array.from({ length: GENERATED_POST_IMAGE_TARGET_COUNT }, async (_, index) => {
+        const candidateIndex = index + 1;
+        const prompt = [
+          `Generated tweet content is the primary visual brief: ${post.content}`,
+          args.imageAspectRatio ? `Selected image aspect ratio: ${args.imageAspectRatio}${args.imageWidth && args.imageHeight ? `, base resolution ${args.imageWidth} x ${args.imageHeight}` : ""}${args.imageRatioLabel ? `, ${args.imageRatioLabel}` : ""}. Compose the image for this ratio.` : "",
+          "Extract concrete visual requirements from the tweet first: clothing, outfit type, fabric, color, room/location, props, action, mood, and any named object must appear when visually possible.",
+          "If the tweet mentions clothes, wardrobe, closet, teacher clothes, school clothes, outfit try-on, or sorting clothes, the image must show the persona with those clothes/outfit and a matching wardrobe/room context, not a generic portrait.",
+          `Candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: keep the same persona identity and tweet context, but vary composition, distance, pose, lighting, or scene details from the other candidates.`,
+        ].filter(Boolean).join("\n");
+        return generateClosedPersonaPostImage({
+          archiveId: args.archiveId,
+          archiveName: archive.name,
+          post,
+          prompt,
+          imageAspectRatio: args.imageAspectRatio,
+        }).catch((error) => ({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }),
+    );
+    for (let index = 0; index < images.length; index += 1) {
+      const urls = collectGeneratedImageUrls(images[index]);
+      if (urls.length) {
+        for (const url of urls) {
+          if (imageUrls.length >= GENERATED_POST_IMAGE_TARGET_COUNT) break;
+          if (url && !imageUrls.includes(url)) imageUrls.push(url);
+        }
+      } else {
+        errors.push(`\u5617\u8A66${index + 1}: ${images[index]?.error || "\u5716\u7247\u751F\u6210\u5931\u6557"}`);
+      }
+    }
+    if (imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT) {
+      const missing = GENERATED_POST_IMAGE_TARGET_COUNT - imageUrls.length;
+      for (let retryIndex = 1; imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT && retryIndex <= missing; retryIndex += 1) {
+        const candidateIndex = imageUrls.length + 1;
+        const prompt = [
+          `Generated tweet content is the primary visual brief: ${post.content}`,
+          args.imageAspectRatio ? `Selected image aspect ratio: ${args.imageAspectRatio}${args.imageWidth && args.imageHeight ? `, base resolution ${args.imageWidth} x ${args.imageHeight}` : ""}${args.imageRatioLabel ? `, ${args.imageRatioLabel}` : ""}. Compose the image for this ratio.` : "",
+          `Retry candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: keep the same persona identity and tweet context, but vary composition from existing candidates.`,
+        ].filter(Boolean).join("\n");
+        const image = await generateClosedPersonaPostImage({
+          archiveId: args.archiveId,
+          archiveName: archive.name,
+          post,
+          prompt,
+          imageAspectRatio: args.imageAspectRatio,
+        }).catch((error) => ({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        const urls = collectGeneratedImageUrls(image);
+        if (urls.length) {
+          for (const url of urls) {
+            if (imageUrls.length >= GENERATED_POST_IMAGE_TARGET_COUNT) break;
+            if (url && !imageUrls.includes(url)) imageUrls.push(url);
+          }
+        } else {
+          errors.push(`retry ${retryIndex}: ${image?.error || "\u5716\u7247\u751F\u6210\u5931\u6557"}`);
+        }
+      }
+    }
+    if (imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT) {
+      throw new Error(`\u53EA\u751F\u6210 ${imageUrls.length}/${GENERATED_POST_IMAGE_TARGET_COUNT} \u5F35\u5019\u9078\u5716\uFF1B${errors.join("\uFF1B") || "\u5716\u7247\u751F\u6210\u5931\u6557"}`);
+    }
+    return { content: post.content, imageUrls, errors };
+  }
   for (let attemptIndex = 1; imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT && attemptIndex <= GENERATED_POST_IMAGE_MAX_ATTEMPTS; attemptIndex += 1) {
     const candidateIndex = imageUrls.length + 1;
     const prompt = [
@@ -7612,6 +7805,10 @@ async function generateArchivePostImageCandidates(args: {
         archiveName: archive.name,
         post,
         prompt,
+        imageAspectRatio: args.imageAspectRatio,
+        imageWidth: args.imageWidth,
+        imageHeight: args.imageHeight,
+        imageRatioLabel: args.imageRatioLabel,
         hasPersonaReferenceImage: hasExplicitPersonaReference,
         }).catch((error) => ({
           ok: false,
@@ -13380,6 +13577,63 @@ function sendMainMenu(chatId: number, msgId?: number) {
       };
       setPendingGeneratePost(chatId, nextState);
       await sendGeneratePostPromptInputStep(bot, chatId, msgId, nextState);
+      return;
+    }
+
+    if (data.startsWith("post_img_ratio_")) {
+      const action = pendingPostImageRatioActions.get(chatId);
+      if (!action?.archiveId || !action.postId) {
+        await safeEditOrSend(bot, chatId, msgId, "\u914D\u5716\u6BD4\u4F8B\u9078\u64C7\u5DF2\u904E\u671F\uFF0C\u8ACB\u5F9E\u63A8\u6587\u5217\u8868\u91CD\u65B0\u6253\u958B\u3002", {
+          reply_markup: { inline_keyboard: [[{ text: "\uD83D\uDCDD \u67E5\u770B\u63A8\u6587\u5217\u8868", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(action.archiveId);
+      const post = archive?.posts.find((item) => item.id === action.postId);
+      if (!archive || !post) {
+        pendingPostImageRatioActions.delete(chatId);
+        await safeEditOrSend(bot, chatId, msgId, "\u6C92\u6709\u627E\u5230\u9019\u7BC7\u63A8\u6587\u3002", {
+          reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE\u63A8\u6587\u5217\u8868", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+        });
+        return;
+      }
+      const profile = await freeGeneratedPostImageRatioProfile();
+      const option = toolR18T2iRatioOption(profile, data.slice("post_img_ratio_".length));
+      const displayIndex = action.displayIndex || (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+      await safeEditOrSend(bot, chatId, msgId, [
+        `\uD83D\uDDBC \u6B63\u5728\u70BA\u7B2C ${displayIndex} \u7BC7\u751F\u6210 4 \u5F35\u5019\u9078\u914D\u5716...`,
+        `\u756B\u9762\u6BD4\u4F8B\uFF1A${option.ratio}\uFF08${option.label}\uFF09`,
+        `\u57FA\u790E\u5206\u8FA8\u7387\uFF1A${option.width} x ${option.height}`,
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE\u63A8\u6587\u5217\u8868", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+      });
+      const stopTyping = startTelegramTyping(bot, chatId);
+      try {
+        const result = await generateArchivePostImageCandidates({
+          archiveId: action.archiveId,
+          postId: action.postId,
+          chatId,
+          imageAspectRatio: option.ratio,
+          imageWidth: option.width,
+          imageHeight: option.height,
+          imageRatioLabel: option.label,
+        });
+        stopTyping();
+        pendingPostImageRatioActions.delete(chatId);
+        await sendPostImageCandidateGroupMessage(bot, chatId, {
+          archiveId: action.archiveId,
+          postId: action.postId,
+          content: result.content,
+          imageUrls: result.imageUrls,
+          displayIndex,
+          totalPosts: archive.posts.length || 1,
+        });
+      } catch (error) {
+        stopTyping();
+        await bot.sendMessage(chatId, `\u274C \u5716\u7247\u751F\u6210\u5931\u6557\uFF1A${formatUserFacingError(error, "\u5716\u7247\u751F\u6210\u5931\u6557\uFF0C\u8ACB\u7A0D\u5F8C\u91CD\u8A66\u3002")}`, {
+          reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE\u63A8\u6587\u5217\u8868", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+        });
+      }
       return;
     }
 
