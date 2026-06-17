@@ -22,7 +22,7 @@ import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, save
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
 import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
-import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
+import { buildPersonaPaidCaptionToneGuide } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
 import { generateClosedModelImage } from "@/runtime/node/image-generator";
@@ -3256,6 +3256,60 @@ async function advanceGeneratePostAfterMemorySelection(
   await sendGenerateTimeSlotPicker(bot, chatId, messageId, nextState);
 }
 const TOOL_R18_PUBLIC_URL = (process.env.TOOL_R18_PUBLIC_URL || process.env.PUBLIC_BASE_URL || "http://47.250.188.76/r18").replace(new RegExp("/+$"), "");
+function resolveQuickSetupPublicUrl(): string {
+  const explicit = String(process.env.QUICK_SETUP_PUBLIC_URL || "").trim();
+  if (explicit) return explicit;
+  const base = String(
+    process.env.PUBLIC_BASE_URL
+    || process.env.TOOL_R18_PUBLIC_URL
+    || process.env.WEB_PUBLIC_BASE_URL
+    || "",
+  ).trim().replace(new RegExp("/+$"), "");
+  if (base) return `${base}/quick-setup.html`;
+  return "http://43.167.237.120/quick-setup.html";
+}
+
+function getQuickSetupMissingConfigItems(): string[] {
+  const missing: string[] = [];
+  try {
+    const runtime = readRuntimeApiConfig();
+    const hasGrokKey = Boolean(
+      String(runtime.gptKey || runtime.zhanhuKey || process.env.OPENAI_API_KEY || "").trim(),
+    );
+    if (!hasGrokKey) missing.push("Grok API Key");
+  } catch {
+    missing.push("Grok API Key");
+  }
+  return missing;
+}
+
+async function sendQuickSetupEntryForStart(chatId: number) {
+  const setupUrl = resolveQuickSetupPublicUrl();
+  const missing = getQuickSetupMissingConfigItems();
+  const text = missing.length
+    ? [
+        "⚙️ 快捷配置",
+        "",
+        `目前缺少配置：${missing.join("、")}。`,
+        "請先打開快捷配置頁補齊設定，再繼續使用 Bot。",
+        setupUrl,
+      ].join("\n")
+    : [
+        "⚙️ 快捷配置",
+        "",
+        "需要更換 Token、設定 Grok API，或啟停 Bot 進程時，可打開快捷配置頁。",
+        setupUrl,
+      ].join("\n");
+  await bot.sendMessage(chatId, text, {
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [[{ text: "打開快捷配置", url: setupUrl }]],
+    },
+  }).catch((error) => {
+    console.error("[telegram][quick_setup_entry_error]", error?.message || error);
+  });
+}
+
 function defaultToolR18UploadHostDir() {
   if (process.platform !== "win32") return "/opt/apps/workflow_delivery_package-R18/webapp_data/tool_r18_uploads";
   const projectRoot = path.basename(process.cwd()).toLowerCase() === "tool_r18"
@@ -6594,6 +6648,55 @@ function normalizePaidR18PostContent(raw: string, linkPresentation: { url: strin
   return normalized || "";
 }
 
+function extractPaidR18CaptionBody(text: string): string {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^https?:\/\//i.test(line))
+    .join(" ");
+}
+
+function hasPaidR18SecondPerson(text: string): boolean {
+  return /[\u4f60\u59b3]/.test(extractPaidR18CaptionBody(text));
+}
+
+function hasPaidR18ExposureDetail(text: string): boolean {
+  const body = extractPaidR18CaptionBody(text);
+  return /(\u80f8\u53e3|\u80f8\u524d|\u4e73\u66c8|\u4e73\u5934|\u4e73\u982d|\u5927\u817f|\u817f\u6839|\u900f\u51fa|\u900f\u819a|\u9732\u51fa|\u8d70\u5149|\u6572\u958b|\u6ed1\u958b|\u89e3\u958b|\u6253\u958b|\u4f4e\u80f8)/i.test(body);
+}
+
+function needsPaidR18NaturalRewriteRetry(text: string): boolean {
+  const body = extractPaidR18CaptionBody(text);
+  if (!body) return true;
+  if (hasPaidR18SecondPerson(body)) return true;
+  if (!hasPaidR18ExposureDetail(body)) return true;
+  return false;
+}
+
+function buildJinjunyaPaidR18HardFallback(args: {
+  prompt?: string;
+  promptAnalysis?: string;
+  imageAnalysis?: string;
+  linkPresentation: { url: string; text: string } | null;
+}) {
+  const source = [args.imageAnalysis || "", args.promptAnalysis || "", args.prompt || ""].join(" ").replace(/\s+/g, " ").trim();
+  const opener = firstPaidR18PromptMatch(source, [
+    [/\u7761\u888d|\u6d74\u888d/i, "\u7761\u888d\u4e00\u6ed1\u958b"],
+    [/\u896f\u886b|\u4e0a\u8863/i, "\u4e0a\u8863\u4e00\u9b06\u958b"],
+    [/\u77ed\u88d9|\u5305\u81c0\u88d9|\u7a84\u88d9/i, "\u88d9\u64fa\u4e00\u5f80\u4e0a\u5e36"],
+    [/\u7d72\u8932|\u9ed1\u7d72/i, "\u9ed1\u7d72\u914d\u4e0a\u90a3\u817f\u7dda"],
+    [/\u540a\u5e36|\u7761\u8863/i, "\u9019\u5957\u4e00\u4e0a\u8eab"],
+  ], "\u9019\u5f35\u4e00\u6253\u958b");
+  const exposure = firstPaidR18PromptMatch(source, [
+    [/\u4e73\u982d|\u4e73\u66c8/i, "\u524d\u9762\u6574\u500b\u90fd\u5feb\u9732\u51fa\u4f86\u4e86"],
+    [/\u4f4e\u80f8|\u80f8\u53e3|\u9732\u80f8/i, "\u80f8\u53e3\u958b\u5f97\u592a\u4f4e\u4e86"],
+    [/\u5927\u817f|\u817f\u6839/i, "\u817f\u908a\u90a3\u6bb5\u771f\u7684\u5f88\u72af\u898f"],
+    [/\u900f\u660e|\u900f\u819a|\u534a\u900f/i, "\u900f\u51fa\u4f86\u90a3\u6bb5\u771f\u7684\u592a\u660e\u986f\u4e86"],
+    [/\u6572\u958b|\u6563\u958b|\u6ed1\u958b|\u6253\u958b|\u89e3\u958b/i, "\u4e00\u6ed1\u958b\u771f\u7684\u5168\u88ab\u770b\u5149\u4e86"],
+  ], "\u9019\u7a2e\u9732\u6cd5\u771f\u7684\u592a\u64a9\u4e86");
+  return normalizePaidR18PostContent(`${opener}\uFF0C${exposure}`, args.linkPresentation);
+}
+
 async function rewritePaidR18CaptionAsNaturalLanguage(args: {
   content: string;
   setup?: Partial<DramaSetup> | null;
@@ -6604,17 +6707,23 @@ async function rewritePaidR18CaptionAsNaturalLanguage(args: {
 }) {
   if (!usesJinjunyaFreeContentStyle(args.setup)) return normalizePaidR18PostContent(args.content, args.linkPresentation);
   const instruction = [
-    "請把下面這句 Telegram 付費群短文案改寫成更像真人說話的台灣口語短句。",
-    "只針對金君雅人設；保留付費群福利導向，但語氣要像真人偷放一句，不要像鏡頭描述或器官清單。",
-    "服裝和視覺焦點必須保留，但要融進一句自然反應裡。",
-    "允許一點害羞、撒嬌、試探、偷放一張的語感。",
-    "只輸出 10-20 個中文字左右的短句；如果有固定連結，固定連結放最後一行。",
-    "不要固定開頭，不要輸出說明、編號、JSON 或 Markdown。",
-    "不要用「清晰可見」「完全敞開」「全露出」這類機械字眼。",
-    args.imageAnalysis ? `看圖要點：${args.imageAnalysis}` : "",
-    args.promptAnalysis ? `提示詞要點：${args.promptAnalysis}` : "",
-    args.prompt ? `使用者要求：${args.prompt}` : "",
-    `原句：${args.content}`,
+    "Rewrite the following paid Telegram caption into natural spoken Traditional Chinese.",
+    "Target persona: Jinjunya only.",
+    "Keep the paid-group teaser intent, but make it sound like a real person casually reacting to the picture.",
+    "Use the same natural, colloquial tone as the free-content copy, but keep the paid-content direction.",
+    "Do not sound like a scene report, keyword list, anatomy description, or prompt text.",
+    "Prefer one smooth reaction sentence. You may add a light flirty or teasing tone.",
+    "Do not use second-person pronouns like ni or second-person direct address.",
+    "The main sentence must naturally mention one visible exposure detail, such as chest opening, nipples showing, thighs exposed, sheer fabric, or clothing sliding open.",
+    "Keep the clothing focus and the exposure hook, but express them naturally.",
+    "Avoid dry anatomical list style, but do not remove the exposure detail.",
+    "Output about 10-20 Chinese characters for the main sentence.",
+    "If there is a fixed link, keep it on the last line only.",
+    "No title, no bullets, no JSON, no Markdown fence, no explanation.",
+    args.imageAnalysis ? `Image notes: ${args.imageAnalysis}` : "",
+    args.promptAnalysis ? `Prompt notes: ${args.promptAnalysis}` : "",
+    args.prompt ? `User request: ${args.prompt}` : "",
+    `Original caption: ${args.content}`,
   ].filter(Boolean).join("\n");
   const { data } = await callTextUnderstandingModelWithFallback(
     "xai/grok-4.3",
@@ -6630,7 +6739,41 @@ async function rewritePaidR18CaptionAsNaturalLanguage(args: {
     },
   );
   const rewritten = normalizePaidR18PostContent(extractText(data), args.linkPresentation);
-  return rewritten || normalizePaidR18PostContent(args.content, args.linkPresentation);
+  if (rewritten && !needsPaidR18NaturalRewriteRetry(rewritten)) return rewritten;
+
+  const retryInstruction = [
+    "Rewrite again in Traditional Chinese.",
+    "Do not use second-person pronouns.",
+    "Must keep one natural but explicit exposure detail in the sentence.",
+    "Must sound like a real spoken tease, not a report.",
+    "Keep it short: around 10-20 Chinese characters.",
+    args.imageAnalysis ? `Image notes: ${args.imageAnalysis}` : "",
+    args.promptAnalysis ? `Prompt notes: ${args.promptAnalysis}` : "",
+    args.prompt ? `User request: ${args.prompt}` : "",
+    `Bad version to fix: ${rewritten || args.content}`,
+  ].filter(Boolean).join("\n");
+  const retry = await callTextUnderstandingModelWithFallback(
+    "xai/grok-4.3",
+    [{ role: "user", parts: [{ text: retryInstruction }] }],
+    { temperature: 0.6, maxOutputTokens: 120 },
+    undefined,
+    {
+      isUsableResponse: (data) => Boolean(extractText(data).trim()),
+      isRetryableError: isTextModelFallbackError,
+      onFallback: (event) => {
+        console.warn("[telegram][paid_r18_caption_rewrite_retry_fallback]", `${event.from}->${event.to}: ${event.error}`);
+      },
+    },
+  );
+  const retried = normalizePaidR18PostContent(extractText(retry.data), args.linkPresentation);
+  if (retried && !needsPaidR18NaturalRewriteRetry(retried)) return retried;
+
+  return buildJinjunyaPaidR18HardFallback({
+    prompt: args.prompt,
+    promptAnalysis: args.promptAnalysis,
+    imageAnalysis: args.imageAnalysis,
+    linkPresentation: args.linkPresentation,
+  });
 }
 
 async function generatePaidR18PostContentFromSelectedImage(args: {
@@ -6674,7 +6817,7 @@ async function generatePaidR18PostContentFromSelectedImage(args: {
     },
   );
   const normalized = normalizePaidR18PostContent(extractText(data), args.linkPresentation);
-  if (normalized && isMechanicalPaidCaption(normalized) && usesJinjunyaFreeContentStyle(args.setup)) {
+  if (normalized && usesJinjunyaFreeContentStyle(args.setup)) {
     return rewritePaidR18CaptionAsNaturalLanguage({
       content: normalized,
       setup: args.setup,
@@ -6872,7 +7015,7 @@ async function generatePaidR18VideoPostContent(args: {
     },
   );
   const normalized = normalizePaidR18PostContent(extractText(data), args.linkPresentation);
-  if (normalized && isMechanicalPaidCaption(normalized) && usesJinjunyaFreeContentStyle(args.setup)) {
+  if (normalized && usesJinjunyaFreeContentStyle(args.setup)) {
     return rewritePaidR18CaptionAsNaturalLanguage({
       content: normalized,
       setup: args.setup,
@@ -16005,9 +16148,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
     const video = msg.video || null;
     const documentMedia = msg.document || null;
     const media = photo || video || documentMedia;
-    if (text === "/start" || text === "/menu" || text === "主菜单" || text === "🏠 主選單") {
+    const isStartCommand = text === "/start" || text === "/menu";
+    if (isStartCommand || text === "主菜单" || text === "🏠 主選單") {
       clearTelegramNavigationTransientState(chatId);
       sendMainMenu(chatId);
+      if (isStartCommand) {
+        await sendQuickSetupEntryForStart(chatId);
+      }
       return;
     }
     if (msg.text?.startsWith("/")) return;
