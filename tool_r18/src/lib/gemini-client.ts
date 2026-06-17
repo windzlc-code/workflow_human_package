@@ -514,7 +514,7 @@ export async function callGemini(
 
 export function isTextModelFallbackError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /429|503|502|504|upstream|overload|overloaded|饱和|飽和|繁忙|稍后再试|稍後再試|No available channel|no available distributor|model_not_found|MAX_TOKENS|返回空|空内容|空內容|未返回|模型 .*呼叫失敗/i.test(message);
+  return /402|429|503|502|504|upstream|overload|overloaded|insufficient.*(?:balance|credit|quota)|quota.*exceeded|payment required|余额不足|餘額不足|额度不足|額度不足|饱和|飽和|繁忙|稍后再试|稍後再試|No available channel|no available distributor|model_not_found|MAX_TOKENS|返回空|空内容|空內容|未返回|模型 .*呼叫失敗/i.test(message);
 }
 
 export async function callTextUnderstandingModelWithFallback(

@@ -15327,6 +15327,7 @@ def create_app() -> FastAPI:
             if key in explicit and not str(explicit.get(key) or "").strip():
                 explicit.pop(key, None)
 
+        old_process_snapshot = _tool_r18_process_snapshot()
         merged = dict(DEFAULT_RUNTIME_CONFIG)
         if isinstance(current_runtime, dict):
             merged.update(current_runtime)
@@ -15338,9 +15339,17 @@ def create_app() -> FastAPI:
                 _write_runtime_config_file(merged)
             new_token = str(explicit.get("telegram_bot_token") or "").strip()
             if new_token:
+                _write_tool_r18_process_desired("stopped")
+                _terminate_tool_r18_daemon_processes()
                 _write_tool_r18_bot_token_files(new_token)
             _sync_tool_r18_api_config_from_runtime(merged, explicit)
+            if new_token and old_process_snapshot.get("running"):
+                _write_tool_r18_process_desired("running")
+                if not _tool_r18_external_supervisor_available():
+                    _start_tool_r18_daemon_process()
         except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return api_quick_setup_status()
 
@@ -15356,13 +15365,68 @@ def create_app() -> FastAPI:
             merged.update(current_runtime)
         merged["telegram_bot_token"] = ""
         try:
+            _write_tool_r18_process_desired("stopped")
+            _terminate_tool_r18_daemon_processes()
             merged = _normalize_runtime_config(merged)
             with _RUNTIME_CONFIG_LOCK:
                 _write_runtime_config_file(merged)
             _clear_tool_r18_bot_token_files()
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         return api_quick_setup_status()
+
+    @app.delete("/api/quick_setup/grok_key")
+    def api_quick_setup_clear_grok_key():
+        try:
+            with db() as conn:
+                current_runtime = _get_runtime_config(conn)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        merged = dict(DEFAULT_RUNTIME_CONFIG)
+        if isinstance(current_runtime, dict):
+            merged.update(current_runtime)
+        merged["llm_api_key"] = ""
+        merged["llm_api_key_gpt"] = ""
+        explicit = {"llm_api_key": "", "llm_api_key_gpt": ""}
+        try:
+            merged = _normalize_runtime_config(merged)
+            merged["llm_api_key"] = ""
+            merged["llm_api_key_gpt"] = ""
+            with _RUNTIME_CONFIG_LOCK:
+                _write_runtime_config_file(merged)
+            _sync_tool_r18_api_config_from_runtime(merged, explicit)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return api_quick_setup_status()
+
+    @app.post("/api/quick_setup/llm_models")
+    def api_quick_setup_llm_models(payload: LlmModelsPayload):
+        base_url = str(payload.llm_base_url or "").strip()
+        api_key = str(payload.llm_api_key or "").strip()
+        if "***" in api_key:
+            api_key = ""
+        if not base_url or not api_key:
+            try:
+                with db() as conn:
+                    runtime = _get_runtime_config(conn)
+            except RuntimeConfigFileError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            base_url = base_url or str(runtime.get("llm_base_url") or "").strip()
+            api_key = api_key or str(runtime.get("llm_api_key_gpt") or runtime.get("llm_api_key") or "").strip()
+        if not base_url or not api_key:
+            raise HTTPException(status_code=400, detail="請先配置 API Base URL 和 Grok Key")
+        try:
+            models = _fetch_openai_compatible_model_ids(base_url=base_url, api_key=api_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        grok_models = [model for model in models if "grok" in model.lower()]
+        return {"ok": True, "models": grok_models or models}
 
     @app.post("/api/quick_setup/process")
     def api_quick_setup_process(payload: QuickSetupProcessPayload):

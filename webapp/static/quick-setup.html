@@ -12,7 +12,7 @@
       <div>
         <div class="auth-kicker">Workflow Delivery Package</div>
         <h1>快捷配置</h1>
-        <p>只保留最常用的基礎設定：Telegram Bot Token、Grok API、Grok Key，以及 Bot 工作進程啟動/停止。完整參數仍在後台管理。</p>
+        <p>只保留常用基礎設定：Telegram Bot Token、Grok API、Grok Key，以及 Bot 工作進程啟動/停止。完整參數仍在後台管理。</p>
       </div>
       <div class="quick-setup-actions">
         <button id="btnReloadSetup" class="ghost" type="button">重新讀取</button>
@@ -23,9 +23,9 @@
     <form id="quickSetupForm" class="quick-setup-grid quick-setup-grid-compact">
       <section class="card quick-setup-card">
         <div class="admin-config-card-title">Telegram Bot Token</div>
-        <p class="small">貼上 BotFather 給你的 Token 後保存。切換 Token 會同步寫入後台與 Tool_R18 Bot 設定；需要移除時點「清空 Token」。</p>
+        <p class="small">貼上 BotFather 給你的 Token 後保存。更換 Token 時會先停止目前 Bot，再同步切換到新的 Bot，避免殘留進程搶同一個 Bot。</p>
         <label>Bot Token</label>
-        <input id="telegramBotToken" type="password" autocomplete="off" placeholder="1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+        <input id="telegramBotToken" type="text" autocomplete="off" placeholder="1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
         <div class="quick-setup-inline-actions">
           <button id="btnSaveToken" class="primary" type="button">保存 Token</button>
           <button id="btnClearToken" class="danger" type="button">清空 Token</button>
@@ -35,23 +35,41 @@
 
       <section class="card quick-setup-card">
         <div class="admin-config-card-title">Grok 模型 API</div>
-        <p class="small">用於推文、提示詞理解與文案生成。Key 留空保存時會保留目前 Key。</p>
+        <p class="small">用於推文、提示詞理解與文案生成。已配置時會在輸入框顯示掩碼；留空保存會保留目前 Key。</p>
         <label>API Base URL</label>
         <input id="llmBaseUrl" type="text" placeholder="https://llm.runninghub.ai/v1">
+
         <label>API Key</label>
-        <input id="llmApiKey" type="password" autocomplete="off" placeholder="留空則保留目前 Key">
-        <label>模型順序</label>
-        <input id="llmModelOrder" type="text" placeholder="xai/grok-4.3, grok-4.2">
+        <input id="llmApiKey" type="text" autocomplete="off" placeholder="留空則保留目前 Key">
+        <div class="quick-setup-inline-actions">
+          <button id="btnClearGrokKey" class="danger" type="button">清空 Grok Key</button>
+        </div>
+        <div id="grokKeyStatus" class="small quick-setup-hint">正在讀取...</div>
+
+        <label>可用模型</label>
+        <div class="quick-model-picker-wrap">
+        <div class="admin-model-list-input-row admin-model-list-input-row-picker">
+          <input id="quickModelInput" type="text" placeholder="輸入模型名，例如 xai/grok-4.3">
+          <button id="btnAddQuickModel" class="ghost admin-model-picker-btn quick-model-add-btn" type="button" aria-label="添加模型" title="添加模型">+</button>
+          <button id="btnBrowseQuickGrokModels" class="ghost admin-model-picker-btn" type="button">識別可用模型</button>
+        </div>
+        <div id="quickAvailableModelPicker" class="admin-model-picker" hidden></div>
+        </div>
+
+        <input id="llmModelOrder" class="quick-hidden-model-order" type="text" placeholder="xai/grok-4.3, grok-4.2" aria-hidden="true" tabindex="-1">
+        <div id="quickModelList" class="quick-setup-model-list"></div>
+
         <button id="btnSaveGrok" class="primary quick-setup-full-button" type="button">保存 Grok 設定</button>
       </section>
 
       <section class="card quick-setup-card quick-setup-card-wide">
         <div class="admin-config-card-title">進程控制</div>
-        <p class="small">此處控制 Telegram Bot 工作進程；Web 設定面板會保持可用，方便停止後再重新啟動。</p>
+        <p class="small">此處只控制 Telegram Bot 工作進程；Web 設定面板會保持可用，方便停止後再重新啟動。</p>
         <div class="quick-setup-process-row">
           <button id="btnStartProcess" class="primary" type="button">一鍵啟動 Bot 進程</button>
           <button id="btnStopProcess" class="danger" type="button">一鍵停止 Bot 進程</button>
         </div>
+        <div id="processOperationStatus" class="small quick-setup-hint">尚未執行操作。</div>
         <div class="quick-setup-status-grid quick-setup-status-grid-compact">
           <div class="overview-pod">
             <div class="overview-label">Bot Token</div>
@@ -72,8 +90,9 @@
         <div class="admin-config-card-title">提示</div>
         <ul class="quick-setup-note-list">
           <li>第一次使用：先保存 Bot Token，再啟動 Bot 進程。</li>
-          <li>更換 Bot：保存新 Token 後，點「停止」再點「啟動」，避免多個 Bot 同時輪詢。</li>
-          <li>Grok Key 不會在頁面回顯，只顯示是否已配置。</li>
+          <li>更換 Bot：直接保存新的 Token；系統會先停止舊 Bot，再按原本狀態切換到新 Bot。</li>
+          <li>Grok Key 不會明文回傳；已配置時只顯示掩碼與狀態。</li>
+          <li>模型順序會按從左到右、從上到下依次嘗試；可添加、識別、上移、下移或刪除。</li>
         </ul>
         <div id="quickSetupMsg" class="msg"></div>
       </section>

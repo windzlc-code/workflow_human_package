@@ -22,6 +22,7 @@ import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, save
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
 import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
+import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
 import { generateClosedModelImage } from "@/runtime/node/image-generator";
@@ -6531,6 +6532,7 @@ async function describePaidR18SelectedImageWithGrok(args: {
 function buildPaidR18PostFromImageInstruction(args: {
   prompt: string;
   archiveName: string;
+  setup?: Partial<DramaSetup> | null;
   contentTimeSlot?: GeneratePostTimeSlot;
   imageDirection: string;
   imageUrl?: string;
@@ -6540,14 +6542,17 @@ function buildPaidR18PostFromImageInstruction(args: {
   const prompt = String(args.prompt || "").trim();
   const promptAnalysis = String(args.promptAnalysis || "").trim();
   const imageAnalysis = String(args.imageAnalysis || "").trim();
+  const toneGuide = buildPersonaPaidCaptionToneGuide(args.setup);
   return [
     "【付費群文案硬性要求】",
     imageAnalysis ? "必須優先根據【Grok 看圖結果】寫文案；提交提示詞只作為補充，不可蓋過圖片實際內容。" : "必須根據使用者提交的提示詞要點寫文案。",
     "文案必須直接引用圖片中的服裝與暴露/視覺重點，這兩項權重最高；姿勢、場景、光線或情緒只作輔助，不要寫成通用模板。",
-    "第一句必須同時包含「服裝」與「暴露/視覺焦點」，不能只寫場景或情緒。",
+    "第一句必須自然帶出「服裝」與「暴露/視覺焦點」，不能只寫場景或情緒，也不能像在列清單。",
     "只寫 10-20 個中文字左右的短文案；口語、直白、色情、裸露、有成人付費群福利感。",
     "不要固定開頭，不要寫新聞、故事、日常長文、免費內容預覽。",
     "如果有固定連結，固定連結放最後一行。",
+    "",
+    toneGuide.length ? toneGuide.join("\n") : "",
     "",
     imageAnalysis ? "【Grok 看圖結果】\n" + imageAnalysis : "",
     imageAnalysis ? "請基於上面的看圖結果重新組織成短文案，不要只照抄原句。" : "",
@@ -6560,7 +6565,7 @@ function buildPaidR18PostFromImageInstruction(args: {
     prompt ? `使用者主題/要求（最高優先級）：${prompt}` : "使用者未提供本次提示詞，請根據人設和已生成圖片自由發展。",
     "本次流程是先生成 R18 付費群配圖，再依照圖片內容生成文案；文案必須服務已生成圖片，不要反過來改圖、不要寫成新聞、泛話題、免費群預覽或免費內容格式。",
     "付費群文案方向：依照照片內容生成文案，文案用詞必須直白、色情、誘惑、暴露性器官、帶付費群福利感；只寫短句，不要鋪陳新聞、故事或日常長文。",
-    "短文案只要 10-20 個中文字，口語化；服裝與色情暴露部位/視覺裸露焦點必須出現，姿勢、場景、光線或情緒降低權重。",
+    "短文案只要 10-20 個中文字，口語化；服裝與色情暴露部位/視覺裸露焦點必須出現，但要像真人一句話順口講出來，不要變成解剖式描寫。",
     "如果人設有固定連結，固定連結仍放最後一行。",
     "不要固定開頭，不要自動加入「哥哥們～早安安」或「深夜福利來了」這類固定句。",
     "格式只能是：10-20 字短文案；最後一行固定連結（如果有）。",
@@ -6589,10 +6594,50 @@ function normalizePaidR18PostContent(raw: string, linkPresentation: { url: strin
   return normalized || "";
 }
 
+async function rewritePaidR18CaptionAsNaturalLanguage(args: {
+  content: string;
+  setup?: Partial<DramaSetup> | null;
+  prompt?: string;
+  promptAnalysis?: string;
+  imageAnalysis?: string;
+  linkPresentation: { url: string; text: string } | null;
+}) {
+  if (!usesJinjunyaFreeContentStyle(args.setup)) return normalizePaidR18PostContent(args.content, args.linkPresentation);
+  const instruction = [
+    "請把下面這句 Telegram 付費群短文案改寫成更像真人說話的台灣口語短句。",
+    "只針對金君雅人設；保留付費群福利導向，但語氣要像真人偷放一句，不要像鏡頭描述或器官清單。",
+    "服裝和視覺焦點必須保留，但要融進一句自然反應裡。",
+    "允許一點害羞、撒嬌、試探、偷放一張的語感。",
+    "只輸出 10-20 個中文字左右的短句；如果有固定連結，固定連結放最後一行。",
+    "不要固定開頭，不要輸出說明、編號、JSON 或 Markdown。",
+    "不要用「清晰可見」「完全敞開」「全露出」這類機械字眼。",
+    args.imageAnalysis ? `看圖要點：${args.imageAnalysis}` : "",
+    args.promptAnalysis ? `提示詞要點：${args.promptAnalysis}` : "",
+    args.prompt ? `使用者要求：${args.prompt}` : "",
+    `原句：${args.content}`,
+  ].filter(Boolean).join("\n");
+  const { data } = await callTextUnderstandingModelWithFallback(
+    "xai/grok-4.3",
+    [{ role: "user", parts: [{ text: instruction }] }],
+    { temperature: 0.55, maxOutputTokens: 120 },
+    undefined,
+    {
+      isUsableResponse: (data) => Boolean(extractText(data).trim()),
+      isRetryableError: isTextModelFallbackError,
+      onFallback: (event) => {
+        console.warn("[telegram][paid_r18_caption_rewrite_fallback]", `${event.from}->${event.to}: ${event.error}`);
+      },
+    },
+  );
+  const rewritten = normalizePaidR18PostContent(extractText(data), args.linkPresentation);
+  return rewritten || normalizePaidR18PostContent(args.content, args.linkPresentation);
+}
+
 async function generatePaidR18PostContentFromSelectedImage(args: {
   imageUrl: string;
   prompt: string;
   archiveName: string;
+  setup?: Partial<DramaSetup> | null;
   contentTimeSlot?: GeneratePostTimeSlot;
   imageDirection: string;
   promptAnalysis: string;
@@ -6606,6 +6651,7 @@ async function generatePaidR18PostContentFromSelectedImage(args: {
   const instruction = buildPaidR18PostFromImageInstruction({
     prompt: args.prompt,
     archiveName: args.archiveName,
+    setup: args.setup,
     contentTimeSlot: args.contentTimeSlot,
     imageDirection: args.imageDirection,
     imageUrl: args.imageUrl,
@@ -6627,7 +6673,18 @@ async function generatePaidR18PostContentFromSelectedImage(args: {
       },
     },
   );
-  return normalizePaidR18PostContent(extractText(data), args.linkPresentation);
+  const normalized = normalizePaidR18PostContent(extractText(data), args.linkPresentation);
+  if (normalized && isMechanicalPaidCaption(normalized) && usesJinjunyaFreeContentStyle(args.setup)) {
+    return rewritePaidR18CaptionAsNaturalLanguage({
+      content: normalized,
+      setup: args.setup,
+      prompt: args.prompt,
+      promptAnalysis: args.promptAnalysis,
+      imageAnalysis: args.imageAnalysis,
+      linkPresentation: args.linkPresentation,
+    });
+  }
+  return normalized;
 }
 
 function isPaidR18TextModerationError(error: unknown): boolean {
@@ -6639,6 +6696,7 @@ function buildPaidR18FallbackPostContent(args: {
   prompt: string;
   imageDirection: string;
   imageAnalysis?: string;
+  setup?: Partial<DramaSetup> | null;
   linkPresentation: { url: string; text: string } | null;
 }): string {
   const source = `${args.imageAnalysis || ""} ${args.prompt || ""} ${args.imageDirection || ""}`;
@@ -6672,10 +6730,16 @@ function buildPaidR18FallbackPostContent(args: {
     [/透明|半透|透視/i, "透出感很強"],
     [/貼身|紧身|緊身|包臀/i, "貼身曲線很清楚"],
   ], "露出感很重");
-  const lead = `${outfit}${exposureFocus}`;
+  const lead = usesJinjunyaFreeContentStyle(args.setup)
+    ? `這件${outfit}${exposureFocus ? `，${exposureFocus}` : ""}`
+    : `${outfit}${exposureFocus}`;
   const lines = [
-    scene === "這張" ? lead : `${lead}，${scene}更有感`,
-    detail ? "想看更完整細節就進來" : "想看完整的就進來",
+    usesJinjunyaFreeContentStyle(args.setup)
+      ? (scene === "這張" ? `${lead}，真的有點太犯規` : `${lead}，${scene}真的更有感`)
+      : (scene === "這張" ? lead : `${lead}，${scene}更有感`),
+    usesJinjunyaFreeContentStyle(args.setup)
+      ? (detail ? "想看完整的就進來吧" : "想看更多就進來吧")
+      : (detail ? "想看更完整細節就進來" : "想看完整的就進來"),
   ];
   const linkUrl = args.linkPresentation?.url?.trim();
   if (linkUrl) lines.push(linkUrl);
@@ -6776,14 +6840,18 @@ async function saveAndSendPaidR18SelectedImagePost(args: {
 async function generatePaidR18VideoPostContent(args: {
   prompt: string;
   archiveName: string;
+  setup?: Partial<DramaSetup> | null;
   contentTimeSlot?: GeneratePostTimeSlot;
   linkPresentation: { url: string; text: string } | null;
 }) {
+  const toneGuide = buildPersonaPaidCaptionToneGuide(args.setup);
   const instruction = [
     "請生成 Telegram 付費群短文案。",
     "素材類型：已生成的付費群視頻。",
     "文案要根據視頻生成提示詞中的服裝、姿勢、場景、光線、動作和氛圍來寫，不要寫成免費內容或一般日常推文。",
     "只寫 10-20 個中文字左右的短句；口語、直白、付費群導向。",
+    "",
+    toneGuide.length ? toneGuide.join("\n") : "",
     "不要固定開頭，不要輸出說明、編號、JSON 或 Markdown。",
     "如果有固定連結，固定連結放最後一行。",
     args.contentTimeSlot ? `本次文案時段：${generatePostTimeSlotLabel(args.contentTimeSlot)}。` : "",
@@ -6804,12 +6872,22 @@ async function generatePaidR18VideoPostContent(args: {
     },
   );
   const normalized = normalizePaidR18PostContent(extractText(data), args.linkPresentation);
+  if (normalized && isMechanicalPaidCaption(normalized) && usesJinjunyaFreeContentStyle(args.setup)) {
+    return rewritePaidR18CaptionAsNaturalLanguage({
+      content: normalized,
+      setup: args.setup,
+      prompt: args.prompt,
+      promptAnalysis: args.prompt,
+      linkPresentation: args.linkPresentation,
+    });
+  }
   if (!normalized) throw new Error("Grok 未返回可用付費群視頻文案");
   return normalized;
 }
 
 function buildPaidR18VideoFallbackPostContent(args: {
   prompt: string;
+  setup?: Partial<DramaSetup> | null;
   linkPresentation: { url: string; text: string } | null;
 }) {
   const source = String(args.prompt || "");
@@ -6826,7 +6904,10 @@ function buildPaidR18VideoFallbackPostContent(args: {
     [/腿|大腿|絲襪|丝袜|黑絲|黑丝/i, "腿部線條"],
     [/浴袍|睡袍|襯衫|衬衫|吊帶|吊带/i, "這身衣服"],
   ], "畫面細節");
-  const lines = [`${focus}${scene}`, "想看完整視頻就進來"];
+  const lines = [
+    usesJinjunyaFreeContentStyle(args.setup) ? `${focus}${scene}，真的有點太超過` : `${focus}${scene}`,
+    usesJinjunyaFreeContentStyle(args.setup) ? "想看完整視頻就進來吧" : "想看完整視頻就進來",
+  ];
   const linkUrl = args.linkPresentation?.url?.trim();
   if (linkUrl) lines.push(linkUrl);
   return lines.join("\n").trim();
@@ -7006,6 +7087,7 @@ async function executePaidR18PostFromSelectedImage(args: {
       imageUrl: args.imageUrl,
       prompt: args.context.prompt,
       archiveName: args.context.archiveName,
+      setup: initialArchive?.setup,
       contentTimeSlot: args.context.contentTimeSlot,
       imageDirection: args.context.imageDirection,
       promptAnalysis,
@@ -7028,6 +7110,7 @@ async function executePaidR18PostFromSelectedImage(args: {
       prompt: args.context.prompt,
       imageDirection: args.context.imageDirection,
       imageAnalysis,
+      setup: initialArchive?.setup,
       linkPresentation,
     });
     const fallbackKey = rememberPaidR18FallbackPostAction({
@@ -13801,18 +13884,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const linkPresentation = getTweetStyleLinkPresentation(archive?.setup);
         let finalContent = "";
         if (paidR18VideoPostAction.action === "save") {
-          finalContent = buildPaidR18VideoFallbackPostContent({ prompt: action.prompt, linkPresentation });
+          finalContent = buildPaidR18VideoFallbackPostContent({ prompt: action.prompt, setup: archive?.setup, linkPresentation });
         } else {
           try {
             finalContent = await generatePaidR18VideoPostContent({
               prompt: action.prompt,
               archiveName: action.archiveName,
+              setup: archive?.setup,
               contentTimeSlot: action.contentTimeSlot,
               linkPresentation,
             });
           } catch (error) {
             console.warn("[telegram][paid_r18_video_post_ai_failed]", rawErrorMessage(error));
-            finalContent = buildPaidR18VideoFallbackPostContent({ prompt: action.prompt, linkPresentation });
+            finalContent = buildPaidR18VideoFallbackPostContent({ prompt: action.prompt, setup: archive?.setup, linkPresentation });
           }
         }
         const result = await saveAndSendPaidR18VideoPost({ bot, chatId, action, finalContent });
