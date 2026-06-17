@@ -22,7 +22,7 @@ import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, save
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
 import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
-import { buildPersonaPaidCaptionToneGuide } from "@/lib/paid-r18-caption-style";
+import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
 import { generateClosedModelImage } from "@/runtime/node/image-generator";
@@ -6468,53 +6468,47 @@ function buildPaidR18SubmittedPromptAnalysis(args: { prompt: string; imageDirect
   const source = `${args.prompt || ""} ${args.imageDirection || ""}`.replace(/\s+/g, " ").trim();
   if (!source) return "";
   const color = firstPaidR18PromptMatch(source, [
-    [/肉色|膚色/i, "肉色"],
-    [/透明|半透|透視/i, "透明"],
-    [/白色|米白|奶白/i, "白色"],
-    [/黑色|黑絲/i, "黑色"],
-    [/粉色|粉紅/i, "粉色"],
-    [/紅色/i, "紅色"],
-    [/藍色/i, "藍色"],
+    [/\u8089\u8272|\u818f\u8272/i, "\u8089\u8272"],
+    [/\u767d\u8272|\u7c73\u767d|\u5976\u767d/i, "\u767d\u8272"],
+    [/\u9ed1\u8272|\u9ed1\u7d72/i, "\u9ed1\u8272"],
+    [/\u7c89\u8272/i, "\u7c89\u8272"],
+    [/\u85cd\u8272/i, "\u85cd\u8272"],
+    [/\u900f\u660e|\u534a\u900f/i, "\u900f\u611f"],
   ], "");
   const outfit = firstPaidR18PromptMatch(source, [
-    [/襯衫|衬衫/i, "襯衫"],
-    [/浴袍|睡袍/i, "浴袍"],
-    [/睡裙|吊帶裙|吊带裙/i, "吊帶睡裙"],
-    [/短裙|包臀裙|窄裙/i, "短裙"],
-    [/蕾絲|蕾丝|絲襪|丝袜|黑絲|黑丝/i, "蕾絲/絲襪"],
-    [/比基尼|泳裝|泳衣/i, "泳裝"],
-    [/內衣|内衣|bra/i, "內衣"],
-    [/制服|空姐|老師|教师|教師/i, "制服風格"],
-    [/洋裝|連衣裙|连衣裙|dress/i, "洋裝"],
-  ], "服裝細節");
-  const exposure = firstPaidR18PromptMatch(source, [
-    [/敞開|敞开|拉開|拉开|掀開|掀开|解開|解开/i, "衣物敞開"],
-    [/透明|半透|透視/i, "半透明質感"],
-    [/低胸|深V|露胸|胸口/i, "胸口線條"],
-    [/露肩|肩膀/i, "肩頸線條"],
-    [/露腿|大腿|腿部/i, "腿部線條"],
-    [/貼身|紧身|緊身|包臀/i, "貼身曲線"],
-  ], "露出感和身形曲線");
+    [/\u897f\u88dd|\u895f\u886b/i, "\u895f\u886b"],
+    [/\u7761\u888d|\u6d74\u888d/i, "\u7761\u888d"],
+    [/\u540a\u5e36|\u7761\u8863/i, "\u540a\u5e36\u7761\u8863"],
+    [/\u77ed\u88d9|\u5305\u81c0\u88d9|\u7a84\u88d9/i, "\u77ed\u88d9"],
+    [/\u7d72\u896a|\u9ed1\u7d72|\u7d72\u8a0a/i, "\u7d72\u896a"],
+    [/\u6cf3\u88dd|\u6bd4\u57fa\u5c3c/i, "\u6cf3\u88dd"],
+    [/\u5236\u670d|\u8001\u5e2b|\u7a7a\u59d0/i, "\u5236\u670d\u98a8\u683c"],
+    [/\u6d0b\u88dd|dress/i, "\u6d0b\u88dd"],
+  ], "\u670d\u88dd");
+  const anchor = firstPaidR18PromptMatch(source, [
+    [/\u4f4e\u89d2\u5ea6|\u89d2\u5ea6|\u93e1\u982d/i, "\u4f4e\u89d2\u5ea6\u93e1\u982d"],
+    [/\u6292\u624b|\u624b\u81c2/i, "\u6292\u624b\u52d5\u4f5c"],
+    [/\u7a97\u908a|\u7a97|\u767e\u8449\u7a97/i, "\u7a97\u908a\u5149\u7dda"],
+    [/\u5e8a\u908a|\u5e8a|\u6905\u5b50|\u6c99\u767c/i, "\u5e8a\u908a/\u6905\u908a\u69cb\u5716"],
+    [/\u5074\u8eab|\u56de\u982d/i, "\u5074\u8eab\u59ff\u614b"],
+    [/\u9818\u53e3|\u6ed1\u958b|\u6572\u958b|\u88d9\u64fa/i, "\u670d\u88dd\u958b\u53e3\u8b8a\u5316"],
+  ], "\u756b\u9762\u8996\u89ba\u9328\u9ede");
   const scene = firstPaidR18PromptMatch(source, [
-    [/床|臥室|卧室|房間|房间/i, "臥室"],
-    [/酒店|旅館|飯店/i, "飯店房間"],
-    [/浴室|浴缸|淋浴/i, "浴室"],
-    [/夜景|深夜|窗邊|窗边/i, "夜景窗邊"],
-    [/車內|车内|機艙|机舱|飛機|飞机/i, "交通空間"],
-    [/便利店|超商|咖啡/i, "生活場景"],
-  ], "私密場景");
-  const pose = firstPaidR18PromptMatch(source, [
-    [/坐|坐在|跪坐/i, "坐姿"],
-    [/躺|趴|床邊|床边/i, "床邊姿態"],
-    [/站|站姿/i, "站姿"],
-    [/俯身|前傾|前倾|彎腰|弯腰/i, "前傾姿態"],
-    [/看鏡頭|看镜头|直視|对视|對視/i, "直視鏡頭"],
-  ], "誘惑姿態");
+    [/\u81e5\u5ba4|\u623f\u9593/i, "\u81e5\u5ba4"],
+    [/\u9152\u5e97|\u65c5\u9928/i, "\u9152\u5e97\u623f\u9593"],
+    [/\u6d74\u5ba4|\u6d74\u7f38/i, "\u6d74\u5ba4"],
+    [/\u591c\u666f|\u6df1\u591c/i, "\u591c\u666f"],
+  ], "\u79c1\u5bc6\u5834\u666f");
+  const mood = firstPaidR18PromptMatch(source, [
+    [/\u8a98\u60d1|\u649e/i, "\u649e\u4eba"],
+    [/\u6175|\u58de/i, "\u6709\u9ede\u58de"],
+    [/\u67d4|\u6eab/i, "\u67d4\u4e2d\u5e36\u649e"],
+  ], "\u8f15\u6311\u9017");
   return [
-    `服裝：${[color, outfit].filter(Boolean).join("") || outfit}`,
-    `視覺重點：${exposure}`,
-    `場景：${scene}`,
-    `姿態/情緒：${pose}`,
+    `\u670d\u88dd\uff1a${[color, outfit].filter(Boolean).join("") || outfit}`,
+    `\u8996\u89ba\u9328\u9ede\uff1a${anchor}`,
+    `\u5834\u666f\uff1a${scene}`,
+    `\u6c23\u6c1b\uff1a${mood}`,
   ].join("\n");
 }
 
@@ -6556,13 +6550,13 @@ async function describePaidR18SelectedImageWithGrok(args: {
         parts: [
           {
             text: [
-              "請用繁體中文分析這張已選中的付費群 R18 配圖。",
-              "只輸出可用於生成 Telegram 付費群短文案的畫面要點，不要寫成成品文案。",
-              "必須根據圖片本身描述，不要只照抄使用者提示詞。",
-              "重點提取：服裝/材質/顏色、暴露或視覺焦點、姿勢、場景、光線、情緒氛圍；服裝與暴露/視覺焦點權重最高。",
-              "描述要直接、成人向、可描述暴露部位，但保持簡短，最多 6 行。",
-              prompt ? `使用者原始要求：${prompt}` : "",
-              imageDirection ? `生成圖片方向：${imageDirection}` : "",
+              "\u8acb\u7528\u7e41\u9ad4\u4e2d\u6587\u5206\u6790\u9019\u5f35\u5df2\u9078\u4e2d\u7684\u4ed8\u8cbb\u5167\u5bb9\u914d\u5716\u3002",
+              "\u53ea\u8f38\u51fa\u5f8c\u7e8c\u751f\u6210\u77ed\u6587\u6848\u771f\u6b63\u6709\u7528\u7684\u756b\u9762\u8cc7\u8a0a\uff0c\u4e0d\u8981\u76f4\u63a5\u5beb\u6210\u63a8\u6587\u3002",
+              "\u512a\u5148\u63d0\u53d6\u5177\u9ad4\u8996\u89ba\u9328\u9ede\uff1a\u93e1\u982d\u89d2\u5ea6\u3001\u4eba\u7269\u59ff\u52e2\u3001\u624b\u90e8\u52d5\u4f5c\u3001\u7a97\u908a/\u5e8a\u908a/\u6905\u908a\u4f4d\u7f6e\u3001\u5149\u7dda\u3001\u80cc\u666f\u3001\u670d\u88dd\u958b\u53e3\u6216\u5e03\u6599\u72c0\u614b\u3002",
+              "\u82e5\u756b\u9762\u6709\u660e\u986f\u670d\u88dd\u9b06\u958b\u3001\u6ed1\u958b\u3001\u900f\u611f\u6216\u5bb9\u6613\u8b93\u4eba\u591a\u770b\u7684\u5730\u65b9\uff0c\u53ef\u4ee5\u81ea\u7136\u9ede\u51fa\uff0c\u4f46\u4e0d\u8981\u505a\u90e8\u4f4d\u6e05\u55ae\u3002",
+              "\u8f38\u51fa 4-6 \u884c\u5373\u53ef\uff0c\u6bcf\u884c\u90fd\u8981\u77ed\uff0c\u50cf\u5099\u5fd8\u9304\uff0c\u4e0d\u8981\u5beb\u6210\u5b8c\u6574\u63a8\u6587\u3002",
+              prompt ? `\u4f7f\u7528\u8005\u539f\u59cb\u8981\u6c42\uff1a${prompt}` : "",
+              imageDirection ? `\u751f\u6210\u5716\u7247\u65b9\u5411\uff1a${imageDirection}` : "",
             ].filter(Boolean).join("\n"),
           },
           { inlineData: inline },
@@ -6580,7 +6574,7 @@ async function describePaidR18SelectedImageWithGrok(args: {
     },
   );
   const text = extractText(data).trim();
-  return text ? `模型：${model}\n${text}` : "";
+  return text ? `\u6a21\u578b\uff1a${model}\n${text}` : "";
 }
 
 function buildPaidR18PostFromImageInstruction(args: {
@@ -6598,36 +6592,23 @@ function buildPaidR18PostFromImageInstruction(args: {
   const imageAnalysis = String(args.imageAnalysis || "").trim();
   const toneGuide = buildPersonaPaidCaptionToneGuide(args.setup);
   return [
-    "【付費群文案硬性要求】",
-    imageAnalysis ? "必須優先根據【Grok 看圖結果】寫文案；提交提示詞只作為補充，不可蓋過圖片實際內容。" : "必須根據使用者提交的提示詞要點寫文案。",
-    "文案必須直接引用圖片中的服裝與暴露/視覺重點，這兩項權重最高；姿勢、場景、光線或情緒只作輔助，不要寫成通用模板。",
-    "第一句必須自然帶出「服裝」與「暴露/視覺焦點」，不能只寫場景或情緒，也不能像在列清單。",
-    "只寫 10-20 個中文字左右的短文案；口語、直白、色情、裸露、有成人付費群福利感。",
-    "不要固定開頭，不要寫新聞、故事、日常長文、免費內容預覽。",
-    "如果有固定連結，固定連結放最後一行。",
+    "\u3010\u4ed8\u8cbb\u5167\u5bb9\u77ed\u6587\u6848\u8981\u6c42\u3011",
+    imageAnalysis ? "\u5fc5\u9808\u512a\u5148\u6839\u64da\u5716\u7247\u5206\u6790\u4f86\u5beb\u6587\u6848\uff1b\u4f7f\u7528\u8005\u63d0\u793a\u8a5e\u53ea\u80fd\u4f5c\u70ba\u88dc\u5145\u3002" : "\u5fc5\u9808\u6839\u64da\u4f7f\u7528\u8005\u8981\u6c42\u8207\u4eba\u7269\u5716\u65b9\u5411\u4f86\u5beb\u77ed\u6587\u6848\u3002",
+    "\u6587\u6848\u8981\u50cf\u771f\u4eba\u770b\u5230\u9019\u5f35\u5716\u6642\u96a8\u53e3\u5192\u51fa\u4f86\u7684\u4e00\u53e5\u8a71\uff0c\u4e0d\u8981\u50cf\u5728\u89e3\u8aaa\u756b\u9762\u3002",
+    "\u7b2c\u4e00\u53e5\u5fc5\u9808\u5e36\u51fa\u4e00\u500b\u5177\u9ad4\u8996\u89ba\u9328\u9ede\uff0c\u4f8b\u5982\u89d2\u5ea6\u3001\u624b\u90e8\u52d5\u4f5c\u3001\u7a97\u908a\u5149\u7dda\u3001\u5e8a\u908a\u4f4d\u7f6e\u3001\u670d\u88dd\u958b\u53e3\u3001\u88d9\u64fa\u3001\u9818\u53e3\u6216\u5e03\u6599\u72c0\u614b\u3002",
+    "\u5982\u679c\u756b\u9762\u88e1\u6709\u660e\u986f\u670d\u88dd\u9b06\u958b\u3001\u6ed1\u958b\u3001\u900f\u611f\u6216\u5bb9\u6613\u8b93\u4eba\u591a\u770b\u7684\u5730\u65b9\uff0c\u53ef\u4ee5\u9806\u624b\u5e36\u9032\u540c\u4e00\u53e5\uff0c\u4f46\u4e0d\u8981\u8b8a\u6210\u90e8\u4f4d\u6e05\u55ae\u3002",
+    "\u53ea\u5beb 10-20 \u500b\u4e2d\u6587\u5b57\u5de6\u53f3\uff0c\u53e3\u8a9e\u3001\u81ea\u7136\u3001\u5e36\u9ede\u6311\u9017\u611f\uff0c\u4f46\u4e0d\u8981\u6a5f\u68b0\u3002",
+    "\u4e0d\u8981\u56fa\u5b9a\u958b\u982d\uff0c\u4e0d\u8981\u5beb\u6545\u4e8b\uff0c\u4e0d\u8981\u65b0\u805e\u611f\uff0c\u4e0d\u8981\u63d0\u793a\u8a5e\u6458\u8981\u3002",
+    "\u5982\u679c\u6709\u4eba\u8a2d\u56fa\u5b9a\u9023\u7d50\uff0c\u653e\u5728\u6700\u5f8c\u4e00\u884c\u3002",
     "",
     toneGuide.length ? toneGuide.join("\n") : "",
     "",
-    imageAnalysis ? "【Grok 看圖結果】\n" + imageAnalysis : "",
-    imageAnalysis ? "請基於上面的看圖結果重新組織成短文案，不要只照抄原句。" : "",
-    "",
-    promptAnalysis ? "【提交提示詞要點】\n" + promptAnalysis : "",
-    promptAnalysis && !imageAnalysis ? "請基於上面的要點重新組織成短文案，不要只照抄原句。" : "",
-    "",
-    "本次生成類型：付費群內容。這不是一般推文，必須生成 Telegram 付費群導流文案。",
-    args.contentTimeSlot ? `本次文案時段：${generatePostTimeSlotLabel(args.contentTimeSlot)}。` : "",
-    prompt ? `使用者主題/要求（最高優先級）：${prompt}` : "使用者未提供本次提示詞，請根據人設和已生成圖片自由發展。",
-    "本次流程是先生成 R18 付費群配圖，再依照圖片內容生成文案；文案必須服務已生成圖片，不要反過來改圖、不要寫成新聞、泛話題、免費群預覽或免費內容格式。",
-    "付費群文案方向：依照照片內容生成文案，文案用詞必須直白、色情、誘惑、暴露性器官、帶付費群福利感；只寫短句，不要鋪陳新聞、故事或日常長文。",
-    "短文案只要 10-20 個中文字，口語化；服裝與色情暴露部位/視覺裸露焦點必須出現，但要像真人一句話順口講出來，不要變成解剖式描寫。",
-    "如果人設有固定連結，固定連結仍放最後一行。",
-    "不要固定開頭，不要自動加入「哥哥們～早安安」或「深夜福利來了」這類固定句。",
-    "格式只能是：10-20 字短文案；最後一行固定連結（如果有）。",
-    "只生成推文正文，不要輸出說明、編號、JSON 或 Markdown。",
-    "",
-    "【已生成圖片內容方向】",
-    args.imageDirection,
-    args.imageUrl ? "使用者已從候選圖中選中 1 張人物圖片，請把它視為本篇付費群文案的唯一配圖。" : "",
+    imageAnalysis ? "\u3010\u5716\u7247\u5206\u6790\u3011\n" + imageAnalysis : "",
+    promptAnalysis ? "\u3010\u63d0\u793a\u8a5e\u6458\u8981\u3011\n" + promptAnalysis : "",
+    args.contentTimeSlot ? `\u76ee\u524d\u6642\u6bb5\uff1a${generatePostTimeSlotLabel(args.contentTimeSlot)}` : "",
+    prompt ? `\u4f7f\u7528\u8005\u8981\u6c42\uff1a${prompt}` : "",
+    `\u4eba\u8a2d\uff1a${args.archiveName}`,
+    "\u683c\u5f0f\u53ea\u8f38\u51fa\uff1a\u4e00\u884c\u77ed\u6587\u6848\uff1b\u82e5\u6709\u56fa\u5b9a\u9023\u7d50\u5247\u53e6\u8d77\u6700\u5f8c\u4e00\u884c\u3002\u4e0d\u8981\u6a19\u984c\u3001\u4e0d\u8981 JSON\u3001\u4e0d\u8981\u89e3\u91cb\u3002",
   ].filter(Boolean).join("\n");
 }
 
@@ -6660,16 +6641,17 @@ function hasPaidR18SecondPerson(text: string): boolean {
   return /[\u4f60\u59b3]/.test(extractPaidR18CaptionBody(text));
 }
 
-function hasPaidR18ExposureDetail(text: string): boolean {
+function hasPaidR18VisualAnchor(text: string): boolean {
   const body = extractPaidR18CaptionBody(text);
-  return /(\u80f8\u53e3|\u80f8\u524d|\u4e73\u66c8|\u4e73\u5934|\u4e73\u982d|\u5927\u817f|\u817f\u6839|\u900f\u51fa|\u900f\u819a|\u9732\u51fa|\u8d70\u5149|\u6572\u958b|\u6ed1\u958b|\u89e3\u958b|\u6253\u958b|\u4f4e\u80f8)/i.test(body);
+  return /(\u89d2\u5ea6|\u93e1\u982d|\u4f4e\u89d2\u5ea6|\u5074\u8eab|\u56de\u982d|\u6292\u624b|\u624b\u4e00\u6292|\u7a97\u908a|\u5e8a\u908a|\u767e\u8449\u7a97|\u6905\u5b50|\u5149\u7dda|\u9006\u5149|\u9818\u53e3|\u88d9\u64fa|\u5e03\u6599|\u7d72\u896a|\u5916\u5957|\u895f\u886b|\u80f8\u53e3|\u524d\u9762|\u6ed1\u958b|\u6572\u958b|\u8d70\u5149)/i.test(body);
 }
 
 function needsPaidR18NaturalRewriteRetry(text: string): boolean {
   const body = extractPaidR18CaptionBody(text);
   if (!body) return true;
   if (hasPaidR18SecondPerson(body)) return true;
-  if (!hasPaidR18ExposureDetail(body)) return true;
+  if (isMechanicalPaidCaption(body)) return true;
+  if (!hasPaidR18VisualAnchor(body)) return true;
   return false;
 }
 
@@ -6680,21 +6662,22 @@ function buildJinjunyaPaidR18HardFallback(args: {
   linkPresentation: { url: string; text: string } | null;
 }) {
   const source = [args.imageAnalysis || "", args.promptAnalysis || "", args.prompt || ""].join(" ").replace(/\s+/g, " ").trim();
-  const opener = firstPaidR18PromptMatch(source, [
-    [/\u7761\u888d|\u6d74\u888d/i, "\u7761\u888d\u4e00\u6ed1\u958b"],
-    [/\u896f\u886b|\u4e0a\u8863/i, "\u4e0a\u8863\u4e00\u9b06\u958b"],
-    [/\u77ed\u88d9|\u5305\u81c0\u88d9|\u7a84\u88d9/i, "\u88d9\u64fa\u4e00\u5f80\u4e0a\u5e36"],
-    [/\u7d72\u8932|\u9ed1\u7d72/i, "\u9ed1\u7d72\u914d\u4e0a\u90a3\u817f\u7dda"],
-    [/\u540a\u5e36|\u7761\u8863/i, "\u9019\u5957\u4e00\u4e0a\u8eab"],
-  ], "\u9019\u5f35\u4e00\u6253\u958b");
-  const exposure = firstPaidR18PromptMatch(source, [
-    [/\u4e73\u982d|\u4e73\u66c8/i, "\u524d\u9762\u6574\u500b\u90fd\u5feb\u9732\u51fa\u4f86\u4e86"],
-    [/\u4f4e\u80f8|\u80f8\u53e3|\u9732\u80f8/i, "\u80f8\u53e3\u958b\u5f97\u592a\u4f4e\u4e86"],
-    [/\u5927\u817f|\u817f\u6839/i, "\u817f\u908a\u90a3\u6bb5\u771f\u7684\u5f88\u72af\u898f"],
-    [/\u900f\u660e|\u900f\u819a|\u534a\u900f/i, "\u900f\u51fa\u4f86\u90a3\u6bb5\u771f\u7684\u592a\u660e\u986f\u4e86"],
-    [/\u6572\u958b|\u6563\u958b|\u6ed1\u958b|\u6253\u958b|\u89e3\u958b/i, "\u4e00\u6ed1\u958b\u771f\u7684\u5168\u88ab\u770b\u5149\u4e86"],
-  ], "\u9019\u7a2e\u9732\u6cd5\u771f\u7684\u592a\u64a9\u4e86");
-  return normalizePaidR18PostContent(`${opener}\uFF0C${exposure}`, args.linkPresentation);
+  const anchor = firstPaidR18PromptMatch(source, [
+    [/\u4f4e\u89d2\u5ea6|\u89d2\u5ea6|\u93e1\u982d/i, "\u9019\u500b\u89d2\u5ea6\u771f\u7684\u6709\u9ede\u592a\u72af\u898f\u4e86"],
+    [/\u6292\u624b|\u624b\u81c2|\u624b\u4e00\u6292/i, "\u624b\u4e00\u6292\u8d77\u4f86\uFF0C\u6574\u500b\u6c23\u6c1b\u90fd\u8b8a\u4e86"],
+    [/\u7a97\u908a|\u767e\u8449\u7a97|\u7a97\u7c3e|\u7a97/i, "\u7a97\u908a\u9019\u6a23\u4e00\u5074\u904e\u4f86\uFF0C\u771f\u7684\u5f88\u96e3\u4e0d\u591a\u770b"],
+    [/\u5e8a\u908a|\u5e8a|\u6905\u5b50|\u6c99\u767c/i, "\u5750\u5728\u5e8a\u908a\u9019\u6a23\u62cd\uFF0C\u6c23\u6c1b\u4e00\u4e0b\u5c31\u4e0d\u592a\u5c0d\u4e86"],
+    [/\u9818\u53e3|\u895f\u886b|\u7761\u888d|\u6d74\u888d|\u5916\u5957/i, "\u9818\u53e3\u9b06\u6210\u9019\u6a23\uFF0C\u6574\u5f35\u5716\u90fd\u958b\u59cb\u4e0d\u4e56\u4e86"],
+    [/\u88d9|\u88d9\u64fa|\u77ed\u88d9|\u5305\u81c0\u88d9/i, "\u88d9\u64fa\u4e00\u5f80\u4e0a\u5e36\uFF0C\u90a3\u4e00\u4e0b\u771f\u7684\u5f88\u6703"],
+    [/\u7d72\u896a|\u9ed1\u7d72|\u900f\u819a|\u534a\u900f/i, "\u5e03\u6599\u4e00\u900f\u51fa\u4f86\uFF0C\u756b\u9762\u99ac\u4e0a\u8b8a\u5f97\u4e0d\u592a\u5b89\u5206"],
+  ], "\u9019\u5f35\u4e00\u6253\u958b\uFF0C\u6c23\u6c1b\u5c31\u958b\u59cb\u4e0d\u592a\u5b89\u5206\u4e86");
+  const trailing = firstPaidR18PromptMatch(source, [
+    [/\u80f8\u53e3|\u524d\u9762|\u4f4e\u80f8|\u9732/i, "\u524d\u9762\u90a3\u6bb5\u771f\u7684\u5feb\u85cf\u4e0d\u4f4f\u4e86"],
+    [/\u817f|\u817f\u6839/i, "\u817f\u908a\u90a3\u6bb5\u771f\u7684\u5f88\u96e3\u7576\u4f5c\u6c92\u770b\u5230"],
+    [/\u900f\u660e|\u900f\u819a|\u534a\u900f/i, "\u900f\u51fa\u4f86\u90a3\u4e00\u5c64\u771f\u7684\u592a\u6703\u649e\u4eba\u4e86"],
+    [/\u6ed1\u958b|\u6572\u958b|\u89e3\u958b/i, "\u4e00\u9b06\u958b\u4e4b\u5f8c\uFF0C\u6574\u5f35\u5716\u90fd\u4e0d\u592a\u80fd\u88dd\u6c92\u4e8b"],
+  ], "\u8d8a\u770b\u8d8a\u4e0d\u50cf\u53ea\u662f\u5728\u4e82\u62cd");
+  return normalizePaidR18PostContent(`${anchor}\uFF0C${trailing}`, args.linkPresentation);
 }
 
 async function rewritePaidR18CaptionAsNaturalLanguage(args: {
@@ -6714,9 +6697,11 @@ async function rewritePaidR18CaptionAsNaturalLanguage(args: {
     "Do not sound like a scene report, keyword list, anatomy description, or prompt text.",
     "Prefer one smooth reaction sentence. You may add a light flirty or teasing tone.",
     "Do not use second-person pronouns like ni or second-person direct address.",
-    "The main sentence must naturally mention one visible exposure detail, such as chest opening, nipples showing, thighs exposed, sheer fabric, or clothing sliding open.",
-    "Keep the clothing focus and the exposure hook, but express them naturally.",
-    "Avoid dry anatomical list style, but do not remove the exposure detail.",
+    "The main sentence must mention one concrete visual anchor from the image, such as angle, hand movement, window light, bed edge, blinds, chair, collar, skirt line, or loose fabric.",
+    "Prefer the most distinctive anchor in the frame; do not default to light if angle, pose, or gesture is stronger.",
+    "If the image also has a clear revealing clothing cue, weave it into the same sentence naturally, but do not list body parts.",
+    "Avoid dry anatomy-list style. Keep the line image-led, not prompt-led.",
+    "Good tone examples: 這個角度真的有點太犯規了 / 手一抬起來，整個氣氛都變了 / 窗邊這樣一側過來，真的很難不多看.",
     "Output about 10-20 Chinese characters for the main sentence.",
     "If there is a fixed link, keep it on the last line only.",
     "No title, no bullets, no JSON, no Markdown fence, no explanation.",
@@ -6744,8 +6729,11 @@ async function rewritePaidR18CaptionAsNaturalLanguage(args: {
   const retryInstruction = [
     "Rewrite again in Traditional Chinese.",
     "Do not use second-person pronouns.",
-    "Must keep one natural but explicit exposure detail in the sentence.",
+    "Must keep one concrete visual anchor from the image in the sentence.",
+    "Prefer the most distinctive anchor in the frame, not the safest generic one.",
+    "If there is a visible clothing or revealing cue, mention it naturally without listing anatomy.",
     "Must sound like a real spoken tease, not a report.",
+    "Follow this tone: short, casual, flirty, like a real person muttering one teasing line.",
     "Keep it short: around 10-20 Chinese characters.",
     args.imageAnalysis ? `Image notes: ${args.imageAnalysis}` : "",
     args.promptAnalysis ? `Prompt notes: ${args.promptAnalysis}` : "",
@@ -6989,17 +6977,17 @@ async function generatePaidR18VideoPostContent(args: {
 }) {
   const toneGuide = buildPersonaPaidCaptionToneGuide(args.setup);
   const instruction = [
-    "請生成 Telegram 付費群短文案。",
-    "素材類型：已生成的付費群視頻。",
-    "文案要根據視頻生成提示詞中的服裝、姿勢、場景、光線、動作和氛圍來寫，不要寫成免費內容或一般日常推文。",
-    "只寫 10-20 個中文字左右的短句；口語、直白、付費群導向。",
-    "",
+    "\u8acb\u751f\u6210 Telegram \u4ed8\u8cbb\u5167\u5bb9\u77ed\u6587\u6848\u3002",
+    "\u7d20\u6750\u985e\u578b\uff1a\u5df2\u751f\u6210\u7684\u4ed8\u8cbb\u5167\u5bb9\u8996\u983b\u3002",
+    "\u6587\u6848\u8981\u50cf\u771f\u4eba\u770b\u5230\u9019\u6bb5\u8996\u983b\u6642\uff0c\u5c0d\u5176\u4e2d\u4e00\u500b\u6700\u660e\u986f\u756b\u9762\u7279\u5fb5\u7684\u81ea\u7136\u53cd\u61c9\u3002",
+    "\u512a\u5148\u6293\u4e00\u500b\u5177\u9ad4\u8996\u89ba\u9328\u9ede\uff0c\u4f8b\u5982\u89d2\u5ea6\u3001\u52d5\u4f5c\u3001\u5149\u7dda\u3001\u670d\u88dd\u72c0\u614b\u3001\u7a97\u908a/\u5e8a\u908a\u4f4d\u7f6e\uff0c\u4e0d\u8981\u5beb\u6210\u63d0\u793a\u8a5e\u6458\u8981\u3002",
+    "\u53ea\u5beb 10-20 \u500b\u4e2d\u6587\u5b57\u5de6\u53f3\uff0c\u53e3\u8a9e\u3001\u81ea\u7136\u3001\u5e36\u9ede\u6311\u9017\u611f\u3002",
     toneGuide.length ? toneGuide.join("\n") : "",
-    "不要固定開頭，不要輸出說明、編號、JSON 或 Markdown。",
-    "如果有固定連結，固定連結放最後一行。",
-    args.contentTimeSlot ? `本次文案時段：${generatePostTimeSlotLabel(args.contentTimeSlot)}。` : "",
-    `人設：${args.archiveName}`,
-    `視頻生成提示詞：${args.prompt || "未提供，請按付費群視頻素材方向生成。"}`,
+    "\u4e0d\u8981\u56fa\u5b9a\u958b\u982d\uff0c\u4e0d\u8981\u8aaa\u660e\uff0c\u4e0d\u8981 JSON\u3002",
+    "\u82e5\u6709\u56fa\u5b9a\u9023\u7d50\uff0c\u653e\u6700\u5f8c\u4e00\u884c\u3002",
+    args.contentTimeSlot ? `\u76ee\u524d\u6642\u6bb5\uff1a${generatePostTimeSlotLabel(args.contentTimeSlot)}` : "",
+    `\u4eba\u8a2d\uff1a${args.archiveName}`,
+    `\u8996\u983b\u63d0\u793a\u8a5e\uff1a${args.prompt || "\u672a\u63d0\u4f9b\uff0c\u8acb\u6309\u8996\u983b\u756b\u9762\u65b9\u5411\u751f\u6210\u3002"}`,
   ].filter(Boolean).join("\n");
   const { data } = await callTextUnderstandingModelWithFallback(
     "xai/grok-4.3",
@@ -7024,7 +7012,7 @@ async function generatePaidR18VideoPostContent(args: {
       linkPresentation: args.linkPresentation,
     });
   }
-  if (!normalized) throw new Error("Grok 未返回可用付費群視頻文案");
+  if (!normalized) throw new Error("Grok \u672a\u8fd4\u56de\u53ef\u7528\u4ed8\u8cbb\u5167\u5bb9\u77ed\u6587\u6848");
   return normalized;
 }
 

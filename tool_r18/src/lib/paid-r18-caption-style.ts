@@ -4,13 +4,16 @@ import { usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
 export function buildPersonaPaidCaptionToneGuide(setup?: Partial<DramaSetup> | null): string[] {
   if (!usesJinjunyaFreeContentStyle(setup)) return [];
   return [
-    "【金君雅付費群口吻補充】",
-    "延續免費內容那種台灣口語、像真人偷傳一句的感覺，但內容仍然是付費群福利導向。",
-    "要像人在說話，不要像鏡頭描述、器官盤點或商品文案。",
-    "優先寫成帶反應的小句子：可以自然用「這件…」「剛剛…」「結果…」「有點…」「真的…」這類口氣。",
-    "服裝和視覺焦點一定要出現，但要融進同一句自然反應裡，不要拆成名詞清單。",
-    "允許一點害羞、試探、撒嬌、偷放一張的語感，像在跟熟人說話。",
-    "避免連續堆疊身體部位名詞；不要寫成「米白睡袍完全敞開，豐滿乳房和暗褐乳頭全露出」這種機械句。",
+    "[Jinjunya paid caption tone]",
+    "Write in short, natural Traditional Chinese.",
+    "Sound like a real person reacting to one concrete thing in the image, not a report.",
+    "Keep one visual anchor from the image, such as camera angle, raised hand, window light, bed edge, blinds, chair, collar, skirt line, or loose fabric.",
+    "Prefer the most distinctive anchor in the frame; do not default to light if angle, pose, or gesture is stronger.",
+    "Use paid-group teaser direction, but keep it spoken and casual.",
+    "Prefer a structure like: emotion hook + visual anchor + light trailing beat.",
+    "Example tone: 這個角度真的有點太犯規了 / 手一抬起來，整個氣氛都變了 / 窗邊這樣一側過來，真的很難不多看。",
+    "Do not use second-person direct address such as 你 or 妳.",
+    "Do not output dry anatomy lists, prompt summaries, or scene reports.",
   ];
 }
 
@@ -22,12 +25,13 @@ export function isMechanicalPaidCaption(text: string): boolean {
     .join(" ");
   if (!body) return false;
 
-  const anatomyMatches = body.match(/乳房|乳頭|乳晕|乳暈|乳溝|陰部|陰唇|陰蒂|胸口|大腿|腿根/gi) || [];
-  const hasMechanicalVerb = /全露出|完全敞開|清晰可見|明顯露出|自然清晰|完全打開|豐滿乳房|暗褐乳頭/i.test(body);
-  const hasListyStructure = /[，、,].*(乳房|乳頭|乳晕|乳暈|乳溝|陰部|陰唇|陰蒂|胸口|大腿|腿根)/i.test(body);
-  const hasColloquialBeat = /有點|真的|剛剛|結果|差點|根本|這件|這套|這張|太|欸|啦|喔|耶|好像|怎麼/i.test(body);
+  const anatomyMatches = body.match(/胸口|胸前|乳暈|乳頭|大腿|腿根|私處|臀線/gi) || [];
+  const hasMechanicalVerb = /清晰可見|自然清晰|完整露出|完全敞開|全部露出|露出來了|透出來了/gi.test(body);
+  const hasListyStructure = /[，、].*(胸口|胸前|乳暈|乳頭|大腿|腿根|私處|臀線)/i.test(body);
+  const hasColloquialBeat = /真的|有點|這個|這套|這身|這張|快要|差點|根本|太犯規|不太對|不乖|難不成|很會/i.test(body);
+  const hasVisualAnchor = /角度|鏡頭|抬手|側身|回頭|窗邊|床邊|百葉窗|椅子|光線|領口|裙擺|布料|絲襪|外套|襯衫/i.test(body);
 
   if (anatomyMatches.length >= 2 && !hasColloquialBeat) return true;
-  if (hasMechanicalVerb && hasListyStructure) return true;
+  if (hasMechanicalVerb && hasListyStructure && !hasVisualAnchor) return true;
   return false;
 }
