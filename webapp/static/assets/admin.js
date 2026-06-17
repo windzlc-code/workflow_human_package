@@ -287,9 +287,9 @@ function syncPriorityModelsFromCatalog(type) {
   const normalizeLlmPriorityKey = (key) => {
     const explicitPriority = grokModelItems(adminState[key]);
     adminState[key] = normalizePriorityList(
-      explicitPriority.length ? explicitPriority : llmModelOptions(),
+      explicitPriority,
       [],
-      ["grok-4.2"],
+      key === "llmPriorityModels" ? ["grok-4.2"] : [],
     );
   };
   normalizeLlmPriorityKey("llmPriorityModels");
@@ -348,14 +348,33 @@ function renderPriorityModelList(listKey, wrapId) {
   });
 }
 
+function renderPriorityModelListSafe(listKey, wrapId) {
+  const wrap = el(wrapId);
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  (Array.isArray(adminState[listKey]) ? adminState[listKey] : []).forEach((model, index) => {
+    const chip = document.createElement("div");
+    chip.className = "admin-model-chip";
+    const escapedListKey = escapeHtml(listKey);
+    chip.innerHTML = `
+      <span>${escapeHtml(model)}</span>
+      <div class="admin-model-chip-actions">
+        <button type="button" class="ghost admin-model-chip-order" data-priority-list="${escapedListKey}" data-priority-idx="${index}" data-priority-action="up" aria-label="上移">↑</button>
+        <button type="button" class="ghost admin-model-chip-order" data-priority-list="${escapedListKey}" data-priority-idx="${index}" data-priority-action="down" aria-label="下移">↓</button>
+        <button type="button" class="ghost admin-model-chip-remove" data-list="${escapedListKey}" data-idx="${index}" aria-label="删除模型">×</button>
+      </div>`;
+    wrap.appendChild(chip);
+  });
+}
+
 function renderAllModelLists() {
   syncPriorityModelsFromCatalog("llm");
   syncPriorityModelsFromCatalog("image");
   renderModelList("llmGptModels", "rtLlmGptModelList");
-  renderPriorityModelList("llmFreePriorityModels", "rtLlmFreePriorityModelList");
-  renderPriorityModelList("llmPaidPriorityModels", "rtLlmPaidPriorityModelList");
+  renderPriorityModelListSafe("llmFreePriorityModels", "rtLlmFreePriorityModelList");
+  renderPriorityModelListSafe("llmPaidPriorityModels", "rtLlmPaidPriorityModelList");
   renderModelList("imageGeminiModels", "rtImageGeminiModelList");
-  renderPriorityModelList("imagePriorityModels", "rtImagePriorityModelList");
+  renderPriorityModelListSafe("imagePriorityModels", "rtImagePriorityModelList");
   renderModelSummaries();
 }
 
@@ -2786,8 +2805,15 @@ function bindActions() {
       const listName = String(btn.dataset.list || "");
       const list = adminState[listName];
       if (idx >= 0 && Array.isArray(list)) {
-        list.splice(idx, 1);
-        if (listName === "llmGptModels" || listName === "llmPriorityModels" || listName === "llmFreePriorityModels" || listName === "llmPaidPriorityModels") {
+        const [removedModel] = list.splice(idx, 1);
+        if (listName === "llmGptModels") {
+          ["llmPriorityModels", "llmFreePriorityModels", "llmPaidPriorityModels"].forEach((priorityKey) => {
+            if (Array.isArray(adminState[priorityKey])) {
+              adminState[priorityKey] = adminState[priorityKey].filter((model) => model !== removedModel);
+            }
+          });
+          syncPriorityModelsFromCatalog("llm");
+        } else if (listName === "llmPriorityModels" || listName === "llmFreePriorityModels" || listName === "llmPaidPriorityModels") {
           syncPriorityModelsFromCatalog("llm");
         } else if (listName === "imageGeminiModels" || listName === "imagePriorityModels") {
           syncPriorityModelsFromCatalog("image");
