@@ -20,6 +20,10 @@ export interface RuntimeApiConfig {
   runningHubWorkflowId?: string;
   runningHubImageWebappId?: string;
   runningHubAccessPassword?: string;
+  newPersonaRunningHubPersonaTextToImageEndpoint?: string;
+  newPersonaRunningHubPersonaTextToImageDetailUrl?: string;
+  newPersonaRunningHubTweetImageToImageEndpoint?: string;
+  newPersonaRunningHubTweetImageToImageDetailUrl?: string;
   comfyWorkflowJupyterBase?: string;
   comfyWorkflowComfyBase?: string;
   comfyWorkflowToken?: string;

@@ -122,6 +122,156 @@ function stringifyModelList(items) {
 }
 
 const RUNTIME_MODEL_DRAFT_KEY = "runtime_model_candidates_draft_v1";
+const NEW_PERSONA_RUNNINGHUB_API_PRESETS = {
+  "2046514150500524033": {
+    kind: "text-to-image",
+    endpoint: "/rhart-image-g-2/text-to-image",
+    label: "全能图片G-2.0-文生图-低价渠道版",
+    detailUrl: "https://www.runninghub.cn/call-api/api-detail/2046514150500524033",
+  },
+  "2027192837726294017": {
+    kind: "text-to-image",
+    endpoint: "/rhart-image-n-g31-flash/text-to-image",
+    label: "全能图片V2-文生图-低价渠道版",
+    detailUrl: "https://www.runninghub.cn/call-api/api-detail/2027192837726294017",
+  },
+  "2046503667076751361": {
+    kind: "image-to-image",
+    endpoint: "/rhart-image-g-2/image-to-image",
+    label: "全能图片G-2.0-图生图-低价渠道版",
+    detailUrl: "https://www.runninghub.cn/call-api/api-detail/2046503667076751361",
+  },
+  "2027196343409463297": {
+    kind: "image-to-image",
+    endpoint: "/rhart-image-n-g31-flash/image-to-image",
+    label: "全能图片V2-图生图-低价渠道版",
+    detailUrl: "https://www.runninghub.cn/call-api/api-detail/2027196343409463297",
+  },
+};
+
+const RUNNINGHUB_SLOT_FIELDS = {
+  persona: {
+    kind: "text-to-image",
+    selectId: "rtNewPersonaPersonaT2iPreset",
+    detailInputId: "rtNewPersonaPersonaT2iDetailUrl",
+    endpointInputId: "rtNewPersonaPersonaT2iEndpoint",
+    statusId: "rtNewPersonaPersonaT2iStatus",
+    successText: "人设图文生图链路已切换并保存。",
+  },
+  tweet: {
+    kind: "image-to-image",
+    selectId: "rtNewPersonaTweetI2iPreset",
+    detailInputId: "rtNewPersonaTweetI2iDetailUrl",
+    endpointInputId: "rtNewPersonaTweetI2iEndpoint",
+    statusId: "rtNewPersonaTweetI2iStatus",
+    successText: "推文配图图生图链路已切换并保存。",
+  },
+};
+
+function runningHubPresetOptions(kind) {
+  return Object.entries(NEW_PERSONA_RUNNINGHUB_API_PRESETS)
+    .filter(([, preset]) => preset.kind === kind);
+}
+
+function runningHubPresetIdFromValues(kind, detailUrl, endpoint) {
+  const normalizedEndpoint = String(endpoint || "").trim();
+  const match = runningHubPresetOptions(kind).find(([, preset]) => preset.endpoint && preset.endpoint === normalizedEndpoint);
+  if (match) return match[0];
+  const detailId = runningHubDetailId(detailUrl);
+  if (detailId && NEW_PERSONA_RUNNINGHUB_API_PRESETS[detailId]?.kind === kind) return detailId;
+  return "";
+}
+
+function renderRunningHubPresetSelect(slotName) {
+  const slot = RUNNINGHUB_SLOT_FIELDS[slotName];
+  if (!slot) return;
+  const select = el(slot.selectId);
+  if (!select) return;
+  const detailInput = el(slot.detailInputId);
+  const endpointInput = el(slot.endpointInputId);
+  const currentId = runningHubPresetIdFromValues(slot.kind, detailInput?.value, endpointInput?.value);
+  const options = runningHubPresetOptions(slot.kind);
+  select.innerHTML = options.map(([id, preset]) => {
+    const selected = id === currentId ? " selected" : "";
+    return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(preset.label)}</option>`;
+  }).join("");
+  if (!currentId && options[0]) {
+    select.value = options[0][0];
+    applyRunningHubPresetToHidden(slotName, false);
+  }
+  select.dataset.appliedValue = select.value || "";
+  updateRunningHubPresetStatus(slotName);
+}
+
+function applyRunningHubPresetToHidden(slotName, updateStatus = true) {
+  const slot = RUNNINGHUB_SLOT_FIELDS[slotName];
+  if (!slot) return false;
+  const select = el(slot.selectId);
+  const preset = select ? NEW_PERSONA_RUNNINGHUB_API_PRESETS[select.value] : null;
+  if (!preset || preset.kind !== slot.kind || !preset.endpoint) {
+    updateRunningHubPresetStatus(slotName, "该 API 暂不可用，未应用。");
+    return false;
+  }
+  const detailInput = el(slot.detailInputId);
+  const endpointInput = el(slot.endpointInputId);
+  if (detailInput) detailInput.value = preset.detailUrl;
+  if (endpointInput) endpointInput.value = preset.endpoint;
+  if (updateStatus) updateRunningHubPresetStatus(slotName);
+  return true;
+}
+
+function updateRunningHubPresetStatus(slotName, overrideText = "") {
+  const slot = RUNNINGHUB_SLOT_FIELDS[slotName];
+  if (!slot) return;
+  const status = el(slot.statusId);
+  const select = el(slot.selectId);
+  const preset = select ? NEW_PERSONA_RUNNINGHUB_API_PRESETS[select.value] : null;
+  if (!status) return;
+  if (overrideText) {
+    status.textContent = overrideText;
+    return;
+  }
+  if (!preset) {
+    status.textContent = "尚未选择 RunningHub API。";
+    return;
+  }
+  status.textContent = preset.endpoint
+    ? `当前使用：${preset.label}`
+    : `${preset.label} 缺少 Endpoint，无法调用。`;
+}
+
+async function switchRunningHubPreset(slotName) {
+  const slot = RUNNINGHUB_SLOT_FIELDS[slotName];
+  if (!slot || !applyRunningHubPresetToHidden(slotName)) return;
+  const select = el(slot.selectId);
+  if (select) select.dataset.appliedValue = select.value || "";
+  try {
+    await saveRuntime();
+    setMsg("runtimeMsg", slot.successText, true);
+  } catch (err) {
+    setMsg("runtimeMsg", getErrorMessage(err), false);
+  }
+}
+
+function bindRunningHubPresetSelect(slotName) {
+  const slot = RUNNINGHUB_SLOT_FIELDS[slotName];
+  const select = slot ? el(slot.selectId) : null;
+  if (!select) return;
+  const handle = () => switchRunningHubPreset(slotName);
+  select.addEventListener("change", handle);
+  select.addEventListener("input", handle);
+  select.addEventListener("click", () => {
+    setTimeout(() => {
+      if ((select.value || "") !== (select.dataset.appliedValue || "")) handle();
+    }, 0);
+  });
+}
+
+function runningHubDetailId(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/api-detail\/(\d{10,})/) || text.match(/\b(\d{10,})\b/);
+  return match ? match[1] : "";
+}
 
 function uniqueItems(items) {
   return Array.from(new Set((Array.isArray(items) ? items : [])
@@ -864,6 +1014,20 @@ function bindTextModelContentTabs() {
     tab.addEventListener("click", () => activate(tab.dataset.textModelTab || "free"));
   });
   activate(tabs.find((tab) => tab.classList.contains("is-active"))?.dataset.textModelTab || "free");
+}
+
+function bindRunningHubSlotTabs() {
+  const tabs = Array.from(document.querySelectorAll("[data-runninghub-slot-tab]"));
+  const panels = Array.from(document.querySelectorAll("[data-runninghub-slot-panel]"));
+  if (!tabs.length || !panels.length) return;
+  const activate = (name) => {
+    tabs.forEach((tab) => tab.classList.toggle("is-active", tab.dataset.runninghubSlotTab === name));
+    panels.forEach((panel) => panel.classList.toggle("is-active", panel.dataset.runninghubSlotPanel === name));
+  };
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => activate(tab.dataset.runninghubSlotTab || "persona"));
+  });
+  activate(tabs.find((tab) => tab.classList.contains("is-active"))?.dataset.runninghubSlotTab || "persona");
 }
 
 function closeModelPickersOnOutsideClick(target) {
@@ -2053,6 +2217,10 @@ function runtimeFormToPayload() {
     image_model_priority_order: imagePriorityModels || imageGeminiModels,
     new_persona_runninghub_base_url: el("rtNewPersonaRunningHubBaseUrl") ? el("rtNewPersonaRunningHubBaseUrl").value.trim() : "",
     new_persona_runninghub_api_key: el("rtNewPersonaRunningHubApiKey") ? el("rtNewPersonaRunningHubApiKey").value.trim() : "",
+    new_persona_runninghub_persona_t2i_detail_url: el("rtNewPersonaPersonaT2iDetailUrl") ? el("rtNewPersonaPersonaT2iDetailUrl").value.trim() : "",
+    new_persona_runninghub_persona_t2i_endpoint: el("rtNewPersonaPersonaT2iEndpoint") ? el("rtNewPersonaPersonaT2iEndpoint").value.trim() : "",
+    new_persona_runninghub_tweet_i2i_detail_url: el("rtNewPersonaTweetI2iDetailUrl") ? el("rtNewPersonaTweetI2iDetailUrl").value.trim() : "",
+    new_persona_runninghub_tweet_i2i_endpoint: el("rtNewPersonaTweetI2iEndpoint") ? el("rtNewPersonaTweetI2iEndpoint").value.trim() : "",
     mulerouter_api_name: el("rtMuleRouterApiName").value.trim(),
     mulerouter_api_key: el("rtMuleRouterApiKey").value.trim(),
     mulerouter_base_url: el("rtMuleRouterBaseUrl").value.trim(),
@@ -2108,6 +2276,12 @@ function fillRuntimeForm(data) {
   el("rtImageGeminiApiKey").value = v.image_model_provider_api_key_gemini || "";
   if (el("rtNewPersonaRunningHubBaseUrl")) el("rtNewPersonaRunningHubBaseUrl").value = v.new_persona_runninghub_base_url || "https://www.runninghub.ai";
   if (el("rtNewPersonaRunningHubApiKey")) el("rtNewPersonaRunningHubApiKey").value = v.new_persona_runninghub_api_key || "";
+  if (el("rtNewPersonaPersonaT2iDetailUrl")) el("rtNewPersonaPersonaT2iDetailUrl").value = v.new_persona_runninghub_persona_t2i_detail_url || "https://www.runninghub.cn/call-api/api-detail/2046514150500524033";
+  if (el("rtNewPersonaPersonaT2iEndpoint")) el("rtNewPersonaPersonaT2iEndpoint").value = v.new_persona_runninghub_persona_t2i_endpoint || "/rhart-image-g-2/text-to-image";
+  if (el("rtNewPersonaTweetI2iDetailUrl")) el("rtNewPersonaTweetI2iDetailUrl").value = v.new_persona_runninghub_tweet_i2i_detail_url || "https://www.runninghub.cn/call-api/api-detail/2046503667076751361";
+  if (el("rtNewPersonaTweetI2iEndpoint")) el("rtNewPersonaTweetI2iEndpoint").value = v.new_persona_runninghub_tweet_i2i_endpoint || "/rhart-image-g-2/image-to-image";
+  renderRunningHubPresetSelect("persona");
+  renderRunningHubPresetSelect("tweet");
   adminState.imageGeminiModels = imageModelItems([
     ...parseModelList(v.image_model_default_model_gemini || ""),
     ...parseModelList(v.image_model_default_model || ""),
@@ -2492,6 +2666,7 @@ async function submitRecharge() {
 function bindActions() {
   bindModelTabs();
   bindTextModelContentTabs();
+  bindRunningHubSlotTabs();
   el("btnSaveRuntime").addEventListener("click", async () => {
     setMsg("runtimeMsg", "");
     try {
@@ -2646,6 +2821,15 @@ function bindActions() {
   if (el("btnBrowseVideoModels")) {
     el("btnBrowseVideoModels").addEventListener("click", toggleAvailableVideoModels);
   }
+  bindRunningHubPresetSelect("persona");
+  bindRunningHubPresetSelect("tweet");
+  document.querySelectorAll("[data-secret-target]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = el(button.dataset.secretTarget || "");
+      if (!input) return;
+      input.type = input.type === "password" ? "text" : "password";
+    });
+  });
   if (el("btnApplyVideoModel")) {
     el("btnApplyVideoModel").addEventListener("click", () => applyVideoModel(el("rtMuleRouterWanI2vModelName")?.value));
   }

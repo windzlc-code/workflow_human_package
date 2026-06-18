@@ -4339,6 +4339,46 @@ body.page-admin {
   gap: 10px;
 }
 
+.page-admin .admin-secret-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 54px;
+  gap: 8px;
+  align-items: center;
+}
+
+.page-admin .admin-secret-row input {
+  min-width: 0;
+}
+
+.page-admin .secret-toggle {
+  min-height: 48px;
+  padding: 0;
+}
+
+.page-admin .admin-runninghub-slot-tabs {
+  margin-top: 16px;
+}
+
+.page-admin .admin-runninghub-slot-panel {
+  display: none;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.page-admin .admin-runninghub-slot-panel.is-active {
+  display: grid;
+  gap: 10px;
+}
+
+.page-admin .admin-runninghub-slot-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
 .page-admin .admin-model-list {
   display: flex;
   flex-wrap: wrap;

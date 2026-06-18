@@ -110,6 +110,10 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "image_model_priority_order": "gemini-3-pro-image-preview, gpt-image-1",
     "new_persona_runninghub_base_url": "https://www.runninghub.ai",
     "new_persona_runninghub_api_key": "",
+    "new_persona_runninghub_persona_t2i_detail_url": "https://www.runninghub.cn/call-api/api-detail/2046514150500524033",
+    "new_persona_runninghub_persona_t2i_endpoint": "/rhart-image-g-2/text-to-image",
+    "new_persona_runninghub_tweet_i2i_detail_url": "https://www.runninghub.cn/call-api/api-detail/2046503667076751361",
+    "new_persona_runninghub_tweet_i2i_endpoint": "/rhart-image-g-2/image-to-image",
     "llm_base_url": "http://202.90.21.53:3008",
     "llm_api_key": "",
     "llm_api_key_gemini": "",
@@ -2746,6 +2750,22 @@ def _merge_runninghub_config_from_tool_r18(runtime: dict[str, Any]) -> None:
         endpoint = str(api_config.get("runningHubEndpoint") or "").strip()
         if endpoint:
             runtime["new_persona_runninghub_base_url"] = endpoint
+    if not str(runtime.get("new_persona_runninghub_persona_t2i_endpoint") or "").strip():
+        endpoint = str(api_config.get("newPersonaRunningHubPersonaTextToImageEndpoint") or "").strip()
+        if endpoint:
+            runtime["new_persona_runninghub_persona_t2i_endpoint"] = endpoint
+    if not str(runtime.get("new_persona_runninghub_persona_t2i_detail_url") or "").strip():
+        detail_url = str(api_config.get("newPersonaRunningHubPersonaTextToImageDetailUrl") or "").strip()
+        if detail_url:
+            runtime["new_persona_runninghub_persona_t2i_detail_url"] = detail_url
+    if not str(runtime.get("new_persona_runninghub_tweet_i2i_endpoint") or "").strip():
+        endpoint = str(api_config.get("newPersonaRunningHubTweetImageToImageEndpoint") or "").strip()
+        if endpoint:
+            runtime["new_persona_runninghub_tweet_i2i_endpoint"] = endpoint
+    if not str(runtime.get("new_persona_runninghub_tweet_i2i_detail_url") or "").strip():
+        detail_url = str(api_config.get("newPersonaRunningHubTweetImageToImageDetailUrl") or "").strip()
+        if detail_url:
+            runtime["new_persona_runninghub_tweet_i2i_detail_url"] = detail_url
 def _write_tool_r18_api_config(raw: dict[str, Any]) -> None:
     path = _tool_r18_api_config_file()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2808,6 +2828,10 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             "image_model_priority_order",
             "new_persona_runninghub_base_url",
             "new_persona_runninghub_api_key",
+            "new_persona_runninghub_persona_t2i_detail_url",
+            "new_persona_runninghub_persona_t2i_endpoint",
+            "new_persona_runninghub_tweet_i2i_detail_url",
+            "new_persona_runninghub_tweet_i2i_endpoint",
         )
     ):
         image_key = str(runtime.get("image_model_provider_api_key_gemini") or "").strip()
@@ -2840,6 +2864,18 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             updates["runningHubKey"] = runninghub_key
         elif runninghub_key:
             updates["runningHubKey"] = runninghub_key
+        persona_t2i = str(runtime.get("new_persona_runninghub_persona_t2i_endpoint") or "").strip()
+        tweet_i2i = str(runtime.get("new_persona_runninghub_tweet_i2i_endpoint") or "").strip()
+        if persona_t2i:
+            updates["newPersonaRunningHubPersonaTextToImageEndpoint"] = persona_t2i
+        if tweet_i2i:
+            updates["newPersonaRunningHubTweetImageToImageEndpoint"] = tweet_i2i
+        persona_t2i_detail = str(runtime.get("new_persona_runninghub_persona_t2i_detail_url") or "").strip()
+        tweet_i2i_detail = str(runtime.get("new_persona_runninghub_tweet_i2i_detail_url") or "").strip()
+        if persona_t2i_detail:
+            updates["newPersonaRunningHubPersonaTextToImageDetailUrl"] = persona_t2i_detail
+        if tweet_i2i_detail:
+            updates["newPersonaRunningHubTweetImageToImageDetailUrl"] = tweet_i2i_detail
     if any(
         key in explicit
         for key in (
@@ -15385,6 +15421,10 @@ class RuntimeConfigPayload(BaseModel):
     image_model_priority_order: str = "gemini-3-pro-image-preview, gpt-image-1"
     new_persona_runninghub_base_url: str = "https://www.runninghub.ai"
     new_persona_runninghub_api_key: str = ""
+    new_persona_runninghub_persona_t2i_detail_url: str = "https://www.runninghub.cn/call-api/api-detail/2046514150500524033"
+    new_persona_runninghub_persona_t2i_endpoint: str = "/rhart-image-g-2/text-to-image"
+    new_persona_runninghub_tweet_i2i_detail_url: str = "https://www.runninghub.cn/call-api/api-detail/2046503667076751361"
+    new_persona_runninghub_tweet_i2i_endpoint: str = "/rhart-image-g-2/image-to-image"
     llm_base_url: str = "http://202.90.21.53:3008"
     llm_api_key: str = ""
     llm_api_key_gemini: str = ""
@@ -15654,6 +15694,10 @@ def create_app() -> FastAPI:
             "new_persona_runninghub_base_url": str(runtime.get("new_persona_runninghub_base_url") or "").strip(),
             "new_persona_runninghub_api_key_configured": bool(str(runtime.get("new_persona_runninghub_api_key") or "").strip()),
             "new_persona_runninghub_api_key_masked": _mask_secret(str(runtime.get("new_persona_runninghub_api_key") or "").strip()) if str(runtime.get("new_persona_runninghub_api_key") or "").strip() else "",
+            "new_persona_runninghub_persona_t2i_detail_url": str(runtime.get("new_persona_runninghub_persona_t2i_detail_url") or "").strip(),
+            "new_persona_runninghub_persona_t2i_endpoint": str(runtime.get("new_persona_runninghub_persona_t2i_endpoint") or "").strip(),
+            "new_persona_runninghub_tweet_i2i_detail_url": str(runtime.get("new_persona_runninghub_tweet_i2i_detail_url") or "").strip(),
+            "new_persona_runninghub_tweet_i2i_endpoint": str(runtime.get("new_persona_runninghub_tweet_i2i_endpoint") or "").strip(),
             "mulerouter_api_name": str(runtime.get("mulerouter_api_name") or "").strip(),
             "mulerouter_api_key": "",
             "mulerouter_api_key_configured": bool(str(runtime.get("mulerouter_api_key") or "").strip()),

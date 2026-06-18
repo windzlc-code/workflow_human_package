@@ -9,7 +9,7 @@ import {
   waitRunningHubTaskOutputs,
   type RunningHubNodeInfo,
 } from "./runninghub-client";
-import type { RuntimeConfigOptions } from "./config";
+import { readRuntimeApiConfig, type RuntimeConfigOptions } from "./config";
 import type { PersonaWorkflowImageConfig } from "./comfyui-workflow-client";
 
 type RunningHubApiPrompt = Record<string, {
@@ -140,16 +140,26 @@ function buildRunningHubNodeInfoList(
 
 function imageSizeFromAspectRatio(aspectRatio?: string): { width: number; height: number } {
   switch (aspectRatio) {
+    case "8:15":
+      return { width: 1024, height: 1920 };
+    case "2:3":
+      return { width: 1024, height: 1536 };
     case "4:5":
       return { width: 1024, height: 1280 };
     case "3:4":
-      return { width: 960, height: 1280 };
+      return { width: 1024, height: 1365 };
     case "9:16":
-      return { width: 832, height: 1472 };
+      return { width: 1024, height: 1820 };
+    case "3:2":
+      return { width: 1536, height: 1024 };
     case "4:3":
-      return { width: 1280, height: 960 };
+      return { width: 1365, height: 1024 };
     case "16:9":
-      return { width: 1472, height: 832 };
+      return { width: 1820, height: 1024 };
+    case "5:4":
+      return { width: 1280, height: 1024 };
+    case "21:9":
+      return { width: 1792, height: 768 };
     default:
       return { width: 1024, height: 1024 };
   }
@@ -226,7 +236,7 @@ export async function generateRunningHubAiAppImage(
 function normalizeRunningHubAspectRatio(aspectRatio?: string): string {
   const value = String(aspectRatio || "").trim();
   if (!value) return "1:1";
-  if (["1:1", "2:3", "3:2", "4:5", "5:4", "9:16", "16:9", "3:4", "4:3", "21:9"].includes(value)) {
+  if (["1:1", "8:15", "2:3", "3:2", "4:5", "5:4", "9:16", "16:9", "3:4", "4:3", "21:9"].includes(value)) {
     return value;
   }
   return "1:1";
@@ -252,12 +262,18 @@ export async function generateRunningHubNewPersonaStandardImage(
   runtimeOptions: RuntimeConfigOptions = {},
 ): Promise<RunningHubImageResult> {
   const config = resolveRunningHubConfig(runtimeOptions);
+  const runtime = readRuntimeApiConfig(runtimeOptions);
   const endpointPath = params.mode === "image-to-image"
-    ? NEW_PERSONA_IMAGE_TO_IMAGE_ENDPOINT
-    : NEW_PERSONA_TEXT_TO_IMAGE_ENDPOINT;
+    ? (runtime.newPersonaRunningHubTweetImageToImageEndpoint || NEW_PERSONA_IMAGE_TO_IMAGE_ENDPOINT)
+    : (runtime.newPersonaRunningHubPersonaTextToImageEndpoint || NEW_PERSONA_TEXT_TO_IMAGE_ENDPOINT);
+  const aspectRatio = normalizeRunningHubAspectRatio(params.aspectRatio);
+  const size = imageSizeFromAspectRatio(aspectRatio);
   const payload: Record<string, unknown> = {
     prompt: params.prompt,
-    aspectRatio: normalizeRunningHubAspectRatio(params.aspectRatio),
+    aspectRatio,
+    imageAspectRatio: aspectRatio,
+    width: size.width,
+    height: size.height,
     resolution: "1k",
   };
   if (params.mode === "image-to-image") {
