@@ -4913,7 +4913,7 @@ async function downloadToolR18TelegramMedia(bot: TelegramBot, msg: TelegramBot.M
     if (downloadedPath) fs.rmSync(downloadedPath, { force: true });
   }
   const containerPath = path.posix.join(TOOL_R18_UPLOAD_CONTAINER_DIR, String(chatId), safeBase);
-  return { name: originalName || safeBase, path: containerPath, kind: guessToolR18FileKind(originalName || safeBase, media?.mime_type) };
+  return { name: originalName || safeBase, path: containerPath, hostPath, kind: guessToolR18FileKind(originalName || safeBase, media?.mime_type) };
 }
 
 function buildToolR18SubmitParams(taskType: ToolR18TaskType, text: string, files: Array<{ path: string; kind: string }>) {
@@ -8303,6 +8303,12 @@ function extractCloudAccountDebugPath(message: string): string | undefined {
   const raw = match[1].trim();
   const end = raw.search(/[｜|]/);
   return (end >= 0 ? raw.slice(0, end) : raw).trim().replace(/^["']|["']$/g, "") || undefined;
+}
+
+function extractInlineDebugPath(message: string): string | undefined {
+  const match = message.match(/(?:^|[|｜\s])(?:debug|sample|screenshot)=([^\n\r|｜]+)/i);
+  if (!match) return undefined;
+  return match[1].trim().replace(/^["']|["']$/g, "") || undefined;
 }
 
 function stripCloudAccountDebugSuffix(message: string): string {
@@ -17218,9 +17224,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    const generatedReferenceMediaUrl = media?.file_id ? await resolveTelegramMediaUrl(bot, media.file_id).catch(() => null) : null;
-
     const pendingThreadsProfile = pendingThreadsProfileActions.get(chatId);
+    const generatedReferenceMediaUrl = media?.file_id && pendingThreadsProfile?.stage !== "await_avatar"
+      ? await resolveTelegramMediaUrl(bot, media.file_id).catch(() => null)
+      : null;
     if (pendingThreadsProfile?.stage === "await_avatar") {
       if (!media?.file_id || video) {
         await bot.sendMessage(chatId, "❌ 请发送一张图片作为 Threads 头像，不要发送视频或純文字。", {
@@ -17228,7 +17235,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const imageUrl = generatedReferenceMediaUrl;
+      let imageUrl = "";
+      try {
+        const downloaded = await downloadToolR18TelegramMedia(bot, msg, media);
+        imageUrl = downloaded.hostPath || "";
+      } catch (error) {
+        await bot.sendMessage(chatId, `❌ 头像图片下载失败，请重新上传一次。\n原因：${formatUserFacingError(error, "Telegram 文件下载失败")}`, {
+          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
+        });
+        return;
+      }
       if (!imageUrl) {
         await bot.sendMessage(chatId, "❌ 头像图片读取失败，请重新上传一次。", {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
@@ -17273,7 +17289,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
       } catch (error) {
         stopTyping();
-        const notice = formatCloudAccountStateNotice(rawErrorMessage(error), {
+        const errorRaw = rawErrorMessage(error);
+        const notice = formatCloudAccountStateNotice(errorRaw, {
           action: "头像修改",
           padName: pendingThreadsProfile.padName,
           padCode: pendingThreadsProfile.padCode,
@@ -17284,7 +17301,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await bot.sendMessage(chatId, message, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
         });
-        const evidenceInput = resolveCloudAccountEvidenceInput(notice?.debugPath);
+        const evidenceInput = resolveCloudAccountEvidenceInput(notice?.debugPath || extractInlineDebugPath(errorRaw));
         if (evidenceInput) {
           await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
         }

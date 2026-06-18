@@ -18657,10 +18657,15 @@ async function detectThreadsEditProfilePageByScreenshotHeuristic(screenshotUrl?:
   const title = avgDarkness(135, 92, 270, 80);
   const topRightDoneGray = avgNonWhite(600, 90, 95, 85);
   const profileAvatar = avgNonWhite(535, 210, 130, 130);
-  return topLeftX > 0.02
+  const strictEditProfile = topLeftX > 0.02
     && title > 0.05
     && topRightDoneGray > 0.06
     && profileAvatar > 0.16;
+  const lightDoneEditProfile = topLeftX > 0.015
+    && title > 0.035
+    && profileAvatar > 0.08
+    && avgNonWhite(50, 215, 620, 1080) > 0.08;
+  return strictEditProfile || lightDoneEditProfile;
 }
 
 async function locateThreadsEditProfileAvatarFromScreenshot(screenshotUrl?: string): Promise<{ x: number; y: number } | null> {
@@ -18970,6 +18975,10 @@ async function openThreadsEditProfilePage(
       }
     }
     editProfileScreenshotUrl = await screenshot(config, padCode).catch(() => editProfileScreenshotUrl);
+    if (await detectThreadsEditProfilePageByScreenshotHeuristic(editProfileScreenshotUrl).catch(() => false)) {
+      visuallyOnEditProfile = true;
+      break;
+    }
     visuallyOnEditProfile = await detectThreadsEditProfilePageByVision(editProfileScreenshotUrl);
     if (visuallyOnEditProfile) break;
     if (/keeps stopping|has stopped|Close app|關閉應用程式|关闭应用程序|已停止|停止運作|停止运行/i.test(uiXml)) {
@@ -18985,6 +18994,10 @@ async function openThreadsEditProfilePage(
       uiXml = await dumpUiXml(config, padCode).catch(() => "");
       if (isThreadsEditProfilePageUiXml(uiXml)) break;
       editProfileScreenshotUrl = await screenshot(config, padCode).catch(() => editProfileScreenshotUrl);
+      if (await detectThreadsEditProfilePageByScreenshotHeuristic(editProfileScreenshotUrl).catch(() => false)) {
+        visuallyOnEditProfile = true;
+        break;
+      }
       visuallyOnEditProfile = await detectThreadsEditProfilePageByVision(editProfileScreenshotUrl);
       if (visuallyOnEditProfile) break;
       const accountProtection = detectThreadsProfileEditAccountProtectionUiXml(uiXml);
@@ -19196,13 +19209,60 @@ function findThreadsProfileAvatarPickerTarget(uiXml: string): { x: number; y: nu
   );
 }
 
+function findThreadsProfileAvatarNewPhotoTarget(uiXml: string): { x: number; y: number } | null {
+  return findThreadsTextTargetFromUiXml(
+    uiXml,
+    [
+      /新大頭貼照|新大头贴照|新增大頭貼|新增大头贴|新頭像|新头像|更換大頭貼照|更换大头贴照/i,
+      /New profile (photo|picture)|New photo|Change profile (photo|picture)/i,
+    ],
+    { minY: 640, maxY: 1300, preferTop: true },
+  );
+}
+
 function isThreadsAvatarInstagramImportOnlyUiXml(uiXml: string): boolean {
   const normalized = normalizeSingleLine(decodeXmlAttr(uiXml));
   if (!normalized) return false;
+  const hasNewPhoto = /新大頭貼照|新大头贴照|新增大頭貼|新增大头贴|新頭像|新头像|New profile (photo|picture)|New photo/i.test(normalized);
+  if (hasNewPhoto) return false;
   const hasInstagramImport = /Instagram/i.test(normalized)
     && /(匯入|汇入|導入|导入|Import|登入|登录|Log in)/i.test(normalized);
   const hasLocalPicker = /(相簿|相册|圖庫|图库|選擇相片|选择照片|Choose from library|Select from gallery|Upload photo)/i.test(normalized);
   return hasInstagramImport && !hasLocalPicker;
+}
+
+async function detectThreadsAvatarInstagramImportOnlyByScreenshot(screenshotUrl?: string): Promise<boolean> {
+  if (!screenshotUrl || typeof fetch !== "function") return false;
+  const response = await fetchWithTimeout(screenshotUrl, {}, 8_000);
+  if (!response.ok) return false;
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const sharp = (await import("sharp")).default;
+  const { data, info } = await sharp(buffer).resize(720, 1600, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const idx = (x: number, y: number) => (Math.max(0, Math.min(info.height - 1, Math.round(y))) * info.width + Math.max(0, Math.min(info.width - 1, Math.round(x)))) * 3;
+  const ratio = (left: number, top: number, width: number, height: number, pred: (r: number, g: number, b: number) => boolean) => {
+    let total = 0;
+    let matched = 0;
+    for (let y = top; y < top + height; y += 5) {
+      for (let x = left; x < left + width; x += 5) {
+        const i = idx(x, y);
+        total += 1;
+        if (pred(data[i], data[i + 1], data[i + 2])) matched += 1;
+      }
+    }
+    return total ? matched / total : 0;
+  };
+  const bottomSheetWhite = ratio(25, 1290, 670, 255, (r, g, b) => r > 236 && g > 236 && b > 236);
+  const dimmedEditArea = ratio(45, 185, 630, 980, (r, g, b) => {
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    return max < 225 && max - min < 55;
+  });
+  const localPickerGrid = ratio(20, 760, 680, 500, (r, g, b) => {
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    return max - min > 45 && max < 245;
+  });
+  return bottomSheetWhite > 0.82 && dimmedEditArea > 0.58 && localPickerGrid < 0.28;
 }
 
 async function assertThreadsAvatarDirectUploadStillAvailable(
@@ -19219,7 +19279,8 @@ async function assertThreadsAvatarDirectUploadStillAvailable(
     400,
   ).catch(() => "");
   const shotUrl = await screenshot(config, padCode).catch(() => undefined);
-  if (/com\.android\.chrome|CustomTabActivity/i.test(focus) || isThreadsAvatarInstagramImportOnlyUiXml(uiXml)) {
+  const importOnlyByScreenshot = await detectThreadsAvatarInstagramImportOnlyByScreenshot(shotUrl).catch(() => false);
+  if (/com\.android\.chrome|CustomTabActivity/i.test(focus) || isThreadsAvatarInstagramImportOnlyUiXml(uiXml) || importOnlyByScreenshot) {
     throw new Error(buildThreadsBlockedError(
       `${context}：Threads 目前只顯示「從 Instagram 匯入」頭像入口，沒有本機相簿/圖庫入口；需要先登入並修改 Instagram 頭像後再匯入，無法在 Threads 內直接上傳新頭像。`,
       shotUrl,
@@ -19248,8 +19309,25 @@ async function tapThreadsProfileAvatarSaveOrNext(
     await tapViaAdbAbsolute(config, padCode, tapPoint.x, tapPoint.y, waitMs);
     return true;
   }
+  if (isAcpPad(padCode)) {
+    const focus = await execAdbForText(
+      config,
+      padCode,
+      `dumpsys activity activities 2>/dev/null | grep -E "mResumedActivity|topResumedActivity" | head -n 5`,
+      8_000,
+      400,
+    ).catch(() => "");
+    if (/MediaCaptureActivity/i.test(focus)) {
+      await tapViaAdbAbsolute(config, padCode, 640, 1230, waitMs);
+      return true;
+    }
+  }
   const shotUrl = await screenshot(config, padCode).catch(() => undefined);
   if (await detectThreadsAvatarSystemCropEditorByScreenshot(shotUrl).catch(() => false)) {
+    if (isAcpPad(padCode)) {
+      await tapViaAdbAbsolute(config, padCode, 640, 1230, waitMs);
+      return true;
+    }
     const fallback = await scaleReferencePointToPhysicalTap(config, padCode, { x: 638, y: 1532 }, FIXED_VMOS_SCREEN);
     await tapViaAdbAbsolute(config, padCode, fallback.x, fallback.y, waitMs);
     return true;
@@ -19262,7 +19340,7 @@ async function tapThreadsProfileAvatarSaveOrNext(
 function isThreadsAvatarPostSelectionUiXml(uiXml: string): boolean {
   const normalized = normalizeSingleLine(decodeXmlAttr(uiXml));
   if (!normalized) return false;
-  if (isThreadsEditProfilePageUiXml(normalized)) return true;
+  if (isThreadsEditProfilePageUiXml(normalized)) return false;
   if (/裁切|裁剪|Crop|Move and scale|縮放|缩放|調整|调整/i.test(normalized)) return true;
   if (/相片|照片|圖庫|图库|媒體|媒体|Photos?|Gallery|Albums?|Recents?|Camera/i.test(normalized)) return false;
   return /完成|Done|下一步|Next|儲存|保存|Save|套用|Apply/i.test(normalized);
@@ -19281,7 +19359,6 @@ async function waitForThreadsAvatarSelectionAdvance(
     if (isThreadsAvatarPostSelectionUiXml(uiXml)) return true;
     lastShotUrl = await screenshot(config, padCode).catch(() => lastShotUrl);
     if (await detectThreadsAvatarSystemCropEditorByScreenshot(lastShotUrl).catch(() => false)) return true;
-    if (await detectThreadsEditProfilePageByVision(lastShotUrl).catch(() => false)) return true;
     await delay(650);
   }
   return false;
@@ -19341,7 +19418,30 @@ export async function updateThreadsProfileAvatar(
   await tapViaAdbAbsolute(config, padCode, avatarTapPoint.x, avatarTapPoint.y, 1800);
   await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
   await delay(900);
-  await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "打開 Threads 頭像設定後");
+
+  uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const newPhotoTarget = findThreadsProfileAvatarNewPhotoTarget(uiXml);
+  if (newPhotoTarget) {
+    const newPhotoTap = await scaleUiXmlPointToPhysicalTap(config, padCode, newPhotoTarget);
+    onProgress?.({ step: "选择「新大頭貼」...", done: false });
+    await tapViaAdbAbsolute(config, padCode, newPhotoTap.x, newPhotoTap.y, 2200);
+    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+    await delay(900);
+    await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "點擊「新大頭貼」後");
+  } else if (isAcpPad(padCode)) {
+    const sourceShotUrl = await screenshot(config, padCode).catch(() => undefined);
+    if (await detectThreadsAvatarInstagramImportOnlyByScreenshot(sourceShotUrl).catch(() => false)) {
+      onProgress?.({ step: "选择「新大頭貼」...", done: false });
+      await tapViaAdbAbsolute(config, padCode, 360, 920, 2200);
+      await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+      await delay(900);
+      await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "點擊「新大頭貼」後");
+    } else {
+      await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "Threads 頭像來源列表中");
+    }
+  } else {
+    await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "Threads 頭像來源列表中");
+  }
 
   uiXml = await dumpUiXml(config, padCode).catch(() => "");
   const pickerTarget = findThreadsProfileAvatarPickerTarget(uiXml);
@@ -19351,15 +19451,36 @@ export async function updateThreadsProfileAvatar(
     await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
     await delay(900);
     await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "點擊 Threads 頭像來源後");
-  } else if (isAcpPad(padCode)) {
-    await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "Threads 頭像來源列表中");
   }
 
   onProgress?.({ step: "选择新的头像图片...", done: false });
   let selected = false;
+  if (isAcpPad(padCode)) {
+    await tapViaAdbAbsolute(config, padCode, 650, 113, 1800);
+    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+    await delay(900);
+    const afterTopDoneShot = await screenshot(config, padCode).catch(() => undefined);
+    if (
+      await detectThreadsAvatarSystemCropEditorByScreenshot(afterTopDoneShot).catch(() => false)
+      || isThreadsEditProfilePageUiXml(await dumpUiXml(config, padCode).catch(() => ""))
+    ) {
+      selected = true;
+    }
+  }
+  const initialSelectionShot = await screenshot(config, padCode).catch(() => undefined);
+  if (
+    await detectThreadsAvatarSelectionReadyByScreenshot(initialSelectionShot).catch(() => false)
+    || await detectThreadsAvatarSystemCropEditorByScreenshot(initialSelectionShot).catch(() => false)
+  ) {
+    selected = true;
+  }
   for (let attempt = 0; attempt < 6 && !selected; attempt += 1) {
     const shotUrl = await screenshot(config, padCode).catch(() => undefined);
     const selectionReady = await detectThreadsAvatarSelectionReadyByScreenshot(shotUrl).catch(() => false);
+    if (selectionReady || await detectThreadsAvatarSystemCropEditorByScreenshot(shotUrl).catch(() => false)) {
+      selected = true;
+      break;
+    }
     const refPoint = shotUrl ? await locateThreadsGalleryReferenceImage(shotUrl, targetImageUrl).catch(() => null) : null;
     const tapPoint = refPoint
       || (selectionReady && isAcpPad(padCode)
@@ -19391,9 +19512,24 @@ export async function updateThreadsProfileAvatar(
     await tapThreadsProfileAvatarSaveOrNext(config, padCode, 2200).catch(() => undefined);
     await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
     await delay(1100);
+    const focusAfterSaveTap = await execAdbForText(
+      config,
+      padCode,
+      `dumpsys activity activities 2>/dev/null | grep -E "mResumedActivity|topResumedActivity" | head -n 5`,
+      8_000,
+      400,
+    ).catch(() => "");
+    if (!/MediaCaptureActivity/i.test(focusAfterSaveTap)) break;
   }
 
-  await saveThreadsEditProfilePage(config, padCode);
+  const afterAvatarXml = await dumpUiXml(config, padCode).catch(() => "");
+  if (isThreadsEditProfilePageUiXml(afterAvatarXml)) {
+    if (isAcpPad(padCode)) {
+      await tapViaAdbAbsoluteQuick(config, padCode, 642, 118, 2600).catch(() => undefined);
+    } else {
+      await saveThreadsEditProfilePage(config, padCode);
+    }
+  }
   await delay(1600);
   const finalShot = await screenshot(config, padCode).catch(() => undefined);
   onProgress?.({ step: "Threads 头像已提交", done: true });
