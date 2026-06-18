@@ -18,6 +18,7 @@ import { callGemini, extractText, getGeminiEndpoint, getInlineData } from "./gem
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "./media-utils";
 import { publishTelegramGroupPost } from "./telegram-group-publisher";
 import { registerThreadsPublishSample } from "./threads-sample-registry";
+import { readRuntimeApiConfig } from "@/runtime/node/config";
 import {
   type VmosConfig,
   execAdb,
@@ -223,7 +224,28 @@ export async function buildRednoteTextCardDataUrl(caption: string): Promise<stri
   return `data:image/png;base64,${png.toString("base64")}`;
 }
 
-const PUBLISH_VERIFY_MODEL = "grok-4.2";
+function resolvePublishVerifyModel(): string {
+  const config = readRuntimeApiConfig();
+  const candidates = [
+    config.llmModelPriorityOrder,
+    config.llm_model_priority_order,
+    config.llmDefaultModelGpt,
+    config.llm_default_model_gpt,
+    config.llmDefaultModel,
+    config.llm_default_model,
+    "xai/grok-4.3",
+  ];
+  for (const candidate of candidates) {
+    const model = String(candidate || "")
+      .split(/[,\n]/)
+      .map((item) => item.trim())
+      .filter(Boolean)[0];
+    if (model) return model;
+  }
+  return "xai/grok-4.3";
+}
+
+const PUBLISH_VERIFY_MODEL = resolvePublishVerifyModel();
 const FIXED_VMOS_SCREEN = { width: 720, height: 1600 };
 const BASE_SCREEN = FIXED_VMOS_SCREEN;
 const THREADS_TALL_REFERENCE_SCREEN = FIXED_VMOS_SCREEN;
@@ -797,7 +819,7 @@ async function checkPublicMediaReachability(publicUrl: string): Promise<{ ok: bo
       failures.push(`attempt ${attempt} GET ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    if (attempt < 3) await sleep(600 * attempt);
+    if (attempt < 3) await delay(600 * attempt);
   }
   return { ok: false, detail: failures.join("; ") || "unknown error" };
 }
@@ -1225,6 +1247,41 @@ function hasThreadsProfileUiCue(uiXml: string): boolean {
   return hasProfileAction || (hasProfileTabs && hasStats);
 }
 
+function hasThreadsProfileTextCue(texts: string[]): boolean {
+  const joined = texts.map((text) => text.trim()).filter(Boolean).join("\n");
+  const hasProfileAction = /編輯個人檔案|编辑个人资料|编辑主页|Edit profile|分享個人檔案|分享个人资料|Share profile/i.test(joined);
+  const hasProfileTabs = /(^|\n)(串文|Threads|回覆|回复|Replies|轉發|转发|Reposts)(\n|$)/i.test(joined);
+  const hasStats = /粉絲|粉丝|followers|following|追蹤中|关注中/i.test(joined);
+  return hasProfileAction || (hasProfileTabs && hasStats);
+}
+
+function extractThreadsProfileUsernameFromTexts(texts: string[]): string | null {
+  if (!hasThreadsProfileTextCue(texts)) return null;
+
+  const profileActionIndex = texts.findIndex((text) =>
+    /編輯個人檔案|编辑个人资料|编辑主页|Edit profile|分享個人檔案|分享个人资料|Share profile/i.test(text),
+  );
+  const statsIndex = texts.findIndex((text) => /粉絲|粉丝|followers|following|追蹤中|关注中/i.test(text));
+  const candidates: Array<{ username: string; score: number }> = [];
+
+  texts.forEach((raw, index) => {
+    const username = normalizeThreadsProfileUsername(raw);
+    if (!username) return;
+
+    let score = 0;
+    if (raw.trim().startsWith("@")) score += 20;
+    if (/[0-9._]/.test(username)) score += 8;
+    if (username.length >= 6) score += 6;
+    if (profileActionIndex >= 0 && index < profileActionIndex) score += 8;
+    if (statsIndex >= 0 && index < statsIndex) score += 5;
+    if (index <= 12) score += 2;
+    candidates.push({ username, score });
+  });
+
+  const best = candidates.sort((a, b) => b.score - a.score || b.username.length - a.username.length)[0];
+  return best?.username ?? null;
+}
+
 export function extractThreadsProfileUsernameFromUiXml(uiXml: string): string | null {
   if (!hasThreadsProfileUiCue(uiXml)) return null;
 
@@ -1245,6 +1302,8 @@ export function extractThreadsProfileUsernameFromUiXml(uiXml: string): string | 
 
       let score = 0;
       if (raw.trim().startsWith("@")) score += 20;
+      if (/[0-9._]/.test(username)) score += 8;
+      if (username.length >= 6) score += 6;
       if (center) {
         if (center.y <= 520) score += 8;
         if (center.y <= 320) score += 4;
@@ -1254,7 +1313,7 @@ export function extractThreadsProfileUsernameFromUiXml(uiXml: string): string | 
     }
   }
 
-  const best = candidates.sort((a, b) => b.score - a.score || a.username.length - b.username.length)[0];
+  const best = candidates.sort((a, b) => b.score - a.score || b.username.length - a.username.length)[0];
   return best?.username ?? null;
 }
 
@@ -7539,7 +7598,7 @@ async function relaunchThreads(
   await execAdbAndWait(
     config,
     padCode,
-    `am force-stop com.vmos.vmosauto; am force-stop com.android.camera2; am force-stop com.android.camera; am force-stop ${GOOGLE_PLAY_PACKAGE}; am force-stop ${THREADS_PACKAGE}; input keyevent KEYCODE_HOME`,
+    `am force-stop com.vmos.vmosauto; am force-stop com.android.chrome; am force-stop com.android.camera2; am force-stop com.android.camera; am force-stop ${GOOGLE_PLAY_PACKAGE}; am force-stop ${THREADS_PACKAGE}; input keyevent KEYCODE_HOME`,
     30000,
     1000,
   );
@@ -7563,7 +7622,9 @@ async function relaunchThreads(
       await delay(1200);
       if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
     }
-    if (await tapThreadsLauncherIconIfVisible(config, padCode, launchShotUrl)) return;
+    if (await tapThreadsLauncherIconIfVisible(config, padCode, launchShotUrl)) {
+      if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+    }
   }
 
   let focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
@@ -7589,7 +7650,9 @@ async function relaunchThreads(
       await delay(1200);
       if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
     }
-    if (await tapThreadsLauncherIconIfVisible(config, padCode, launchShotUrl)) return;
+    if (await tapThreadsLauncherIconIfVisible(config, padCode, launchShotUrl)) {
+      if (await waitForThreadsForegroundOrVisible(config, padCode, Math.max(5000, waitMs))) return;
+    }
   }
 
   focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
@@ -8144,20 +8207,72 @@ async function dumpUiXml(
   config: VmosConfig,
   padCode: string,
 ): Promise<string> {
+  const readDump = async (targetPath: string) => {
+    await execAdbForText(
+      config,
+      padCode,
+      `rm -f ${targetPath}; uiautomator dump ${targetPath} 2>&1; chmod 644 ${targetPath} 2>/dev/null; ls -l ${targetPath} 2>&1`,
+      30000,
+      1000,
+    ).catch(() => "");
+    const output = await execAdbForText(
+      config,
+      padCode,
+      `ls -l ${targetPath} 2>&1; cat ${targetPath} 2>&1 | head -c 60000`,
+      30000,
+      1000,
+    ).catch(() => "");
+    const xmlStart = output.indexOf("<?xml");
+    return xmlStart >= 0 ? output.slice(xmlStart) : output;
+  };
+
+  const tmpXml = await readDump("/data/local/tmp/vmos_window.xml");
+  if (/<node\b/.test(tmpXml)) return tmpXml;
+  const sdcardXml = await readDump("/sdcard/vmos_window.xml");
+  return sdcardXml;
+}
+
+async function dumpUiXmlQuick(
+  config: VmosConfig,
+  padCode: string,
+  timeoutMs = 6_000,
+): Promise<string> {
+  const targetPath = "/sdcard/vmos_window_quick.xml";
   await execAdbForText(
     config,
     padCode,
-    "rm -f /data/local/tmp/vmos_window.xml; uiautomator dump /data/local/tmp/vmos_window.xml 2>&1; chmod 644 /data/local/tmp/vmos_window.xml 2>/dev/null",
-    30000,
-    1000,
+    `rm -f ${targetPath}; uiautomator dump ${targetPath} 2>&1; chmod 644 ${targetPath} 2>/dev/null`,
+    timeoutMs,
+    500,
   ).catch(() => "");
-  return execAdbForText(
+  const output = await execAdbForText(
     config,
     padCode,
-    "cat /data/local/tmp/vmos_window.xml | head -c 60000 2>&1",
+    `cat ${targetPath} 2>&1 | head -c 60000`,
+    timeoutMs,
+    500,
+  ).catch(() => "");
+  const xmlStart = output.indexOf("<?xml");
+  return xmlStart >= 0 ? output.slice(xmlStart) : output;
+}
+
+async function dumpUiTextAttributes(
+  config: VmosConfig,
+  padCode: string,
+): Promise<string[]> {
+  const output = await execAdbForText(
+    config,
+    padCode,
+    [
+      "uiautomator dump /sdcard/vmos_window.xml >/dev/null 2>&1",
+      "grep -ioE '(text|content-desc)=\"[^\"]*\"' /sdcard/vmos_window.xml | head -n 180",
+    ].join("; "),
     30000,
     1000,
   );
+  return [...output.matchAll(/(?:text|content-desc)="([^"]*)"/gi)]
+    .map((match) => decodeXmlAttr(match[1] || "").trim())
+    .filter(Boolean);
 }
 
 async function detectThreadsBlockedScreenOnDevice(
@@ -10036,7 +10151,10 @@ async function classifyThreadsPageOnDevice(
     return { page, reason: blockedReason, screenshotUrl };
   }
 
-  const result = await classifyThreadsPageFromScreenshot(screenshotUrl);
+  const result = await classifyThreadsPageFromScreenshot(screenshotUrl).catch((error) => ({
+    page: "unknown" as ThreadsPageState,
+    reason: `VISUAL_CLASSIFIER_UNAVAILABLE: ${error instanceof Error ? error.message : String(error)}`,
+  }));
   if (result.page !== "unknown") {
     return { ...result, screenshotUrl };
   }
@@ -16164,6 +16282,142 @@ export interface AccountSessionResult {
   screenshotUrl?: string;
 }
 
+function threadsAccountMatchesExpected(result: { username?: string; email?: string }, expected?: string | null): boolean {
+  const expectedValue = String(expected || "").trim();
+  if (!expectedValue) return Boolean(result.username || result.email);
+  const expectedUsername = normalizeThreadsProfileUsername(expectedValue);
+  const actualUsername = normalizeThreadsProfileUsername(result.username || "");
+  if (expectedUsername && actualUsername && expectedUsername === actualUsername) return true;
+  const expectedEmail = expectedValue.toLowerCase();
+  const actualEmail = String(result.email || "").trim().toLowerCase();
+  if (expectedEmail.includes("@") && actualEmail && expectedEmail === actualEmail) return true;
+  if (expectedEmail.includes("@") && actualUsername && !actualEmail) return true;
+  return false;
+}
+
+function isTransientThreadsAccountCheckError(message: string | undefined | null): boolean {
+  const text = normalizeSingleLine(message || "");
+  return /timeout|timed?\s*out|任務超時|任务超时|fetch failed|network|socket|ECONN|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|502|503|504|Bad Gateway|Service Unavailable|Gateway Timeout|VMOS|云机|雲機|白屏|啟動中|启动中|載入中|载入中|加载中|Threads 未在前台|unknown/i.test(text);
+}
+
+async function confirmThreadsAccountBeforeLogin(
+  config: VmosConfig,
+  padCode: string,
+  expectedAccount: string,
+): Promise<
+  | { action: "already_logged_in"; result: ThreadsLoginResult }
+  | { action: "login_required"; reason: string; screenshotUrl?: string }
+  | { action: "blocked"; result: ThreadsLoginResult }
+> {
+  let lastReason = "";
+  let lastScreenshotUrl: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const checked = await queryThreadsAccount(config, padCode).catch((error: any) => ({
+      padCode,
+      platform: "threads" as const,
+      method: "failed" as const,
+      error: error?.message || String(error),
+      screenshotUrl: error?.screenshotUrl,
+    }));
+    lastReason = checked.error || "";
+    lastScreenshotUrl = checked.screenshotUrl;
+
+    if (checked.loggedIn && threadsAccountMatchesExpected(checked, expectedAccount)) {
+      const detected = checked.username ? `@${checked.username}` : checked.email || "已登录账号";
+      return {
+        action: "already_logged_in",
+        result: {
+          ok: true,
+          state: "logged_in",
+          message: `Threads 已处于登录状态，已真实确认账号：${detected}`,
+          screenshotUrl: checked.screenshotUrl,
+        },
+      };
+    }
+
+    if (checked.loggedIn) {
+      const detected = checked.username ? `@${checked.username}` : checked.email || "未识别到可读账号";
+      return {
+        action: "login_required",
+        reason: `当前云机已登录其他 Threads 账号：${detected}，将重新登录目标账号。`,
+        screenshotUrl: checked.screenshotUrl,
+      };
+    }
+
+    const reason = checked.error || "未确认登录状态";
+    if (!isTransientThreadsAccountCheckError(reason)) {
+      return { action: "login_required", reason, screenshotUrl: checked.screenshotUrl };
+    }
+
+    if (attempt === 0) {
+      await delay(2500);
+      continue;
+    }
+  }
+
+  return {
+    action: "blocked",
+    result: {
+      ok: false,
+      state: "failed",
+      message: `登录前无法稳定确认云机 Threads 当前状态，已停止重登以避免误清账号。原因：${lastReason || "外部网络/VMOS 超时"}`,
+      screenshotUrl: lastScreenshotUrl,
+    },
+  };
+}
+
+async function verifyThreadsLoginAccount(
+  config: VmosConfig,
+  padCode: string,
+  expectedAccount: string,
+): Promise<ThreadsLoginResult> {
+  let verified: PadAccountInfo = { padCode, platform: "threads", method: "failed", error: "未开始确认" };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    verified = await queryThreadsAccount(config, padCode).catch((error: any) => ({
+      padCode,
+      platform: "threads" as const,
+      method: "failed" as const,
+      error: error instanceof Error ? error.message : String(error),
+      screenshotUrl: error?.screenshotUrl,
+    }));
+    if (verified.loggedIn || !isTransientThreadsAccountCheckError(verified.error)) break;
+    if (attempt === 0) await delay(2500);
+  }
+  if (verified.loggedIn && threadsAccountMatchesExpected(verified, expectedAccount)) {
+    rememberThreadsAccountQuery(padCode, {
+      padCode,
+      platform: "threads",
+      username: verified.username,
+      email: verified.email,
+      loggedIn: true,
+      method: verified.method === "vision" ? "vision" : "adb",
+      screenshotUrl: verified.screenshotUrl,
+    });
+    const detected = verified.username ? `@${verified.username}` : verified.email || "已登录账号";
+    return {
+      ok: true,
+      state: "logged_in",
+      message: `登录成功，已二次确认 Threads 账号：${detected}`,
+      screenshotUrl: verified.screenshotUrl,
+    };
+  }
+  if (!verified.loggedIn && isTransientThreadsAccountCheckError(verified.error)) {
+    return {
+      ok: false,
+      state: "failed",
+      message: `登录后无法稳定确认 Threads 账号，疑似外部网络/VMOS 超时。原因：${verified.error || "未知超时"}`,
+      screenshotUrl: verified.screenshotUrl,
+    };
+  }
+  const detected = verified.username ? `@${verified.username}` : verified.email || "未识别到可核对账号";
+  return {
+    ok: false,
+    state: "challenge_manual",
+    message: `登录流程已执行，但未能确认当前 Threads 账号匹配保存资料。检测结果：${detected}；原因：${verified.error || "未进入可核对的个人主页"}`,
+    screenshotUrl: verified.screenshotUrl,
+  };
+}
+
 function isTelegramLoginPageText(text: string): boolean {
   return /Start Messaging|Log in|Your phone|Phone number|Country|Code|login email|Your email|Google|验证码|驗證碼|登入|登录|Sign in|您的手機號碼|您的手机号码|手機號碼|手机号码|國家\/地區|国家\/地区|請確認您的國際電話區號|请确认您的国际电话区号/i.test(text);
 }
@@ -16431,6 +16685,36 @@ async function classifyTelegramLoggedInScreenshot(screenshotUrl?: string): Promi
   } catch {
     return null;
   }
+}
+
+async function dismissTelegramCommonBlockerIfPossible(
+  config: VmosConfig,
+  padCode: string,
+  screenshotUrl?: string,
+): Promise<boolean> {
+  if (await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false)) {
+    return true;
+  }
+  if (await dismissThreadsSystemCrashDialogIfPossible(config, padCode, screenshotUrl).catch(() => false)) {
+    return true;
+  }
+  const uiXml = await withTimeout(dumpUiXml(config, padCode), 2_500, "telegram blocker ui dump timeout").catch(() => "");
+  const text = normalizeSingleLine(uiXml);
+  if (!text) return false;
+  const closeTarget = findThreadsTextTargetFromUiXml(
+    uiXml,
+    [
+      /^Not now$|^Skip$|^Later$|^Cancel$|^OK$|^Close$/i,
+      /^稍後再說$|^稍后再说$|^略過$|^跳過$|^取消$|^確定$|^确定$|^關閉$|^关闭$/i,
+      /^允許$|^允许$|^Allow$/i,
+    ],
+    { preferTop: false, requireClickable: true },
+  );
+  if (closeTarget && !/刪除|删除|Delete|Remove|移除|Log out|登出|退出/i.test(text)) {
+    await tapViaAdbAbsoluteQuick(config, padCode, closeTarget.x, closeTarget.y, 1200);
+    return true;
+  }
+  return false;
 }
 
 function normalizeTelegramPhoneForInput(phone: string): string {
@@ -16744,6 +17028,25 @@ async function classifyThreadsPage(
   config: VmosConfig,
   padCode: string,
 ): Promise<{ page: string; confidence: number; evidence: string }> {
+  const localState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (localState) {
+    if (localState.page === "home_feed" || localState.page === "profile_page") {
+      return { page: localState.page, confidence: 0.96, evidence: localState.reason };
+    }
+    if (localState.page === "system_dialog") {
+      return { page: "system_dialog", confidence: 0.9, evidence: localState.reason };
+    }
+    if (localState.page === "challenge") {
+      return { page: "challenge_other", confidence: 0.88, evidence: localState.reason };
+    }
+    if (localState.page === "login_required") {
+      const page = /PHONE|VERIFICATION|OTP|验证码|驗證碼|手機|手机/i.test(localState.reason)
+        ? "otp_input"
+        : "login_account_picker";
+      return { page, confidence: 0.9, evidence: localState.reason };
+    }
+  }
+
   const { callGemini, extractText, getInlineData } = await import("./gemini-client");
   const shotUrl = await screenshot(config, padCode);
   const inlineData = await getInlineData(shotUrl).catch(() => null);
@@ -16769,11 +17072,20 @@ async function classifyThreadsPage(
 严格只返回 JSON：
 {"page": "<枚举值>", "confidence": 0.0-1.0, "evidence": "判断依据简述"}`;
 
-  const raw = await callGemini(
-    PUBLISH_VERIFY_MODEL,
-    [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
-    { maxOutputTokens: 200, temperature: 0 },
-  );
+  let raw: unknown;
+  try {
+    raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
+      { maxOutputTokens: 200, temperature: 0 },
+    );
+  } catch (error: any) {
+    return fallbackThreadsLoginActivityClassification(config, padCode, {
+      page: "unknown",
+      confidence: 0,
+      evidence: `视觉模型不可用：${error?.message || error}`,
+    });
+  }
   const text = (extractText(raw) || "").trim().replace(/^```json\s*/i, "").replace(/```\s*$/, "");
   // 用更宽松的正则匹配 JSON 对象（允许 evidence 里有引号）
   const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -16807,6 +17119,46 @@ async function classifyThreadsPage(
         evidence: text.slice(0, 80),
       });
     }
+  }
+}
+
+async function classifyThreadsLoginTransitionVisually(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ page: string; evidence: string } | null> {
+  const { callGemini, extractText, getInlineData } = await import("./gemini-client");
+  const shotUrl = await screenshot(config, padCode);
+  const inlineData = await getInlineData(shotUrl).catch(() => null);
+  if (!inlineData) return null;
+
+  const prompt = `看这张 Android Threads / Instagram 登录流程截图，只判断当前是否是登录后的中间页。
+
+枚举：
+- save_login_info：出现「儲存登入資料? / Save login info」页面，要求保存或稍后再说。
+- login_form：仍是用户名/密码登录表单或 Threads 登录入口。
+- challenge：验证码、2FA、安全验证、账号异常、人工确认页。
+- home_or_profile：已经进入 Threads 首页或个人页。
+- unknown：无法确认。
+
+严格只返回 JSON：
+{"page":"<枚举>","evidence":"短原因"}`;
+
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{ role: "user", parts: [{ text: prompt }, { inlineData }] }],
+      { maxOutputTokens: 120, temperature: 0 },
+    );
+    const text = (extractText(raw) || "").trim().replace(/^```json\s*/i, "").replace(/```\s*$/, "");
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { page: "unknown", evidence: text.slice(0, 120) };
+    const json = JSON.parse(jsonMatch[0]);
+    return {
+      page: String(json.page || "unknown"),
+      evidence: String(json.evidence || ""),
+    };
+  } catch (error: any) {
+    return { page: "unknown", evidence: `视觉判定不可用：${error?.message || error}` };
   }
 }
 
@@ -16864,8 +17216,30 @@ async function login_tapAndWait(config: VmosConfig, padCode: string, x: number, 
 }
 
 async function login_inputText(config: VmosConfig, padCode: string, text: string) {
-  await inputText(config, padCode, text);
-  await delay(800);
+  try {
+    const taskId = await Promise.race([
+      inputText(config, padCode, text),
+      new Promise<never>((_, reject) => {
+        const timer = globalThis.setTimeout(() => {
+          globalThis.clearTimeout(timer);
+          reject(new Error("inputText timeout"));
+        }, 15000);
+      }),
+    ]);
+    const numericTaskId = Number(taskId);
+    if (Number.isFinite(numericTaskId) && numericTaskId > 0) {
+      await waitTask(config, numericTaskId, 30000, 1000).catch(() => undefined);
+    }
+  } catch {
+    await execAdbAndWait(
+      config,
+      padCode,
+      `am broadcast -a ADB_INPUT_B64 --es msg ${shellSingleQuote(encodeBase64Utf8(text))}`,
+      20000,
+      1000,
+    );
+  }
+  await delay(1200);
 }
 
 async function login_pressBack(config: VmosConfig, padCode: string) {
@@ -16891,10 +17265,62 @@ const THREADS_LOGIN_ADB_POINTS = {
   usernameField: { x: 360, y: 600 },
   passwordField: { x: 360, y: 760 },
   submitButton: { x: 360, y: 895 },
-  saveLoginButton: { x: 360, y: 1085 },
+  saveLoginButton: { x: 360, y: 1035 },
   setupContinueButton: { x: 360, y: 1180 },
-  instagramLoginCard: { x: 605, y: 780 },
+  instagramLoginCard: { x: 360, y: 790 },
 } as const;
+
+function isThreadsSaveLoginInfoText(text: string | undefined | null): boolean {
+  return /儲存登入資料|储存登录资料|保存登录信息|保存登入資訊|登入資料|登录资料|Save login info|Save your login info/i.test(text || "");
+}
+
+function findThreadsSaveLoginTargetFromUiXml(uiXml: string): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  for (const node of nodes) {
+    const label = normalizeSingleLine([
+      decodeXmlAttr(getXmlAttr(node, "text")),
+      decodeXmlAttr(getXmlAttr(node, "content-desc")),
+    ].filter(Boolean).join(" "));
+    if (!label) continue;
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center) continue;
+    let score = 0;
+    if (/^(儲存|储存|保存|Save)$/i.test(label)) score += 30;
+    if (/^(稍後再說|稍后再说|Not now|Skip)$/i.test(label)) score += 18;
+    if (/儲存|储存|保存|Save/i.test(label)) score += 12;
+    if (/android\.widget\.Button|Button/i.test(getXmlAttr(node, "class"))) score += 5;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 5;
+    if (center.y >= 650) score += 4;
+    if (score >= 18) candidates.push({ ...center, score });
+  }
+  return candidates.sort((a, b) => b.score - a.score || b.y - a.y)[0] || null;
+}
+
+async function handleThreadsSaveLoginInfoIfPresent(config: VmosConfig, padCode: string, confirmed = false): Promise<boolean> {
+  const windowText = await getThreadsWindowText(config, padCode).catch(() => "");
+  if (!confirmed && !isThreadsSaveLoginInfoText(windowText)) return false;
+
+  const target = findThreadsSaveLoginTargetFromUiXml(windowText);
+  if (target) {
+    await login_tapAdbPoint(config, padCode, target, 3000);
+    return true;
+  }
+
+  const visualTarget = await findButtonOnScreen(
+    config,
+    padCode,
+    "Instagram / Threads「儲存登入資料？」頁面底部的藍色「儲存 / Save」按鈕；如果沒有藍色按鈕，找「稍後再說 / Not now」按鈕",
+    8000,
+  ).catch(() => null);
+  if (visualTarget) {
+    await login_tapAndWait(config, padCode, visualTarget.x, visualTarget.y, 3000);
+    return true;
+  }
+
+  await login_tapAndWait(config, padCode, 360, 1148, 3000);
+  return true;
+}
 
 const TELEGRAM_LOGIN_ADB_POINTS = {
   welcomeStart: { x: 360, y: 1128 },
@@ -16952,20 +17378,37 @@ async function login_completeThreadsFirstRunScreens(config: VmosConfig, padCode:
   // 登录成功后 Threads 可能出现「储存登录资料」和首次使用体验设置页。
   // 这些页面在 MainActivity 内，视觉分类容易返回 unknown；用已验证坐标推进。
   for (let attempt = 0; attempt < 6; attempt += 1) {
-    if (await detectThreadsModalActivityInFocus(config, padCode)) return false;
-    if (!await detectThreadsMainActivityInFocus(config, padCode)) return false;
+    if (await handleThreadsSaveLoginInfoIfPresent(config, padCode)) continue;
+    if (await detectThreadsModalActivityInFocus(config, padCode)) {
+      const transition = await classifyThreadsLoginTransitionVisually(config, padCode).catch(() => null);
+      if (transition?.page === "save_login_info") {
+        await handleThreadsSaveLoginInfoIfPresent(config, padCode, true);
+        continue;
+      }
+      return false;
+    }
+    if (!await detectThreadsMainActivityInFocus(config, padCode)) {
+      if (await detectThreadsLoginActivityInFocus(config, padCode)) {
+        await delay(1500);
+        continue;
+      }
+      return false;
+    }
 
     const windowText = await getThreadsWindowText(config, padCode);
     if (/你已登出|您已登出|已登出|請重新登入|请重新登录|Log in again|logged out/i.test(windowText)) return false;
     if (/有什麼新鮮事|有什么新鲜事|首頁|主页|首頁|Home|搜尋|搜索|Search|通知|Notifications/i.test(windowText)) return true;
 
     const result = await classifyThreadsPage(config, padCode).catch(() => null);
-    if (result?.page === "home_feed" || result?.page === "profile_page") return true;
     if (result?.page === "login_username_form" || result?.page === "login_password_form" || result?.page === "login_account_picker") return false;
     if (result?.page === "otp_input" || result?.page === "login_2fa_choice" || result?.page === "login_2fa_device_push" || result?.page === "challenge_other" || result?.page === "account_disabled") return false;
+    if (result?.page === "save_login_info") {
+      await handleThreadsSaveLoginInfoIfPresent(config, padCode, true);
+      continue;
+    }
 
-    if (/儲存.*登入|储存.*登录|保存.*登录|Save.*login|登入資料|登录资料/i.test(windowText)) {
-      await execAdbAndWait(config, padCode, adbTapScript(THREADS_LOGIN_ADB_POINTS.saveLoginButton, 3), 12000, 500).catch(() => undefined);
+    if (isThreadsSaveLoginInfoText(windowText)) {
+      await handleThreadsSaveLoginInfoIfPresent(config, padCode);
       continue;
     }
 
@@ -16997,11 +17440,17 @@ export async function loginThreadsAccount(
   padCode: string,
   credential: ThreadsLoginInput,
 ): Promise<ThreadsLoginResult> {
-  clearThreadsAccountQueryCache(padCode);
   const handle = credential.username;
   const password = credential.password;
 
-  // Step 1: 清除 App 数据，强制重新登录
+  // Step 0: 每次都真实确认云机当前账号；不直接使用缓存，避免云机被别人改过后误判。
+  const precheck = await confirmThreadsAccountBeforeLogin(config, padCode, handle);
+  if (precheck.action === "already_logged_in") return precheck.result;
+  if (precheck.action === "blocked") return precheck.result;
+
+  clearThreadsAccountQueryCache(padCode);
+
+  // Step 1: 当前未确认登录到目标账号时，才清除 App 数据并重新登录
   await login_clearAppData(config, padCode);
   await login_launchThreads(config, padCode);
 
@@ -17201,12 +17650,50 @@ export async function loginThreadsAccount(
   }
 
   // Step 5: 验证登录结果（最多 4 轮）
+  let saveLoginTapTried = false;
   for (let round = 0; round < 4; round++) {
-    if (await login_completeThreadsFirstRunScreens(config, padCode)) {
+    const loginWindowText = await getThreadsWindowText(config, padCode).catch(() => "");
+    if (isThreadsSaveLoginInfoText(loginWindowText)) {
+      await handleThreadsSaveLoginInfoIfPresent(config, padCode);
+      continue;
+    }
+    if (/密碼錯誤|密码错误|密碼不正確|密码不正确|password.*incorrect|incorrect.*password|請再試一次|请再试一次/i.test(loginWindowText)) {
       const shotUrl = await screenshot(config, padCode).catch(() => undefined);
-      const username = normalizeThreadsProfileUsername(handle) || undefined;
-      rememberThreadsAccountQuery(padCode, { padCode, platform: "threads", username, loggedIn: true, method: "adb" });
-      return { ok: true, state: "logged_in", message: "登录成功，当前已进入 Threads", screenshotUrl: shotUrl };
+      return {
+        ok: false,
+        state: "failed",
+        message: "Threads 登录失败：平台提示密码错误，请更新账号管理里的 Threads 密码后重试。",
+        screenshotUrl: shotUrl,
+      };
+    }
+    if (await detectThreadsModalActivityInFocus(config, padCode)) {
+      if (!saveLoginTapTried) {
+        saveLoginTapTried = true;
+        await login_tapAdbPoint(config, padCode, THREADS_LOGIN_ADB_POINTS.saveLoginButton, 3500);
+        continue;
+      }
+      const transition = await classifyThreadsLoginTransitionVisually(config, padCode).catch(() => null);
+      if (transition?.page === "save_login_info") {
+        await handleThreadsSaveLoginInfoIfPresent(config, padCode, true);
+        continue;
+      }
+      if (transition?.page === "challenge") {
+        const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+        return {
+          ok: false,
+          state: "challenge_manual",
+          message: `Threads 登录遇到人工验证：${transition.evidence || "需要人工处理"}`,
+          screenshotUrl: shotUrl,
+        };
+      }
+    }
+
+    if (await login_completeThreadsFirstRunScreens(config, padCode)) {
+      const verified = await verifyThreadsLoginAccount(config, padCode, handle);
+      if (verified.ok) return verified;
+      page = "unknown";
+      evidence = verified.message;
+      return verified;
     }
 
     const result = await classifyThreadsPage(config, padCode);
@@ -17214,14 +17701,15 @@ export async function loginThreadsAccount(
     evidence = result.evidence;
 
     if (page === "home_feed" || page === "profile_page") {
-      const shotUrl = await screenshot(config, padCode).catch(() => undefined);
-      const username = normalizeThreadsProfileUsername(handle) || undefined;
-      rememberThreadsAccountQuery(padCode, { padCode, platform: "threads", username, loggedIn: true, method: "adb" });
-      return { ok: true, state: "logged_in", message: `登录成功，当前页面: ${page}`, screenshotUrl: shotUrl };
+      const verified = await verifyThreadsLoginAccount(config, padCode, handle);
+      if (verified.ok) return verified;
+      page = "unknown";
+      evidence = verified.message;
+      return verified;
     }
 
     if (page === "save_login_info") {
-      await execAdbAndWait(config, padCode, adbTapScript(THREADS_LOGIN_ADB_POINTS.saveLoginButton, 3), 12000, 500).catch(() => undefined);
+      await handleThreadsSaveLoginInfoIfPresent(config, padCode, true);
       continue;
     }
 
@@ -17351,7 +17839,11 @@ export async function queryTelegramAccountSession(
       if (isTelegramFocused(fallbackOutput)) break;
     }
   }
-  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  let shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  if (await dismissTelegramCommonBlockerIfPossible(config, padCode, shotUrl).catch(() => false)) {
+    await delay(1200);
+    shotUrl = await screenshot(config, padCode).catch(() => shotUrl);
+  }
   const uiXml = await dumpUiXml(config, padCode).catch(() => "");
   const combined = `${launchOutput}\n${uiXml}`;
   const focusLines = launchOutput
@@ -17476,6 +17968,7 @@ export async function startTelegramAccountLoginSession(
     25_000,
     1_000,
   ).catch(() => "");
+  await dismissTelegramCommonBlockerIfPossible(config, padCode).catch(() => false);
   const launchCheck = await queryTelegramAccountSession(config, padCode);
   if (launchCheck.ok) return launchCheck;
   if (launchCheck.state === "challenge_otp") return launchCheck;
@@ -17545,6 +18038,7 @@ export async function startTelegramAccountLoginSession(
   ).catch(() => "");
   await onProgress?.("当前步骤 3/4：正在识别 Telegram 下一步页面。").catch(() => undefined);
   const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  await dismissTelegramCommonBlockerIfPossible(config, padCode, shotUrl).catch(() => false);
   const uiXml = await dumpUiXml(config, padCode).catch(() => "");
   const uiXmlText = uiXml.replace(/\s+password="(?:true|false)"/gi, "");
   const challenge = classifyTelegramLoginChallengeText(uiXml, input.email);
@@ -17595,6 +18089,7 @@ export async function clearTelegramAccountSession(
     20_000,
     1_000,
   ).catch(() => "");
+  await dismissTelegramCommonBlockerIfPossible(config, padCode).catch(() => false);
   const shotUrl = await screenshot(config, padCode).catch(() => undefined);
   return {
     ok: true,
@@ -17639,7 +18134,7 @@ export interface ThreadsProfileSettingsSnapshot {
   uiXml?: string;
 }
 
-const THREADS_ACCOUNT_QUERY_CACHE_TTL_MS = 20_000;
+const THREADS_ACCOUNT_QUERY_CACHE_TTL_MS = 120_000;
 const threadsAccountQueryCache = new Map<string, { expiresAt: number; result: PadAccountInfo }>();
 
 function getCachedThreadsAccountQuery(padCode: string): PadAccountInfo | null {
@@ -17708,23 +18203,37 @@ async function openThreadsProfileForAccountQuery(
   padCode: string,
 ): Promise<{ ok: true; profileLikely: boolean; screenshotUrl?: string } | { ok: false; error: string; screenshotUrl?: string }> {
   await relaunchThreads(config, padCode, 4500);
-  await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
-  await delay(900);
-  await relaunchThreads(config, padCode, 3200);
-  const initialShotUrl = await screenshot(config, padCode).catch(() => undefined);
-  const initialCloseOverlayTarget = initialShotUrl
-    ? await locateThreadsButtonByVision(
-        initialShotUrl,
-        "Threads 全屏图片/视频/帖子查看浮层左上角的关闭 X 或返回箭头中心点；只有画面是全屏媒体查看浮层时才返回坐标，如果是普通首页、个人页或有底部导航栏则输出 NOT_FOUND",
-      ).catch(() => null)
-    : null;
-  if (initialCloseOverlayTarget) {
-    await tapViaAdbAbsolute(config, padCode, initialCloseOverlayTarget.x, initialCloseOverlayTarget.y, 1600);
-    await delay(900);
-    await relaunchThreads(config, padCode, 2600);
+  let initialShotUrl = await screenshot(config, padCode).catch(() => undefined);
+  let initialUiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const alreadyOnEditProfile = isThreadsEditProfilePageUiXml(initialUiXml)
+    || await detectThreadsEditProfilePageByScreenshotHeuristic(initialShotUrl).catch(() => false);
+  if (alreadyOnEditProfile) {
+    return { ok: true, profileLikely: true, screenshotUrl: initialShotUrl };
+  }
+  if (await detectAndroidKeyboardVisibleLocally(initialShotUrl).catch(() => false)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
+    await delay(700);
+    initialShotUrl = await screenshot(config, padCode).catch(() => initialShotUrl);
+    initialUiXml = await dumpUiXml(config, padCode).catch(() => initialUiXml);
+    const editAfterKeyboardClose = isThreadsEditProfilePageUiXml(initialUiXml)
+      || await detectThreadsEditProfilePageByScreenshotHeuristic(initialShotUrl).catch(() => false);
+    if (editAfterKeyboardClose) {
+      return { ok: true, profileLikely: true, screenshotUrl: initialShotUrl };
+    }
   }
 
-  const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  let focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  if (!focus.includes(THREADS_PACKAGE)) {
+    await execAdbForText(
+      config,
+      padCode,
+      `am start -S -n ${THREADS_PACKAGE}/.mainactivity.BarcelonaActivity`,
+      15_000,
+      1_000,
+    ).catch(() => "");
+    await delay(3500);
+    focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+  }
   if (!focus.includes(THREADS_PACKAGE)) {
     return { ok: false, error: `Threads 未在前台：${focus || "unknown"}` };
   }
@@ -18070,6 +18579,13 @@ export function isThreadsEditProfilePageUiXml(uiXml: string): boolean {
   return hasTitle && cues >= 2;
 }
 
+function isThreadsProfileEditSubPageUiXml(uiXml: string): boolean {
+  const normalized = normalizeSingleLine(decodeXmlAttr(uiXml));
+  if (!normalized) return false;
+  if (isThreadsEditProfilePageUiXml(uiXml)) return false;
+  return /編輯名稱|编辑名称|Edit name|編輯姓名|编辑姓名|編輯用戶名稱|编辑用户名|Edit username|編輯個人簡介|编辑个人简介|Edit bio|新增連結|新增链接|Add link/i.test(normalized);
+}
+
 function hasThreadsVisibleTextInUiXml(uiXml: string): boolean {
   const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
   return nodes.some((node) => Boolean(normalizeSingleLine(`${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`)));
@@ -18103,7 +18619,7 @@ async function detectThreadsEditProfilePageByVision(screenshotUrl?: string): Pro
 
 async function detectThreadsEditProfilePageByScreenshotHeuristic(screenshotUrl?: string): Promise<boolean> {
   if (!screenshotUrl || typeof fetch !== "function") return false;
-  const response = await fetch(screenshotUrl);
+  const response = await fetchWithTimeout(screenshotUrl, {}, 8_000);
   if (!response.ok) return false;
   const buffer = Buffer.from(await response.arrayBuffer());
   const sharp = (await import("sharp")).default;
@@ -18141,24 +18657,22 @@ async function detectThreadsEditProfilePageByScreenshotHeuristic(screenshotUrl?:
   const title = avgDarkness(135, 92, 270, 80);
   const topRightDoneGray = avgNonWhite(600, 90, 95, 85);
   const profileAvatar = avgNonWhite(535, 210, 130, 130);
-  const editButtonRegion = avgDarkness(70, 490, 260, 95);
   return topLeftX > 0.02
     && title > 0.05
     && topRightDoneGray > 0.06
-    && profileAvatar > 0.2
-    && editButtonRegion < 0.06;
+    && profileAvatar > 0.16;
 }
 
 async function locateThreadsEditProfileAvatarFromScreenshot(screenshotUrl?: string): Promise<{ x: number; y: number } | null> {
   if (!screenshotUrl || typeof fetch !== "function") return null;
-  const response = await fetch(screenshotUrl);
+  const response = await fetchWithTimeout(screenshotUrl, {}, 8_000);
   if (!response.ok) return null;
   const buffer = Buffer.from(await response.arrayBuffer());
   const sharp = (await import("sharp")).default;
   const { data, info } = await sharp(buffer).resize(720, 1600, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
   const idx = (x: number, y: number) => (Math.max(0, Math.min(info.height - 1, Math.round(y))) * info.width + Math.max(0, Math.min(info.width - 1, Math.round(x)))) * 3;
   let best: { x: number; y: number; score: number } | null = null;
-  for (let cy = 190; cy <= 1460; cy += 20) {
+  for (let cy = 250; cy <= 380; cy += 20) {
     for (let cx = 555; cx <= 635; cx += 20) {
       let total = 0;
       let colorful = 0;
@@ -18185,7 +18699,7 @@ async function locateThreadsEditProfileAvatarFromScreenshot(screenshotUrl?: stri
 
 async function detectThreadsAvatarSelectionReadyByScreenshot(screenshotUrl?: string): Promise<boolean> {
   if (!screenshotUrl || typeof fetch !== "function") return false;
-  const response = await fetch(screenshotUrl);
+  const response = await fetchWithTimeout(screenshotUrl, {}, 8_000);
   if (!response.ok) return false;
   const buffer = Buffer.from(await response.arrayBuffer());
   const sharp = (await import("sharp")).default;
@@ -18220,7 +18734,7 @@ async function detectThreadsAvatarSelectionReadyByScreenshot(screenshotUrl?: str
 
 async function detectThreadsAvatarSystemCropEditorByScreenshot(screenshotUrl?: string): Promise<boolean> {
   if (!screenshotUrl || typeof fetch !== "function") return false;
-  const response = await fetch(screenshotUrl);
+  const response = await fetchWithTimeout(screenshotUrl, {}, 8_000);
   if (!response.ok) return false;
   const buffer = Buffer.from(await response.arrayBuffer());
   const sharp = (await import("sharp")).default;
@@ -18280,9 +18794,51 @@ async function openThreadsEditProfilePage(
   onProgress?: (progress: PublishProgress) => void,
 ): Promise<{ uiXml: string; screenshotUrl?: string }> {
   onProgress?.({ step: "启动 Threads 并打开个人主页...", done: false });
+  if (isAcpPad(padCode)) {
+    const tryFastOpenEditProfile = async (): Promise<{ uiXml: string; screenshotUrl?: string } | null> => {
+      onProgress?.({ step: "启动 Threads App...", done: false });
+      await execAdbForText(
+        config,
+        padCode,
+        `am start -S -n ${THREADS_PACKAGE}/.mainactivity.BarcelonaActivity`,
+        20_000,
+        1_000,
+      ).catch(() => "");
+      await delay(4_500);
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        onProgress?.({ step: `检查 Threads 当前页面 (${attempt + 1}/2)...`, done: false });
+        let currentShot = await screenshot(config, padCode).catch(() => undefined);
+        if (await detectThreadsEditProfilePageByScreenshotHeuristic(currentShot).catch(() => false)) {
+          return { uiXml: "", screenshotUrl: currentShot };
+        }
+
+        onProgress?.({ step: "进入 Threads 个人主页标签...", done: false });
+        await tapViaAdbAbsoluteQuick(config, padCode, 660, 1210, 1_000).catch(() => undefined);
+        await delay(2_000);
+        onProgress?.({ step: "点击 Threads 编辑个人档案...", done: false });
+        await tapViaAdbAbsoluteQuick(config, padCode, 192, 588, 1_200).catch(() => undefined);
+        await delay(2_200);
+        currentShot = await screenshot(config, padCode).catch(() => currentShot);
+        if (await detectThreadsEditProfilePageByScreenshotHeuristic(currentShot).catch(() => false)) {
+          return { uiXml: "", screenshotUrl: currentShot };
+        }
+      }
+      return null;
+    };
+    const fastOpened = await tryFastOpenEditProfile().catch(() => null);
+    if (fastOpened) return fastOpened;
+  }
+
   const profile = await openThreadsProfileForAccountQuery(config, padCode);
   if (!profile.ok) {
     throw new Error(profile.error || "未能打开 Threads 个人主页");
+  }
+
+  let uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  let profileShotUrl = await screenshot(config, padCode).catch(() => profile.screenshotUrl);
+  if (isThreadsEditProfilePageUiXml(uiXml) || await detectThreadsEditProfilePageByScreenshotHeuristic(profileShotUrl).catch(() => false)) {
+    return { uiXml, screenshotUrl: profileShotUrl };
   }
 
   if (profile.profileLikely) {
@@ -18292,7 +18848,6 @@ async function openThreadsEditProfilePage(
     }
   }
 
-  let uiXml = await dumpUiXml(config, padCode).catch(() => "");
   let editTarget = uiXml
     ? findThreadsTextTargetFromUiXml(
         uiXml,
@@ -18301,11 +18856,10 @@ async function openThreadsEditProfilePage(
       )
     : null;
   let editTargetSource: ThreadsProfileLinkTargetSource | null = editTarget ? "xml" : null;
-  const profileShotUrl = await screenshot(config, padCode).catch(() => profile.screenshotUrl);
   const editVisionShotUrl = profileShotUrl || profile.screenshotUrl;
   if (!editTarget && profile.profileLikely && isAcpPad(padCode)) {
-    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
-    editTarget = await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, FIXED_VMOS_SCREEN);
+    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 588 };
+    editTarget = fallbackPoint;
     editTargetSource = "fallback";
   }
   if (!editTarget && editVisionShotUrl) {
@@ -18316,8 +18870,10 @@ async function openThreadsEditProfilePage(
     if (editTarget) editTargetSource = "vision";
   }
   if (!editTarget && profile.profileLikely) {
-    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
-    editTarget = await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, FIXED_VMOS_SCREEN);
+    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 588 };
+    editTarget = isAcpPad(padCode)
+      ? fallbackPoint
+      : await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, FIXED_VMOS_SCREEN);
     editTargetSource = "fallback";
   }
   if (!editTarget) throw new Error("未找到 Threads 个人主页的编辑按钮");
@@ -18328,11 +18884,91 @@ async function openThreadsEditProfilePage(
   await delay(900);
   await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
   await delay(700);
+
+  const recoverFromEditSubPage = async (): Promise<{ ok: boolean; uiXml: string; screenshotUrl?: string }> => {
+    let currentXml = await dumpUiXml(config, padCode).catch(() => "");
+    let currentShot = await screenshot(config, padCode).catch(() => undefined);
+    if (!isThreadsProfileEditSubPageUiXml(currentXml) && !(currentShot && await detectAndroidKeyboardVisibleLocally(currentShot).catch(() => false))) {
+      return { ok: false, uiXml: currentXml, screenshotUrl: currentShot };
+    }
+    onProgress?.({ step: "检测到进入资料子页面，正在返回编辑资料主页面...", done: false });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      currentXml = await dumpUiXml(config, padCode).catch(() => "");
+      currentShot = await screenshot(config, padCode).catch(() => currentShot);
+      const onMainEditPage = isThreadsEditProfilePageUiXml(currentXml)
+        || await detectThreadsEditProfilePageByScreenshotHeuristic(currentShot).catch(() => false);
+      if (onMainEditPage) return { ok: true, uiXml: currentXml, screenshotUrl: currentShot };
+      const keyboardVisible = currentShot ? await detectAndroidKeyboardVisibleLocally(currentShot).catch(() => false) : false;
+      const onSubPage = isThreadsProfileEditSubPageUiXml(currentXml) || keyboardVisible;
+      if (!onSubPage) return { ok: false, uiXml: currentXml, screenshotUrl: currentShot };
+      await execAdbForText(config, padCode, "input keyevent 4", 8_000, 700).catch(() => "");
+      await delay(900);
+    }
+    currentXml = await dumpUiXml(config, padCode).catch(() => "");
+    currentShot = await screenshot(config, padCode).catch(() => currentShot);
+    return { ok: false, uiXml: currentXml, screenshotUrl: currentShot };
+  };
+
+  const checkEditProfileOpened = async (): Promise<{ ok: boolean; uiXml: string; screenshotUrl?: string }> => {
+    const currentXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (isThreadsEditProfilePageUiXml(currentXml)) return { ok: true, uiXml: currentXml };
+    if (isThreadsProfileEditSubPageUiXml(currentXml)) {
+      const recovered = await recoverFromEditSubPage();
+      if (recovered.ok) return recovered;
+      return { ok: false, uiXml: recovered.uiXml, screenshotUrl: recovered.screenshotUrl };
+    }
+    const currentShot = await screenshot(config, padCode).catch(() => undefined);
+    if (currentShot && await detectAndroidKeyboardVisibleLocally(currentShot).catch(() => false)) {
+      const recovered = await recoverFromEditSubPage();
+      if (recovered.ok) return recovered;
+      return { ok: false, uiXml: recovered.uiXml, screenshotUrl: recovered.screenshotUrl };
+    }
+    const heuristic = await detectThreadsEditProfilePageByScreenshotHeuristic(currentShot).catch(() => false);
+    if (heuristic) return { ok: true, uiXml: currentXml, screenshotUrl: currentShot };
+    const visual = await detectThreadsEditProfilePageByVision(currentShot).catch(() => false);
+    return { ok: visual, uiXml: currentXml, screenshotUrl: currentShot };
+  };
+
+  let quickOpened = await checkEditProfileOpened();
+  if (!quickOpened.ok && profile.profileLikely && isAcpPad(padCode)) {
+    const guardXml = quickOpened.uiXml || await dumpUiXml(config, padCode).catch(() => "");
+    const guardShot = quickOpened.screenshotUrl || await screenshot(config, padCode).catch(() => undefined);
+    if (isThreadsProfileEditSubPageUiXml(guardXml) || (guardShot && await detectAndroidKeyboardVisibleLocally(guardShot).catch(() => false))) {
+      const recovered = await recoverFromEditSubPage();
+      if (recovered.ok) return { uiXml: recovered.uiXml, screenshotUrl: recovered.screenshotUrl };
+      throw new Error(`进入了 Threads 资料子页面，已停止继续盲点，避免跑偏${recovered.screenshotUrl ? `，截图：${recovered.screenshotUrl}` : ""}`);
+    }
+    const fallbackPoints = [
+      { x: 192, y: 588 },
+      { x: 360, y: 588 },
+    ];
+    for (const fallbackPoint of fallbackPoints) {
+      const point = isAcpPad(padCode)
+        ? fallbackPoint
+        : await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, { width: 720, height: 1280 }).catch(() => fallbackPoint);
+      await tapViaAdbAbsoluteQuick(config, padCode, point.x, point.y, 1100).catch(() => undefined);
+      quickOpened = await checkEditProfileOpened();
+      if (quickOpened.ok) {
+        return { uiXml: quickOpened.uiXml, screenshotUrl: quickOpened.screenshotUrl };
+      }
+    }
+  } else if (quickOpened.ok) {
+    return { uiXml: quickOpened.uiXml, screenshotUrl: quickOpened.screenshotUrl };
+  }
+
   let editProfileScreenshotUrl: string | undefined;
   let visuallyOnEditProfile = false;
   for (let attempt = 0; attempt < 12; attempt += 1) {
     uiXml = await dumpUiXml(config, padCode).catch(() => "");
     if (isThreadsEditProfilePageUiXml(uiXml)) break;
+    if (isThreadsProfileEditSubPageUiXml(uiXml)) {
+      const recovered = await recoverFromEditSubPage();
+      if (recovered.ok) {
+        uiXml = recovered.uiXml;
+        editProfileScreenshotUrl = recovered.screenshotUrl;
+        break;
+      }
+    }
     editProfileScreenshotUrl = await screenshot(config, padCode).catch(() => editProfileScreenshotUrl);
     visuallyOnEditProfile = await detectThreadsEditProfilePageByVision(editProfileScreenshotUrl);
     if (visuallyOnEditProfile) break;
@@ -18553,11 +19189,42 @@ function findThreadsProfileAvatarPickerTarget(uiXml: string): { x: number; y: nu
   return findThreadsTextTargetFromUiXml(
     uiXml,
     [
-      /新大頭貼照|新头像|新增大頭貼照|新增头像|從相簿選擇|从相册选择|從圖庫選擇|从图库选择|選擇相片|选择照片|選擇大頭貼/i,
-      /Choose from library|Select from gallery|Upload photo|New profile picture/i,
+      /從相簿選擇|从相册选择|從圖庫選擇|从图库选择|選擇相片|选择照片|選擇大頭貼/i,
+      /Choose from library|Select from gallery|Upload photo/i,
     ],
     { minY: 240, maxY: 1300, preferTop: true },
   );
+}
+
+function isThreadsAvatarInstagramImportOnlyUiXml(uiXml: string): boolean {
+  const normalized = normalizeSingleLine(decodeXmlAttr(uiXml));
+  if (!normalized) return false;
+  const hasInstagramImport = /Instagram/i.test(normalized)
+    && /(匯入|汇入|導入|导入|Import|登入|登录|Log in)/i.test(normalized);
+  const hasLocalPicker = /(相簿|相册|圖庫|图库|選擇相片|选择照片|Choose from library|Select from gallery|Upload photo)/i.test(normalized);
+  return hasInstagramImport && !hasLocalPicker;
+}
+
+async function assertThreadsAvatarDirectUploadStillAvailable(
+  config: VmosConfig,
+  padCode: string,
+  context: string,
+): Promise<void> {
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  const focus = await execAdbForText(
+    config,
+    padCode,
+    `dumpsys activity activities 2>/dev/null | grep -E "mResumedActivity|topResumedActivity" | head -n 5`,
+    8_000,
+    400,
+  ).catch(() => "");
+  const shotUrl = await screenshot(config, padCode).catch(() => undefined);
+  if (/com\.android\.chrome|CustomTabActivity/i.test(focus) || isThreadsAvatarInstagramImportOnlyUiXml(uiXml)) {
+    throw new Error(buildThreadsBlockedError(
+      `${context}：Threads 目前只顯示「從 Instagram 匯入」頭像入口，沒有本機相簿/圖庫入口；需要先登入並修改 Instagram 頭像後再匯入，無法在 Threads 內直接上傳新頭像。`,
+      shotUrl,
+    ));
+  }
 }
 
 async function tapThreadsProfileAvatarSaveOrNext(
@@ -18592,6 +19259,34 @@ async function tapThreadsProfileAvatarSaveOrNext(
   return true;
 }
 
+function isThreadsAvatarPostSelectionUiXml(uiXml: string): boolean {
+  const normalized = normalizeSingleLine(decodeXmlAttr(uiXml));
+  if (!normalized) return false;
+  if (isThreadsEditProfilePageUiXml(normalized)) return true;
+  if (/裁切|裁剪|Crop|Move and scale|縮放|缩放|調整|调整/i.test(normalized)) return true;
+  if (/相片|照片|圖庫|图库|媒體|媒体|Photos?|Gallery|Albums?|Recents?|Camera/i.test(normalized)) return false;
+  return /完成|Done|下一步|Next|儲存|保存|Save|套用|Apply/i.test(normalized);
+}
+
+async function waitForThreadsAvatarSelectionAdvance(
+  config: VmosConfig,
+  padCode: string,
+  timeoutMs = 5500,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let lastShotUrl: string | undefined;
+  while (Date.now() < deadline) {
+    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (isThreadsAvatarPostSelectionUiXml(uiXml)) return true;
+    lastShotUrl = await screenshot(config, padCode).catch(() => lastShotUrl);
+    if (await detectThreadsAvatarSystemCropEditorByScreenshot(lastShotUrl).catch(() => false)) return true;
+    if (await detectThreadsEditProfilePageByVision(lastShotUrl).catch(() => false)) return true;
+    await delay(650);
+  }
+  return false;
+}
+
 export async function updateThreadsProfileAvatar(
   config: VmosConfig,
   padCode: string,
@@ -18605,7 +19300,14 @@ export async function updateThreadsProfileAvatar(
   const remotePath = `/sdcard/Download/threads-profile-avatar-${Date.now()}.jpg`;
   const staging = startDeviceMediaStaging(config, padCode, targetImageUrl, remotePath, onProgress, { reuse: false });
   const opened = await openThreadsEditProfilePage(config, padCode, onProgress);
-  await staging.wait("等待头像图片写入云机图库...");
+  const stagedRemotePath = await staging.wait("等待头像图片写入云机图库...");
+  await execAdbForText(
+    config,
+    padCode,
+    `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://${stagedRemotePath}`,
+    8_000,
+    700,
+  ).catch(() => "");
 
   let uiXml = opened.uiXml;
   let avatarTarget = findThreadsProfileAvatarEditTarget(uiXml);
@@ -18613,7 +19315,7 @@ export async function updateThreadsProfileAvatar(
   if (!avatarTarget && isAcpPad(padCode)) {
     const shotUrl = opened.screenshotUrl || await screenshot(config, padCode).catch(() => undefined);
     avatarTarget = await locateThreadsEditProfileAvatarFromScreenshot(shotUrl).catch(() => null);
-    avatarTargetSource = avatarTarget ? "fallback" : null;
+    avatarTargetSource = avatarTarget ? "vision" : null;
   }
   if (!avatarTarget) {
     const shotUrl = opened.screenshotUrl || await screenshot(config, padCode).catch(() => undefined);
@@ -18626,12 +19328,9 @@ export async function updateThreadsProfileAvatar(
     if (avatarTarget) avatarTargetSource = "vision";
   }
   if (!avatarTarget) {
-    avatarTarget = await scaleReferencePointToPhysicalTap(
-      config,
-      padCode,
-      isAcpPad(padCode) ? { x: 595, y: 270 } : { x: 360, y: 318 },
-      FIXED_VMOS_SCREEN,
-    );
+    avatarTarget = isAcpPad(padCode)
+      ? { x: 595, y: 270 }
+      : await scaleReferencePointToPhysicalTap(config, padCode, { x: 360, y: 318 }, FIXED_VMOS_SCREEN);
     avatarTargetSource = "fallback";
   }
 
@@ -18642,6 +19341,7 @@ export async function updateThreadsProfileAvatar(
   await tapViaAdbAbsolute(config, padCode, avatarTapPoint.x, avatarTapPoint.y, 1800);
   await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
   await delay(900);
+  await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "打開 Threads 頭像設定後");
 
   uiXml = await dumpUiXml(config, padCode).catch(() => "");
   const pickerTarget = findThreadsProfileAvatarPickerTarget(uiXml);
@@ -18650,11 +19350,9 @@ export async function updateThreadsProfileAvatar(
     await tapViaAdbAbsolute(config, padCode, pickerTap.x, pickerTap.y, 2200);
     await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
     await delay(900);
+    await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "點擊 Threads 頭像來源後");
   } else if (isAcpPad(padCode)) {
-    const pickerTap = await scaleReferencePointToPhysicalTap(config, padCode, { x: 170, y: 1280 }, FIXED_VMOS_SCREEN);
-    await tapViaAdbAbsolute(config, padCode, pickerTap.x, pickerTap.y, 2200);
-    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
-    await delay(900);
+    await assertThreadsAvatarDirectUploadStillAvailable(config, padCode, "Threads 頭像來源列表中");
   }
 
   onProgress?.({ step: "选择新的头像图片...", done: false });
@@ -18669,17 +19367,22 @@ export async function updateThreadsProfileAvatar(
         : { x: 120 + attempt * 170, y: attempt < 2 ? 330 : 520 });
     await tapViaAdbAbsolute(config, padCode, tapPoint.x, tapPoint.y, 1800);
     await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
-    await delay(1000);
+    await delay(700);
     const nextXml = normalizeSingleLine(await dumpUiXml(config, padCode).catch(() => ""));
-    if (/裁切|裁剪|Crop|完成|Done|下一步|Next|儲存|保存|Save|編輯個人檔案|编辑个人档案|Edit profile/i.test(nextXml)) {
+    if (isThreadsAvatarPostSelectionUiXml(nextXml)) {
       selected = true;
       break;
     }
-    selected = await detectThreadsAvatarSelectionReadyByScreenshot(
-      await screenshot(config, padCode).catch(() => undefined),
-    ).catch(() => false);
+    if ((await getThreadsGallerySelectedMarkers(config, padCode).catch(() => [])).length > 0) {
+      selected = true;
+      break;
+    }
+    selected = await waitForThreadsAvatarSelectionAdvance(config, padCode).catch(() => false);
   }
-  if (!selected) throw new Error("未能在图库中选择新的头像图片");
+  if (!selected) {
+    const shot = await screenshot(config, padCode).catch(() => undefined);
+    throw new Error(`未能在图库中选择新的头像图片${shot ? `，截图：${shot}` : ""}`);
+  }
 
   onProgress?.({ step: "确认头像裁剪与保存...", done: false });
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -19051,6 +19754,22 @@ export async function queryThreadsAccount(
     }
   } catch {}
 
+  // VMOS ADB task output can truncate long uiautomator XML before the profile
+  // username appears. For account checks, query only short text attributes so
+  // the username/profile cues fit inside the task result.
+  try {
+    const texts = await dumpUiTextAttributes(config, padCode);
+    if (texts.length > 0) {
+      uiProfileCue = uiProfileCue || hasThreadsProfileTextCue(texts);
+      const username = extractThreadsProfileUsernameFromTexts(texts);
+      if (username) {
+        const result = { padCode, platform: "threads" as const, username, loggedIn: true, method: "adb" as const, screenshotUrl: profilePage.screenshotUrl };
+        rememberThreadsAccountQuery(padCode, result);
+        return result;
+      }
+    }
+  } catch {}
+
   // ── 方案二：仅在已打开个人页后使用截图辅助识别 ───────────────────────────
   try {
     if (!profilePage.profileLikely && !uiProfileCue && uiXmlHadNodes) {
@@ -19278,6 +19997,23 @@ export interface WarmupProgress {
   candidates: WarmupCandidate[];
   likeScreenshots?: string[];
   commentScreenshots?: string[];
+  done: boolean;
+  error?: string;
+}
+
+export interface ThreadsAutoReplyConfig {
+  maxPosts?: number;
+  maxReplies?: number;
+  commentPersona?: WarmupCommentPersona;
+}
+
+export interface ThreadsAutoReplyProgress {
+  step: string;
+  scannedPosts: number;
+  scannedComments: number;
+  replied: number;
+  skipped: number;
+  replyScreenshots?: string[];
   done: boolean;
   error?: string;
 }
@@ -22184,6 +22920,412 @@ ${templateHint}
   } finally {
     request.cleanup();
   }
+}
+
+type ThreadsAutoReplyCandidate = {
+  text: string;
+  score: number;
+};
+
+function extractThreadsAutoReplyVisibleTexts(uiXml: string): string[] {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  const values: string[] = [];
+  for (const node of nodes) {
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (center && (center.y < 150 || center.y > 1360)) continue;
+    for (const raw of [
+      decodeXmlAttr(getXmlAttr(node, "text")),
+      decodeXmlAttr(getXmlAttr(node, "content-desc")),
+    ]) {
+      const text = normalizeSingleLine(raw);
+      if (!text) continue;
+      values.push(text);
+    }
+  }
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = value.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function isThreadsAutoReplyIgnoredText(text: string): boolean {
+  const compact = normalizeSingleLine(text);
+  if (!compact) return true;
+  if (compact.length < 3 || compact.length > 160) return true;
+  if (/^(讚|赞|喜歡|喜欢|回覆|回复|留言|評論|评论|轉發|转发|分享|發佈|发布|Post|Reply|Like|Share|Repost|Threads|Following|For you)$/i.test(compact)) return true;
+  if (/^(首頁|主页|搜尋|搜索|探索|通知|個人|个人|新增|取消|完成|更多|返回|查看|複製|复制|編輯|编辑)$/i.test(compact)) return true;
+  if (/^\d+(\.\d+)?[萬万千kKmM]?$/.test(compact)) return true;
+  if (/^\d+\s*(秒|分鐘|分钟|小時|小时|天|週|周|月|年|s|m|h|d|w)$/i.test(compact)) return true;
+  if (/^@?[a-z0-9_.-]{3,32}$/i.test(compact)) return true;
+  if (/https?:\/\/|t\.me\/|line\.me|whatsapp|賺錢|赚钱|兼職|兼职|私訊|私信|加群|導流|引流|博彩|裸聊|約炮|约炮/i.test(compact)) return true;
+  if (!/[\p{L}\p{N}]/u.test(compact)) return true;
+  return false;
+}
+
+function rankThreadsAutoReplyCandidates(
+  texts: string[],
+  persona?: WarmupCommentPersona,
+): ThreadsAutoReplyCandidate[] {
+  const personaText = warmupCommentPersonaText(persona);
+  const keywords = buildWarmupInterestKeywords(persona).map((item) => item.toLowerCase());
+  const candidates: ThreadsAutoReplyCandidate[] = [];
+  for (const text of texts) {
+    if (isThreadsAutoReplyIgnoredText(text)) continue;
+    const lower = text.toLowerCase();
+    let score = 0;
+    if (text.length >= 6 && text.length <= 60) score += 8;
+    if (/[?？]$/.test(text)) score += 8;
+    if (/喜歡|喜欢|想看|期待|好看|可愛|可爱|有趣|真的|哈哈|懂|請問|请问|怎麼|怎么|哪裡|哪里|求|想要|感覺|感觉|漂亮|厲害|厉害/i.test(text)) score += 8;
+    if (/謝謝|谢谢|支持|加油|認同|认同|收藏|學到|学到/i.test(text)) score += 4;
+    for (const keyword of keywords) {
+      if (keyword.length >= 2 && lower.includes(keyword)) score += 6;
+    }
+    if (personaText && text.split("").some((char) => personaText.includes(char))) score += 2;
+    if (/罵|骂|噁|恶|垃圾|騙|骗|死|滾|滚|爛|烂|假|黑粉/i.test(text)) score -= 16;
+    if (score > 0) candidates.push({ text, score });
+  }
+  return candidates
+    .sort((a, b) => b.score - a.score || a.text.length - b.text.length)
+    .slice(0, 8);
+}
+
+async function chooseThreadsAutoReplyCandidateByModel(
+  postPreview: string,
+  candidates: ThreadsAutoReplyCandidate[],
+  persona?: WarmupCommentPersona,
+): Promise<ThreadsAutoReplyCandidate | null> {
+  if (!candidates.length) return null;
+  if (!getGeminiEndpoint().apiKey) return candidates[0];
+  const request = createTimeoutSignal(7000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [{
+          text: `你要幫 Threads 帳號挑選自己貼文底下值得回覆的一條留言。
+
+貼文摘要：${normalizeSingleLine(postPreview).slice(0, 160) || "未取得"}
+帳號人設：${warmupCommentPersonaText(persona) || "未指定，台灣地區自然口語"}
+
+候選留言：
+${candidates.map((item, index) => `${index + 1}. ${item.text}`).join("\n")}
+
+只挑一條最適合回覆的留言。標準：
+- 優先選和貼文內容或帳號人設相關、有提問、有情緒、有具體反應的留言。
+- 不選廣告、導流、辱罵、無意義、純表情、太泛泛的留言。
+- 如果都不值得回，輸出 0。
+
+只輸出 JSON：{"index":1}`,
+        }],
+      }],
+      { maxOutputTokens: 40, temperature: 0 },
+      request.signal,
+    );
+    const text = extractText(raw);
+    const json = text.match(/\{[\s\S]*\}/)?.[0];
+    const index = json ? Number(JSON.parse(json).index) : Number(text.match(/\d+/)?.[0] || 0);
+    if (!Number.isFinite(index) || index <= 0 || index > candidates.length) return null;
+    return candidates[index - 1];
+  } catch {
+    return candidates[0];
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function generateThreadsAutoReplyText(
+  postPreview: string,
+  commentText: string,
+  persona?: WarmupCommentPersona,
+): Promise<string> {
+  const cleanedComment = normalizeSingleLine(commentText).slice(0, 120);
+  const cleanedPost = normalizeSingleLine(postPreview).slice(0, 160);
+  if (!cleanedComment) return fallbackWarmupComment(cleanedPost, [], persona);
+  if (!getGeminiEndpoint().apiKey) {
+    return finalizeWarmupComment(`真的 ${cleanedComment.slice(0, 16)}`, cleanedPost || cleanedComment, [], persona);
+  }
+  const request = createTimeoutSignal(8000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [{
+          text: `請替 Threads 帳號回覆自己貼文底下的一條留言。
+
+帳號人設：${warmupCommentPersonaText(persona) || "台灣地區自然口語"}
+貼文摘要：${cleanedPost || "未取得"}
+留言內容：${cleanedComment}
+
+要求：
+- 只輸出回覆文字，不要解釋。
+- 口語、自然、像真人短回，不要像客服。
+- 必須順著留言內容回，不要答非所問。
+- 8 到 36 個中文字左右；留言很短時可以更短。
+- 不要 hashtag、連結、@、廣告語，不要說自己是 AI。
+- 不要過度熱情，不要每句都加標點或表情。`,
+        }],
+      }],
+      { maxOutputTokens: 90, temperature: 0.8 },
+      request.signal,
+    );
+    return finalizeWarmupComment(extractText(raw), cleanedPost || cleanedComment, [], persona);
+  } catch {
+    return fallbackWarmupComment(cleanedPost || cleanedComment, [], persona);
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function decideThreadsAutoReplyByModel(
+  postPreview: string,
+  candidates: ThreadsAutoReplyCandidate[],
+  persona?: WarmupCommentPersona,
+): Promise<{ candidate: ThreadsAutoReplyCandidate; reply: string; reason: string } | null> {
+  if (!candidates.length) return null;
+  const fallbackCandidate = await chooseThreadsAutoReplyCandidateByModel(postPreview, candidates, persona);
+  if (!getGeminiEndpoint().apiKey) {
+    return fallbackCandidate
+      ? {
+          candidate: fallbackCandidate,
+          reply: await generateThreadsAutoReplyText(postPreview, fallbackCandidate.text, persona),
+          reason: "model_unavailable_fallback",
+        }
+      : null;
+  }
+
+  const cleanedPost = normalizeSingleLine(postPreview).slice(0, 180);
+  const personaHint = warmupCommentPersonaText(persona) || "未指定，使用台灣地區自然口語";
+  const request = createTimeoutSignal(10000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [{
+          text: `你是 Threads 帳號的自動回覆決策器。請根據「帳號人設」「自己的貼文」「遊客留言」挑選一條真正值得回覆的留言，並直接寫出合理回覆。
+
+帳號人設：
+${personaHint}
+
+自己的貼文摘要：
+${cleanedPost || "未取得"}
+
+遊客留言候選：
+${candidates.map((item, index) => `${index + 1}. ${item.text}`).join("\n")}
+
+判斷規則：
+- 只回覆和帳號人設、貼文主題、圖片/生活場景、情緒互動、提問請求相關的留言。
+- 優先選有用信息：提問、具體反應、真實情緒、對圖片/內容的具體觀察、和人設設定相關的留言。
+- 垃圾信息不要回：廣告導流、網址、辱罵、攻擊、無意義敷衍、純表情、抽獎/賺錢/色情導流、和貼文完全無關。
+- 如果候選都不值得回覆，index 必須輸出 0，reply 留空。
+- 回覆要像真人口語短句，順著留言回，不要像客服，不要說「感謝支持」這種套話。
+- 回覆 6 到 32 個中文字左右；可以有少量自然語氣詞。
+- 不要輸出 hashtag、@、網址、廣告話術，也不要透露 AI 或自動化。
+
+嚴格只輸出 JSON：
+{"index":1,"reply":"這個我也有同感欸","reason":"留言有具體情緒且和貼文相關"}`,
+        }],
+      }],
+      { maxOutputTokens: 180, temperature: 0.35 },
+      request.signal,
+    );
+    const text = extractText(raw).replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+    const json = text.match(/\{[\s\S]*\}/)?.[0];
+    if (!json) return fallbackCandidate ? {
+      candidate: fallbackCandidate,
+      reply: await generateThreadsAutoReplyText(postPreview, fallbackCandidate.text, persona),
+      reason: "model_json_missing_fallback",
+    } : null;
+    const parsed = JSON.parse(json);
+    const index = Number(parsed?.index);
+    if (!Number.isFinite(index) || index <= 0 || index > candidates.length) return null;
+    const candidate = candidates[index - 1];
+    const reply = finalizeWarmupComment(String(parsed?.reply || ""), cleanedPost || candidate.text, [], persona);
+    if (!reply || isGenericWarmupComment(reply)) {
+      return {
+        candidate,
+        reply: await generateThreadsAutoReplyText(postPreview, candidate.text, persona),
+        reason: String(parsed?.reason || "model_reply_weak_fallback"),
+      };
+    }
+    return {
+      candidate,
+      reply,
+      reason: normalizeSingleLine(String(parsed?.reason || "model_selected")),
+    };
+  } catch {
+    return fallbackCandidate ? {
+      candidate: fallbackCandidate,
+      reply: await generateThreadsAutoReplyText(postPreview, fallbackCandidate.text, persona),
+      reason: "model_error_fallback",
+    } : null;
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function openThreadsLatestOwnPostFromProfile(
+  config: VmosConfig,
+  padCode: string,
+): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  const profile = await openThreadsProfileForAccountQuery(config, padCode);
+  if (!profile.ok) return profile;
+  let shotUrl = profile.screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode));
+  const target = await locateThreadsButtonByVision(
+    shotUrl,
+    "Threads 个人主页中第一条自己发布的帖子内容区域中心点；不要选头像、编辑个人资料、底部导航、回复/转发/分享按钮；如果没有可见帖子输出 NOT_FOUND",
+  ).catch(() => null);
+  const image = await getImageDimensions(shotUrl).catch(() => null);
+  const tapTarget = target || {
+    x: Math.round((image?.width || BASE_SCREEN.width) * 0.50),
+    y: Math.round((image?.height || BASE_SCREEN.height) * 0.58),
+  };
+  await tapScreenshotPointViaAdb(config, padCode, shotUrl, tapTarget, 2800).catch(async () => {
+    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    await tapViaAdbAbsolute(config, padCode, Math.round(screen.width * 0.50), Math.round(screen.height * 0.58), 2800);
+  });
+  await delay(1400);
+  shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+  const page = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (page && (page.page === "login_required" || page.page === "challenge" || page.page === "system_dialog")) {
+    return { ok: false, error: `Threads 当前不可自动回复：${page.reason}`, screenshotUrl: page.screenshotUrl || shotUrl };
+  }
+  if (page?.screenshotUrl) shotUrl = page.screenshotUrl;
+  return { ok: true, screenshotUrl: shotUrl };
+}
+
+export async function autoReplyThreadsAccount(
+  config: VmosConfig,
+  padCode: string,
+  cfg: ThreadsAutoReplyConfig = {},
+  onProgress?: (progress: ThreadsAutoReplyProgress) => void,
+): Promise<ThreadsAutoReplyProgress> {
+  const maxPosts = Math.max(1, Math.min(5, Math.floor(cfg.maxPosts || 3)));
+  const maxReplies = Math.max(1, Math.min(5, Math.floor(cfg.maxReplies || 3)));
+  const report = (progress: Partial<ThreadsAutoReplyProgress>) => {
+    onProgress?.({
+      step: progress.step || "Threads 自动回复进行中",
+      scannedPosts: progress.scannedPosts ?? scannedPosts,
+      scannedComments: progress.scannedComments ?? scannedComments,
+      replied: progress.replied ?? replied,
+      skipped: progress.skipped ?? skipped,
+      replyScreenshots,
+      done: progress.done ?? false,
+      error: progress.error,
+    });
+  };
+
+  let scannedPosts = 0;
+  let scannedComments = 0;
+  let replied = 0;
+  let skipped = 0;
+  const replyScreenshots: string[] = [];
+  const errors: string[] = [];
+
+  report({ step: "正在进入 Threads 个人主页" });
+  const opened = await openThreadsLatestOwnPostFromProfile(config, padCode);
+  if (!opened.ok) {
+    const result = {
+      step: "Threads 自动回复失败",
+      scannedPosts,
+      scannedComments,
+      replied,
+      skipped,
+      replyScreenshots,
+      done: true,
+      error: opened.error,
+    };
+    onProgress?.(result);
+    throw new Error(opened.error);
+  }
+
+  for (let postIndex = 0; postIndex < maxPosts && replied < maxReplies; postIndex += 1) {
+    scannedPosts += 1;
+    report({ step: `正在扫描第 ${postIndex + 1} 条帖子评论` });
+
+    const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => opened.screenshotUrl);
+    const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    const postPreview = await warmupExtractPostPreview(config, padCode, shotUrl, { allowVisionFallback: true }).catch(() => "");
+    const visibleTexts = extractThreadsAutoReplyVisibleTexts(uiXml);
+    const normalizedPostPreview = normalizeSingleLine(postPreview).replace(/\s+/g, "");
+    const candidates = rankThreadsAutoReplyCandidates(visibleTexts, cfg.commentPersona)
+      .filter((item) => {
+        const normalizedCandidate = normalizeSingleLine(item.text).replace(/\s+/g, "");
+        return !normalizedPostPreview
+          || normalizedCandidate.length < 8
+          || (
+            normalizedCandidate !== normalizedPostPreview
+            && !normalizedPostPreview.includes(normalizedCandidate)
+            && !normalizedCandidate.includes(normalizedPostPreview.slice(0, 30))
+          );
+      });
+    scannedComments += candidates.length;
+
+    const decision = await decideThreadsAutoReplyByModel(postPreview, candidates, cfg.commentPersona);
+    if (!decision) {
+      skipped += 1;
+      errors.push(`第 ${postIndex + 1} 条没有适合回复的评论`);
+    } else {
+      const actions = await warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode).catch(() => null);
+      const commentTarget = actions?.comment;
+      if (!commentTarget) {
+        skipped += 1;
+        errors.push(`第 ${postIndex + 1} 条找不到可靠回复入口：${actions?.debugReason || "unknown"}`);
+      } else {
+        try {
+          const result = await warmupExecuteCommentAtPoint(
+            config,
+            padCode,
+            commentTarget,
+            decision.reply,
+            {
+              sourceScreenshotUrl: actions?.screenshotUrl || shotUrl,
+              openViaCommentFirst: true,
+              debugReason: actions?.debugReason || "thread_detail_visual:auto_reply",
+            },
+          );
+          replied += 1;
+          if (result.screenshotUrl) replyScreenshots.push(result.screenshotUrl);
+          report({ step: `已回复精选评论：${decision.candidate.text.slice(0, 24)}` });
+        } catch (error) {
+          skipped += 1;
+          errors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+    }
+
+    if (replied >= maxReplies || postIndex >= maxPosts - 1) break;
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    await delay(900);
+    await execAdbForText(config, padCode, "input swipe 360 1120 360 560 420", 8_000, 700).catch(() => "");
+    await delay(1400);
+    const nextOpened = await openThreadsLatestOwnPostFromProfile(config, padCode).catch((error) => ({
+      ok: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    if (!nextOpened.ok) {
+      errors.push(nextOpened.error);
+      break;
+    }
+  }
+
+  const done = {
+    step: replied > 0 ? "Threads 自动回复完成" : "Threads 自动回复未找到可回复评论",
+    scannedPosts,
+    scannedComments,
+    replied,
+    skipped,
+    replyScreenshots,
+    done: true,
+    error: replied > 0 ? undefined : errors.filter(Boolean).slice(-2).join("；"),
+  };
+  onProgress?.(done);
+  return done;
 }
 
 async function warmupExecuteLikeAtPoint(

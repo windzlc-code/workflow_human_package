@@ -286,7 +286,7 @@ function syncPriorityModelsFromCatalog(type) {
     adminState[key] = normalizePriorityList(
       explicitPriority,
       [],
-      key === "llmPriorityModels" ? ["grok-4.2"] : [],
+      [],
     );
   };
   normalizeLlmPriorityKey("llmPriorityModels");
@@ -296,7 +296,7 @@ function syncPriorityModelsFromCatalog(type) {
 
 function defaultClosedLlmModel(priorityKey = "llmPriorityModels") {
   const priority = grokModelItems(adminState[priorityKey]);
-  return priority[0] || llmModelOptions()[0] || "grok-4.2";
+  return priority[0] || llmModelOptions()[0] || "";
 }
 
 function normalizeWorkflowStageForType(type, value) {

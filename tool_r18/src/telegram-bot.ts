@@ -16,7 +16,7 @@ import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
-import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona } from "@/lib/vmos-publisher";
+import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
@@ -25,6 +25,7 @@ import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinju
 import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
+import { buildPersonaVisualIdentityCue } from "@/lib/persona-image-search";
 import type { DramaSetup, EpisodeScript } from "@/types/drama";
 import type { PersonaArchive } from "@/core/archives/persona-archive-domain";
 
@@ -474,8 +475,11 @@ interface PersonaLocal {
 const pendingActions = new Map<number, {
   type: "bind-pad" | "edit-persona-name" | "edit-persona-content" | "create-persona" | "set-persona-tweet-style" | "set-telegram-group-binding";
   archiveId: string;
-  stage?: "await_name" | "await_prompt";
+  stage?: "await_name" | "await_prompt" | "await_keywords";
   personaName?: string;
+  personaPrompt?: string;
+  keywordOptions?: string[];
+  selectedKeywords?: string[];
   mode?: "patch" | "replace";
   groupContentType?: TelegramGroupContentType;
 }>();
@@ -520,8 +524,10 @@ const pendingWarmupConfigs = new Map<number, {
   interactionEveryMaxPosts?: number;
   likeChance?: number;
   maxLikes?: number;
+  minRequiredLikes?: number;
   commentChance?: number;
   maxComments?: number;
+  minRequiredComments?: number;
   commentTemplates?: string[];
   commentPersona?: WarmupCommentPersona;
   keywords?: string[];
@@ -2618,6 +2624,7 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
       { text: "✏️ 改名称", callback_data: `editname_${id}` },
       { text: "\uD83E\uDDFE \u63A8\u6587\u98A8\u683C", callback_data: `tweetstyle_${id}` },
     ],
+    [{ text: "🧾 人设简介", callback_data: `editcontent_${id}` }],
     [{ text: "📱 绑定云机", callback_data: `bindpad_${id}` }],
     [{ text: "🔐 账号管理", callback_data: `acctmgmt_${id}` }],
     [
@@ -5887,6 +5894,278 @@ async function derivePersonaSpecWithCodex(text: string): Promise<{ name: string;
   return normalizeCodexPersonaSpec(await runCodexJsonInstruction(instruction), originalText);
 }
 
+const CREATE_PERSONA_KEYWORD_COUNT = 5;
+const CREATE_PERSONA_MAX_SELECTED_KEYWORDS = 2;
+
+function normalizePersonaDirectionKeyword(value: unknown): string {
+  return normalizeTelegramSingleLine(String(value || ""))
+    .replace(/^[\s\d.、\-_*#]+/g, "")
+    .replace(/[，。；;：:「」『』"'`]+$/g, "")
+    .slice(0, 18);
+}
+
+function isWeakPersonaDirectionKeyword(keyword: string): boolean {
+  const value = normalizeTelegramSingleLine(keyword);
+  if (!value) return true;
+  if (/^(平常做什麼|私下愛好|穿什麼衣服|外貌形象|身形輪廓|怎麼說話|常在哪裡|長什麼樣子)$/.test(value)) return true;
+  if (/^(身份|外貌|穿搭|口吻|場景|性格|行為|圈子|生活|風格|核心|方向|關鍵詞)$/.test(value)) return true;
+  if (/[什麼什么哪裡哪里如何怎樣怎样]/.test(value)) return true;
+  if (/^(有特色|有辨識度|很特別|很明確|很鮮明|人設感|故事感|氛圍感)$/.test(value)) return true;
+  return false;
+}
+
+function expandPersonaDirectionKeywordCandidates(originalText: string): string[] {
+  const text = String(originalText || "").toLowerCase();
+  const groups: Array<{ pattern: RegExp; keywords: string[] }> = [
+    {
+      pattern: /阿宅|宅男|宅女|宅|二次元|動漫|动漫|遊戲|游戏|acg|otaku/i,
+      keywords: ["愛看動漫", "喜歡手辦", "常去漫展", "會打遊戲", "有點社恐"],
+    },
+    {
+      pattern: /司機|司机|出租車|出租车|網約車|网约车|開車|开车|貨車|货车/i,
+      keywords: ["常跑夜班", "很熟路線", "話不多", "愛聽乘客聊天", "懂城市角落"],
+    },
+    {
+      pattern: /教授|物理|化學|化学|科學|科学|研究員|研究员|學者|学者|實驗|实验|博士/i,
+      keywords: ["大學教授", "會講物理", "愛做實驗", "說話很冷靜", "穿白襯衫"],
+    },
+    {
+      pattern: /老師|老师|教師|教师|補習|补习|校園|校园|學生|学生/i,
+      keywords: ["會教學生", "講話有耐心", "常在教室", "穿得乾淨", "有老師架勢"],
+    },
+    {
+      pattern: /上班族|白領|白领|打工|職場|职场|辦公室|办公室|社畜/i,
+      keywords: ["每天通勤", "常在辦公室", "加班很多", "穿襯衫西裝", "說話很職場"],
+    },
+    {
+      pattern: /媽媽|妈妈|人妻|主婦|主妇|家庭|太太|寶媽|宝妈/i,
+      keywords: ["會照顧人", "常在家裡", "會做家務", "說話溫柔", "像鄰家太太"],
+    },
+    {
+      pattern: /健身|運動|运动|瑜伽|跑步|教練|教练|身材/i,
+      keywords: ["每天健身", "穿運動裝", "身材很緊實", "說話很直接", "愛流汗運動"],
+    },
+    {
+      pattern: /旅行|旅遊|旅游|背包|攝影|摄影|探店|咖啡|露營|露营/i,
+      keywords: ["常去旅行", "愛拍照片", "喜歡咖啡店", "會露營", "走路看城市"],
+    },
+    {
+      pattern: /阿姨|大媽|大妈|嬸|婶|中年女人|中年女性|中年婦女|中年妇女/i,
+      keywords: ["像鄰家阿姨", "說話很會套近乎", "穿樸素外套", "常拎購物袋", "眼神很精明"],
+    },
+    {
+      pattern: /人販|人贩|拐賣|拐卖|綁架|绑架|黑幫|黑帮|騙子|骗子|小偷|殺手|杀手|反派/i,
+      keywords: ["街頭反派", "眼神很警惕", "穿深色外套", "話術很強", "常在車站附近"],
+    },
+  ];
+  const matched: string[] = [];
+  for (const group of groups) {
+    if (group.pattern.test(text)) matched.push(...group.keywords);
+  }
+  return matched;
+}
+
+function buildPersonaPromptFallbackKeywords(originalText: string): string[] {
+  const clean = normalizeTelegramSingleLine(originalText)
+    .replace(/[。！？!?，,；;：:「」『』"'`]/g, "")
+    .replace(/^(我想要|我要|請生成|生成|新建|做一個|做一个|一個|一个)/, "")
+    .replace(/的人設$|的人设$/g, "")
+    .trim();
+  if (!clean) return [];
+  const seed = clean.length > 8 ? clean.slice(0, 8) : clean;
+  return [
+    `${seed}身份`,
+    `${seed}口吻`,
+    `${seed}穿搭`,
+    `${seed}日常`,
+    `${seed}場景`,
+  ];
+}
+
+function normalizePersonaDirectionKeywords(raw: unknown, originalText: string): string[] {
+  const source = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as any)?.keywords)
+      ? (raw as any).keywords
+      : [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of source) {
+    const value = typeof item === "string" ? item : (item as any)?.label || (item as any)?.keyword || (item as any)?.name;
+    const keyword = normalizePersonaDirectionKeyword(value);
+    if (keyword.length < 2) continue;
+    if (isWeakPersonaDirectionKeyword(keyword)) continue;
+    const key = keyword.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(keyword);
+    if (result.length >= CREATE_PERSONA_KEYWORD_COUNT) break;
+  }
+  if (result.length >= CREATE_PERSONA_KEYWORD_COUNT) return result;
+
+  const fallbackCandidates = [
+    ...expandPersonaDirectionKeywordCandidates(originalText),
+    ...String(originalText || "").split(/[\s,，。；;、\n\r]+/g),
+    ...buildPersonaPromptFallbackKeywords(originalText),
+  ];
+  for (const item of fallbackCandidates) {
+    const keyword = normalizePersonaDirectionKeyword(item);
+    if (keyword.length < 2 || keyword.length > 18) continue;
+    if (isWeakPersonaDirectionKeyword(keyword)) continue;
+    if (/^(我|我要|希望|生成|新建|人設|提示詞|一個|一个)$/.test(keyword)) continue;
+    const key = keyword.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(keyword);
+    if (result.length >= CREATE_PERSONA_KEYWORD_COUNT) break;
+  }
+  return result.slice(0, CREATE_PERSONA_KEYWORD_COUNT);
+}
+
+async function derivePersonaDirectionKeywordsWithCodex(personaName: string, userPrompt: string): Promise<string[]> {
+  const originalText = String(userPrompt || "").trim();
+  const keywordContextText = [personaName, originalText].filter(Boolean).join(" ");
+  const aiInput = compactLongAiInput(originalText, 3000);
+  const instruction = [
+    "你是自動化推文人設策劃助手。",
+    "任務：根據使用者的新建人設提示詞，先生成 5 個自然、可選、有延展空間的核心關鍵詞，讓使用者決定人設走向。",
+    "關鍵詞要往「人設本身」靠：這個人是誰、外貌形象、身形輪廓、平常做什麼、穿什麼、怎麼說話、常出現在哪裡、跟什麼圈子有關。不要只做單篇內容選題。",
+    "請用直白、口語化、看一眼就懂的短句。不要用含糊抽象詞，不要讓使用者猜意思。",
+    "可以根據現實生活做合理聯想擴展，但所有擴展都要能回到人設構成。比如「阿宅」可聯想到愛看動漫、喜歡手辦、常去漫展、會打遊戲、有點社恐、穿寬鬆帽T；「物理學家教授」可聯想到大學教授、會講物理、愛做實驗、說話很冷靜、穿白襯衫、斯文外貌；「出租車司機」可聯想到常跑夜班、很熟路線、話不多、愛聽乘客聊天、懂城市角落、穿深色外套。",
+    "要求：",
+    "1. 關鍵詞要像按鈕選項，直白、具體、有畫面感，最好能直接看出身份、外貌形象、身形輪廓、行為、穿搭、口吻或生活環境。",
+    "2. 不要求五個詞必須屬於不同分類，但要避免近義重複；每個詞最好都能帶出不同的人設味道。",
+    "3. 每個關鍵詞都要能影響後續人物形象、外貌形象、身形輪廓、穿搭、語氣、社交方式、內容邊界或視覺風格。",
+    "4. 反向限制：不要輸出黑板氣質、學院派、理性克制、實驗潔癖、氛圍感、鬆弛感這類抽象概念；不要輸出單篇標題、劇情橋段、臨時活動、發布話題、工具功能、工作流程，也不要胡亂跳到無關職業或無關圈層。",
+    "5. 關鍵詞要短，3 到 10 個中文字最佳，可以是口語短句，不要輸出完整人設文案。",
+    "6. 只輸出 JSON，不要 Markdown。",
+    "",
+    "JSON schema:",
+    JSON.stringify({ keywords: ["核心關鍵詞1", "核心關鍵詞2", "核心關鍵詞3", "核心關鍵詞4", "核心關鍵詞5"] }, null, 2),
+    "",
+    `人設名稱：${personaName}`,
+    `使用者提示詞：${aiInput}`,
+  ].join("\n");
+  try {
+    return normalizePersonaDirectionKeywords(await runCodexJsonInstruction(instruction), keywordContextText);
+  } catch (error: any) {
+    console.warn("[telegram][persona_keyword_fallback]", error?.message || error);
+    return normalizePersonaDirectionKeywords([], keywordContextText);
+  }
+}
+
+function buildCreatePersonaKeywordText(personaName: string, userPrompt: string, options: string[], selected: string[]): string {
+  const selectedText = selected.length ? selected.join("、") : "尚未選擇";
+  return [
+    "✍️ 新建人設",
+    "",
+    `人設：${personaName}`,
+    "",
+    "請先選擇本次人設走向的核心關鍵詞。",
+    `最多可選 ${CREATE_PERSONA_MAX_SELECTED_KEYWORDS} 個；選好後再生成完整人設。`,
+    "",
+    `目前已選：${selectedText}`,
+    "",
+    `原始提示：${normalizeTelegramSingleLine(userPrompt).slice(0, 180)}${userPrompt.length > 180 ? "..." : ""}`,
+  ].join("\n");
+}
+
+function buildCreatePersonaKeywordKeyboard(options: string[], selected: string[]) {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < options.length; i += 2) {
+    rows.push(options.slice(i, i + 2).map((keyword, offset) => {
+      const index = i + offset;
+      const active = selected.includes(keyword);
+      return { text: `${active ? "✅" : "☑️"} ${keyword}`, callback_data: `cpk_t_${index}` };
+    }));
+  }
+  rows.push([{ text: "✅ 確認並生成人設", callback_data: "cpk_done" }]);
+  rows.push([{ text: "🧹 清空選擇", callback_data: "cpk_clear" }, { text: "◀️ 返回修改提示詞", callback_data: "cpk_back" }]);
+  return { inline_keyboard: rows };
+}
+
+function buildCreatePersonaPromptWithKeywords(personaName: string, userPrompt: string, selectedKeywords: string[]): string {
+  return [
+    `角色名稱：${personaName}`,
+    "",
+    userPrompt,
+    "",
+    selectedKeywords.length
+      ? `使用者已選擇的人設走向核心關鍵詞：${selectedKeywords.join("、")}。請把這些方向作為最高優先級，生成完整人設。`
+      : "使用者未額外選擇核心關鍵詞，請根據原始提示詞自主判斷最合理的人設走向。",
+  ].join("\n");
+}
+
+async function createPersonaFromPromptSelection(args: {
+  bot: TelegramBot;
+  chatId: number;
+  thinkingMessageId: number;
+  personaName: string;
+  userPrompt: string;
+  selectedKeywords: string[];
+  instanceName: string;
+  defaultPadCode: string;
+}) {
+  const { bot, chatId, thinkingMessageId, personaName, userPrompt, selectedKeywords, instanceName, defaultPadCode } = args;
+  const personaPrompt = buildCreatePersonaPromptWithKeywords(personaName, userPrompt, selectedKeywords);
+  let specError = "";
+  const spec = await derivePersonaSpecWithCodex(personaPrompt).catch((error: any) => {
+    specError = error?.message || String(error);
+    console.error("[telegram][codex_create_persona_error]", error?.message || error);
+    return null;
+  });
+  if (!spec) {
+    const reason = specError ? `\n原因：${formatUserFacingAiError(specError)}` : "";
+    await bot.editMessageText(`❌ AI 未能解析這個人設，請稍後重試。${reason}`, {
+      chat_id: chatId,
+      message_id: thinkingMessageId,
+      reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+    }).catch(() => undefined);
+    return;
+  }
+  spec.name = personaName;
+  spec.setup = {
+    ...spec.setup,
+    personaName,
+    customTopic: userPrompt,
+    contentTheme: [
+      spec.setup.contentTheme,
+      selectedKeywords.length ? `核心走向：${selectedKeywords.join("、")}` : "",
+    ].filter(Boolean).join("\n"),
+  } as DramaSetup;
+  const created = await createPersonaBySpec({
+    name: spec.name,
+    content: spec.content,
+    setup: spec.setup,
+  }, {
+    ownerBotName: instanceName,
+    chatId,
+    defaultPadCode,
+  }).catch((error: any) => {
+    console.error("[telegram][create_persona_error]", error?.message || error);
+    return null;
+  });
+  if (!created?.archiveId) {
+    await bot.editMessageText("❌ 新建人設失敗，請稍後重試。", {
+      chat_id: chatId,
+      message_id: thinkingMessageId,
+      reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+    }).catch(() => undefined);
+    return;
+  }
+  const archive = await loadPersonaArchive(created.archiveId).catch(() => null);
+  await bot.editMessageText(`✅ 已新建人設：${created.name}\n\n${archive?.content || spec.content}\n\n步驟 3/3：請先生成人設圖。後續生成推文配圖會優先使用人設圖鎖定人物長相。`, {
+    chat_id: chatId,
+    message_id: thinkingMessageId,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🎨 生成人設圖", callback_data: `genimg_${created.archiveId}` }],
+        [{ text: "🧾 查看人設詳情", callback_data: `pd_${created.archiveId}` }],
+      ],
+    },
+  }).catch(() => undefined);
+}
+
 function normalizeCodexPersonaIntroUpdate(raw: any, archive: any, userText: string): { content: string; setup: Partial<DramaSetup> } {
   const content = pickString(raw?.content);
   const setupRaw = raw?.setupPatch && typeof raw.setupPatch === "object" ? raw.setupPatch : {};
@@ -5960,7 +6239,16 @@ async function rewritePersonaIntroWithCodex(archive: any, userText: string, mode
 const GENERATED_POST_IMAGE_TARGET_COUNT = 4;
 const GENERATED_POST_IMAGE_MAX_ATTEMPTS = 6;
 
-function buildGeneratedPostImageVisualBrief(archiveName: string, postContent: string, userVisualInstruction?: string) {
+function buildArchivePersonaVisualIdentityCue(archive: PersonaArchive | null | undefined, fallbackName?: string, currentContent?: string) {
+  if (!archive?.setup) return fallbackName ? `persona visual identity cue: persona name ${fallbackName}; infer a distinctive visual identity from the current generated copy, not a generic portrait` : "";
+  return buildPersonaVisualIdentityCue({
+    ...archive.setup,
+    personaName: archive.setup.personaName || archive.name || fallbackName,
+    personaDescription: archive.setup.personaDescription || archive.content,
+  } as DramaSetup, undefined, currentContent);
+}
+
+function buildGeneratedPostImageVisualBrief(archiveName: string, postContent: string, userVisualInstruction?: string, personaVisualIdentity?: string) {
   const cleanPost = String(postContent || "")
     .replace(/https?:\/\/\S+/gi, "")
     .replace(/\s+/g, " ")
@@ -5968,9 +6256,11 @@ function buildGeneratedPostImageVisualBrief(archiveName: string, postContent: st
   const userRequest = String(userVisualInstruction || "").replace(/\s+/g, " ").trim();
   return [
     `Persona reference: ${archiveName}. Keep the persona recognizable, but this is free-group non-R18 preview content.`,
+    personaVisualIdentity ? `Persona visual identity to preserve and show clearly: ${personaVisualIdentity}` : "",
     userRequest ? `Highest priority user visual requirement: ${userRequest}` : "",
     cleanPost ? `Public Telegram free-group copy to support visually; use it as scene context, not as text to copy into the image prompt: ${cleanPost}` : "",
     "Create a normal public-safe image prompt for free content. The image must satisfy the user's clothing, color, role, scene, pose, prop, action, and mood requirements first.",
+    "Before composing the image, infer what this persona is at a glance: field/type, personality, recurring environment, props, color mood, clothing logic, and body language must come from the persona card.",
     "When the user gives a short request, infer concrete visual details logically: outfit structure, fabric/texture, fit, key accessories, matching public environment, camera distance, and natural pose.",
     "Do not add paid-group, R18, unrelated private-room posing, exposure, underwear-focus, opened-clothing, or body-part emphasis unless the user explicitly asks for that exact safe public scene or clothing detail.",
     "Do not ignore named clothing, outfit type, fabric, color, role, location, prop, action, mood, or time-of-day words from the user requirement.",
@@ -6101,6 +6391,7 @@ async function generateClosedPersonaPostImage(args: {
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const referenceUrl = getExplicitPersonaReferenceImageUrl(archive);
   if (!referenceUrl) return { ok: false, error: "\u6b64\u4eba\u8a2d\u5c1a\u672a\u751f\u6210\u4eba\u8a2d\u5716\uff0c\u7121\u6cd5\u9396\u5b9a\u540c\u4e00\u5f35\u81c9\u3002" };
+  const personaVisualIdentity = buildArchivePersonaVisualIdentityCue(archive, args.archiveName, args.post.content);
 
   const visualContext = [
     args.prompt,
@@ -6111,8 +6402,10 @@ async function generateClosedPersonaPostImage(args: {
     "Keep the same recognizable face and age impression. Do not copy the reference outfit, body pose, or background unless the current request asks for them.",
     "Only face identity is locked. Clothing, pose, scene, action, camera angle, lighting, props, and mood must follow the current request and generated tweet context.",
     `Persona/archive name: ${args.archiveName}`,
+    personaVisualIdentity ? `Persona visual identity to express in the image: ${personaVisualIdentity}` : "",
     "Current visual request:",
     visualContext,
+    "The result must not look like an interchangeable generic portrait; make the persona's field, core style, personality, and recurring visual world readable at first glance.",
     "Important: obey concrete user requirements such as color, clothing type, object, location, action, and atmosphere. The image should match the current tweet, not an old persona template.",
   ].filter(Boolean).join("\n");
 
@@ -6142,10 +6435,12 @@ async function generateImagesForGeneratedPosts(args: {
   hasPersonaReferenceImage?: boolean;
 }) {
   const results: Array<{ id?: string; content: string; imageUrls: string[]; ok: boolean; error?: string }> = [];
+  const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
+  const personaVisualIdentity = buildArchivePersonaVisualIdentityCue(archive, args.archiveName);
   for (const post of args.posts) {
     const imageUrls: string[] = [];
     const errors: string[] = [];
-    const visualBrief = buildGeneratedPostImageVisualBrief(args.archiveName, post.content, args.visualInstruction);
+    const visualBrief = buildGeneratedPostImageVisualBrief(args.archiveName, post.content, args.visualInstruction, personaVisualIdentity);
     if (args.hasPersonaReferenceImage) {
       const images = await Promise.all(
         Array.from({ length: GENERATED_POST_IMAGE_TARGET_COUNT }, async (_, index) => {
@@ -6329,7 +6624,9 @@ async function submitGeneratedPostImageCandidateTask(args: {
   imageRatioLabel?: string;
   hasPersonaReferenceImage?: boolean;
 }): Promise<{ ok: boolean; imageUrl?: string; imageUrls?: string[]; error?: string }> {
-  const requestText = [
+  const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
+  const personaVisualIdentity = buildArchivePersonaVisualIdentityCue(archive, args.archiveName, args.post.content);
+  const baseRequestText = [
     "為這篇推文生成 4 張候選配圖，圖片必須服務推文內容，不要脫離人設和推文語境。",
     args.hasPersonaReferenceImage
       ? "保留同一個人設身份、臉部特徵、年齡感、身形比例、髮型和整體氣質。"
@@ -6338,6 +6635,11 @@ async function submitGeneratedPostImageCandidateTask(args: {
     "人設：" + args.archiveName,
     "推文內容：" + args.post.content,
     "配圖要求：" + args.prompt,
+  ].filter(Boolean).join(String.fromCharCode(10));
+  const requestText = [
+    baseRequestText,
+    personaVisualIdentity ? "Persona visual identity cue: " + personaVisualIdentity : "",
+    "Make the outfit, styling, grooming, silhouette, accessory choices, props, environment, posture, and camera language visibly different from any other persona. A viewer should understand the persona's field, temperament, and role before reading the caption.",
   ].filter(Boolean).join(String.fromCharCode(10));
   const qaEnabled = await toolR18GlobalTextToImageQaEnabled();
   const generationParams: Record<string, any> = {
@@ -6349,6 +6651,7 @@ async function submitGeneratedPostImageCandidateTask(args: {
       tg_generation_context: "Generated-post image candidates for archive " + args.archiveId + ", post " + (args.post.id || ""),
       tg_generated_post_content: args.post.content,
       tg_generated_post_visual_instruction: args.prompt,
+      tg_persona_visual_identity: personaVisualIdentity,
       tg_persona_reference_available: Boolean(args.hasPersonaReferenceImage),
       tg_no_persona_reference_image: !args.hasPersonaReferenceImage,
       persona_reference_available: Boolean(args.hasPersonaReferenceImage),
@@ -7708,6 +8011,7 @@ async function generateArchivePostImageCandidates(args: {
   if (!archive) throw new Error("\u4EBA\u8A2D\u4E0D\u5B58\u5728");
   const post = archive.posts.find((item) => item.id === args.postId);
   if (!post) throw new Error("\u63A8\u6587\u4E0D\u5B58\u5728");
+  const personaVisualIdentity = buildArchivePersonaVisualIdentityCue(archive, archive.name, post.content);
   const hasExplicitPersonaReference = Boolean(getExplicitPersonaReferenceImageUrl(archive));
   if (!isWorkflowPersonaListItem(archive) && !hasExplicitPersonaReference) {
     throw new Error("此人設尚未生成人設圖，請先生成人設圖後再生成推文配圖。");
@@ -7720,8 +8024,10 @@ async function generateArchivePostImageCandidates(args: {
         const candidateIndex = index + 1;
         const prompt = [
           `Generated tweet content is the primary visual brief: ${post.content}`,
+          personaVisualIdentity ? `Persona visual identity to preserve and express: ${personaVisualIdentity}` : "",
           args.imageAspectRatio ? `Selected image aspect ratio: ${args.imageAspectRatio}${args.imageWidth && args.imageHeight ? `, base resolution ${args.imageWidth} x ${args.imageHeight}` : ""}${args.imageRatioLabel ? `, ${args.imageRatioLabel}` : ""}. Compose the image for this ratio.` : "",
           "Extract concrete visual requirements from the tweet first: clothing, outfit type, fabric, color, room/location, props, action, mood, and any named object must appear when visually possible.",
+          "Make the persona's field/type, personality, recurring environment, props, color mood, and visual style obvious without adding text or logos.",
           "If the tweet mentions clothes, wardrobe, closet, teacher clothes, school clothes, outfit try-on, or sorting clothes, the image must show the persona with those clothes/outfit and a matching wardrobe/room context, not a generic portrait.",
           `Candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: keep the same persona identity and tweet context, but vary composition, distance, pose, lighting, or scene details from the other candidates.`,
         ].filter(Boolean).join("\n");
@@ -7754,6 +8060,7 @@ async function generateArchivePostImageCandidates(args: {
         const candidateIndex = imageUrls.length + 1;
         const prompt = [
           `Generated tweet content is the primary visual brief: ${post.content}`,
+          personaVisualIdentity ? `Persona visual identity to preserve and express: ${personaVisualIdentity}` : "",
           args.imageAspectRatio ? `Selected image aspect ratio: ${args.imageAspectRatio}${args.imageWidth && args.imageHeight ? `, base resolution ${args.imageWidth} x ${args.imageHeight}` : ""}${args.imageRatioLabel ? `, ${args.imageRatioLabel}` : ""}. Compose the image for this ratio.` : "",
           `Retry candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: keep the same persona identity and tweet context, but vary composition from existing candidates.`,
         ].filter(Boolean).join("\n");
@@ -7787,7 +8094,9 @@ async function generateArchivePostImageCandidates(args: {
     const candidateIndex = imageUrls.length + 1;
     const prompt = [
       `Generated tweet content is the primary visual brief: ${post.content}`,
+      personaVisualIdentity ? `Persona visual identity to preserve and express: ${personaVisualIdentity}` : "",
       "Extract concrete visual requirements from the tweet first: clothing, outfit type, fabric, color, room/location, props, action, mood, and any named object must appear when visually possible.",
+      "Make the persona's field/type, personality, recurring environment, props, color mood, and visual style obvious without adding text or logos.",
       "If the tweet mentions clothes, wardrobe, closet, teacher clothes, school clothes, outfit try-on, or sorting clothes, the image must show the persona with those clothes/outfit and a matching wardrobe/room context, not a generic portrait.",
       `Candidate image ${candidateIndex}/${GENERATED_POST_IMAGE_TARGET_COUNT}: keep the same persona identity and tweet context, but vary composition, distance, pose, lighting, or scene details from the other candidates.`,
     ].join("\n");
@@ -11331,11 +11640,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
+            [{ text: "🔍 查询 Threads 帳號", callback_data: `pad_query_account_${padCode}` }],
             [{ text: "🔄 切换登录帳號", callback_data: `pad_switch_account_${padCode}` }],
             [{ text: "🔗 Threads 简介新增链接", callback_data: `pad_threads_profile_link_${padCode}` }],
             [{ text: "📝 修改 Threads 简介", callback_data: `pad_threads_profile_bio_${padCode}` }],
             [{ text: "🏷 修改 Threads 名稱", callback_data: `pad_threads_profile_name_${padCode}` }],
             [{ text: "🖼 修改 Threads 頭像", callback_data: `pad_threads_profile_avatar_${padCode}` }],
+            [{ text: "Threads自动回复", callback_data: `pad_threads_auto_reply_${padCode}` }],
             ...buildAllowedWarmupRows(padCode),
             [{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }],
           ],
@@ -11378,6 +11689,111 @@ function sendMainMenu(chatId: number, msgId?: number) {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
       });
+      return;
+    }
+
+    if (data.startsWith("pad_threads_auto_reply_") && !data.startsWith("pad_threads_auto_reply_run_")) {
+      const padCode = data.slice("pad_threads_auto_reply_".length);
+      const pads = await listPadsForThisBot();
+      const allowedPad = pads.find((p) => p.padCode === padCode);
+      if (!allowedPad) {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        });
+        return;
+      }
+      const padName = padDisplayName(allowedPad);
+      const persona = await resolveWarmupCommentPersonaForPad(padCode);
+      const personaName = persona?.name || "未綁定人設";
+      await safeEditOrSend(bot, chatId, msgId, `💬 *Threads自动回复*\n\n雲機：${padName}\n人設：${personaName}\n\n執行規則：\n- 只掃描這個雲機目前 Threads 帳號自己發布的最新貼文。\n- 先篩掉廣告、辱罵、無意義、純表情和過短留言。\n- 只挑和人設或貼文內容相關的留言回覆。\n- 回覆會使用自然口語，不做客服式套話。\n\n預設最多掃描 3 篇貼文，最多回覆 3 條留言。`, {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "✅ 開始 Threads自动回复", callback_data: `pad_threads_auto_reply_run_${padCode}` }],
+            [{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("pad_threads_auto_reply_run_")) {
+      const padCode = data.slice("pad_threads_auto_reply_run_".length);
+      const pads = await listPadsForThisBot();
+      const allowedPad = pads.find((p) => p.padCode === padCode);
+      if (!allowedPad) {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        });
+        return;
+      }
+      const padName = padDisplayName(allowedPad);
+      const padOperationKey = `threads-auto-reply:${padCode}:${chatId}:${Date.now()}`;
+      if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "Threads自动回复"))) return;
+      const stopTyping = startTelegramTyping(bot, chatId);
+      try {
+        const creds = resolveVmosCredentials();
+        const commentPersona = await resolveWarmupCommentPersonaForPad(padCode);
+        let lastProgress: ThreadsAutoReplyProgress | null = null;
+        await safeEditOrSend(bot, chatId, msgId, `💬 Threads自动回复執行中...\n\n雲機：${padName}\n人設：${commentPersona?.name || "未綁定人設"}\n\n正在進入 Threads。`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+        });
+        const result = await autoReplyThreadsAccount(
+          creds,
+          padCode,
+          { maxPosts: 3, maxReplies: 3, commentPersona },
+          (p) => {
+            assertPadOperationNotCancelled(padOperationKey);
+            lastProgress = p;
+            const lines = [
+              `💬 Threads自动回复：${p.step}`,
+              `已掃描貼文：${p.scannedPosts}`,
+              `候選留言：${p.scannedComments}`,
+              `已回覆：${p.replied}`,
+              `已跳過：${p.skipped}`,
+            ];
+            void updateTelegramPublishStatus(bot, chatId, msgId, "threads_auto_reply", lines, p.step);
+          },
+        );
+        assertPadOperationNotCancelled(padOperationKey);
+        stopTyping();
+        await bot.sendMessage(chatId, `✅ *Threads自动回复完成*\n\n雲機：${padName}\n已掃描貼文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+        });
+        const screenshots = result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [];
+        for (let i = 0; i < screenshots.length; i += 1) {
+          const evidencePath = saveWarmupEvidenceImage(screenshots[i], padCode, "comment", i);
+          if (evidencePath) console.log(`[telegram][threads_auto_reply_evidence] chat=${chatId} pad=${padCode} index=${i + 1} path=${evidencePath}`);
+          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(screenshots[i]), {
+            caption: `📸 Threads自动回复證據 ${i + 1}/${screenshots.length}`,
+          }).catch(() => undefined);
+        }
+      } catch (error: any) {
+        stopTyping();
+        if (isTelegramTaskCancelledError(error)) {
+          await bot.sendMessage(chatId, `🚫 已中止 Threads自动回复任務\n\n雲機：${padName}`);
+          return;
+        }
+        if (await sendCloudAccountStateNotice(
+          bot,
+          chatId,
+          error,
+          { action: "Threads自动回复", padName, padCode },
+          [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]],
+        )) {
+          return;
+        }
+        await sendManualInterventionFailure(bot, chatId, error, {
+          action: "Threads自动回复",
+          padName,
+          padCode,
+          fallback: "Threads自动回复失敗，請人工檢查目前 Threads 頁面後重試。",
+          inlineKeyboard: [[{ text: "◀️ 返回", callback_data: `pad_detail_${padCode}` }]],
+        });
+      } finally {
+        releaseRuntimePadOperation(padCode, padOperationKey);
+      }
       return;
     }
 
@@ -11468,7 +11884,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         maxSessionMinutes: 10,
         interactionEveryMinPosts: 2,
         interactionEveryMaxPosts: 3,
-        riskManaged: true,
+        riskManaged: false,
         stopOnRiskLimit: true,
         stage: "choose_engagement",
       });
@@ -11493,7 +11909,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const browseCount = Number(parts[1]) || 10;
       const prev = pendingWarmupConfigs.get(chatId) || { platform: "threads" as const, padCode, stage: "choose_count" as const };
       pendingWarmupConfigs.set(chatId, { ...prev, browseCount, stage: "choose_engagement" });
-      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号设置*\n\n雲機：${prev.padName || padCode}\n浏览數量：${browseCount} 條\n\n請選擇互动策略：\n\n目前使用低风险托管：随机触发、失敗跳过、读不到正文不留言。`, {
+      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号设置*\n\n雲機：${prev.padName || padCode}\n浏览數量：${browseCount} 條\n\n請選擇互动策略：\n\n严格执行所选目标；未达到浏览、点赞或留言目标会提示失败并请求人工介入。`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
@@ -11533,10 +11949,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           platform,
           likeChance: 0,
           maxLikes: 0,
+          minRequiredLikes: 0,
           commentChance: 0,
           maxComments: 0,
+          minRequiredComments: 0,
           commentTemplates: [],
-          riskManaged: true,
+          riskManaged: false,
           stage: "ready",
         });
         await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：只滑动浏览\n规则：滑动速度快慢混合，遇到风险阈值停止并提示人工介入\n\n確認开始？`, {
@@ -11553,10 +11971,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           platform,
           likeChance: 100,
           maxLikes: plannedLikes,
+          minRequiredLikes: plannedLikes,
           commentChance: 0,
           maxComments: 0,
+          minRequiredComments: 0,
           commentTemplates: [],
-          riskManaged: true,
+          riskManaged: false,
           stage: "ready",
         });
         await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机點讚 1 次\n點讚风险上限：${plannedLikes} 个/日内预算内\n规则：精准點擊，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
@@ -11573,10 +11993,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           platform,
           likeChance: 0,
           maxLikes: 0,
+          minRequiredLikes: 0,
           commentChance: 100,
           maxComments: plannedComments,
+          minRequiredComments: plannedComments,
           commentTemplates: [],
-          riskManaged: true,
+          riskManaged: false,
           stage: "ready",
         });
         await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机留言 1 次\n留言风险上限：${plannedComments} 个/日内预算内\n留言规则：按人設生成，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
@@ -11594,10 +12016,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           platform,
           likeChance: 100,
           maxLikes: plannedLikes,
+          minRequiredLikes: plannedLikes,
           commentChance: 100,
           maxComments: plannedComments,
+          minRequiredComments: plannedComments,
           commentTemplates: [],
-          riskManaged: true,
+          riskManaged: false,
           stage: "ready",
         });
         await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机挑选點讚或留言 1 次\n點讚风险上限：${plannedLikes} 个/日内预算内\n留言风险上限：${plannedComments} 个/日内预算内\n规则：不每篇互动，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
@@ -11625,7 +12049,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号執行中*\n\n雲機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n滑动时长：${cfg.minSessionMinutes || 7}-${cfg.maxSessionMinutes || 10} 分鐘\n互动间隔：每 ${cfg.interactionEveryMinPosts || 2}-${cfg.interactionEveryMaxPosts || 3} 篇最多 1 次\n點讚风险上限：${cfg.maxLikes || 0} 个\n留言风险上限：${cfg.maxComments || 0} 个\n模式：低风险托管，精准點擊，失敗跳过；达到风险阈值转人工介入\n\n⏳ 正在執行，請稍候...`, {
+      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号執行中*\n\n雲機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n滑动时长：${cfg.minSessionMinutes || 7}-${cfg.maxSessionMinutes || 10} 分鐘\n互动间隔：每 ${cfg.interactionEveryMinPosts || 2}-${cfg.interactionEveryMaxPosts || 3} 篇最多 1 次\n目标點讚：${cfg.maxLikes || 0} 个\n目标留言：${cfg.maxComments || 0} 个\n模式：严格执行，未达目标会提示失败并请求人工介入\n\n⏳ 正在執行，請稍候...`, {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
       });
@@ -11656,15 +12080,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
             interactionEveryMaxPosts: cfg.interactionEveryMaxPosts,
             likeChance: cfg.likeChance,
             maxLikes: cfg.maxLikes,
+            minRequiredLikes: cfg.minRequiredLikes ?? cfg.maxLikes ?? 0,
             commentChance: cfg.commentChance,
             maxComments: cfg.maxComments,
+            minRequiredComments: cfg.minRequiredComments ?? cfg.maxComments ?? 0,
             commentTemplates: cfg.commentTemplates || [],
             commentPersona,
             keywords,
             searchChance: platform === "threads" ? (cfg.searchChance ?? 16) : 0,
-            riskManaged: cfg.riskManaged !== false,
+            riskManaged: cfg.riskManaged === true,
             stopOnRiskLimit: cfg.stopOnRiskLimit === true,
-            strictCompletion: false,
+            strictCompletion: true,
             requireReadablePostForComment: platform === "threads",
           },
           (p) => {
@@ -11685,7 +12111,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         );
         stopTyping();
         pendingWarmupConfigs.delete(chatId);
-        await bot.sendMessage(chatId, `✅ *养号完成*\n\n雲機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n${formatWarmupStepForTelegram(result.step)}\n已浏览：${result.browsed} 條\n已點讚：${result.liked} 个\n已留言：${result.commented} 个\n\n低风险托管已启用：未达上限不视為失敗。`, {
+        await bot.sendMessage(chatId, `✅ *养号完成*\n\n雲機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n${formatWarmupStepForTelegram(result.step)}\n已浏览：${result.browsed} 條\n已點讚：${result.liked} 个\n已留言：${result.commented} 个\n\n已按所选目标完成。`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
         });
@@ -11849,30 +12275,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stopTyping();
         pendingLoginActions.delete(chatId);
         if (result.ok) {
-          await bot.sendMessage(chatId, `✅ *Threads 登录成功*\n\n雲機：${padName}\n帳號：${loginState.username}\n\n${result.message}`, {
-            parse_mode: "Markdown",
+          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 Threads 登录成功确认画面");
+          await bot.sendMessage(chatId, `✅ Threads 登录成功并已确认\n\n雲機：${padName}\n帳號：${loginState.username}\n\n${result.message}`, {
             reply_markup: { inline_keyboard: [[{ text: "🔍 验证帳號", callback_data: `pad_query_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
           });
-          if (result.screenshotUrl) {
-            await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 登录后截图" }).catch(() => undefined);
-          }
         } else if (result.state === "challenge_otp") {
           pendingLoginActions.set(chatId, { ...loginState, stage: "await_otp" });
-          await bot.sendMessage(chatId, `📱 *需要驗證碼*\n\n雲機：${padName}\n\n${result.message}\n\n⭐ 請直接回复 6 位驗證碼 ⭐\n　　　只需要發送數字即可。`, {
-            parse_mode: "Markdown",
+          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 当前验证码画面");
+          await bot.sendMessage(chatId, `📱 Threads 需要驗證碼\n\n雲機：${padName}\n\n${result.message}\n\n⭐ 請直接回复 6 位驗證碼 ⭐\n　　　只需要發送數字即可。`, {
             reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: loginReturnCallback }]] },
           });
-          if (result.screenshotUrl) {
-            await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 当前截图" }).catch(() => undefined);
-          }
         } else {
-          await bot.sendMessage(chatId, `❌ *登录失败*\n\n云机：${padName}\n\n${result.message}`, {
-            parse_mode: "Markdown",
+          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 Threads 登录失败画面");
+          await bot.sendMessage(chatId, `❌ Threads 登录失败\n\n云机：${padName}\n\n${result.message}`, {
             reply_markup: { inline_keyboard: [[{ text: "🔄 重试", callback_data: `pad_switch_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
           });
-          if (result.screenshotUrl) {
-            await bot.sendPhoto(chatId, result.screenshotUrl, { caption: "📸 失败截图" }).catch(() => undefined);
-          }
         }
       } catch (error: any) {
         stopTyping();
@@ -12112,7 +12529,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
               returnCallback: `acctplatform_telegram_${id}`,
             });
           }
-          await safeEditOrSend(bot, chatId, msgId, [
+          await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, result.ok ? "📸 Telegram 登入後確認畫面" : "📸 Telegram 登入當前畫面");
+          await bot.sendMessage(chatId, [
             `${result.ok ? "✅" : "📲"} Telegram 登入流程已返回狀態`,
             "",
             `人設：${archive.name}`,
@@ -12129,7 +12547,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
               ],
             },
           });
-          await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, result.ok ? "📸 Telegram 登入後確認畫面" : "📸 Telegram 登入當前畫面");
         } catch (error: any) {
           stopTyping();
           await bot.sendMessage(chatId, `❌ Telegram 登入啟動失敗：${formatUserFacingError(error, "請查看截圖後重試。")}`, {
@@ -12195,21 +12612,24 @@ function sendMainMenu(chatId: number, msgId?: number) {
                   : "未确认已登录。"),
               };
             }
-            await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform, status), {
-              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
-            });
             await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, status.state === "logged_in" ? "📸 Threads 已登录确认画面" : "📸 Threads 当前画面");
+            await bot.sendMessage(chatId, buildPersonaPlatformAccountText(archive, platform, status), {
+              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
+            }).catch((error: any) => {
+              console.warn(`[telegram][threads_query_message_failed] chat=${chatId} error=${error?.message || error}`);
+            });
             return;
           }
 
           if (action === "logout") {
             const result = await clearThreadsAccountSession(creds, boundPad.padCode);
             stopTyping();
-            await bot.sendMessage(chatId, `🚪 *Threads 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.ok ? "✅ 已二次确认登出" : "❌ 未能确认登出"}\n${result.message}`, {
-              parse_mode: "Markdown",
-              reply_markup: { inline_keyboard: rows },
-            });
             await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, result.ok ? "📸 Threads 登出后确认画面" : "📸 Threads 登出失败画面");
+            await bot.sendMessage(chatId, `Threads 登出/清理\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.ok ? "已二次確認登出" : "未能確認登出"}\n${result.message}`, {
+              reply_markup: { inline_keyboard: rows },
+            }).catch((error: any) => {
+              console.warn(`[telegram][threads_logout_message_failed] chat=${chatId} error=${error?.message || error}`);
+            });
             return;
           }
 
@@ -12225,24 +12645,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           const result = await loginThreadsAccount(creds, boundPad.padCode, { username: threads.handle, password: threads.password });
           stopTyping();
           if (result.ok) {
-            const verifyResult = await queryThreadsAccount(creds, boundPad.padCode).catch((error: any) => ({
-              padCode: boundPad.padCode,
-              platform: "threads" as const,
-              method: "failed" as const,
-              error: error?.message || String(error),
-            }));
-            const verifiedLogin = Boolean(verifyResult.loggedIn && threadsQueryMatchesSavedAccount(verifyResult, threads.handle));
-            const detectedAccount = verifyResult.username ? ` @${verifyResult.username}` : verifyResult.email ? ` ${verifyResult.email}` : "";
-            const verifyDetail = verifiedLogin
-              ? ""
-              : detectedAccount
-                ? `\n\n二次检测：当前识别账号${detectedAccount}，与保存账号 ${maskAccountSecret(threads.handle)} 不一致。请查看截图确认。`
-                : `\n\n二次检测：${formatUserFacingError(verifyResult.error || "未识别到可核对的 Threads 账号", "未识别到可核对的 Threads 账号。请查看截图确认当前页面。")}`;
-            await bot.sendMessage(chatId, `${verifiedLogin ? "✅" : "⚠️"} *Threads 登录${verifiedLogin ? "成功并已确认" : "流程完成但未确认"}*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}${verifyDetail}`, {
-              parse_mode: "Markdown",
+            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 登录成功确认画面");
+            await bot.sendMessage(chatId, `✅ Threads 登录成功并已确认\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}`, {
               reply_markup: { inline_keyboard: [[{ text: "🔍 检测 Threads 状态", callback_data: `acctquery_threads_${id}` }], ...rows] },
+            }).catch((error: any) => {
+              console.warn(`[telegram][threads_login_message_failed] chat=${chatId} error=${error?.message || error}`);
             });
-            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, verifyResult.screenshotUrl || result.screenshotUrl, verifiedLogin ? "📸 Threads 登录成功确认画面" : "📸 Threads 登录后未确认画面");
             return;
           }
           if (result.state === "challenge_otp") {
@@ -12284,10 +12692,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
             state: result.ok ? "logged_in" : result.state === "logged_out" || result.state === "not_installed" ? "logged_out" : "unknown",
             message: result.message,
           };
-          await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform, status), {
-            reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
-          });
           await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, status.state === "logged_in" ? "📸 Telegram 已登录确认画面" : "📸 Telegram 当前画面");
+          await bot.sendMessage(chatId, buildPersonaPlatformAccountText(archive, platform, status), {
+            reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
+          }).catch((error: any) => {
+            console.warn(`[telegram][telegram_query_message_failed] chat=${chatId} error=${error?.message || error}`);
+          });
           return;
         }
 
@@ -12298,13 +12708,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
           message: formatUserFacingError(error, "登出后状态检测失败。"),
           screenshotUrl: result.screenshotUrl,
         }));
-        const verifiedLogout = !verifyResult.ok && (verifyResult.state === "logged_out" || verifyResult.state === "not_installed" || verifyResult.state === "unknown");
+        const verifiedLogout = !verifyResult.ok && (verifyResult.state === "logged_out" || verifyResult.state === "not_installed");
         stopTyping();
+        await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, verifyResult.screenshotUrl || result.screenshotUrl, verifiedLogout ? "📸 Telegram 登出后确认画面" : "📸 Telegram 登出未确认画面");
         await bot.sendMessage(chatId, `🚪 *Telegram 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${verifiedLogout ? "✅ 已二次确认登出" : "❌ 未能确认登出"}\n${result.message}\n\n二次检测：${verifyResult.message}`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: rows },
         });
-        await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, verifyResult.screenshotUrl || result.screenshotUrl, verifiedLogout ? "📸 Telegram 登出后确认画面" : "📸 Telegram 登出未确认画面");
       } catch (error: any) {
         stopTyping();
         if (isTelegramTaskCancelledError(error)) {
@@ -15668,6 +16078,92 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data.startsWith("cpk_")) {
+      const pending = pendingActions.get(chatId);
+      if (!pending || pending.type !== "create-persona" || pending.stage !== "await_keywords") {
+        await safeEditOrSend(bot, chatId, msgId, "這組人設關鍵詞選項已失效，請重新新建人設。", {
+          reply_markup: { inline_keyboard: [[{ text: "➕ 新建人設", callback_data: "create_persona_entry" }]] },
+        });
+        return;
+      }
+      const personaName = pending.personaName || "新人設";
+      const userPrompt = pending.personaPrompt || "";
+      const options = (pending.keywordOptions || []).slice(0, CREATE_PERSONA_KEYWORD_COUNT);
+      const selected = [...(pending.selectedKeywords || [])].filter((item) => options.includes(item));
+
+      if (data === "cpk_back") {
+        pendingActions.set(chatId, {
+          type: "create-persona",
+          archiveId: "",
+          stage: "await_prompt",
+          personaName,
+        });
+        await safeEditOrSend(bot, chatId, msgId, [
+          "✍️ 新建人設",
+          "",
+          `角色名稱：${personaName}`,
+          "",
+          "請重新輸入人設提示詞。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回重新輸入名稱", callback_data: "create_persona_entry" }]] },
+        });
+        return;
+      }
+
+      if (data === "cpk_clear") {
+        pendingActions.set(chatId, { ...pending, selectedKeywords: [] });
+        await safeEditOrSend(bot, chatId, msgId, buildCreatePersonaKeywordText(personaName, userPrompt, options, []), {
+          reply_markup: buildCreatePersonaKeywordKeyboard(options, []),
+        });
+        return;
+      }
+
+      if (data === "cpk_done") {
+        pendingActions.delete(chatId);
+        const thinking = await bot.sendMessage(chatId, selected.length
+          ? `🧠 正在根據「${selected.join("、")}」生成人設...`
+          : "🧠 正在根據原始提示生成人設...");
+        await createPersonaFromPromptSelection({
+          bot,
+          chatId,
+          thinkingMessageId: thinking.message_id,
+          personaName,
+          userPrompt,
+          selectedKeywords: selected,
+          instanceName,
+          defaultPadCode,
+        });
+        return;
+      }
+
+      if (data.startsWith("cpk_t_")) {
+        const index = Number(data.slice("cpk_t_".length));
+        const keyword = Number.isInteger(index) ? options[index] : "";
+        if (!keyword) {
+          await safeEditOrSend(bot, chatId, msgId, buildCreatePersonaKeywordText(personaName, userPrompt, options, selected), {
+            reply_markup: buildCreatePersonaKeywordKeyboard(options, selected),
+          });
+          return;
+        }
+        const nextSelected = selected.includes(keyword)
+          ? selected.filter((item) => item !== keyword)
+          : selected.length >= CREATE_PERSONA_MAX_SELECTED_KEYWORDS
+            ? selected
+            : [...selected, keyword];
+        if (!selected.includes(keyword) && nextSelected.length === selected.length) {
+          await bot.answerCallbackQuery(query.id, {
+            text: `最多只能選 ${CREATE_PERSONA_MAX_SELECTED_KEYWORDS} 個核心關鍵詞。`,
+            show_alert: true,
+          }).catch(() => undefined);
+        }
+        pendingActions.set(chatId, { ...pending, selectedKeywords: nextSelected });
+        await safeEditOrSend(bot, chatId, msgId, buildCreatePersonaKeywordText(personaName, userPrompt, options, nextSelected), {
+          reply_markup: buildCreatePersonaKeywordKeyboard(options, nextSelected),
+        });
+        return;
+      }
+    }
+
     const customPublishPersonaPage = parseSimplePagedCallback(data, "custom_publish_pick_persona");
     if (customPublishPersonaPage !== null) {
       const list = await listPersonasForThisBot();
@@ -17477,6 +17973,38 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "可以描述身份、性格、內容方向、語氣、受眾、圖片風格等。",
         ].join("\n"), {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回重新輸入名稱", callback_data: "create_persona_entry" }]] },
+        });
+        return;
+      }
+
+      if (pending.stage === "await_prompt") {
+        const personaName = pending.personaName || value.slice(0, 40);
+        const thinking = await bot.sendMessage(chatId, "🧠 正在提煉人設核心關鍵詞...");
+        const keywordOptions = await derivePersonaDirectionKeywordsWithCodex(personaName, value);
+        pendingActions.set(chatId, {
+          type: "create-persona",
+          archiveId: "",
+          stage: "await_keywords",
+          personaName,
+          personaPrompt: value,
+          keywordOptions,
+          selectedKeywords: [],
+        });
+        await bot.editMessageText(buildCreatePersonaKeywordText(personaName, value, keywordOptions, []), {
+          chat_id: chatId,
+          message_id: thinking.message_id,
+          reply_markup: buildCreatePersonaKeywordKeyboard(keywordOptions, []),
+        }).catch(async () => {
+          await bot.sendMessage(chatId, buildCreatePersonaKeywordText(personaName, value, keywordOptions, []), {
+            reply_markup: buildCreatePersonaKeywordKeyboard(keywordOptions, []),
+          });
+        });
+        return;
+      }
+
+      if (pending.stage === "await_keywords") {
+        await bot.sendMessage(chatId, "請先點擊上方按鈕選擇核心關鍵詞；最多選 2 個，選好後點「確認並生成人設」。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回修改提示詞", callback_data: "cpk_back" }]] },
         });
         return;
       }

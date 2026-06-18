@@ -1,6 +1,7 @@
 import {
   buildGirlPersonaImagePrompt,
   buildPersonaSocialImagePrompt,
+  buildPersonaVisualIdentityCue,
   buildSceneOnlyImagePrompt,
   classifyPersonaImageSubject,
   getPersonaImageSignals,
@@ -192,14 +193,7 @@ function normalizePromptCue(text: string) {
 
 export function buildPersonaCardImageDirection(setup: DramaSetup, signals?: PersonaImageSignals): string {
   const resolvedSignals = signals || getPersonaImageSignals(setup);
-  const cardCues = normalizePromptCue([
-    setup.personaDescription || "",
-    setup.contentTheme || "",
-    setup.personaStyle || "",
-    setup.personaPersonality || "",
-    (setup.genres || []).join(" "),
-    (setup.trendTopics || []).join(" "),
-  ].filter(Boolean).join(" "));
+  const cardCues = normalizePromptCue(buildPersonaVisualIdentityCue(setup, resolvedSignals));
   const direction = resolvedSignals.isMemeType
     ? "persona-card visual direction: meme or reaction-image leaning only when the persona card supports it"
     : resolvedSignals.isGirlType
@@ -208,7 +202,8 @@ export function buildPersonaCardImageDirection(setup: DramaSetup, signals?: Pers
 
   return [
     direction,
-    cardCues ? `persona card cues: ${cardCues.slice(0, 260)}` : "",
+    cardCues ? `persona card cues: ${cardCues.slice(0, 760)}` : "",
+    "the generated image must be immediately distinguishable from other personas by field, role, recurring objects, environment, color mood, and personality-driven body language",
   ].filter(Boolean).join(", ");
 }
 

@@ -6,6 +6,7 @@ import {
   generatePersonaImage,
   resolvePersonaImageRoute,
 } from "@/lib/persona-image-production";
+import { buildPersonaVisualIdentityCue } from "@/lib/persona-image-search";
 import type { DramaSetup } from "@/types/drama";
 
 function workflowSetup(overrides: Partial<DramaSetup> = {}): DramaSetup {
@@ -87,6 +88,46 @@ describe("persona image production", () => {
     expect(direction).toContain("福利传播型美女");
     expect(direction).toContain("搞笑日常");
     expect(direction).toContain("only when the persona card supports it");
+  });
+
+  it("carries distinctive persona identity cues into the image direction", () => {
+    const direction = buildPersonaCardImageDirection(nonWorkflowSetup({
+      genres: ["仙侠IP分析", "战力排名", "世界观深挖"],
+      personaName: "资深老宅",
+      personaDescription: "专注修仙仙侠类 IP 的资深动漫评论人，熟悉凡人修仙传、仙逆和斗破苍穹，擅长用战力榜、角色模型对比和世界观考据做深度分析。",
+      personaPersonality: "理性、热血、爱辩论、老宅感强",
+      personaStyle: "像资深二次元评论区老粉，专业但有讨论欲",
+      contentTheme: "仙侠战力排名、角色模型对比、世界观设定、经典作品复盘",
+      personaAppearance: "22-40岁男性动漫评论人，眼镜，黑色连帽外套，桌面有手办、漫画书、角色卡和数据榜单",
+    }));
+
+    expect(direction).toContain("资深老宅");
+    expect(direction).toContain("仙侠IP分析");
+    expect(direction).toContain("战力排名");
+    expect(direction).toContain("手办");
+    expect(direction).toContain("角色卡");
+    expect(direction).toContain("field, role, recurring objects");
+  });
+
+  it("requires visible wardrobe and styling differentiation for persona tweet images", () => {
+    const cue = buildPersonaVisualIdentityCue(nonWorkflowSetup({
+      personaName: "office rail fan analyst",
+      genres: ["commuter diary", "railway route analysis"],
+      personaDescription: "city commuter who compares train routes, station crowds, and small office routines",
+      personaPersonality: "precise, observant, dry humor",
+      personaStyle: "short practical notes with commuter jokes",
+      contentTheme: "station platforms, laptop notes, route maps, office coffee",
+      personaAppearance: "late twenties office worker, neat glasses, navy commuter jacket, canvas tote, transit card holder",
+      trendTopics: ["delayed train", "coffee run", "route map"],
+    }), undefined, "same black hoodie outfit, waiting near the station after work");
+
+    expect(cue).toContain("signature wardrobe and styling system");
+    expect(cue).toContain("clothing silhouette");
+    expect(cue).toContain("grooming");
+    expect(cue).toContain("accessories");
+    expect(cue).toContain("if another persona wore the same basic clothing item");
+    expect(cue).toContain("navy commuter jacket");
+    expect(cue).toContain("transit card holder");
   });
 
   it("uses closed-model POV for workflow persona cafe scenes without showing the persona", async () => {

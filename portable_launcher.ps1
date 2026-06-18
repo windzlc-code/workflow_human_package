@@ -292,7 +292,7 @@ function Get-SavedGrokInfoText {
   $models = First-NonEmpty @($cfg.llm_model_priority_order, $cfg.llm_default_model_gpt, $cfg.llm_default_model)
   $baseUrl = String-Trim ($cfg.llm_base_url)
   if (-not $key) { return "尚未設定" }
-  if (-not $models) { $models = "grok-4.2" }
+  if (-not $models) { $models = "" }
   if (-not $baseUrl) { $baseUrl = "未設定" }
   return "模型：" + $models + "，Base URL：" + $baseUrl + "，Key：" + (Mask-Secret $key)
 }
@@ -391,7 +391,7 @@ function Configure-GrokTextModel {
   $exampleBaseUrl = $currentBaseUrl
   if (-not $exampleBaseUrl) { $exampleBaseUrl = "https://llm.runninghub.ai/v1" }
   $defaultModels = $currentModels
-  if (-not $defaultModels) { $defaultModels = "xai/grok-4.3, grok-4.2" }
+  if (-not $defaultModels) { $defaultModels = "xai/grok-4.3" }
 
   if ($Force) {
     Write-Host "請輸入新的 Grok 文字模型 API 設定。"

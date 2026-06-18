@@ -244,15 +244,62 @@ export function buildPersonaSocialImagePrompt(
     .replace(/[“”"']/g, "")
     .slice(0, 180);
   const theme = sanitizeSocialPromptText(setup.contentTheme || signals.personaKeywords || "");
+  const visualIdentityCue = buildPersonaVisualIdentityCue(setup, signals, content);
 
   return [
     appearance,
+    visualIdentityCue,
     ...sceneHints,
     cleanedContent,
     theme ? `subtle theme cues: ${theme}` : "",
+    "the image must make the persona type, core field, personality, and recurring visual world recognizable at first glance; avoid a generic portrait, generic selfie, generic street photo, or interchangeable influencer image",
     "personal social media post photo, candid iPhone-style capture, realistic skin texture, natural lighting, non-commercial everyday scene, imperfect timing, unpolished framing, looks like a real post someone uploaded seconds after the incident",
     SOCIAL_PHOTO_NEGATIVE_TOKENS.join(", "),
   ].filter(Boolean).join(", ");
+}
+
+export function buildPersonaVisualIdentityCue(
+  setup: DramaSetup,
+  signals?: PersonaImageSignals,
+  currentContent?: string,
+): string {
+  const resolvedSignals = signals || getPersonaImageSignals(setup, currentContent);
+  const identityType = sanitizeSocialPromptText([
+    setup.personaName || "",
+    (setup.genres || []).join(" "),
+    setup.contentTheme || "",
+    resolvedSignals.personaKeywords || "",
+  ].filter(Boolean).join(" ")).slice(0, 180);
+  const coreSetting = sanitizeSocialPromptText([
+    setup.personaDescription || "",
+    setup.personaAppearance || resolvedSignals.appearanceHint || "",
+  ].filter(Boolean).join(" ")).slice(0, 280);
+  const personality = sanitizeSocialPromptText([
+    setup.personaPersonality || "",
+    setup.personaStyle || "",
+  ].filter(Boolean).join(" ")).slice(0, 180);
+  const visualAnchors = sanitizeSocialPromptText([
+    setup.imageWorkflow?.visualAnchorAddendum || "",
+    (setup.trendTopics || []).join(" "),
+  ].filter(Boolean).join(" ")).slice(0, 180);
+  const stylingCore = sanitizeSocialPromptText([
+    identityType,
+    coreSetting,
+    personality,
+    visualAnchors,
+  ].filter(Boolean).join(" ")).slice(0, 520);
+
+  return [
+    "persona visual identity cue:",
+    identityType ? `type and field: ${identityType}` : "",
+    coreSetting ? `core character and visual world: ${coreSetting}` : "",
+    personality ? `personality shown through posture, expression, props, scene choice, and camera distance: ${personality}` : "",
+    visualAnchors ? `recurring visual anchors: ${visualAnchors}` : "",
+    stylingCore ? `derive a signature wardrobe and styling system from this persona, not a generic outfit: ${stylingCore}` : "",
+    "visible differentiation requirements: design role-specific clothing silhouette, layering, fabric texture, color palette, grooming, hair or makeup logic, accessories, hand-held objects, background objects, and camera distance so the persona is identifiable without reading text",
+    "if another persona wore the same basic clothing item, this persona must still look different through fit, layering, accessories, grooming, posture, facial expression, props, environment, and color mood",
+    "translate the persona card into visible details: clothing logic, props, workspace or living environment, color mood, body language, and social-media composition must all fit this specific persona",
+  ].filter(Boolean).join("; ");
 }
 
 export function sanitizeGirlPromptText(text: string): string {

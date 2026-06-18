@@ -100,6 +100,14 @@ describe("stored post media previews", () => {
 });
 
 describe("buildPersonaSettingsRows", () => {
+  it("keeps the persona intro edit entry connected to the existing editcontent flow", () => {
+    const archive = archiveForSettings();
+    const rows = buildPersonaSettingsRows(archive);
+    const buttons = rows.flat();
+
+    expect(buttons).toContainEqual({ text: "🧾 人设简介", callback_data: `editcontent_${archive.id}` });
+  });
+
   it("hides persona-image controls for workflow personas", () => {
     const rows = buildPersonaSettingsRows(archiveForSettings({
       setup: {

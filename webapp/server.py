@@ -114,12 +114,12 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "llm_api_key": "",
     "llm_api_key_gemini": "",
     "llm_api_key_gpt": "",
-    "llm_default_model": "grok-4.2",
+    "llm_default_model": "",
     "llm_default_model_gemini": "",
-    "llm_default_model_gpt": "grok-4.2",
-    "llm_model_priority_order": "grok-4.2",
-    "llm_free_model_priority_order": "grok-4.2",
-    "llm_paid_model_priority_order": "grok-4.2",
+    "llm_default_model_gpt": "",
+    "llm_model_priority_order": "",
+    "llm_free_model_priority_order": "",
+    "llm_paid_model_priority_order": "",
     "text_to_image_auto_qa_enabled": False,
     "text_to_image_auto_qa_max_attempts": 3,
     "persona_body_profiles": {},
@@ -159,7 +159,7 @@ BUILTIN_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 BUILTIN_LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 BUILTIN_LLM_API_KEY_GEMINI = ""
 BUILTIN_LLM_API_KEY_GPT = BUILTIN_LLM_API_KEY
-BUILTIN_LLM_DEFAULT_MODEL = "grok-4.2"
+BUILTIN_LLM_DEFAULT_MODEL = ""
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
@@ -967,7 +967,7 @@ def _grok_llm_models(*groups: list[str], fallback: list[str] | None = None) -> l
             seen.add(model)
             models.append(model)
     if not models:
-        for raw in fallback or ["grok-4.2"]:
+        for raw in fallback or []:
             model = str(raw or "").strip()
             if model and _is_grok_llm_model(model) and model not in seen:
                 seen.add(model)
@@ -976,7 +976,7 @@ def _grok_llm_models(*groups: list[str], fallback: list[str] | None = None) -> l
 
 
 def _llm_models(*groups: list[str], fallback: list[str] | None = None) -> list[str]:
-    return _ordered_model_list(*groups, fallback=fallback if fallback is not None else ["grok-4.2"])
+    return _ordered_model_list(*groups, fallback=fallback if fallback is not None else [])
 
 
 def _detect_image_model_provider(model: str) -> str:
@@ -1057,7 +1057,7 @@ def _resolve_llm_fallback_candidates(source: dict[str, Any] | None, *, allow_bui
         model_priority,
         gpt_models,
         priority_models,
-        fallback=["grok-4.2"],
+        fallback=[],
     )
 
     candidates: list[dict[str, str]] = []
@@ -2570,7 +2570,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["llm_api_key_gemini"] = ""
     merged["llm_api_key_gpt"] = str(llm_api_key_gpt or llm_api_key_legacy or "").strip()
     merged["llm_api_key"] = str(merged["llm_api_key_gpt"] or llm_api_key_legacy or BUILTIN_LLM_API_KEY).strip()
-    merged["llm_default_model"] = str(merged.get("llm_default_model") or "grok-4.2").strip() or "grok-4.2"
+    merged["llm_default_model"] = str(merged.get("llm_default_model") or "").strip()
     llm_default_model_gemini = ""
     llm_default_model_gpt = current.get("llm_default_model_gpt") if "llm_default_model_gpt" in current else None
     llm_model_priority_order = current.get("llm_model_priority_order") if "llm_model_priority_order" in current else None
@@ -2579,7 +2579,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         parse_model_list(llm_model_priority_order),
         parse_model_list(llm_default_model_gpt),
         parse_model_list(merged.get("llm_default_model")),
-        fallback=["grok-4.2"],
+        fallback=[],
     )
     merged["llm_default_model_gemini"] = str(llm_default_model_gemini or "").strip()
     merged["llm_default_model_gpt"] = ", ".join(llm_gpt_models)
@@ -2587,7 +2587,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     llm_priority_models = _llm_models(
         parse_model_list(llm_model_priority_order),
         llm_gpt_models,
-        fallback=llm_gpt_models or ["grok-4.2"],
+        fallback=llm_gpt_models,
     )
     merged["llm_model_priority_order"] = ", ".join(llm_priority_models)
     free_models_present = "llm_free_model_priority_order" in current
@@ -2596,11 +2596,11 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     raw_paid_models = parse_model_list(current.get("llm_paid_model_priority_order"))
     llm_free_models = _llm_models(
         raw_free_models if free_models_present else llm_priority_models,
-        fallback=[] if free_models_present else (llm_priority_models or llm_gpt_models or ["grok-4.2"]),
+        fallback=[] if free_models_present else (llm_priority_models or llm_gpt_models),
     )
     llm_paid_models = _llm_models(
         raw_paid_models if paid_models_present else llm_priority_models,
-        fallback=[] if paid_models_present else (llm_priority_models or llm_gpt_models or ["grok-4.2"]),
+        fallback=[] if paid_models_present else (llm_priority_models or llm_gpt_models),
     )
     merged["llm_free_model_priority_order"] = ", ".join(llm_free_models)
     merged["llm_paid_model_priority_order"] = ", ".join(llm_paid_models)
@@ -2770,7 +2770,7 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
             parse_model_list(runtime.get("llm_model_priority_order")),
             parse_model_list(runtime.get("llm_default_model_gpt")),
             parse_model_list(runtime.get("llm_default_model")),
-            fallback=["grok-4.2"],
+            fallback=[],
         )
         if llm_models:
             model_order = ", ".join(llm_models)
@@ -2786,11 +2786,11 @@ def _sync_tool_r18_api_config_from_runtime(runtime: dict[str, Any], explicit: di
         raw_paid_models = parse_model_list(runtime.get("llm_paid_model_priority_order"))
         free_models = _ordered_model_list(
             raw_free_models if free_models_present else parse_model_list(runtime.get("llm_model_priority_order")),
-            fallback=[] if free_models_present else (llm_models or ["grok-4.2"]),
+            fallback=[] if free_models_present else llm_models,
         )
         paid_models = _ordered_model_list(
             raw_paid_models if paid_models_present else parse_model_list(runtime.get("llm_model_priority_order")),
-            fallback=[] if paid_models_present else (llm_models or ["grok-4.2"]),
+            fallback=[] if paid_models_present else llm_models,
         )
         if free_models_present or free_models:
             updates["llmFreeModelPriorityOrder"] = ", ".join(free_models)
@@ -15389,12 +15389,12 @@ class RuntimeConfigPayload(BaseModel):
     llm_api_key: str = ""
     llm_api_key_gemini: str = ""
     llm_api_key_gpt: str = ""
-    llm_default_model: str = "grok-4.2"
+    llm_default_model: str = ""
     llm_default_model_gemini: str = ""
-    llm_default_model_gpt: str = "grok-4.2"
-    llm_model_priority_order: str = "grok-4.2"
-    llm_free_model_priority_order: str = "grok-4.2"
-    llm_paid_model_priority_order: str = "grok-4.2"
+    llm_default_model_gpt: str = ""
+    llm_model_priority_order: str = ""
+    llm_free_model_priority_order: str = ""
+    llm_paid_model_priority_order: str = ""
     mulerouter_api_name: str = ""
     mulerouter_api_key: str = ""
     mulerouter_base_url: str = "https://api.mulerouter.ai"
