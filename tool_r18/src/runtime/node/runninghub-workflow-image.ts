@@ -233,13 +233,15 @@ export async function generateRunningHubAiAppImage(
   }
 }
 
+const RUNNINGHUB_STANDARD_ASPECT_RATIOS = new Set(["1:1", "2:3", "3:2", "4:5", "5:4", "9:16", "16:9", "3:4", "4:3", "21:9"]);
+
 function normalizeRunningHubAspectRatio(aspectRatio?: string): string {
   const value = String(aspectRatio || "").trim();
   if (!value) return "1:1";
-  if (["1:1", "8:15", "2:3", "3:2", "4:5", "5:4", "9:16", "16:9", "3:4", "4:3", "21:9"].includes(value)) {
+  if (RUNNINGHUB_STANDARD_ASPECT_RATIOS.has(value)) {
     return value;
   }
-  return "1:1";
+  return "";
 }
 
 function buildImageUrlInput(source?: string, mimeType?: string): string | undefined {
@@ -267,6 +269,14 @@ export async function generateRunningHubNewPersonaStandardImage(
     ? (runtime.newPersonaRunningHubTweetImageToImageEndpoint || NEW_PERSONA_IMAGE_TO_IMAGE_ENDPOINT)
     : (runtime.newPersonaRunningHubPersonaTextToImageEndpoint || NEW_PERSONA_TEXT_TO_IMAGE_ENDPOINT);
   const aspectRatio = normalizeRunningHubAspectRatio(params.aspectRatio);
+  if (!aspectRatio) {
+    return {
+      ok: false,
+      error: `RunningHub OpenAPI v2 不支持畫面比例：${String(params.aspectRatio || "").trim()}`,
+      retryable: false,
+      reasonCode: "aspect_ratio_unsupported",
+    };
+  }
   const size = imageSizeFromAspectRatio(aspectRatio);
   const payload: Record<string, unknown> = {
     prompt: params.prompt,

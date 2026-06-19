@@ -4340,6 +4340,25 @@ function toolR18T2iRatioOption(profile: string, id: string) {
   return options.find((item) => item.id === id) || options[0];
 }
 
+const NEW_PERSONA_POST_IMAGE_RATIO_OPTIONS = [
+  { id: "2x3", ratio: "2:3", label: "2:3 豎圖", note: "RunningHub 支援比例", width: 1024, height: 1536, final: "關閉" },
+  { id: "3x4", ratio: "3:4", label: "3:4 穩定豎圖", note: "RunningHub 支援比例", width: 1024, height: 1365, final: "關閉" },
+  { id: "9x16", ratio: "9:16", label: "9:16 手機豎屏長圖", note: "RunningHub 支援比例", width: 1024, height: 1820, final: "關閉" },
+  { id: "3x2", ratio: "3:2", label: "3:2 橫圖基準", note: "RunningHub 支援比例", width: 1536, height: 1024, final: "關閉" },
+  { id: "4x3", ratio: "4:3", label: "4:3 平衡橫圖", note: "RunningHub 支援比例", width: 1365, height: 1024, final: "關閉" },
+  { id: "16x9", ratio: "16:9", label: "16:9 寬屏", note: "RunningHub 支援比例", width: 1820, height: 1024, final: "關閉" },
+  { id: "1x1", ratio: "1:1", label: "1:1 正方形", note: "RunningHub 支援比例", width: 1024, height: 1024, final: "關閉" },
+];
+
+function newPersonaPostImageRatioOptions(profile: string) {
+  return NEW_PERSONA_POST_IMAGE_RATIO_OPTIONS;
+}
+
+function newPersonaPostImageRatioOption(profile: string, id: string) {
+  const options = newPersonaPostImageRatioOptions(profile);
+  return options.find((item) => item.id === id) || null;
+}
+
 function toolR18T2iCurrentOption(state?: PendingToolR18TaskState) {
   const profile = String(state?.params?.text_to_image_workflow_profile || "zit_final");
   const ratio = String(state?.params?.aspect_ratio || "");
@@ -4396,7 +4415,7 @@ async function freeGeneratedPostImageRatioProfile() {
 }
 
 function buildFreeGeneratedPostImageRatioKeyboard(profile: string, qaEnabled = false) {
-  const options = toolR18TextToImageRatioOptions(profile);
+  const options = newPersonaPostImageRatioOptions(profile);
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let i = 0; i < options.length; i += 2) {
     rows.push(options.slice(i, i + 2).map((item) => ({
@@ -4410,7 +4429,7 @@ function buildFreeGeneratedPostImageRatioKeyboard(profile: string, qaEnabled = f
 }
 
 function buildPostImageRatioKeyboard(profile: string, backCallback: string, qaEnabled = false) {
-  const options = toolR18TextToImageRatioOptions(profile);
+  const options = newPersonaPostImageRatioOptions(profile);
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let i = 0; i < options.length; i += 2) {
     rows.push(options.slice(i, i + 2).map((item) => ({
@@ -6244,6 +6263,7 @@ async function rewritePersonaIntroWithCodex(archive: any, userText: string, mode
 
 const GENERATED_POST_IMAGE_TARGET_COUNT = 4;
 const GENERATED_POST_IMAGE_MAX_ATTEMPTS = 6;
+const NEW_PERSONA_POST_IMAGE_TIMEOUT_MS = 5 * 60 * 1000;
 
 function buildArchivePersonaVisualIdentityCue(archive: PersonaArchive | null | undefined, fallbackName?: string, currentContent?: string) {
   if (!archive?.setup) return fallbackName ? `persona visual identity cue: persona name ${fallbackName}; infer a distinctive visual identity from the current generated copy, not a generic portrait` : "";
@@ -6691,7 +6711,7 @@ async function submitGeneratedPostImageCandidateTask(args: {
   });
   const taskId = String(submit?.id || "").trim();
   if (!taskId) throw new Error("後端沒有返回配圖任務 ID");
-  const waited = await waitForToolR18GeneratedTaskDownloadPath(args.chatId, taskId, 30 * 60 * 1000);
+  const waited = await waitForToolR18GeneratedTaskDownloadPath(args.chatId, taskId, NEW_PERSONA_POST_IMAGE_TIMEOUT_MS);
   const imageUrls = (waited.imagePaths?.length ? waited.imagePaths : [waited.downloadPath]).filter(Boolean);
   return {
     ok: imageUrls.length >= GENERATED_POST_IMAGE_TARGET_COUNT,
@@ -6743,7 +6763,7 @@ async function generateCurrentFreeGeneratedPostImageGroup(bot: TelegramBot, chat
   await telegramBestEffort("generatePosts.freeImageGroupStart", bot.sendMessage(chatId, `\u23F3 \u6B63\u5728\u751F\u6210\u7B2C ${displayIndex}/${flow.posts.length} \u7D44\u914D\u5716\uFF0C\u6BCF\u7D44\u751F\u6210 ${GENERATED_POST_IMAGE_TARGET_COUNT} \u5F35\u5019\u9078\u5716...`, {
     reply_markup: { inline_keyboard: [[{ text: "\uD83D\uDCDD \u67E5\u770B\u63A8\u6587\u5217\u8868", callback_data: flow.generatedPostsListCallback }]] },
   }), 45_000);
-  const results = await generateImagesForGeneratedPosts({
+  const results = await withTimeout(generateImagesForGeneratedPosts({
     bot,
     chatId,
     archiveId: flow.archiveId,
@@ -6755,7 +6775,14 @@ async function generateCurrentFreeGeneratedPostImageGroup(bot: TelegramBot, chat
     imageHeight: flow.imageHeight,
     imageRatioLabel: flow.imageRatioLabel,
     hasPersonaReferenceImage: flow.hasPersonaReferenceImage,
-  });
+  }), NEW_PERSONA_POST_IMAGE_TIMEOUT_MS, `新建人設第 ${displayIndex}/${flow.posts.length} 組配圖生成超時（5 分鐘未返回圖片）`)
+    .catch((error) => [{
+      id: post.id,
+      content: post.content,
+      imageUrls: [],
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }]);
   const image = results[0];
   if (!image?.ok || image.imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT) {
     await telegramBestEffort("generatePosts.freeImageGroupFailed", bot.sendMessage(chatId, `\u274C \u7B2C ${displayIndex}/${flow.posts.length} \u7D44\u914D\u5716\u751F\u6210\u5931\u6557\u3002\n${formatUserFacingError(image?.error || "", "\u914D\u5716\u5931\u6557\uFF0C\u8ACB\u91CD\u8A66\u3002")}`, {
@@ -6827,7 +6854,7 @@ async function generateR18ImagesForGeneratedPosts(args: { bot: TelegramBot; chat
       const taskId = String(submit?.id || "").trim();
       if (!taskId) throw new Error("R18 \u5F8C\u7AEF\u6C92\u6709\u8FD4\u56DE\u4EFB\u52D9 ID");
       await args.bot.sendMessage(args.chatId, `\u23F3 \u7B2C ${index + 1}/${args.posts.length} \u7D44\u4ED8\u8CBB R18 \u914D\u5716\u5DF2\u63D0\u4EA4\uFF1A${taskId}\n\u76EE\u6A19\uFF1A${qaEnabled ? "\u901A\u904E QA \u7684 4 \u5F35\u5716" : "\u751F\u6210 4 \u5F35\u5019\u9078\u5716"}`);
-      const waited = await waitForToolR18GeneratedTaskDownloadPath(args.chatId, taskId);
+      const waited = await waitForToolR18GeneratedTaskDownloadPath(args.chatId, taskId, NEW_PERSONA_POST_IMAGE_TIMEOUT_MS);
       const imageUrls = (waited.imagePaths?.length ? waited.imagePaths : [waited.downloadPath]).filter(Boolean);
       results.push({
         id: post.id,
@@ -7753,7 +7780,7 @@ async function generateCurrentPaidR18ImageFirstGroup(bot: TelegramBot, chatId: n
     `⏳ 正在生成第 ${index + 1}/${flow.total} 組付費 R18 候選圖...\n${targetText}`,
     { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回付費內容", callback_data: "paidr18_back_workflow" }]] } },
   ), 15_000);
-  const imageResult = (await generateR18ImagesForGeneratedPosts({
+  const imageResult = (await withTimeout(generateR18ImagesForGeneratedPosts({
     bot,
     chatId,
     archiveId: flow.archiveId,
@@ -7763,7 +7790,13 @@ async function generateCurrentPaidR18ImageFirstGroup(bot: TelegramBot, chatId: n
     sourceBot: "tool_r18",
     taskType: flow.taskType,
     baseParams: flow.params,
-  }))[0];
+  }), NEW_PERSONA_POST_IMAGE_TIMEOUT_MS, `付費內容第 ${index + 1}/${flow.total} 組 R18 候選圖生成超時（5 分鐘未返回圖片）`)
+    .catch((error) => [{
+      content: imageDirection,
+      imageUrls: [],
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }]))[0];
 
   if (!imageResult?.ok || imageResult.imageUrls.length < GENERATED_POST_IMAGE_TARGET_COUNT) {
     await telegramBestEffort("generatePosts.r18ImageGroupFailed", bot.sendMessage(chatId, [
@@ -14049,7 +14082,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const profile = await freeGeneratedPostImageRatioProfile();
-      const option = toolR18T2iRatioOption(profile, data.slice("genpost_ratio_".length));
+      const option = newPersonaPostImageRatioOption(profile, data.slice("genpost_ratio_".length));
+      if (!option) {
+        await bot.answerCallbackQuery(query.id, { text: "這個畫面比例目前 API 不支援，請重新選擇。", show_alert: true }).catch(() => undefined);
+        await sendFreeGeneratedPostImageRatioPicker(bot, chatId, msgId, pending);
+        return;
+      }
       const nextState: PendingGeneratePostState = {
         ...pending,
         imageRatioId: option.id,
@@ -14082,7 +14120,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const profile = await freeGeneratedPostImageRatioProfile();
-      const option = toolR18T2iRatioOption(profile, data.slice("post_img_ratio_".length));
+      const option = newPersonaPostImageRatioOption(profile, data.slice("post_img_ratio_".length));
+      if (!option) {
+        await bot.answerCallbackQuery(query.id, { text: "這個畫面比例目前 API 不支援，請重新選擇。", show_alert: true }).catch(() => undefined);
+        await sendPostImageRatioPicker(bot, chatId, msgId, action);
+        return;
+      }
       const displayIndex = action.displayIndex || (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
       await safeEditOrSend(bot, chatId, msgId, [
         `\uD83D\uDDBC \u6B63\u5728\u70BA\u7B2C ${displayIndex} \u7BC7\u751F\u6210 4 \u5F35\u5019\u9078\u914D\u5716...`,
