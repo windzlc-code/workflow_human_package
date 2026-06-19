@@ -5212,43 +5212,21 @@ export function scaleScreenshotPointToAdbPointForSizes(
 }
 
 function normalizeVmosScreenSize(size: { width: number; height: number } | null): { width: number; height: number } | null {
-  return size;
+  void size;
+  return FIXED_VMOS_SCREEN;
 }
 
 async function getScreenSize(
   config: VmosConfig,
   padCode: string
 ): Promise<{ width: number; height: number }> {
+  // All VMOS click coordinates in this module are authored against the cloud
+  // phone's fixed 720x1600 panel. Do not trust transient `wm size`, screenshot
+  // query params, or device-info layouts for tap math: those values can report
+  // the input surface or a cropped stream and cause systematic mis-taps.
+  void config;
   const cached = screenSizeCache.get(padCode);
   if (cached) return cached;
-
-  const fromAdb = await execAdbForText(config, padCode, "wm size", 15000, 500)
-    .then(parseScreenSizeFromWmSize)
-    .then(normalizeVmosScreenSize)
-    .catch(() => null);
-  if (fromAdb) {
-    screenSizeCache.set(padCode, fromAdb);
-    return fromAdb;
-  }
-
-  const fromScreenshot = await screenshot(config, padCode)
-    .then(parseScreenSizeFromScreenshotUrl)
-    .then(normalizeVmosScreenSize)
-    .catch(() => null);
-  if (fromScreenshot) {
-    screenSizeCache.set(padCode, fromScreenshot);
-    return fromScreenshot;
-  }
-
-  const fromInfo = await getPadInfo(config, padCode)
-    .then((info) => parseScreenSizeFromLayout(info.screenLayoutCode))
-    .then(normalizeVmosScreenSize)
-    .catch(() => null);
-  if (fromInfo) {
-    screenSizeCache.set(padCode, fromInfo);
-    return fromInfo;
-  }
-
   screenSizeCache.set(padCode, BASE_SCREEN);
   return BASE_SCREEN;
 }
@@ -5257,14 +5235,11 @@ async function getScreenshotCoordinateScreenSize(
   config: VmosConfig,
   padCode: string,
 ): Promise<{ width: number; height: number }> {
-  const fromPhysicalWm = await execAdbForText(config, padCode, "wm size", 15_000, 500)
-    .then(parsePhysicalScreenSizeFromWmSize)
-    .catch(() => null);
-  if (fromPhysicalWm) return fromPhysicalWm;
   const fromScreenshot = await screenshot(config, padCode)
     .then(parseScreenSizeFromScreenshotUrl)
     .catch(() => null);
-  return fromScreenshot || FIXED_VMOS_SCREEN;
+  if (fromScreenshot) return fromScreenshot;
+  return FIXED_VMOS_SCREEN;
 }
 
 async function scaleUiXmlPointToPhysicalTap(
@@ -6801,9 +6776,7 @@ async function tapThreadsProfileVideoTab(
     return;
   }
 
-  const screen = await getScreenSize(config, padCode);
-  const fallbackY = screen.height >= 1500 ? 492 : 394;
-  await tapViaAdbAbsolute(config, padCode, 450, fallbackY, 1800);
+  throw new Error("未定位到 Threads 影音頁籤，已停止盲點擊以避免誤觸分享個人檔案");
 }
 
 async function captureThreadsProfileVideoTabScreenshot(
@@ -6824,7 +6797,15 @@ async function captureThreadsProfileVideoTabBaselineForPublish(
   if (!getLocalVisualVerificationSupport().supported) return undefined;
 
   onProgress({ step: "讀取 Threads 影音頁基線...", done: false });
-  const beforeProfileVideoTabUrl = await captureThreadsProfileVideoTabScreenshot(config, padCode);
+  const beforeProfileVideoTabUrl = await captureThreadsProfileVideoTabScreenshot(config, padCode).catch((error) => {
+    onProgress({
+      step: `Threads 影音頁基線讀取失敗，跳過影音頁快驗：${error instanceof Error ? error.message : String(error)}`,
+      done: false,
+      warning: "跳過 Threads 影音頁快驗",
+    });
+    return undefined;
+  });
+  if (!beforeProfileVideoTabUrl) return undefined;
   const beforeProfileVideoTabShot = await getInlineData(beforeProfileVideoTabUrl);
   const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, beforeProfileVideoTabShot);
   if (blockedReason) {
@@ -6878,6 +6859,7 @@ async function verifyThreadsPublishLocally(
           return {
             state: "verified",
             detail: `發布完成 ✓（本機快驗：Threads 主頁已命中參考圖，diff=${localMatch.diff.toFixed(1)}${localMatch.mode ? `, mode=${localMatch.mode}` : ""}）`,
+            screenshotUrl: afterProfileUrl,
           };
         }
       } catch {
@@ -6954,9 +6936,14 @@ async function verifyThreadsVideoPublishLocally(
 
     if (diffScore >= THREADS_VIDEO_TAB_DIFF_THRESHOLD) {
       onProgress?.({
-        step: `Threads 影音頁已變化 diff=${diffScore.toFixed(1)}，繼續回主頁確認目標貼文...`,
+        step: `Threads 影音頁已變化 diff=${diffScore.toFixed(1)}，返回影音頁證據截圖...`,
         done: false,
       });
+      return {
+        state: "verified",
+        detail: `發布完成 ✓（本機校驗：Threads 影音頁已出現新變化，diff=${diffScore.toFixed(1)}）`,
+        screenshotUrl: afterProfileVideoTabUrl,
+      };
     }
   }
 
@@ -7129,10 +7116,9 @@ async function tapScreenshotPointViaAdb(
     console.warn(`[threads][tap] ignored non-720x1600 screenshot coordinate map image=${image.width}x${image.height} screen=${screen.width}x${screen.height}`);
   }
 
-  // VMOS screenshots are 720x1600, while ADB input on the same cloud phone can
-  // report/use 720x1280. Always project screenshot coordinates into the actual
-  // input surface; otherwise bottom controls such as Threads "Post" are tapped
-  // below the reachable ADB screen.
+  // VMOS screenshots and tap coordinates are normalized to the same 720x1600
+  // reference panel. This keeps screenshot-derived visual targets and fixed
+  // fallback taps in the same coordinate system.
   const scale = screen.width / image.width;
   const scaleY = screen.height / image.height;
   const x = Math.round(point.x * scale);
@@ -8864,11 +8850,29 @@ async function recoverThreadsSearchOverlayAfterCaptionInput(
   return false;
 }
 
+async function typeThreadsComposerCaptionText(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  waitMs = 2500,
+) {
+  if (/^[\x20-\x7E]+$/.test(caption)) {
+    await typeAsciiTextViaAndroidInput(config, padCode, caption, Math.max(waitMs, 1200));
+    return;
+  }
+  try {
+    await typeTextViaAdbBroadcast(config, padCode, caption, Math.max(waitMs, 2200), 16_000);
+  } catch {
+    await typeText(config, padCode, caption, Math.max(waitMs, 2500));
+  }
+}
+
 async function waitForThreadsComposerCaptionText(
   config: VmosConfig,
   padCode: string,
   caption: string,
   attempts = 4,
+  options: { allowPublishButtonFallback?: boolean } = {},
 ): Promise<boolean> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const [uiXml, state] = await Promise.all([
@@ -8877,7 +8881,9 @@ async function waitForThreadsComposerCaptionText(
     ]);
     if (hasThreadsComposerCaptionText(uiXml, caption)) return true;
     if (state?.page !== "compose_editor") return false;
-    if (state.screenshotUrl && await locateThreadsComposerPublishButton(state.screenshotUrl).catch(() => null)) {
+    if (options.allowPublishButtonFallback !== false
+      && state.screenshotUrl
+      && await locateThreadsComposerPublishButton(state.screenshotUrl).catch(() => null)) {
       // Some Threads builds do not expose the draft text in UIAutomator after
       // cloud input, but an enabled Post pill is enough proof that text/media is present.
       return true;
@@ -10112,7 +10118,6 @@ async function classifyThreadsPageOnDevice(
   if (await detectThreadsPostActionSheetLocally(screenshotUrl)) {
     return { page: "unknown", reason: "LOCAL_THREADS_POST_ACTION_SHEET", screenshotUrl };
   }
-
   if (await detectThreadsSideDrawerLocally(screenshotUrl)) {
     return { page: "unknown", reason: "LOCAL_THREADS_SIDE_DRAWER", screenshotUrl };
   }
@@ -12413,6 +12418,7 @@ async function verifyThreadsProfileContainsPost(
   });
   const referenceShot = hasImageReferenceMedia(mediaUrl) ? await getInlineData(mediaUrl!) : null;
   const verificationCues = extractThreadsVerificationCues(caption);
+  const evidenceUrl = isVideoMediaUrl(mediaUrl) ? profileMidUrl : profileTopUrl;
 
   if (!profileTop || !profileMid || !profileLow) {
     return {
@@ -12422,16 +12428,20 @@ async function verifyThreadsProfileContainsPost(
   }
 
   if (verificationCues.length > 0) {
-    const localCue = findThreadsLocalTextCueMatch(
-      [profileTopXml, profileMidXml, profileLowXml].join("\n"),
-      verificationCues,
-    );
-    if (localCue) {
-      return {
-        state: "verified",
-        detail: `發布完成 ✓（本機校驗：主頁 XML 已命中目標線索「${summarizeCaption(localCue, 40)}」）`,
-        screenshotUrl: profileTopUrl,
-      };
+    const localCueCandidates = [
+      { label: "個人主頁首屏", xml: profileTopXml, url: profileTopUrl },
+      { label: "個人主頁下滑一次", xml: profileMidXml, url: profileMidUrl },
+      { label: "個人主頁下滑兩次", xml: profileLowXml, url: profileLowUrl },
+    ];
+    for (const candidate of localCueCandidates) {
+      const localCue = findThreadsLocalTextCueMatch(candidate.xml, verificationCues);
+      if (localCue) {
+        return {
+          state: "verified",
+          detail: `發布完成 ✓（本機校驗：${candidate.label} XML 已命中目標線索「${summarizeCaption(localCue, 40)}」）`,
+          screenshotUrl: isVideoMediaUrl(mediaUrl) ? evidenceUrl : candidate.url,
+        };
+      }
     }
   }
 
@@ -12479,6 +12489,7 @@ NO|原因`;
           detail: reason
             ? `發布完成 ✓（已校驗：${reason}）`
             : "發布完成 ✓（已校驗：主頁已出現目標線索）",
+          screenshotUrl: profileMidUrl,
         };
       }
       if (/^NO\b/i.test(quickLine)) {
@@ -12487,6 +12498,7 @@ NO|原因`;
           detail: quickLine.includes("|")
             ? `已執行發布，待人工確認（${quickLine.split("|").slice(1).join("|").trim()}）`
             : "已執行發布，待人工確認（主頁中未找到目標線索）",
+          screenshotUrl: evidenceUrl,
         };
       }
     } catch {
@@ -12511,7 +12523,7 @@ NO|原因`;
           return {
             state: "verified",
             detail: `發布完成 ✓（本機校驗：${candidate.label}已命中參考圖，diff=${match.diff.toFixed(1)}${match.mode ? `, mode=${match.mode}` : ""}）`,
-            screenshotUrl: candidate.url,
+            screenshotUrl: isVideoMediaUrl(mediaUrl) ? evidenceUrl : candidate.url,
           };
         }
       }
@@ -12568,6 +12580,7 @@ NO|原因
           detail: reason
             ? `發布完成 ✓（已校驗：${reason}）`
             : "發布完成 ✓（已校驗：主頁已出現相同配圖）",
+          screenshotUrl: evidenceUrl,
         };
       }
     } catch {
@@ -12620,6 +12633,7 @@ NO|原因
           detail: reason
             ? `發布完成 ✓（已校驗：${reason}）`
             : "發布完成 ✓（已校驗：主頁已出現目標線索）",
+          screenshotUrl: evidenceUrl,
         };
       }
       return {
@@ -12627,6 +12641,7 @@ NO|原因
         detail: textLine.includes("|")
           ? `已執行發布，待人工確認（${textLine.split("|").slice(1).join("|").trim()}）｜debug=${formatThreadsDebugTargets([profileTopUrl, profileMidUrl, profileLowUrl])}`
           : `已執行發布，待人工確認（主頁中未找到目標線索）｜debug=${formatThreadsDebugTargets([profileTopUrl, profileMidUrl, profileLowUrl])}`,
+        screenshotUrl: evidenceUrl,
       };
     } catch {
       // Fall through to broader multi-screenshot verification.
@@ -12680,6 +12695,7 @@ UNKNOWN|原因
       detail: parsed.reason
         ? `發布完成 ✓（已校驗：${parsed.reason}）`
         : "發布完成 ✓（已校驗）",
+      screenshotUrl: evidenceUrl,
     };
   }
 
@@ -12688,6 +12704,7 @@ UNKNOWN|原因
     detail: parsed.reason
       ? `已執行發布，待人工確認（${parsed.reason}）`
       : "已執行發布，待人工確認（主頁中未找到目標文案）",
+    screenshotUrl: evidenceUrl,
   };
 }
 
@@ -13435,6 +13452,7 @@ UNKNOWN|原因
       return {
         state: "verified",
         detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
+        screenshotUrl: lateUrl,
       };
     }
 
@@ -13496,6 +13514,7 @@ UNKNOWN|原因
         detail: parsed.reason
           ? `發布完成 ✓（已校驗：${parsed.reason}）`
           : "發布完成 ✓（已校驗：已離開編輯頁並出現成功訊號）",
+        screenshotUrl: lateUrl,
       };
     }
 
@@ -14595,12 +14614,12 @@ async function publishThreads(
       : null;
 
     throwIfCancelled();
-    beforeProfileUrl = await prepareThreadsPublishContext(
-      config,
-      padCode,
-      true,
-      onProgress,
-      {
+      beforeProfileUrl = await prepareThreadsPublishContext(
+        config,
+        padCode,
+        true,
+        onProgress,
+        {
         grantPermissions: true,
         verifyLaunchState: true,
         launchWaitMs: 3500,
@@ -15599,7 +15618,7 @@ async function tapRednoteTarget(
   fallback: { xRatio: number; yRatio: number },
   waitMs = 1800,
 ) {
-  const screen = await getScreenSize(config, padCode).catch(() => ({ width: 1080, height: 2340 }));
+  const screen = await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
   const uiXml = await dumpUiXml(config, padCode).catch(() => "");
   const target = findRednoteTargetByText(uiXml, patterns) || {
     x: Math.round(screen.width * fallback.xRatio),
@@ -16843,9 +16862,9 @@ async function inputTelegramEmailViaKeyboard(
       config,
       padCode,
       [
-        // Telegram login pages are rendered on a 720x1600 screenshot, but ADB input
-        // coordinates use the 720x1280 VMOS override space on ACP pads. The
-        // points below are ADB coordinates, not screenshot coordinates.
+        // Telegram login pages and click coordinates are normalized to the
+        // fixed 720x1600 VMOS panel. Keep these points in screenshot/panel
+        // coordinates so they stay comparable with visual checks.
         "input tap 360 500",
         "sleep 0.3",
         adbSelectAllTextSequence(),
@@ -17361,8 +17380,7 @@ async function login_fillInstagramCombinedFormByCoordinates(
   handle: string,
   password: string,
 ) {
-  // ADB 的实际触控坐标是 720x1280；VMOS 截图会拉成 720x1600。
-  // 这里明确使用 ADB 坐标，避免把截图坐标直接拿来点击。
+  // Threads 登入固定使用 720x1600 VMOS 面板坐标，和截图/视觉判断保持一致。
   await login_tapAdbPoint(config, padCode, THREADS_LOGIN_ADB_POINTS.usernameField, 500);
   await login_inputText(config, padCode, handle);
 
@@ -18950,7 +18968,7 @@ async function openThreadsEditProfilePage(
     for (const fallbackPoint of fallbackPoints) {
       const point = isAcpPad(padCode)
         ? fallbackPoint
-        : await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, { width: 720, height: 1280 }).catch(() => fallbackPoint);
+        : await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, FIXED_VMOS_SCREEN).catch(() => fallbackPoint);
       await tapViaAdbAbsoluteQuick(config, padCode, point.x, point.y, 1100).catch(() => undefined);
       quickOpened = await checkEditProfileOpened();
       if (quickOpened.ok) {
@@ -26580,7 +26598,7 @@ async function relaunchRednote(
 }
 
 async function warmupRednoteScrollDown(config: VmosConfig, padCode: string) {
-  const screen = await getScreenSize(config, padCode).catch(() => ({ width: 1080, height: 2340 }));
+  const screen = await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
   await warmupHumanSwipeByRatio(
     config,
     padCode,
@@ -26615,7 +26633,7 @@ async function getRednoteDetailFallbackActionTarget(
 ): Promise<{ x: number; y: number; debugReason: string } | null> {
   const focus = await getAndroidCurrentFocusQuick(config, padCode).catch(() => "");
   if (!focus.includes("NoteDetailActivity")) return null;
-  const screen = await getScreenSize(config, padCode).catch(() => ({ width: 1080, height: 2340 }));
+  const screen = await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
   return {
     x: Math.round(screen.width * (kind === "like" ? 0.535 : 0.91)),
     y: Math.round(screen.height * 0.955),
@@ -26626,7 +26644,7 @@ async function getRednoteDetailFallbackActionTarget(
 async function ensureRednoteDetailForInteraction(config: VmosConfig, padCode: string) {
   const focus = await getAndroidCurrentFocusQuick(config, padCode).catch(() => "");
   if (focus.includes("NoteDetailActivity")) return;
-  const screen = await getScreenSize(config, padCode).catch(() => ({ width: 1080, height: 2340 }));
+  const screen = await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN);
   await tapViaAdbAbsolute(
     config,
     padCode,
@@ -26674,16 +26692,16 @@ async function warmupCommentRednoteCurrentPost(
   await tapViaAdbAbsolute(config, padCode, commentButton.x, commentButton.y, 1500);
   const composerXml = await dumpUiXml(config, padCode).catch(() => "");
   const input = findRednoteTargetByText(composerXml, [/说点什么|评论|留言|Comment|输入/i]) || {
-    x: Math.round((await getScreenSize(config, padCode).catch(() => ({ width: 1080 }))).width * 0.35),
-    y: Math.round((await getScreenSize(config, padCode).catch(() => ({ height: 2340 }))).height * 0.93),
+    x: Math.round((await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN)).width * 0.35),
+    y: Math.round((await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN)).height * 0.93),
   };
   await tapViaAdbAbsolute(config, padCode, input.x, input.y, 600);
   await clearFocusedTextInput(config, padCode, 200);
   await typeTextViaAdbBroadcast(config, padCode, comment, 1000);
   const sendXml = await dumpUiXml(config, padCode).catch(() => "");
   const send = findRednoteTargetByText(sendXml, [/发送|Send|发布/i]) || {
-    x: Math.round((await getScreenSize(config, padCode).catch(() => ({ width: 1080 }))).width * 0.88),
-    y: Math.round((await getScreenSize(config, padCode).catch(() => ({ height: 2340 }))).height * 0.93),
+    x: Math.round((await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN)).width * 0.88),
+    y: Math.round((await getScreenSize(config, padCode).catch(() => FIXED_VMOS_SCREEN)).height * 0.93),
   };
   await tapViaAdbAbsolute(config, padCode, send.x, send.y, 1500);
   const shotUrl = await withTimeout(screenshot(config, padCode), 20_000, "rednote comment screenshot timeout").catch(() => "");

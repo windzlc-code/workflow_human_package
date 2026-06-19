@@ -617,6 +617,12 @@ type PendingCustomPublish = {
 
 const pendingCustomPublishes = new Map<number, PendingCustomPublish>();
 
+const pendingPersonaImageViews = new Map<number, {
+  archiveId: string;
+  originMessageId?: number;
+  photoMessageId?: number;
+}>();
+
 const pendingPostSelections = new Map<number, {
   archiveId: string;
   postIds: string[];
@@ -5519,14 +5525,14 @@ async function handlePendingCustomPersonaPostInput(
   const nextState = { ...state };
   if (text) nextState.text = text;
   if (media?.file_id) {
-    const mediaUrl = await resolveTelegramMediaUrl(bot, media.file_id).catch(() => null);
-    if (!mediaUrl) {
+    const downloaded = await downloadToolR18TelegramMedia(bot, { chat: { id: chatId } } as TelegramBot.Message, media).catch(() => null);
+    if (!downloaded?.hostPath) {
       await bot.sendMessage(chatId, "❌ 媒體讀取失敗，請重新上傳一次。", {
         reply_markup: buildCustomPersonaPostBackKeyboard(state),
       });
       return true;
     }
-    nextState.mediaUrl = mediaUrl;
+    nextState.mediaUrl = downloaded.hostPath;
     nextState.mediaKind = mediaKind;
   }
   pendingCustomPersonaPosts.set(chatId, nextState);
@@ -8225,6 +8231,37 @@ async function loadTelegramMediaBuffer(mediaUrl: string): Promise<Buffer> {
   return fs.readFileSync(localPath);
 }
 
+async function sendOriginalScreenshotDocument(
+  bot: TelegramBot,
+  chatId: number,
+  imageUrl: string | Buffer,
+  caption: string,
+): Promise<boolean> {
+  try {
+    const buffer = Buffer.isBuffer(imageUrl) ? imageUrl : await loadTelegramImageBuffer(imageUrl);
+    const metadata = await sharp(buffer).metadata().catch(() => ({}));
+    const width = metadata.width || 0;
+    const height = metadata.height || 0;
+    const format = metadata.format === "png" ? "png" : "jpg";
+    const filename = width && height
+      ? `vmos-screenshot-${width}x${height}.${format}`
+      : `vmos-screenshot.${format}`;
+    const dimensionLine = width && height
+      ? `\n原始尺寸：${width} x ${height}（請以這個文件為坐標基準，不要以聊天氣泡預覽為準）`
+      : "\n請以這個原始文件為坐標基準，不要以聊天氣泡預覽為準";
+    await bot.sendDocument(
+      chatId,
+      buffer,
+      { caption: `${caption}${dimensionLine}` },
+      { filename, contentType: format === "png" ? "image/png" : "image/jpeg" },
+    );
+    return true;
+  } catch (error: any) {
+    console.warn(`[telegram][screenshot_document_failed] chat=${chatId} error=${error?.message || String(error)}`);
+    return false;
+  }
+}
+
 function candidateGridLabelSvg(index: number, width: number, height: number) {
   const label = String(index);
   return Buffer.from(`
@@ -8428,7 +8465,9 @@ async function sendCloudAccountStateNotice(
   });
   const evidenceInput = resolveCloudAccountEvidenceInput(notice.debugPath);
   if (evidenceInput) {
-    await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
+    if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 当前账号状态截图")) {
+      await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
+    }
   } else if (context.padCode) {
     await sendCurrentPadScreenshot(bot, chatId, context.padCode, "📸 当前账号状态截图").catch(() => undefined);
   }
@@ -8449,6 +8488,7 @@ async function sendCurrentPadScreenshot(
   if (!creds.ak || !creds.sk) return false;
   const shotUrl = await screenshot(creds, padCode).catch(() => "");
   if (!shotUrl) return false;
+  if (await sendOriginalScreenshotDocument(bot, chatId, shotUrl, caption)) return true;
   await bot.sendPhoto(chatId, resolveTelegramPhotoInput(shotUrl), { caption }).catch(() => undefined);
   return true;
 }
@@ -8463,10 +8503,13 @@ async function sendAccountActionScreenshot(
   let lastErrorMessage = "";
   const trySendPhoto = async (photoUrl: string, source: string) => {
     try {
-      await Promise.race([
-        bot.sendPhoto(chatId, resolveTelegramPhotoInput(photoUrl), { caption }),
+      const sentOriginal = await Promise.race([
+        sendOriginalScreenshotDocument(bot, chatId, photoUrl, caption),
         new Promise((_, reject) => setTimeout(() => reject(new Error("sendPhoto timeout")), 45_000)),
       ]);
+      if (!sentOriginal) {
+        await bot.sendPhoto(chatId, resolveTelegramPhotoInput(photoUrl), { caption });
+      }
       console.log(`[telegram][account_screenshot_sent] chat=${chatId} pad=${padCode} source=${source}`);
       return true;
     } catch (error: any) {
@@ -8517,7 +8560,9 @@ async function sendManualInterventionFailure(
 
   const evidenceInput = resolveCloudAccountEvidenceInput(extractFailureDebugPath(error));
   if (evidenceInput) {
-    await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 失败界面截图" }).catch(() => undefined);
+    if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 失败界面截图")) {
+      await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 失败界面截图" }).catch(() => undefined);
+    }
     return;
   }
   if (context.padCode) {
@@ -10642,9 +10687,12 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
         ? result.screenshotUrl
         : await screenshot(credentials, padCode).catch(() => undefined);
       if (publishScreenshotUrl) {
-        await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
-          caption: `📸 发布验证截图（${state.platform || effectiveDefaultPublishPlatform}）`,
-        })
+        await sendOriginalScreenshotDocument(
+          bot,
+          chatId,
+          publishScreenshotUrl,
+          `📸 发布验证截图（${state.platform || effectiveDefaultPublishPlatform}）`,
+        )
           .then(() => console.log(`[telegram][publish_evidence_screenshot_sent] chat=${chatId} platform=${state.platform || effectiveDefaultPublishPlatform} source=custom_publish`))
           .catch((error: any) => console.warn(`[telegram][publish_evidence_screenshot_failed] chat=${chatId} platform=${state.platform || effectiveDefaultPublishPlatform} source=custom_publish error=${error?.message || String(error)}`));
       }
@@ -12192,7 +12240,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${candidate.padCode}` }]] },
         });
         if (result.screenshotUrl) {
-          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(result.screenshotUrl), { caption: "📸 執行后截图" }).catch(() => undefined);
+          await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, "📸 執行后截图").catch(() => undefined);
         }
       } catch (error: any) {
         pendingWarmupCandidates.delete(candidateId);
@@ -12385,12 +12433,24 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const id = data.slice("settings_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
+      let settingsTargetMessageId = msgId;
+      const imageViewState = pendingPersonaImageViews.get(chatId);
+      if (imageViewState?.archiveId === id) {
+        const messagesToDelete = new Set<number>();
+        if (imageViewState.originMessageId) messagesToDelete.add(imageViewState.originMessageId);
+        if (imageViewState.photoMessageId) messagesToDelete.add(imageViewState.photoMessageId);
+        for (const messageToDelete of messagesToDelete) {
+          await bot.deleteMessage(chatId, messageToDelete).catch(() => undefined);
+        }
+        pendingPersonaImageViews.delete(chatId);
+        settingsTargetMessageId = undefined;
+      }
       const boundPadName = await resolvePadBindingDisplayName(archive.boundPadCode, archive.boundPadName, defaultPadCode, await listPadsForThisBot());
       const tgFreeGroupName = normalizeTelegramSingleLine(archive.boundTelegramFreeGroupName || "") || "未綁定";
       const tgPaidGroupName = normalizeTelegramSingleLine(archive.boundTelegramPaidGroupName || "") || "未綁定";
       const settingsRows = buildPersonaSettingsRows(archive);
       console.log(`[telegram][settings_group_binding] archive=${id} free="${tgFreeGroupName}" paid="${tgPaidGroupName}"`);
-      await safeEditOrSend(bot, chatId, msgId, [
+      await safeEditOrSend(bot, chatId, settingsTargetMessageId, [
         "⚙️ *人設設定*",
         "",
         `人設：${archive.name}`,
@@ -14553,9 +14613,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
             const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
             publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
             if (publishScreenshotUrl) {
-              await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
-                caption: `📸 发布验证截图（${platform}，第 ${i + 1}/${selectedPosts.length} 篇）`,
-              }).catch(() => undefined);
+              await sendOriginalScreenshotDocument(
+                bot,
+                chatId,
+                publishScreenshotUrl,
+                `📸 发布验证截图（${platform}，第 ${i + 1}/${selectedPosts.length} 篇）`,
+              ).catch(() => undefined);
             }
           }
           stopTyping();
@@ -15103,10 +15166,18 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      await bot.sendPhoto(chatId, resolveTelegramPhotoInput(imageUrl), {
+      if (msgId) {
+        await bot.deleteMessage(chatId, msgId).catch(() => undefined);
+      }
+      const photoMessage = await bot.sendPhoto(chatId, resolveTelegramPhotoInput(imageUrl), {
         caption: `👁 人设「${archive.name}」当前参考图`,
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${archiveId}` }]] },
       }).catch(() => undefined);
+      pendingPersonaImageViews.set(chatId, {
+        archiveId,
+        originMessageId: msgId,
+        photoMessageId: photoMessage?.message_id,
+      });
       return;
     }
 
@@ -15914,9 +15985,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
           publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
           if (publishScreenshotUrl) {
-            await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
-              caption: `📸 发布验证截图（${platform}，第 ${index + 1}/${posts.length} 篇）`,
-            }).catch(() => undefined);
+            await sendOriginalScreenshotDocument(
+              bot,
+              chatId,
+              publishScreenshotUrl,
+              `📸 发布验证截图（${platform}，第 ${index + 1}/${posts.length} 篇）`,
+            ).catch(() => undefined);
           }
         }
         stopTyping();
@@ -16036,9 +16110,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
         });
         if (publishScreenshotUrl) {
-          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
-            caption: `📸 发布验证截图（${platform}）`,
-          }).catch(() => undefined);
+          await sendOriginalScreenshotDocument(
+            bot,
+            chatId,
+            publishScreenshotUrl,
+            `📸 发布验证截图（${platform}）`,
+          ).catch(() => undefined);
         }
       } catch (error: any) {
         stopTyping();
@@ -16720,9 +16797,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: `posts_${archiveId}` }]] },
         });
         if (publishScreenshotUrl) {
-          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(publishScreenshotUrl), {
-            caption: `📸 發佈验证截图（${platform}）`,
-          }).catch(() => undefined);
+          await sendOriginalScreenshotDocument(
+            bot,
+            chatId,
+            publishScreenshotUrl,
+            `📸 發佈验证截图（${platform}）`,
+          ).catch(() => undefined);
         }
       } catch (error: any) {
         stopTyping();
@@ -17285,7 +17365,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
         });
         if (result.screenshotUrl) {
-          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(result.screenshotUrl), { caption: "📸 Threads 头像修改后截图" }).catch(() => undefined);
+          await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, "📸 Threads 头像修改后截图").catch(() => undefined);
         }
       } catch (error) {
         stopTyping();
@@ -17303,7 +17383,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         const evidenceInput = resolveCloudAccountEvidenceInput(notice?.debugPath || extractInlineDebugPath(errorRaw));
         if (evidenceInput) {
-          await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
+          if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 当前账号状态截图")) {
+            await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
+          }
         }
       } finally {
         releasePadOperation(pendingThreadsProfile.padCode, opKey);
@@ -17561,7 +17643,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${profileState.padCode}` }]] },
         });
         if (result.screenshotUrl) {
-          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(result.screenshotUrl), { caption: operation.screenshotCaption }).catch(() => undefined);
+          await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, operation.screenshotCaption).catch(() => undefined);
         }
       } catch (error) {
         stopTyping();
@@ -17578,7 +17660,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         const evidenceInput = resolveCloudAccountEvidenceInput(notice?.debugPath);
         if (evidenceInput) {
-          await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
+          if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 当前账号状态截图")) {
+            await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
+          }
         }
       } finally {
         releasePadOperation(profileState.padCode, opKey);
