@@ -249,7 +249,7 @@ const PUBLISH_VERIFY_MODEL = resolvePublishVerifyModel();
 const FIXED_VMOS_SCREEN = { width: 720, height: 1600 };
 const BASE_SCREEN = FIXED_VMOS_SCREEN;
 const THREADS_TALL_REFERENCE_SCREEN = FIXED_VMOS_SCREEN;
-const THREADS_COMPOSER_TEXT_INPUT_POINT = { x: 238, y: 334 };
+const THREADS_COMPOSER_TEXT_INPUT_POINT = { x: 238, y: 296 };
 const THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE = { ...THREADS_COMPOSER_TEXT_INPUT_POINT, absolute: true };
 const screenSizeCache = new Map<string, { width: number; height: number }>();
 const permissionGrantCache = new Set<string>();
@@ -658,7 +658,7 @@ function getVmosMediaStagingDir(): string {
 }
 
 function getVmosMediaStagingPublicBaseUrl(): string {
-  const base = (process.env.VMOS_MEDIA_STAGING_PUBLIC_BASE_URL || process.env.TOOL_R18_PUBLIC_URL || process.env.PUBLIC_BASE_URL || "http://43.167.237.120:19198").trim();
+  const base = (process.env.VMOS_MEDIA_STAGING_PUBLIC_BASE_URL || "http://43.167.237.120:19198").trim();
   return base.replace(/\/+$/, "");
 }
 
@@ -800,7 +800,7 @@ async function checkPublicMediaReachability(publicUrl: string): Promise<{ ok: bo
   const failures: string[] = [];
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const head = await fetchWithTimeout(publicUrl, { method: "HEAD" }, 8000);
+      const head = await fetchWithTimeout(publicUrl, { method: "HEAD" }, 15000);
       if (head.ok) return { ok: true, detail: `HEAD ${head.status}` };
       failures.push(`attempt ${attempt} HEAD ${head.status}`);
     } catch (error) {
@@ -811,7 +811,7 @@ async function checkPublicMediaReachability(publicUrl: string): Promise<{ ok: bo
       const response = await fetchWithTimeout(publicUrl, {
         method: "GET",
         headers: { Range: "bytes=0-1023" },
-      }, 10000);
+      }, 20000);
       await response.body?.cancel();
       if (response.ok || response.status === 206) return { ok: true, detail: `GET ${response.status}` };
       failures.push(`attempt ${attempt} GET ${response.status}`);
@@ -861,7 +861,7 @@ async function requirePublicMediaUrlForVmosUpload(
   if (isPublicHttpMediaUrl(mediaUrl)) {
     const reachable = await checkPublicMediaReachability(mediaUrl);
     if (!reachable.ok) {
-      throw new Error(`${mediaLabel}公网 URL 不可达，已停止发布，未回退慢速通道：${reachable.detail}`);
+      throw new Error(`${mediaLabel}公网 URL 不可达，已停止发布，未回退慢速通道：${mediaUrl}；${reachable.detail}`);
     }
     onProgress?.({
       step: `已确认${mediaLabel}公网 URL 可访问，使用云机直传...`,
@@ -872,7 +872,7 @@ async function requirePublicMediaUrlForVmosUpload(
 
   const publicBaseUrl = getVmosMediaStagingPublicBaseUrl();
   if (!isUsableVmosMediaStagingBaseUrl(publicBaseUrl)) {
-    throw new Error(`${mediaLabel}公网上传未配置可用 PUBLIC URL，已停止发布，未回退慢速通道`);
+    throw new Error(`${mediaLabel}公网上传未配置可用 VMOS_MEDIA_STAGING_PUBLIC_BASE_URL，已停止发布，未回退慢速通道`);
   }
 
   const stagingDir = getVmosMediaStagingDir();
@@ -6828,7 +6828,13 @@ async function captureThreadsFastVideoPublishEvidence(
     await captureThreadsProfileContentScreenshot(config, padCode, { skipInitialSwipe: true });
     await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1380, endX: 360, endY: 470 });
     await delay(1200);
-    return await freezeScreenshotUrl(await screenshot(config, padCode));
+    const listUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    await tapViaAdbReferencePoint(config, padCode, { x: 360, y: 650 }, 2600, FIXED_VMOS_SCREEN);
+    const detailUrl = await freezeScreenshotUrl(await screenshot(config, padCode));
+    if (await isThreadsScreenVisibleLocally(detailUrl).catch(() => false)) {
+      return detailUrl;
+    }
+    return listUrl;
   } catch {
     return undefined;
   }
@@ -8870,20 +8876,24 @@ async function recoverThreadsSearchOverlayAfterCaptionInput(
   return false;
 }
 
+type ThreadsCaptionInputMethod = "android-input" | "vmos-inputtext" | "adb-broadcast";
+
 async function typeThreadsComposerCaptionText(
   config: VmosConfig,
   padCode: string,
   caption: string,
   waitMs = 2500,
-) {
+): Promise<ThreadsCaptionInputMethod> {
   if (/^[\x20-\x7E]+$/.test(caption)) {
     await typeAsciiTextViaAndroidInput(config, padCode, caption, Math.max(waitMs, 1200));
-    return;
+    return "android-input";
   }
   try {
-    await typeTextViaAdbBroadcast(config, padCode, caption, Math.max(waitMs, 2200), 16_000);
-  } catch {
     await typeText(config, padCode, caption, Math.max(waitMs, 2500));
+    return "vmos-inputtext";
+  } catch {
+    await typeTextViaAdbBroadcast(config, padCode, caption, Math.max(waitMs, 2200), 16_000);
+    return "adb-broadcast";
   }
 }
 
@@ -8923,8 +8933,8 @@ async function rewriteThreadsComposerCaption(
   const inputPoints = [
     fallbackInputPoint,
     THREADS_COMPOSER_TEXT_INPUT_POINT_ABSOLUTE,
-    { x: 170, y: 455, absolute: true },
-    { x: 220, y: 520, absolute: true },
+    { x: 190, y: 288, absolute: true },
+    { x: 360, y: 300, absolute: true },
   ];
 
   const recoverOverlayToComposer = async () => {
@@ -8953,16 +8963,24 @@ async function rewriteThreadsComposerCaption(
     state = await recoverOverlayToComposer();
     if (state && state.page !== "compose_editor") continue;
     await clearFocusedTextInput(config, padCode, 350);
-    await typeThreadsComposerCaptionText(
+    const inputMethod = await typeThreadsComposerCaptionText(
       config,
       padCode,
       caption,
       Math.max(waitMs, point === fallbackInputPoint ? waitMs : 1800),
     );
-    if (await waitForThreadsComposerCaptionText(config, padCode, caption, 3)) return;
+    if (await waitForThreadsComposerCaptionText(config, padCode, caption, 3, { allowPublishButtonFallback: false })) return;
+    if (inputMethod === "vmos-inputtext") {
+      const stateAfterInput = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (stateAfterInput?.page === "compose_editor"
+        && stateAfterInput.screenshotUrl
+        && await locateThreadsComposerPublishButton(stateAfterInput.screenshotUrl).catch(() => null)) {
+        return;
+      }
+    }
   }
 
-  if (!await waitForThreadsComposerCaptionText(config, padCode, caption, 4)) {
+  if (!await waitForThreadsComposerCaptionText(config, padCode, caption, 4, { allowPublishButtonFallback: false })) {
     throw new Error("Threads 文案输入未确认，已停止发布以避免点击灰色发布按钮");
   }
 }

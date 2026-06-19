@@ -37,14 +37,15 @@ async function main() {
     return;
   }
 
-  const logs: Array<{ step: string; done: boolean; error?: string; warning?: string }> = [];
+  const startedAt = Date.now();
+  const logs: Array<{ step: string; done: boolean; error?: string; warning?: string; elapsedMs: number }> = [];
   const result = await publishPost(
     credentials,
     input,
-    (progress) => logs.push(progress),
+    (progress) => logs.push({ ...progress, elapsedMs: Date.now() - startedAt }),
   );
 
-  printJson({ ok: true, result, logs });
+  printJson({ ok: true, result, elapsedMs: Date.now() - startedAt, logs });
 }
 
 main().catch((error) => {

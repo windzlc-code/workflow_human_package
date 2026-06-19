@@ -537,11 +537,15 @@ export async function inputText(
     return ipc.inputText({ padCode, text });
   }
 
-  const data = await vmosRequest<{ taskId: string }>(config, "/vcpcloud/api/padApi/inputText", {
+  const data = await vmosRequest<{ taskId?: string | number } | Array<{ taskId?: string | number }>>(config, "/vcpcloud/api/padApi/inputText", {
     padCodes: [padCode],
     text,
   });
-  return data.taskId;
+  const taskId = Array.isArray(data) ? data[0]?.taskId : data.taskId;
+  if (taskId === undefined || taskId === null || `${taskId}`.trim() === "") {
+    throw new Error("VMOSCloud inputText 未返回 taskId，无法确认文本输入任务");
+  }
+  return String(taskId);
 }
 
 /** 透過 URL 上傳檔案到雲機指定路徑 */
