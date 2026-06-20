@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildSentimentCandidateId } from "@/lib/sentiment-candidate-store";
-import { buildSentimentHotKeywords } from "@/lib/sentiment-hot-importer";
+import { buildSentimentHotKeywords, cleanSentimentCandidateContent } from "@/lib/sentiment-hot-importer";
 
 describe("sentiment hot importer", () => {
   it("builds persona-specific search keywords", () => {
@@ -47,5 +47,18 @@ describe("sentiment hot importer", () => {
 
     expect(first).toBe(second);
     expect(first).not.toBe(other);
+  });
+
+  it("cleans social search breadcrumbs from candidate content", () => {
+    const cleaned = cleanSentimentCandidateContent(
+      "www.threads.net › t › CuiVm72yO3g Threads ... Threads palantir vulnerability canonical site:threads.net 相關 廣告 www.ups.com/Luxury_Goods/Shipping",
+    );
+
+    expect(cleaned).not.toContain("www.threads.net");
+    expect(cleaned).not.toContain("›");
+    expect(cleaned).not.toContain("廣告");
+    expect(cleaned).not.toContain("site:threads.net");
+    expect(cleaned).not.toContain("CuiVm72yO3g");
+    expect(cleaned).toContain("palantir vulnerability canonical");
   });
 });

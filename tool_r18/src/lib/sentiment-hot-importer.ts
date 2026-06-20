@@ -58,6 +58,27 @@ function splitKeywords(value: string): string[] {
     .slice(0, 12);
 }
 
+const GENERIC_SENTIMENT_KEYWORDS = new Set([
+  "threads",
+  "instagram",
+  "thread",
+  "ig",
+  "生活",
+  "情緒",
+  "日常",
+  "熱門",
+  "熱點",
+  "推文",
+  "文案",
+]);
+
+function meaningfulNeedles(keywords: string[]): string[] {
+  return keywords
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => item.length >= 2 && !GENERIC_SENTIMENT_KEYWORDS.has(item))
+    .slice(0, 12);
+}
+
 export function buildSentimentHotKeywords(args: {
   archive?: Partial<Pick<PersonaArchive, "name" | "content" | "setup">>;
   prompt?: string;
@@ -67,6 +88,10 @@ export function buildSentimentHotKeywords(args: {
   const setup = archive.setup || {};
   const pieces = [
     archive.name,
+    Array.isArray((setup as any).genres) ? (setup as any).genres.join(" ") : "",
+    (setup as any).contentTheme,
+    (setup as any).personality,
+    (setup as any).personaType,
     setup.tweetStyleProfile,
     setup.tweetStyleSample,
     archive.content,
@@ -76,8 +101,32 @@ export function buildSentimentHotKeywords(args: {
   const joined = pieces.join(" ");
   const extracted = splitKeywords(joined);
   const personaName = cleanText(archive.name);
-  const defaults = ["生活", "情緒", "日常", "熱門", "Threads", "Instagram"];
+  const defaults = ["生活", "情緒", "日常", "熱門"];
   return [...new Set([personaName, ...extracted, ...defaults].filter(Boolean))].slice(0, 10);
+}
+
+export function cleanSentimentCandidateContent(value: unknown): string {
+  let text = cleanText(value);
+  text = text
+    .replace(/(?:https?:\/\/)?(?:www\.)?(?:threads\.net|instagram\.com)\s*[›>]\s*/gi, " ")
+    .replace(/(?:^|\s)(?:@[\w.-]+|t)\s*[›>]\s*(?:post\s*)?/gi, " ")
+    .replace(/\s*(?:相關|相关|广告|廣告)\s+.*$/i, "")
+    .replace(/\s*&middot;\s*/gi, " ")
+    .replace(/\bThreads\s*\.\.\.\s*Threads\b/gi, " ")
+    .replace(/\bInstagram\s*\.\.\.\s*Instagram\b/gi, " ")
+    .replace(/\bsite:(?:threads\.net|instagram\.com)\b/gi, " ")
+    .replace(/^\s*[A-Za-z0-9_-]{8,}\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text;
+}
+
+function isLowQualitySentimentContent(value: string): boolean {
+  const text = cleanText(value);
+  if (text.length < 12) return true;
+  if (/not all who wander are lost|link'?s not working|page is gone|go back to keep exploring/i.test(text)) return true;
+  if (/^(?:Threads|Instagram)(?:\s*\.\.\.)?$/i.test(text)) return true;
+  return false;
 }
 
 export async function fetchSentimentCookieStatuses(): Promise<SentimentCookieStatus[]> {
@@ -121,13 +170,14 @@ export async function fetchSentimentCookieStatuses(): Promise<SentimentCookieSta
 export async function fetchSentimentHotCandidates(args: {
   archive?: PersonaArchive;
   prompt?: string;
+  memorySummaries?: string[];
   limit?: number;
   refresh?: boolean;
 }): Promise<FetchSentimentHotCandidatesResult> {
   const warnings: string[] = [];
   const archive = args.archive;
   const archiveId = cleanText(archive?.id) || "default";
-  const keywords = buildSentimentHotKeywords({ archive, prompt: args.prompt });
+  const keywords = buildSentimentHotKeywords({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries });
   const runtime = await ensureSentimentRuntime();
   if (!runtime.ok && runtime.warning) warnings.push(runtime.warning);
   const cookieStatuses = await fetchSentimentCookieStatuses();
@@ -221,18 +271,26 @@ async function readCandidatesFromDatabase(args: { archiveId: string; keywords: s
       LIMIT 200
     `).all();
     const excluded = getSentimentHotExcludedIds(args.archiveId);
-    const needles = args.keywords.map((item) => item.toLowerCase()).filter(Boolean);
+    const needles = meaningfulNeedles(args.keywords);
     const candidates: SentimentHotCandidate[] = [];
     for (const row of rows) {
       const platform = normalizePlatform(row.platform);
       if (!platform) continue;
-      const content = cleanText(row.content || row.title);
+      const contentCandidate = cleanSentimentCandidateContent(row.content);
+      const titleCandidate = cleanSentimentCandidateContent(row.title);
+      const content = !isLowQualitySentimentContent(contentCandidate)
+        ? contentCandidate
+        : !isLowQualitySentimentContent(titleCandidate)
+          ? titleCandidate
+          : "";
       const sourceUrl = cleanText(row.url);
       if (!content || !sourceUrl) continue;
       const id = buildSentimentCandidateId({ platform, sourceUrl, content });
       if (excluded.has(id)) continue;
       const haystack = [content, row.title, row.author, row.keyword, row.keywords, row.extracted_keywords].map(cleanText).join(" ").toLowerCase();
-      const relevance = needles.some((needle) => haystack.includes(needle)) ? 25 : 0;
+      const matchedNeedles = needles.filter((needle) => haystack.includes(needle));
+      if (needles.length && matchedNeedles.length === 0) continue;
+      const relevance = Math.min(60, matchedNeedles.length * 20);
       const media = readMediaForSentiment(db, Number(row.id));
       const hotScore = Math.round(
         Number(row.spread_score || 0)

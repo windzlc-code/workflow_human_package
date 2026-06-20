@@ -26,7 +26,7 @@ import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinju
 import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
-import { downloadCandidatePrimaryMedia, fetchSentimentHotCandidates, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
+import { cleanSentimentCandidateContent, downloadCandidatePrimaryMedia, fetchSentimentHotCandidates, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
 import { rememberSentimentHotImported, rememberSentimentHotSelected, type SentimentHotCandidate } from "@/lib/sentiment-candidate-store";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import { buildPersonaVisualIdentityCue } from "@/lib/persona-image-search";
@@ -3276,9 +3276,9 @@ function rememberSentimentHotAction(chatId: number, archiveId: string) {
 
 function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index: number) {
   const platform = candidate.platform === "threads" ? "Threads" : "Instagram";
-  const text = candidate.content.replace(/\s+/g, " ").slice(0, 52);
+  const text = cleanSentimentCandidateContent(candidate.content).slice(0, 52);
   const media = candidate.media.some((item) => item.type === "video") ? "視頻" : candidate.media.length ? "圖片" : "純文字";
-  return `${index + 1}. [${platform}/${media}] 熱度 ${candidate.hotScore}｜${text}${candidate.content.length > 52 ? "..." : ""}`;
+  return `${index + 1}. [${platform}/${media}] 熱度 ${candidate.hotScore}｜${text}${cleanSentimentCandidateContent(candidate.content).length > 52 ? "..." : ""}`;
 }
 
 function formatSentimentCookieLine(status: SentimentCookieStatus) {
@@ -3303,8 +3303,13 @@ async function sendSentimentHotCandidatePicker(args: {
   }
 
   await safeEditOrSend(args.bot, args.chatId, args.messageId, "正在抓取 Threads / Instagram 舆情热点，请稍候...");
+  const memorySummaries = (await loadSelectablePersonaMemories(archive.id).catch(() => []))
+    .map((entry) => String(entry.summary || "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
   const result = await fetchSentimentHotCandidates({
     archive,
+    memorySummaries,
     limit: 10,
     refresh: args.refresh === true,
   });
@@ -3371,7 +3376,7 @@ async function importSentimentHotCandidate(args: {
   await appendCustomPersonaArchivePost({
     archiveId: pending.archiveId,
     title: `舆情热点 #${args.index + 1}`,
-    content: candidate.content,
+    content: cleanSentimentCandidateContent(candidate.content),
     mediaUrl: mediaUrl || undefined,
     mediaType,
     telegramGroupContentType: pending.contentBranch === "r18" ? "paid" : pending.contentBranch === "nonr18" ? "free" : undefined,
