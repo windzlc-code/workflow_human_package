@@ -12,6 +12,7 @@ import { analyzeSentiment, assessRiskLevel, insertSentimentItem } from "../senti
 
 const USER_AGENT = "Mozilla/5.0 (compatible; OpinXCraw/1.0)";
 const REQUEST_TIMEOUT_MS = 12000;
+const BING_SEARCH_URL = "https://www.bing.com/search";
 
 function socialTargetResult(results = []) {
   return scraperResult(
@@ -44,6 +45,51 @@ function stripHtml(value = "", max = 1200) {
     .replace(/&#39;|&apos;/gi, "'")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">"), max);
+}
+
+function decodeHtmlEntityText(value = "") {
+  return String(value || "")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
+}
+
+function normalizeBingResultUrl(rawUrl = "") {
+  const decoded = decodeHtmlEntityText(rawUrl);
+  try {
+    const url = new URL(decoded);
+    const host = url.hostname.replace(/^www\./i, "").toLowerCase();
+    if (host === "bing.com" && /^\/ck\/a/i.test(url.pathname)) {
+      const encoded = url.searchParams.get("u");
+      if (encoded) {
+        const payload = encoded.replace(/^a1/i, "").replace(/-/g, "+").replace(/_/g, "/");
+        try {
+          const target = Buffer.from(payload, "base64").toString("utf8");
+          if (/^https?:\/\//i.test(target)) return target;
+        } catch {
+          // Fall through to the visible Bing URL when the redirect payload is not decodable.
+        }
+      }
+    }
+    return url.toString();
+  } catch {
+    return decoded;
+  }
+}
+
+function urlHostMatches(url, allowedHostPattern) {
+  if (!allowedHostPattern) return true;
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return allowedHostPattern.test(hostname);
+  } catch {
+    return false;
+  }
 }
 
 function extractMetaContent(html = "", names = []) {
@@ -431,6 +477,137 @@ function parseSocialDirectPostPage(html = "", direct = {}, { platform = "", keyw
   return item;
 }
 
+function parseBingSocialResults(html = "", { allowedHostPattern = null, resultUrlFilter = null, maxItems = 10 } = {}) {
+  const source = String(html || "");
+  const results = [];
+  const blockRegex = /<li[^>]+class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>([\s\S]*?)(?=<li[^>]+class=["'][^"']*\bb_algo\b|<\/ol>|$)/gi;
+  let blockMatch;
+  while ((blockMatch = blockRegex.exec(source)) !== null) {
+    const block = blockMatch[1] || "";
+    const linkMatch = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i.exec(block);
+    if (!linkMatch) continue;
+    const url = normalizeBingResultUrl(linkMatch[1]);
+    if (!urlHostMatches(url, allowedHostPattern)) continue;
+    if (typeof resultUrlFilter === "function" && !resultUrlFilter(url)) continue;
+    const title = stripHtml(linkMatch[2], 240);
+    const paragraph = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(block)?.[1] || "";
+    const content = stripHtml(paragraph || block, 700);
+    if (!title && !content) continue;
+    results.push({
+      url,
+      title: title || url,
+      content: content || title || url,
+      publishedAt: new Date().toISOString(),
+    });
+    if (results.length >= Math.max(1, Number(maxItems) || 10)) break;
+  }
+  return results;
+}
+
+async function scrapeBingSocialSearch(keywords, {
+  proxyUrl = "",
+  platform = "",
+  author = "",
+  siteQuery = "",
+  allowedHostPattern = null,
+  resultUrlFilter = null,
+  budget = {},
+  domainControls = {},
+  contentControls = {},
+  metricsEnhancer = null,
+  logPrefix = "SocialBing",
+} = {}) {
+  const normalizedKeywords = Array.isArray(keywords) ? keywords.filter(Boolean) : [];
+  if (!normalizedKeywords.length) return scraperResult(0);
+  const maxItems = Math.max(1, Math.min(30, Number(budget.maxItemsPerKeyword || budget.max_items_per_keyword || 10) || 10));
+  const failures = [];
+  const seenItemUrls = new Set();
+  let inserted = 0;
+
+  for (const keyword of normalizedKeywords.slice(0, 12)) {
+    try {
+      const query = [keyword, siteQuery].filter(Boolean).join(" ");
+      const url = `${BING_SEARCH_URL}?q=${encodeURIComponent(query)}&setlang=zh-TW&mkt=zh-TW&cc=TW`;
+      const res = await fetchPublicSource(url, {
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Accept-Language": "zh-TW,zh-Hant;q=0.9,zh;q=0.8,en;q=0.6",
+        },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      }, proxyUrl);
+      if (!res.ok) {
+        failures.push({ keyword, message: httpFailure(res) });
+        continue;
+      }
+      const html = await res.text();
+      const items = parseBingSocialResults(html, {
+        allowedHostPattern,
+        resultUrlFilter,
+        maxItems: Math.max(1, maxItems - inserted),
+      });
+      for (const item of items) {
+        const dedupeKey = platform === "threads"
+          ? normalizeThreadsDedupeUrl(item.url)
+          : normalizeInstagramDedupeUrl(item.url);
+        if (!dedupeKey || seenItemUrls.has(dedupeKey)) continue;
+        seenItemUrls.add(dedupeKey);
+        const sentiment = analyzeSentiment(`${item.title} ${item.content}`);
+        const metrics = {
+          bing_social_search: 1,
+          bing_social_search_query: query,
+          bing_social_search_scan_dedupe_key: dedupeKey,
+        };
+        const enhancedMetrics = typeof metricsEnhancer === "function"
+          ? metricsEnhancer({
+            item: { ...item, author },
+            keyword,
+            platform,
+            author,
+            metrics,
+            siteQuery,
+            querySuffix: "",
+          }) || {}
+          : {};
+        const result = insertSentimentItem({
+          platform,
+          url: item.url,
+          title: item.title,
+          content: item.content,
+          author,
+          sentiment,
+          risk_level: assessRiskLevel({ title: item.title, content: item.content, sentiment }),
+          keyword,
+          keywords: [keyword],
+          published_at: item.publishedAt,
+          ai_summary: item.content,
+          raw_html: "",
+          evidence: {
+            source_key: "bingSocialSearch",
+            evidence_type: "bing_social_search_result",
+            metrics: {
+              ...metrics,
+              ...enhancedMetrics,
+            },
+          },
+          visual_assets: [],
+          source_type: "scraper",
+          domainControls,
+          contentControls,
+        });
+        if (result.inserted) inserted += 1;
+        if (inserted >= maxItems) break;
+      }
+    } catch (err) {
+      const message = formatSourceError(err, proxyUrl);
+      failures.push({ keyword, message });
+      console.warn(`[CRM/${logPrefix}/Bing] 鐖彇澶辨晽 keyword=${keyword}: ${message}`);
+    }
+    if (inserted >= maxItems) break;
+  }
+
+  return scraperResult(inserted, failures);
+}
+
 async function insertSocialDirectItems(items = [], {
   keyword = "",
   platform = "",
@@ -551,7 +728,7 @@ async function scrapeSocialSearchTargets(keywords, {
 }) {
   const results = [];
   for (const target of socialSearchTargets(platform, profiles)) {
-    results.push(await scrapeYahooSearch(keywords, {
+    const yahoo = await scrapeYahooSearch(keywords, {
       proxyUrl,
       enrich,
       budget,
@@ -565,6 +742,26 @@ async function scrapeSocialSearchTargets(keywords, {
       requireTaiwan,
       allowedHostPattern,
       resultUrlFilter,
+      logPrefix: target.profile ? `${logPrefix}/${target.profile}` : logPrefix,
+      metricsEnhancer: ({ item, platform: sourcePlatform, metrics }) => socialPublicSearchNarrativeSignals({
+        item,
+        platform: sourcePlatform,
+        target,
+        metrics,
+      }),
+    });
+    results.push(yahoo);
+    if (Number(yahoo?.inserted || 0) > 0) continue;
+    results.push(await scrapeBingSocialSearch(keywords, {
+      proxyUrl,
+      platform,
+      author: target.profile ? `${author} ${target.profile}` : author,
+      siteQuery: target.siteQuery,
+      allowedHostPattern,
+      resultUrlFilter,
+      budget,
+      domainControls,
+      contentControls,
       logPrefix: target.profile ? `${logPrefix}/${target.profile}` : logPrefix,
       metricsEnhancer: ({ item, platform: sourcePlatform, metrics }) => socialPublicSearchNarrativeSignals({
         item,

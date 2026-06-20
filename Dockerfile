@@ -31,7 +31,8 @@ RUN python -m pip install --upgrade pip \
 
 COPY tool_r18/package*.json /app/tool_r18/
 WORKDIR /app/tool_r18
-RUN npm ci
+RUN npm ci \
+    && npx playwright install --with-deps chromium
 
 WORKDIR /app
 COPY . /app
