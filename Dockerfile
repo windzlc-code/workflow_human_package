@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
     WEBAPP_DATA_DIR=/data/webapp_data \
     APP_RUNTIME_CONFIG_PATH=/data/webapp_data/runtime_config.json \
+    TG_WORKBENCH_DB_PATH=/data/webapp_data/workbench.db \
     TOOL_R18_RUNTIME_DIR=/data/tool_r18_runtime \
     AUTO_TWEET_RUNTIME_DIR=/data/tool_r18_runtime \
     TOOL_R18_TELEGRAM_BOT_TOKEN_FILE=/data/tool_r18_runtime/telegram_bot_token.txt \
