@@ -59,22 +59,23 @@ function splitKeywords(value: string): string[] {
 }
 
 export function buildSentimentHotKeywords(args: {
-  archive: Pick<PersonaArchive, "name" | "content" | "setup">;
+  archive?: Partial<Pick<PersonaArchive, "name" | "content" | "setup">>;
   prompt?: string;
   memorySummaries?: string[];
 }): string[] {
-  const setup = args.archive.setup || {};
+  const archive = args.archive || {};
+  const setup = archive.setup || {};
   const pieces = [
-    args.archive.name,
+    archive.name,
     setup.tweetStyleProfile,
     setup.tweetStyleSample,
-    args.archive.content,
+    archive.content,
     ...(args.memorySummaries || []),
     args.prompt,
   ].map(cleanText).filter(Boolean);
   const joined = pieces.join(" ");
   const extracted = splitKeywords(joined);
-  const personaName = cleanText(args.archive.name);
+  const personaName = cleanText(archive.name);
   const defaults = ["生活", "情緒", "日常", "熱門", "Threads", "Instagram"];
   return [...new Set([personaName, ...extracted, ...defaults].filter(Boolean))].slice(0, 10);
 }
@@ -118,13 +119,15 @@ export async function fetchSentimentCookieStatuses(): Promise<SentimentCookieSta
 }
 
 export async function fetchSentimentHotCandidates(args: {
-  archive: PersonaArchive;
+  archive?: PersonaArchive;
   prompt?: string;
   limit?: number;
   refresh?: boolean;
 }): Promise<FetchSentimentHotCandidatesResult> {
   const warnings: string[] = [];
-  const keywords = buildSentimentHotKeywords({ archive: args.archive, prompt: args.prompt });
+  const archive = args.archive;
+  const archiveId = cleanText(archive?.id) || "default";
+  const keywords = buildSentimentHotKeywords({ archive, prompt: args.prompt });
   const runtime = await ensureSentimentRuntime();
   if (!runtime.ok && runtime.warning) warnings.push(runtime.warning);
   const cookieStatuses = await fetchSentimentCookieStatuses();
@@ -141,18 +144,18 @@ export async function fetchSentimentHotCandidates(args: {
   }
 
   let candidates = await readCandidatesFromDatabase({
-    archiveId: args.archive.id,
+    archiveId,
     keywords,
     limit: args.limit || 10,
   });
   if (runtime.ok && usableSources.length > 0 && candidates.length === 0) {
     candidates = await waitForCandidates({
-      archiveId: args.archive.id,
+      archiveId,
       keywords,
       limit: args.limit || 10,
     });
   }
-  rememberSentimentHotShown(args.archive.id, candidates);
+  rememberSentimentHotShown(archiveId, candidates);
   scheduleSentimentRuntimeShutdown();
   return { candidates, keywords, cookieStatuses, warnings };
 }
@@ -295,7 +298,7 @@ function readMediaForSentiment(db: any, sentimentId: number): SentimentHotMedia[
 
 function normalizeMedia(media: { type: "image" | "video"; url: string }): SentimentHotMedia {
   if (/^https?:\/\//i.test(media.url)) {
-    return { ...media, warning: "媒體仍為原始連結，導入時會保留來源。" };
+    return { ...media, warning: "媒體仍為原始連結，寫入時會保留來源。" };
   }
   const resolved = path.isAbsolute(media.url) ? media.url : path.resolve(resolveSentimentDataDir(), media.url);
   return fs.existsSync(resolved) ? { ...media, localPath: resolved } : { ...media, warning: "媒體本地文件不存在，已保留原連結。" };
