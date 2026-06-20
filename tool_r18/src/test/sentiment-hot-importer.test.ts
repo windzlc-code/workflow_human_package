@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildSentimentCandidateId } from "@/lib/sentiment-candidate-store";
-import { buildSentimentHotKeywords, cleanSentimentCandidateContent } from "@/lib/sentiment-hot-importer";
+import { buildSentimentHotKeywords, cleanSentimentCandidateContent, isChineseSentimentCandidate } from "@/lib/sentiment-hot-importer";
 
 describe("sentiment hot importer", () => {
   it("builds persona-specific search keywords", () => {
@@ -60,5 +60,11 @@ describe("sentiment hot importer", () => {
     expect(cleaned).not.toContain("site:threads.net");
     expect(cleaned).not.toContain("CuiVm72yO3g");
     expect(cleaned).toContain("palantir vulnerability canonical");
+  });
+
+  it("keeps only Chinese sentiment copy candidates", () => {
+    expect(isChineseSentimentCandidate("公路車的世界裡有兩種人是最強的，邊騎邊自拍的人真的很厲害。")).toBe(true);
+    expect(isChineseSentimentCandidate("palantir vulnerability 原文")).toBe(false);
+    expect(isChineseSentimentCandidate("gpt 爆料")).toBe(false);
   });
 });

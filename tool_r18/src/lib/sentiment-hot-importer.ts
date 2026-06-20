@@ -75,7 +75,7 @@ const GENERIC_SENTIMENT_KEYWORDS = new Set([
 function meaningfulNeedles(keywords: string[]): string[] {
   return keywords
     .map((item) => item.trim().toLowerCase())
-    .filter((item) => item.length >= 2 && !GENERIC_SENTIMENT_KEYWORDS.has(item))
+    .filter((item) => item.length >= 2 && item.length <= 40 && !GENERIC_SENTIMENT_KEYWORDS.has(item))
     .slice(0, 12);
 }
 
@@ -127,6 +127,14 @@ function isLowQualitySentimentContent(value: string): boolean {
   if (/not all who wander are lost|link'?s not working|page is gone|go back to keep exploring/i.test(text)) return true;
   if (/^(?:Threads|Instagram)(?:\s*\.\.\.)?$/i.test(text)) return true;
   return false;
+}
+
+export function isChineseSentimentCandidate(value: unknown): boolean {
+  const text = cleanText(value);
+  const hanCount = (text.match(/[\u3400-\u9fff]/gu) || []).length;
+  if (hanCount < 6) return false;
+  const latinCount = (text.match(/[A-Za-z]/g) || []).length;
+  return hanCount >= 12 || hanCount >= latinCount * 0.3;
 }
 
 export async function fetchSentimentCookieStatuses(): Promise<SentimentCookieStatus[]> {
@@ -186,6 +194,9 @@ export async function fetchSentimentHotCandidates(args: {
     .map((status) => status.platform);
 
   if (runtime.ok && usableSources.length > 0) {
+    await syncSentimentKeywords(keywords).catch((error) => {
+      warnings.push(`舆情关键词同步失败：${error instanceof Error ? error.message : String(error)}`);
+    });
     await requestSentimentScanStart(keywords, usableSources).catch((error) => {
       warnings.push(`舆情掃描接口暫不可用：${error instanceof Error ? error.message : String(error)}`);
     });
@@ -225,6 +236,19 @@ async function requestSentimentScanStart(keywords: string[], sources: SentimentH
     signal: AbortSignal.timeout(8_000),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
+}
+
+async function syncSentimentKeywords(keywords: string[]) {
+  const usableKeywords = meaningfulNeedles(keywords).slice(0, 6);
+  for (const keyword of usableKeywords) {
+    const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/keywords`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ keyword }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok && response.status !== 409) throw new Error(`HTTP ${response.status}`);
+  }
 }
 
 async function waitForCandidates(args: { archiveId: string; keywords: string[]; limit: number }): Promise<SentimentHotCandidate[]> {
@@ -285,11 +309,11 @@ async function readCandidatesFromDatabase(args: { archiveId: string; keywords: s
           : "";
       const sourceUrl = cleanText(row.url);
       if (!content || !sourceUrl) continue;
+      if (!isChineseSentimentCandidate(content)) continue;
       const id = buildSentimentCandidateId({ platform, sourceUrl, content });
       if (excluded.has(id)) continue;
       const haystack = [content, row.title, row.author, row.keyword, row.keywords, row.extracted_keywords].map(cleanText).join(" ").toLowerCase();
       const matchedNeedles = needles.filter((needle) => haystack.includes(needle));
-      if (needles.length && matchedNeedles.length === 0) continue;
       const relevance = Math.min(60, matchedNeedles.length * 20);
       const media = readMediaForSentiment(db, Number(row.id));
       const hotScore = Math.round(
