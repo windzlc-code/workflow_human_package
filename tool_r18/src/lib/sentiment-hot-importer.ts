@@ -52,10 +52,14 @@ function safeJson(value: unknown): any {
 
 function splitKeywords(value: string): string[] {
   return value
-    .split(/[,，、\s#]+/g)
+    .split(/[,，、。.!！?？；;：:\s#]+/g)
     .map((item) => item.trim())
-    .filter((item) => item.length >= 2)
+    .filter((item) => item.length >= 2 && item.length <= 24)
     .slice(0, 12);
+}
+
+function hasHan(value: unknown): boolean {
+  return /[\u3400-\u9fff]/u.test(String(value || ""));
 }
 
 const GENERIC_SENTIMENT_KEYWORDS = new Set([
@@ -79,6 +83,48 @@ function meaningfulNeedles(keywords: string[]): string[] {
     .slice(0, 12);
 }
 
+function addMedicalTopicKeywords(out: string[], text: string) {
+  if (!/[医醫]|医生|醫生|医院|醫院|医疗|醫療|手术|手術|诊所|診所|医美|醫美/.test(text)) return;
+  out.push(
+    "醫療",
+    "医疗",
+    "醫生",
+    "医生",
+    "醫院",
+    "医院",
+    "醫療糾紛",
+    "医疗纠纷",
+    "醫療事故",
+    "医疗事故",
+    "黑心診所",
+    "黑心诊所",
+    "醫美",
+    "医美",
+    "手術",
+    "手术",
+  );
+  if (/黑暗|邪恶|邪惡|反派|阴谋|陰謀|恐怖|壓迫|压迫/.test(text)) {
+    out.push("黑心醫生", "黑心医生", "醫院爆料", "医院爆料", "醫療爭議", "医疗争议");
+  }
+}
+
+function buildSearchKeywordCandidates(args: {
+  archiveName: string;
+  pieces: string[];
+}): string[] {
+  const joined = args.pieces.join(" ");
+  const out: string[] = [];
+  addMedicalTopicKeywords(out, joined);
+  for (const item of splitKeywords(joined)) {
+    if (!hasHan(item)) continue;
+    if (args.archiveName && item.includes(args.archiveName)) continue;
+    out.push(item);
+  }
+  return [...new Set(out)]
+    .filter((item) => item.length >= 2 && item.length <= 12 && !GENERIC_SENTIMENT_KEYWORDS.has(item.toLowerCase()))
+    .slice(0, 10);
+}
+
 export function buildSentimentHotKeywords(args: {
   archive?: Partial<Pick<PersonaArchive, "name" | "content" | "setup">>;
   prompt?: string;
@@ -99,10 +145,10 @@ export function buildSentimentHotKeywords(args: {
     args.prompt,
   ].map(cleanText).filter(Boolean);
   const joined = pieces.join(" ");
-  const extracted = splitKeywords(joined);
   const personaName = cleanText(archive.name);
   const defaults = ["生活", "情緒", "日常", "熱門"];
-  return [...new Set([personaName, ...extracted, ...defaults].filter(Boolean))].slice(0, 10);
+  const extracted = buildSearchKeywordCandidates({ archiveName: personaName, pieces });
+  return [...new Set([...extracted, ...defaults].filter(Boolean))].slice(0, 10);
 }
 
 export function cleanSentimentCandidateContent(value: unknown): string {
