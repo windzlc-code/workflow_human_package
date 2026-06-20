@@ -1,2 +1,2 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Keep vendored OpinX files byte-for-byte identical to the working server copy.
+* -text
