@@ -23771,6 +23771,63 @@ async function openThreadsLatestOwnPostFromProfile(
   let lastOpenError: { ok: false; error: string; screenshotUrl?: string } | null = null;
   for (let openAttempt = 0; openAttempt < 2; openAttempt += 1) {
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+    for (let setupScrollAttempt = 0; setupScrollAttempt < 3; setupScrollAttempt += 1) {
+      const profileUiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
+      const profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
+      const hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
+      const hasVisibleOwnPost = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|https?:\/\/)/i.test(profileUiText)
+        && !/完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项/.test(profileUiText);
+      if (!hasProfileSetupCard || hasVisibleOwnPost) break;
+      await execAdbForText(config, padCode, "input swipe 360 1320 360 430 520", 8_000, 850).catch(() => "");
+      await delay(850);
+      shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+    }
+    const image = await getImageDimensions(shotUrl).catch(() => null);
+    const imageWidth = image?.width || BASE_SCREEN.width;
+    const imageHeight = image?.height || BASE_SCREEN.height;
+    const stablePostTextPoints = [
+      { x: Math.round(imageWidth * 0.30), y: Math.round(imageHeight * 0.505) },
+      { x: Math.round(imageWidth * 0.30), y: Math.round(imageHeight * 0.82) },
+      { x: Math.round(imageWidth * 0.50), y: Math.round(imageHeight * 0.58) },
+    ];
+    for (const stablePoint of stablePostTextPoints) {
+      if (!(await detectThreadsProfilePageLocally(shotUrl).catch(() => false))) break;
+      await tapScreenshotPointViaAdb(config, padCode, shotUrl, stablePoint, 1600).catch(async () => {
+        const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+        await tapViaAdbAbsolute(
+          config,
+          padCode,
+          Math.round(stablePoint.x * (screen.width / imageWidth)),
+          Math.round(stablePoint.y * (screen.height / imageHeight)),
+          1600,
+        );
+      });
+      await delay(1400);
+      const stableShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+      if (await detectThreadsProfilePageLocally(stableShotUrl).catch(() => false)) {
+        shotUrl = stableShotUrl;
+        continue;
+      }
+      const stableDetail = await withTimeout(
+        validateThreadsAutoReplyDetailReady(config, padCode, stableShotUrl),
+        8_000,
+        "threadsAutoReply validate stable post point timeout",
+      ).catch((error) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+        screenshotUrl: stableShotUrl,
+      }));
+      if (stableDetail.ok) return { ok: true, screenshotUrl: stableDetail.screenshotUrl };
+      if (await detectThreadsFullscreenMediaViewerLocally(stableDetail.screenshotUrl || stableShotUrl).catch(() => false)) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 700).catch(() => "");
+        await delay(900);
+        shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+        continue;
+      }
+      lastOpenError = stableDetail;
+      shotUrl = stableDetail.screenshotUrl || stableShotUrl;
+    }
     let profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     let target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml),
@@ -23816,9 +23873,22 @@ async function openThreadsLatestOwnPostFromProfile(
       return { ok: false, error: `Threads 当前不可自动回复：${page.reason}`, screenshotUrl: page.screenshotUrl || shotUrl };
     }
     if (page?.screenshotUrl) shotUrl = page.screenshotUrl;
-    const detail = await validateThreadsAutoReplyDetailReady(config, padCode, shotUrl);
+    const detail = await withTimeout(
+      validateThreadsAutoReplyDetailReady(config, padCode, shotUrl),
+      10_000,
+      "threadsAutoReply validate opened post timeout",
+    ).catch((error) => ({
+      ok: false as const,
+      error: error instanceof Error ? error.message : String(error),
+      screenshotUrl: shotUrl,
+    }));
     if (detail.ok) return { ok: true, screenshotUrl: detail.screenshotUrl };
     lastOpenError = detail;
+    if (detail.screenshotUrl && await detectThreadsProfilePageLocally(detail.screenshotUrl).catch(() => false)) {
+      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, detail.screenshotUrl);
+      await delay(500);
+      continue;
+    }
     if (!/关注建议页|個人主頁|个人主页|個人資料|个人资料/.test(detail.error)) {
       return detail;
     }
@@ -23893,7 +23963,15 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   if (openedPage && (openedPage.page === "login_required" || openedPage.page === "challenge" || openedPage.page === "system_dialog")) {
     return { ok: false, error: `Threads 当前不可自动回复：${openedPage.reason}`, screenshotUrl: openedPage.screenshotUrl || shotUrl };
   }
-  const detail = await validateThreadsAutoReplyDetailReady(config, padCode, openedPage?.screenshotUrl || shotUrl);
+  const detail = await withTimeout(
+    validateThreadsAutoReplyDetailReady(config, padCode, openedPage?.screenshotUrl || shotUrl),
+    10_000,
+    "threadsAutoReply validate next opened post timeout",
+  ).catch((error) => ({
+    ok: false as const,
+    error: error instanceof Error ? error.message : String(error),
+    screenshotUrl: openedPage?.screenshotUrl || shotUrl,
+  }));
   if (!detail.ok) return detail;
   return { ok: true, screenshotUrl: openedPage?.screenshotUrl || shotUrl };
 }
@@ -24552,11 +24630,14 @@ export async function autoReplyThreadsAccount(
   let preflightState = await closeThreadsComposerLayer(config, padCode, (progress) => {
     report({ step: progress.step || "清理 Threads 当前编辑状态" });
   }).catch(() => null);
-  for (let forceCloseAttempt = 0; forceCloseAttempt < 2; forceCloseAttempt += 1) {
+  for (let forceCloseAttempt = 0; forceCloseAttempt < 4; forceCloseAttempt += 1) {
     const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => preflightState?.screenshotUrl || "");
+    const uiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
+    const uiLine = normalizeSingleLine(decodeXmlAttr(uiXml));
     const stillReplyComposer = Boolean(
       await detectThreadsReplyComposerLocally(shotUrl).catch(() => null)
       || await detectThreadsCommentReplyEditorLocally(shotUrl).catch(() => false)
+      || (/回覆|回复|Reply/i.test(uiLine) && /發佈|发布|Post|新增其他回覆|添加其他回复|回覆選項|回复选项|GIF/.test(uiLine))
     );
     if (!stillReplyComposer) break;
     report({ step: "Threads 仍停在回复编辑页，点击左上角关闭" });
