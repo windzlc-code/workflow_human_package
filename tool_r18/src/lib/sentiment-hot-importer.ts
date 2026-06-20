@@ -108,6 +108,18 @@ function addMedicalTopicKeywords(out: string[], text: string) {
   }
 }
 
+function addGeneralTopicKeywords(out: string[], text: string) {
+  const groups: Array<[RegExp, string[]]> = [
+    [/(教师|老師|老师|校園|校园|學生|学生|课堂|課堂)/, ["老師", "教師", "學生", "校園", "課堂"]],
+    [/(恋爱|戀愛|情感|感情|暧昧|曖昧|分手|关系|關係)/, ["戀愛", "感情", "曖昧", "分手", "關係"]],
+    [/(穿搭|美妆|美妝|护肤|護膚|拍照|女生|日系)/, ["穿搭", "美妝", "護膚", "女生", "拍照"]],
+    [/(AI|人工智能|人工智慧|自动化|自動化|科技|互联网|互聯網|职场|職場)/i, ["AI", "人工智慧", "自動化", "科技", "職場"]],
+  ];
+  for (const [pattern, values] of groups) {
+    if (pattern.test(text)) out.push(...values);
+  }
+}
+
 function buildSearchKeywordCandidates(args: {
   archiveName: string;
   pieces: string[];
@@ -115,6 +127,7 @@ function buildSearchKeywordCandidates(args: {
   const joined = args.pieces.join(" ");
   const out: string[] = [];
   addMedicalTopicKeywords(out, joined);
+  addGeneralTopicKeywords(out, joined);
   for (const item of splitKeywords(joined)) {
     if (!hasHan(item)) continue;
     if (args.archiveName && item.includes(args.archiveName)) continue;
