@@ -263,7 +263,7 @@ export async function fetchSentimentHotCandidates(args: {
       timeoutMs: 15_000,
     });
   }
-  if (runtime.ok && usableSources.includes("threads") && candidates.length === 0) {
+  if (candidates.length === 0) {
     const fallbackCandidates = await fetchThreadsSearchPageCandidates({
       archiveId,
       keywords,
