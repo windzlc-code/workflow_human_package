@@ -235,6 +235,19 @@ function normalizePost(raw: any, fallbackIndex: number): PersonaArchivePost {
     publishedMemory,
     memorySummary: rawMemorySummary || publishedMemory,
     imageUrl: typeof raw?.imageUrl === "string" ? raw.imageUrl : undefined,
+    mediaUrl: typeof raw?.mediaUrl === "string" ? raw.mediaUrl : typeof raw?.media_url === "string" ? raw.media_url : undefined,
+    mediaType: raw?.mediaType === "video" || raw?.media_type === "video"
+      ? "video"
+      : raw?.mediaType === "image" || raw?.media_type === "image"
+        ? "image"
+        : raw?.mediaType === "unknown" || raw?.media_type === "unknown"
+          ? "unknown"
+          : undefined,
+    sourceMeta: raw?.sourceMeta && typeof raw.sourceMeta === "object"
+      ? raw.sourceMeta
+      : raw?.source_meta && typeof raw.source_meta === "object"
+        ? raw.source_meta
+        : undefined,
     imageHistory: Array.isArray(raw?.imageHistory) ? raw.imageHistory : undefined,
     history: Array.isArray(raw?.history) ? raw.history : undefined,
     telegramGroupContentType: raw?.telegramGroupContentType === "paid" ? "paid" : raw?.telegramGroupContentType === "free" ? "free" : undefined,
@@ -1117,6 +1130,16 @@ export async function appendCustomPersonaArchivePost(args: {
   archiveId: string;
   content: string;
   mediaUrl?: string;
+  mediaType?: "image" | "video" | "unknown";
+  sourceMeta?: {
+    source?: string;
+    platform?: string;
+    sourceUrl?: string;
+    hotScore?: number;
+    metrics?: Record<string, unknown>;
+    capturedAt?: string;
+    warnings?: string[];
+  };
   title?: string;
   telegramGroupContentType?: "free" | "paid";
 }): Promise<PersonaArchive | null> {
@@ -1139,6 +1162,9 @@ export async function appendCustomPersonaArchivePost(args: {
       createdAt: now,
       updatedAt: now,
       imageUrl: args.mediaUrl,
+      mediaUrl: args.mediaUrl,
+      mediaType: args.mediaType,
+      sourceMeta: args.sourceMeta,
       telegramGroupContentType: args.telegramGroupContentType,
     },
     nextOrderIndex,

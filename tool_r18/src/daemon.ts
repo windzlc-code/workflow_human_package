@@ -8,6 +8,7 @@ import { publishPost, type PublishCancellationToken, type PublishProgress } from
 import { startTelegramBot, stopTelegramPolling, type TelegramBotInstanceOptions } from "@/telegram-bot";
 import { markArchiveEpisodesPublished } from "@/lib/persona-archives";
 import { screenshot as captureVmosScreenshot } from "@/lib/vmos-client";
+import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import fs from "node:fs";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 
@@ -490,6 +491,7 @@ async function main() {
   const shutdown = () => {
     log("\n正在关闭...");
     scheduler.stop();
+    stopSentimentRuntime();
     void stopActiveTelegramBots().catch(() => undefined);
     releaseTelegramBotLock();
     removeDaemonHeartbeat();

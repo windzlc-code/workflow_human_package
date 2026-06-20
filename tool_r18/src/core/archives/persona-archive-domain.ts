@@ -42,6 +42,17 @@ export interface PersonaArchivePost {
   publishedMemory?: string;
   memorySummary?: string;
   imageUrl?: string;
+  mediaUrl?: string;
+  mediaType?: "image" | "video" | "unknown";
+  sourceMeta?: {
+    source?: string;
+    platform?: string;
+    sourceUrl?: string;
+    hotScore?: number;
+    metrics?: Record<string, unknown>;
+    capturedAt?: string;
+    warnings?: string[];
+  };
   imageHistory?: EpisodeScript["imageHistory"];
   history?: EpisodeScript["history"];
   telegramGroupContentType?: "free" | "paid";
