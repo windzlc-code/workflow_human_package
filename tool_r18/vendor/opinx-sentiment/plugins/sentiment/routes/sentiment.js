@@ -229,8 +229,10 @@ import {
   applySentimentCollectionOperationsRemediation,
   executeSentimentContinuousCollectionCycle,
   executeDueSentimentCollectionJobs,
+  executeDueSentimentCollectionJobDrain,
   getSentimentContinuousCollectionRun,
   getSentimentCollectionOperationsReport,
+  getSentimentCollectionOperationsFastReport,
   getSentimentFreeSourceTargetCoverageReport,
   getSentimentRealtimeSourceCoverageReport,
   listSentimentContinuousCollectionRuns,
@@ -368,7 +370,137 @@ function routeSearchSettingsWithSources(c, sources = null) {
   };
 }
 
+const COLLECTION_JOB_EXECUTION_FILTERS = [
+  ["postScanEvidenceFollowupsOnly", ["post_scan_evidence_followups_only", "postScanEvidenceFollowupsOnly"]],
+  ["postScanRealtimeKeywordExpansionOnly", ["post_scan_realtime_keyword_expansion_only", "postScanRealtimeKeywordExpansionOnly"]],
+  ["sourceFamilyCoverageFollowupsOnly", ["source_family_coverage_followups_only", "sourceFamilyCoverageFollowupsOnly"]],
+  ["keywordSourceFamilyCoverageFollowupsOnly", ["keyword_source_family_coverage_followups_only", "keywordSourceFamilyCoverageFollowupsOnly"]],
+  ["realtimeKeywordExpansionFollowupsOnly", ["realtime_keyword_expansion_followups_only", "realtimeKeywordExpansionFollowupsOnly"]],
+  ["keywordRealtimeExpansionRouteFollowupsOnly", ["keyword_realtime_expansion_route_followups_only", "keywordRealtimeExpansionRouteFollowupsOnly"]],
+  ["commercialQueryFanoutFollowupsOnly", ["commercial_query_fanout_followups_only", "commercialQueryFanoutFollowupsOnly"]],
+  ["commercialQueryFanoutDeepCrawlFollowupsOnly", ["commercial_query_fanout_deep_crawl_followups_only", "commercialQueryFanoutDeepCrawlFollowupsOnly"]],
+  ["openSearchArchiveFeedbackFollowupsOnly", ["opensearch_archive_feedback_followups_only", "open_search_archive_feedback_followups_only", "openSearchArchiveFeedbackFollowupsOnly"]],
+  ["openSearchArchiveDeepCrawlFollowupsOnly", ["opensearch_archive_deep_crawl_followups_only", "open_search_archive_deep_crawl_followups_only", "openSearchArchiveDeepCrawlFollowupsOnly"]],
+  ["highValueEvidenceFollowupsOnly", ["high_value_evidence_followups_only", "highValueEvidenceFollowupsOnly"]],
+  ["highValueEvidenceDeepCrawlFollowupsOnly", ["high_value_evidence_deep_crawl_followups_only", "highValueEvidenceDeepCrawlFollowupsOnly"]],
+  ["highRiskEvidenceRevisitOnly", ["high_risk_evidence_revisit_only", "highRiskEvidenceRevisitOnly"]],
+  ["highRiskEvidenceRevisitDeepCrawlOnly", ["high_risk_evidence_revisit_deep_crawl_only", "highRiskEvidenceRevisitDeepCrawlOnly"]],
+  ["highValueEvidenceCorroborationOnly", ["high_value_evidence_corroboration_only", "highValueEvidenceCorroborationOnly"]],
+  ["highValueEvidenceCorroborationDeepCrawlOnly", ["high_value_evidence_corroboration_deep_crawl_only", "highValueEvidenceCorroborationDeepCrawlOnly"]],
+  ["factClaimCorroborationOnly", ["fact_claim_corroboration_only", "factClaimCorroborationOnly"]],
+  ["factClaimCorroborationDeepCrawlOnly", ["fact_claim_corroboration_deep_crawl_only", "factClaimCorroborationDeepCrawlOnly"]],
+  ["alertEventFollowupsOnly", ["alert_event_followups_only", "alertEventFollowupsOnly"]],
+  ["alertEventDeepCrawlFollowupsOnly", ["alert_event_deep_crawl_followups_only", "alertEventDeepCrawlFollowupsOnly"]],
+  ["sourceFailurePersistentRecoveryFollowupsOnly", ["source_failure_persistent_recovery_followups_only", "sourceFailurePersistentRecoveryFollowupsOnly"]],
+  ["sourceCoverageRefreshFollowupsOnly", ["source_coverage_refresh_followups_only", "sourceCoverageRefreshFollowupsOnly"]],
+  ["freeSourceTargetCoverageFollowupsOnly", ["free_source_target_coverage_followups_only", "freeSourceTargetCoverageFollowupsOnly"]],
+  ["eventClusterFollowupsOnly", ["event_cluster_followups_only", "eventClusterFollowupsOnly"]],
+  ["eventClusterDeepCrawlFollowupsOnly", ["event_cluster_deep_crawl_followups_only", "eventClusterDeepCrawlFollowupsOnly"]],
+  ["historicalWindowBackfillOnly", ["historical_window_backfill_only", "historicalWindowBackfillOnly"]],
+  ["authorPivotFollowupsOnly", ["author_pivot_followups_only", "authorPivotFollowupsOnly"]],
+  ["authorPivotDeepCrawlFollowupsOnly", ["author_pivot_deep_crawl_followups_only", "authorPivotDeepCrawlFollowupsOnly"]],
+  ["authorReputationFollowupsOnly", ["author_reputation_followups_only", "authorReputationFollowupsOnly"]],
+  ["authorReputationDeepCrawlFollowupsOnly", ["author_reputation_deep_crawl_followups_only", "authorReputationDeepCrawlFollowupsOnly"]],
+  ["deepCrawlChainGapFollowupsOnly", ["deep_crawl_chain_gap_followups_only", "deepCrawlChainGapFollowupsOnly"]],
+];
+
+const COLLECTION_JOB_TASK_TYPE_FILTERS = {
+  "post-scan-evidence-followup": "postScanEvidenceFollowupsOnly",
+  "post-scan-realtime-keyword-expansion": "postScanRealtimeKeywordExpansionOnly",
+  "source-family-coverage-followup": "sourceFamilyCoverageFollowupsOnly",
+  "keyword-source-family-coverage-followup": "keywordSourceFamilyCoverageFollowupsOnly",
+  "realtime-keyword-expansion-followup": "realtimeKeywordExpansionFollowupsOnly",
+  "keyword-realtime-expansion-route-followup": "keywordRealtimeExpansionRouteFollowupsOnly",
+  "commercial-query-fanout-followup": "commercialQueryFanoutFollowupsOnly",
+  "commercial-query-fanout-deep-crawl-followup": "commercialQueryFanoutDeepCrawlFollowupsOnly",
+  "opensearch-archive-feedback-followup": "openSearchArchiveFeedbackFollowupsOnly",
+  "opensearch-archive-deep-crawl-followup": "openSearchArchiveDeepCrawlFollowupsOnly",
+  "high-value-evidence-followup": "highValueEvidenceFollowupsOnly",
+  "high-value-evidence-deep-crawl-followup": "highValueEvidenceDeepCrawlFollowupsOnly",
+  "high-risk-evidence-revisit": "highRiskEvidenceRevisitOnly",
+  "high-risk-evidence-revisit-deep-crawl": "highRiskEvidenceRevisitDeepCrawlOnly",
+  "high-value-evidence-corroboration": "highValueEvidenceCorroborationOnly",
+  "high-value-evidence-corroboration-deep-crawl": "highValueEvidenceCorroborationDeepCrawlOnly",
+  "fact-claim-corroboration": "factClaimCorroborationOnly",
+  "fact-claim-corroboration-deep-crawl": "factClaimCorroborationDeepCrawlOnly",
+  "alert-event-followup": "alertEventFollowupsOnly",
+  "alert-event-deep-crawl-followup": "alertEventDeepCrawlFollowupsOnly",
+  "source-failure-persistent-recovery": "sourceFailurePersistentRecoveryFollowupsOnly",
+  "source-coverage-refresh-followup": "sourceCoverageRefreshFollowupsOnly",
+  "free-source-target-coverage-followup": "freeSourceTargetCoverageFollowupsOnly",
+  "event-cluster-followup": "eventClusterFollowupsOnly",
+  "event-cluster-deep-crawl-followup": "eventClusterDeepCrawlFollowupsOnly",
+  "historical-window-backfill": "historicalWindowBackfillOnly",
+  "author-pivot-followup": "authorPivotFollowupsOnly",
+  "author-pivot-deep-crawl-followup": "authorPivotDeepCrawlFollowupsOnly",
+  "author-reputation-followup": "authorReputationFollowupsOnly",
+  "author-reputation-deep-crawl-followup": "authorReputationDeepCrawlFollowupsOnly",
+  "deep-crawl-chain-gap-followup": "deepCrawlChainGapFollowupsOnly",
+};
+
+function normalizeCollectionJobTaskType(raw = "") {
+  return String(raw || "").trim().replace(/_/g, "-").toLowerCase();
+}
+
+function collectionJobExecutionOptionsForRoute(body = {}) {
+  const options = {
+    sourceKey: body.source_key || body.sourceKey || "",
+    limit: parseLimit(body.limit, 5),
+    concurrency: parseLimit(body.concurrency, 1),
+    collectionJobTimeoutMs: optionalBodyNumber(body, [
+      "collection_job_timeout_ms",
+      "collectionJobTimeoutMs",
+      "source_timeout_ms",
+      "sourceTimeoutMs",
+    ]),
+    drainBatches: optionalBodyNumber(body, [
+      "drain_batches",
+      "drainBatches",
+      "collection_job_drain_batches",
+      "collectionJobDrainBatches",
+      "collection_job_backlog_drain_batches",
+      "collectionJobBacklogDrainBatches",
+      "backlog_drain_batches",
+      "backlogDrainBatches",
+    ]),
+  };
+  for (const [optionKey, aliases] of COLLECTION_JOB_EXECUTION_FILTERS) {
+    const raw = optionalBodyNumber(body, aliases);
+    if (raw !== undefined) options[optionKey] = optionalBoolean(raw, false);
+  }
+  const taskTypes = parseSourceList(body.task_type ?? body.taskType ?? body.job_type ?? body.jobType) || [];
+  for (const taskType of taskTypes.map(normalizeCollectionJobTaskType)) {
+    const optionKey = COLLECTION_JOB_TASK_TYPE_FILTERS[taskType];
+    if (optionKey) options[optionKey] = true;
+  }
+  return options;
+}
+
+async function executeCollectionJobsForRoute(options = {}, { searchSettings = null, log = null } = {}) {
+  const { drainBatches, collectionJobTimeoutMs, limit, concurrency, ...collectionOptions } = options || {};
+  const safeDrainBatches = Math.max(1, Math.min(5, Number(drainBatches) || 1));
+  if (safeDrainBatches > 1) {
+    return executeDueSentimentCollectionJobDrain({
+      batches: safeDrainBatches,
+      limit,
+      concurrency,
+      collectionJobTimeoutMs,
+      collectionOptions,
+      searchSettings,
+      log,
+    });
+  }
+  return executeDueSentimentCollectionJobs({
+    ...collectionOptions,
+    limit,
+    concurrency,
+    collectionJobTimeoutMs,
+    searchSettings,
+  });
+}
+
 async function continuousCollectionPreviewForRoute(c, body = {}) {
+  const ctx = pluginCtx(c);
   const mode = routeScanMode(body.mode || body.scanMode || body.scan_mode || "fast");
   const sources = configuredSourceScopeForMode(c, mode);
   const searchSettings = routeSearchSettingsWithSources(c, sources);
@@ -892,7 +1024,9 @@ async function continuousCollectionPreviewForRoute(c, body = {}) {
       defer_continuous_collection_execution: optionalBoolean(
         body.defer_continuous_collection_execution
           ?? body.deferContinuousCollectionExecution,
-        body.async === true && sourceCoverageRefreshSeedBaselinesOnly,
+        body.async === true
+          && sourceCoverageRefreshSeedBaselinesOnly
+          && typeof ctx.startBackgroundContinuousCollection !== "function",
       ),
       source_coverage_refresh_timeout_ms: Math.max(0, Math.min(15 * 60 * 1000, Number(optionalBodyNumber(body, ["source_coverage_refresh_timeout_ms", "sourceCoverageRefreshTimeoutMs", "source_coverage_timeout_ms", "sourceCoverageTimeoutMs"]) || 120_000) || 0)),
       search_index_maintenance: optionalBoolean(body.search_index_maintenance ?? body.searchIndexMaintenance, true),
@@ -935,6 +1069,7 @@ async function continuousCollectionPreviewForRoute(c, body = {}) {
 }
 
 function continuousCollectionRunOptionsForRoute(c, body = {}) {
+  const ctx = pluginCtx(c);
   const mode = routeScanMode(body.mode || body.scanMode || body.scan_mode || "fast");
   const sources = configuredSourceScopeForMode(c, mode);
   const scanSources = optionalBoolean(body.scan_sources ?? body.scanSources ?? body.execute_scan ?? body.executeScan, true);
@@ -957,7 +1092,10 @@ function continuousCollectionRunOptionsForRoute(c, body = {}) {
   const sourceCoverageRefreshSeedBaselinesOnly = scanSources === false
     && sourceCoverageRefreshSeedBaselinesWhenScanDisabled !== false
     && (sourceCoverageRefreshFollowupLimit === null || sourceCoverageRefreshFollowupLimit === undefined);
-  const deferAsyncNoDataSourceCoverageSeedBaseline = body.async === true && sourceCoverageRefreshSeedBaselinesOnly;
+  const hasExternalContinuousCollectionWorker = typeof ctx.startBackgroundContinuousCollection === "function";
+  const deferAsyncNoDataSourceCoverageSeedBaseline = body.async === true
+    && sourceCoverageRefreshSeedBaselinesOnly
+    && !hasExternalContinuousCollectionWorker;
   const freeSourceTargetCoverageFollowupLimit = optionalBodyNumber(body, ["free_source_target_coverage_followup_limit", "freeSourceTargetCoverageFollowupLimit"]);
   const historicalWindowBackfillLimit = optionalBodyNumber(body, ["historical_window_backfill_limit", "historicalWindowBackfillLimit"]);
   return {
@@ -1045,9 +1183,13 @@ function continuousCollectionRunOptionsForRoute(c, body = {}) {
           ?? body.deferContinuousCollectionExecution,
         deferAsyncNoDataSourceCoverageSeedBaseline,
       ),
-      deferContinuousCollectionReason: deferAsyncNoDataSourceCoverageSeedBaseline
-        ? "async-no-data-source-coverage-seed-baseline-deferred-from-web-process"
-        : "",
+      deferContinuousCollectionReason: String(
+        body.defer_continuous_collection_reason
+          || body.deferContinuousCollectionReason
+          || (deferAsyncNoDataSourceCoverageSeedBaseline
+            ? "async-no-data-source-coverage-seed-baseline-deferred-from-web-process"
+            : "")
+      ).slice(0, 240),
       freeSourceTargetCoverageFollowups: body.free_source_target_coverage_followups ?? body.freeSourceTargetCoverageFollowups ?? true,
       freeSourceTargetCoverageFollowupLimit: freeSourceTargetCoverageFollowupLimit === null || freeSourceTargetCoverageFollowupLimit === undefined
         ? (scanSources === false ? 0 : null)
@@ -1638,13 +1780,20 @@ app.get("/continuous-collection-plan", (c) => {
 // GET /api/plugins/sentiment/sentiment/collection-operations
 app.get("/collection-operations", (c) => {
   const { mode, sources, sourceScope } = resolveRouteQueryScanSources(c, c.req.query("mode") || "fast");
-  const report = getSentimentCollectionOperationsReport({
+  const useFastSummary = optionalBoolean(c.req.query("fast_summary") ?? c.req.query("fastSummary") ?? c.req.query("summary_only") ?? c.req.query("summaryOnly"), false);
+  const reportOptions = {
     mode,
     searchSettings: routeSearchSettingsWithSources(c, sources),
     maxSources: parseLimit(c.req.query("max_sources") || c.req.query("maxSources"), 8),
     retryLimit: parseLimit(c.req.query("retry_limit") || c.req.query("retryLimit"), 20),
     staleMultiplier: parseLimit(c.req.query("stale_multiplier") || c.req.query("staleMultiplier"), 3),
-  });
+    includeJobDetails: optionalBoolean(c.req.query("include_job_details") ?? c.req.query("includeJobDetails"), false),
+    includeSourceDetails: optionalBoolean(c.req.query("include_source_details") ?? c.req.query("includeSourceDetails"), false),
+    includePlanDetails: optionalBoolean(c.req.query("include_plan_details") ?? c.req.query("includePlanDetails"), false),
+  };
+  const report = useFastSummary
+    ? getSentimentCollectionOperationsFastReport(reportOptions)
+    : getSentimentCollectionOperationsReport(reportOptions);
   return c.json({
     ...report,
     mode,
@@ -1766,10 +1915,17 @@ app.post("/continuous-collection/run", async (c) => {
   }
   const { options, routeMeta } = continuousCollectionRunOptionsForRoute(c, body);
   if (optionalBoolean(body.async ?? body.asyncRun ?? body.background ?? body.backgroundRun, false)) {
-    const started = startSentimentContinuousCollectionRun({
-      ...options,
-      allowConcurrent: optionalBoolean(body.allow_concurrent ?? body.allowConcurrent, false),
-    });
+    const ctx = pluginCtx(c);
+    const allowConcurrent = optionalBoolean(body.allow_concurrent ?? body.allowConcurrent, false);
+    const started = typeof ctx.startBackgroundContinuousCollection === "function"
+      ? ctx.startBackgroundContinuousCollection({
+        options,
+        allowConcurrent,
+      })
+      : startSentimentContinuousCollectionRun({
+        ...options,
+        allowConcurrent,
+      });
     return c.json({
       ...started,
       ...routeMeta,
@@ -1785,13 +1941,32 @@ app.post("/continuous-collection/run", async (c) => {
 });
 
 // GET /api/plugins/sentiment/sentiment/continuous-collection/runs
-app.get("/continuous-collection/runs", (c) => c.json(listSentimentContinuousCollectionRuns({
-  limit: parseLimit(c.req.query("limit"), 20),
-})));
+app.get("/continuous-collection/runs", (c) => {
+  const limit = parseLimit(c.req.query("limit"), 20);
+  const local = listSentimentContinuousCollectionRuns({ limit });
+  const ctx = pluginCtx(c);
+  if (typeof ctx.listBackgroundContinuousCollectionRuns !== "function") return c.json(local);
+  const external = ctx.listBackgroundContinuousCollectionRuns({ limit });
+  const unique = new Map();
+  for (const run of [...(local.runs || []), ...(external.runs || [])]) {
+    if (!run?.id || unique.has(run.id)) continue;
+    unique.set(run.id, run);
+  }
+  return c.json({
+    ok: true,
+    runs: [...unique.values()]
+      .sort((a, b) => Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0))
+      .slice(0, limit),
+  });
+});
 
 // GET /api/plugins/sentiment/sentiment/continuous-collection/runs/:id
 app.get("/continuous-collection/runs/:id", (c) => {
-  const result = getSentimentContinuousCollectionRun(c.req.param("id"));
+  const ctx = pluginCtx(c);
+  let result = getSentimentContinuousCollectionRun(c.req.param("id"));
+  if (!result.ok && typeof ctx.getBackgroundContinuousCollectionRun === "function") {
+    result = ctx.getBackgroundContinuousCollectionRun(c.req.param("id"));
+  }
   if (!result.ok) return c.json({ ok: false, error: "continuous collection run not found" }, 404);
   return c.json(result);
 });
@@ -2553,9 +2728,22 @@ app.post("/rss-feed-pack-coverage/native-entry-promotion-governance/apply", asyn
 // POST /api/plugins/sentiment/sentiment/collection-jobs/execute-due
 app.post("/collection-jobs/execute-due", async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  return c.json(await executeDueSentimentCollectionJobs({
-    sourceKey: body.source_key || body.sourceKey || "",
-    limit: body.limit || 5,
+  const options = collectionJobExecutionOptionsForRoute(body);
+  if (optionalBoolean(body.async ?? body.asyncRun ?? body.background ?? body.backgroundRun, false)) {
+    const ctx = pluginCtx(c);
+    if (typeof ctx.startBackgroundCollectionJobExecution === "function") {
+      const started = ctx.startBackgroundCollectionJobExecution({
+        options,
+        allowConcurrent: optionalBoolean(body.allow_concurrent ?? body.allowConcurrent, false),
+      });
+      return c.json({
+        ...started,
+        run_id: started.run?.id || null,
+        poll_url: started.run?.id ? `/api/plugins/sentiment/sentiment/continuous-collection/runs/${started.run.id}` : null,
+      }, 202);
+    }
+  }
+  return c.json(await executeCollectionJobsForRoute(options, {
     searchSettings: pluginCtx(c).config,
   }));
 });

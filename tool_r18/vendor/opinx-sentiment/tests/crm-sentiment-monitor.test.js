@@ -289,6 +289,7 @@ import {
   deriveSourceFamilyCoverageFollowupSourceSignals,
   getSentimentSourceFamilyCoverageFollowupEffectivenessReport,
   getSentimentCollectionOperationsReport,
+  getSentimentCollectionOperationsFastReport,
   getSentimentFreeSourceTargetCoverageReport,
   getSentimentRealtimeSourceCoverageReport,
   getSentimentSourceHealth,
@@ -70407,13 +70408,58 @@ describe("CRM sentiment monitor", () => {
       retry_consumer: true,
     });
 
+    const routeJobs = createSentimentCollectionJobs({
+      batchId: batch.lastInsertRowid,
+      jobs: [{
+        jobKey: "collection:execute-route-normal",
+        sourceKey: "rssFeeds",
+        label: "通用 RSS 普通重试",
+        reason: "manual-retry",
+        mode: "fast",
+        status: "pending",
+        priority: 100,
+        query: ["OpinX 普通重试"],
+        scheduledAt: new Date(Date.now() - 60 * 1000).toISOString(),
+        metadata: { task_type: "routine-retry" },
+      }, {
+        jobKey: "collection:execute-route-source-coverage",
+        sourceKey: "rssFeeds",
+        label: "通用 RSS 来源覆盖刷新",
+        reason: "source-coverage-refresh",
+        mode: "fast",
+        status: "pending",
+        priority: 90,
+        query: ["OpinX 来源覆盖"],
+        scheduledAt: new Date(Date.now() - 60 * 1000).toISOString(),
+        metadata: { task_type: "source-coverage-refresh-followup" },
+      }],
+    });
+
     const routeResponse = await sentimentRoutes.request("/collection-jobs/execute-due", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source_key: "rssFeeds", limit: 2 }),
+      body: JSON.stringify({
+        source_key: "rssFeeds",
+        limit: 1,
+        concurrency: 2,
+        drainBatches: 2,
+        taskType: "source-coverage-refresh-followup",
+      }),
     });
     expect(routeResponse.status).toBe(200);
-    expect((await routeResponse.json()).ok).toBe(true);
+    const routeJson = await routeResponse.json();
+    expect(routeJson).toMatchObject({
+      ok: true,
+      executed: 1,
+      backlog_drain: {
+        requested_batches: 2,
+        execution_concurrency: 1,
+        selected_task_types: ["source-coverage-refresh-followup"],
+      },
+    });
+    const routeExecutedJobs = listSentimentCollectionJobs({ sourceKey: "rssFeeds", limit: 10 });
+    expect(routeExecutedJobs.find(job => job.id === routeJobs[0].id)).toMatchObject({ status: "pending" });
+    expect(routeExecutedJobs.find(job => job.id === routeJobs[1].id).status).not.toBe("pending");
   });
 
   it("passes realtime keyword expansion direct URLs into due-job platform scrapers", async () => {
@@ -74049,9 +74095,9 @@ describe("CRM sentiment monitor", () => {
           reason: "manual-retry",
           status: "pending",
           priority: 85,
-          query: ["OpinX 退款"],
+          query: ["OpinX 退款", "OpinX 投訴", "OpinX scam", "OpinX negative review", "OpinX discussion", "OpinX viral"],
           scheduledAt: new Date(now - 10 * 60 * 1000).toISOString(),
-          metadata: { retry_of_job_id: 10 },
+          metadata: { retry_of_job_id: 10, task_type: "manual-retry" },
         },
         {
           sourceKey: "youtube",
@@ -74090,6 +74136,23 @@ describe("CRM sentiment monitor", () => {
       backlog_jobs: 2,
       recommended_next_action: "execute-due-retry-jobs",
     });
+    expect(report.summary.due_pending_by_task_type).toEqual([
+      { key: "manual-retry", count: 1 },
+    ]);
+    expect(report.summary.recommended_execute_due_payloads[0]).toMatchObject({
+      task_type: "manual-retry",
+      due_pending_jobs: 1,
+      request: {
+        async: true,
+        taskType: "manual-retry",
+      },
+    });
+    expect(report.detail_mode).toEqual({
+      jobs: "compact",
+      sources: "compact",
+      plan: "summary",
+    });
+    expect(report.retry_plan).toBeNull();
     const youtube = report.sources.find(source => source.source_key === "youtube");
     const duckDuckGo = report.sources.find(source => source.source_key === "duckDuckGo");
     expect(youtube.health).toBe("critical");
@@ -74098,17 +74161,74 @@ describe("CRM sentiment monitor", () => {
     expect(duckDuckGo.health).toBe("degraded");
     expect(duckDuckGo.issues).toContain("due-pending-jobs");
     expect(duckDuckGo.recommended_actions).toContain("execute-due-retry-jobs");
+    expect(duckDuckGo).not.toHaveProperty("priority_reasons");
     expect(report.actionable_sources.map(source => source.source_key)).toEqual(expect.arrayContaining(["youtube", "duckDuckGo"]));
     expect(report.job_backlog.due_pending[0]).toMatchObject({
       source_key: "duckDuckGo",
       status: "pending",
+      task_type: "manual-retry",
+      query_count: 6,
+      query_preview: ["OpinX 退款", "OpinX 投訴", "OpinX scam", "OpinX negative review", "OpinX discussion"],
     });
+    expect(report.job_backlog.detail_mode).toBe("compact");
+    expect(report.job_backlog.due_pending[0]).not.toHaveProperty("query_json");
+    expect(report.job_backlog.due_pending[0]).not.toHaveProperty("metadata_json");
+
+    const fastReport = getSentimentCollectionOperationsFastReport({
+      mode: "fast",
+      staleMultiplier: 2,
+      now,
+      searchSettings: { sources: ["youtube", "duckDuckGo"] },
+    });
+    expect(fastReport).toMatchObject({
+      ok: true,
+      fast_summary: true,
+      mode: "fast",
+      detail_mode: {
+        jobs: "compact",
+        sources: "compact",
+        plan: "fast-summary",
+      },
+      summary: {
+        total_sources: 2,
+        due_pending_jobs: 1,
+        stale_running_jobs: 1,
+        recommended_next_action: "execute-due-retry-jobs",
+      },
+      continuous_plan_summary: {
+        fast_summary: true,
+      },
+      retry_plan: null,
+    });
+    expect(fastReport.summary.due_pending_by_task_type).toEqual([
+      { key: "manual-retry", count: 1 },
+    ]);
+    expect(fastReport.summary.recommended_execute_due_payloads[0]).toMatchObject({
+      task_type: "manual-retry",
+      request: { taskType: "manual-retry", async: true },
+    });
+    expect(fastReport.sources.find(source => source.source_key === "duckDuckGo")).not.toHaveProperty("priority_reasons");
 
     const response = await sentimentRoutes.request("/collection-operations?mode=fast&max_sources=2&stale_multiplier=2");
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.summary.total_sources).toBeGreaterThan(0);
+    expect(Array.isArray(body.summary.due_pending_by_task_type)).toBe(true);
+    expect(body.detail_mode).toMatchObject({ jobs: "compact", sources: "compact", plan: "summary" });
+    expect(body.retry_plan).toBeNull();
+    expect(body.job_backlog.detail_mode).toBe("compact");
     expect(Array.isArray(body.actionable_sources)).toBe(true);
+
+    const fastResponse = await sentimentRoutes.request("/collection-operations?mode=fast&sources=youtube,duckDuckGo&fast_summary=1&stale_multiplier=2");
+    expect(fastResponse.status).toBe(200);
+    const fastBody = await fastResponse.json();
+    expect(fastBody).toMatchObject({
+      fast_summary: true,
+      sourceScope: "request",
+      requested_sources: ["youtube", "duckDuckGo"],
+      detail_mode: { plan: "fast-summary" },
+      retry_plan: null,
+    });
   });
 
   it("plans and applies collection operations remediation jobs for degraded sources", async () => {

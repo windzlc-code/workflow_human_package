@@ -26,6 +26,7 @@ import { JsonConfigStore } from "./config-store.js";
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_INTERVAL_MINUTES = 5;
+const CONTINUOUS_WORKER_STALE_HEARTBEAT_MS = 2 * 60 * 1000;
 const DEFAULT_ADMIN_SETTINGS = {
   scanDays: 30,
   reportDays: 30,
@@ -197,6 +198,120 @@ function normalizeAdminSettings(input = {}) {
   };
 }
 
+function createContinuousRunId() {
+  return `continuous-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createWorkerRunId(prefix = "worker") {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function publicContinuousRunView(run = null) {
+  if (!run || typeof run !== "object") return null;
+  return {
+    id: run.id || "",
+    status: run.status || "unknown",
+    accepted: run.accepted !== false,
+    mode: run.mode || "fast",
+    created_at: run.created_at || null,
+    started_at: run.started_at || null,
+    finished_at: run.finished_at || null,
+    duration_ms: run.duration_ms ?? null,
+    heartbeat_at: run.heartbeat_at || null,
+    heartbeat_elapsed_ms: run.heartbeat_elapsed_ms ?? null,
+    options: run.options || {},
+    result: compactContinuousRunResult(run.result),
+    result_full_available: Boolean(run.result),
+    error: run.error || "",
+    worker: run.worker || null,
+  };
+}
+
+function compactJobResult(result = null) {
+  if (!result || typeof result !== "object") return null;
+  return {
+    ok: result.ok !== false,
+    executed: Number(result.executed || 0),
+    total: Number(result.total || 0),
+    events: Number(result.events || 0),
+    alerts: Number(result.alerts || 0),
+    reason: result.reason || "",
+    job_count: Array.isArray(result.jobs) ? result.jobs.length : 0,
+  };
+}
+
+function compactContinuousRunResult(result = null) {
+  if (!result || typeof result !== "object") return null;
+  if (result.deferred === true) {
+    return {
+      ok: result.ok !== false,
+      deferred: true,
+      reason: result.reason || "",
+      mode: result.mode || "",
+      sourceCoverageRefreshStage: result.sourceCoverageRefreshStage || null,
+    };
+  }
+  const collectionJobRun = Boolean(result.dueJobSelection || result.backlog_drain);
+  return {
+    ok: result.ok !== false,
+    type: collectionJobRun ? "collection-jobs-execute-due" : "continuous-collection",
+    deferred: false,
+    mode: result.mode || result.plan?.mode || "",
+    collectionJobResult: collectionJobRun
+      ? {
+        ...compactJobResult(result),
+        dueJobSelection: result.dueJobSelection || null,
+        backlogDrain: result.backlog_drain || null,
+      }
+      : null,
+    executed_scan_sources: Array.isArray(result.executed_scan_sources) ? result.executed_scan_sources.slice(0, 50) : [],
+    executed_scan_source_count: Array.isArray(result.executed_scan_sources) ? result.executed_scan_sources.length : 0,
+    collectionJobBacklogDrain: result.collectionJobBacklogDrain || null,
+    retryStage: result.retryStage || null,
+    scanStage: result.scanStage || null,
+    sourceCoverageRefreshStage: result.sourceCoverageRefreshStage || null,
+    retryResult: compactJobResult(result.retryResult),
+    sourceCoverageRefreshFollowupResult: compactJobResult(result.sourceCoverageRefreshFollowupResult),
+    freeSourceTargetCoverageFollowupResult: compactJobResult(result.freeSourceTargetCoverageFollowupResult),
+    deepCrawlChainGapFollowupResult: compactJobResult(result.deepCrawlChainGapFollowupResult),
+    postScanFollowupResult: compactJobResult(result.postScanFollowupResult),
+    postScanSourceFamilyCoverageFollowupResult: compactJobResult(result.postScanSourceFamilyCoverageFollowupResult),
+    searchIndexMaintenanceResult: result.searchIndexMaintenanceResult
+      ? {
+        ok: result.searchIndexMaintenanceResult.ok !== false,
+        updated: Number(result.searchIndexMaintenanceResult.updated || result.searchIndexMaintenanceResult.updated_count || 0),
+        reason: result.searchIndexMaintenanceResult.reason || "",
+      }
+      : null,
+    openSearchArchiveSyncResult: result.openSearchArchiveSyncResult
+      ? {
+        ok: result.openSearchArchiveSyncResult.ok !== false,
+        synced: Number(result.openSearchArchiveSyncResult.synced || result.openSearchArchiveSyncResult.synced_count || 0),
+        reason: result.openSearchArchiveSyncResult.reason || "",
+      }
+      : null,
+  };
+}
+
+function readJsonFile(filePath = "") {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid = 0) {
+  const value = Number(pid || 0);
+  if (!Number.isFinite(value) || value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function createSentimentBackendApp({
   dataDir = resolveDataDir(),
   configPath = "",
@@ -211,7 +326,10 @@ export function createSentimentBackendApp({
   ensureSentimentOperationalDefaults();
 
   const config = new JsonConfigStore(configPath || path.join(resolvedDataDir, "sentiment-config.json"));
+  const continuousRunDir = path.join(resolvedDataDir, "continuous-runs");
   let scanChild = null;
+  let continuousChild = null;
+  let collectionJobChild = null;
   const startBackgroundScan = (job = {}) => {
     if (scanChild && scanChild.exitCode === null && scanChild.signalCode === null) return scanChild.pid;
     const child = spawn(process.execPath, [path.join(SRC_DIR, "scan-worker.js")], {
@@ -233,6 +351,162 @@ export function createSentimentBackendApp({
     return child.pid;
   };
   const isBackgroundScanRunning = () => Boolean(scanChild && scanChild.exitCode === null && scanChild.signalCode === null);
+  const continuousRunPath = (runId = "") => path.join(continuousRunDir, `${String(runId || "").replace(/[^a-zA-Z0-9_-]/g, "")}.json`);
+  const writeContinuousRun = (run = {}) => {
+    fs.mkdirSync(continuousRunDir, { recursive: true });
+    fs.writeFileSync(continuousRunPath(run.id), `${JSON.stringify(run, null, 2)}\n`, "utf8");
+    return run;
+  };
+  const reconcileContinuousRun = (run = null) => {
+    if (!run || typeof run !== "object") return run;
+    if (!["queued", "running"].includes(run.status)) return run;
+    const pid = run.worker?.pid;
+    const alive = isPidAlive(pid);
+    const heartbeatAt = Date.parse(run.heartbeat_at || run.started_at || run.created_at || 0);
+    const heartbeatAgeMs = Number.isFinite(heartbeatAt) ? Date.now() - heartbeatAt : Infinity;
+    if (alive && heartbeatAgeMs <= CONTINUOUS_WORKER_STALE_HEARTBEAT_MS) return run;
+    const next = {
+      ...run,
+      status: "failed",
+      finished_at: new Date().toISOString(),
+      duration_ms: run.started_at ? Math.max(0, Date.now() - Date.parse(run.started_at)) : run.duration_ms,
+      error: alive
+        ? `continuous collection worker heartbeat stale for ${Math.max(0, Math.round(heartbeatAgeMs / 1000))}s`
+        : `continuous collection worker process not running: pid=${pid || ""}`,
+      worker: {
+        ...(run.worker || {}),
+        alive,
+        stale_heartbeat: alive,
+        heartbeat_age_ms: Number.isFinite(heartbeatAgeMs) ? Math.max(0, heartbeatAgeMs) : null,
+      },
+    };
+    writeContinuousRun(next);
+    return next;
+  };
+  const getBackgroundContinuousCollectionRun = (runId = "") => {
+    const run = reconcileContinuousRun(readJsonFile(continuousRunPath(runId)));
+    return {
+      ok: Boolean(run),
+      run: publicContinuousRunView(run),
+    };
+  };
+  const listBackgroundContinuousCollectionRuns = ({ limit = 20 } = {}) => {
+    const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
+    let runs = [];
+    try {
+      runs = fs.readdirSync(continuousRunDir)
+        .filter(name => name.endsWith(".json"))
+        .map(name => reconcileContinuousRun(readJsonFile(path.join(continuousRunDir, name))))
+        .filter(Boolean);
+    } catch {
+      runs = [];
+    }
+    return {
+      ok: true,
+      runs: runs
+        .sort((a, b) => Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0))
+        .slice(0, safeLimit)
+        .map(publicContinuousRunView),
+    };
+  };
+  const isBackgroundContinuousCollectionRunning = () => Boolean(continuousChild && continuousChild.exitCode === null && continuousChild.signalCode === null);
+  const isBackgroundCollectionJobExecutionRunning = () => Boolean(collectionJobChild && collectionJobChild.exitCode === null && collectionJobChild.signalCode === null);
+  const startWorkerRun = ({ type = "continuous-collection", idPrefix = "worker", options = {}, allowConcurrent = false, childRef = () => null, setChildRef = () => {} } = {}) => {
+    const activeChild = childRef();
+    if (!allowConcurrent && activeChild && activeChild.exitCode === null && activeChild.signalCode === null) {
+      return {
+        ok: true,
+        accepted: false,
+        already_running: true,
+        reason: `${type}-worker-already-running`,
+        run: publicContinuousRunView(readJsonFile(activeChild.__opinxRunPath || "")),
+      };
+    }
+    const runId = createWorkerRunId(idPrefix);
+    const now = new Date().toISOString();
+    const run = writeContinuousRun({
+      id: runId,
+      type,
+      status: "queued",
+      accepted: true,
+      mode: options.mode || "fast",
+      created_at: now,
+      started_at: null,
+      finished_at: null,
+      duration_ms: null,
+      options: {
+        ...options,
+        searchSettings: options.searchSettings ? "[route-search-settings]" : null,
+        log: undefined,
+      },
+      result: null,
+      error: "",
+      worker: {
+        external_process: true,
+        pid: null,
+        type,
+      },
+    });
+    const child = spawn(process.execPath, [path.join(SRC_DIR, "scan-worker.js")], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        SENTIMENT_DATA_DIR: resolvedDataDir,
+        SENTIMENT_CONFIG_PATH: config.filePath,
+        SENTIMENT_SCAN_JOB: JSON.stringify({
+          type,
+          runId,
+          statusPath: continuousRunPath(runId),
+          options,
+        }),
+      },
+    });
+    child.__opinxRunPath = continuousRunPath(runId);
+    setChildRef(child);
+    run.worker.pid = child.pid;
+    writeContinuousRun(run);
+    child.once("exit", (code, signal) => {
+      const latest = readJsonFile(continuousRunPath(runId)) || run;
+      if (latest.status === "queued" || latest.status === "running") {
+        writeContinuousRun({
+          ...latest,
+          status: code === 0 ? "success" : "failed",
+          finished_at: new Date().toISOString(),
+          error: code === 0 ? "" : `worker exited before completion: code=${code ?? ""} signal=${signal ?? ""}`,
+        });
+      }
+      if (childRef() === child) setChildRef(null);
+    });
+    child.unref();
+    return {
+      ok: true,
+      accepted: true,
+      already_running: false,
+      run: publicContinuousRunView(run),
+    };
+  };
+  const startBackgroundContinuousCollection = ({ options = {}, allowConcurrent = false } = {}) => {
+    return startWorkerRun({
+      type: "continuous-collection",
+      idPrefix: "continuous",
+      options,
+      allowConcurrent,
+      childRef: () => continuousChild,
+      setChildRef: child => { continuousChild = child; },
+    });
+  };
+  const startBackgroundCollectionJobExecution = ({ options = {}, allowConcurrent = false } = {}) => {
+    return startWorkerRun({
+      type: "collection-jobs-execute-due",
+      idPrefix: "collection-jobs",
+      options,
+      allowConcurrent,
+      childRef: () => collectionJobChild,
+      setChildRef: child => { collectionJobChild = child; },
+    });
+  };
   configureSentimentRunner({
     bus,
     log,
@@ -248,7 +522,19 @@ export function createSentimentBackendApp({
 
   const app = new Hono();
   app.use("*", async (c, next) => {
-    c.set("pluginCtx", { config, bus, log, startBackgroundScan, isBackgroundScanRunning });
+    c.set("pluginCtx", {
+      config,
+      bus,
+      log,
+      startBackgroundScan,
+      isBackgroundScanRunning,
+      startBackgroundContinuousCollection,
+      startBackgroundCollectionJobExecution,
+      getBackgroundContinuousCollectionRun,
+      listBackgroundContinuousCollectionRuns,
+      isBackgroundContinuousCollectionRunning,
+      isBackgroundCollectionJobExecutionRunning,
+    });
     await next();
   });
 
@@ -311,7 +597,10 @@ export function createSentimentBackendApp({
     dataDir: resolvedDataDir,
     scheduler: {
       ...getSentimentMonitorStatus(),
-      running: getSentimentMonitorStatus().running || isBackgroundScanRunning(),
+      running: getSentimentMonitorStatus().running
+        || isBackgroundScanRunning()
+        || isBackgroundContinuousCollectionRunning()
+        || isBackgroundCollectionJobExecutionRunning(),
     },
   }));
 

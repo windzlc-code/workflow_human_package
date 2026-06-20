@@ -6346,7 +6346,10 @@ export function deriveSourceDiscoveryDeepCrawlEffectivenessSignals(report = {}, 
 
 function collectionOperationsJobStats(jobs = [], now = Date.now()) {
   const byStatus = {};
+  const byTaskType = {};
   const bySource = new Map();
+  const byDuePendingTaskType = {};
+  const byDuePendingSource = {};
   const duePending = [];
   const staleRunning = [];
   const retryable = [];
@@ -6354,7 +6357,9 @@ function collectionOperationsJobStats(jobs = [], now = Date.now()) {
   for (const job of Array.isArray(jobs) ? jobs : []) {
     const status = String(job.status || "unknown");
     const sourceKey = String(job.source_key || "unknown");
+    const taskType = collectionOperationsJobTaskType(job);
     byStatus[status] = (byStatus[status] || 0) + 1;
+    byTaskType[taskType] = (byTaskType[taskType] || 0) + 1;
     const source = bySource.get(sourceKey) || {
       source_key: sourceKey,
       total: 0,
@@ -6383,6 +6388,8 @@ function collectionOperationsJobStats(jobs = [], now = Date.now()) {
       && Number(job.attempt_count || 0) < Number(job.max_attempts || 0);
     if (due) {
       source.due_pending += 1;
+      byDuePendingTaskType[taskType] = (byDuePendingTaskType[taskType] || 0) + 1;
+      byDuePendingSource[sourceKey] = (byDuePendingSource[sourceKey] || 0) + 1;
       duePending.push(job);
     }
     if (stale) {
@@ -6398,6 +6405,9 @@ function collectionOperationsJobStats(jobs = [], now = Date.now()) {
   }
   return {
     byStatus,
+    byTaskType,
+    byDuePendingTaskType,
+    byDuePendingSource,
     bySource,
     duePending,
     staleRunning,
@@ -6488,6 +6498,9 @@ export function getSentimentCollectionOperationsReport({
   maxSources = 8,
   retryLimit = 20,
   staleMultiplier = 3,
+  includeJobDetails = false,
+  includeSourceDetails = false,
+  includePlanDetails = false,
   now = Date.now(),
 } = {}) {
   const plan = planSentimentContinuousCollection({
@@ -6512,6 +6525,10 @@ export function getSentimentCollectionOperationsReport({
   const actionable = sources.filter(item => !["healthy", "disabled"].includes(item.health));
   const ready = new Set(plan.ready_scan_sources || []);
   const dueRetryJobs = jobStats.duePending.filter(job => String(job.reason || "").includes("retry"));
+  const compactJobs = jobsList => includeJobDetails ? jobsList : jobsList.map(compactCollectionOperationJob);
+  const compactSources = sourceList => includeSourceDetails ? sourceList : sourceList.map(compactCollectionOperationSource);
+  const duePendingTaskTypes = topCollectionOperationCounts(jobStats.byDuePendingTaskType, 20);
+  const recommendedExecuteDuePayloads = collectionOperationsExecuteDuePayloads(jobStats, { limit: 8 });
   return {
     ok: true,
     generated_at: new Date(now).toISOString(),
@@ -6531,8 +6548,12 @@ export function getSentimentCollectionOperationsReport({
       backlog_jobs: jobs.filter(job => ["pending", "running"].includes(String(job.status || ""))).length,
       terminal_failure_jobs: jobStats.terminalFailures.length,
       by_job_status: jobStats.byStatus,
+      by_job_task_type: jobStats.byTaskType,
+      due_pending_by_task_type: duePendingTaskTypes,
+      due_pending_by_source: topCollectionOperationCounts(jobStats.byDuePendingSource, 20),
       highest_priority_source: sources[0]?.source_key || "",
-      recommended_next_action: dueRetryJobs.length
+      recommended_execute_due_payloads: recommendedExecuteDuePayloads,
+      recommended_next_action: dueRetryJobs.length || recommendedExecuteDuePayloads.length
         ? "execute-due-retry-jobs"
         : ready.size || actionable.some(item => item.recommended_actions.includes("run-continuous-collection"))
           ? "run-continuous-collection"
@@ -6541,15 +6562,135 @@ export function getSentimentCollectionOperationsReport({
             : "keep-monitoring",
     },
     ready_scan_sources: plan.ready_scan_sources || [],
-    actionable_sources: actionable.slice(0, 30),
-    sources,
+    detail_mode: {
+      jobs: includeJobDetails ? "full" : "compact",
+      sources: includeSourceDetails ? "full" : "compact",
+      plan: includePlanDetails ? "full" : "summary",
+    },
+    actionable_sources: compactSources(actionable.slice(0, 30)),
+    sources: compactSources(sources),
     job_backlog: {
-      due_pending: jobStats.duePending.slice(0, 30),
-      stale_running: jobStats.staleRunning.slice(0, 30),
-      retryable: jobStats.retryable.slice(0, 30),
+      detail_mode: includeJobDetails ? "full" : "compact",
+      due_pending_by_task_type: duePendingTaskTypes,
+      due_pending_by_source: topCollectionOperationCounts(jobStats.byDuePendingSource, 20),
+      recommended_execute_due_payloads: recommendedExecuteDuePayloads,
+      due_pending: compactJobs(jobStats.duePending.slice(0, 30)),
+      stale_running: compactJobs(jobStats.staleRunning.slice(0, 30)),
+      retryable: compactJobs(jobStats.retryable.slice(0, 30)),
     },
     continuous_plan_summary: plan.summary,
-    retry_plan: plan.retry_plan,
+    retry_plan: includePlanDetails ? plan.retry_plan : null,
+  };
+}
+
+function collectionOperationSourceInputFromRecord(source = {}, { now = Date.now() } = {}) {
+  const intervalMinutes = Math.max(1, Number(source.scan_interval_minutes || 0) || 1);
+  const lastScanMs = new Date(source.last_scan_at || "").getTime();
+  const due = source.enabled !== false && (!Number.isFinite(lastScanMs) || Number(now) - lastScanMs >= intervalMinutes * 60 * 1000);
+  return {
+    ...source,
+    realtime: source.config?.realtime === true || source.source_type === "social",
+    due,
+    should_scan: due,
+    status: source.last_error ? "error" : due ? "due" : "ok",
+    action: due ? "scan-due-source" : "wait-scan-interval",
+    priority_score: Number(source.priority || 0),
+  };
+}
+
+function collectionOperationSourceRows(searchSettings = null) {
+  const search = readSentimentSearchSettings(searchSettings);
+  const allowedSources = Array.isArray(search?.sources) && search.sources.length
+    ? new Set(search.sources.map(source => String(source || "").trim()).filter(Boolean))
+    : null;
+  return listSentimentSources().filter(source => !allowedSources || allowedSources.has(source.source_key));
+}
+
+export function getSentimentCollectionOperationsFastReport({
+  mode = SCAN_MODE_FAST,
+  searchSettings = null,
+  staleMultiplier = 3,
+  includeJobDetails = false,
+  includeSourceDetails = false,
+  now = Date.now(),
+} = {}) {
+  const normalizedMode = normalizeSentimentScanMode(mode);
+  const jobs = listSentimentCollectionJobs({ limit: 500 });
+  const jobStats = collectionOperationsJobStats(jobs, now);
+  const sources = collectionOperationSourceRows(searchSettings).map(source => collectionOperationsSourceStatus(
+    collectionOperationSourceInputFromRecord(source, { now }),
+    jobStats.bySource.get(source.source_key) || {},
+    { now, staleMultiplier },
+  )).sort((a, b) => {
+    const rank = { critical: 0, degraded: 1, watch: 2, healthy: 3, disabled: 4 };
+    return (rank[a.health] ?? 9) - (rank[b.health] ?? 9)
+      || b.priority_score - a.priority_score
+      || a.source_key.localeCompare(b.source_key);
+  });
+  const actionable = sources.filter(item => !["healthy", "disabled"].includes(item.health));
+  const readyScanSources = sources.filter(source => source.enabled !== false && source.due).map(source => source.source_key);
+  const dueRetryJobs = jobStats.duePending.filter(job => String(job.reason || "").includes("retry"));
+  const compactJobs = jobsList => includeJobDetails ? jobsList : jobsList.map(compactCollectionOperationJob);
+  const compactSources = sourceList => includeSourceDetails ? sourceList : sourceList.map(compactCollectionOperationSource);
+  const duePendingTaskTypes = topCollectionOperationCounts(jobStats.byDuePendingTaskType, 20);
+  const recommendedExecuteDuePayloads = collectionOperationsExecuteDuePayloads(jobStats, { limit: 8 });
+  return {
+    ok: true,
+    fast_summary: true,
+    generated_at: new Date(now).toISOString(),
+    mode: normalizedMode,
+    summary: {
+      total_sources: sources.length,
+      healthy_sources: sources.filter(item => item.health === "healthy").length,
+      watch_sources: sources.filter(item => item.health === "watch").length,
+      degraded_sources: sources.filter(item => item.health === "degraded").length,
+      critical_sources: sources.filter(item => item.health === "critical").length,
+      disabled_sources: sources.filter(item => item.health === "disabled").length,
+      ready_scan_sources: readyScanSources.length,
+      due_retry_jobs: dueRetryJobs.length,
+      due_pending_jobs: jobStats.duePending.length,
+      stale_running_jobs: jobStats.staleRunning.length,
+      retryable_jobs: jobStats.retryable.length,
+      backlog_jobs: jobs.filter(job => ["pending", "running"].includes(String(job.status || ""))).length,
+      terminal_failure_jobs: jobStats.terminalFailures.length,
+      by_job_status: jobStats.byStatus,
+      by_job_task_type: jobStats.byTaskType,
+      due_pending_by_task_type: duePendingTaskTypes,
+      due_pending_by_source: topCollectionOperationCounts(jobStats.byDuePendingSource, 20),
+      highest_priority_source: sources[0]?.source_key || "",
+      recommended_execute_due_payloads: recommendedExecuteDuePayloads,
+      recommended_next_action: dueRetryJobs.length || recommendedExecuteDuePayloads.length
+        ? "execute-due-retry-jobs"
+        : readyScanSources.length || actionable.some(item => item.recommended_actions.includes("run-continuous-collection"))
+          ? "run-continuous-collection"
+          : actionable.some(item => item.recommended_actions.includes("review-source-quality-policy"))
+            ? "review-source-quality-policy"
+            : "keep-monitoring",
+    },
+    ready_scan_sources: readyScanSources,
+    detail_mode: {
+      jobs: includeJobDetails ? "full" : "compact",
+      sources: includeSourceDetails ? "full" : "compact",
+      plan: "fast-summary",
+    },
+    actionable_sources: compactSources(actionable.slice(0, 30)),
+    sources: compactSources(sources),
+    job_backlog: {
+      detail_mode: includeJobDetails ? "full" : "compact",
+      due_pending_by_task_type: duePendingTaskTypes,
+      due_pending_by_source: topCollectionOperationCounts(jobStats.byDuePendingSource, 20),
+      recommended_execute_due_payloads: recommendedExecuteDuePayloads,
+      due_pending: compactJobs(jobStats.duePending.slice(0, 30)),
+      stale_running: compactJobs(jobStats.staleRunning.slice(0, 30)),
+      retryable: compactJobs(jobStats.retryable.slice(0, 30)),
+    },
+    continuous_plan_summary: {
+      mode: normalizedMode,
+      ready_scan_sources: readyScanSources.length,
+      source_count: sources.length,
+      fast_summary: true,
+    },
+    retry_plan: null,
   };
 }
 
@@ -15314,6 +15455,87 @@ export function planSentimentEventClusterFollowupJobs({
   };
 }
 
+function collectionOperationsJobTaskType(job = {}) {
+  return String(job.metadata?.task_type || job.metadata?.taskType || job.reason || "unknown").trim() || "unknown";
+}
+
+function topCollectionOperationCounts(counts = {}, limit = 12) {
+  return Object.entries(counts || {})
+    .map(([key, count]) => ({ key, count: Number(count || 0) }))
+    .filter(item => item.key && item.count > 0)
+    .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
+    .slice(0, Math.max(1, Math.min(50, Number(limit) || 12)));
+}
+
+function compactCollectionOperationJob(job = {}) {
+  const query = Array.isArray(job.query) ? job.query : [];
+  return {
+    id: job.id,
+    job_key: job.job_key || "",
+    source_key: job.source_key || "",
+    label: job.label || "",
+    reason: job.reason || "",
+    task_type: collectionOperationsJobTaskType(job),
+    mode: job.mode || "",
+    status: job.status || "",
+    priority: Number(job.priority || 0),
+    scheduled_at: job.scheduled_at || null,
+    started_at: job.started_at || null,
+    cooling_until: job.cooling_until || null,
+    attempt_count: Number(job.attempt_count || 0),
+    max_attempts: Number(job.max_attempts || 0),
+    result_count: Number(job.result_count || 0),
+    failure_count: Number(job.failure_count || 0),
+    query_count: query.length,
+    query_preview: query.slice(0, 5),
+    message: job.message || "",
+  };
+}
+
+function compactCollectionOperationSource(source = {}) {
+  return {
+    source_key: source.source_key || "",
+    label: source.label || "",
+    source_type: source.source_type || "",
+    source_family: source.source_family || "",
+    enabled: source.enabled !== false,
+    realtime: source.realtime === true,
+    health: source.health || "",
+    issues: Array.isArray(source.issues) ? source.issues.slice(0, 8) : [],
+    recommendation: source.recommendation || "",
+    recommended_actions: Array.isArray(source.recommended_actions) ? source.recommended_actions.slice(0, 6) : [],
+    action: source.action || "",
+    should_scan: source.should_scan === true,
+    due: source.due === true,
+    status: source.status || "",
+    priority_score: Number(source.priority_score || 0),
+    scan_interval_minutes: Number(source.scan_interval_minutes || 0),
+    last_scan_at: source.last_scan_at || null,
+    last_success_at: source.last_success_at || null,
+    last_error: source.last_error || "",
+    age_minutes: source.age_minutes,
+    scan_age_minutes: source.scan_age_minutes,
+    next_scan_at: source.next_scan_at || null,
+    job_backlog: source.job_backlog || {},
+  };
+}
+
+function collectionOperationsExecuteDuePayloads(jobStats = {}, { limit = 12 } = {}) {
+  return topCollectionOperationCounts(jobStats.byDuePendingTaskType, limit)
+    .map(item => ({
+      task_type: item.key,
+      due_pending_jobs: item.count,
+      request: {
+        async: true,
+        taskType: item.key,
+        limit: Math.min(5, Math.max(1, item.count)),
+        concurrency: Math.min(3, Math.max(1, item.count)),
+        drainBatches: Math.min(5, Math.max(1, Math.ceil(item.count / 5))),
+        collectionJobTimeoutMs: 5000,
+      },
+    }));
+}
+
 export function applySentimentEventClusterFollowupJobs({
   apply = false,
   limit = 20,
@@ -20936,7 +21158,7 @@ export function startSentimentContinuousCollectionRun(options = {}) {
   };
 }
 
-async function executeDueSentimentCollectionJobDrain({
+export async function executeDueSentimentCollectionJobDrain({
   batches = 1,
   limit = 5,
   concurrency = 1,
