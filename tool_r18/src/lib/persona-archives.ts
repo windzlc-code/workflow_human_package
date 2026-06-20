@@ -1011,6 +1011,33 @@ export async function updateArchiveEpisode(
   return savedPost ? archivePostsToEpisodes([savedPost])[0] : null;
 }
 
+export async function updateArchivePostMedia(
+  archiveId: string,
+  archivePostId: string,
+  media: {
+    imageUrl: string;
+    imageHistory?: PersonaArchivePost["imageHistory"];
+    updatedAt?: string;
+  },
+): Promise<PersonaArchivePost | null> {
+  const archive = await loadPersonaArchive(archiveId);
+  if (!archive || !archivePostId) return null;
+  const now = media.updatedAt || new Date().toISOString();
+  const updatePost = (post: PersonaArchivePost): PersonaArchivePost => post.id === archivePostId
+    ? {
+        ...post,
+        imageUrl: media.imageUrl,
+        imageHistory: media.imageHistory,
+        updatedAt: now,
+      }
+    : post;
+  const saved = await savePersonaArchive(withPlatformQueues(
+    archive,
+    (posts) => posts.map(updatePost),
+  ));
+  return saved.posts.find((post) => post.id === archivePostId) || null;
+}
+
 export async function deleteArchiveEpisode(
   archiveId: string,
   archivePostId: string,

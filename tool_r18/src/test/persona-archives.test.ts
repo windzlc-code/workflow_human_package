@@ -15,6 +15,7 @@ import {
   reorderArchivePosts,
   savePersonaArchive,
   updateArchiveEpisode,
+  updateArchivePostMedia,
   updatePersonaArchivePadBinding,
   updatePersonaArchiveProfile,
 } from "@/lib/persona-archives";
@@ -65,6 +66,43 @@ describe("persona archives migration", () => {
     expect(saved?.posts).toHaveLength(1);
     expect(saved?.posts[0].content).toBe("这条要配视频发布");
     expect(saved?.posts[0].imageUrl).toBe(mediaUrl);
+  });
+
+  it("updates generated post media inside platform queues", async () => {
+    const now = "2026-06-01T00:00:00.000Z";
+    const post = {
+      id: "post-with-platform-copy",
+      title: "post #1",
+      content: "content needing generated image",
+      wordCount: 31,
+      orderIndex: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await savePersonaArchive({
+      id: "platform-media-sync",
+      name: "platform media sync",
+      content: "persona",
+      createdAt: now,
+      updatedAt: now,
+      posts: [{ ...post, imageUrl: "https://example.test/new-before-save.jpg" }],
+      platformPosts: {
+        threads: [{ ...post }],
+        telegram: [{ ...post }],
+      },
+    } as any);
+
+    const savedPost = await updateArchivePostMedia("platform-media-sync", post.id, {
+      imageUrl: "https://example.test/generated.jpg",
+      imageHistory: [{ imageUrl: "https://example.test/generated.jpg", createdAt: now, source: "generated-post-image" } as any],
+      updatedAt: now,
+    });
+    const reloaded = getCachedPersonaArchive("platform-media-sync");
+
+    expect(savedPost?.imageUrl).toBe("https://example.test/generated.jpg");
+    expect(reloaded?.posts[0].imageUrl).toBe("https://example.test/generated.jpg");
+    expect(reloaded?.platformPosts?.threads?.[0]?.imageUrl).toBe("https://example.test/generated.jpg");
+    expect(reloaded?.platformPosts?.telegram?.[0]?.imageUrl).toBe("https://example.test/generated.jpg");
   });
 
   it("loads one archive without parsing the full archive array", () => {

@@ -15,10 +15,11 @@ import { resolveVmosCredentials, readRuntimeApiConfig } from "@/runtime/node/con
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
+import { buildRegeneratePostInstruction, isRegeneratedPostTooSimilar } from "@/core/persona/regenerate-post-instruction";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
-import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
+import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updateArchivePostMedia, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
 import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
@@ -694,7 +695,7 @@ type PendingPaidR18VideoPostAction = {
 type PendingGeneratedPostImageGroupFlow = {
   archiveId: string;
   archiveName: string;
-  posts: Array<{ id?: string; content: string }>;
+  posts: Array<{ id?: string; content: string; archiveDisplayIndex?: number }>;
   currentIndex: number;
   prompt: string;
   generatedPostsListCallback: string;
@@ -2910,7 +2911,6 @@ function extractTweetStyleLinkTextFromTelegramMessage(msg: TelegramBot.Message):
 }
 
 function getTweetStyleLinkPresentation(setup: any): { url: string; text: string } | null {
-  if (!isJinjunyaLinkPersona(setup)) return null;
   const url = normalizeTweetStyleLinkUrl(String(setup?.tweetStyleLinkUrl || ""));
   if (!url) return null;
   const text = String(setup?.tweetStyleLinkText || "").trim();
@@ -4422,7 +4422,7 @@ async function sendPostImageRatioPicker(bot: TelegramBot, chatId: number, msgId:
 }
 
 function shouldSelectFreeGeneratedPostImageRatio(state: PendingGeneratePostState) {
-  return state.contentBranch === "nonr18" && !state.textOnly;
+  return !state.textOnly;
 }
 
 async function sendFreeGeneratedPostImageRatioPicker(bot: TelegramBot, chatId: number, msgId: number | undefined, state: PendingGeneratePostState) {
@@ -6345,6 +6345,7 @@ function buildPostImageGroupCandidateKeyboard(args: {
   content: string;
   imageUrls: string[];
   displayIndex: number;
+  archiveDisplayIndex?: number;
   paidR18Context?: PendingPostImageCandidateSelectionAction["paidR18Context"];
 }) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
@@ -6356,7 +6357,7 @@ function buildPostImageGroupCandidateKeyboard(args: {
       postId: args.postId,
       content: args.content,
       imageUrl,
-      displayIndex: args.displayIndex,
+      displayIndex: args.archiveDisplayIndex || args.displayIndex,
       candidateIndex: index + 1,
       paidR18Context: args.paidR18Context,
     });
@@ -6374,24 +6375,50 @@ async function sendPostImageCandidateGroupMessage(bot: TelegramBot, chatId: numb
   content: string;
   imageUrls: string[];
   displayIndex: number;
+  archiveDisplayIndex?: number;
   totalPosts: number;
+  displayFailureKeyboard?: Array<Array<{ text: string; callback_data: string }>>;
   paidR18Context?: PendingPostImageCandidateSelectionAction["paidR18Context"];
 }) {
   const caption = args.paidR18Context
-    ? `\uD83D\uDDBC \u7B2C ${args.displayIndex}/${args.totalPosts} \u7BC7\u4ED8\u8CBB R18 \u5019\u9078\u5716\uFF08\u5171 ${args.imageUrls.length} \u5F35\uFF09`
-    : `\uD83D\uDDBC \u7B2C ${args.displayIndex}/${args.totalPosts} \u7BC7\u5019\u9078\u914D\u5716\uFF08\u5171 ${args.imageUrls.length} \u5F35\uFF09`;
+    ? `🖼 第 ${args.displayIndex}/${args.totalPosts} 篇付費 R18 候選圖（共 ${args.imageUrls.length} 張）`
+    : `🖼 第 ${args.displayIndex}/${args.totalPosts} 篇候選配圖（共 ${args.imageUrls.length} 張）`;
+  const failedIndexes: number[] = [];
   for (let index = 0; index < args.imageUrls.length; index += 1) {
-    await telegramBestEffort("generatePosts.sendPhotoCandidate", bot.sendPhoto(chatId, resolveTelegramPhotoInput(args.imageUrls[index]), {
-      caption: `${caption}\n第 ${index + 1}/${args.imageUrls.length} 張`,
+    const photoCaption = `${caption}\n第 ${index + 1}/${args.imageUrls.length} 張`;
+    const sent = await telegramBestEffort("generatePosts.sendPhotoCandidate", bot.sendPhoto(chatId, resolveTelegramPhotoInput(args.imageUrls[index]), {
+      caption: photoCaption,
     }), 45_000);
+    if (!sent && args.displayFailureKeyboard) {
+      let fallbackSent = false;
+      try {
+        const buffer = await loadTelegramImageBuffer(args.imageUrls[index]);
+        fallbackSent = Boolean(await telegramBestEffort("generatePosts.sendPhotoCandidateBuffer", bot.sendPhoto(chatId, buffer, {
+          caption: photoCaption,
+        }), 45_000));
+      } catch (error) {
+        console.warn("[telegram][candidate_photo_buffer_fallback_failed]", error instanceof Error ? error.message : error);
+      }
+      if (!fallbackSent) failedIndexes.push(index + 1);
+    }
+  }
+  if (failedIndexes.length && args.displayFailureKeyboard) {
+    await telegramBestEffort("generatePosts.sendCandidateGroupDisplayFailed", bot.sendMessage(chatId, [
+      `❌ 第 ${args.displayIndex}/${args.totalPosts} 組候選配圖顯示失敗。`,
+      `未成功顯示：第 ${failedIndexes.join("、")} 張。`,
+      "原因：圖片已生成，但 Telegram 無法取得或傳送部分圖片；請重新生成這組，避免選到未顯示的圖片。",
+    ].join("\n"), {
+      reply_markup: { inline_keyboard: args.displayFailureKeyboard },
+    }), 45_000);
+    return false;
   }
   await telegramBestEffort("generatePosts.sendCandidateGroupPicker", bot.sendMessage(chatId, [
     args.paidR18Context
-      ? `\u8ACB\u70BA\u7B2C ${args.displayIndex}/${args.totalPosts} \u7BC7\u4ED8\u8CBB\u63A8\u6587\u9078\u64C7\u8981\u63D2\u5165\u7684 R18 \u5716\u7247\u3002`
-      : `\u8ACB\u70BA\u7B2C ${args.displayIndex}/${args.totalPosts} \u7BC7\u63A8\u6587\u9078\u64C7\u8981\u5BEB\u5165\u7684\u5716\u7247\u3002`,
+      ? `請為第 ${args.displayIndex}/${args.totalPosts} 篇付費推文選擇要插入的 R18 圖片。`
+      : `請為第 ${args.displayIndex}/${args.totalPosts} 篇推文選擇要寫入的圖片。`,
     args.paidR18Context
-      ? "\u9078\u4E2D\u5F8C\u624D\u6703\u6839\u64DA\u9019\u5F35\u5716\u751F\u6210\u4ED8\u8CBB\u7FA4\u6587\u6848\uFF1B\u5B8C\u6210\u5F8C\u518D\u9EDE\u64CA\u751F\u6210\u4E0B\u4E00\u7D44\u5716\u7247\u3002"
-      : "\u9078\u5B8C\u5F8C\uFF0C\u7CFB\u7D71\u6703\u63D0\u793A\u4F60\u518D\u9EDE\u64CA\u751F\u6210\u4E0B\u4E00\u7D44\u5716\u7247\u3002",
+      ? "選中後才會根據這張圖生成付費群文案；完成後再點擊生成下一組圖片。"
+      : "選完後，系統會提示你再點擊生成下一組圖片。",
   ].join(String.fromCharCode(10)), {
     reply_markup: buildPostImageGroupCandidateKeyboard({
       archiveId: args.archiveId,
@@ -6399,9 +6426,11 @@ async function sendPostImageCandidateGroupMessage(bot: TelegramBot, chatId: numb
       content: args.content,
       imageUrls: args.imageUrls,
       displayIndex: args.displayIndex,
+      archiveDisplayIndex: args.archiveDisplayIndex,
       paidR18Context: args.paidR18Context,
     }),
   }), 45_000);
+  return true;
 }
 
 async function generateClosedPersonaPostImage(args: {
@@ -6796,7 +6825,12 @@ async function generateCurrentFreeGeneratedPostImageGroup(bot: TelegramBot, chat
     content: post.content,
     imageUrls: image.imageUrls,
     displayIndex,
+    archiveDisplayIndex: post.archiveDisplayIndex,
     totalPosts: flow.posts.length,
+    displayFailureKeyboard: [
+      [{ text: "\uD83D\uDD01 \u91CD\u65B0\u751F\u6210\u9019\u7D44", callback_data: "genpost_imggrp_retry" }],
+      [{ text: "\uD83D\uDCDD \u67E5\u770B\u63A8\u6587\u5217\u8868", callback_data: flow.generatedPostsListCallback }],
+    ],
   });
 }
 
@@ -7849,6 +7883,7 @@ async function attachSelectedImageCandidateToArchivePost(args: {
   postId?: string;
   content: string;
   imageUrl: string;
+  displayIndex?: number;
 }) {
   const persisted = await attachGeneratedImageToArchivePost({
     archiveId: args.archiveId,
@@ -7856,12 +7891,17 @@ async function attachSelectedImageCandidateToArchivePost(args: {
     content: args.content,
     imageUrl: args.imageUrl,
     prompt: args.content,
+    displayIndex: args.displayIndex,
   });
   if (!persisted) throw new Error("\u5716\u7247\u5DF2\u9078\u64C7\uFF0C\u4F46\u5BEB\u5165\u63A8\u6587\u5931\u6557");
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const wanted = args.content.trim();
   const matchedPost = archive?.posts.find((post) => args.postId && post.id === args.postId)
-    || [...(archive?.posts || [])].reverse().find((post) => archivePostContentMatches(post.content, wanted));
+    || [...(archive?.posts || [])].reverse().find((post) => archivePostContentMatches(post.content, wanted))
+    || (Number.isInteger(args.displayIndex) && Number(args.displayIndex) > 0
+      ? archive?.posts.find((post) => post.orderIndex === Number(args.displayIndex) - 1)
+        || archive?.posts[Number(args.displayIndex) - 1]
+      : undefined);
   const imageHistory = Array.isArray((matchedPost as any)?.imageHistory) ? (matchedPost as any).imageHistory : [];
   const latestHistoryImage = imageHistory.length ? String(imageHistory[imageHistory.length - 1]?.imageUrl || "").trim() : "";
   return {
@@ -7875,7 +7915,7 @@ async function resolveGeneratedArchivePostsForImages(args: {
   archiveId: string;
   generatedPosts: Array<{ id?: string; content?: string }>;
   initialPostCount: number;
-}): Promise<Array<{ id?: string; content: string }>> {
+}): Promise<Array<{ id?: string; content: string; archiveDisplayIndex?: number }>> {
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const appendedPosts = archive?.posts?.slice(Math.max(0, args.initialPostCount)) || [];
   const usedIndexes = new Set<number>();
@@ -7895,7 +7935,12 @@ async function resolveGeneratedArchivePostsForImages(args: {
       if (index >= 0) {
         usedIndexes.add(index);
         const matched = appendedPosts[index];
-        return { id: matched.id, content: content || matched.content };
+        const archiveIndex = args.initialPostCount + index;
+        return {
+          id: matched.id,
+          content: content || matched.content,
+          archiveDisplayIndex: typeof matched.orderIndex === "number" ? matched.orderIndex + 1 : archiveIndex + 1,
+        };
       }
       return { id: post.id, content };
     })
@@ -7908,6 +7953,7 @@ async function attachGeneratedImageToArchivePost(args: {
   content?: string;
   imageUrl: string;
   prompt?: string;
+  displayIndex?: number;
 }) {
   const archive = await loadPersonaArchive(args.archiveId);
   if (!archive) return false;
@@ -7922,6 +7968,13 @@ async function attachGeneratedImageToArchivePost(args: {
         : latest;
     }, -1);
   }
+  if (index < 0 && Number.isInteger(args.displayIndex) && Number(args.displayIndex) > 0) {
+    const expectedOrderIndex = Number(args.displayIndex) - 1;
+    index = archive.posts.findIndex((post) => post.orderIndex === expectedOrderIndex);
+    if (index < 0 && expectedOrderIndex >= 0 && expectedOrderIndex < archive.posts.length) {
+      index = expectedOrderIndex;
+    }
+  }
   if (index < 0) return false;
   const post = archive.posts[index];
   const now = new Date().toISOString();
@@ -7934,17 +7987,12 @@ async function attachGeneratedImageToArchivePost(args: {
       source: "generated-post-image",
     },
   ];
-  await savePersonaArchive({
-    ...archive,
-    posts: archive.posts.map((item, currentIndex) => currentIndex === index
-      ? {
-          ...item,
-          imageUrl: args.imageUrl,
-          imageHistory,
-          updatedAt: now,
-        }
-      : item),
+  const savedPost = await updateArchivePostMedia(args.archiveId, post.id, {
+    imageUrl: args.imageUrl,
+    imageHistory,
+    updatedAt: now,
   });
+  if (!savedPost) return false;
   invalidatePersonaListCache();
   return true;
 }
@@ -7959,32 +8007,33 @@ async function regenerateArchivePostContent(args: {
   const original = archive.posts[originalIndex];
   if (!original) throw new Error("推文不存在");
 
-  const result = await runPersonaWorkflow({
-    action: "generate-posts",
-    archiveId: args.archiveId,
-    count: 1,
-    textModelBranch: original.telegramGroupContentType === "paid" ? "paid" : "free",
-    customInstruction: [
-      "重新生成下面这 1 篇待發佈推文。",
-      "要求：",
-      "1. 只生成一篇新的推文文案，不要解释，不要输出编号。",
-      "2. 保持同一个人设、同一主题方向和同一语言风格，但表达要明显不同。",
-      "3. 不要复用原文句式；如果原文有具体主题，必须保留主题，不要跑题。",
-      "",
-      `原推文：${original.content}`,
-    ].join("\n"),
-  } as any);
-
-  const generated = ((result as any)?.posts || [])[0];
-  const generatedPostId = String(generated?.id || generated?.archivePostId || "");
-  const generatedContent = String(generated?.content || "").trim();
-  if (!generatedContent) throw new Error("AI 未返回新推文内容");
+  let generated: any = null;
+  let generatedContent = "";
+  const generatedPostIds = new Set<string>();
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = await runPersonaWorkflow({
+      action: "generate-posts",
+      archiveId: args.archiveId,
+      count: 1,
+      textModelBranch: original.telegramGroupContentType === "paid" ? "paid" : "free",
+      customInstruction: buildRegeneratePostInstruction(original.content, attempt),
+    } as any);
+    generated = ((result as any)?.posts || [])[0];
+    const generatedPostId = String(generated?.id || generated?.archivePostId || "");
+    if (generatedPostId) generatedPostIds.add(generatedPostId);
+    generatedContent = String(generated?.content || "").trim();
+    if (!generatedContent) throw new Error("AI 未返回新推文內容");
+    if (!isRegeneratedPostTooSimilar(original.content, generatedContent)) break;
+    if (attempt === 3) {
+      throw new Error("AI 連續返回與原推文過於相似的內容，請稍後再試或換一個生成方向。");
+    }
+  }
 
   const latestArchive = await loadPersonaArchive(args.archiveId);
   if (!latestArchive) throw new Error("人设不存在");
   const now = new Date().toISOString();
   const nextPosts = latestArchive.posts
-    .filter((post) => !generatedPostId || post.id !== generatedPostId)
+    .filter((post) => !generatedPostIds.has(post.id))
     .map((post) => post.id === args.postId
       ? {
           ...post,
@@ -14307,15 +14356,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const textOnly = remainder.slice(lastUnderscore + 1) === "textonly";
       const archive = await loadPersonaArchive(archiveId).catch(() => null);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      setPendingGeneratePost(chatId, {
+      const nextState: PendingGeneratePostState = {
         archiveId,
         archiveName: archive.name,
         count,
         textOnly,
         selectedMemoryEntryIds: [],
-        stage: "await_prompt",
-      });
-      await sendGeneratePostPromptInputStep(bot, chatId, msgId, pendingGeneratePosts.get(chatId)!);
+        stage: shouldSelectFreeGeneratedPostImageRatio({ archiveId, archiveName: archive.name, count, textOnly, selectedMemoryEntryIds: [], stage: "await_count" } as PendingGeneratePostState) ? "await_ratio" : "await_prompt",
+      };
+      setPendingGeneratePost(chatId, nextState);
+      if (nextState.stage === "await_ratio") {
+        await sendFreeGeneratedPostImageRatioPicker(bot, chatId, msgId, nextState);
+      } else {
+        await sendGeneratePostPromptInputStep(bot, chatId, msgId, nextState);
+      }
       return;
     }
 
@@ -15520,7 +15574,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
 
-    if (data.startsWith("tweetstyle_")) {
+    if (data.startsWith("tweetstyle_") && !data.startsWith("tweetstyle_reset_")) {
       const id = data.slice("tweetstyle_".length);
       const archive = await loadPersonaForThisBot(id).catch(() => null);
       if (!archive) {
@@ -15531,6 +15585,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       pendingActions.set(chatId, { type: "set-persona-tweet-style", archiveId: id });
       const currentStyle = String((archive.setup as any)?.tweetStyleProfile || "").trim();
+      const hasTweetStyleConfig = Boolean(currentStyle || String((archive.setup as any)?.tweetStyleSample || "").trim() || String((archive.setup as any)?.tweetStyleLinkUrl || "").trim());
       await safeEditOrSend(
         bot,
         chatId,
@@ -15546,9 +15601,50 @@ function sendMainMenu(chatId: number, msgId?: number) {
         ].join("\n"),
         {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "\u274C \u53D6\u6D88", callback_data: `settings_${id}` }]] },
+          reply_markup: {
+            inline_keyboard: [
+              ...(hasTweetStyleConfig ? [[{ text: "\u267B\uFE0F \u6062\u5FA9\u521D\u59CB\u98A8\u683C", callback_data: `tweetstyle_reset_${id}` }]] : []),
+              [{ text: "\u274C \u53D6\u6D88", callback_data: `settings_${id}` }],
+            ],
+          },
         },
       );
+      return;
+    }
+
+    if (data.startsWith("tweetstyle_reset_")) {
+      const id = data.slice("tweetstyle_reset_".length);
+      pendingActions.delete(chatId);
+      const archive = await loadPersonaForThisBot(id).catch(() => null);
+      if (!archive) {
+        await safeEditOrSend(bot, chatId, msgId, "\u274C \u7576\u524D Bot \u4E0D\u80FD\u8B80\u53D6\u9019\u500B\u4EBA\u8A2D\u3002", {
+          reply_markup: { inline_keyboard: [[{ text: "\uD83C\uDFE0 \u4E3B\u9078\u55AE", callback_data: "back_main" }]] },
+        });
+        return;
+      }
+      const updated = await updatePersonaArchiveProfile(id, {
+        setup: {
+          ...archive.setup,
+          tweetStyleSample: "",
+          tweetStyleProfile: "",
+          tweetStyleLinkUrl: "",
+          tweetStyleLinkText: "",
+          tweetStyleUpdatedAt: "",
+        } as any,
+      }).catch((error: any) => {
+        console.error("[telegram][reset_tweet_style_error]", error?.message || error);
+        return null;
+      });
+      if (!updated) {
+        await safeEditOrSend(bot, chatId, msgId, "\u274C \u63A8\u6587\u98A8\u683C\u6062\u5FA9\u5931\u6557\uFF0C\u8ACB\u7A0D\u5F8C\u91CD\u8A66\u3002", {
+          reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE\u8A2D\u5B9A", callback_data: `settings_${id}` }]] },
+        });
+        return;
+      }
+      invalidatePersonaListCache();
+      await safeEditOrSend(bot, chatId, msgId, "\u2705 \u5DF2\u6062\u5FA9\u521D\u59CB\u63A8\u6587\u98A8\u683C\u3002\n\n\u5F8C\u7E8C\u751F\u6210\u5C07\u56DE\u5230\u901A\u7528\u4EBA\u8A2D\u63A8\u6587\u898F\u5247\u3002", {
+        reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE\u8A2D\u5B9A", callback_data: `settings_${id}` }]] },
+      });
       return;
     }
 

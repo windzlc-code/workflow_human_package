@@ -58,7 +58,7 @@ function memorySummaryForPrompt(summary: string): string {
 
 function buildTweetStyleInstruction(setup: any): string {
   const profile = String(setup?.tweetStyleProfile || "").trim();
-  const linkUrl = isJinjunyaLinkPersona(setup) ? String(setup?.tweetStyleLinkUrl || "").trim() : "";
+  const linkUrl = String(setup?.tweetStyleLinkUrl || "").trim();
   if (!profile && !linkUrl) return "";
   return [
     "【固定推文风格】",
@@ -68,6 +68,16 @@ function buildTweetStyleInstruction(setup: any): string {
     linkUrl ? "Every generated post must include this fixed link exactly once. The fixed link must be the final line of the post; do not add body text, questions, emojis, or punctuation after the link." : "",
     "必须使用当前人设、记忆和用户提示生成全新内容；如果没有明确主题，就换一个同人设的日常/观点/互动主题，不要沿用案例主题。",
   ].filter(Boolean).join("\n");
+}
+
+function buildChineseScriptInstruction(archive: { id?: string; setup?: any }): string {
+  if (String(archive.id || "").startsWith("workflow-persona-")) return "";
+  return [
+    "【Traditional Chinese output rule】",
+    "1. Final post body must be generated directly in Traditional Chinese.",
+    "2. Use natural Taiwan social-media wording; do not output Simplified Chinese.",
+    "3. If persona data, memories, trends, or user input contain Simplified Chinese, only use them for meaning and rewrite the final post in Traditional Chinese.",
+  ].join("\n");
 }
 
 function isJinjunyaLinkPersona(setup: any): boolean {
@@ -97,7 +107,7 @@ function moveTweetStyleLinkToEnd(content: string, linkUrl: string) {
 }
 
 function ensurePostsContainTweetStyleLink(posts: EpisodeScript[], setup: any): EpisodeScript[] {
-  const linkUrl = isJinjunyaLinkPersona(setup) ? String(setup?.tweetStyleLinkUrl || "").trim() : "";
+  const linkUrl = String(setup?.tweetStyleLinkUrl || "").trim();
   if (!linkUrl) return posts;
   return posts.map((post) => {
     const nextContent = moveTweetStyleLinkToEnd(String(post.content || ""), linkUrl);
@@ -387,19 +397,28 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
           .filter((entry) => entry.summary),
       ];
       const selectedMemoryInstruction = buildSelectedMemoryInstruction(selectedEntries);
-      const tweetStyleInstruction = buildTweetStyleInstruction(archive.setup);
+      const effectiveSetup = String(archive.id || "").startsWith("workflow-persona-")
+        ? archive.setup
+        : {
+            ...(archive.setup || {}),
+            targetMarket: (archive.setup as any)?.targetMarket || "cn",
+            chineseScript: "traditional",
+          };
+      const tweetStyleInstruction = buildTweetStyleInstruction(effectiveSetup);
+      const chineseScriptInstruction = buildChineseScriptInstruction(archive);
       const customInstruction = [
         input.customInstruction || "",
+        chineseScriptInstruction,
         tweetStyleInstruction,
         selectedMemoryInstruction,
       ].filter((part) => part.trim()).join("\n\n");
       const trendIntel = await fetchPersonaTrendIntelForNode(
-        archive.setup as DramaSetup,
+        effectiveSetup as DramaSetup,
         archive.id,
         archive.name,
       );
       const prompt = buildSocialPostsPrompt(
-        archive.setup as DramaSetup,
+        effectiveSetup as DramaSetup,
         archive.content,
         targetCount,
         customInstruction,
@@ -408,7 +427,7 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
         memoryContext.recentPosts,
         trendIntel,
         undefined,
-        input.customInstruction || "",
+        [input.customInstruction || "", chineseScriptInstruction].filter((part) => part.trim()).join("\n\n"),
       );
 
       const textModelBranch = input.textModelBranch === "paid" ? "paid" : "free";
