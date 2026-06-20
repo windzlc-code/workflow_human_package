@@ -260,7 +260,22 @@ export async function fetchSentimentHotCandidates(args: {
       archiveId,
       keywords,
       limit: args.limit || 10,
+      timeoutMs: 15_000,
     });
+  }
+  if (runtime.ok && usableSources.includes("threads") && candidates.length === 0) {
+    const fallbackCandidates = await fetchThreadsSearchPageCandidates({
+      archiveId,
+      keywords,
+      limit: args.limit || 10,
+    }).catch((error) => {
+      warnings.push(`Threads 页面兜底抓取失败：${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    });
+    if (fallbackCandidates.length > 0) {
+      warnings.push("主搜索源当前没有产出，已改用 Threads 页面兜底抓取中文热点。");
+      candidates = fallbackCandidates;
+    }
   }
   if (candidates.length === 0) {
     warnings.push("未找到符合当前人设关键词的中文 Threads / Instagram 热点；如果 Cookie 正常，通常是当前关键词扫描源没有产出，建议刷新或换更宽的中文关键词。");
@@ -300,14 +315,186 @@ async function syncSentimentKeywords(keywords: string[]) {
   }
 }
 
-async function waitForCandidates(args: { archiveId: string; keywords: string[]; limit: number }): Promise<SentimentHotCandidate[]> {
-  const deadline = Date.now() + 45_000;
+async function waitForCandidates(args: { archiveId: string; keywords: string[]; limit: number; timeoutMs?: number }): Promise<SentimentHotCandidate[]> {
+  const deadline = Date.now() + (args.timeoutMs || 45_000);
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     const candidates = await readCandidatesFromDatabase(args);
     if (candidates.length > 0) return candidates;
   }
   return [];
+}
+
+async function fetchThreadsSearchPageCandidates(args: {
+  archiveId: string;
+  keywords: string[];
+  limit: number;
+}): Promise<SentimentHotCandidate[]> {
+  const queries = meaningfulNeedles(args.keywords)
+    .filter((keyword) => hasHan(keyword))
+    .slice(0, 3);
+  const excluded = getSentimentHotExcludedIds(args.archiveId);
+  const results: SentimentHotCandidate[] = [];
+  if (queries.length === 0) return results;
+
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+  });
+  try {
+    const context = await browser.newContext({
+      locale: "zh-TW",
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    });
+    const page = await context.newPage();
+    for (const query of queries) {
+      if (results.length >= args.limit) break;
+      const searchUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
+      await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+      await page.waitForTimeout(4_000);
+      const text = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+      const parsed = parseThreadsSearchTextCandidates({
+        text,
+        query,
+        keywords: args.keywords,
+        limit: args.limit - results.length,
+        sourceUrl: page.url() || searchUrl,
+      });
+      for (const candidate of parsed) {
+        if (excluded.has(candidate.id)) continue;
+        if (results.some((item) => item.id === candidate.id || item.content === candidate.content)) continue;
+        results.push(candidate);
+        if (results.length >= args.limit) break;
+      }
+    }
+    await context.close();
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+  return results.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
+}
+
+const THREADS_SEARCH_NOISE_LINES = new Set([
+  "threads",
+  "instagram",
+  "登入",
+  "登录",
+  "註冊",
+  "注册",
+  "翻譯",
+  "翻译",
+  "搜尋",
+  "搜索",
+  "搜尋 Threads",
+  "搜索 Threads",
+  "使用 Instagram 帳號繼續",
+  "使用 Instagram 账号继续",
+  "建立新帳號",
+  "创建新帐号",
+  "隱私政策",
+  "隐私政策",
+  "Cookie 政策",
+  "使用條款",
+  "使用条款",
+  "回報問題",
+  "报告问题",
+]);
+
+function isThreadsSearchNoiseLine(line: string, query: string): boolean {
+  const text = cleanText(line);
+  if (!text) return true;
+  if (text === query) return true;
+  if (THREADS_SEARCH_NOISE_LINES.has(text)) return true;
+  if (/^©\s*\d{4}/.test(text)) return true;
+  if (/^[\d,.，]+(?:\s*[萬万])?$/.test(text)) return true;
+  if (/^\[\d+\]$/.test(text)) return true;
+  if (/^(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周|月|年)|昨天|前天)$/.test(text)) return true;
+  if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(text)) return true;
+  if (/^(?:所有|最新|热门|熱門)$/.test(text)) return true;
+  return false;
+}
+
+function isLikelyThreadsHandle(line: string): boolean {
+  const text = line.trim();
+  if (!/^@?[A-Za-z0-9_.]{2,32}$/.test(text)) return false;
+  if (!/[A-Za-z_]/.test(text)) return false;
+  return !/^(?:threads|instagram|search|login|home|profile)$/i.test(text);
+}
+
+function parseThreadsHotScore(lines: string[]): number {
+  let score = 30;
+  for (const line of lines) {
+    const text = line.replace(/,/g, "").trim();
+    const wan = text.match(/^(\d+(?:\.\d+)?)\s*[萬万]$/);
+    if (wan) score += Math.round(Number(wan[1]) * 10_000);
+    const plain = text.match(/^\[?(\d{1,6})\]?$/);
+    if (plain) score += Math.min(20_000, Number(plain[1]));
+  }
+  return score;
+}
+
+export function parseThreadsSearchTextCandidates(args: {
+  text: string;
+  query: string;
+  keywords?: string[];
+  limit?: number;
+  sourceUrl: string;
+}): SentimentHotCandidate[] {
+  const query = cleanText(args.query);
+  const lines = String(args.text || "")
+    .split(/\r?\n/g)
+    .map((line) => cleanText(line))
+    .filter(Boolean);
+  const chunks: Array<{ author: string; lines: string[] }> = [];
+  let current: { author: string; lines: string[] } | null = null;
+
+  for (const line of lines) {
+    if (isLikelyThreadsHandle(line)) {
+      if (current?.lines.length) chunks.push(current);
+      current = { author: line.replace(/^@/, ""), lines: [] };
+      continue;
+    }
+    if (!current) continue;
+    current.lines.push(line);
+  }
+  if (current?.lines.length) chunks.push(current);
+
+  const needles = meaningfulNeedles([...(args.keywords || []), query])
+    .filter((keyword) => hasHan(keyword))
+    .slice(0, 10);
+  const out: SentimentHotCandidate[] = [];
+  for (const [index, chunk] of chunks.entries()) {
+    const contentLines = chunk.lines
+      .filter((line) => !isThreadsSearchNoiseLine(line, query))
+      .filter((line) => hasHan(line));
+    const content = cleanSentimentCandidateContent(contentLines.join(" "));
+    if (isLowQualitySentimentContent(content)) continue;
+    if (!isChineseSentimentCandidate(content)) continue;
+    const haystack = [content, chunk.author].join(" ").toLowerCase();
+    const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
+    if (needles.length && matchedNeedles.length === 0) continue;
+    const sourceUrl = `${args.sourceUrl}#candidate-${index + 1}`;
+    const id = buildSentimentCandidateId({ platform: "threads", sourceUrl, content });
+    out.push({
+      id,
+      platform: "threads",
+      sourceUrl,
+      author: chunk.author || "unknown",
+      content,
+      media: [],
+      hotScore: parseThreadsHotScore(chunk.lines) + matchedNeedles.length * 20,
+      metrics: {
+        source: "threads-search-page",
+        matchedKeywords: matchedNeedles,
+      },
+      capturedAt: new Date().toISOString(),
+      warnings: ["Threads 搜索页面未暴露稳定媒体地址，已先保留文字热点。"],
+    });
+    if (out.length >= (args.limit || 10)) break;
+  }
+  return out;
 }
 
 async function readCandidatesFromDatabase(args: { archiveId: string; keywords: string[]; limit: number }): Promise<SentimentHotCandidate[]> {
