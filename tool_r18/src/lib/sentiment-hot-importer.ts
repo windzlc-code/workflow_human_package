@@ -154,6 +154,10 @@ export function buildSentimentHotKeywords(args: {
 export function cleanSentimentCandidateContent(value: unknown): string {
   let text = cleanText(value);
   text = text
+    .replace(/\s*登入以取得更多有關此主題的串文。.*$/i, "")
+    .replace(/\s*登入或註冊 Threads.*$/i, "")
+    .replace(/\s*登录以获取更多有关此话题的串文。.*$/i, "")
+    .replace(/\s*登录或注册 Threads.*$/i, "")
     .replace(/(?:https?:\/\/)?(?:www\.)?(?:threads\.net|instagram\.com)\s*[›>]\s*/gi, " ")
     .replace(/(?:^|\s)(?:@[\w.-]+|t)\s*[›>]\s*(?:post\s*)?/gi, " ")
     .replace(/\s*(?:相關|相关|广告|廣告)\s+.*$/i, "")
@@ -330,9 +334,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   keywords: string[];
   limit: number;
 }): Promise<SentimentHotCandidate[]> {
-  const queries = meaningfulNeedles(args.keywords)
-    .filter((keyword) => hasHan(keyword))
-    .slice(0, 3);
+  const queries = buildThreadsSearchQueries(args.keywords).slice(0, 6);
   const excluded = getSentimentHotExcludedIds(args.archiveId);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
@@ -374,6 +376,33 @@ async function fetchThreadsSearchPageCandidates(args: {
     await browser.close().catch(() => undefined);
   }
   return results.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
+}
+
+function buildThreadsSearchQueries(keywords: string[]): string[] {
+  const joined = keywords.join(" ");
+  const out: string[] = [];
+  const add = (value: string) => {
+    const text = cleanText(value);
+    if (!text) return;
+    if (!hasHan(text) && !/^AI$/i.test(text)) return;
+    if (text.length > 10) return;
+    out.push(text);
+  };
+  for (const keyword of meaningfulNeedles(keywords)) {
+    add(keyword);
+    for (const part of splitKeywords(keyword)) add(part);
+  }
+  const synonymGroups: Array<[RegExp, string[]]> = [
+    [/(教师|老師|老师|校園|校园|學生|学生|课堂|課堂)/, ["老師", "教師", "學生", "校園", "課堂"]],
+    [/(恋爱|戀愛|情感|感情|暧昧|曖昧|分手|关系|關係)/, ["戀愛", "感情", "曖昧", "分手", "關係"]],
+    [/(穿搭|美妆|美妝|护肤|護膚|拍照|女生|日系)/, ["穿搭", "美妝", "護膚", "女生", "拍照"]],
+    [/(医疗|醫療|医生|醫生|医院|醫院|手术|手術|医美|醫美)/, ["醫療", "醫生", "醫院", "醫療事故", "醫美"]],
+    [/(AI|人工智能|人工智慧|自动化|自動化|科技|互联网|互聯網|职场|職場)/i, ["AI", "人工智慧", "自動化", "科技", "職場"]],
+  ];
+  for (const [pattern, values] of synonymGroups) {
+    if (pattern.test(joined)) values.forEach(add);
+  }
+  return [...new Set(out)].slice(0, 12);
 }
 
 const THREADS_SEARCH_NOISE_LINES = new Set([
@@ -420,7 +449,7 @@ function isLikelyThreadsHandle(line: string): boolean {
   const text = line.trim();
   if (!/^@?[A-Za-z0-9_.]{2,32}$/.test(text)) return false;
   if (!/[A-Za-z_]/.test(text)) return false;
-  return !/^(?:threads|instagram|search|login|home|profile)$/i.test(text);
+  return !/^(?:threads|instagram|search|login|home|profile|www|net|com|t)$/i.test(text);
 }
 
 function parseThreadsHotScore(lines: string[]): number {
@@ -472,6 +501,7 @@ export function parseThreadsSearchTextCandidates(args: {
     const content = cleanSentimentCandidateContent(contentLines.join(" "));
     if (isLowQualitySentimentContent(content)) continue;
     if (!isChineseSentimentCandidate(content)) continue;
+    if ((content.match(/[\u3400-\u9fff]/gu) || []).length < 18) continue;
     const haystack = [content, chunk.author].join(" ").toLowerCase();
     const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
     if (needles.length && matchedNeedles.length === 0) continue;
