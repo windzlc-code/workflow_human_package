@@ -511,6 +511,7 @@ const pendingThreadsProfileActions = new Map<number, {
   padCode: string;
   padName?: string;
   stage: "await_link" | "await_bio" | "await_name" | "await_avatar";
+  returnCallback?: string;
 }>();
 
 const pendingWarmupConfigs = new Map<number, {
@@ -535,6 +536,8 @@ const pendingWarmupConfigs = new Map<number, {
   searchChance?: number;
   riskManaged?: boolean;
   stopOnRiskLimit?: boolean;
+  returnCallback?: string;
+  startCallback?: string;
 }>();
 
 const pendingWarmupCandidates = new Map<string, {
@@ -564,6 +567,20 @@ async function resolveWarmupCommentPersonaForPad(padCode: string): Promise<Warmu
     style: archive.personaStyle,
     personality: archive.personaPersonality,
     language: archive.language || "台灣地區繁體中文",
+  };
+  return {
+    ...persona,
+    interests: buildWarmupInterestKeywords(persona),
+  };
+}
+
+function buildWarmupCommentPersonaFromArchive(archive: PersonaArchive): WarmupCommentPersona {
+  const persona = {
+    name: archive.name,
+    description: archive.personaDescription || archive.contentPreview,
+    style: archive.personaStyle,
+    personality: archive.personaPersonality,
+    language: archive.language || "台灣在地繁體中文",
   };
   return {
     ...persona,
@@ -2769,7 +2786,7 @@ function buildPersonaPlatformAccountText(archive: PersonaArchive, platform: Pers
   ].join("\n");
 }
 
-function buildPersonaPlatformAccountRows(archiveId: string, platform: PersonaAccountPlatform, status?: PersonaAccountRuntimeStatus): Array<Array<{ text: string; callback_data: string }>> {
+function buildPersonaPlatformAccountRows(archiveId: string, platform: PersonaAccountPlatform, status?: PersonaAccountRuntimeStatus, archive?: PersonaArchive): Array<Array<{ text: string; callback_data: string }>> {
   const platformLabel = platform === "threads" ? "Threads" : "Telegram";
   const actionRows: Array<Array<{ text: string; callback_data: string }>> = [
     [{ text: `🔍 检测 ${platformLabel} 登录状态`, callback_data: `acctquery_${platform}_${archiveId}` }],
@@ -2779,12 +2796,35 @@ function buildPersonaPlatformAccountRows(archiveId: string, platform: PersonaAcc
   } else if (status && status.state !== "checking") {
     actionRows.push([{ text: `🔐 登录 ${platformLabel}`, callback_data: `acctlogin_${platform}_${archiveId}` }]);
   }
-  return [
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [
     [{ text: platform === "threads" ? "✍️ 設定 Threads 登入資料" : "✍️ 設定 Telegram 登入資料", callback_data: `acctset_${platform}_${archiveId}` }],
     [{ text: "🧹 清除已保存登录资料", callback_data: `acctclear_${platform}_${archiveId}` }],
     ...actionRows,
-    [{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${archiveId}` }],
   ];
+  if (platform === "threads") {
+    const boundPadCode = String(archive?.boundPadCode || "").trim();
+    rows.push([{ text: "📱 更換綁定雲機", callback_data: `bindpad_${archiveId}` }]);
+    if (boundPadCode) {
+      rows.push(
+        [
+          { text: "🔗 Threads 簡介新增連結", callback_data: `acctprofile_link_${archiveId}` },
+          { text: "📝 修改 Threads 簡介", callback_data: `acctprofile_bio_${archiveId}` },
+        ],
+        [
+          { text: "🏷 修改 Threads 名稱", callback_data: `acctprofile_name_${archiveId}` },
+          { text: "🖼 修改 Threads 頭像", callback_data: `acctprofile_avatar_${archiveId}` },
+        ],
+        [
+          { text: "💬 Threads 自動回覆", callback_data: `acctautoreply_${archiveId}` },
+          { text: "🌱 Threads 養號", callback_data: `acctwarmup_threads_${archiveId}` },
+        ],
+      );
+    } else {
+      rows.push([{ text: "🔎 查詢各雲機 Threads 帳號", callback_data: `queryaccounts_${archiveId}` }]);
+    }
+  }
+  rows.push([{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${archiveId}` }]);
+  return rows;
 }
 
 async function withPersonaAccountDetectionTimeout<T>(promise: Promise<T>, timeoutMs = 45_000): Promise<T> {
@@ -10587,75 +10627,6 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     lastTelegramUpdateAt = Date.now();
   };
 
-  const ensurePublishPlatformLoggedIn = async (args: {
-    chatId: number;
-    msgId?: number;
-    archive: PersonaArchive | null | undefined;
-    platform: TelegramPublishPlatform;
-    padCode: string;
-    backCallback: string;
-  }) => {
-    if (args.platform !== "threads" && args.platform !== "telegram") return true;
-    const archiveId = args.archive?.id;
-    const platformLabel = formatPublishPlatformLabel(args.platform);
-    await safeEditOrSend(bot, args.chatId, args.msgId, `🔍 正在檢測「${platformLabel}」登入狀態...\n\n雲機：${args.padCode}`, {
-      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: args.backCallback }]] },
-    });
-    const rows = archiveId
-      ? [
-          [{ text: `🔐 登入 ${platformLabel}`, callback_data: `acctlogin_${args.platform}_${archiveId}` }],
-          [{ text: `🔍 檢測 ${platformLabel} 登入狀態`, callback_data: `acctquery_${args.platform}_${archiveId}` }],
-          [{ text: "◀️ 返回", callback_data: args.backCallback }],
-        ]
-      : [[{ text: "◀️ 返回", callback_data: args.backCallback }]];
-
-    const creds = resolveVmosCredentials();
-    try {
-      if (args.platform === "threads") {
-        const result = await withPersonaAccountDetectionTimeout(queryThreadsAccount(creds, args.padCode), 35_000).catch((error: any) => ({
-          padCode: args.padCode,
-          platform: "threads" as const,
-          method: "failed" as const,
-          loggedIn: false,
-          error: error?.message || String(error),
-        }));
-        const expectedThreads = getPersonaAccountManagement(args.archive).threads?.handle;
-        const accountMatched = Boolean(result.loggedIn && threadsQueryMatchesSavedAccount(result, expectedThreads));
-        if (accountMatched) return true;
-        const detectedAccount = formatThreadsDetectedAccount(result);
-        await sendAccountActionScreenshot(bot, args.chatId, args.padCode, (result as any).screenshotUrl, "📸 Threads 發佈前登入檢測畫面");
-        const reason = result.loggedIn && detectedAccount && expectedThreads
-          ? `目前登入帳號 ${detectedAccount} 與人設保存帳號 ${maskAccountSecret(expectedThreads)} 不一致。`
-          : result.loggedIn
-            ? "已打開 Threads，但無法確認登入帳號與人設匹配。"
-            : formatUserFacingError((result as any).error, "未確認 Threads 已登入。");
-        await bot.sendMessage(args.chatId, `⛔ 發佈已暫停：${platformLabel} 尚未通過登入檢測。\n\n雲機：${args.padCode}\n原因：${reason}\n\n請先完成登入，再返回重新點擊發佈。`, {
-          reply_markup: { inline_keyboard: rows },
-        });
-        return false;
-      }
-
-      const result = await withPersonaAccountDetectionTimeout(queryTelegramAccountSession(creds, args.padCode), 35_000).catch((error: any) => ({
-        ok: false,
-        state: "unknown",
-        message: error?.message || String(error),
-        screenshotUrl: undefined,
-      }));
-      if ((result as any).ok) return true;
-      await sendAccountActionScreenshot(bot, args.chatId, args.padCode, (result as any).screenshotUrl, "📸 Telegram 發佈前登入檢測畫面");
-      await bot.sendMessage(args.chatId, `⛔ 發佈已暫停：${platformLabel} 尚未通過登入檢測。\n\n雲機：${args.padCode}\n原因：${formatUserFacingError((result as any).message, "未確認 Telegram 已登入。")}\n\n請先完成登入，再返回重新點擊發佈。`, {
-        reply_markup: { inline_keyboard: rows },
-      });
-      return false;
-    } catch (error: any) {
-      await sendCurrentPadScreenshot(bot, args.chatId, args.padCode, `📸 ${platformLabel} 登入檢測失敗畫面`).catch(() => undefined);
-      await bot.sendMessage(args.chatId, `⛔ 發佈已暫停：${platformLabel} 登入檢測失敗。\n\n原因：${formatUserFacingError(error, "請先完成登入後再重試發布。")}`, {
-        reply_markup: { inline_keyboard: rows },
-      });
-      return false;
-    }
-  };
-
   const restartProcessForPollingStall = (reason: string) => {
     console.error(`[telegram][polling_stall_restart] ${reason}`);
     setTimeout(() => process.exit(1), 100).unref?.();
@@ -10754,14 +10725,6 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       return;
     }
     const customPlatform = state.platform || effectiveDefaultPublishPlatform;
-    if (!(await ensurePublishPlatformLoggedIn({
-      chatId,
-      archive,
-      platform: customPlatform,
-      padCode,
-      backCallback: state.archiveId ? buildPersonaPublishCallback(state.archiveId, state.groupContentType) : "custom_publish",
-    }))) return;
-
     const publishLockKey = `custom:${state.archiveId || state.archiveName || "adhoc"}:${customPlatform}:${caption.slice(0, 80)}:${state.fileId || state.publishWithGeneratedImage ? "media" : "text"}`;
     const publishScopeKey = `pad:${padCode}`;
     if (!acquirePublishCommand(chatId, publishLockKey, "自定义发布", publishScopeKey)) {
@@ -12145,6 +12108,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const browseCount = Number(parts[1]) || 10;
       const prev = pendingWarmupConfigs.get(chatId) || { platform: "threads" as const, padCode, stage: "choose_count" as const };
       pendingWarmupConfigs.set(chatId, { ...prev, browseCount, stage: "choose_engagement" });
+      const warmupStartCallback = prev.startCallback || `warmup_start_${prev.platform || "threads"}_${padCode}`;
       await safeEditOrSend(bot, chatId, msgId, `🌱 *养号设置*\n\n雲機：${prev.padName || padCode}\n浏览數量：${browseCount} 條\n\n請選擇互动策略：\n\n严格执行所选目标；未达到浏览、点赞或留言目标会提示失败并请求人工介入。`, {
         parse_mode: "Markdown",
         reply_markup: {
@@ -12153,7 +12117,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             [{ text: "低频浏览 + 少量點讚", callback_data: `warmup_engage_${prev.platform || "threads"}_${padCode}_like` }],
             [{ text: "低频浏览 + 谨慎留言", callback_data: `warmup_engage_${prev.platform || "threads"}_${padCode}_comment` }],
             [{ text: "低频浏览 + 少量互动", callback_data: `warmup_engage_${prev.platform || "threads"}_${padCode}_both` }],
-            [{ text: "◀️ 返回改數量", callback_data: `warmup_start_${prev.platform || "threads"}_${padCode}` }],
+            [{ text: "◀️ 返回改數量", callback_data: warmupStartCallback }],
           ],
         },
       });
@@ -12179,6 +12143,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const warmupStartCallback = prev.startCallback || `warmup_start_${platform}_${padCode}`;
       if (mode === "browse") {
         pendingWarmupConfigs.set(chatId, {
           ...prev,
@@ -12195,7 +12160,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：只滑动浏览\n规则：滑动速度快慢混合，遇到风险阈值停止并提示人工介入\n\n確認开始？`, {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: `warmup_start_${platform}_${padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: warmupStartCallback }]] },
         });
         return;
       }
@@ -12217,7 +12182,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机點讚 1 次\n點讚风险上限：${plannedLikes} 个/日内预算内\n规则：精准點擊，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: `warmup_start_${platform}_${padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: warmupStartCallback }]] },
         });
         return;
       }
@@ -12239,7 +12204,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机留言 1 次\n留言风险上限：${plannedComments} 个/日内预算内\n留言规则：按人設生成，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: `warmup_start_${platform}_${padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: warmupStartCallback }]] },
         });
         return;
       }
@@ -12262,7 +12227,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机挑选點讚或留言 1 次\n點讚风险上限：${plannedLikes} 个/日内预算内\n留言风险上限：${plannedComments} 个/日内预算内\n规则：不每篇互动，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: `warmup_start_${platform}_${padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: warmupStartCallback }]] },
         });
         return;
       }
@@ -12285,9 +12250,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const warmupReturnCallback = cfg.returnCallback || `pad_detail_${padCode}`;
       await safeEditOrSend(bot, chatId, msgId, `🌱 *养号執行中*\n\n雲機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n滑动时长：${cfg.minSessionMinutes || 7}-${cfg.maxSessionMinutes || 10} 分鐘\n互动间隔：每 ${cfg.interactionEveryMinPosts || 2}-${cfg.interactionEveryMaxPosts || 3} 篇最多 1 次\n目标點讚：${cfg.maxLikes || 0} 个\n目标留言：${cfg.maxComments || 0} 个\n模式：严格执行，未达目标会提示失败并请求人工介入\n\n⏳ 正在執行，請稍候...`, {
         parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: warmupReturnCallback }]] },
       });
       const padOperationKey = `warmup:${padCode}:${chatId}:${Date.now()}`;
       if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "养号"))) {
@@ -12349,7 +12315,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         pendingWarmupConfigs.delete(chatId);
         await bot.sendMessage(chatId, `✅ *养号完成*\n\n雲機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n${formatWarmupStepForTelegram(result.step)}\n已浏览：${result.browsed} 條\n已點讚：${result.liked} 个\n已留言：${result.commented} 个\n\n已按所选目标完成。`, {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: warmupReturnCallback }]] },
         });
         for (let i = 0; i < (result.likeScreenshots || []).length; i += 1) {
           const evidencePath = saveWarmupEvidenceImage(result.likeScreenshots![i], padCode, "like", i);
@@ -12381,7 +12347,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           chatId,
           error,
           { action: "养号", padName: cfg.padName, padCode },
-          [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]],
+          [[{ text: "◀️ 返回", callback_data: warmupReturnCallback }]],
         )) {
           return;
         }
@@ -12390,7 +12356,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           padName: cfg.padName,
           padCode,
           fallback: "养号執行失敗，請人工检查目前界面后重試。",
-          inlineKeyboard: [[{ text: "◀️ 返回", callback_data: `pad_detail_${padCode}` }]],
+          inlineKeyboard: [[{ text: "◀️ 返回", callback_data: warmupReturnCallback }]],
         });
       } finally {
         releaseRuntimePadOperation(padCode, padOperationKey);
@@ -12674,8 +12640,195 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       await safeEditOrSend(bot, chatId, msgId, buildPersonaPlatformAccountText(archive, platform), {
-        reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform) },
+        reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, undefined, archive) },
       });
+      return;
+    }
+
+    const accountProfileMatch = data.match(/^acctprofile_(link|bio|name|avatar)_(.+)$/);
+    if (accountProfileMatch) {
+      pendingPersonaAccountActions.delete(chatId);
+      const kind = accountProfileMatch[1] as "link" | "bio" | "name" | "avatar";
+      const id = accountProfileMatch[2];
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
+      const returnCallback = `acctplatform_threads_${id}`;
+      if (!boundPad) {
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 資料修改。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        });
+        return;
+      }
+      const stage = kind === "link" ? "await_link" : kind === "bio" ? "await_bio" : kind === "name" ? "await_name" : "await_avatar";
+      pendingThreadsProfileActions.set(chatId, { padCode: boundPad.padCode, padName: boundPad.padName, stage, returnCallback });
+      const title = kind === "link" ? "🔗 Threads 簡介新增連結" : kind === "bio" ? "📝 修改 Threads 簡介" : kind === "name" ? "🏷 修改 Threads 名稱" : "🖼 修改 Threads 頭像";
+      const hint = kind === "link"
+        ? "請直接發送要添加到 Threads 個人簡介裡的完整連結。\n例如：https://example.com"
+        : kind === "bio"
+          ? "請直接發送新的 Threads 個人簡介，建議 150 字以內。"
+          : kind === "name"
+            ? "請直接發送新的 Threads 名稱，建議 30 字以內。"
+            : "請直接發送一張圖片作為新的 Threads 頭像。";
+      await safeEditOrSend(bot, chatId, msgId, `${title}\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${hint}`, {
+        reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: returnCallback }]] },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctwarmup_threads_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      const id = data.slice("acctwarmup_threads_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
+      const returnCallback = `acctplatform_threads_${id}`;
+      if (!boundPad) {
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 養號。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        });
+        return;
+      }
+      const platform: TelegramWarmupPlatform = "threads";
+      const commentPersona = buildWarmupCommentPersonaFromArchive(archive);
+      const keywords = buildWarmupInterestKeywords(commentPersona);
+      pendingWarmupConfigs.set(chatId, {
+        platform,
+        padCode: boundPad.padCode,
+        padName: boundPad.padName,
+        commentPersona,
+        keywords,
+        searchChance: 16,
+        browseCount: 80,
+        minSessionMinutes: 7,
+        maxSessionMinutes: 10,
+        interactionEveryMinPosts: 2,
+        interactionEveryMaxPosts: 3,
+        riskManaged: false,
+        stopOnRiskLimit: true,
+        stage: "choose_engagement",
+        returnCallback,
+        startCallback: `acctwarmup_threads_${id}`,
+      });
+      await safeEditOrSend(bot, chatId, msgId, `🌱 *養號設定*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n平台：Threads\n留言人設：${commentPersona.name || archive.name}\n\n執行規則：\n- 每次滑動瀏覽 7-10 分鐘，每天最多 2 次\n- 每滑過約 2-3 篇，隨機挑選 1 篇點讚或留言\n- 不會每篇都互動；達到風險閾值會停止並提示人工介入\n\n請選擇互動策略：`, {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "只滑動", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_browse` }],
+            [{ text: "滑動 + 隨機點讚", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_like` }],
+            [{ text: "滑動 + 隨機留言", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_comment` }],
+            [{ text: "滑動 + 隨機點讚/留言", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_both` }],
+            [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctautoreply_") && !data.startsWith("acctautoreply_run_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      const id = data.slice("acctautoreply_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
+      const returnCallback = `acctplatform_threads_${id}`;
+      if (!boundPad) {
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 自動回覆。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        });
+        return;
+      }
+      await safeEditOrSend(bot, chatId, msgId, `💬 *Threads 自動回覆*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n執行規則：\n- 只掃描這台雲機目前 Threads 帳號自己發布的最新推文。\n- 先過濾廣告、辱罵、釣魚、純表情和過短留言。\n- 只挑和人設或推文內容相關的留言回覆。\n- 回覆會使用自然口語，不做客服式套話。\n\n預設最多掃描 3 篇推文，最多回覆 3 條留言。`, {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "✅ 開始 Threads 自動回覆", callback_data: `acctautoreply_run_${id}` }],
+            [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("acctautoreply_run_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      const id = data.slice("acctautoreply_run_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
+      const returnCallback = `acctplatform_threads_${id}`;
+      if (!boundPad) {
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 自動回覆。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        });
+        return;
+      }
+      const padOperationKey = `threads-auto-reply:${boundPad.padCode}:${chatId}:${Date.now()}`;
+      if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, padOperationKey, "Threads自動回覆"))) return;
+      const stopTyping = startTelegramTyping(bot, chatId);
+      try {
+        const creds = resolveVmosCredentials();
+        const commentPersona = buildWarmupCommentPersonaFromArchive(archive);
+        let lastProgress: ThreadsAutoReplyProgress | null = null;
+        await safeEditOrSend(bot, chatId, msgId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n正在進入 Threads。`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        });
+        const result = await autoReplyThreadsAccount(
+          creds,
+          boundPad.padCode,
+          { maxPosts: 3, maxReplies: 3, commentPersona },
+          (p) => {
+            assertPadOperationNotCancelled(padOperationKey);
+            lastProgress = p;
+            const lines = [
+              `💬 Threads 自動回覆：${p.step}`,
+              `已掃描推文：${p.scannedPosts}`,
+              `候選留言：${p.scannedComments}`,
+              `已回覆：${p.replied}`,
+              `已跳過：${p.skipped}`,
+            ];
+            void updateTelegramPublishStatus(bot, chatId, msgId, "threads_auto_reply", lines, p.step);
+          },
+        );
+        assertPadOperationNotCancelled(padOperationKey);
+        stopTyping();
+        await bot.sendMessage(chatId, `✅ *Threads 自動回覆完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        });
+        const screenshots = result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [];
+        for (let i = 0; i < screenshots.length; i += 1) {
+          const evidencePath = saveWarmupEvidenceImage(screenshots[i], boundPad.padCode, "comment", i);
+          if (evidencePath) console.log(`[telegram][threads_auto_reply_evidence] chat=${chatId} pad=${boundPad.padCode} index=${i + 1} path=${evidencePath}`);
+          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(screenshots[i]), {
+            caption: `📳 Threads 自動回覆證據 ${i + 1}/${screenshots.length}`,
+          }).catch(() => undefined);
+        }
+      } catch (error: any) {
+        stopTyping();
+        if (isTelegramTaskCancelledError(error)) {
+          await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆任務\n\n雲機：${boundPad.padName}`);
+          return;
+        }
+        if (await sendCloudAccountStateNotice(
+          bot,
+          chatId,
+          error,
+          { action: "Threads自動回覆", padName: boundPad.padName, padCode: boundPad.padCode },
+          [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]],
+        )) {
+          return;
+        }
+        await sendManualInterventionFailure(bot, chatId, error, {
+          action: "Threads自動回覆",
+          padName: boundPad.padName,
+          padCode: boundPad.padCode,
+          fallback: "Threads 自動回覆失敗，請人工檢查目前 Threads 頁面後重試。",
+          inlineKeyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]],
+        });
+      } finally {
+        releaseRuntimePadOperation(boundPad.padCode, padOperationKey);
+      }
       return;
     }
 
@@ -12740,7 +12893,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const telegram = accounts.telegram;
         if (!telegram?.phone) {
           await safeEditOrSend(bot, chatId, msgId, "尚未設定 Telegram 手機號，請先點「設定 Telegram 登入資料」。", {
-            reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, "telegram") },
+            reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, "telegram", undefined, archive) },
           });
           return;
         }
@@ -12866,7 +13019,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             }
             await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, status.state === "logged_in" ? "📸 Threads 已登录确认画面" : "📸 Threads 当前画面");
             await bot.sendMessage(chatId, buildPersonaPlatformAccountText(archive, platform, status), {
-              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
+              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status, archive) },
             }).catch((error: any) => {
               console.warn(`[telegram][threads_query_message_failed] chat=${chatId} error=${error?.message || error}`);
             });
@@ -12890,7 +13043,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           if (!threads?.handle || !threads?.password) {
             stopTyping();
             await bot.sendMessage(chatId, `❌ 尚未設定 Threads 登入資料。\n\n請先點「設定 Threads 登入資料」保存帳號與密碼。`, {
-              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, "threads") },
+              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, "threads", undefined, archive) },
             });
             return;
           }
@@ -12946,7 +13099,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           };
           await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, status.state === "logged_in" ? "📸 Telegram 已登录确认画面" : "📸 Telegram 当前画面");
           await bot.sendMessage(chatId, buildPersonaPlatformAccountText(archive, platform, status), {
-            reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status) },
+            reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status, archive) },
           }).catch((error: any) => {
             console.warn(`[telegram][telegram_query_message_failed] chat=${chatId} error=${error?.message || error}`);
           });
@@ -14747,14 +14900,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
         if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
         const padCode = archive.boundPadCode || defaultPadCode;
-        if (!(await ensurePublishPlatformLoggedIn({
-          chatId,
-          msgId,
-          archive,
-          platform,
-          padCode,
-          backCallback: buildStoredPostsPageCallback(state.archiveId, visiblePage, state.groupContentType),
-        }))) return;
         if (!credentials.ak || !credentials.sk) {
           await safeEditOrSend(bot, chatId, msgId, "❌ VMOS 凭据未配置", {
             reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: buildStoredPostsPageCallback(state.archiveId, visiblePage, state.groupContentType) }]] },
@@ -16170,14 +16315,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const posts = scopedPosts.slice(startIndex, startIndex + Math.max(1, Math.min(count, scopedPosts.length - startIndex)));
       const selection = summarizeManualPublishSelection(scopedPosts, startIndex, posts.length);
       const padCode = archive.boundPadCode || defaultPadCode;
-      if (!(await ensurePublishPlatformLoggedIn({
-        chatId,
-        msgId,
-        archive,
-        platform,
-        padCode,
-        backCallback: buildPersonaPublishCallback(archiveId, groupContentType),
-      }))) return;
       const publishLockKey = `manual:${archiveId}:${platform}:${startIndex}:${posts.map((post) => post.id).join(",")}`;
       const publishScopeKey = `pad:${padCode}`;
       if (!acquirePublishCommand(chatId, publishLockKey, "人工发布", publishScopeKey)) {
@@ -16294,14 +16431,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
       const post = archive.posts[0];
       const padCode = archive.boundPadCode || defaultPadCode;
-      if (!(await ensurePublishPlatformLoggedIn({
-        chatId,
-        msgId,
-        archive,
-        platform,
-        padCode,
-        backCallback: buildStoredPostsPageCallback(id, 0),
-      }))) return;
       if (!credentials.ak || !credentials.sk) {
         bot.editMessageText("❌ VMOS 凭据未配置", { chat_id: chatId, message_id: msgId });
         return;
@@ -16995,14 +17124,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const padCode = archive?.boundPadCode || defaultPadCode;
-      if (!(await ensurePublishPlatformLoggedIn({
-        chatId,
-        msgId,
-        archive,
-        platform,
-        padCode,
-        backCallback: buildStoredPostsPageCallback(archiveId, 0, action?.groupContentType),
-      }))) return;
       const publishLockKey = `dopubpost:${archiveId}:${postId}:${platform}`;
       const publishScopeKey = `pad:${padCode}`;
       if (!acquirePublishCommand(chatId, publishLockKey, "發佈", publishScopeKey)) {
@@ -17571,9 +17692,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       ? await resolveTelegramMediaUrl(bot, media.file_id).catch(() => null)
       : null;
     if (pendingThreadsProfile?.stage === "await_avatar") {
+      const profileReturnCallback = pendingThreadsProfile.returnCallback || `pad_detail_${pendingThreadsProfile.padCode}`;
       if (!media?.file_id || video) {
         await bot.sendMessage(chatId, "❌ 请发送一张图片作为 Threads 头像，不要发送视频或純文字。", {
-          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
         });
         return;
       }
@@ -17583,13 +17705,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
         imageUrl = downloaded.hostPath || "";
       } catch (error) {
         await bot.sendMessage(chatId, `❌ 头像图片下载失败，请重新上传一次。\n原因：${formatUserFacingError(error, "Telegram 文件下载失败")}`, {
-          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
         });
         return;
       }
       if (!imageUrl) {
         await bot.sendMessage(chatId, "❌ 头像图片读取失败，请重新上传一次。", {
-          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
         });
         return;
       }
@@ -17603,7 +17725,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
 
       const statusMsg = await bot.sendMessage(chatId, `🖼 正在修改 Threads 头像\n\n云机：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n⏳ 正在准备头像图片...`, {
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
       });
       const stopTyping = startTelegramTyping(bot, chatId);
       const progress = (p: PublishProgress) => {
@@ -17612,7 +17734,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           {
             chat_id: chatId,
             message_id: statusMsg.message_id,
-            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
           },
         ).catch(() => undefined);
       };
@@ -17624,7 +17746,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         assertPadOperationNotCancelled(opKey);
         stopTyping();
         await bot.sendMessage(chatId, `✅ Threads 头像已提交\n\n云机：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n${result.detail}`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
         if (result.screenshotUrl) {
           await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, "📸 Threads 头像修改后截图").catch(() => undefined);
@@ -17641,7 +17763,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           ? notice.text
           : `❌ Threads 头像修改失败\n\n云机：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n原因：${formatUserFacingError(error, "头像修改失败，请稍后重试。")}`;
         await bot.sendMessage(chatId, message, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${pendingThreadsProfile.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
         const evidenceInput = resolveCloudAccountEvidenceInput(notice?.debugPath || extractInlineDebugPath(errorRaw));
         if (evidenceInput) {
@@ -17817,6 +17939,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     const profileState = pendingThreadsProfileActions.get(chatId);
     if (profileState && text && profileState.stage !== "await_avatar") {
+      const profileReturnCallback = profileState.returnCallback || `pad_detail_${profileState.padCode}`;
       const operation =
         profileState.stage === "await_link"
           ? {
@@ -17862,7 +17985,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
       if (!operation.input) {
         await bot.sendMessage(chatId, operation.invalidMessage, {
-          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${profileState.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
         });
         return;
       }
@@ -17879,7 +18002,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         chatId,
         `${operation.progressTitle}\n\n云机：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n⏳ 正在打开个人主页...`,
         {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${profileState.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         },
       );
       const stopTyping = startTelegramTyping(bot, chatId);
@@ -17889,7 +18012,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           {
             chat_id: chatId,
             message_id: statusMsg.message_id,
-            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${profileState.padCode}` }]] },
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
           },
         ).catch(() => undefined);
       };
@@ -17902,7 +18025,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stopTyping();
         const title = result.state === "verified" ? operation.successVerified : operation.successSubmitted;
         await bot.sendMessage(chatId, `${title}\n\n云机：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n${result.detail}`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${profileState.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
         if (result.screenshotUrl) {
           await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, operation.screenshotCaption).catch(() => undefined);
@@ -17918,7 +18041,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           ? notice.text
           : `${operation.failureTitle}\n\n云机：${profileState.padName || profileState.padCode}\n原因：${formatUserFacingError(error, `${operation.title}失败，请稍后重试。`)}`;
         await bot.sendMessage(chatId, message, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${profileState.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
         const evidenceInput = resolveCloudAccountEvidenceInput(notice?.debugPath);
         if (evidenceInput) {
