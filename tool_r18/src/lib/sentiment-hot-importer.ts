@@ -216,6 +216,9 @@ export async function fetchSentimentHotCandidates(args: {
       limit: args.limit || 10,
     });
   }
+  if (candidates.length === 0) {
+    warnings.push("未找到符合当前人设关键词的中文 Threads / Instagram 热点；如果 Cookie 正常，通常是当前关键词扫描源没有产出，建议刷新或换更宽的中文关键词。");
+  }
   rememberSentimentHotShown(archiveId, candidates);
   scheduleSentimentRuntimeShutdown();
   return { candidates, keywords, cookieStatuses, warnings };
@@ -314,6 +317,7 @@ async function readCandidatesFromDatabase(args: { archiveId: string; keywords: s
       if (excluded.has(id)) continue;
       const haystack = [content, row.title, row.author, row.keyword, row.keywords, row.extracted_keywords].map(cleanText).join(" ").toLowerCase();
       const matchedNeedles = needles.filter((needle) => haystack.includes(needle));
+      if (needles.length && matchedNeedles.length === 0) continue;
       const relevance = Math.min(60, matchedNeedles.length * 20);
       const media = readMediaForSentiment(db, Number(row.id));
       const hotScore = Math.round(
