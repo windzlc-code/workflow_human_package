@@ -394,12 +394,56 @@ export async function generatePersonaImage(
     }
 
     if (isWorkflowBackendFailure(result?.error, result?.timings)) {
+      const attempts: any[] = [{ provider: "comfyui-workflow", result }];
+      if (setup.imageWorkflow?.workflowId && setup.imageWorkflow.executionProvider !== "runninghub") {
+        const runningHubWorkflow = { ...setup.imageWorkflow, executionProvider: "runninghub" as const };
+        const runningHubResult = await imageAPI.generate({
+          ...requestPayload,
+          workflowImage: runningHubWorkflow,
+        });
+        attempts.push({ provider: "runninghub-workflow", result: runningHubResult });
+        if (runningHubResult?.ok && runningHubResult?.url) {
+          return {
+            ok: true,
+            url: runningHubResult.url,
+            mode: "workflow",
+            error: runningHubResult.error,
+            timings: { primary: result?.timings, fallback: runningHubResult.timings, fallbackProvider: "runninghub-workflow", attempts },
+          };
+        }
+      }
+
+      const standardFallbackPrompt = [
+        workflowPrompt,
+        "fallback from unavailable workflow backend; keep the same persona card cues and current post context as much as possible",
+      ].filter(Boolean).join(", ");
+      const standardFallback = await callClosedModel(
+        imageAPI,
+        standardFallbackPrompt,
+        model,
+        aspectRatio,
+        undefined,
+        undefined,
+        runtimeOptions,
+        { runningHubNewPersonaMode: "text-to-image" },
+      );
+      attempts.push({ provider: "runninghub-standard-model", result: standardFallback });
+      if (standardFallback?.ok && standardFallback?.url) {
+        return {
+          ok: true,
+          url: standardFallback.url,
+          mode: "workflow",
+          error: standardFallback.error,
+          timings: { primary: result?.timings, fallback: standardFallback.timings, fallbackProvider: "runninghub-standard-model", attempts },
+        };
+      }
+
       return {
         ok: false,
-        url: result?.url,
+        url: standardFallback?.url || result?.url,
         mode: "workflow",
-        error: `远端 ComfyUI 工作流不可用，已停止兜底生成，避免生成错误人设。原始错误：${result?.error || "unknown"}`,
-        timings: result?.timings,
+        error: `工作流与兜底生图均不可用。原始错误：${result?.error || "unknown"}；兜底错误：${standardFallback?.error || "unknown"}`,
+        timings: { primary: result?.timings, fallback: standardFallback?.timings, attempts },
       };
     }
 

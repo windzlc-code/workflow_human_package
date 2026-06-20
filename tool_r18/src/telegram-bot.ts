@@ -1307,15 +1307,6 @@ const STORED_POSTS_PAGE_SIZE = 5;
 
 type PersonaContentTypeTarget = "posts" | "history" | "publish";
 
-export function buildPersonaContentTypeCallback(
-  target: PersonaContentTypeTarget,
-  archiveId: string,
-  groupContentType: TelegramGroupContentType,
-) {
-  const prefix = target === "publish" ? "pub" : target;
-  return `${prefix}_${archiveId}_ct_${groupContentType}`;
-}
-
 export function parsePersonaContentTypeCallback(data: string): {
   target: PersonaContentTypeTarget;
   archiveId: string;
@@ -1328,22 +1319,6 @@ export function parsePersonaContentTypeCallback(data: string): {
     archiveId: match[2],
     groupContentType: match[3] as TelegramGroupContentType,
   };
-}
-
-export function buildPersonaContentTypePickerRows(args: {
-  archiveId: string;
-  target: PersonaContentTypeTarget;
-  counts?: Partial<Record<TelegramGroupContentType, number>>;
-}) {
-  const freeCount = Number(args.counts?.free || 0);
-  const paidCount = Number(args.counts?.paid || 0);
-  return [
-    [
-      { text: `免費內容（${freeCount}）`, callback_data: buildPersonaContentTypeCallback(args.target, args.archiveId, "free") },
-      { text: `付費內容（${paidCount}）`, callback_data: buildPersonaContentTypeCallback(args.target, args.archiveId, "paid") },
-    ],
-    [{ text: "◀️ 返回人設詳情", callback_data: `pd_${args.archiveId}` }],
-  ];
 }
 
 function buildStoredPostsPageCallback(archiveId: string, page: number, groupContentType?: TelegramGroupContentType) {
@@ -1613,7 +1588,7 @@ export function buildStoredPostsListView(
     { text: "\uD83D\uDE80 \u767C\u5E03\u63A8\u6587", callback_data: `bulkpub_${archiveId}${branchSuffix}_p${safePage}` },
     { text: "\uD83D\uDDD1 \u522A\u9664\u63A8\u6587", callback_data: `bulkdel_${archiveId}${branchSuffix}_p${safePage}` },
   ]);
-  keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: groupContentType ? `posts_branch_${archiveId}` : `pd_${archiveId}` }]);
+  keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: `pd_${archiveId}` }]);
   const branchTitle = groupContentType === "paid" ? "付費內容" : groupContentType === "free" ? "免費內容" : "";
   return {
     page: safePage,
@@ -2633,11 +2608,13 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
     [{ text: "🧾 人设简介", callback_data: `editcontent_${id}` }],
     [{ text: "📱 绑定云机", callback_data: `bindpad_${id}` }],
     [{ text: "🔐 账号管理", callback_data: `acctmgmt_${id}` }],
-    [
-      { text: "TG免費群", callback_data: `bindtg_free_${id}` },
-      { text: "TG付費群", callback_data: `bindtg_paid_${id}` },
-    ],
   ];
+  rows.push(isWorkflow
+    ? [
+        { text: "TG免費群", callback_data: `bindtg_free_${id}` },
+        { text: "TG付費群", callback_data: `bindtg_paid_${id}` },
+      ]
+    : [{ text: "TG通用群", callback_data: `bindtg_free_${id}` }]);
 
   if (!isWorkflow) {
     rows.push(referenceImageUrl
@@ -2933,10 +2910,20 @@ function extractTweetStyleLinkTextFromTelegramMessage(msg: TelegramBot.Message):
 }
 
 function getTweetStyleLinkPresentation(setup: any): { url: string; text: string } | null {
+  if (!isJinjunyaLinkPersona(setup)) return null;
   const url = normalizeTweetStyleLinkUrl(String(setup?.tweetStyleLinkUrl || ""));
   if (!url) return null;
   const text = String(setup?.tweetStyleLinkText || "").trim();
   return { url, text: text || url };
+}
+
+function isJinjunyaLinkPersona(setup: any): boolean {
+  const markers = [
+    String(setup?.personaName || ""),
+    String(setup?.imageWorkflow?.personaKey || ""),
+    String(setup?.imageWorkflow?.workflowFile || ""),
+  ].join(" ").toLowerCase();
+  return markers.includes("\u91d1\u541b\u96c5") || markers.includes("jinjunya");
 }
 
 function formatPersonaButtonText(persona: any) {
@@ -3185,8 +3172,10 @@ function parseGeneratePostCustomCallback(data: string): { archiveId: string; con
 async function sendGeneratePostModePickerForArchive(bot: TelegramBot, chatId: number, archiveId: string, messageId?: number, contentBranch?: GeneratePostContentBranch) {
   const archive = await loadPersonaArchive(archiveId).catch(() => null);
   if (!archive) { sendMainMenu(chatId, messageId); return; }
-  const scopedPosts = filterByTelegramGroupContentType(archive.posts, contentBranchToTelegramGroupContentType(contentBranch));
-  const branchLine = contentBranch ? ["內容類型：" + generatePostContentBranchLabel(contentBranch)] : [];
+  const scopedPosts = archive.posts || [];
+  const branchLine: string[] = [];
+  const backTo = "pd_" + archiveId;
+  const backText = "◀️ 返回人設詳情";
   const text = ["✍️ *新建推文*", "", "人設：" + archive.name, ...branchLine, "目前待發佈：" + scopedPosts.length + " 篇", "", "請選擇生成模式："].join(String.fromCharCode(10));
   await safeEditOrSend(bot, chatId, messageId, text, {
     parse_mode: "Markdown",
@@ -3195,25 +3184,7 @@ async function sendGeneratePostModePickerForArchive(bot: TelegramBot, chatId: nu
         [{ text: "📝 只生成推文（不配圖）", callback_data: buildGeneratePostModeCallback(archiveId, "textonly", contentBranch) }],
         [{ text: "🖼 生成推文+配圖/視頻", callback_data: buildGeneratePostModeCallback(archiveId, "withimage", contentBranch) }],
         [{ text: "🧩 自訂新建（文字/圖片/視頻）", callback_data: buildGeneratePostCustomCallback(archiveId, contentBranch) }],
-        [{ text: "◀️ 返回內容類型", callback_data: "genpost_branch_" + archiveId }],
-      ],
-    },
-  });
-}
-
-async function sendGeneratePostBranchPickerForArchive(bot: TelegramBot, chatId: number, archiveId: string, messageId?: number) {
-  const archive = await loadPersonaArchive(archiveId).catch(() => null);
-  if (!archive) { sendMainMenu(chatId, messageId); return; }
-  const counts = countByTelegramGroupContentType(archive.posts || []);
-  await safeEditOrSend(bot, chatId, messageId, ["✍️ *新建推文*", "", "人設：" + archive.name, "", "請先選擇本次要生成的內容類型："].join("\n"), {
-    parse_mode: "Markdown",
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: `免費內容（${counts.free}）`, callback_data: "genpost_nonr18_" + archiveId },
-          { text: `付費內容（${counts.paid}）`, callback_data: "genpost_r18_" + archiveId },
-        ],
-        [{ text: "◀️ 返回人設詳情", callback_data: "pd_" + archiveId }],
+        [{ text: backText, callback_data: backTo }],
       ],
     },
   });
@@ -3257,15 +3228,6 @@ function buildGenerateTimeSlotKeyboard(state: PendingGeneratePostState) {
   return { inline_keyboard: rows };
 }
 
-async function sendGenerateMemoryBranchPicker(bot: TelegramBot, chatId: number, messageId: number | undefined, state: PendingGeneratePostState) {
-  const modeLabel = generatePostModeLabel(state.textOnly, state.contentBranch, state.contentTimeSlot);
-  const selectedCount = state.selectedMemoryEntryIds?.length || 0;
-  await safeEditOrSend(bot, chatId, messageId, ["✍️ *新建推文*", "", "人設：" + state.archiveName, "模式：" + modeLabel, "指定記憶：" + (selectedCount ? `${selectedCount} 條` : "不指定"), "", "請選擇本次要生成的群內容類型："].join(String.fromCharCode(10)), {
-    parse_mode: "Markdown",
-    reply_markup: { inline_keyboard: [[{ text: "免費群內容", callback_data: "genmem_branch_nonr18" }, { text: "付費群內容", callback_data: "genmem_branch_r18" }], [{ text: "◀️ 返回記憶選擇", callback_data: "genmem_branch_back" }]] },
-  });
-}
-
 async function sendGenerateTimeSlotPicker(bot: TelegramBot, chatId: number, messageId: number | undefined, state: PendingGeneratePostState) {
   const modeLabel = generatePostModeLabel(state.textOnly, state.contentBranch, state.contentTimeSlot);
   const selectedCount = state.selectedMemoryEntryIds?.length || 0;
@@ -3282,9 +3244,9 @@ async function advanceGeneratePostAfterMemorySelection(
   state: PendingGeneratePostState,
 ) {
   if (!state.contentBranch) {
-    const branchState = { ...state, stage: "await_branch" as const };
-    setPendingGeneratePost(chatId, branchState);
-    await sendGenerateMemoryBranchPicker(bot, chatId, messageId, branchState);
+    const countState = { ...state, stage: "await_count" as const };
+    setPendingGeneratePost(chatId, countState);
+    await promptGeneratePostCount(bot, chatId, messageId, countState);
     return;
   }
 
@@ -5520,11 +5482,7 @@ function buildCustomPersonaPostBackKeyboard(state: {
   archiveId: string;
   contentBranch?: GeneratePostContentBranch;
 }) {
-  const modeBack = state.contentBranch === "r18"
-    ? `genpost_r18_${state.archiveId}`
-    : state.contentBranch === "nonr18"
-      ? `genpost_nonr18_${state.archiveId}`
-      : `genpost_branch_${state.archiveId}`;
+  const modeBack = `genpost_branch_${state.archiveId}`;
   return {
     inline_keyboard: [
       [{ text: "◀️ 返回生成模式", callback_data: modeBack }],
@@ -5594,7 +5552,7 @@ async function handlePendingCustomPersonaPostInput(
   }
   await bot.sendMessage(
     chatId,
-    `✅ 已寫入推文庫\n人設：${nextState.archiveName}\n內容類型：${generatePostContentBranchLabel(nextState.contentBranch)}\n類型：${nextState.mediaUrl ? "圖文/視頻文案" : "純文字"}\n目前待發佈：${saved.posts.length} 篇`,
+    `✅ 已寫入推文庫\n人設：${nextState.archiveName}${nextState.contentBranch ? `\n內容類型：${generatePostContentBranchLabel(nextState.contentBranch)}` : ""}\n類型：${nextState.mediaUrl ? "圖文/視頻文案" : "純文字"}\n目前待發佈：${saved.posts.length} 篇`,
     {
       reply_markup: {
         inline_keyboard: [
@@ -6309,6 +6267,45 @@ function collectGeneratedImageUrls(result: any): string[] {
   return urls.map((url) => String(url || "").trim()).filter(Boolean);
 }
 
+function looksLikeGeneratedImagePath(value: string) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (/^https?:\/\//i.test(text)) return true;
+  if (/^data:image\//i.test(text)) return true;
+  if (/\.(?:png|jpe?g|webp)(?:[?#].*)?$/i.test(text)) return true;
+  return false;
+}
+
+function collectTaskImageResultPaths(value: unknown, depth = 0): string[] {
+  if (depth > 5 || value == null) return [];
+  if (typeof value === "string") return looksLikeGeneratedImagePath(value) ? [value.trim()] : [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectTaskImageResultPaths(item, depth + 1));
+  if (typeof value !== "object") return [];
+  const obj = value as Record<string, unknown>;
+  const preferredKeys = [
+    "image_paths",
+    "imagePaths",
+    "image_urls",
+    "imageUrls",
+    "images",
+    "output_images",
+    "outputImages",
+    "result_images",
+    "resultImages",
+    "download_paths",
+    "downloadPaths",
+    "download_urls",
+    "downloadUrls",
+    "download_path",
+    "downloadPath",
+  ];
+  const nestedKeys = ["result", "output", "outputs", "payload", "data", "latest_event"];
+  const out: string[] = [];
+  for (const key of preferredKeys) out.push(...collectTaskImageResultPaths(obj[key], depth + 1));
+  for (const key of nestedKeys) out.push(...collectTaskImageResultPaths(obj[key], depth + 1));
+  return Array.from(new Set(out.map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
 async function sendPostImageCandidateMessage(bot: TelegramBot, chatId: number, args: {
   archiveId: string;
   postId?: string;
@@ -6625,9 +6622,7 @@ async function waitForToolR18GeneratedTaskDownloadPath(chatId: number, taskId: s
     lastTask = task;
     const status = String(task.status || "").toLowerCase();
     const downloadPath = String(task.download_path || "").trim();
-    const imagePaths = Array.isArray(task.image_paths)
-      ? task.image_paths.map((item: unknown) => String(item || "").trim()).filter(Boolean)
-      : [];
+    const imagePaths = collectTaskImageResultPaths(task);
     if (["success", "done", "completed"].includes(status)) {
       if (imagePaths.length || downloadPath) return { task, downloadPath: downloadPath || imagePaths[0], imagePaths };
       throw new Error("R18 \u4EFB\u52D9\u5DF2\u5B8C\u6210\uFF0C\u4F46\u6C92\u6709\u8FD4\u56DE\u53EF\u5BEB\u5165\u63A8\u6587\u7684\u5716\u7247\u8DEF\u5F91\u3002ID\uFF1A" + taskId);
@@ -7315,6 +7310,23 @@ function buildPaidR18FallbackPostContent(args: {
   return lines.join("\n").trim();
 }
 
+function normalizeArchivePostContentForMatch(value: string): string {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function archivePostContentMatches(postContent: string, wantedContent: string): boolean {
+  const post = String(postContent || "").trim();
+  const wanted = String(wantedContent || "").trim();
+  if (!post || !wanted) return false;
+  return post === wanted
+    || normalizeArchivePostContentForMatch(post) === normalizeArchivePostContentForMatch(wanted);
+}
+
 async function findLatestGeneratedArchivePost(args: {
   archiveId: string;
   postId?: string;
@@ -7325,7 +7337,7 @@ async function findLatestGeneratedArchivePost(args: {
   const appendedPosts = archive?.posts?.slice(Math.max(0, args.initialPostCount)) || [];
   const wanted = String(args.content || "").trim();
   const matched = (args.postId ? appendedPosts.find((post) => post.id === args.postId) : null)
-    || [...appendedPosts].reverse().find((post) => wanted && post.content.trim() === wanted)
+    || [...appendedPosts].reverse().find((post) => archivePostContentMatches(post.content, wanted))
     || appendedPosts.at(-1);
   return { archive, post: matched };
 }
@@ -7368,12 +7380,20 @@ async function saveAndSendPaidR18SelectedImagePost(args: {
   const latestPost = saved?.posts?.at(-1);
   const postId = latestPost?.id || "";
   if (!postId) throw new Error("付費群文案已生成，但寫入歸檔失敗");
+  const imagePersisted = await attachGeneratedImageToArchivePost({
+    archiveId: args.archiveId,
+    postId,
+    content: args.finalContent,
+    imageUrl: args.imageUrl,
+    prompt: args.finalContent,
+  });
+  if (!imagePersisted) throw new Error("Paid post saved, but selected image could not be attached to the archive record.");
   await markPersonaArchivePostTelegramGroupContentType(args.archiveId, postId, "paid").catch((error) => {
     console.warn("[telegram][paid_r18_mark_group_type_failed]", error?.message || error);
   });
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const post = archive?.posts.find((item) => postId && item.id === postId)
-    || [...(archive?.posts || [])].reverse().find((item) => item.content.trim() === args.finalContent.trim());
+    || [...(archive?.posts || [])].reverse().find((item) => archivePostContentMatches(item.content, args.finalContent));
   const archiveIndex = archive?.posts.findIndex((item) => post?.id && item.id === post.id) ?? -1;
   const displayIndex = post?.orderIndex !== undefined ? post.orderIndex + 1 : (archiveIndex >= 0 ? archiveIndex + 1 : 1);
   const linkPresentation = getTweetStyleLinkPresentation(archive?.setup);
@@ -7841,7 +7861,7 @@ async function attachSelectedImageCandidateToArchivePost(args: {
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const wanted = args.content.trim();
   const matchedPost = archive?.posts.find((post) => args.postId && post.id === args.postId)
-    || [...(archive?.posts || [])].reverse().find((post) => wanted && post.content.trim() === wanted);
+    || [...(archive?.posts || [])].reverse().find((post) => archivePostContentMatches(post.content, wanted));
   const imageHistory = Array.isArray((matchedPost as any)?.imageHistory) ? (matchedPost as any).imageHistory : [];
   const latestHistoryImage = imageHistory.length ? String(imageHistory[imageHistory.length - 1]?.imageUrl || "").trim() : "";
   return {
@@ -7869,7 +7889,7 @@ async function resolveGeneratedArchivePostsForImages(args: {
         : -1;
       if (index < 0 && content) {
         index = appendedPosts.findIndex((candidate, candidateIndex) => (
-          !usedIndexes.has(candidateIndex) && candidate.content.trim() === content
+          !usedIndexes.has(candidateIndex) && archivePostContentMatches(candidate.content, content)
         ));
       }
       if (index >= 0) {
@@ -7895,7 +7915,7 @@ async function attachGeneratedImageToArchivePost(args: {
   if (index < 0 && args.content?.trim()) {
     const wanted = args.content.trim();
     index = archive.posts.reduce((latest, post, currentIndex) => {
-      if (post.content.trim() !== wanted) return latest;
+      if (!archivePostContentMatches(post.content, wanted)) return latest;
       if (latest < 0) return currentIndex;
       return new Date(post.createdAt).getTime() >= new Date(archive.posts[latest].createdAt).getTime()
         ? currentIndex
@@ -9426,6 +9446,7 @@ async function executeGeneratePostsFromTelegram(args: GeneratePostsTelegramArgs)
       ? buildStoredPostsPageCallback(args.archiveId, Math.floor(firstGeneratedIndex / STORED_POSTS_PAGE_SIZE))
       : `posts_${args.archiveId}`;
     const linkPresentation = getTweetStyleLinkPresentation(latestArchive?.setup);
+    const latestHasPersonaReferenceImage = Boolean(getExplicitPersonaReferenceImageUrl(latestArchive || initialArchive));
     if (args.textOnly) {
       await telegramBestEffort("generatePosts.textOnlyDone", args.bot.sendMessage(args.chatId, buildGeneratedPostsPreviewHtml(
         imageTargets,
@@ -9458,7 +9479,7 @@ async function executeGeneratePostsFromTelegram(args: GeneratePostsTelegramArgs)
       imageWidth: args.imageWidth,
       imageHeight: args.imageHeight,
       imageRatioLabel: args.imageRatioLabel,
-      hasPersonaReferenceImage,
+      hasPersonaReferenceImage: latestHasPersonaReferenceImage,
       startedAt: Date.now(),
     });
     await telegramBestEffort("generatePosts.imageGroupIntro", args.bot.sendMessage(args.chatId, `\uD83D\uDDBC \u63A5\u4E0B\u4F86\u6703\u6309\u63A8\u6587\u9806\u5E8F\u9010\u7D44\u751F\u6210\u914D\u5716\u3002\n\n\u6BCF\u7D44\u751F\u6210 ${GENERATED_POST_IMAGE_TARGET_COUNT} \u5F35\u5019\u9078\u5716\uFF0C\u8ACB\u5148\u9078\u64C7\u5176\u4E2D 1 \u5F35\uFF0C\u518D\u9EDE\u64CA\u751F\u6210\u4E0B\u4E00\u7D44\u3002`, {
@@ -9846,13 +9867,14 @@ export async function generatePostsByMatchedPersona(
     generatedPosts: posts,
     initialPostCount,
   });
+  const latestArchiveForImages = await loadPersonaArchive(match.id).catch(() => null);
   const imageResults = await generateImagesForGeneratedPosts({
     archiveId: match.id,
     archiveName: match.name,
     posts: imageTargets.length
       ? imageTargets
       : posts.map((post: any) => ({ id: post.id, content: String(post.content || "") })).filter((post: any) => post.content.trim()),
-    hasPersonaReferenceImage: Boolean(getExplicitPersonaReferenceImageUrl(initialArchive)),
+    hasPersonaReferenceImage: Boolean(getExplicitPersonaReferenceImageUrl(latestArchiveForImages || initialArchive)),
   });
 
   const rendered = [
@@ -10515,6 +10537,76 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   const markTelegramUpdate = () => {
     lastTelegramUpdateAt = Date.now();
   };
+
+  const ensurePublishPlatformLoggedIn = async (args: {
+    chatId: number;
+    msgId?: number;
+    archive: PersonaArchive | null | undefined;
+    platform: TelegramPublishPlatform;
+    padCode: string;
+    backCallback: string;
+  }) => {
+    if (args.platform !== "threads" && args.platform !== "telegram") return true;
+    const archiveId = args.archive?.id;
+    const platformLabel = formatPublishPlatformLabel(args.platform);
+    await safeEditOrSend(bot, args.chatId, args.msgId, `🔍 正在檢測「${platformLabel}」登入狀態...\n\n雲機：${args.padCode}`, {
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: args.backCallback }]] },
+    });
+    const rows = archiveId
+      ? [
+          [{ text: `🔐 登入 ${platformLabel}`, callback_data: `acctlogin_${args.platform}_${archiveId}` }],
+          [{ text: `🔍 檢測 ${platformLabel} 登入狀態`, callback_data: `acctquery_${args.platform}_${archiveId}` }],
+          [{ text: "◀️ 返回", callback_data: args.backCallback }],
+        ]
+      : [[{ text: "◀️ 返回", callback_data: args.backCallback }]];
+
+    const creds = resolveVmosCredentials();
+    try {
+      if (args.platform === "threads") {
+        const result = await withPersonaAccountDetectionTimeout(queryThreadsAccount(creds, args.padCode), 35_000).catch((error: any) => ({
+          padCode: args.padCode,
+          platform: "threads" as const,
+          method: "failed" as const,
+          loggedIn: false,
+          error: error?.message || String(error),
+        }));
+        const expectedThreads = getPersonaAccountManagement(args.archive).threads?.handle;
+        const accountMatched = Boolean(result.loggedIn && threadsQueryMatchesSavedAccount(result, expectedThreads));
+        if (accountMatched) return true;
+        const detectedAccount = formatThreadsDetectedAccount(result);
+        await sendAccountActionScreenshot(bot, args.chatId, args.padCode, (result as any).screenshotUrl, "📸 Threads 發佈前登入檢測畫面");
+        const reason = result.loggedIn && detectedAccount && expectedThreads
+          ? `目前登入帳號 ${detectedAccount} 與人設保存帳號 ${maskAccountSecret(expectedThreads)} 不一致。`
+          : result.loggedIn
+            ? "已打開 Threads，但無法確認登入帳號與人設匹配。"
+            : formatUserFacingError((result as any).error, "未確認 Threads 已登入。");
+        await bot.sendMessage(args.chatId, `⛔ 發佈已暫停：${platformLabel} 尚未通過登入檢測。\n\n雲機：${args.padCode}\n原因：${reason}\n\n請先完成登入，再返回重新點擊發佈。`, {
+          reply_markup: { inline_keyboard: rows },
+        });
+        return false;
+      }
+
+      const result = await withPersonaAccountDetectionTimeout(queryTelegramAccountSession(creds, args.padCode), 35_000).catch((error: any) => ({
+        ok: false,
+        state: "unknown",
+        message: error?.message || String(error),
+        screenshotUrl: undefined,
+      }));
+      if ((result as any).ok) return true;
+      await sendAccountActionScreenshot(bot, args.chatId, args.padCode, (result as any).screenshotUrl, "📸 Telegram 發佈前登入檢測畫面");
+      await bot.sendMessage(args.chatId, `⛔ 發佈已暫停：${platformLabel} 尚未通過登入檢測。\n\n雲機：${args.padCode}\n原因：${formatUserFacingError((result as any).message, "未確認 Telegram 已登入。")}\n\n請先完成登入，再返回重新點擊發佈。`, {
+        reply_markup: { inline_keyboard: rows },
+      });
+      return false;
+    } catch (error: any) {
+      await sendCurrentPadScreenshot(bot, args.chatId, args.padCode, `📸 ${platformLabel} 登入檢測失敗畫面`).catch(() => undefined);
+      await bot.sendMessage(args.chatId, `⛔ 發佈已暫停：${platformLabel} 登入檢測失敗。\n\n原因：${formatUserFacingError(error, "請先完成登入後再重試發布。")}`, {
+        reply_markup: { inline_keyboard: rows },
+      });
+      return false;
+    }
+  };
+
   const restartProcessForPollingStall = (reason: string) => {
     console.error(`[telegram][polling_stall_restart] ${reason}`);
     setTimeout(() => process.exit(1), 100).unref?.();
@@ -10612,8 +10704,16 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       });
       return;
     }
+    const customPlatform = state.platform || effectiveDefaultPublishPlatform;
+    if (!(await ensurePublishPlatformLoggedIn({
+      chatId,
+      archive,
+      platform: customPlatform,
+      padCode,
+      backCallback: state.archiveId ? buildPersonaPublishCallback(state.archiveId, state.groupContentType) : "custom_publish",
+    }))) return;
 
-    const publishLockKey = `custom:${state.archiveId || state.archiveName || "adhoc"}:${state.platform || "threads"}:${caption.slice(0, 80)}:${state.fileId || state.publishWithGeneratedImage ? "media" : "text"}`;
+    const publishLockKey = `custom:${state.archiveId || state.archiveName || "adhoc"}:${customPlatform}:${caption.slice(0, 80)}:${state.fileId || state.publishWithGeneratedImage ? "media" : "text"}`;
     const publishScopeKey = `pad:${padCode}`;
     if (!acquirePublishCommand(chatId, publishLockKey, "自定义发布", publishScopeKey)) {
       await sendDuplicatePublishNotice(bot, chatId, publishScopeKey);
@@ -12443,15 +12543,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: {
             inline_keyboard: [
               [
-                { text: "📝 查看推文", callback_data: `posts_branch_${id}` },
-                { text: "🕘 发布历史", callback_data: `history_branch_${id}` },
+                { text: "📝 查看推文", callback_data: buildStoredPostsPageCallback(id, 0) },
+                { text: "🕘 发布历史", callback_data: buildPersonaHistoryCallback(id) },
               ],
               [
                 { text: "✍️ 新建推文", callback_data: `genpost_branch_${id}` },
                 { text: "⚙️ 人设设置", callback_data: `settings_${id}` },
               ],
               [
-                { text: "🚀 发布推文", callback_data: `pub_branch_${id}` },
+                { text: "🚀 发布推文", callback_data: buildPersonaPublishCallback(id) },
               ],
               [{ text: "◀️ 返回", callback_data: "list_personas" }],
             ],
@@ -12481,19 +12581,23 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const boundPadName = await resolvePadBindingDisplayName(archive.boundPadCode, archive.boundPadName, defaultPadCode, await listPadsForThisBot());
       const tgFreeGroupName = normalizeTelegramSingleLine(archive.boundTelegramFreeGroupName || "") || "未綁定";
       const tgPaidGroupName = normalizeTelegramSingleLine(archive.boundTelegramPaidGroupName || "") || "未綁定";
+      const isWorkflowPersona = isWorkflowPersonaListItem(archive);
       const settingsRows = buildPersonaSettingsRows(archive);
       console.log(`[telegram][settings_group_binding] archive=${id} free="${tgFreeGroupName}" paid="${tgPaidGroupName}"`);
-      await safeEditOrSend(bot, chatId, settingsTargetMessageId, [
+      const settingsLines = [
         "⚙️ *人設設定*",
         "",
         `人設：${archive.name}`,
         `綁定雲機：${boundPadName}`,
-        `TG免費群：${tgFreeGroupName}`,
-        `TG付費群：${tgPaidGroupName}`,
+        ...(isWorkflowPersona ? [
+          `TG免費群：${tgFreeGroupName}`,
+          `TG付費群：${tgPaidGroupName}`,
+        ] : [`TG通用群：${tgFreeGroupName}`]),
         `账号管理：${formatPersonaAccountStatus(archive).replace(/\n/g, "；")}`,
         `待發布推文：${archive.posts.length} 篇`,
         `已發布：${archive.publishHistory?.length || 0} 篇`,
-      ].join("\n"), {
+      ];
+      await safeEditOrSend(bot, chatId, settingsTargetMessageId, settingsLines.join("\n"), {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: settingsRows,
@@ -13109,19 +13213,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data.startsWith("genpost_branch_")) {
       pendingCustomPersonaPosts.delete(chatId);
-      await sendGeneratePostBranchPickerForArchive(bot, chatId, data.slice("genpost_branch_".length), msgId);
+      await sendGeneratePostModePickerForArchive(bot, chatId, data.slice("genpost_branch_".length), msgId);
       return;
     }
 
     if (data.startsWith("genpost_nonr18_")) {
       pendingCustomPersonaPosts.delete(chatId);
-      await sendGeneratePostModePickerForArchive(bot, chatId, data.slice("genpost_nonr18_".length), msgId, "nonr18");
+      await sendGeneratePostModePickerForArchive(bot, chatId, data.slice("genpost_nonr18_".length), msgId);
       return;
     }
 
     if (data.startsWith("genpost_r18_")) {
       pendingCustomPersonaPosts.delete(chatId);
-      await sendGeneratePostModePickerForArchive(bot, chatId, data.slice("genpost_r18_".length), msgId, "r18");
+      await sendGeneratePostModePickerForArchive(bot, chatId, data.slice("genpost_r18_".length), msgId);
       return;
     }
 
@@ -13709,7 +13813,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       && data !== "genpost_prompt_skip"
     ) {
       const archiveId = data.slice("genpost_".length);
-      await sendGeneratePostBranchPickerForArchive(bot, chatId, archiveId, msgId);
+      await sendGeneratePostModePickerForArchive(bot, chatId, archiveId, msgId);
       return;
     }
 
@@ -13718,23 +13822,25 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archiveId = parsedCustom?.archiveId || "";
       const archive = await loadPersonaArchive(archiveId).catch(() => null);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const customContentBranch: GeneratePostContentBranch | undefined = undefined;
       deletePendingGeneratePost(chatId);
       pendingCustomPersonaPosts.set(chatId, {
         archiveId,
         archiveName: archive.name,
-        contentBranch: parsedCustom?.contentBranch,
+        contentBranch: customContentBranch,
         stage: "await_input",
       });
+      const contentTypeLine = customContentBranch ? `\n內容類型：${generatePostContentBranchLabel(customContentBranch)}` : "";
       await safeEditOrSend(
         bot,
         chatId,
         msgId,
-        `🧩 *自訂新建推文*\n\n人設：${archive.name}\n內容類型：${generatePostContentBranchLabel(parsedCustom?.contentBranch)}\n\n目前步驟：等待推文內容\n\n請直接發送以下任一內容：\n1) 純文字推文\n2) 圖片/視頻 + 文案（caption 或下一條文字）\n\n收到完整內容後，我會寫入該內容類型的待發佈推文庫。`,
+        `🧩 *自訂新建推文*\n\n人設：${archive.name}${contentTypeLine}\n\n目前步驟：等待推文內容\n\n請直接發送以下任一內容：\n1) 純文字推文\n2) 圖片/視頻 + 文案（caption 或下一條文字）\n\n收到完整內容後，我會寫入待發佈推文庫。`,
         {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "◀️ 返回生成模式", callback_data: parsedCustom?.contentBranch === "r18" ? `genpost_r18_${archiveId}` : parsedCustom?.contentBranch === "nonr18" ? `genpost_nonr18_${archiveId}` : `genpost_branch_${archiveId}` }],
+              [{ text: "◀️ 返回生成模式", callback_data: `genpost_branch_${archiveId}` }],
               [{ text: "◀️ 返回人設詳情", callback_data: `pd_${archiveId}` }],
             ],
           },
@@ -13749,14 +13855,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const mode = parsedMode?.mode;
       const archive = await loadPersonaArchive(archiveId).catch(() => null);
       if (!archive || !mode) { sendMainMenu(chatId, msgId); return; }
-      const modeLabel = generatePostModeLabel(mode === "textonly", parsedMode.contentBranch);
+      const contentBranch: GeneratePostContentBranch | undefined = undefined;
+      const modeLabel = generatePostModeLabel(mode === "textonly", contentBranch);
       const memoryOptions = await loadSelectablePersonaMemories(archiveId);
       const pendingState: PendingGeneratePostState = {
         archiveId,
         archiveName: archive.name,
         count: 0,
         textOnly: mode === "textonly",
-        contentBranch: parsedMode.contentBranch,
+        contentBranch,
         selectedMemoryEntryIds: [],
         memoryOptions,
         memoryPage: 0,
@@ -13908,7 +14015,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const nextState = {
         ...pending,
         selectedMemoryEntryIds: data === "genmem_skip" ? [] : pending.selectedMemoryEntryIds || [],
-        stage: pending.contentBranch ? "await_time_slot" as const : "await_branch" as const,
+        stage: pending.contentBranch ? "await_time_slot" as const : "await_count" as const,
       };
       await advanceGeneratePostAfterMemorySelection(bot, chatId, msgId, nextState);
       return;
@@ -13922,28 +14029,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      if (data === "genmem_branch_picker") {
-        await sendGenerateMemoryBranchPicker(bot, chatId, msgId, pending);
-        return;
-      }
       if (data === "genmem_branch_back") {
         const nextState = await ensureGenerateMemoryOptions({ ...pending, stage: "await_memory" as const });
         setPendingGeneratePost(chatId, nextState);
         await safeEditOrSend(bot, chatId, msgId, buildGenerateMemorySelectionText(nextState), { reply_markup: buildGenerateMemorySelectionKeyboard(nextState) });
         return;
       }
-      const nextState = {
-        ...pending,
-        contentBranch: data === "genmem_branch_r18" ? "r18" as const : "nonr18" as const,
-        contentTimeSlot: data === "genmem_branch_r18" ? ensurePaidR18TimeSlot() : undefined,
-        stage: "await_time_slot" as const,
-      };
+      const nextState = { ...pending, contentBranch: undefined, contentTimeSlot: undefined, stage: "await_count" as const };
       setPendingGeneratePost(chatId, nextState);
-      if (nextState.contentBranch === "r18") {
-        await sendPaidR18EntryPicker(bot, chatId, msgId, nextState);
-        return;
-      }
-      await sendGenerateTimeSlotPicker(bot, chatId, msgId, nextState);
+      await promptGeneratePostCount(bot, chatId, msgId, nextState);
       return;
     }
 
@@ -13967,9 +14061,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         if (pending.contentBranch === "r18") {
           if (await sendPaidR18MemorySelectionFromContext(bot, chatId, msgId)) return;
         }
-        const branchState = await ensureGenerateMemoryOptions({ ...pending, contentBranch: undefined, contentTimeSlot: undefined, stage: "await_branch" as const });
-        setPendingGeneratePost(chatId, branchState);
-        await sendGenerateMemoryBranchPicker(bot, chatId, msgId, branchState);
+        const countState = { ...pending, contentBranch: undefined, contentTimeSlot: undefined, stage: "await_count" as const };
+        setPendingGeneratePost(chatId, countState);
+        await promptGeneratePostCount(bot, chatId, msgId, countState);
         return;
       }
       const nextState = {
@@ -14198,9 +14292,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await safeEditOrSend(bot, chatId, msgId, buildGenerateMemorySelectionText(nextState), { reply_markup: buildGenerateMemorySelectionKeyboard(nextState) });
         return;
       }
-      const branchState = { ...pending, selectedMemoryEntryIds: [], stage: "await_branch" as const };
-      setPendingGeneratePost(chatId, branchState);
-      await sendGenerateMemoryBranchPicker(bot, chatId, msgId, branchState);
+      const modeState = { ...pending, selectedMemoryEntryIds: [] };
+      deletePendingGeneratePost(chatId);
+      await sendGeneratePostModePickerForArchive(bot, chatId, pending.archiveId, msgId, modeState.contentBranch);
       return;
     }
 
@@ -14298,7 +14392,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const branchTitle = parsedHistory?.groupContentType === "paid" ? "付費內容" : parsedHistory?.groupContentType === "free" ? "免費內容" : "";
         await safeEditOrSend(bot, chatId, msgId, `<b>\uD83D\uDD58 \u767C\u5E03\u6B77\u53F2${branchTitle ? ` - ${branchTitle}` : ""}</b>\n\n\u76EE\u524D\u6C92\u6709\u767C\u5E03\u6B77\u53F2\u8A18\u9304\u3002`, {
           parse_mode: "HTML",
-          reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: parsedHistory?.groupContentType ? `history_branch_${id}` : `pd_${id}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: `pd_${id}` }]] },
         });
         return;
       }
@@ -14324,7 +14418,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         totalPages,
         callbackForPage: (targetPage) => buildPersonaHistoryCallback(id, parsedHistory?.groupContentType, targetPage),
       }));
-      keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: parsedHistory?.groupContentType ? `history_branch_${id}` : `pd_${id}` }]);
+      keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: `pd_${id}` }]);
       const branchTitle = parsedHistory?.groupContentType === "paid" ? "付費內容" : parsedHistory?.groupContentType === "free" ? "免費內容" : "";
       await safeEditOrSend(bot, chatId, msgId, `<b>\uD83D\uDD58 \u767C\u5E03\u6B77\u53F2${branchTitle ? ` - ${branchTitle}` : ""}</b>\uFF08\u5171 ${history.length} \u689D\uFF0C\u7B2C ${safePage + 1}/${totalPages} \u9801\uFF09\n\n${lines.join("\n\n")}`, {
         parse_mode: "HTML",
@@ -14369,24 +14463,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
           ? "publish"
           : "posts";
       const id = data.slice(`${target === "publish" ? "pub" : target}_branch_`.length);
-      const archive = await loadPersonaForThisBot(id).catch(() => null);
-      if (!archive) { sendMainMenu(chatId, msgId); return; }
-      const countSource = target === "history" ? (archive.publishHistory || []) : (archive.posts || []);
-      const counts = countByTelegramGroupContentType(countSource as Array<{ telegramGroupContentType?: "free" | "paid" }>);
-      const title = target === "history" ? "發布歷史" : target === "publish" ? "發布推文" : "待發布推文";
-      await safeEditOrSend(bot, chatId, msgId, `請選擇要查看的${title}內容類型：`, {
-        reply_markup: { inline_keyboard: buildPersonaContentTypePickerRows({ archiveId: id, target, counts }) },
-      });
-      return;
+      if (target === "history") data = buildPersonaHistoryCallback(id);
+      else if (target === "publish") data = buildPersonaPublishCallback(id);
+      else data = buildStoredPostsPageCallback(id, 0);
     }
 
     const contentTypeSelection = parsePersonaContentTypeCallback(data);
     if (contentTypeSelection?.target === "posts") {
-      data = buildStoredPostsPageCallback(contentTypeSelection.archiveId, 0, contentTypeSelection.groupContentType);
+      data = buildStoredPostsPageCallback(contentTypeSelection.archiveId, 0);
+    } else if (contentTypeSelection?.target === "history") {
+      data = buildPersonaHistoryCallback(contentTypeSelection.archiveId);
     } else if (contentTypeSelection?.target === "publish") {
-      data = buildPersonaPublishCallback(contentTypeSelection.archiveId, contentTypeSelection.groupContentType);
+      data = buildPersonaPublishCallback(contentTypeSelection.archiveId);
     }
-
     if (data.startsWith("posts_")) {
       const parsed = parseStoredPostsCallback(data);
       const id = parsed?.archiveId || "";
@@ -14603,13 +14692,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return;
         }
         if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
+        const padCode = archive.boundPadCode || defaultPadCode;
+        if (!(await ensurePublishPlatformLoggedIn({
+          chatId,
+          msgId,
+          archive,
+          platform,
+          padCode,
+          backCallback: buildStoredPostsPageCallback(state.archiveId, visiblePage, state.groupContentType),
+        }))) return;
         if (!credentials.ak || !credentials.sk) {
           await safeEditOrSend(bot, chatId, msgId, "❌ VMOS 凭据未配置", {
             reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: buildStoredPostsPageCallback(state.archiveId, visiblePage, state.groupContentType) }]] },
           });
           return;
         }
-        const padCode = archive.boundPadCode || defaultPadCode;
         const publishLockKey = `bulkpost:${state.archiveId}:${platform}:${selectedPosts.map((post) => post.id).join(",")}`;
         const publishScopeKey = `pad:${padCode}`;
         if (!acquirePublishCommand(chatId, publishLockKey, "批量发布", publishScopeKey)) {
@@ -14869,7 +14966,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         pendingPostImageCandidateSelectionActions.delete(postImageCandidateSelectKey);
         const archive = result.archive || await loadPersonaForThisBot(action.archiveId).catch(() => null);
         const post = archive?.posts.find((item) => selectedPostId && item.id === selectedPostId)
-          || [...(archive?.posts || [])].reverse().find((item) => item.content.trim() === result.content.trim());
+          || [...(archive?.posts || [])].reverse().find((item) => archivePostContentMatches(item.content, result.content));
         const archiveIndex = archive?.posts.findIndex((item) => post?.id && item.id === post.id) ?? -1;
         const displayIndex = action.displayIndex || (post?.orderIndex !== undefined ? post.orderIndex + 1 : 0) || (archiveIndex >= 0 ? archiveIndex + 1 : 1);
         const linkPresentation = getTweetStyleLinkPresentation(archive?.setup);
@@ -14907,7 +15004,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           && flow.archiveId === action.archiveId
           && (
             (currentPost?.id && selectedPostId && currentPost.id === selectedPostId)
-            || (!currentPost?.id && currentPost?.content?.trim() && currentPost.content.trim() === result.content.trim())
+            || (!currentPost?.id && currentPost?.content?.trim() && archivePostContentMatches(currentPost.content, result.content))
           ),
         );
         if (flow && matchesCurrentFlow) {
@@ -15475,12 +15572,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const current = groupContentType === "paid"
         ? formatTelegramGroupBindingDisplay(archive.boundTelegramPaidGroupName)
         : formatTelegramGroupBindingDisplay(archive.boundTelegramFreeGroupName);
+      const isWorkflowPersona = isWorkflowPersonaListItem(archive);
       pendingActions.set(chatId, {
         type: "set-telegram-group-binding",
         archiveId: id,
         groupContentType,
       });
-      const groupLabel = groupContentType === "paid" ? "TG付費群" : "TG免費群";
+      const groupLabel = !isWorkflowPersona ? "TG通用群" : groupContentType === "paid" ? "TG付費群" : "TG免費群";
       await safeEditOrSend(bot, chatId, msgId, [
         `請輸入「${archive.name}」的 ${groupLabel} 群組名稱。`,
         "",
@@ -15738,7 +15836,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inline_keyboard: [
             [{ text: "🖼 自定义发布", callback_data: `custom_publish_persona_${id}` }],
             [{ text: "📚 从存储推文选择发布", callback_data: "sp" }],
-            [{ text: "◀️ 返回內容類型", callback_data: parsedPublish?.groupContentType ? `pub_branch_${id}` : `pd_${id}` }],
+            [{ text: "◀️ 返回人設詳情", callback_data: `pd_${id}` }],
           ],
         },
       });
@@ -15976,6 +16074,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const posts = scopedPosts.slice(startIndex, startIndex + Math.max(1, Math.min(count, scopedPosts.length - startIndex)));
       const selection = summarizeManualPublishSelection(scopedPosts, startIndex, posts.length);
       const padCode = archive.boundPadCode || defaultPadCode;
+      if (!(await ensurePublishPlatformLoggedIn({
+        chatId,
+        msgId,
+        archive,
+        platform,
+        padCode,
+        backCallback: buildPersonaPublishCallback(archiveId, groupContentType),
+      }))) return;
       const publishLockKey = `manual:${archiveId}:${platform}:${startIndex}:${posts.map((post) => post.id).join(",")}`;
       const publishScopeKey = `pad:${padCode}`;
       if (!acquirePublishCommand(chatId, publishLockKey, "人工发布", publishScopeKey)) {
@@ -16086,16 +16192,25 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("dopub_")) {
       const parts = data.slice(6).split("_");
       const id = parts[0];
-      const platform = parts.slice(1).join("_");
+      const platform = parts.slice(1).join("_") as TelegramPublishPlatform;
       const archive = await loadPersonaArchive(id).catch(() => null);
       if (!archive || archive.posts.length === 0) { sendMainMenu(chatId, msgId); return; }
+      if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
+      const post = archive.posts[0];
+      const padCode = archive.boundPadCode || defaultPadCode;
+      if (!(await ensurePublishPlatformLoggedIn({
+        chatId,
+        msgId,
+        archive,
+        platform,
+        padCode,
+        backCallback: buildStoredPostsPageCallback(id, 0),
+      }))) return;
       if (!credentials.ak || !credentials.sk) {
         bot.editMessageText("❌ VMOS 凭据未配置", { chat_id: chatId, message_id: msgId });
         return;
       }
 
-      const post = archive.posts[0];
-      const padCode = archive.boundPadCode || defaultPadCode;
       const publishLockKey = `dopub:${id}:${platform}:${post.id}`;
       const publishScopeKey = `pad:${padCode}`;
       if (!acquirePublishCommand(chatId, publishLockKey, "发布", publishScopeKey)) {
@@ -16784,6 +16899,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const padCode = archive?.boundPadCode || defaultPadCode;
+      if (!(await ensurePublishPlatformLoggedIn({
+        chatId,
+        msgId,
+        archive,
+        platform,
+        padCode,
+        backCallback: buildStoredPostsPageCallback(archiveId, 0, action?.groupContentType),
+      }))) return;
       const publishLockKey = `dopubpost:${archiveId}:${postId}:${platform}`;
       const publishScopeKey = `pad:${padCode}`;
       if (!acquirePublishCommand(chatId, publishLockKey, "發佈", publishScopeKey)) {
@@ -17156,9 +17279,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       if (generatePostState.stage === "await_branch") {
-        await bot.sendMessage(chatId, "\u8ACB\u5148\u9EDE\u64CA\u6309\u9215\u9078\u64C7\u300C\u514D\u8CBB\u7FA4\u5167\u5BB9\u300D\u6216\u300C\u4ED8\u8CBB\u7FA4\u5167\u5BB9\u300D\u3002", {
-          reply_markup: { inline_keyboard: [[{ text: "\u514D\u8CBB\u7FA4\u5167\u5BB9", callback_data: "genmem_branch_nonr18" }, { text: "\u4ED8\u8CBB\u7FA4\u5167\u5BB9", callback_data: "genmem_branch_r18" }], [{ text: "\u25C0\uFE0F \u8FD4\u56DE\u8A18\u61B6\u9078\u64C7", callback_data: "genmem_branch_back" }]] },
-        });
+        const countState = { ...generatePostState, contentBranch: undefined, contentTimeSlot: undefined, stage: "await_count" as const };
+        setPendingGeneratePost(chatId, countState);
+        await promptGeneratePostCount(bot, chatId, undefined, countState);
         return;
       }
       if (generatePostState.stage === "await_time_slot") {
@@ -18053,8 +18176,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const groupLabel = pending.groupContentType === "paid" ? "TG付費群" : "TG免費群";
-      await updatePersonaArchivePadBinding(pending.archiveId, pending.groupContentType === "paid"
+      const isWorkflowPersona = isWorkflowPersonaListItem(archive);
+      const effectiveGroupContentType = isWorkflowPersona ? pending.groupContentType : "free";
+      const groupLabel = !isWorkflowPersona ? "TG通用群" : effectiveGroupContentType === "paid" ? "TG付費群" : "TG免費群";
+      await updatePersonaArchivePadBinding(pending.archiveId, effectiveGroupContentType === "paid"
         ? { telegramPaidGroupId: undefined, telegramPaidGroupName: groupName }
         : { telegramFreeGroupId: undefined, telegramFreeGroupName: groupName }).catch(() => null);
       invalidatePersonaListCache();

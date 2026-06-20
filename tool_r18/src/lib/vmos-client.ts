@@ -657,6 +657,21 @@ export async function execAdb(
 }
 
 /** 查詢任務執行結果（taskIds 為陣列） */
+/** 重啟雲機實例，用於 asyncCmd 任務卡死或系統無響應恢復。 */
+export async function restartPad(
+  config: VmosConfig,
+  padCode: string
+): Promise<unknown> {
+  const ipc = vmosAPI();
+  if (ipc?.restartPad) {
+    return ipc.restartPad({ padCode });
+  }
+
+  return vmosRequest(config, "/vcpcloud/api/padApi/restart", {
+    padCodes: [padCode],
+  });
+}
+
 export async function getTaskResult(
   config: VmosConfig,
   taskId: number

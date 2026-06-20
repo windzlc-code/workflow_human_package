@@ -191,11 +191,16 @@ function renderRunningHubPresetSelect(slotName) {
   const endpointInput = el(slot.endpointInputId);
   const currentId = runningHubPresetIdFromValues(slot.kind, detailInput?.value, endpointInput?.value);
   const options = runningHubPresetOptions(slot.kind);
-  select.innerHTML = options.map(([id, preset]) => {
+  const savedDetail = String(detailInput?.value || "").trim();
+  const savedEndpoint = String(endpointInput?.value || "").trim();
+  const savedCustomOption = !currentId && (savedDetail || savedEndpoint)
+    ? `<option value="__custom_saved" selected>当前已保存 API（自定义/未收录）</option>`
+    : "";
+  select.innerHTML = savedCustomOption + options.map(([id, preset]) => {
     const selected = id === currentId ? " selected" : "";
     return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(preset.label)}</option>`;
   }).join("");
-  if (!currentId && options[0]) {
+  if (!currentId && !savedCustomOption && options[0]) {
     select.value = options[0][0];
     applyRunningHubPresetToHidden(slotName, false);
   }
@@ -229,6 +234,11 @@ function updateRunningHubPresetStatus(slotName, overrideText = "") {
   if (!status) return;
   if (overrideText) {
     status.textContent = overrideText;
+    return;
+  }
+  if (select?.value === "__custom_saved") {
+    const endpoint = String(el(slot.endpointInputId)?.value || "").trim();
+    status.textContent = endpoint ? `当前使用：已保存自定义 API（${endpoint}）` : "当前使用：已保存自定义 API";
     return;
   }
   if (!preset) {

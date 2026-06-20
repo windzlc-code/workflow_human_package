@@ -18,6 +18,7 @@ let maskedTextKeyValue = "";
 let maskedImageKeyValue = "";
 let maskedNewPersonaRunningHubKeyValue = "";
 let maskedVideoKeyValue = "";
+let quickRunningHubPresetSaveTimer = 0;
 let operationInFlight = false;
 let quickTextModels = [];
 let quickImageModels = [];
@@ -106,6 +107,11 @@ function quickUpdateRunningHubPresetStatus(slotName, overrideText = "") {
     status.textContent = overrideText;
     return;
   }
+  if (select?.value === "__custom_saved") {
+    const endpoint = String(qsEl(slot.endpointInputId)?.value || "").trim();
+    status.textContent = endpoint ? `当前使用：已保存自定义 API（${endpoint}）` : "当前使用：已保存自定义 API";
+    return;
+  }
   if (!preset) {
     status.textContent = "尚未选择 RunningHub API。";
     return;
@@ -141,11 +147,16 @@ function quickRenderRunningHubPresetSelect(slotName) {
   const endpointInput = qsEl(slot.endpointInputId);
   const currentId = quickRunningHubPresetIdFromValues(slot.kind, detailInput?.value, endpointInput?.value);
   const options = quickRunningHubOptions(slot.kind);
-  select.innerHTML = options.map(([id, preset]) => {
+  const savedDetail = String(detailInput?.value || "").trim();
+  const savedEndpoint = String(endpointInput?.value || "").trim();
+  const savedCustomOption = !currentId && (savedDetail || savedEndpoint)
+    ? `<option value="__custom_saved" selected>当前已保存 API（自定义/未收录）</option>`
+    : "";
+  select.innerHTML = savedCustomOption + options.map(([id, preset]) => {
     const selected = id === currentId ? " selected" : "";
     return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(preset.label)}</option>`;
   }).join("");
-  if (!currentId && options[0]) {
+  if (!currentId && !savedCustomOption && options[0]) {
     select.value = options[0][0];
     quickApplyRunningHubPresetToHidden(slotName, false);
   }
@@ -160,6 +171,7 @@ function bindQuickRunningHubPresetSelect(slotName) {
   const handle = () => {
     if (quickApplyRunningHubPresetToHidden(slotName)) {
       select.dataset.appliedValue = select.value || "";
+      scheduleQuickRunningHubPresetSave();
     }
   };
   select.addEventListener("change", handle);
@@ -169,6 +181,16 @@ function bindQuickRunningHubPresetSelect(slotName) {
       if ((select.value || "") !== (select.dataset.appliedValue || "")) handle();
     }, 0);
   });
+}
+
+function scheduleQuickRunningHubPresetSave() {
+  if (quickRunningHubPresetSaveTimer) window.clearTimeout(quickRunningHubPresetSaveTimer);
+  quickRunningHubPresetSaveTimer = window.setTimeout(() => {
+    quickRunningHubPresetSaveTimer = 0;
+    saveModelConfig().catch((err) => {
+      setSetupMsg(err?.detail || err?.message || String(err), false);
+    });
+  }, 250);
 }
 
 function parseModelList(value) {

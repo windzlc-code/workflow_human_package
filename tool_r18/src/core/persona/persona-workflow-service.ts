@@ -58,7 +58,7 @@ function memorySummaryForPrompt(summary: string): string {
 
 function buildTweetStyleInstruction(setup: any): string {
   const profile = String(setup?.tweetStyleProfile || "").trim();
-  const linkUrl = String(setup?.tweetStyleLinkUrl || "").trim();
+  const linkUrl = isJinjunyaLinkPersona(setup) ? String(setup?.tweetStyleLinkUrl || "").trim() : "";
   if (!profile && !linkUrl) return "";
   return [
     "【固定推文风格】",
@@ -68,6 +68,15 @@ function buildTweetStyleInstruction(setup: any): string {
     linkUrl ? "Every generated post must include this fixed link exactly once. The fixed link must be the final line of the post; do not add body text, questions, emojis, or punctuation after the link." : "",
     "必须使用当前人设、记忆和用户提示生成全新内容；如果没有明确主题，就换一个同人设的日常/观点/互动主题，不要沿用案例主题。",
   ].filter(Boolean).join("\n");
+}
+
+function isJinjunyaLinkPersona(setup: any): boolean {
+  const markers = [
+    String(setup?.personaName || ""),
+    String(setup?.imageWorkflow?.personaKey || ""),
+    String(setup?.imageWorkflow?.workflowFile || ""),
+  ].join(" ").toLowerCase();
+  return markers.includes("\u91d1\u541b\u96c5") || markers.includes("jinjunya");
 }
 
 
@@ -88,7 +97,7 @@ function moveTweetStyleLinkToEnd(content: string, linkUrl: string) {
 }
 
 function ensurePostsContainTweetStyleLink(posts: EpisodeScript[], setup: any): EpisodeScript[] {
-  const linkUrl = String(setup?.tweetStyleLinkUrl || "").trim();
+  const linkUrl = isJinjunyaLinkPersona(setup) ? String(setup?.tweetStyleLinkUrl || "").trim() : "";
   if (!linkUrl) return posts;
   return posts.map((post) => {
     const nextContent = moveTweetStyleLinkToEnd(String(post.content || ""), linkUrl);
