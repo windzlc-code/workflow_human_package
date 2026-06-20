@@ -355,7 +355,7 @@ async function fetchThreadsSearchPageCandidates(args: {
       if (results.length >= args.limit) break;
       const searchUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
       await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
-      await page.waitForTimeout(4_000);
+      await page.waitForTimeout(2_500);
       const text = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
       const parsed = parseThreadsSearchTextCandidates({
         text,
@@ -388,10 +388,6 @@ function buildThreadsSearchQueries(keywords: string[]): string[] {
     if (text.length > 10) return;
     out.push(text);
   };
-  for (const keyword of meaningfulNeedles(keywords)) {
-    add(keyword);
-    for (const part of splitKeywords(keyword)) add(part);
-  }
   const synonymGroups: Array<[RegExp, string[]]> = [
     [/(教师|老師|老师|校園|校园|學生|学生|课堂|課堂)/, ["老師", "教師", "學生", "校園", "課堂"]],
     [/(恋爱|戀愛|情感|感情|暧昧|曖昧|分手|关系|關係)/, ["戀愛", "感情", "曖昧", "分手", "關係"]],
@@ -401,6 +397,10 @@ function buildThreadsSearchQueries(keywords: string[]): string[] {
   ];
   for (const [pattern, values] of synonymGroups) {
     if (pattern.test(joined)) values.forEach(add);
+  }
+  for (const keyword of meaningfulNeedles(keywords)) {
+    add(keyword);
+    for (const part of splitKeywords(keyword)) add(part);
   }
   return [...new Set(out)].slice(0, 12);
 }
