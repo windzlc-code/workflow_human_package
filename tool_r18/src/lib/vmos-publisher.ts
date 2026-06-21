@@ -6952,6 +6952,11 @@ async function captureThreadsPublishedEvidenceScreenshot(
   onProgress?: (p: PublishProgress) => void,
 ): Promise<string> {
   onProgress?.({ step: "返回 Threads 個人頁截圖取證...", done: false });
+  const detail = await openThreadsLatestOwnPostFromProfile(config, padCode, undefined, false).catch(() => null);
+  if (detail?.ok && detail.screenshotUrl) {
+    onProgress?.({ step: "已取得 Threads 最新帖文詳情截圖。", done: false });
+    return detail.screenshotUrl;
+  }
   const topUrl = await captureThreadsProfileContentScreenshot(config, padCode, { skipInitialSwipe: true });
   const topXml = await dumpUiXml(config, padCode).catch(() => "");
   const verificationCues = extractThreadsVerificationCues(caption);
@@ -24663,6 +24668,7 @@ async function openThreadsLatestOwnPostFromProfile(
   config: VmosConfig,
   padCode: string,
   maxAgeDays?: number,
+  requireCommentBadge = true,
 ): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
   const profile = await openThreadsProfileForAccountQuery(config, padCode);
   if (!profile.ok) return profile;
@@ -24687,7 +24693,7 @@ async function openThreadsLatestOwnPostFromProfile(
     let profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     let target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
-        requireCommentBadge: true,
+        requireCommentBadge,
         padCode,
         sampleStep: "profile-comment-badge-scan",
         maxAgeDays,
@@ -24710,7 +24716,7 @@ async function openThreadsLatestOwnPostFromProfile(
       profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
-          requireCommentBadge: true,
+          requireCommentBadge,
           padCode,
           sampleStep: "profile-comment-badge-scan-retry",
           maxAgeDays,
@@ -24723,7 +24729,9 @@ async function openThreadsLatestOwnPostFromProfile(
     if (!target) {
       return {
         ok: false,
-        error: "个人页可见范围未找到带数字评论角标的本人推文，已停止自动回复以避免误点无评论推文",
+        error: requireCommentBadge
+          ? "个人页可见范围未找到带数字评论角标的本人推文，已停止自动回复以避免误点无评论推文"
+          : "个人页可见范围未找到可安全打开的本人最新推文",
         screenshotUrl: shotUrl,
       };
     }
