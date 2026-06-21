@@ -273,12 +273,13 @@ const THREADS_PROFILE_REFERENCE_IMAGE_DIFF_THRESHOLD = 14;
 const THREADS_PROFILE_REFERENCE_IMAGE_CROP_DIFF_THRESHOLD = 12;
 const THREADS_VIDEO_TAB_DIFF_THRESHOLD = 1.0;
 const THREADS_TEXT_QUICK_DIFF_THRESHOLD = 1.0;
-const THREADS_LOCAL_VERIFY_DELAYS_MS = [2500, 7000];
+const THREADS_LOCAL_VERIFY_DELAYS_MS = [1800, 3500];
 const THREADS_VIDEO_TAB_VERIFY_DELAYS_MS = [2500, 7000, 12000];
 const THREADS_TEXT_PROFILE_RETRY_DELAYS_MS = [2500, 6000];
 const THREADS_IMAGE_PROFILE_RETRY_DELAYS_MS = [5000, 12000];
 const THREADS_VIDEO_PROFILE_RETRY_DELAYS_MS = [8000, 15000, 30000];
 const THREADS_PROFILE_VERIFY_TIMEOUT_MS = 30000;
+const THREADS_PROFILE_VERIFY_FAST_TIMEOUT_MS = 12000;
 const THREADS_TEXT_TOAST_SETTLE_DELAY_MS = 1200;
 
 export function getThreadsLauncherIconFallbackPoints(width = BASE_SCREEN.width, height = BASE_SCREEN.height) {
@@ -6171,6 +6172,13 @@ async function getThreadsProfileReferenceImageQuickMatchWithSharp(
   return best.diff === Number.POSITIVE_INFINITY ? null : best;
 }
 
+async function getThreadsProfileReferenceImageFastMatch(
+  referenceUrl: string,
+  screenshotUrl: string,
+): Promise<{ diff: number; x: number; y: number; width: number; height: number; mode?: string } | null> {
+  return getThreadsProfileReferenceImageQuickMatchWithSharp(referenceUrl, screenshotUrl);
+}
+
 async function getThreadsProfileReferenceImageBestMatch(
   referenceUrl: string,
   screenshotUrl: string,
@@ -6943,19 +6951,18 @@ async function captureThreadsPublishedEvidenceScreenshot(
   caption: string,
   onProgress?: (p: PublishProgress) => void,
 ): Promise<string> {
-  onProgress?.({ step: "截取 Threads 個人頁最新內容...", done: false });
+  onProgress?.({ step: "返回 Threads 個人頁截圖取證...", done: false });
   const topUrl = await captureThreadsProfileContentScreenshot(config, padCode, { skipInitialSwipe: true });
   const topXml = await dumpUiXml(config, padCode).catch(() => "");
   const verificationCues = extractThreadsVerificationCues(caption);
-  const candidates: Array<{ label: string; url: string; xml: string }> = [
-    { label: "個人主頁首屏", url: topUrl, xml: topXml },
-  ];
+  const candidates: Array<{ label: string; url: string; xml: string }> = [];
 
   await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1180, endX: 360, endY: 760 });
   await delay(700);
   const midUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => topUrl);
   const midXml = await dumpUiXml(config, padCode).catch(() => "");
   candidates.push({ label: "個人主頁下滑一次", url: midUrl, xml: midXml });
+  candidates.push({ label: "個人主頁首屏", url: topUrl, xml: topXml });
 
   for (const candidate of candidates) {
     if (
@@ -6966,12 +6973,13 @@ async function captureThreadsPublishedEvidenceScreenshot(
         || await isThreadsScreenVisibleLocally(candidate.url).catch(() => false)
       )
     ) {
-      onProgress?.({ step: `已在 Threads ${candidate.label} 命中最新正文線索。`, done: false });
+      onProgress?.({ step: `已取得 Threads 發布證據截圖（${candidate.label}）。`, done: false });
       return candidate.url;
     }
   }
 
-  throw new Error("快速取證未看到最新正文線索");
+  onProgress?.({ step: "未命中正文線索，回傳最接近完整內容的個人頁截圖。", done: false });
+  return midUrl || topUrl;
 }
 
 async function tapThreadsProfileTab(
@@ -7187,12 +7195,17 @@ async function verifyThreadsPublishLocally(
 
     if (hasImageReferenceMedia(mediaUrl)) {
       try {
-        const localMatch = await getThreadsProfileReferenceImageBestMatch(mediaUrl!, afterProfileUrl);
+        const localMatch = await getThreadsProfileReferenceImageFastMatch(mediaUrl!, afterProfileUrl);
+        if (!localMatch) {
+          throw new Error("Threads 本機快驗未取得可用圖片候選");
+        }
         if (isThreadsProfileReferenceImageMatch(localMatch)) {
+          const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
+            .catch(() => afterProfileUrl);
           return {
             state: "verified",
             detail: `發布完成 ✓（本機快驗：Threads 主頁已命中參考圖，diff=${localMatch.diff.toFixed(1)}${localMatch.mode ? `, mode=${localMatch.mode}` : ""}）`,
-            screenshotUrl: afterProfileUrl,
+            screenshotUrl: evidenceUrl,
           };
         }
       } catch {
@@ -7538,12 +7551,10 @@ async function typeText(
   waitMs = 2000
 ) {
   let usedFallback = false;
-  if (/[^\x20-\x7E]/.test(text)) {
-    await ensureVmosUnicodeInputMethod(config, padCode).catch(() => undefined);
-    await typeTextViaAdbBroadcast(config, padCode, text, Math.max(waitMs, 2200), 20_000);
-    return;
-  }
   try {
+    if (/[^\x20-\x7E]/.test(text)) {
+      await ensureVmosPlainTextInputMethod(config, padCode).catch(() => undefined);
+    }
     const taskId = await Promise.race([
       inputText(config, padCode, text),
       new Promise<never>((_, reject) => {
@@ -7568,6 +7579,36 @@ async function typeText(
     );
   }
   await delay(usedFallback ? Math.max(waitMs, 2500) : waitMs);
+}
+
+async function ensureVmosPlainTextInputMethod(
+  config: VmosConfig,
+  padCode: string,
+): Promise<void> {
+  const current = await execAdbForText(
+    config,
+    padCode,
+    "settings get secure default_input_method",
+    8_000,
+    500,
+  ).catch(() => "");
+  if (!current.includes("com.android.adbkeyboard/.AdbIME")) return;
+
+  const available = await execAdbForText(
+    config,
+    padCode,
+    "ime list -s",
+    8_000,
+    500,
+  ).catch(() => "");
+  const candidates = [
+    "com.cloud.rtcgesture/.input.MyInputMethodService",
+    "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME",
+  ];
+  const nextIme = candidates.find((ime) => available.includes(ime));
+  if (!nextIme) return;
+  await execAdbForText(config, padCode, `ime set ${nextIme}`, 10_000, 500);
+  await delay(500);
 }
 
 async function ensureVmosUnicodeInputMethod(
@@ -7759,10 +7800,10 @@ async function typeWarmupCommentText(
 ) {
   if (/[^\x20-\x7E]/.test(text)) {
     try {
-      await typeTextViaAdbBase64Broadcast(config, padCode, text, Math.max(waitMs, 1400), 10_000);
+      await typeText(config, padCode, text, Math.max(waitMs, 1400));
       return;
     } catch {
-      await typeText(config, padCode, text, Math.max(waitMs, 1800));
+      await typeTextViaAdbBase64Broadcast(config, padCode, text, Math.max(waitMs, 1800), 10_000);
       return;
     }
   }
@@ -10116,6 +10157,7 @@ async function detectExplicitSuccessToast(
 ): Promise<boolean> {
   const { apiKey } = getGeminiEndpoint();
   if (!apiKey || screenshots.length === 0) return false;
+  const request = platform === "threads" ? createTimeoutSignal(6000) : null;
 
   let prompt: string;
   if (platform === "threads") {
@@ -10146,12 +10188,15 @@ async function detectExplicitSuccessToast(
           ]),
         ],
       }],
-      { maxOutputTokens: 20, temperature: 0 }
+      { maxOutputTokens: 20, temperature: 0 },
+      request?.signal,
     );
     const text = normalizeSingleLine(extractText(raw)).toUpperCase();
     return text.startsWith("YES");
   } catch {
     return false;
+  } finally {
+    request?.cleanup();
   }
 }
 
@@ -13027,7 +13072,7 @@ async function verifyThreadsProfileContainsPost(
   });
   const referenceShot = hasImageReferenceMedia(mediaUrl) ? await getInlineData(mediaUrl!) : null;
   const verificationCues = extractThreadsVerificationCues(caption);
-  const evidenceUrl = isVideoMediaUrl(mediaUrl) ? profileMidUrl : profileTopUrl;
+  const evidenceUrl = profileMidUrl || profileTopUrl;
 
   if (!profileTop || !profileMid || !profileLow) {
     return {
@@ -13124,7 +13169,8 @@ NO|原因`;
       ];
       let bestLocalMatch: { label: string; diff: number; screenshotUrl: string } | undefined;
       for (const candidate of localCandidates) {
-        const match = await getThreadsProfileReferenceImageBestMatch(mediaUrl!, candidate.url);
+        const match = await getThreadsProfileReferenceImageFastMatch(mediaUrl!, candidate.url);
+        if (!match) continue;
         if (!bestLocalMatch || match.diff < bestLocalMatch.diff) {
           bestLocalMatch = { label: candidate.label, diff: match.diff, screenshotUrl: candidate.url };
         }
@@ -13179,7 +13225,7 @@ NO|原因
           ],
         }],
         { maxOutputTokens: 80, temperature: 0 },
-        THREADS_PROFILE_VERIFY_TIMEOUT_MS,
+        THREADS_PROFILE_VERIFY_FAST_TIMEOUT_MS,
       );
       const imageLine = normalizeSingleLine(extractText(imageRaw));
       if (/^YES\b/i.test(imageLine)) {
@@ -13232,7 +13278,7 @@ NO|原因
           ],
         }],
         { maxOutputTokens: 80, temperature: 0 },
-        THREADS_PROFILE_VERIFY_TIMEOUT_MS,
+        THREADS_PROFILE_VERIFY_FAST_TIMEOUT_MS,
       );
       const textLine = normalizeSingleLine(extractText(textRaw));
       if (/^YES\b/i.test(textLine)) {
@@ -13294,7 +13340,7 @@ UNKNOWN|原因
       ],
     }],
     { maxOutputTokens: 120, temperature: 0 },
-    THREADS_PROFILE_VERIFY_TIMEOUT_MS,
+    THREADS_PROFILE_VERIFY_FAST_TIMEOUT_MS,
   );
 
   const parsed = parsePublishVisionResult(extractText(raw));
@@ -13859,15 +13905,18 @@ async function verifyThreadsPublish(
       throw new Error("__THREADS_STILL_COMPOSING__發布後仍停留在新串文輸入頁");
     }
 
-    const toastSuccess = await detectExplicitSuccessToast("threads", [immediateShot]);
-    const bottomToastSuccess = toastSuccess
-      || await detectThreadsPublishedToastLocally(immediateUrl)
+    const localImmediateToastSuccess = await detectThreadsPublishedToastLocally(immediateUrl)
       || await detectThreadsBottomSuccessToast(immediateUrl);
+    const toastSuccess = localImmediateToastSuccess
+      || await detectExplicitSuccessToast("threads", [immediateShot]);
+    const bottomToastSuccess = toastSuccess;
     if (bottomToastSuccess) {
+      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
+        .catch(() => immediateUrl);
       return {
         state: "verified",
         detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
-        screenshotUrl: immediateUrl,
+        screenshotUrl: evidenceUrl,
       };
     }
 
@@ -13955,18 +14004,21 @@ async function verifyThreadsPublish(
         };
       }
 
-      const fullToastSuccess = await detectExplicitSuccessToast("threads", [immediateShot, settledShot, lateShot])
-        || await detectThreadsPublishedToastLocally(immediateUrl)
+      const localFullToastSuccess = await detectThreadsPublishedToastLocally(immediateUrl)
         || await detectThreadsPublishedToastLocally(settledUrl)
         || await detectThreadsPublishedToastLocally(lateUrl)
         || await detectThreadsBottomSuccessToast(immediateUrl)
         || await detectThreadsBottomSuccessToast(settledUrl)
         || await detectThreadsBottomSuccessToast(lateUrl);
+      const fullToastSuccess = localFullToastSuccess
+        || await detectExplicitSuccessToast("threads", [immediateShot, settledShot, lateShot]);
       if (fullToastSuccess) {
+        const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
+          .catch(() => lateUrl);
         return {
           state: "verified",
           detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
-          screenshotUrl: lateUrl,
+          screenshotUrl: evidenceUrl,
         };
       }
 
@@ -14010,12 +14062,14 @@ UNKNOWN|原因
 
       const parsed = parsePublishVisionResult(extractText(raw));
       if (parsed.status === "PUBLISHED" && hasExplicitSuccessCue(parsed.reason, "threads")) {
+        const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
+          .catch(() => lateUrl);
         return {
           state: "verified",
           detail: parsed.reason
             ? `發布完成 ✓（已校驗：${parsed.reason}）`
             : "發布完成 ✓（已校驗：已離開編輯頁並出現成功訊號）",
-          screenshotUrl: lateUrl,
+          screenshotUrl: evidenceUrl,
         };
       }
       if (parsed.status === "STILL_COMPOSING") {
@@ -14060,18 +14114,34 @@ UNKNOWN|原因
       };
     }
 
-    const fullToastSuccess = await detectExplicitSuccessToast("threads", [immediateShot, settledShot, lateShot])
-      || await detectThreadsPublishedToastLocally(immediateUrl)
+    const localFullToastSuccess = await detectThreadsPublishedToastLocally(immediateUrl)
       || await detectThreadsPublishedToastLocally(settledUrl)
       || await detectThreadsPublishedToastLocally(lateUrl)
       || await detectThreadsBottomSuccessToast(immediateUrl)
       || await detectThreadsBottomSuccessToast(settledUrl)
       || await detectThreadsBottomSuccessToast(lateUrl);
+    const quickPostState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+    const quickFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
+    if (
+      quickPostState
+      && quickFocus.includes(THREADS_PACKAGE)
+      && quickPostState.page !== "compose_editor"
+      && quickPostState.page !== "reply_composer"
+      && quickPostState.page !== "login_required"
+      && quickPostState.page !== "challenge"
+      && quickPostState.page !== "system_dialog"
+    ) {
+      return await verifyThreadsProfileContainsPostWithRetries(config, padCode, caption, mediaUrl, onProgress);
+    }
+    const fullToastSuccess = localFullToastSuccess
+      || await detectExplicitSuccessToast("threads", [immediateShot, settledShot, lateShot]);
     if (fullToastSuccess) {
+      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
+        .catch(() => lateUrl);
       return {
         state: "verified",
         detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
-        screenshotUrl: lateUrl,
+        screenshotUrl: evidenceUrl,
       };
     }
 
@@ -14128,12 +14198,14 @@ UNKNOWN|原因
 
     const parsed = parsePublishVisionResult(extractText(raw));
     if (parsed.status === "PUBLISHED" && hasExplicitSuccessCue(parsed.reason, "threads")) {
+      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
+        .catch(() => lateUrl);
       return {
         state: "verified",
         detail: parsed.reason
           ? `發布完成 ✓（已校驗：${parsed.reason}）`
           : "發布完成 ✓（已校驗：已離開編輯頁並出現成功訊號）",
-        screenshotUrl: lateUrl,
+        screenshotUrl: evidenceUrl,
       };
     }
 
@@ -24224,12 +24296,19 @@ function isThreadsAutoReplyIgnoredText(text: string): boolean {
   if (!compact) return true;
   if (/^(可見留言|可见留言|可見評論|可见评论|visible comment)$/i.test(compact)) return true;
   if (compact.length < 3 || compact.length > 160) return true;
+  const chars = Array.from(compact.replace(/\s+/g, ""));
+  if (chars.length >= 4) {
+    const uniqueCount = new Set(chars).size;
+    const topRepeat = Math.max(...Array.from(new Set(chars)).map((char) => chars.filter((item) => item === char).length));
+    if (uniqueCount <= 2 || topRepeat / chars.length >= 0.72) return true;
+  }
   if (/^(讚|赞|喜歡|喜欢|回覆|回复|留言|評論|评论|轉發|转发|分享|發佈|发布|Post|Reply|Like|Share|Repost|Threads|Following|For you)$/i.test(compact)) return true;
   if (/^(首頁|主页|搜尋|搜索|探索|通知|個人|个人|新增|取消|完成|更多|返回|查看|複製|复制|編輯|编辑)$/i.test(compact)) return true;
   if (/^\d+(\.\d+)?[萬万千kKmM]?$/.test(compact)) return true;
   if (/^\d+\s*(秒|分鐘|分钟|小時|小时|天|週|周|月|年|s|m|h|d|w)$/i.test(compact)) return true;
   if (/^@?[a-z0-9_.-]{3,32}$/i.test(compact)) return true;
   if (/https?:\/\/|t\.me\/|line\.me|whatsapp|賺錢|赚钱|兼職|兼职|私訊|私信|加群|導流|引流|博彩|裸聊|約炮|约炮/i.test(compact)) return true;
+  if (/^(急+|啊+|喔+|哦+|嗯+|哈+|呵+|嗨+|hi+|ok+|test+|測試+|测试+)$/i.test(compact)) return true;
   if (!/[\p{L}\p{N}]/u.test(compact)) return true;
   return false;
 }
@@ -26472,6 +26551,24 @@ export async function autoReplyThreadsAccount(
   const ownIdentifiers = mergeThreadsAutoReplyOwnIdentifiers([
     accountInfo?.username,
   ]);
+  const rememberEvidenceScreenshot = async (
+    step: string,
+    meta: Record<string, unknown> = {},
+    existingScreenshotUrl?: string,
+  ): Promise<string> => {
+    const shotUrl = existingScreenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    if (!shotUrl) return "";
+    if (!replyScreenshots.includes(shotUrl) && replyScreenshots.length < Math.max(1, maxReplies)) {
+      replyScreenshots.push(shotUrl);
+    }
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step,
+      screenshotUrl: shotUrl,
+      meta,
+    });
+    return shotUrl;
+  };
 
   report({ step: "正在进入 Threads 个人主页" });
   let preflightState = await withTimeout(
@@ -26516,6 +26613,10 @@ export async function autoReplyThreadsAccount(
     preflightState = await classifyThreadsPageOnDevice(config, padCode).catch(() => preflightState);
   }
   if (preflightState?.page === "compose_editor" || preflightState?.page === "reply_composer") {
+    await rememberEvidenceScreenshot("auto-reply-still-in-composer", {
+      page: preflightState.page,
+      reason: preflightState.reason,
+    }, preflightState.screenshotUrl);
     const result = {
       step: "Threads 自动回复失败",
       scannedPosts,
@@ -26550,6 +26651,10 @@ export async function autoReplyThreadsAccount(
       error: error instanceof Error ? error.message : String(error),
     }));
   if (opened.ok === false) {
+    await rememberEvidenceScreenshot("auto-reply-open-profile-failed", {
+      maxAgeDays,
+      error: opened.error,
+    }, opened.screenshotUrl);
     const result = {
       step: "Threads 自动回复未找到可回复评论",
       scannedPosts,
@@ -26577,6 +26682,10 @@ export async function autoReplyThreadsAccount(
       const currentUiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
       const errorMessage = error instanceof Error ? error.message : String(error);
       errors.push(`第 ${postIndex + 1} 条收集评论失败：${errorMessage}`);
+      await rememberEvidenceScreenshot("auto-reply-collect-comments-failed", {
+        postIndex: postIndex + 1,
+        error: errorMessage,
+      }, currentShotUrl);
       saveThreadsAutoReplySampleStep({
         padCode,
         step: "collect-timeout-or-error",
@@ -26693,7 +26802,14 @@ export async function autoReplyThreadsAccount(
           report({ step: `已回复精选评论：${decision.candidate.text.slice(0, 24)}` });
         } catch (error) {
           skipped += 1;
-          errors.push(error instanceof Error ? error.message : String(error));
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          errors.push(errorMessage);
+          await rememberEvidenceScreenshot("auto-reply-send-comment-failed", {
+            postIndex: postIndex + 1,
+            candidateText: decision.candidate.text,
+            replyPreview: decision.reply.slice(0, 80),
+            error: errorMessage,
+          });
         }
       }
     }
@@ -26705,10 +26821,22 @@ export async function autoReplyThreadsAccount(
       }));
     if (!nextOpened.ok) {
       errors.push(nextOpened.error);
+      await rememberEvidenceScreenshot("auto-reply-open-next-post-failed", {
+        postIndex: postIndex + 1,
+        error: nextOpened.error,
+      }, nextOpened.screenshotUrl);
       break;
     }
   }
 
+  if (replied <= 0) {
+    await rememberEvidenceScreenshot("auto-reply-finished-without-reply", {
+      scannedPosts,
+      scannedComments,
+      skipped,
+      errors: errors.filter(Boolean).slice(-3),
+    });
+  }
   const done = {
     step: replied > 0 ? "Threads 自动回复完成" : "Threads 自动回复未找到可回复评论",
     scannedPosts,
