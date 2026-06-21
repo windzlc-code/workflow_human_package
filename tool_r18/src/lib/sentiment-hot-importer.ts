@@ -77,7 +77,7 @@ const GENERIC_SENTIMENT_KEYWORDS = new Set([
   "文案",
 ]);
 
-const BROAD_THREADS_SEARCH_QUERIES = ["生活", "日常", "熱門", "分享"];
+const BROAD_THREADS_SEARCH_QUERIES = ["生活", "日常", "熱門", "分享", "台灣", "心情", "今天", "最近", "穿搭", "美食", "遊戲", "戀愛"];
 
 const DYNAMIC_KEYWORD_STOPWORDS = new Set([
   "人設",
@@ -367,9 +367,7 @@ export async function fetchSentimentHotCandidates(args: {
   }
 
   if (runtime.ok && usableSources.length > 0) {
-    void syncSentimentKeywords(keywords)
-      .then(() => requestSentimentScanStart(keywords, usableSources))
-      .catch(() => undefined);
+    void syncSentimentKeywords(keywords).catch(() => undefined);
   } else if (runtime.ok) {
     warnings.push("\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u002f\u0020\u0049\u006e\u0073\u0074\u0061\u0067\u0072\u0061\u006d\u0020\u7f3a\u5c11\u6709\u6548\u0020\u0043\u006f\u006f\u006b\u0069\u0065\uff0c\u5df2\u8df3\u904e\u771f\u5be6\u6383\u63cf\uff1b\u8acb\u5148\u5728\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u914d\u7f6e\u4e2d\u6388\u6b0a\u5f8c\u518d\u5237\u65b0\u6293\u53d6\u3002");
   }
@@ -396,23 +394,6 @@ async function withSentimentTimeout<T>(promise: Promise<T>, timeoutMs: number, f
   }
 }
 
-async function requestSentimentScanStart(keywords: string[], sources: SentimentHotPlatform[]) {
-  const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/scan-start`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      keywords,
-      keyword: keywords.slice(0, 4).join(" "),
-      sources,
-      sourceScopes: { fast: sources, full: sources, watch: sources },
-      limit: 30,
-      reason: "tool-r18-hot-import",
-    }),
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-}
-
 async function syncSentimentKeywords(keywords: string[]) {
   const usableKeywords = meaningfulNeedles(keywords).slice(0, 6);
   for (const keyword of usableKeywords) {
@@ -424,16 +405,6 @@ async function syncSentimentKeywords(keywords: string[]) {
     });
     if (!response.ok && response.status !== 409) throw new Error(`HTTP ${response.status}`);
   }
-}
-
-async function waitForCandidates(args: { archiveId: string; keywords: string[]; limit: number; timeoutMs?: number }): Promise<SentimentHotCandidate[]> {
-  const deadline = Date.now() + (args.timeoutMs || 45_000);
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(100, deadline - Date.now()))));
-    const candidates = await readCandidatesFromDatabase(args);
-    if (candidates.length > 0) return candidates;
-  }
-  return [];
 }
 
 async function fetchThreadsSearchPageCandidates(args: {
