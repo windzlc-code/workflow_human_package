@@ -27,6 +27,7 @@
     "skill:telegram-custom-publish-selftest": "node --import tsx scripts/skills/telegram-custom-publish-selftest.ts",
     "skill:telegram-custom-post-selftest": "node --import tsx scripts/skills/telegram-custom-post-selftest.ts",
     "skill:promote-threads-samples": "node --import tsx scripts/skills/promote-threads-samples.ts",
+    "skill:threads-auto-reply-once": "node --import tsx scripts/skills/threads-auto-reply-once.ts",
     "skill:persona": "node --import tsx scripts/skills/persona-workflow.ts",
     "skill:persona-generate-by-id": "node --import tsx scripts/skills/persona-generate-by-id.ts",
     "skill:query-pad-account-debug": "node --import tsx scripts/skills/query-pad-account-debug.ts",
