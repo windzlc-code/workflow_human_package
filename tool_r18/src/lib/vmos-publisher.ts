@@ -6972,76 +6972,17 @@ async function captureThreadsPublishedEvidenceScreenshot(
 ): Promise<string> {
   onProgress?.({ step: "返回 Threads 個人頁截圖取證...", done: false });
   const capturePresentationShot = async (): Promise<string | null> => {
-    await tapThreadsProfileTab(config, padCode, 1800).catch(() => undefined);
-    await delay(500);
+    await tapThreadsProfileTab(config, padCode, 900).catch(() => undefined);
+    await delay(350);
     let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
     if (!shotUrl) return null;
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
-    const verificationCues = extractThreadsVerificationCues(caption);
-    const hasSetupCard = async (url: string, xml: string): Promise<boolean> => {
-      const uiText = normalizeSingleLine(decodeXmlAttr(xml));
-      if (/完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(uiText)) {
-        return true;
-      }
-      return detectThreadsProfileSetupCardLocally(url).catch(() => false);
-    };
-    const hasFreshPostMeta = (xml: string): boolean => (
-      /(現在|现在|剛剛|刚刚|秒前|分鐘|分钟|小時|小时|天前|則回覆|则回复|查看串文|查看對話|查看对话)/.test(
-        normalizeSingleLine(decodeXmlAttr(xml)),
-      )
-    );
-    const hasLoosePostCue = (xml: string): boolean => {
-      if (verificationCues.length === 0) return false;
-      const normalizedXml = normalizeThreadsLocalTextCue(xml);
-      return verificationCues.some((cue) => {
-        const normalizedCue = normalizeThreadsLocalTextCue(cue);
-        if (normalizedCue.length < 6) return false;
-        const head = normalizedCue.slice(0, Math.min(14, Math.max(6, Math.floor(normalizedCue.length * 0.45))));
-        return head.length >= 6 && normalizedXml.includes(head);
-      });
-    };
-    const shouldStopOnShot = async (currentShotUrl: string, xml: string, allowFallbackMeta = false): Promise<boolean> => {
-      const setupCardVisible = await hasSetupCard(currentShotUrl, xml);
-      if (setupCardVisible) return false;
-      const hasVisibleUserInfo = Boolean(extractThreadsProfileUsernameFromUiXml(xml));
-      const freshPostMeta = hasFreshPostMeta(xml);
-      const localCue = verificationCues.length > 0
-        ? findThreadsLocalTextCueMatch(xml, verificationCues)
-        : null;
-      if (hasVisibleUserInfo && freshPostMeta && (localCue || hasLoosePostCue(xml))) {
-        return true;
-      }
-      if (
-        allowFallbackMeta
-        && hasVisibleUserInfo
-        && freshPostMeta
-        && await detectThreadsProfilePageLocally(currentShotUrl).catch(() => false)
-      ) {
-        return true;
-      }
-      return false;
-    };
-    const initialXml = await dumpUiXmlStable(config, padCode, "threads publish evidence initial").catch(() => "");
-    if (initialXml && await shouldStopOnShot(shotUrl, initialXml, false)) {
-      return shotUrl;
-    }
     // 发布后的取证只做一轮固定首滑：进入个人页后让首条帖文露出用户名、
     // 发布时间和正文即可，不再多轮校验或大幅补滑。
     await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1220, endX: 360, endY: 600 });
-    await delay(420);
+    await delay(500);
     shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
-    const xml = await dumpUiXmlStable(config, padCode, "threads publish evidence").catch(() => "");
-    if (
-      Boolean(extractThreadsProfileUsernameFromUiXml(xml))
-      && hasFreshPostMeta(xml)
-      && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)
-    ) {
-      return shotUrl;
-    }
-    if (await shouldStopOnShot(shotUrl, xml, true)) {
-      return shotUrl;
-    }
     return shotUrl;
   };
   const presentationShot = await capturePresentationShot().catch(() => null);
