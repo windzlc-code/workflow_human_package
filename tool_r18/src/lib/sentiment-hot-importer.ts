@@ -324,66 +324,76 @@ export async function fetchSentimentHotCandidates(args: {
   const archive = args.archive;
   const archiveId = cleanText(archive?.id) || "default";
   const keywords = buildSentimentHotKeywords({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries });
-  const runtime = await ensureSentimentRuntime();
+  const limit = args.limit || 10;
+
+  let candidates = await fetchThreadsSearchPageCandidates({
+    archiveId,
+    keywords,
+    limit,
+    refresh: args.refresh === true,
+  }).catch((error) => {
+    warnings.push("\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u6293\u53d6\u5931\u6557\uff1a" + (error instanceof Error ? error.message : String(error)));
+    return [];
+  });
+  if (candidates.length > 0) {
+    warnings.push(args.refresh ? "\u5df2\u5373\u6642\u5237\u65b0\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u4e2d\u6587\u71b1\u9ede\u3002" : "\u5df2\u4f7f\u7528\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u6293\u53d6\u4e2d\u6587\u71b1\u9ede\u3002");
+  }
+
+  const runtime = await withSentimentTimeout(ensureSentimentRuntime(), 6_000, {
+    ok: false,
+    url: resolveSentimentBackendUrl(),
+    warning: "\u8206\u60c5\u5f8c\u53f0\u555f\u52d5\u8f03\u6162\uff0c\u5df2\u512a\u5148\u4f7f\u7528\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u5019\u9078\u3002",
+  });
   if (!runtime.ok && runtime.warning) warnings.push(runtime.warning);
-  const cookieStatuses = await fetchSentimentCookieStatuses();
+
+  const cookieStatuses = await withSentimentTimeout(fetchSentimentCookieStatuses(), 6_000, [
+    { platform: "threads" as const, health: "unknown" as const, label: "Threads", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
+    { platform: "instagram" as const, health: "unknown" as const, label: "Instagram", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
+  ]);
   const usableSources = cookieStatuses
     .filter((status) => status.health === "healthy" || status.health === "watch")
     .map((status) => status.platform);
 
-  if (runtime.ok && usableSources.length > 0) {
-    await syncSentimentKeywords(keywords).catch((error) => {
-      warnings.push(`舆情关键词同步失败：${error instanceof Error ? error.message : String(error)}`);
-    });
-    await requestSentimentScanStart(keywords, usableSources).catch((error) => {
-      warnings.push(`舆情掃描接口暫不可用：${error instanceof Error ? error.message : String(error)}`);
-    });
-  } else if (runtime.ok) {
-    warnings.push("Threads / Instagram 缺少有效 Cookie，已跳過真實掃描；請先在舆情 Cookie 配置中授權後再刷新抓取。");
-  }
-
-  const limit = args.limit || 10;
-  let candidates = args.refresh
-    ? []
-    : await readCandidatesFromDatabase({
-        archiveId,
-        keywords,
-        limit,
-      });
-  if (!args.refresh && runtime.ok && usableSources.length > 0 && candidates.length === 0) {
-    candidates = await waitForCandidates({
-      archiveId,
-      keywords,
-      limit,
-      timeoutMs: 3_000,
-    });
-  }
-  if (candidates.length < limit) {
-    const fallbackCandidates = await fetchThreadsSearchPageCandidates({
-      archiveId,
-      keywords,
-      limit,
-      refresh: args.refresh === true,
-    }).catch((error) => {
-      warnings.push(`Threads 页面兜底抓取失败：${error instanceof Error ? error.message : String(error)}`);
-      return [];
-    });
-    if (fallbackCandidates.length > 0) {
-      warnings.push(args.refresh ? "已实时刷新 Threads reader 中文热点。" : "主搜索源当前没有产出，已改用 Threads reader 兜底抓取中文热点。");
+  if (!args.refresh && candidates.length < limit) {
+    const databaseCandidates = await readCandidatesFromDatabase({ archiveId, keywords, limit });
+    if (databaseCandidates.length > 0) {
       const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
-      for (const candidate of fallbackCandidates) {
+      for (const candidate of databaseCandidates) {
         if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
         if (byId.size >= limit) break;
       }
       candidates = [...byId.values()].sort((a, b) => b.hotScore - a.hotScore).slice(0, limit);
     }
   }
+
+  if (runtime.ok && usableSources.length > 0) {
+    void syncSentimentKeywords(keywords)
+      .then(() => requestSentimentScanStart(keywords, usableSources))
+      .catch(() => undefined);
+  } else if (runtime.ok) {
+    warnings.push("\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u002f\u0020\u0049\u006e\u0073\u0074\u0061\u0067\u0072\u0061\u006d\u0020\u7f3a\u5c11\u6709\u6548\u0020\u0043\u006f\u006f\u006b\u0069\u0065\uff0c\u5df2\u8df3\u904e\u771f\u5be6\u6383\u63cf\uff1b\u8acb\u5148\u5728\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u914d\u7f6e\u4e2d\u6388\u6b0a\u5f8c\u518d\u5237\u65b0\u6293\u53d6\u3002");
+  }
+
   if (candidates.length === 0) {
-    warnings.push("未找到符合当前人设关键词的中文 Threads / Instagram 热点；如果 Cookie 正常，通常是当前关键词扫描源没有产出，建议刷新或换更宽的中文关键词。");
+    warnings.push("\u672a\u627e\u5230\u7b26\u5408\u7576\u524d\u4eba\u8a2d\u95dc\u9375\u8a5e\u7684\u4e2d\u6587\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u002f\u0020\u0049\u006e\u0073\u0074\u0061\u0067\u0072\u0061\u006d\u0020\u71b1\u9ede\uff1b\u5982\u679c\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u6b63\u5e38\uff0c\u901a\u5e38\u662f\u7576\u524d\u95dc\u9375\u8a5e\u6383\u63cf\u6e90\u6c92\u6709\u7522\u51fa\uff0c\u5efa\u8b70\u5237\u65b0\u6216\u63db\u66f4\u5bec\u7684\u4e2d\u6587\u95dc\u9375\u8a5e\u3002");
   }
   rememberSentimentHotShown(archiveId, candidates);
   scheduleSentimentRuntimeShutdown();
   return { candidates, keywords, cookieStatuses, warnings };
+}
+
+async function withSentimentTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function requestSentimentScanStart(keywords: string[], sources: SentimentHotPlatform[]) {
@@ -462,7 +472,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   if (args.refresh && readerResults.length < args.limit) {
     const relaxedResults = await fetchThreadsReaderSearchCandidates({
       archiveId: args.archiveId,
-      keywords: args.keywords,
+      keywords: [...args.keywords, ...BROAD_THREADS_SEARCH_QUERIES],
       queries: [...queries, ...BROAD_THREADS_SEARCH_QUERIES],
       limit: args.limit,
       refresh: false,
