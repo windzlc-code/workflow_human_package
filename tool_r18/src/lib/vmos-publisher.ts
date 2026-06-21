@@ -275,9 +275,9 @@ const THREADS_VIDEO_TAB_DIFF_THRESHOLD = 1.0;
 const THREADS_TEXT_QUICK_DIFF_THRESHOLD = 1.0;
 const THREADS_LOCAL_VERIFY_DELAYS_MS = [1800, 3500];
 const THREADS_VIDEO_TAB_VERIFY_DELAYS_MS = [2500, 7000, 12000];
-const THREADS_TEXT_PROFILE_RETRY_DELAYS_MS = [1200, 3000];
-const THREADS_IMAGE_PROFILE_RETRY_DELAYS_MS = [5000, 12000];
-const THREADS_VIDEO_PROFILE_RETRY_DELAYS_MS = [8000, 15000, 30000];
+const THREADS_TEXT_PROFILE_RETRY_DELAYS_MS = [1200];
+const THREADS_IMAGE_PROFILE_RETRY_DELAYS_MS = [2500];
+const THREADS_VIDEO_PROFILE_RETRY_DELAYS_MS = [3500];
 const THREADS_PROFILE_VERIFY_TIMEOUT_MS = 30000;
 const THREADS_PROFILE_VERIFY_FAST_TIMEOUT_MS = 12000;
 const THREADS_TEXT_TOAST_SETTLE_DELAY_MS = 1200;
@@ -7025,31 +7025,22 @@ async function captureThreadsPublishedEvidenceScreenshot(
     if (initialXml && await shouldStopOnShot(shotUrl, initialXml, false)) {
       return shotUrl;
     }
-    const swipePlan = [
-      // 這組值已在真實 VMOS 個人頁量過：首滑直接落到首條帖文頭部附近，
-      // 後續只做小幅補滑，不再大段重拉。
-      { startX: 360, startY: 1220, endX: 360, endY: 600 },
-      { startX: 360, startY: 1160, endX: 360, endY: 1020 },
-      { startX: 360, startY: 1120, endX: 360, endY: 1040 },
-    ];
-    for (let attempt = 0; attempt < swipePlan.length; attempt += 1) {
-      const swipeStep = swipePlan[attempt]!;
-      await swipe(config, padCode, "BOTTOM_TO_TOP", swipeStep);
-      await delay(420);
-      shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
-      const xml = await dumpUiXmlStable(config, padCode, "threads publish evidence").catch(() => "");
-      if (
-        attempt === 0
-        && Boolean(extractThreadsProfileUsernameFromUiXml(xml))
-        && hasFreshPostMeta(xml)
-        && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)
-      ) {
-        return shotUrl;
-      }
-      if (await shouldStopOnShot(shotUrl, xml, attempt >= 1)) {
-        return shotUrl;
-      }
+    // 发布后的取证只做一轮固定首滑：进入个人页后让首条帖文露出用户名、
+    // 发布时间和正文即可，不再多轮校验或大幅补滑。
+    await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1220, endX: 360, endY: 600 });
+    await delay(420);
+    shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+    shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
+    const xml = await dumpUiXmlStable(config, padCode, "threads publish evidence").catch(() => "");
+    if (
+      Boolean(extractThreadsProfileUsernameFromUiXml(xml))
+      && hasFreshPostMeta(xml)
+      && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)
+    ) {
+      return shotUrl;
+    }
+    if (await shouldStopOnShot(shotUrl, xml, true)) {
+      return shotUrl;
     }
     return shotUrl;
   };
@@ -25207,56 +25198,6 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   return { ok: true, screenshotUrl: openedPage?.screenshotUrl || shotUrl };
 }
 
-async function locateThreadsProfilePostTextOpenTarget(
-  screenshotUrl: string,
-  uiXml: string,
-  actionTarget: { x: number; y: number },
-): Promise<{ x: number; y: number }> {
-  const image = await getImageDimensions(screenshotUrl).catch(() => null);
-  const width = image?.width || BASE_SCREEN.width;
-  const height = image?.height || BASE_SCREEN.height;
-  const nodes = [...uiXml.matchAll(/<node\b[^>]*>/g)]
-    .map((match) => {
-      const rect = parseBoundsRect(getXmlAttr(match[0], "bounds"));
-      const text = normalizeSingleLine([
-        decodeXmlAttr(getXmlAttr(match[0], "text")),
-        decodeXmlAttr(getXmlAttr(match[0], "content-desc")),
-      ].filter(Boolean).join(" "));
-      return rect && text ? { rect, text } : null;
-    })
-    .filter(Boolean) as Array<{
-      rect: { left: number; top: number; right: number; bottom: number; width: number; height: number };
-      text: string;
-    }>;
-  const minTop = Math.max(Math.round(height * 0.18), Math.round(actionTarget.y - height * 0.45));
-  const maxBottom = Math.max(minTop + 1, Math.round(actionTarget.y - height * 0.055));
-  const candidates = nodes
-    .filter((node) => node.rect.top >= minTop && node.rect.bottom <= maxBottom)
-    .filter((node) => node.rect.left >= width * 0.12 && node.rect.right <= width * 0.98)
-    .filter((node) => node.rect.width >= width * 0.22 && node.rect.height >= height * 0.012)
-    .filter((node) => {
-      const text = node.text;
-      if (text.length < 4) return false;
-      if (/^(串文|回覆|回复|影音內容|影音内容|轉發|转发|查看個人檔案|查看个人档案|編輯個人檔案|编辑个人资料|分享個人檔案|分享个人资料)$/i.test(text)) return false;
-      if (/^\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周|days?|hours?|minutes?)$/i.test(text)) return false;
-      if (/^(?:圖片|图片|圖像|图像|影片|视频|video|image|photo|GIF)$/i.test(text)) return false;
-      if (/^\w[\w.]{2,30}$/.test(text)) return false;
-      return true;
-    })
-    .map((node) => ({
-      x: Math.round(Math.min(width * 0.72, Math.max(width * 0.28, (node.rect.left + node.rect.right) / 2))),
-      y: Math.round((node.rect.top + node.rect.bottom) / 2),
-      score: Math.max(0, node.rect.bottom) - Math.abs(((node.rect.left + node.rect.right) / 2) - width * 0.48) * 0.08,
-      text: node.text,
-    }))
-    .sort((a, b) => b.score - a.score);
-  if (candidates[0]) return { x: candidates[0].x, y: candidates[0].y };
-  return {
-    x: Math.round(width * 0.46),
-    y: Math.round(Math.max(height * 0.24, Math.min(height * 0.70, actionTarget.y - height * 0.28))),
-  };
-}
-
 async function openThreadsProfilePostByTextFallback(
   config: VmosConfig,
   padCode: string,
@@ -25273,57 +25214,21 @@ async function openThreadsProfilePostByTextFallback(
     await delay(700);
     currentShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => currentShotUrl || profileShotUrl);
   }
-  const textTarget = await locateThreadsProfilePostTextOpenTarget(profileShotUrl, profileUiXml, actionTarget);
   saveThreadsAutoReplySampleStep({
     padCode,
     step: sampleStep,
     screenshotUrl: currentShotUrl || profileShotUrl,
-    meta: { actionTarget, textTarget },
+    meta: {
+      actionTarget,
+      skippedReason: "comment_badge_opened_reply_editor_no_text_fallback",
+      policy: "auto_reply_only_opens_comment_ui",
+    },
   });
-  await tapScreenshotPointViaAdbNoWait(config, padCode, profileShotUrl, textTarget, 2600).catch(async () => {
-    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-    const image = await getImageDimensions(profileShotUrl).catch(() => null);
-    const imageWidth = image?.width || BASE_SCREEN.width;
-    const imageHeight = image?.height || BASE_SCREEN.height;
-    await tapViaAdbAbsolute(
-      config,
-      padCode,
-      Math.round(textTarget.x * (screen.width / imageWidth)),
-      Math.round(textTarget.y * (screen.height / imageHeight)),
-      2600,
-    );
-  });
-  await delay(1300);
-  let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => currentShotUrl || profileShotUrl);
-  saveThreadsAutoReplySampleStep({
-    padCode,
-    step: `${sampleStep}-after-tap`,
-    screenshotUrl: shotUrl,
-    meta: { textTarget },
-  });
-  shotUrl = await openThreadsMediaOverlayCommentsIfVisible(config, padCode, shotUrl).catch(() => shotUrl) || shotUrl;
-  const detail = await withTimeout(
-    validateThreadsAutoReplyDetailReady(config, padCode, shotUrl),
-    5_000,
-    "threadsAutoReply validate opened post text fallback timeout",
-  ).catch((error) => ({
-    ok: false as const,
-    error: error instanceof Error ? error.message : String(error),
-    screenshotUrl: shotUrl,
-  }));
-  if (detail.ok === true) return { ok: true, screenshotUrl: detail.screenshotUrl };
-  const detailError = detail as { ok: false; error: string; screenshotUrl?: string };
-  if (/回复编辑器|回覆編輯器|reply editor|回复|回覆/.test(detailError.error)) {
-    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
-    await delay(650);
-    const afterBackShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => detailError.screenshotUrl || shotUrl);
-    return {
-      ok: false,
-      error: "点击评论角标和推文文字都进入了回复编辑器，已退回并停止当前帖以避免回复到自己帖子",
-      screenshotUrl: afterBackShotUrl || detailError.screenshotUrl || shotUrl,
-    };
-  }
-  return detailError;
+  return {
+    ok: false,
+    error: "点击评论入口后进入了回复编辑器，已退回并跳过当前帖，避免点正文或媒体导致跑偏",
+    screenshotUrl: currentShotUrl || profileShotUrl,
+  };
 }
 
 async function restoreThreadsAutoReplyProfileForNextScan(
@@ -25791,6 +25696,25 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
     }
     return total ? dark / total : 0;
   };
+  const lightUiBackgroundRatio = (left: number, top: number, right: number, bottom: number) => {
+    let total = 0;
+    let light = 0;
+    const step = Math.max(2, Math.floor(Math.min(width, height) / 220));
+    for (let y = Math.max(0, top); y <= Math.min(height - 1, bottom); y += step) {
+      for (let x = Math.max(0, left); x <= Math.min(width - 1, right); x += step) {
+        const i = (y * width + x) * 4;
+        if ((data[i + 3] ?? 0) < 120) continue;
+        total += 1;
+        const r = data[i] ?? 0;
+        const g = data[i + 1] ?? 0;
+        const b = data[i + 2] ?? 0;
+        const value = (r + g + b) / 3;
+        const spread = Math.max(r, g, b) - Math.min(r, g, b);
+        if (value >= 218 && spread <= 42) light += 1;
+      }
+    }
+    return total ? light / total : 0;
+  };
   const fixedRowTarget = locateThreadsProfileFixedCountedCommentRowByPixels();
   if (fixedRowTarget) return fixedRowTarget;
   const rowTarget = locateThreadsProfileCommentCountDigitTargetByPixels();
@@ -25923,6 +25847,12 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
         Math.round(width * 0.72),
         y + Math.round(height * 0.060),
       );
+      const rowUiBackground = lightUiBackgroundRatio(
+        Math.round(width * 0.07),
+        y - Math.round(height * 0.030),
+        Math.round(width * 0.72),
+        y + Math.round(height * 0.036),
+      );
       const rowScore = likeNear * 1.1 + commentNear * 1.4 + countNear * 1.8 + repostNear + shareNear;
       if (
         likeNear >= 0.010
@@ -25930,10 +25860,11 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
         && countNear >= 0.012
         && repostNear >= 0.010
         && shareNear >= 0.010
+        && rowUiBackground >= 0.52
         && belowRowText <= 0.040
       ) {
         rows.push({
-          x: Math.round(width * 0.350),
+          x: Math.round(width * 0.405),
           y,
           score: rowScore + Math.max(0, height - y) / height,
         });
@@ -26037,6 +25968,12 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
           Math.round(width * 0.70),
           Math.round(rowY + height * 0.064),
         );
+        const rowUiBackground = lightUiBackgroundRatio(
+          Math.round(width * 0.07),
+          Math.round(rowY - height * 0.030),
+          Math.round(width * 0.72),
+          Math.round(rowY + height * 0.036),
+        );
         if (
           commentX < width * 0.26
           || commentX > width * 0.42
@@ -26044,12 +25981,13 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
           || commentNear < 0.014
           || repostNear < 0.010
           || shareNear < 0.010
+          || rowUiBackground < 0.52
           || belowRowText > 0.035
         ) {
           continue;
         }
         digits.push({
-          x: commentX,
+          x: Math.round(digitX),
           y: rowY,
           width: boxW,
           height: boxH,
@@ -26156,8 +26094,20 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
         && item.x >= width * 0.52
         && item.x <= width * 0.66
       );
-      if (!likeNear || !repostNear || !shareNear || !hasLikelyCommentCountDigits(comment.x, rowY)) continue;
-      return { x: comment.x, y: rowY };
+      const rowUiBackground = lightUiBackgroundRatio(
+        Math.round(width * 0.07),
+        Math.round(rowY - height * 0.030),
+        Math.round(width * 0.72),
+        Math.round(rowY + height * 0.036),
+      );
+      if (
+        !likeNear
+        || !repostNear
+        || !shareNear
+        || rowUiBackground < 0.52
+        || !hasLikelyCommentCountDigits(comment.x, rowY)
+      ) continue;
+      return { x: Math.round(comment.x + width * 0.070), y: rowY };
     }
     return null;
   }
