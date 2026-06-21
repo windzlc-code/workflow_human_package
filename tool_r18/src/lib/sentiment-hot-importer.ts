@@ -290,7 +290,7 @@ export async function fetchSentimentHotCandidates(args: {
       return [];
     });
     if (fallbackCandidates.length > 0) {
-      warnings.push("主搜索源当前没有产出，已改用 Threads 页面兜底抓取中文热点。");
+      warnings.push("主搜索源当前没有产出，已改用 Threads reader 兜底抓取中文热点。");
       candidates = fallbackCandidates;
     }
   }
@@ -347,7 +347,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   keywords: string[];
   limit: number;
 }): Promise<SentimentHotCandidate[]> {
-  const queries = buildThreadsSearchQueries(args.keywords).slice(0, 3);
+  const queries = buildThreadsSearchQueries(args.keywords).slice(0, 5);
   const excluded = getSentimentHotExcludedIds(args.archiveId);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
@@ -375,7 +375,7 @@ async function fetchThreadsSearchPageCandidates(args: {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     });
     const page = await context.newPage();
-    for (const query of queries) {
+    for (const query of queries.slice(0, 3)) {
       if (results.length >= args.limit) break;
       const search = await readThreadsSearchPageText(page, query);
       const parsed = parseThreadsSearchTextCandidates({
@@ -412,7 +412,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
   const excluded = getSentimentHotExcludedIds(args.archiveId);
   const all: SentimentHotCandidate[] = [];
   const searches = await Promise.all(
-    args.queries.slice(0, 3).map(async (query) => {
+    args.queries.slice(0, 5).map(async (query) => {
       const targetUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
       const response = await fetch(`${JINA_READER_PREFIX}${targetUrl}`, {
         headers: {
@@ -457,6 +457,8 @@ function decodeMarkdownLinkText(value: string): string {
 
 function cleanThreadsReaderContent(value: string): string {
   const lines = String(value || "")
+    .replace(/Sorry,\s*we'?re having trouble playing this video\.\s*Learn more/gi, " ")
+    .replace(/\bVideo\s+\d+\b/gi, " ")
     .split(/\r?\n/g)
     .map((line) => decodeMarkdownLinkText(line))
     .filter(Boolean)
