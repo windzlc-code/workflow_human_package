@@ -363,6 +363,8 @@ async function fetchThreadsSearchPageCandidates(args: {
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     });
+    const authCookies = readSentimentBrowserAuthCookies("threads");
+    if (authCookies.length > 0) await context.addCookies(authCookies);
     const page = await context.newPage();
     for (const query of queries) {
       if (results.length >= args.limit) break;
@@ -389,6 +391,39 @@ async function fetchThreadsSearchPageCandidates(args: {
     await browser.close().catch(() => undefined);
   }
   return results.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
+}
+
+function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
+  const configPath = path.join(resolveSentimentDataDir(), "sentiment-config.json");
+  if (!fs.existsSync(configPath)) return [];
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const profiles = config?.sentimentSearch?.browserFallback?.profiles || config?.browserFallback?.profiles || [];
+    const profile = Array.isArray(profiles)
+      ? profiles.find((item: any) => item?.platform === platform || item?.sourceKey === platform || item?.key === platform)
+      : null;
+    const nowSeconds = Date.now() / 1000;
+    return (Array.isArray(profile?.cookies) ? profile.cookies : [])
+      .filter((cookie: any) => {
+        const expires = Number(cookie?.expires);
+        return cookie?.name && cookie?.value && (!Number.isFinite(expires) || expires <= 0 || expires > nowSeconds);
+      })
+      .map((cookie: any) => {
+        const sameSite = ["Strict", "Lax", "None"].includes(cookie.sameSite) ? cookie.sameSite : undefined;
+        return {
+          name: String(cookie.name),
+          value: String(cookie.value),
+          domain: String(cookie.domain || profile.domain || "threads.net"),
+          path: String(cookie.path || "/"),
+          expires: Number.isFinite(Number(cookie.expires)) ? Number(cookie.expires) : -1,
+          httpOnly: Boolean(cookie.httpOnly || cookie.http_only),
+          secure: cookie.secure !== false,
+          sameSite,
+        };
+      });
+  } catch {
+    return [];
+  }
 }
 
 function buildThreadsSearchQueries(keywords: string[]): string[] {
