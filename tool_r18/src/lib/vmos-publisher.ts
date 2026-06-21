@@ -6972,7 +6972,10 @@ async function captureThreadsPublishedEvidenceScreenshot(
 ): Promise<string> {
   onProgress?.({ step: "返回 Threads 個人頁截圖取證...", done: false });
   const capturePresentationShot = async (): Promise<string | null> => {
-    await tapThreadsProfileTab(config, padCode, 900).catch(() => undefined);
+    await tapViaAdbReferencePoint(config, padCode, { x: 614, y: 1516 }, 900, FIXED_VMOS_SCREEN)
+      .catch(async () => {
+        await tapThreadsProfileTab(config, padCode, 900).catch(() => undefined);
+      });
     await delay(350);
     let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
     if (!shotUrl) return null;
@@ -6990,83 +6993,13 @@ async function captureThreadsPublishedEvidenceScreenshot(
     onProgress?.({ step: "已定位到 Threads 個人頁最新帖文位置並截圖。", done: false });
     return presentationShot;
   }
-  const detail = await openThreadsLatestOwnPostFromProfile(config, padCode, undefined, false).catch(() => null);
-  if (detail?.ok && detail.screenshotUrl) {
-    onProgress?.({ step: "已取得 Threads 最新帖文詳情截圖。", done: false });
-    return detail.screenshotUrl;
-  }
-  const hasSetupCard = async (url: string, xml: string): Promise<boolean> => {
-    const uiText = normalizeSingleLine(decodeXmlAttr(xml));
-    if (/完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(uiText)) {
-      return true;
-    }
-    return detectThreadsProfileSetupCardLocally(url).catch(() => false);
-  };
-  const hasPostMeta = (xml: string): boolean => {
-    const uiText = normalizeSingleLine(decodeXmlAttr(xml));
-    return /(分鐘|分钟|小時|小时|天前|剛剛|刚刚|秒前|則回覆|则回复|查看串文|查看对话|查看對話)/.test(uiText);
-  };
-  const topUrl = await captureThreadsProfileContentScreenshot(config, padCode, { skipInitialSwipe: true });
-  const topXml = await dumpUiXml(config, padCode).catch(() => "");
-  const verificationCues = extractThreadsVerificationCues(caption);
-  const candidates: Array<{ label: string; url: string; xml: string }> = [];
 
-  await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1180, endX: 360, endY: 760 });
-  await delay(700);
-  const midUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => topUrl);
-  const midXml = await dumpUiXml(config, padCode).catch(() => "");
-  await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1320, endX: 360, endY: 520 });
-  await delay(700);
-  const lowUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => midUrl);
-  const lowXml = await dumpUiXml(config, padCode).catch(() => "");
-  await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1240, endX: 360, endY: 900 });
-  await delay(500);
-  const focusUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => lowUrl);
-  const focusXml = await dumpUiXml(config, padCode).catch(() => "");
-  candidates.push({ label: "個人主頁首條帖文定位", url: focusUrl, xml: focusXml });
-  candidates.push({ label: "個人主頁下滑兩次", url: lowUrl, xml: lowXml });
-  candidates.push({ label: "個人主頁下滑一次", url: midUrl, xml: midXml });
-  candidates.push({ label: "個人主頁首屏", url: topUrl, xml: topXml });
-
-  for (const candidate of candidates) {
-    if (await hasSetupCard(candidate.url, candidate.xml)) continue;
-    if (
-      verificationCues.length > 0
-      && findThreadsLocalTextCueMatch(candidate.xml, verificationCues)
-      && (
-        await detectThreadsProfilePageLocally(candidate.url).catch(() => false)
-        || await isThreadsScreenVisibleLocally(candidate.url).catch(() => false)
-      )
-    ) {
-      onProgress?.({ step: `已取得 Threads 發布證據截圖（${candidate.label}）。`, done: false });
-      return candidate.url;
-    }
+  const fallbackUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  if (fallbackUrl) {
+    onProgress?.({ step: "未完成固定取證滑動，回傳當前 Threads 截圖。", done: false });
+    return fallbackUrl;
   }
-
-  for (const candidate of candidates) {
-    if (await hasSetupCard(candidate.url, candidate.xml)) continue;
-    if (
-      hasPostMeta(candidate.xml)
-      && (
-        await detectThreadsProfilePageLocally(candidate.url).catch(() => false)
-        || await isThreadsScreenVisibleLocally(candidate.url).catch(() => false)
-      )
-    ) {
-      onProgress?.({ step: `已取得 Threads 發布證據截圖（${candidate.label}，已見帖文時間/內容）。`, done: false });
-      return candidate.url;
-    }
-  }
-
-  const fallback = [];
-  for (const candidate of candidates) {
-    const setupCard = await hasSetupCard(candidate.url, candidate.xml);
-    fallback.push({ candidate, setupCard, postMeta: hasPostMeta(candidate.xml) });
-  }
-  const best = fallback.find((item) => !item.setupCard && item.postMeta)
-    || fallback.find((item) => !item.setupCard)
-    || fallback[0];
-  onProgress?.({ step: "未命中正文線索，回傳最接近完整內容的個人頁截圖。", done: false });
-  return best?.candidate.url || lowUrl || midUrl || topUrl;
+  throw new Error("未能取得 Threads 發布後截圖");
 }
 
 async function tapThreadsProfileTab(
@@ -15568,15 +15501,23 @@ async function publishThreads(
 
     onProgress({ step: "校驗發布結果...", done: false });
     throwIfCancelled();
-    const verification = await verifyThreadsPublish(
-      config,
-      padCode,
-      normalizedCaption.trim(),
-      beforeProfileUrl,
-      mediaUrl,
-      beforeProfileVideoTabUrl,
-      onProgress,
-    );
+    const verification = publishMediaKind === "video"
+      ? await verifyThreadsPublish(
+        config,
+        padCode,
+        normalizedCaption.trim(),
+        beforeProfileUrl,
+        mediaUrl,
+        beforeProfileVideoTabUrl,
+        onProgress,
+      )
+      : await verifyThreadsProfileContainsPostWithRetries(
+        config,
+        padCode,
+        normalizedCaption.trim(),
+        mediaUrl,
+        onProgress,
+      );
     onProgress({
       step: verification.detail,
       done: true,
@@ -16178,15 +16119,23 @@ async function publishThreads(
 
     onProgress({ step: "校驗發布結果...", done: false });
     throwIfCancelled();
-    const verification = await verifyThreadsPublish(
-      config,
-      padCode,
-      normalizedCaption.trim(),
-      beforeProfileUrl,
-      mediaUrl,
-      beforeProfileVideoTabUrl,
-      onProgress
-    );
+    const verification = publishMediaKind === "video"
+      ? await verifyThreadsPublish(
+        config,
+        padCode,
+        normalizedCaption.trim(),
+        beforeProfileUrl,
+        mediaUrl,
+        beforeProfileVideoTabUrl,
+        onProgress
+      )
+      : await verifyThreadsProfileContainsPostWithRetries(
+        config,
+        padCode,
+        normalizedCaption.trim(),
+        mediaUrl,
+        onProgress,
+      );
     onProgress({
       step: verification.detail,
       done: true,
@@ -16292,12 +16241,10 @@ async function publishThreads(
 
     onProgress({ step: "校驗發布結果...", done: false });
     throwIfCancelled();
-    const verification = await verifyThreadsPublish(
+    const verification = await verifyThreadsProfileContainsPostWithRetries(
       config,
       padCode,
       normalizedCaption.trim(),
-      beforeProfileUrl,
-      undefined,
       undefined,
       onProgress,
     );
