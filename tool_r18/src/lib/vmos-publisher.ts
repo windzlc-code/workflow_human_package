@@ -13556,50 +13556,35 @@ async function verifyThreadsProfileContainsPostWithRetries(
       ? THREADS_VIDEO_PROFILE_RETRY_DELAYS_MS
       : THREADS_IMAGE_PROFILE_RETRY_DELAYS_MS
     : THREADS_TEXT_PROFILE_RETRY_DELAYS_MS;
-  let lastResult: PublishVerificationResult | undefined;
+  onProgress?.({
+    step: "等待主頁同步（第 1/1 輪）...",
+    done: false,
+  });
+  await delay(retryDelaysMs[0] ?? 1200);
 
-  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
-    onProgress?.({
-      step: `等待主頁同步（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
-      done: false,
-    });
-    await delay(retryDelaysMs[attempt]);
+  onProgress?.({
+    step: "返回 Threads 個人頁截圖取證...",
+    done: false,
+  });
 
-    if (attempt > 0) {
-      onProgress?.({
-        step: `回到主頁複查（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
-        done: false,
-      });
-      await relaunchThreads(config, padCode, 5000);
+  try {
+    const screenshotUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress);
+    return {
+      state: "verified",
+      detail: "發布完成 ✓（已返回 Threads 個人頁截圖取證）",
+      screenshotUrl,
+    };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.startsWith("__THREADS_BLOCKED__") || msg.startsWith("__THREADS_STILL_COMPOSING__")) {
+      throw error instanceof Error ? error : new Error(msg);
     }
-
-    onProgress?.({
-      step: `分析 Threads 主頁內容（第 ${attempt + 1}/${retryDelaysMs.length} 輪）...`,
-      done: false,
-    });
-    try {
-      const result = await verifyThreadsProfileContainsPost(config, padCode, caption, mediaUrl);
-      if (result.state === "verified") return result;
-      lastResult = result;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.startsWith("__THREADS_BLOCKED__") || msg.startsWith("__THREADS_STILL_COMPOSING__")) {
-        throw error instanceof Error ? error : new Error(msg);
-      }
-      if (isPublishVerifierAuthError(msg)) {
-        throw new Error(`AI 校驗 API 金鑰無效，且本機主頁校驗未命中：${msg}`);
-      }
-      lastResult = {
-        state: "warning",
-        detail: `已執行發布，待人工確認（本輪主頁校驗未完成：${msg}）`,
-      };
-    }
+    return {
+      state: "warning",
+      detail: `已執行發布，待人工確認（個人頁截圖取證失敗：${msg}）`,
+      screenshotUrl: await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined),
+    };
   }
-
-  return lastResult ?? {
-    state: "warning",
-    detail: "已執行發布，待人工確認（多輪主頁校驗仍未命中目標內容）",
-  };
 }
 
 async function verifyInstagramProfileContainsReferenceImage(
