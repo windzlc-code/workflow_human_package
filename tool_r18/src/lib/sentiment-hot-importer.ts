@@ -461,6 +461,8 @@ function cleanThreadsReaderContent(value: string): string {
     .map((line) => decodeMarkdownLinkText(line))
     .filter(Boolean)
     .filter((line) => !/^(?:Translate|翻譯|翻译)$/i.test(line))
+    .filter((line) => !/^Sorry,\s*we'?re having trouble playing this video\.\s*Learn more$/i.test(line))
+    .filter((line) => !/^Video\s+\d+$/i.test(line))
     .filter((line) => !/^\d+(?:[.,]\d+)?\s*[Kk萬万]?$/.test(line))
     .filter((line) => !/^Image\s+\d+/i.test(line));
   return cleanSentimentCandidateContent(lines.join(" "));
@@ -502,7 +504,7 @@ export function parseThreadsReaderSearchMarkdownCandidates(args: {
     const content = cleanThreadsReaderContent(block);
     if (isLowQualitySentimentContent(content)) continue;
     if (!isChineseSentimentCandidate(content)) continue;
-    if ((content.match(/[\u3400-\u9fff]/gu) || []).length < 8) continue;
+    if ((content.match(/[\u3400-\u9fff]/gu) || []).length < 12) continue;
     const haystack = [content, author].join(" ").toLowerCase();
     const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
     if (needles.length && matchedNeedles.length === 0) continue;
