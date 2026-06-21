@@ -6957,6 +6957,17 @@ async function captureThreadsPublishedEvidenceScreenshot(
     onProgress?.({ step: "已取得 Threads 最新帖文詳情截圖。", done: false });
     return detail.screenshotUrl;
   }
+  const hasSetupCard = async (url: string, xml: string): Promise<boolean> => {
+    const uiText = normalizeSingleLine(decodeXmlAttr(xml));
+    if (/完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(uiText)) {
+      return true;
+    }
+    return detectThreadsProfileSetupCardLocally(url).catch(() => false);
+  };
+  const hasPostMeta = (xml: string): boolean => {
+    const uiText = normalizeSingleLine(decodeXmlAttr(xml));
+    return /(分鐘|分钟|小時|小时|天前|剛剛|刚刚|秒前|則回覆|则回复|查看串文|查看对话|查看對話)/.test(uiText);
+  };
   const topUrl = await captureThreadsProfileContentScreenshot(config, padCode, { skipInitialSwipe: true });
   const topXml = await dumpUiXml(config, padCode).catch(() => "");
   const verificationCues = extractThreadsVerificationCues(caption);
@@ -6966,10 +6977,21 @@ async function captureThreadsPublishedEvidenceScreenshot(
   await delay(700);
   const midUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => topUrl);
   const midXml = await dumpUiXml(config, padCode).catch(() => "");
+  await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1320, endX: 360, endY: 520 });
+  await delay(700);
+  const lowUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => midUrl);
+  const lowXml = await dumpUiXml(config, padCode).catch(() => "");
+  await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1240, endX: 360, endY: 900 });
+  await delay(500);
+  const focusUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => lowUrl);
+  const focusXml = await dumpUiXml(config, padCode).catch(() => "");
+  candidates.push({ label: "個人主頁首條帖文定位", url: focusUrl, xml: focusXml });
+  candidates.push({ label: "個人主頁下滑兩次", url: lowUrl, xml: lowXml });
   candidates.push({ label: "個人主頁下滑一次", url: midUrl, xml: midXml });
   candidates.push({ label: "個人主頁首屏", url: topUrl, xml: topXml });
 
   for (const candidate of candidates) {
+    if (await hasSetupCard(candidate.url, candidate.xml)) continue;
     if (
       verificationCues.length > 0
       && findThreadsLocalTextCueMatch(candidate.xml, verificationCues)
@@ -6983,8 +7005,30 @@ async function captureThreadsPublishedEvidenceScreenshot(
     }
   }
 
+  for (const candidate of candidates) {
+    if (await hasSetupCard(candidate.url, candidate.xml)) continue;
+    if (
+      hasPostMeta(candidate.xml)
+      && (
+        await detectThreadsProfilePageLocally(candidate.url).catch(() => false)
+        || await isThreadsScreenVisibleLocally(candidate.url).catch(() => false)
+      )
+    ) {
+      onProgress?.({ step: `已取得 Threads 發布證據截圖（${candidate.label}，已見帖文時間/內容）。`, done: false });
+      return candidate.url;
+    }
+  }
+
+  const fallback = [];
+  for (const candidate of candidates) {
+    const setupCard = await hasSetupCard(candidate.url, candidate.xml);
+    fallback.push({ candidate, setupCard, postMeta: hasPostMeta(candidate.xml) });
+  }
+  const best = fallback.find((item) => !item.setupCard && item.postMeta)
+    || fallback.find((item) => !item.setupCard)
+    || fallback[0];
   onProgress?.({ step: "未命中正文線索，回傳最接近完整內容的個人頁截圖。", done: false });
-  return midUrl || topUrl;
+  return best?.candidate.url || lowUrl || midUrl || topUrl;
 }
 
 async function tapThreadsProfileTab(
@@ -21072,16 +21116,57 @@ export function planRiskManagedWarmupConfig(
   now = new Date(),
 ): { allowed: boolean; cfg: WarmupConfig; notes: string[]; state: WarmupRiskDayState } {
   const state = getWarmupRiskDayState(padCode, getWarmupDateKey(now));
+  const notes: string[] = [];
+  const timedSession = Number(cfg.minSessionMinutes || 0) > 0 || Number(cfg.maxSessionMinutes || 0) > 0;
+  const blockedUntil = state.blockedUntil ? new Date(state.blockedUntil) : null;
+
+  if (blockedUntil && Number.isFinite(blockedUntil.getTime()) && blockedUntil > now) {
+    notes.push(`近期遇到高風險頁面，已降頻執行，不阻断本次操作。原因：${state.lastBlockReason || "未知"}`);
+  }
+  if (state.sessions >= 3 || state.browsed >= 80 || state.liked >= 8 || state.commented >= 4) {
+    notes.push("今日養號次數或互動量偏高，不建议继续频繁操作；本次會自動降頻。");
+  }
+
+  if (timedSession) {
+    return {
+      allowed: true,
+      cfg: {
+        ...cfg,
+        riskManaged: true,
+        stopOnRiskLimit: cfg.stopOnRiskLimit ?? true,
+        strictCompletion: false,
+        requireReadablePostForComment: cfg.requireReadablePostForComment ?? true,
+      },
+      notes,
+      state,
+    };
+  }
+
+  const plannedBrowse = Math.max(1, Math.floor(cfg.browseCount || 1));
+  const plannedLikes = Math.max(0, Math.floor(cfg.maxLikes || 0));
+  const plannedComments = Math.max(0, Math.floor(cfg.maxComments || 0));
+  const dailyPressure = Math.min(6, Math.floor(state.sessions / 2) + Math.floor(state.failures / 2));
+  const browseCap = Math.max(4, 12 - dailyPressure);
+  const likeCap = state.liked >= 8 ? 0 : 1;
+  const commentCap = state.commented >= 4 ? 0 : 1;
+
   return {
     allowed: true,
     cfg: {
       ...cfg,
+      browseCount: Math.max(1, Math.min(plannedBrowse, browseCap)),
+      likeChance: Math.max(0, Math.min(Number(cfg.likeChance || 0), likeCap > 0 ? 35 : 0)),
+      maxLikes: Math.min(plannedLikes, likeCap),
+      minRequiredLikes: Math.min(Math.max(0, Math.floor(cfg.minRequiredLikes || 0)), likeCap),
+      commentChance: Math.max(0, Math.min(Number(cfg.commentChance || 0), commentCap > 0 ? 15 : 0)),
+      maxComments: Math.min(plannedComments, commentCap),
+      minRequiredComments: Math.min(Math.max(0, Math.floor(cfg.minRequiredComments || 0)), commentCap),
       riskManaged: true,
-      stopOnRiskLimit: false,
+      stopOnRiskLimit: cfg.stopOnRiskLimit ?? true,
       strictCompletion: false,
       requireReadablePostForComment: cfg.requireReadablePostForComment ?? true,
     },
-    notes: [],
+    notes,
     state,
   };
 }
