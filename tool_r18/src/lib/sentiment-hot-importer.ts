@@ -352,6 +352,17 @@ async function fetchThreadsSearchPageCandidates(args: {
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
 
+  const readerResults = await fetchThreadsReaderSearchCandidates({
+    archiveId: args.archiveId,
+    keywords: args.keywords,
+    queries,
+    limit: args.limit,
+  }).catch(() => []);
+  if (readerResults.length > 0) {
+    writeThreadsSearchCandidateCache(args.keywords, readerResults);
+    return readerResults;
+  }
+
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({
     headless: true,
@@ -388,6 +399,142 @@ async function fetchThreadsSearchPageCandidates(args: {
   const sorted = results.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
   if (sorted.length > 0) writeThreadsSearchCandidateCache(args.keywords, sorted);
   return sorted.length > 0 ? sorted : readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit);
+}
+
+const JINA_READER_PREFIX = "https://r.jina.ai/http://r.jina.ai/http://";
+
+async function fetchThreadsReaderSearchCandidates(args: {
+  archiveId: string;
+  keywords: string[];
+  queries: string[];
+  limit: number;
+}): Promise<SentimentHotCandidate[]> {
+  const excluded = getSentimentHotExcludedIds(args.archiveId);
+  const all: SentimentHotCandidate[] = [];
+  const searches = await Promise.all(
+    args.queries.slice(0, 3).map(async (query) => {
+      const targetUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
+      const response = await fetch(`${JINA_READER_PREFIX}${targetUrl}`, {
+        headers: {
+          "user-agent": "Mozilla/5.0",
+          accept: "text/plain, text/markdown, */*",
+        },
+        signal: AbortSignal.timeout(18_000),
+      });
+      if (!response.ok) return { query, targetUrl, text: "" };
+      return { query, targetUrl, text: await response.text() };
+    }),
+  );
+  for (const search of searches) {
+    const parsed = parseThreadsReaderSearchMarkdownCandidates({
+      text: search.text,
+      query: search.query,
+      keywords: args.keywords,
+      sourceUrl: search.targetUrl,
+      limit: args.limit - all.length,
+    });
+    for (const candidate of parsed) {
+      if (excluded.has(candidate.id)) continue;
+      if (all.some((item) => item.id === candidate.id || item.sourceUrl === candidate.sourceUrl || item.content === candidate.content)) continue;
+      all.push(candidate);
+      if (all.length >= args.limit) break;
+    }
+    if (all.length >= args.limit) break;
+  }
+  return all.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
+}
+
+function decodeMarkdownLinkText(value: string): string {
+  return cleanText(
+    value
+      .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+      .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">"),
+  );
+}
+
+function cleanThreadsReaderContent(value: string): string {
+  const lines = String(value || "")
+    .split(/\r?\n/g)
+    .map((line) => decodeMarkdownLinkText(line))
+    .filter(Boolean)
+    .filter((line) => !/^(?:Translate|翻譯|翻译)$/i.test(line))
+    .filter((line) => !/^\d+(?:[.,]\d+)?\s*[Kk萬万]?$/.test(line))
+    .filter((line) => !/^Image\s+\d+/i.test(line));
+  return cleanSentimentCandidateContent(lines.join(" "));
+}
+
+function parseThreadsReaderHotScore(block: string): number {
+  let score = 80;
+  for (const match of block.matchAll(/(?:^|\n)\s*(\d+(?:[.,]\d+)?)(?:\s*([Kk萬万]))?\s*(?=\n|$)/g)) {
+    const base = Number(String(match[1] || "0").replace(/,/g, ""));
+    if (!Number.isFinite(base)) continue;
+    const unit = match[2] || "";
+    const value = /[Kk]/.test(unit) ? base * 1000 : /[萬万]/.test(unit) ? base * 10000 : base;
+    score += Math.min(50_000, Math.round(value));
+  }
+  return score;
+}
+
+export function parseThreadsReaderSearchMarkdownCandidates(args: {
+  text: string;
+  query: string;
+  keywords?: string[];
+  limit?: number;
+  sourceUrl: string;
+}): SentimentHotCandidate[] {
+  const text = String(args.text || "");
+  if (!text || !/Search\s*•\s*Threads|Threads/i.test(text)) return [];
+  const needles = meaningfulNeedles([...(args.keywords || []), args.query])
+    .filter((keyword) => hasHan(keyword))
+    .slice(0, 10);
+  const postRegex = /\[(\d{2}\/\d{2}\/\d{2,4})]\((https:\/\/www\.threads\.net\/(?:@[^)\s]+\/post\/[^)\s]+|t\/[^)\s]+))\)\s*\n([\s\S]*?)(?=\n\[!\[Image\s+\d+:[^\]]*profile picture|\n\[[^\]\n]+]\(https:\/\/www\.threads\.net\/@|$)/g;
+  const out: SentimentHotCandidate[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = postRegex.exec(text)) !== null) {
+    const before = text.slice(Math.max(0, match.index - 900), match.index);
+    const authorMatches = [...before.matchAll(/\[([^\]\n]{2,80})]\((https:\/\/www\.threads\.net\/@[^)\s]+)\)/g)];
+    const author = cleanText(authorMatches.at(-1)?.[1] || "Threads");
+    const sourceUrl = match[2];
+    const block = match[3] || "";
+    const content = cleanThreadsReaderContent(block);
+    if (isLowQualitySentimentContent(content)) continue;
+    if (!isChineseSentimentCandidate(content)) continue;
+    if ((content.match(/[\u3400-\u9fff]/gu) || []).length < 8) continue;
+    const haystack = [content, author].join(" ").toLowerCase();
+    const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
+    if (needles.length && matchedNeedles.length === 0) continue;
+    const media: SentimentHotMedia[] = [];
+    for (const imageMatch of block.matchAll(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/g)) {
+      const url = imageMatch[1];
+      if (/profile_pic|profile|s150x150/i.test(url)) continue;
+      if (media.some((item) => item.url === url)) continue;
+      media.push({ type: "image", url });
+      if (media.length >= 4) break;
+    }
+    const id = buildSentimentCandidateId({ platform: "threads", sourceUrl, content });
+    out.push({
+      id,
+      platform: "threads",
+      sourceUrl,
+      author,
+      content,
+      media,
+      hotScore: parseThreadsReaderHotScore(block) + matchedNeedles.length * 30,
+      metrics: {
+        source: "threads-reader-search",
+        query: args.query,
+        matchedKeywords: matchedNeedles,
+        mediaCount: media.length,
+      },
+      capturedAt: new Date().toISOString(),
+      warnings: [],
+    });
+    if (out.length >= (args.limit || 10)) break;
+  }
+  return out;
 }
 
 async function readThreadsSearchPageText(page: any, query: string): Promise<{ text: string; url: string }> {
