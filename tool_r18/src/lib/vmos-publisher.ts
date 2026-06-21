@@ -11402,10 +11402,15 @@ async function openThreadsComposerFromHomePromptIfVisible(
 
   const uiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
   const target = findThreadsComposerInputTarget(uiXml);
-  if (!target) return false;
+  const inputTarget = target || (options.mediaKind === "text" ? { x: 250, y: 320 } : null);
+  if (!inputTarget) return false;
 
   options.onProgress?.({ step: "點選首頁發帖輸入框...", done: false });
-  await tapScreenshotPointViaAdb(config, padCode, state.screenshotUrl, target, 2600);
+  if (target) {
+    await tapScreenshotPointViaAdb(config, padCode, state.screenshotUrl, inputTarget, 2600);
+  } else {
+    await tapViaAdbReferencePoint(config, padCode, inputTarget, 2600, FIXED_VMOS_SCREEN);
+  }
   const after = await waitForThreadsPageSettled(config, padCode, {
     timeoutMs: 3600,
     intervalMs: 650,
