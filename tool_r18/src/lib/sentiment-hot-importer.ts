@@ -242,6 +242,9 @@ export function buildSentimentHotKeywords(args: {
 export function cleanSentimentCandidateContent(value: unknown): string {
   let text = cleanText(value);
   text = text
+    .replace(/\s*Log in for more threads about this topic\.\s*Log in\s*Log in or sign up for Threads?.*$/i, "")
+    .replace(/\s*Log in or sign up for Threads?.*$/i, "")
+    .replace(/\s*Log in for more.*$/i, "")
     .replace(/\s*登入以取得更多有關此主題的串文。.*$/i, "")
     .replace(/\s*登入或註冊 Threads.*$/i, "")
     .replace(/\s*登录以获取更多有关此话题的串文。.*$/i, "")
