@@ -277,7 +277,7 @@ export async function fetchSentimentHotCandidates(args: {
       archiveId,
       keywords,
       limit: args.limit || 10,
-      timeoutMs: 15_000,
+      timeoutMs: 3_000,
     });
   }
   if (candidates.length === 0) {
@@ -335,7 +335,7 @@ async function syncSentimentKeywords(keywords: string[]) {
 async function waitForCandidates(args: { archiveId: string; keywords: string[]; limit: number; timeoutMs?: number }): Promise<SentimentHotCandidate[]> {
   const deadline = Date.now() + (args.timeoutMs || 45_000);
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(100, deadline - Date.now()))));
     const candidates = await readCandidatesFromDatabase(args);
     if (candidates.length > 0) return candidates;
   }
@@ -347,7 +347,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   keywords: string[];
   limit: number;
 }): Promise<SentimentHotCandidate[]> {
-  const queries = buildThreadsSearchQueries(args.keywords).slice(0, 6);
+  const queries = buildThreadsSearchQueries(args.keywords).slice(0, 3);
   const excluded = getSentimentHotExcludedIds(args.archiveId);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
