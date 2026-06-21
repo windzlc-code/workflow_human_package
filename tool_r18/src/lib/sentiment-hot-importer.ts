@@ -363,21 +363,16 @@ async function fetchThreadsSearchPageCandidates(args: {
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     });
-    const authCookies = readSentimentBrowserAuthCookies("threads");
-    if (authCookies.length > 0) await context.addCookies(authCookies);
     const page = await context.newPage();
     for (const query of queries) {
       if (results.length >= args.limit) break;
-      const searchUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
-      await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
-      await page.waitForTimeout(2_500);
-      const text = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+      const search = await readThreadsSearchPageText(page, query);
       const parsed = parseThreadsSearchTextCandidates({
-        text,
+        text: search.text,
         query,
         keywords: args.keywords,
         limit: args.limit - results.length,
-        sourceUrl: page.url() || searchUrl,
+        sourceUrl: search.url,
       });
       for (const candidate of parsed) {
         if (excluded.has(candidate.id)) continue;
@@ -390,7 +385,57 @@ async function fetchThreadsSearchPageCandidates(args: {
   } finally {
     await browser.close().catch(() => undefined);
   }
-  return results.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
+  const sorted = results.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
+  if (sorted.length > 0) writeThreadsSearchCandidateCache(args.keywords, sorted);
+  return sorted.length > 0 ? sorted : readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit);
+}
+
+async function readThreadsSearchPageText(page: any, query: string): Promise<{ text: string; url: string }> {
+  const searchUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
+  await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+  await page.waitForTimeout(2_500);
+  const text = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+  return { text, url: page.url() || searchUrl };
+}
+
+const THREADS_SEARCH_CACHE_FILE = resolveRuntimeFile("sentiment_threads_search_cache.json");
+
+function threadsSearchCacheKeys(keywords: string[]): string[] {
+  return buildThreadsSearchQueries(keywords).slice(0, 8).map((keyword) => keyword.toLowerCase());
+}
+
+function readThreadsSearchCacheState(): Record<string, { at: string; candidates: SentimentHotCandidate[] }> {
+  try {
+    if (!fs.existsSync(THREADS_SEARCH_CACHE_FILE)) return {};
+    const parsed = JSON.parse(fs.readFileSync(THREADS_SEARCH_CACHE_FILE, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeThreadsSearchCandidateCache(keywords: string[], candidates: SentimentHotCandidate[]) {
+  const state = readThreadsSearchCacheState();
+  const row = { at: new Date().toISOString(), candidates: candidates.slice(0, 20) };
+  for (const key of threadsSearchCacheKeys(keywords)) state[key] = row;
+  fs.mkdirSync(path.dirname(THREADS_SEARCH_CACHE_FILE), { recursive: true });
+  fs.writeFileSync(THREADS_SEARCH_CACHE_FILE, JSON.stringify(state, null, 2), "utf8");
+}
+
+function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], limit: number): SentimentHotCandidate[] {
+  const state = readThreadsSearchCacheState();
+  const excluded = getSentimentHotExcludedIds(archiveId);
+  const byId = new Map<string, SentimentHotCandidate>();
+  const maxAgeMs = 24 * 60 * 60 * 1000;
+  for (const key of threadsSearchCacheKeys(keywords)) {
+    const row = state[key];
+    if (!row || Date.now() - new Date(row.at).getTime() > maxAgeMs) continue;
+    for (const candidate of row.candidates || []) {
+      if (!candidate?.id || excluded.has(candidate.id)) continue;
+      byId.set(candidate.id, { ...candidate, warnings: [...(candidate.warnings || []), "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。"] });
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.hotScore - a.hotScore).slice(0, limit);
 }
 
 function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
@@ -403,7 +448,7 @@ function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
       ? profiles.find((item: any) => item?.platform === platform || item?.sourceKey === platform || item?.key === platform)
       : null;
     const nowSeconds = Date.now() / 1000;
-    return (Array.isArray(profile?.cookies) ? profile.cookies : [])
+    const cookies = (Array.isArray(profile?.cookies) ? profile.cookies : [])
       .filter((cookie: any) => {
         const expires = Number(cookie?.expires);
         return cookie?.name && cookie?.value && (!Number.isFinite(expires) || expires <= 0 || expires > nowSeconds);
@@ -421,6 +466,9 @@ function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
           sameSite,
         };
       });
+    if (platform !== "threads") return cookies;
+    const mirrored = cookies.map((cookie: any) => ({ ...cookie, domain: ".threads.com" }));
+    return [...cookies, ...mirrored];
   } catch {
     return [];
   }
