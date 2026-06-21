@@ -84,7 +84,7 @@ export async function ensureSentimentRuntime(): Promise<{ ok: boolean; url: stri
     });
   }
 
-  const deadline = Date.now() + 12_000;
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (await isSentimentRuntimeHealthy(url)) {
       scheduleSentimentRuntimeShutdown();

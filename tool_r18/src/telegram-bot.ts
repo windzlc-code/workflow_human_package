@@ -3276,9 +3276,14 @@ function rememberSentimentHotAction(chatId: number, archiveId: string) {
 
 function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index: number) {
   const platform = candidate.platform === "threads" ? "Threads" : "Instagram";
-  const text = cleanSentimentCandidateContent(candidate.content).slice(0, 52);
+  const content = cleanSentimentCandidateContent(candidate.content);
+  const text = content.slice(0, 72);
   const media = candidate.media.some((item) => item.type === "video") ? "視頻" : candidate.media.length ? "圖片" : "純文字";
-  return `${index + 1}. [${platform}/${media}] 熱度 ${candidate.hotScore}｜${text}${cleanSentimentCandidateContent(candidate.content).length > 52 ? "..." : ""}`;
+  return [
+    "────────────",
+    `${index + 1}. [${platform}/${media}] 熱度 ${candidate.hotScore}`,
+    `${text}${content.length > 72 ? "..." : ""}`,
+  ].join("\n");
 }
 
 function formatSentimentCookieLine(status: SentimentCookieStatus) {
@@ -3323,10 +3328,16 @@ async function sendSentimentHotCandidatePicker(args: {
     warnings: result.warnings,
   });
   const actionKey = rememberSentimentHotAction(args.chatId, archive.id);
-  const candidateRows = result.candidates.map((candidate, index) => ([{
-    text: `使用第 ${index + 1} 篇`,
-    callback_data: `shuse_${actionKey}_${index}`,
-  }]));
+  const candidateRows = result.candidates.map((candidate, index) => ([
+    {
+      text: `查看第 ${index + 1} 篇`,
+      callback_data: `shdet_${actionKey}_${index}`,
+    },
+    {
+      text: `使用第 ${index + 1} 篇`,
+      callback_data: `shuse_${actionKey}_${index}`,
+    },
+  ]));
   const text = [
     "🔥 舆情热点抓取",
     "",
@@ -3347,6 +3358,94 @@ async function sendSentimentHotCandidatePicker(args: {
         ...candidateRows,
         [{ text: "刷新抓取", callback_data: `shrf_${actionKey}` }],
         [{ text: "返回新建推文", callback_data: `genpost_branch_${archive.id}` }],
+      ],
+    },
+  });
+}
+
+async function showSentimentHotCandidateDetail(args: {
+  bot: TelegramBot;
+  chatId: number;
+  messageId?: number;
+  actionKey: string;
+  index: number;
+}) {
+  const action = sentimentHotActionKeys.get(args.actionKey);
+  const pending = pendingSentimentHotImports.get(args.chatId);
+  const candidate = pending?.candidates[args.index];
+  if (!action || !pending || action.chatId !== args.chatId || action.archiveId !== pending.archiveId || !candidate) {
+    await safeEditOrSend(args.bot, args.chatId, args.messageId, "舆情候选已过期，请重新刷新抓取。", {
+      reply_markup: { inline_keyboard: [[{ text: "返回新建推文", callback_data: pending ? `genpost_branch_${pending.archiveId}` : "list_personas" }]] },
+    });
+    return;
+  }
+  const platform = candidate.platform === "threads" ? "Threads" : "Instagram";
+  const mediaLabel = candidate.media.some((item) => item.type === "video") ? "視頻" : candidate.media.length ? `圖片 ${candidate.media.length}` : "純文字";
+  const warnings = candidate.warnings?.length ? ["", "提示:", ...candidate.warnings.map((item) => `- ${item}`)] : [];
+  const text = [
+    `🔥 舆情热点详情 #${args.index + 1}`,
+    "",
+    `人设: ${pending.archiveName}`,
+    `来源: ${platform}`,
+    `作者: ${candidate.author || "-"}`,
+    `媒体: ${mediaLabel}`,
+    `热度: ${candidate.hotScore}`,
+    `原帖: ${candidate.sourceUrl || "-"}`,
+    "",
+    "正文:",
+    cleanSentimentCandidateContent(candidate.content) || "-",
+    ...warnings,
+  ].join("\n");
+  await safeEditOrSend(args.bot, args.chatId, args.messageId, text.slice(0, 3900), {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: `✅ 使用第 ${args.index + 1} 篇`, callback_data: `shuse_${args.actionKey}_${args.index}` }],
+        [{ text: "返回候选列表", callback_data: `shlist_${args.actionKey}` }],
+        [{ text: "刷新抓取", callback_data: `shrf_${args.actionKey}` }],
+        [{ text: "返回新建推文", callback_data: `genpost_branch_${pending.archiveId}` }],
+      ],
+    },
+  });
+}
+
+async function showSentimentHotPendingList(args: {
+  bot: TelegramBot;
+  chatId: number;
+  messageId?: number;
+  actionKey: string;
+}) {
+  const action = sentimentHotActionKeys.get(args.actionKey);
+  const pending = pendingSentimentHotImports.get(args.chatId);
+  if (!action || !pending || action.chatId !== args.chatId || action.archiveId !== pending.archiveId) {
+    await safeEditOrSend(args.bot, args.chatId, args.messageId, "舆情候选已过期，请重新刷新抓取。", {
+      reply_markup: { inline_keyboard: [[{ text: "返回新建推文", callback_data: pending ? `genpost_branch_${pending.archiveId}` : "list_personas" }]] },
+    });
+    return;
+  }
+  const candidateRows = pending.candidates.map((candidate, index) => ([
+    { text: `查看第 ${index + 1} 篇`, callback_data: `shdet_${args.actionKey}_${index}` },
+    { text: `使用第 ${index + 1} 篇`, callback_data: `shuse_${args.actionKey}_${index}` },
+  ]));
+  const text = [
+    "🔥 舆情热点抓取",
+    "",
+    `人设: ${pending.archiveName}`,
+    `来源: Threads + Instagram`,
+    `关键词: ${pending.keywords.join(" / ") || "自动分析"}`,
+    "",
+    "Cookie 状态:",
+    ...pending.cookieStatuses.map(formatSentimentCookieLine),
+    ...(pending.warnings.length ? ["", "提示:", ...pending.warnings.map((item) => `- ${item}`)] : []),
+    "",
+    pending.candidates.length ? "候选热点:" : "暂时没有抓到可用热点，请刷新或检查 Cookie。",
+    ...pending.candidates.map(formatSentimentHotCandidateLine),
+  ].join("\n");
+  await safeEditOrSend(args.bot, args.chatId, args.messageId, text, {
+    reply_markup: {
+      inline_keyboard: [
+        ...candidateRows,
+        [{ text: "刷新抓取", callback_data: `shrf_${args.actionKey}` }],
+        [{ text: "返回新建推文", callback_data: `genpost_branch_${pending.archiveId}` }],
       ],
     },
   });
@@ -14275,6 +14374,33 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId: pending.archiveId,
         contentBranch: pending.contentBranch,
         refresh: true,
+      });
+      return;
+    }
+
+    if (data.startsWith("shlist_")) {
+      const actionKey = data.slice("shlist_".length);
+      await showSentimentHotPendingList({
+        bot,
+        chatId,
+        messageId: msgId,
+        actionKey,
+      });
+      return;
+    }
+
+    if (data.startsWith("shdet_")) {
+      const match = data.match(/^shdet_([a-f0-9]+)_(\d+)$/);
+      if (!match) {
+        await safeEditOrSend(bot, chatId, msgId, "舆情候选参数无效，请重新刷新抓取。");
+        return;
+      }
+      await showSentimentHotCandidateDetail({
+        bot,
+        chatId,
+        messageId: msgId,
+        actionKey: match[1],
+        index: Number(match[2]),
       });
       return;
     }

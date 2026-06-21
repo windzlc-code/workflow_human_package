@@ -6,6 +6,7 @@ import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 import {
   buildSentimentCandidateId,
   getSentimentHotExcludedIds,
+  getSentimentHotRefreshExcludedIds,
   rememberSentimentHotShown,
   type SentimentHotCandidate,
   type SentimentHotMedia,
@@ -76,6 +77,30 @@ const GENERIC_SENTIMENT_KEYWORDS = new Set([
   "文案",
 ]);
 
+const BROAD_THREADS_SEARCH_QUERIES = ["生活", "日常", "熱門", "分享"];
+
+const DYNAMIC_KEYWORD_STOPWORDS = new Set([
+  "人設",
+  "人设",
+  "內容",
+  "内容",
+  "風格",
+  "风格",
+  "推文",
+  "文案",
+  "生成",
+  "圖片",
+  "图片",
+  "指定",
+  "不指定",
+  "工作流",
+  "角色",
+  "設定",
+  "设定",
+  "目前風格",
+  "目前风格",
+]);
+
 function meaningfulNeedles(keywords: string[]): string[] {
   return keywords
     .map((item) => item.trim().toLowerCase())
@@ -114,10 +139,59 @@ function addGeneralTopicKeywords(out: string[], text: string) {
     [/(恋爱|戀愛|情感|感情|暧昧|曖昧|分手|关系|關係)/, ["戀愛", "感情", "曖昧", "分手", "關係"]],
     [/(穿搭|美妆|美妝|护肤|護膚|拍照|女生|日系)/, ["穿搭", "美妝", "護膚", "女生", "拍照"]],
     [/(AI|人工智能|人工智慧|自动化|自動化|科技|互联网|互聯網|职场|職場)/i, ["AI", "人工智慧", "自動化", "科技", "職場"]],
+    [/(動漫|动漫|二次元|遊戲|游戏|漫展|手辦|手办|cos|cosplay)/i, ["動漫", "二次元", "遊戲", "漫展", "cosplay"]],
+    [/(美食|吃貨|吃货|餐廳|餐厅|咖啡|甜點|甜点|料理|宵夜)/, ["美食", "餐廳", "咖啡", "甜點", "宵夜"]],
+    [/(旅行|旅遊|旅游|露營|露营|景點|景点|出遊|出游|城市|拍照)/, ["旅行", "旅遊", "景點", "露營", "城市"]],
+    [/(寵物|宠物|貓|猫|狗|小動物|小动物|毛孩)/, ["寵物", "貓", "狗", "毛孩", "小動物"]],
+    [/(家庭|媽媽|妈妈|太太|人妻|婚姻|育兒|育儿|家務|家务|親子|亲子)/, ["家庭", "媽媽", "婚姻", "育兒", "親子"]],
+    [/(上班|職場|职场|同事|主管|公司|加班|辦公室|办公室|工作)/, ["職場", "上班", "同事", "加班", "辦公室"]],
+    [/(健身|運動|运动|跑步|瑜伽|球類|球类|排球|籃球|篮球|足球)/, ["健身", "運動", "跑步", "排球", "籃球"]],
+    [/(娛樂|娱乐|明星|偶像|八卦|追星|影劇|影剧|電影|电影|綜藝|综艺)/, ["娛樂", "明星", "八卦", "影劇", "電影"]],
+    [/(理財|理财|投資|投资|股票|基金|幣圈|币圈|副業|副业|賺錢|赚钱)/, ["理財", "投資", "股票", "副業", "賺錢"]],
+    [/(法律|律師|律师|法院|案件|糾紛|纠纷|警察|社會|社会|新聞|新闻)/, ["法律", "社會", "新聞", "案件", "糾紛"]],
   ];
   for (const [pattern, values] of groups) {
     if (pattern.test(text)) out.push(...values);
   }
+}
+
+function normalizeDynamicKeyword(value: string, archiveName: string): string {
+  return cleanText(value)
+    .replace(/^[-_*#\d.、\s]+/g, "")
+    .replace(/^(人設|人设|類型|类型|性格|內容|内容|風格|风格|主題|主题|模式|記憶|记忆)[:：]/, "")
+    .replace(/^(改成|改為|改为|換成|换成|修改成|修改為|修改为|內容以|内容以|以)/, "")
+    .replace(archiveName ? new RegExp(archiveName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g") : /$^/, "")
+    .replace(/(人設|人设|設定|设定|風格|风格|推文|文案|為主|为主)$/g, "")
+    .trim();
+}
+
+function extractDynamicPersonaKeywords(args: { archiveName: string; pieces: string[] }): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string) => {
+    const text = normalizeDynamicKeyword(value, args.archiveName);
+    const key = text.toLowerCase();
+    if (!hasHan(text)) return;
+    if (text.length < 2 || text.length > 14) return;
+    if (DYNAMIC_KEYWORD_STOPWORDS.has(text) || DYNAMIC_KEYWORD_STOPWORDS.has(key)) return;
+    if (args.archiveName && text.includes(args.archiveName)) return;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(text);
+  };
+
+  for (const piece of args.pieces) {
+    const cleaned = cleanText(piece)
+      .replace(/https?:\/\/\S+/g, " ")
+      .replace(/[「」『』“”"'()[\]{}]/g, " ");
+    for (const segment of cleaned.split(/[,，、。.!！?？；;：:\n\r]+/g)) {
+      const text = normalizeDynamicKeyword(segment, args.archiveName);
+      if (!text) continue;
+      add(text);
+      for (const token of text.split(/\s+|和|與|与|及|以及|跟/g)) add(token);
+    }
+  }
+  return out.slice(0, 8);
 }
 
 function buildSearchKeywordCandidates(args: {
@@ -126,6 +200,7 @@ function buildSearchKeywordCandidates(args: {
 }): string[] {
   const joined = args.pieces.join(" ");
   const out: string[] = [];
+  out.push(...extractDynamicPersonaKeywords(args));
   addMedicalTopicKeywords(out, joined);
   addGeneralTopicKeywords(out, joined);
   for (const item of splitKeywords(joined)) {
@@ -159,7 +234,7 @@ export function buildSentimentHotKeywords(args: {
   ].map(cleanText).filter(Boolean);
   const joined = pieces.join(" ");
   const personaName = cleanText(archive.name);
-  const defaults = ["生活", "情緒", "日常", "熱門"];
+  const defaults = BROAD_THREADS_SEARCH_QUERIES;
   const extracted = buildSearchKeywordCandidates({ archiveName: personaName, pieces });
   return [...new Set([...extracted, ...defaults].filter(Boolean))].slice(0, 10);
 }
@@ -267,31 +342,40 @@ export async function fetchSentimentHotCandidates(args: {
     warnings.push("Threads / Instagram 缺少有效 Cookie，已跳過真實掃描；請先在舆情 Cookie 配置中授權後再刷新抓取。");
   }
 
-  let candidates = await readCandidatesFromDatabase({
-    archiveId,
-    keywords,
-    limit: args.limit || 10,
-  });
-  if (runtime.ok && usableSources.length > 0 && candidates.length === 0) {
+  const limit = args.limit || 10;
+  let candidates = args.refresh
+    ? []
+    : await readCandidatesFromDatabase({
+        archiveId,
+        keywords,
+        limit,
+      });
+  if (!args.refresh && runtime.ok && usableSources.length > 0 && candidates.length === 0) {
     candidates = await waitForCandidates({
       archiveId,
       keywords,
-      limit: args.limit || 10,
+      limit,
       timeoutMs: 3_000,
     });
   }
-  if (candidates.length === 0) {
+  if (candidates.length < limit) {
     const fallbackCandidates = await fetchThreadsSearchPageCandidates({
       archiveId,
       keywords,
-      limit: args.limit || 10,
+      limit,
+      refresh: args.refresh === true,
     }).catch((error) => {
       warnings.push(`Threads 页面兜底抓取失败：${error instanceof Error ? error.message : String(error)}`);
       return [];
     });
     if (fallbackCandidates.length > 0) {
-      warnings.push("主搜索源当前没有产出，已改用 Threads reader 兜底抓取中文热点。");
-      candidates = fallbackCandidates;
+      warnings.push(args.refresh ? "已实时刷新 Threads reader 中文热点。" : "主搜索源当前没有产出，已改用 Threads reader 兜底抓取中文热点。");
+      const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+      for (const candidate of fallbackCandidates) {
+        if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+        if (byId.size >= limit) break;
+      }
+      candidates = [...byId.values()].sort((a, b) => b.hotScore - a.hotScore).slice(0, limit);
     }
   }
   if (candidates.length === 0) {
@@ -346,21 +430,53 @@ async function fetchThreadsSearchPageCandidates(args: {
   archiveId: string;
   keywords: string[];
   limit: number;
+  refresh?: boolean;
 }): Promise<SentimentHotCandidate[]> {
-  const queries = buildThreadsSearchQueries(args.keywords).slice(0, 5);
-  const excluded = getSentimentHotExcludedIds(args.archiveId);
+  const queries = buildThreadsSearchQueries(args.keywords).slice(0, 8);
+  const excluded = args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : getSentimentHotExcludedIds(args.archiveId);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
 
-  const readerResults = await fetchThreadsReaderSearchCandidates({
+  let readerResults = await fetchThreadsReaderSearchCandidates({
     archiveId: args.archiveId,
     keywords: args.keywords,
     queries,
     limit: args.limit,
+    refresh: args.refresh,
   }).catch(() => []);
+  if (readerResults.length < args.limit && queries.some((query) => !BROAD_THREADS_SEARCH_QUERIES.includes(query))) {
+    const broadResults = await fetchThreadsReaderSearchCandidates({
+      archiveId: args.archiveId,
+      keywords: BROAD_THREADS_SEARCH_QUERIES,
+      queries: BROAD_THREADS_SEARCH_QUERIES,
+      limit: args.limit,
+      refresh: args.refresh,
+    }).catch(() => []);
+    const byId = new Map(readerResults.map((candidate) => [candidate.id, candidate]));
+    for (const candidate of broadResults) {
+      if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+      if (byId.size >= args.limit) break;
+    }
+    readerResults = [...byId.values()];
+  }
+  if (args.refresh && readerResults.length < args.limit) {
+    const relaxedResults = await fetchThreadsReaderSearchCandidates({
+      archiveId: args.archiveId,
+      keywords: args.keywords,
+      queries: [...queries, ...BROAD_THREADS_SEARCH_QUERIES],
+      limit: args.limit,
+      refresh: false,
+    }).catch(() => []);
+    const byId = new Map(readerResults.map((candidate) => [candidate.id, candidate]));
+    for (const candidate of relaxedResults) {
+      if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+      if (byId.size >= args.limit) break;
+    }
+    readerResults = [...byId.values()];
+  }
   if (readerResults.length > 0) {
     writeThreadsSearchCandidateCache(args.keywords, readerResults);
-    return readerResults;
+    return readerResults.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
   }
 
   const { chromium } = await import("playwright");
@@ -398,7 +514,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   }
   const sorted = results.sort((a, b) => b.hotScore - a.hotScore).slice(0, args.limit);
   if (sorted.length > 0) writeThreadsSearchCandidateCache(args.keywords, sorted);
-  return sorted.length > 0 ? sorted : readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit);
+  return sorted.length > 0 || args.refresh ? sorted : readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit);
 }
 
 const JINA_READER_PREFIX = "https://r.jina.ai/http://r.jina.ai/http://";
@@ -408,11 +524,12 @@ async function fetchThreadsReaderSearchCandidates(args: {
   keywords: string[];
   queries: string[];
   limit: number;
+  refresh?: boolean;
 }): Promise<SentimentHotCandidate[]> {
-  const excluded = getSentimentHotExcludedIds(args.archiveId);
+  const excluded = args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : getSentimentHotExcludedIds(args.archiveId);
   const all: SentimentHotCandidate[] = [];
   const searches = await Promise.all(
-    args.queries.slice(0, 5).map(async (query) => {
+    args.queries.slice(0, 8).map(async (query) => {
       const targetUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
       const response = await fetch(`${JINA_READER_PREFIX}${targetUrl}`, {
         headers: {
@@ -431,7 +548,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
       query: search.query,
       keywords: args.keywords,
       sourceUrl: search.targetUrl,
-      limit: args.limit - all.length,
+      limit: args.limit,
     });
     for (const candidate of parsed) {
       if (excluded.has(candidate.id)) continue;
@@ -642,7 +759,7 @@ function buildThreadsSearchQueries(keywords: string[]): string[] {
     const text = cleanText(value);
     if (!text) return;
     if (!hasHan(text) && !/^AI$/i.test(text)) return;
-    if (text.length > 10) return;
+    if (text.length > 14) return;
     out.push(text);
   };
   const synonymGroups: Array<[RegExp, string[]]> = [
@@ -659,6 +776,7 @@ function buildThreadsSearchQueries(keywords: string[]): string[] {
     add(keyword);
     for (const part of splitKeywords(keyword)) add(part);
   }
+  if (out.length === 0) BROAD_THREADS_SEARCH_QUERIES.forEach(add);
   return [...new Set(out)].slice(0, 12);
 }
 

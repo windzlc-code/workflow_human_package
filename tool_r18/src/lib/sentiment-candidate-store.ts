@@ -70,6 +70,15 @@ export function getSentimentHotExcludedIds(archiveId: string): Set<string> {
   ]);
 }
 
+export function getSentimentHotRefreshExcludedIds(archiveId: string): Set<string> {
+  const state = readState();
+  return new Set([
+    ...(state.shown[archiveId] || []),
+    ...(state.selected[archiveId] || []),
+    ...(state.imported[archiveId] || []),
+  ]);
+}
+
 export function rememberSentimentHotShown(archiveId: string, candidates: SentimentHotCandidate[]) {
   const state = readState();
   const current = new Set(state.shown[archiveId] || []);
