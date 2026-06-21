@@ -457,17 +457,21 @@ function decodeMarkdownLinkText(value: string): string {
 
 function cleanThreadsReaderContent(value: string): string {
   const lines = String(value || "")
-    .replace(/Sorry,\s*we'?re having trouble playing this video\.\s*Learn more/gi, " ")
+    .replace(/Sorry,\s*we.{0,8}re having trouble playing this video\.\s*Learn more/gi, " ")
     .replace(/\bVideo\s+\d+\b/gi, " ")
     .split(/\r?\n/g)
     .map((line) => decodeMarkdownLinkText(line))
     .filter(Boolean)
     .filter((line) => !/^(?:Translate|翻譯|翻译)$/i.test(line))
-    .filter((line) => !/^Sorry,\s*we'?re having trouble playing this video\.\s*Learn more$/i.test(line))
+    .filter((line) => !/^Sorry,\s*we.{0,8}re having trouble playing this video\.\s*Learn more$/i.test(line))
     .filter((line) => !/^Video\s+\d+$/i.test(line))
     .filter((line) => !/^\d+(?:[.,]\d+)?\s*[Kk萬万]?$/.test(line))
     .filter((line) => !/^Image\s+\d+/i.test(line));
-  return cleanSentimentCandidateContent(lines.join(" "));
+  return cleanSentimentCandidateContent(lines.join(" "))
+    .replace(/Sorry,\s*we.{0,8}re having trouble playing this video\.\s*Learn more/gi, " ")
+    .replace(/\bVideo\s+\d+\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function parseThreadsReaderHotScore(block: string): number {
@@ -583,7 +587,13 @@ function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], 
     if (!row || Date.now() - new Date(row.at).getTime() > maxAgeMs) continue;
     for (const candidate of row.candidates || []) {
       if (!candidate?.id || excluded.has(candidate.id)) continue;
-      byId.set(candidate.id, { ...candidate, warnings: [...(candidate.warnings || []), "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。"] });
+      const content = cleanThreadsReaderContent(candidate.content || "");
+      if (!content || isLowQualitySentimentContent(content) || !isChineseSentimentCandidate(content)) continue;
+      byId.set(candidate.id, {
+        ...candidate,
+        content,
+        warnings: [...(candidate.warnings || []), "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。"],
+      });
     }
   }
   return [...byId.values()].sort((a, b) => b.hotScore - a.hotScore).slice(0, limit);
