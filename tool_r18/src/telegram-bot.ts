@@ -1089,6 +1089,7 @@ const pendingSentimentHotEdits = new Map<number, {
   contentBranch?: GeneratePostContentBranch;
   candidate: SentimentHotCandidate;
   stage: "await_input";
+  deleteMediaIndexes?: number[];
 }>();
 const sentimentHotActionKeys = new Map<string, { chatId: number; archiveId: string }>();
 
@@ -3765,17 +3766,6 @@ async function showSentimentHotCandidateDetail(args: {
       ],
     },
   });
-  const previewMediaItems = candidate.media
-    .map((item) => ({
-      url: item.localPath || item.url,
-      type: item.type || "unknown",
-      localPath: item.localPath,
-      warning: item.warning,
-    }))
-    .filter((item) => item.url);
-  if (previewMediaItems.length) {
-    await sendStoredPostMediaPreviews(args.bot, args.chatId, previewMediaItems, args.index + 1);
-  }
 }
 
 async function showSentimentHotPendingList(args: {
@@ -3845,17 +3835,56 @@ async function startSentimentHotEdit(args: {
     contentBranch: pending.contentBranch,
     candidate,
     stage: "await_input",
+    deleteMediaIndexes: [],
   });
-  await safeEditOrSend(args.bot, args.chatId, args.messageId, [
+  await renderSentimentHotEditPanel(args.bot, args.chatId, args.messageId);
+}
+
+function buildSentimentHotEditMediaKeyboard(state: NonNullable<ReturnType<typeof pendingSentimentHotEdits.get>>) {
+  const selected = new Set(state.deleteMediaIndexes || []);
+  const mediaRows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let index = 0; index < state.candidate.media.length; index += 2) {
+    mediaRows.push(state.candidate.media.slice(index, index + 2).map((item, offset) => {
+      const mediaIndex = index + offset;
+      return {
+        text: `${selected.has(mediaIndex) ? "☑️" : "⬜️"} ${mediaIndex + 1}.${item.type === "video" ? "视频" : "图片"}`,
+        callback_data: `shmedia_toggle_${mediaIndex}`,
+      };
+    }));
+  }
+  return [
+    ...mediaRows,
+    ...(state.candidate.media.length ? [[
+      { text: "全选删除", callback_data: "shmedia_select_all" },
+      { text: "清空选择", callback_data: "shmedia_clear" },
+    ]] : []),
+    [{ text: `保存并使用（删除 ${selected.size} 个媒体）`, callback_data: "shmedia_save" }],
+    [{ text: "返回候选详情", callback_data: `shdet_${state.actionKey}_${state.index}` }],
+  ];
+}
+
+async function renderSentimentHotEditPanel(bot: TelegramBot, chatId: number, messageId?: number) {
+  const state = pendingSentimentHotEdits.get(chatId);
+  if (!state) {
+    await safeEditOrSend(bot, chatId, messageId, "请先从候选详情进入编辑。", {
+      reply_markup: { inline_keyboard: [[{ text: "返回人设列表", callback_data: "list_personas" }]] },
+    });
+    return;
+  }
+  const selected = state.deleteMediaIndexes || [];
+  const keptCount = Math.max(0, state.candidate.media.length - selected.length);
+  await safeEditOrSend(bot, chatId, messageId, [
     "✏️ 编辑舆情推文",
     "",
-    `人设: ${pending.archiveName}`,
-    `数据: ${formatSentimentMetricLine(candidate)}`,
+    `人设: ${state.archiveName}`,
+    `数据: ${formatSentimentMetricLine(state.candidate)}`,
+    `媒体: ${state.candidate.media.length} 个，已选删除 ${selected.length} 个，保存后保留 ${keptCount} 个`,
     "",
-    "请直接发送新的文案。",
-    "如需替换媒体，请发送图片/视频并附带文案；只发送媒体则保留原文案并替换媒体。",
+    "可以直接发送新的文案。",
+    "也可以勾选要删除的图片/视频，最后点“保存并使用”。",
+    "如需整体替换媒体，请发送图片/视频并附带文案；只发送媒体则保留原文案并替换媒体。",
   ].join("\n"), {
-    reply_markup: { inline_keyboard: [[{ text: "返回候选详情", callback_data: `shdet_${args.actionKey}_${args.index}` }]] },
+    reply_markup: { inline_keyboard: buildSentimentHotEditMediaKeyboard(state) },
   });
 }
 
@@ -3868,6 +3897,7 @@ async function importSentimentHotCandidate(args: {
   overrideContent?: string;
   overrideMediaUrl?: string;
   overrideMediaType?: "image" | "video" | "unknown";
+  overrideMediaItems?: SentimentHotCandidate["media"];
   edited?: boolean;
 }) {
   const action = sentimentHotActionKeys.get(args.actionKey);
@@ -3881,9 +3911,10 @@ async function importSentimentHotCandidate(args: {
   }
 
   rememberSentimentHotSelected(pending.archiveId, candidate.id);
+  const sourceCandidate = args.overrideMediaItems !== undefined ? { ...candidate, media: args.overrideMediaItems } : candidate;
   const downloadedMedia = args.overrideMediaUrl
     ? [{ type: args.overrideMediaType || "unknown", url: args.overrideMediaUrl }]
-    : await downloadCandidateMedia(candidate).catch(() => candidate.media || []);
+    : await downloadCandidateMedia(sourceCandidate).catch(() => sourceCandidate.media || []);
   const mediaItems = downloadedMedia
     .map((item) => ({
       url: item.localPath || item.url,
@@ -15238,6 +15269,46 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data.startsWith("shmedia_toggle_") || data === "shmedia_select_all" || data === "shmedia_clear" || data === "shmedia_save") {
+      const state = pendingSentimentHotEdits.get(chatId);
+      if (!state) {
+        await safeEditOrSend(bot, chatId, msgId, "请先从候选详情进入编辑。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回人设列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      let selected = (state.deleteMediaIndexes || []).filter((index) => index >= 0 && index < state.candidate.media.length);
+      if (data.startsWith("shmedia_toggle_")) {
+        const mediaIndex = Number(data.slice("shmedia_toggle_".length));
+        if (Number.isInteger(mediaIndex) && mediaIndex >= 0 && mediaIndex < state.candidate.media.length) {
+          selected = selected.includes(mediaIndex)
+            ? selected.filter((index) => index !== mediaIndex)
+            : [...selected, mediaIndex].sort((a, b) => a - b);
+        }
+      } else if (data === "shmedia_select_all") {
+        selected = state.candidate.media.map((_, index) => index);
+      } else if (data === "shmedia_clear") {
+        selected = [];
+      } else if (data === "shmedia_save") {
+        const deleteSet = new Set(selected);
+        const keptMedia = state.candidate.media.filter((_, index) => !deleteSet.has(index));
+        pendingSentimentHotEdits.delete(chatId);
+        await importSentimentHotCandidate({
+          bot,
+          chatId,
+          actionKey: state.actionKey,
+          index: state.index,
+          overrideContent: cleanSentimentCandidateContent(state.candidate.content),
+          overrideMediaItems: keptMedia,
+          edited: selected.length > 0,
+        });
+        return;
+      }
+      pendingSentimentHotEdits.set(chatId, { ...state, deleteMediaIndexes: selected });
+      await renderSentimentHotEditPanel(bot, chatId, msgId);
+      return;
+    }
+
     if (
       data.startsWith("genpost_")
       && !data.startsWith("genpost_branch_")
@@ -18928,6 +18999,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const deleteSet = new Set((sentimentHotEdit.deleteMediaIndexes || []).filter((index) => index >= 0 && index < sentimentHotEdit.candidate.media.length));
+      const keptMedia = deleteSet.size > 0
+        ? sentimentHotEdit.candidate.media.filter((_, index) => !deleteSet.has(index))
+        : undefined;
       pendingSentimentHotEdits.delete(chatId);
       await importSentimentHotCandidate({
         bot,
@@ -18937,6 +19012,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         overrideContent: editedText || cleanSentimentCandidateContent(sentimentHotEdit.candidate.content),
         overrideMediaUrl: overrideMediaUrl || undefined,
         overrideMediaType,
+        overrideMediaItems: overrideMediaUrl ? undefined : keptMedia,
         edited: true,
       });
       return;
