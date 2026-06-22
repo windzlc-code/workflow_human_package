@@ -19,7 +19,7 @@ import { buildRegeneratePostInstruction, isRegeneratedPostTooSimilar } from "@/c
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
-import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updateArchivePostMedia, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
+import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updateArchivePostMedia, updatePersonaArchivePostDraft, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
 import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
@@ -661,6 +661,14 @@ const pendingPostActions = new Map<number, {
   archiveId: string;
   postId: string;
   groupContentType?: TelegramGroupContentType;
+}>();
+
+const pendingStoredPostEdits = new Map<number, {
+  archiveId: string;
+  postId: string;
+  groupContentType?: TelegramGroupContentType;
+  displayIndex?: number;
+  currentContent: string;
 }>();
 
 type PendingBulkPostAction = {
@@ -3897,6 +3905,67 @@ async function importSentimentHotCandidate(args: {
         [{ text: "继续刷新抓取", callback_data: `shrf_${args.actionKey}` }],
         [{ text: "返回人设详情", callback_data: `pd_${pending.archiveId}` }],
       ],
+    },
+  });
+}
+
+async function saveStoredPostCustomEdit(args: {
+  bot: TelegramBot;
+  chatId: number;
+  archiveId: string;
+  postId: string;
+  groupContentType?: TelegramGroupContentType;
+  displayIndex?: number;
+  content?: string;
+  mediaUrl?: string;
+  mediaType?: "image" | "video" | "unknown";
+}) {
+  const archive = await loadPersonaForThisBot(args.archiveId);
+  const post = archive?.posts.find((item) => item.id === args.postId);
+  if (!archive || !post) {
+    await args.bot.sendMessage(args.chatId, "没有找到这篇推文，请返回推文列表重新打开。");
+    return;
+  }
+  const mediaItems = args.mediaUrl
+    ? [{ url: args.mediaUrl, type: args.mediaType || "unknown", localPath: args.mediaUrl }]
+    : post.mediaItems;
+  const updated = await updatePersonaArchivePostDraft(args.archiveId, args.postId, {
+    content: args.content || post.content,
+    mediaUrl: args.mediaUrl,
+    mediaType: args.mediaUrl ? args.mediaType : post.mediaType,
+    mediaItems,
+    sourceMetaPatch: {
+      edited: true,
+      mediaItems: mediaItems || post.sourceMeta?.mediaItems,
+      warnings: [
+        ...(post.sourceMeta?.warnings || []),
+        "已在查看推文中手动编辑",
+      ],
+    },
+  });
+  if (!updated) {
+    await args.bot.sendMessage(args.chatId, "保存失败，请稍后重试。");
+    return;
+  }
+  await addSummariesToMemoryAsync(args.archiveId, [
+    `已编辑待发布推文 | 内容:${updated.content.slice(0, 160)}`,
+  ]).catch(() => undefined);
+  pendingPostActions.set(args.chatId, { archiveId: args.archiveId, postId: args.postId, groupContentType: args.groupContentType });
+  const displayIndex = args.displayIndex || (updated.orderIndex ?? archive.posts.findIndex((item) => item.id === updated.id)) + 1;
+  const mediaList = getStoredPostMediaItems(updated);
+  const imageUrl = String(mediaList[0]?.url || updated.imageUrl || "").trim();
+  await args.bot.sendMessage(args.chatId, `已保存修改\n\n${buildPostDetailTextWithArchive(displayIndex, updated.content, imageUrl, archive, updated.sourceMeta)}`, {
+    parse_mode: "HTML",
+    ...buildPostImagePreviewOptions(imageUrl),
+    reply_markup: {
+      inline_keyboard: buildPostDetailActionRows({
+        hasImage: mediaList.length > 0 || Boolean(imageUrl),
+        publishCallback: "post_action",
+        deleteCallback: "post_delete_action",
+        archiveId: args.archiveId,
+        postIndex: archive.posts.findIndex((item) => item.id === updated.id),
+        groupContentType: args.groupContentType,
+      }),
     },
   });
 }
@@ -9719,6 +9788,7 @@ export function buildPostDetailActionRows(args: {
   return [
     [{ text: "🚀 发布这篇", callback_data: args.publishCallback }],
     ...(args.hasImage ? [[{ text: "🖼 查看配圖/視頻", callback_data: "post_media_preview" }]] : []),
+    [{ text: "编辑文案/媒体", callback_data: "post_edit_custom" }],
     [{ text: "🔄 重新生成推文", callback_data: "post_regen" }],
     [{ text: args.hasImage ? "🖼 重新生成图片" : "🖼 单独生成图片", callback_data: imageRegenCallback }],
     [{ text: "🗑 删除这篇", callback_data: args.deleteCallback }],
@@ -16230,6 +16300,45 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data === "post_edit_custom") {
+      const action = pendingPostActions.get(chatId);
+      if (!action?.archiveId || !action.postId) {
+        await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "人设列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(action.archiveId);
+      const post = archive?.posts.find((item) => item.id === action.postId);
+      if (!archive || !post) {
+        await safeEditOrSend(bot, chatId, msgId, "没有找到这篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+        });
+        return;
+      }
+      const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+      pendingStoredPostEdits.set(chatId, {
+        archiveId: action.archiveId,
+        postId: action.postId,
+        groupContentType: action.groupContentType,
+        displayIndex,
+        currentContent: post.content,
+      });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "编辑已保存推文",
+        "",
+        `人设: ${archive.name}`,
+        `推文: 第 ${displayIndex} 篇`,
+        "",
+        "请直接发送新的文案。",
+        "如果要替换媒体，请发送图片/视频；caption 会作为新文案。",
+        "只发送媒体则保留当前文案并替换媒体。",
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+      });
+      return;
+    }
+
     if (data === "post_regen" || data === "post_img_regen" || data.startsWith("post_img_regen_")) {
       let action = pendingPostActions.get(chatId);
       let explicitPostIndex: number | null = null;
@@ -18435,6 +18544,43 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     const customPersonaPost = pendingCustomPersonaPosts.get(chatId);
+    const storedPostEdit = pendingStoredPostEdits.get(chatId);
+    if (storedPostEdit) {
+      const editedText = String(text || "").trim();
+      let mediaUrl = "";
+      let mediaType: "image" | "video" | "unknown" | undefined;
+      if (media?.file_id) {
+        const downloaded = await downloadToolR18TelegramMedia(bot, msg, media).catch(() => null);
+        if (!downloaded?.hostPath) {
+          await bot.sendMessage(chatId, "媒体读取失败，请重新上传一次。", {
+            reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          });
+          return;
+        }
+        mediaUrl = downloaded.hostPath;
+        mediaType = video ? "video" : photo ? "image" : "unknown";
+      }
+      if (!editedText && !mediaUrl) {
+        await bot.sendMessage(chatId, "请发送新的文案，或发送图片/视频替换媒体。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+        });
+        return;
+      }
+      pendingStoredPostEdits.delete(chatId);
+      await saveStoredPostCustomEdit({
+        bot,
+        chatId,
+        archiveId: storedPostEdit.archiveId,
+        postId: storedPostEdit.postId,
+        groupContentType: storedPostEdit.groupContentType,
+        displayIndex: storedPostEdit.displayIndex,
+        content: editedText || storedPostEdit.currentContent,
+        mediaUrl: mediaUrl || undefined,
+        mediaType,
+      });
+      return;
+    }
+
     const sentimentHotEdit = pendingSentimentHotEdits.get(chatId);
     if (sentimentHotEdit?.stage === "await_input") {
       const editedText = String(text || "").trim();

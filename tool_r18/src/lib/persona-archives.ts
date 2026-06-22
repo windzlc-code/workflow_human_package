@@ -1052,6 +1052,47 @@ export async function updateArchivePostMedia(
   return saved.posts.find((post) => post.id === archivePostId) || null;
 }
 
+export async function updatePersonaArchivePostDraft(
+  archiveId: string,
+  archivePostId: string,
+  patch: {
+    content?: string;
+    mediaUrl?: string;
+    mediaType?: PersonaArchivePost["mediaType"];
+    mediaItems?: PersonaArchivePost["mediaItems"];
+    sourceMetaPatch?: Partial<NonNullable<PersonaArchivePost["sourceMeta"]>>;
+  },
+): Promise<PersonaArchivePost | null> {
+  const archive = await loadPersonaArchive(archiveId);
+  if (!archive || !archivePostId) return null;
+  const now = new Date().toISOString();
+  const updatePost = (post: PersonaArchivePost): PersonaArchivePost => {
+    if (post.id !== archivePostId) return post;
+    const content = typeof patch.content === "string" ? patch.content.trim() : post.content;
+    const mediaUrl = patch.mediaUrl !== undefined ? patch.mediaUrl : post.mediaUrl;
+    const mediaItems = patch.mediaItems !== undefined ? patch.mediaItems : post.mediaItems;
+    const sourceMeta = patch.sourceMetaPatch
+      ? { ...(post.sourceMeta || {}), ...patch.sourceMetaPatch }
+      : post.sourceMeta;
+    return {
+      ...post,
+      content,
+      wordCount: content.length,
+      imageUrl: mediaUrl || post.imageUrl,
+      mediaUrl,
+      mediaType: patch.mediaType !== undefined ? patch.mediaType : post.mediaType,
+      mediaItems,
+      sourceMeta,
+      updatedAt: now,
+    };
+  };
+  const saved = await savePersonaArchive(withPlatformQueues(
+    archive,
+    (posts) => posts.map(updatePost),
+  ));
+  return saved.posts.find((post) => post.id === archivePostId) || null;
+}
+
 export async function deleteArchiveEpisode(
   archiveId: string,
   archivePostId: string,
