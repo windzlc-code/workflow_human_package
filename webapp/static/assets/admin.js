@@ -14,6 +14,7 @@ const ADMIN_PAGE_LABELS = {
   tasks: "生成记录",
   pricing: "额度与计费",
   runtime: "系统配置",
+  sentimentCookies: "舆情 Cookie",
   account: "账号设置",
 };
 
@@ -1077,6 +1078,7 @@ const adminState = {
   localComfyWorkflowMappings: {},
   localComfyWorkflows: [],
   tgTrustedUsers: [],
+  sentimentCookieProfiles: [],
 };
 const REMOTE_COMFY_TASKS = [
   ["text_to_image", "文字生成图片"],
@@ -1089,13 +1091,14 @@ const REMOTE_COMFY_TASKS = [
   ["face_swap", "人物换脸"],
 ];
 const TASK_TYPE_LABELS = Object.fromEntries(REMOTE_COMFY_TASKS);
-const ADMIN_PAGES = new Set(["overview", "users", "tasks", "pricing", "runtime", "account"]);
+const ADMIN_PAGES = new Set(["overview", "users", "tasks", "pricing", "runtime", "sentimentCookies", "account"]);
 const ADMIN_PAGE_ALIASES = {
   secOverview: "overview",
   secUsers: "users",
   secTasks: "tasks",
   secPricing: "pricing",
   secRuntime: "runtime",
+  secSentimentCookies: "sentimentCookies",
   secAccount: "account",
 };
 const WORKFLOW_CHAIN_META = [];
@@ -2338,6 +2341,120 @@ async function saveRuntime() {
   return cfg;
 }
 
+function sentimentCookieHealthLabel(health) {
+  const map = {
+    healthy: "正常",
+    watch: "需关注",
+    degraded: "部分过期",
+    expired: "已过期",
+    missing: "未授权",
+    unknown: "未知",
+  };
+  return map[health] || health || "-";
+}
+
+function formatAdminDate(value) {
+  const text = String(value || "").trim();
+  if (!text) return "-";
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function preferredSentimentCookieProfiles(profiles) {
+  const priority = ["threads", "instagram", "xSearch", "dcard"];
+  const rows = Array.isArray(profiles) ? profiles : [];
+  return rows
+    .slice()
+    .sort((a, b) => {
+      const ak = String(a.key || a.platform || "");
+      const bk = String(b.key || b.platform || "");
+      const ai = priority.includes(ak) ? priority.indexOf(ak) : 99;
+      const bi = priority.includes(bk) ? priority.indexOf(bk) : 99;
+      if (ai !== bi) return ai - bi;
+      return ak.localeCompare(bk);
+    });
+}
+
+function renderSentimentCookieProfiles(payload) {
+  const profiles = preferredSentimentCookieProfiles(payload?.profiles || []);
+  adminState.sentimentCookieProfiles = profiles;
+  const summary = payload?.summary || {};
+  const summaryNode = el("sentimentCookieSummary");
+  if (summaryNode) {
+    summaryNode.innerHTML = `
+      <div class="overview-pod"><div class="overview-label">已授权</div><div class="overview-value">${Number(summary.authorizedProfileCount || 0)}</div></div>
+      <div class="overview-pod"><div class="overview-label">需处理</div><div class="overview-value">${Number(summary.needsRefreshProfileCount || 0)}</div></div>
+      <div class="overview-pod"><div class="overview-label">有效 Cookie</div><div class="overview-value">${Number(summary.validCookieCount || 0)}</div></div>
+      <div class="overview-pod"><div class="overview-label">过期 Cookie</div><div class="overview-value">${Number(summary.expiredCookieCount || 0)}</div></div>
+    `;
+  }
+  const select = el("sentimentCookieProfile");
+  if (select) {
+    const previous = select.value;
+    select.innerHTML = profiles.map((profile) => {
+      const key = String(profile.key || profile.platform || "");
+      const label = `${profile.label || key} (${sentimentCookieHealthLabel(profile.authHealth)})`;
+      return `<option value="${escapeHtml(key)}">${escapeHtml(label)}</option>`;
+    }).join("");
+    if (previous && profiles.some((profile) => String(profile.key || profile.platform || "") === previous)) {
+      select.value = previous;
+    }
+  }
+  const body = el("sentimentCookieBody");
+  if (body) {
+    body.innerHTML = profiles.map((profile) => {
+      const key = String(profile.key || profile.platform || "");
+      const cookieNames = (Array.isArray(profile.cookieNames) ? profile.cookieNames : []).slice(0, 12);
+      const nameText = cookieNames.length ? cookieNames.join(", ") : "-";
+      return `
+        <tr>
+          <td><strong>${escapeHtml(profile.label || key)}</strong><div class="small">${escapeHtml(profile.domain || profile.platform || "")}</div></td>
+          <td><span class="badge ${escapeHtml(profile.authHealth || "unknown")}">${escapeHtml(sentimentCookieHealthLabel(profile.authHealth))}</span><div class="small">${escapeHtml(profile.recommendedAction || "")}</div></td>
+          <td>${Number(profile.validCookieCount || 0)} / ${Number(profile.expiredCookieCount || 0)}</td>
+          <td>${Number(profile.expiringSoonCookieCount || 0)}<div class="small">${escapeHtml(profile.nearestExpiresAt || "")}</div></td>
+          <td>${escapeHtml(formatAdminDate(profile.lastAuthorizedAt))}</td>
+          <td class="sentiment-cookie-names">${escapeHtml(nameText)}</td>
+          <td><button type="button" class="ghost" data-act="sentiment_cookie_pick" data-id="${escapeHtml(key)}">授权</button></td>
+        </tr>
+      `;
+    }).join("");
+  }
+}
+
+async function loadSentimentCookieProfiles() {
+  const payload = await api("/api/admin/sentiment/browser_auth/profiles");
+  renderSentimentCookieProfiles(payload);
+  return payload;
+}
+
+async function saveSentimentCookieProfile() {
+  const profileKey = String(el("sentimentCookieProfile")?.value || "").trim();
+  const cookiesText = String(el("sentimentCookieText")?.value || "").trim();
+  const note = String(el("sentimentCookieNote")?.value || "").trim();
+  if (!profileKey) throw new Error("请选择授权平台。");
+  if (!cookiesText) throw new Error("请粘贴 Cookie 内容。");
+  const resp = await api(`/api/admin/sentiment/browser_auth/profiles/${encodeURIComponent(profileKey)}/cookies`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cookies_text: cookiesText, note }),
+  });
+  if (el("sentimentCookieText")) el("sentimentCookieText").value = "";
+  await loadSentimentCookieProfiles();
+  return resp;
+}
+
+async function clearSentimentCookieProfile() {
+  const profileKey = String(el("sentimentCookieProfile")?.value || "").trim();
+  if (!profileKey) throw new Error("请选择授权平台。");
+  if (!confirm(`确认清空 ${profileKey} 的 Cookie 吗？清空后该平台真实扫描会失效，直到重新授权。`)) return null;
+  const resp = await api(`/api/admin/sentiment/browser_auth/profiles/${encodeURIComponent(profileKey)}/cookies`, {
+    method: "DELETE",
+  });
+  await loadSentimentCookieProfiles();
+  return resp;
+}
+
 async function checkRemoteComfyHealth() {
   return checkComfyHealth("remote");
 }
@@ -3014,6 +3131,40 @@ function bindActions() {
     });
   }
 
+  if (el("btnSentimentCookieRefresh")) {
+    el("btnSentimentCookieRefresh").addEventListener("click", async () => {
+      setMsg("sentimentCookieMsg", "正在刷新舆情 Cookie 状态...");
+      try {
+        await loadSentimentCookieProfiles();
+        setMsg("sentimentCookieMsg", "舆情 Cookie 状态已刷新。", true);
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnSentimentCookieSave")) {
+    el("btnSentimentCookieSave").addEventListener("click", async () => {
+      setMsg("sentimentCookieMsg", "正在保存授权 Cookie...");
+      try {
+        const resp = await saveSentimentCookieProfile();
+        setMsg("sentimentCookieMsg", `已保存 ${Number(resp?.savedCookieCount || 0)} 个 Cookie。`, true);
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnSentimentCookieClear")) {
+    el("btnSentimentCookieClear").addEventListener("click", async () => {
+      setMsg("sentimentCookieMsg", "");
+      try {
+        const resp = await clearSentimentCookieProfile();
+        if (resp) setMsg("sentimentCookieMsg", "当前平台 Cookie 已清空。", true);
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+
   if (el("btnTaskInspectClose")) {
     el("btnTaskInspectClose").addEventListener("click", () => closeTaskInspectModal());
   }
@@ -3193,6 +3344,12 @@ function bindActions() {
       setMsg("tgSettingsMsg", "TG 信任用户已删除", true);
       return;
     }
+    if (act === "sentiment_cookie_pick") {
+      if (el("sentimentCookieProfile")) el("sentimentCookieProfile").value = id;
+      if (el("sentimentCookieText")) el("sentimentCookieText").focus();
+      setActiveAdminPage("sentimentCookies");
+      return;
+    }
     if (act === "delete_task") {
       return;
     }
@@ -3228,6 +3385,13 @@ window.addEventListener("DOMContentLoaded", async () => {
     setMsg("tgSettingsMsg", "");
   } catch (err) {
     setMsg("tgSettingsMsg", getErrorMessage(err), false);
+  }
+
+  try {
+    await loadSentimentCookieProfiles();
+    setMsg("sentimentCookieMsg", "");
+  } catch (err) {
+    setMsg("sentimentCookieMsg", getErrorMessage(err), false);
   }
 
   try {

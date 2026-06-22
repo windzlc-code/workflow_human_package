@@ -219,6 +219,49 @@ a {
   position: relative;
 }
 
+.sentiment-cookie-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.sentiment-cookie-editor textarea {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+.sentiment-cookie-names {
+  max-width: 320px;
+  word-break: break-word;
+}
+
+.sentiment-cookie-table .badge.healthy,
+.sentiment-cookie-table .badge.ok {
+  background: rgba(22, 163, 74, 0.12);
+  color: #166534;
+}
+
+.sentiment-cookie-table .badge.watch,
+.sentiment-cookie-table .badge.degraded {
+  background: rgba(245, 158, 11, 0.16);
+  color: #92400e;
+}
+
+.sentiment-cookie-table .badge.expired,
+.sentiment-cookie-table .badge.missing {
+  background: rgba(220, 38, 38, 0.12);
+  color: #991b1b;
+}
+
+@media (max-width: 900px) {
+  .sentiment-cookie-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .chat-timeline {
   min-height: 420px;
   max-height: 58vh;

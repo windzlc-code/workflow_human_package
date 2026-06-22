@@ -56,6 +56,13 @@ OUTPUT_ROOT = DATA_DIR / "outputs"
 TOOL_R18_UPLOAD_ROOT = Path(os.getenv("TOOL_R18_UPLOAD_HOST_DIR", str(DATA_DIR / "tool_r18_uploads"))).resolve()
 RUNTIME_CONFIG_PATH = Path(os.getenv("APP_RUNTIME_CONFIG_PATH", str(DATA_DIR / "runtime_config.json"))).resolve()
 TG_WORKBENCH_DB_PATH = Path(os.getenv("TG_WORKBENCH_DB_PATH", str(DATA_DIR / "workbench.db"))).resolve()
+TOOL_R18_RUNTIME_DIR = Path(os.getenv("TOOL_R18_RUNTIME_DIR", str(ROOT_DIR / "tool_r18" / ".runtime"))).resolve()
+SENTIMENT_CONFIG_PATH = Path(
+    os.getenv(
+        "TOOL_R18_SENTIMENT_CONFIG_PATH",
+        str(TOOL_R18_RUNTIME_DIR / "sentiment-opinx" / "sentiment-config.json"),
+    )
+).resolve()
 CLOSED_IMAGE_WORKFLOW_STAGE_PREFIX = "closed_image_model:"
 CLOSED_LLM_WORKFLOW_STAGE_PREFIX = "closed_llm_model:"
 _TG_PROMPT_VARIANT_HISTORY_LOCK = threading.Lock()
@@ -668,6 +675,226 @@ def _sanitize_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_payload(v) for v in value]
     return value
+
+
+def _sentiment_now_seconds() -> float:
+    return time.time()
+
+
+def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str | None = None) -> dict[str, Any]:
+    now = _sentiment_now_seconds()
+    valid = 0
+    expired = 0
+    session = 0
+    persistent = 0
+    expiring_soon = 0
+    nearest_expires: float | None = None
+    expired_names: list[str] = []
+    expiring_soon_names: list[str] = []
+    for cookie in cookies:
+        expires_raw = cookie.get("expires")
+        try:
+            expires = float(expires_raw)
+        except Exception:
+            expires = -1
+        name = str(cookie.get("name") or "").strip()
+        if expires <= 0:
+            session += 1
+            valid += 1
+        elif expires <= now:
+            expired += 1
+            if name and name not in expired_names:
+                expired_names.append(name)
+        else:
+            persistent += 1
+            valid += 1
+            nearest_expires = expires if nearest_expires is None else min(nearest_expires, expires)
+            if expires <= now + (7 * 24 * 60 * 60):
+                expiring_soon += 1
+                if name and name not in expiring_soon_names:
+                    expiring_soon_names.append(name)
+    if not cookies:
+        health = "missing"
+        action = "authorize-profile"
+        reasons = ["missing-cookies"]
+    elif valid == 0:
+        health = "expired"
+        action = "reauthorize-profile"
+        reasons = ["all-cookies-expired"]
+    elif expired > 0:
+        health = "degraded"
+        action = "refresh-profile-cookies"
+        reasons = ["partial-expired-cookies"]
+    elif expiring_soon > 0:
+        health = "watch"
+        action = "refresh-before-expiry"
+        reasons = ["cookies-expiring-soon"]
+    else:
+        health = "healthy"
+        action = "keep"
+        reasons = []
+    last_authorized_age_days = None
+    if last_authorized_at:
+        with contextlib.suppress(Exception):
+            parsed = time.mktime(time.strptime(last_authorized_at.replace("Z", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+            last_authorized_age_days = round(max(0, (time.time() - parsed) / 86400), 1)
+    return {
+        "cookieCount": len(cookies),
+        "validCookieCount": valid,
+        "expiredCookieCount": expired,
+        "sessionCookieCount": session,
+        "persistentCookieCount": persistent,
+        "expiringSoonCookieCount": expiring_soon,
+        "nearestExpiresAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(nearest_expires)) if nearest_expires else None,
+        "authStatus": "authorized" if valid > 0 else ("expired" if cookies else "missing"),
+        "authHealth": health,
+        "authorizationNeedsRefresh": action != "keep",
+        "recommendedAction": action,
+        "statusReasons": reasons,
+        "expiredCookieNames": expired_names[:20],
+        "expiringSoonCookieNames": expiring_soon_names[:20],
+        "lastAuthorizedAgeDays": last_authorized_age_days,
+    }
+
+
+def _read_sentiment_config_file() -> dict[str, Any]:
+    if not SENTIMENT_CONFIG_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"舆情 Cookie 配置不存在：{SENTIMENT_CONFIG_PATH}")
+    try:
+        return json.loads(SENTIMENT_CONFIG_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"舆情 Cookie 配置 JSON 无法解析：{exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"舆情 Cookie 配置读取失败：{exc}") from exc
+
+
+def _write_sentiment_config_file(config: dict[str, Any]) -> None:
+    try:
+        SENTIMENT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = SENTIMENT_CONFIG_PATH.with_suffix(SENTIMENT_CONFIG_PATH.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_path.replace(SENTIMENT_CONFIG_PATH)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"舆情 Cookie 配置写入失败：{exc}") from exc
+
+
+def _sentiment_profiles_container(config: dict[str, Any]) -> list[dict[str, Any]]:
+    sentiment_search = config.setdefault("sentimentSearch", {})
+    browser_fallback = sentiment_search.setdefault("browserFallback", {})
+    profiles = browser_fallback.setdefault("profiles", [])
+    if not isinstance(profiles, list):
+        raise HTTPException(status_code=500, detail="舆情 Cookie profiles 配置格式异常。")
+    return profiles
+
+
+def _find_sentiment_profile(profiles: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
+    target = str(key or "").strip()
+    return next(
+        (
+            profile for profile in profiles
+            if str(profile.get("key") or "") == target
+            or str(profile.get("platform") or "") == target
+            or str(profile.get("sourceKey") or "") == target
+        ),
+        None,
+    )
+
+
+def _cookie_default_domain(platform: str) -> str:
+    return {
+        "threads": ".threads.net",
+        "instagram": ".instagram.com",
+        "x": ".x.com",
+        "dcard": ".dcard.tw",
+    }.get(platform, "")
+
+
+def _normalize_manual_cookie(cookie: Any, fallback_domain: str) -> dict[str, Any] | None:
+    if not isinstance(cookie, dict):
+        return None
+    name = str(cookie.get("name") or "").strip()
+    value = str(cookie.get("value") or "").strip()
+    if not name or not value:
+        return None
+    domain = str(cookie.get("domain") or fallback_domain or "").strip()
+    if domain and not domain.startswith(".") and "." in domain:
+        domain = f".{domain.lstrip('.')}"
+    path_value = str(cookie.get("path") or "/").strip() or "/"
+    expires_raw = cookie.get("expires", cookie.get("expirationDate", -1))
+    try:
+        expires = float(expires_raw)
+    except Exception:
+        expires = -1
+    return {
+        "name": name[:240],
+        "value": value[:5000],
+        "domain": domain[:240],
+        "path": path_value[:240],
+        "expires": expires,
+        "httpOnly": bool(cookie.get("httpOnly") or cookie.get("http_only")),
+        "secure": cookie.get("secure") is not False,
+        "sameSite": cookie.get("sameSite") if cookie.get("sameSite") in {"Strict", "Lax", "None"} else None,
+    }
+
+
+def _parse_manual_cookie_payload(raw: str, fallback_domain: str) -> list[dict[str, Any]]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    parsed: Any = None
+    with contextlib.suppress(Exception):
+        parsed = json.loads(text)
+    source_items: list[Any]
+    if isinstance(parsed, list):
+        source_items = parsed
+    elif isinstance(parsed, dict):
+        if isinstance(parsed.get("cookies"), list):
+            source_items = parsed["cookies"]
+        elif parsed.get("name") and parsed.get("value"):
+            source_items = [parsed]
+        else:
+            source_items = []
+    else:
+        source_items = []
+        for part in text.split(";"):
+            if "=" not in part:
+                continue
+            name, value = part.split("=", 1)
+            source_items.append({"name": name.strip(), "value": value.strip(), "domain": fallback_domain, "path": "/"})
+    cookies: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in source_items:
+        cookie = _normalize_manual_cookie(item, fallback_domain)
+        if not cookie:
+            continue
+        key = (cookie["name"], cookie.get("domain") or "", cookie.get("path") or "/")
+        if key in seen:
+            continue
+        seen.add(key)
+        cookies.append(cookie)
+        if len(cookies) >= 120:
+            break
+    return cookies
+
+
+def _sentiment_profile_for_client(profile: dict[str, Any]) -> dict[str, Any]:
+    cookies = profile.get("cookies") if isinstance(profile.get("cookies"), list) else []
+    last_authorized_at = str(profile.get("lastAuthorizedAt") or profile.get("last_authorized_at") or "").strip() or None
+    safe = {
+        "key": profile.get("key"),
+        "label": profile.get("label"),
+        "platform": profile.get("platform"),
+        "sourceKey": profile.get("sourceKey"),
+        "domain": profile.get("domain"),
+        "authUrl": profile.get("authUrl"),
+        "authUrls": profile.get("authUrls") if isinstance(profile.get("authUrls"), list) else [],
+        "cookieDomains": profile.get("cookieDomains") if isinstance(profile.get("cookieDomains"), list) else [],
+        "matchDomains": profile.get("matchDomains") if isinstance(profile.get("matchDomains"), list) else [],
+        "cookieNames": [str(cookie.get("name") or "") for cookie in cookies if isinstance(cookie, dict) and cookie.get("name")][:80],
+        "lastAuthorizedAt": last_authorized_at,
+    }
+    safe.update(_sentiment_auth_state([cookie for cookie in cookies if isinstance(cookie, dict)], last_authorized_at))
+    return safe
 
 
 def _error_analysis_available(runtime: dict[str, Any]) -> bool:
@@ -15538,6 +15765,11 @@ class TgTrustedUserTogglePayload(BaseModel):
     enabled: bool
 
 
+class SentimentBrowserAuthCookiePayload(BaseModel):
+    cookies_text: str = ""
+    note: str = ""
+
+
 class InternalTgSubmitPayload(BaseModel):
     task_type: str
     tg_chat_id: int
@@ -17551,6 +17783,74 @@ def create_app() -> FastAPI:
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"ok": True, "runtime_config": merged}
+
+    @app.get("/api/admin/sentiment/browser_auth/profiles")
+    def api_admin_sentiment_browser_auth_profiles(user: dict[str, Any] = Depends(require_admin)):
+        config = _read_sentiment_config_file()
+        profiles = _sentiment_profiles_container(config)
+        rows = [
+            _sentiment_profile_for_client(profile)
+            for profile in profiles
+            if str(profile.get("key") or profile.get("platform") or "").strip()
+        ]
+        action_profiles = [row for row in rows if row.get("authorizationNeedsRefresh")]
+        return {
+            "ok": True,
+            "configPath": str(SENTIMENT_CONFIG_PATH),
+            "profiles": rows,
+            "summary": {
+                "profileCount": len(rows),
+                "authorizedProfileCount": sum(1 for row in rows if int(row.get("validCookieCount") or 0) > 0),
+                "healthyProfileCount": sum(1 for row in rows if row.get("authHealth") == "healthy"),
+                "needsRefreshProfileCount": len(action_profiles),
+                "missingProfileCount": sum(1 for row in rows if row.get("authHealth") == "missing"),
+                "expiredProfileCount": sum(1 for row in rows if row.get("authHealth") == "expired"),
+                "degradedProfileCount": sum(1 for row in rows if row.get("authHealth") == "degraded"),
+                "watchProfileCount": sum(1 for row in rows if row.get("authHealth") == "watch"),
+                "validCookieCount": sum(int(row.get("validCookieCount") or 0) for row in rows),
+                "expiredCookieCount": sum(int(row.get("expiredCookieCount") or 0) for row in rows),
+                "expiringSoonCookieCount": sum(int(row.get("expiringSoonCookieCount") or 0) for row in rows),
+                "actionProfiles": action_profiles,
+            },
+        }
+
+    @app.post("/api/admin/sentiment/browser_auth/profiles/{profile_key}/cookies")
+    def api_admin_sentiment_browser_auth_set_cookies(
+        profile_key: str,
+        payload: SentimentBrowserAuthCookiePayload,
+        user: dict[str, Any] = Depends(require_admin),
+    ):
+        config = _read_sentiment_config_file()
+        profiles = _sentiment_profiles_container(config)
+        profile = _find_sentiment_profile(profiles, profile_key)
+        if not profile:
+            raise HTTPException(status_code=404, detail="舆情 Cookie profile 不存在。")
+        fallback_domain = str(profile.get("domain") or _cookie_default_domain(str(profile.get("platform") or profile_key))).strip()
+        cookies = _parse_manual_cookie_payload(payload.cookies_text, fallback_domain)
+        if not cookies:
+            raise HTTPException(status_code=400, detail="没有解析到有效 Cookie。请粘贴 JSON Cookie 数组，或 name=value; name2=value2 格式。")
+        profile["cookies"] = cookies
+        profile["lastAuthorizedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        note = str(payload.note or "").strip()
+        if note:
+            profile["lastAuthorizationNote"] = note[:240]
+        profile["lastAuthorizedBy"] = str(user.get("username") or "")
+        _write_sentiment_config_file(config)
+        return {"ok": True, "profile": _sentiment_profile_for_client(profile), "savedCookieCount": len(cookies)}
+
+    @app.delete("/api/admin/sentiment/browser_auth/profiles/{profile_key}/cookies")
+    def api_admin_sentiment_browser_auth_clear_cookies(profile_key: str, user: dict[str, Any] = Depends(require_admin)):
+        config = _read_sentiment_config_file()
+        profiles = _sentiment_profiles_container(config)
+        profile = _find_sentiment_profile(profiles, profile_key)
+        if not profile:
+            raise HTTPException(status_code=404, detail="舆情 Cookie profile 不存在。")
+        profile["cookies"] = []
+        profile["lastAuthorizedAt"] = ""
+        profile["lastAuthorizedBy"] = str(user.get("username") or "")
+        profile["lastAuthorizationNote"] = "cleared from admin page"
+        _write_sentiment_config_file(config)
+        return {"ok": True, "profile": _sentiment_profile_for_client(profile)}
 
     @app.post("/api/admin/llm_models")
     def api_admin_llm_models(payload: LlmModelsPayload, user: dict[str, Any] = Depends(require_admin)):
