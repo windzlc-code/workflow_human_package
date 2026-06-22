@@ -196,9 +196,16 @@ async function apiBase() {
 function profileForUrl(url = "") {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "");
+    const normalizeDomain = (domain = "") => String(domain || "").replace(/^\.+/, "").replace(/^www\./, "");
+    const matchesDomain = (domain = "") => {
+      const normalized = normalizeDomain(domain);
+      return normalized && (host === normalized || host.endsWith(`.${normalized}`));
+    };
+    const exactProfile = PROFILES.find(profile => matchesDomain(profile.domain));
+    if (exactProfile) return exactProfile;
     return PROFILES.find(profile => {
       const domains = [profile.domain, ...(profile.matchDomains || []), ...(profile.cookieDomains || [])]
-        .map(domain => String(domain || "").replace(/^\.+/, "").replace(/^www\./, ""))
+        .map(normalizeDomain)
         .filter(Boolean);
       return [...new Set(domains)].some(domain => host === domain || host.endsWith(`.${domain}`));
     });
