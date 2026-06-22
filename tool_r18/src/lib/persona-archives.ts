@@ -243,6 +243,7 @@ function normalizePost(raw: any, fallbackIndex: number): PersonaArchivePost {
         : raw?.mediaType === "unknown" || raw?.media_type === "unknown"
           ? "unknown"
           : undefined,
+    mediaItems: Array.isArray(raw?.mediaItems) ? raw.mediaItems : Array.isArray(raw?.media_items) ? raw.media_items : undefined,
     sourceMeta: raw?.sourceMeta && typeof raw.sourceMeta === "object"
       ? raw.sourceMeta
       : raw?.source_meta && typeof raw.source_meta === "object"
@@ -1131,6 +1132,7 @@ export async function appendCustomPersonaArchivePost(args: {
   content: string;
   mediaUrl?: string;
   mediaType?: "image" | "video" | "unknown";
+  mediaItems?: PersonaArchivePost["mediaItems"];
   sourceMeta?: {
     source?: string;
     platform?: string;
@@ -1142,6 +1144,8 @@ export async function appendCustomPersonaArchivePost(args: {
     warnings?: string[];
     originalContent?: string;
     originalMediaUrl?: string;
+    originalMediaUrls?: string[];
+    mediaItems?: PersonaArchivePost["mediaItems"];
     edited?: boolean;
   };
   title?: string;
@@ -1168,6 +1172,7 @@ export async function appendCustomPersonaArchivePost(args: {
       imageUrl: args.mediaUrl,
       mediaUrl: args.mediaUrl,
       mediaType: args.mediaType,
+      mediaItems: args.mediaItems,
       sourceMeta: args.sourceMeta,
       telegramGroupContentType: args.telegramGroupContentType,
     },

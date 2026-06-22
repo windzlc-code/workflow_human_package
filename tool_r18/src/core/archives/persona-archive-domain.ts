@@ -44,6 +44,11 @@ export interface PersonaArchivePost {
   imageUrl?: string;
   mediaUrl?: string;
   mediaType?: "image" | "video" | "unknown";
+  mediaItems?: Array<{
+    url: string;
+    type?: "image" | "video" | "unknown";
+    localPath?: string;
+  }>;
   sourceMeta?: {
     source?: string;
     platform?: string;
@@ -55,6 +60,12 @@ export interface PersonaArchivePost {
     warnings?: string[];
     originalContent?: string;
     originalMediaUrl?: string;
+    originalMediaUrls?: string[];
+    mediaItems?: Array<{
+      url: string;
+      type?: "image" | "video" | "unknown";
+      localPath?: string;
+    }>;
     edited?: boolean;
   };
   imageHistory?: EpisodeScript["imageHistory"];

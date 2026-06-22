@@ -26,7 +26,7 @@ import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinju
 import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
-import { cleanSentimentCandidateContent, downloadCandidatePrimaryMedia, fetchSentimentHotCandidates, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
+import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
 import { rememberSentimentHotImported, rememberSentimentHotSelected, type SentimentHotCandidate } from "@/lib/sentiment-candidate-store";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import { buildPersonaVisualIdentityCue } from "@/lib/persona-image-search";
@@ -3824,9 +3824,20 @@ async function importSentimentHotCandidate(args: {
   }
 
   rememberSentimentHotSelected(pending.archiveId, candidate.id);
-  const primaryMedia = args.overrideMediaUrl ? undefined : await downloadCandidatePrimaryMedia(candidate).catch(() => undefined);
-  const mediaUrl = args.overrideMediaUrl || primaryMedia?.localPath || primaryMedia?.url || candidate.media[0]?.localPath || candidate.media[0]?.url || "";
-  const mediaType = args.overrideMediaType || primaryMedia?.type || candidate.media[0]?.type || (mediaUrl ? "unknown" : undefined);
+  const downloadedMedia = args.overrideMediaUrl
+    ? [{ type: args.overrideMediaType || "unknown", url: args.overrideMediaUrl }]
+    : await downloadCandidateMedia(candidate).catch(() => candidate.media || []);
+  const mediaItems = downloadedMedia
+    .map((item) => ({
+      url: item.localPath || item.url,
+      type: item.type || "unknown",
+      localPath: item.localPath,
+      warning: item.warning,
+    }))
+    .filter((item) => item.url);
+  const primaryMedia = mediaItems[0];
+  const mediaUrl = primaryMedia?.url || "";
+  const mediaType = args.overrideMediaType || primaryMedia?.type || (mediaUrl ? "unknown" : undefined);
   const finalContent = cleanSentimentCandidateContent(args.overrideContent || candidate.content);
   await appendCustomPersonaArchivePost({
     archiveId: pending.archiveId,
@@ -3834,6 +3845,7 @@ async function importSentimentHotCandidate(args: {
     content: finalContent,
     mediaUrl: mediaUrl || undefined,
     mediaType,
+    mediaItems,
     telegramGroupContentType: pending.contentBranch === "r18" ? "paid" : pending.contentBranch === "nonr18" ? "free" : undefined,
     sourceMeta: {
       source: "sentiment_hot_import",
@@ -3845,10 +3857,12 @@ async function importSentimentHotCandidate(args: {
       capturedAt: candidate.capturedAt,
       originalContent: cleanSentimentCandidateContent(candidate.content),
       originalMediaUrl: candidate.media[0]?.localPath || candidate.media[0]?.url,
+      originalMediaUrls: candidate.media.map((item) => item.localPath || item.url).filter(Boolean),
+      mediaItems,
       edited: args.edited === true,
       warnings: [
         ...(candidate.warnings || []),
-        ...(primaryMedia?.warning ? [primaryMedia.warning] : []),
+        ...mediaItems.map((item) => item.warning).filter((item): item is string => Boolean(item)),
       ],
     },
   });
@@ -9460,6 +9474,21 @@ function isTelegramPreviewableImageUrl(imageUrl: string) {
   return /^https?:\/\//i.test(imageUrl) && inferStoredPostMediaKind(imageUrl) === "image";
 }
 
+function getStoredPostMediaItems(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">): Array<{ url: string; type?: "image" | "video" | "unknown" }> {
+  const out: Array<{ url: string; type?: "image" | "video" | "unknown" }> = [];
+  const add = (url: unknown, type?: "image" | "video" | "unknown") => {
+    const text = String(url || "").trim();
+    if (!text || out.some((item) => item.url === text)) return;
+    out.push({ url: text, type });
+  };
+  for (const item of Array.isArray(post.mediaItems) ? post.mediaItems : []) add(item.localPath || item.url, item.type);
+  for (const item of Array.isArray(post.sourceMeta?.mediaItems) ? post.sourceMeta.mediaItems : []) add(item.localPath || item.url, item.type);
+  add(post.imageUrl);
+  add(post.mediaUrl);
+  const history = Array.isArray(post.imageHistory) ? post.imageHistory : [];
+  add(history.length ? history[history.length - 1]?.imageUrl : "");
+  return out;
+}
 
 function formatPostContentForTelegramHtml(content: string, linkPresentation: { url: string; text: string } | null) {
   const raw = String(content || "");
@@ -9501,6 +9530,12 @@ function buildSentimentSourceInfoHtml(sourceMeta?: PersonaArchive["posts"][numbe
   ];
   if (sourceMeta.sourceUrl) lines.push(`原帖: ${escapeHtmlText(sourceMeta.sourceUrl)}`);
   if (sourceMeta.edited) lines.push("状态: 已自定义编辑");
+  const mediaCount = Array.isArray(sourceMeta.mediaItems)
+    ? sourceMeta.mediaItems.length
+    : Array.isArray(sourceMeta.originalMediaUrls)
+      ? sourceMeta.originalMediaUrls.length
+      : 0;
+  if (mediaCount > 1) lines.push(`濯掍綋: ${mediaCount} 个`);
   return lines;
 }
 
@@ -9645,6 +9680,21 @@ async function sendPostImagePreviewFallback(
     }
     if (/^https?:\/\//i.test(imageUrl)) {
       await bot.sendMessage(chatId, `📎 第 ${displayIndex} 篇媒體連結：\n${imageUrl}`).catch(() => undefined);
+    }
+  }
+}
+
+async function sendStoredPostMediaPreviews(
+  bot: TelegramBot,
+  chatId: number,
+  mediaItems: Array<{ url: string; type?: "image" | "video" | "unknown" }>,
+  displayIndex: number,
+) {
+  const items = mediaItems.filter((item) => item.url);
+  for (let index = 0; index < items.length; index += 1) {
+    await sendPostImagePreviewFallback(bot, chatId, items[index].url, displayIndex);
+    if (items.length > 1) {
+      await bot.sendMessage(chatId, `Media ${index + 1}/${items.length}`).catch(() => undefined);
     }
   }
 }
@@ -15923,10 +15973,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         || (archiveIndex >= 0 ? archiveIndex + 1 : 1);
       const imageHistory = Array.isArray((post as any).imageHistory) ? (post as any).imageHistory : [];
       const latestHistoryImage = imageHistory.length ? imageHistory[imageHistory.length - 1]?.imageUrl : "";
-      const postImageUrl = String(post.imageUrl || latestHistoryImage || "").trim();
+      const mediaItems = getStoredPostMediaItems(post);
+      const postImageUrl = String(mediaItems[0]?.url || post.imageUrl || latestHistoryImage || "").trim();
       pendingPostActions.set(chatId, { archiveId, postId, groupContentType: selected?.groupContentType });
       const detailRows = buildPostDetailActionRows({
-        hasImage: Boolean(postImageUrl),
+        hasImage: mediaItems.length > 0 || Boolean(postImageUrl),
         publishCallback: selected ? `pp_${selected.index}` : `pubpost_${archiveId}_${postId}`,
         deleteCallback: selected ? `dp_${selected.index}` : `delpost_${archiveId}_${postId}`,
         archiveId,
@@ -15941,6 +15992,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         linkPresentation: getTweetStyleLinkPresentation(archive.setup),
         inlineKeyboard: detailRows,
       })) {
+        if (mediaItems.length > 1) {
+          await sendStoredPostMediaPreviews(bot, chatId, mediaItems.slice(1), displayIndex);
+        }
         await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
@@ -16283,21 +16337,22 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
       const imageHistory = Array.isArray((post as any).imageHistory) ? (post as any).imageHistory : [];
       const latestHistoryImage = imageHistory.length ? imageHistory[imageHistory.length - 1]?.imageUrl : "";
-      const postImageUrl = String(post.imageUrl || latestHistoryImage || "").trim();
+      const mediaItems = getStoredPostMediaItems(post);
+      const postImageUrl = String(mediaItems[0]?.url || post.imageUrl || latestHistoryImage || "").trim();
       if (data === "post_media_preview") {
-        if (!postImageUrl) {
+        if (!mediaItems.length && !postImageUrl) {
           await deleteTemporaryMessage(bot, chatId, loadingMessage);
           await bot.sendMessage(chatId, "这篇推文没有可预览的配图或视频。", {
             reply_markup: { inline_keyboard: [[{ text: "👁 查看这篇", callback_data: "post_action_view" }]] },
           });
           return;
         }
-        await sendPostImagePreviewFallback(bot, chatId, postImageUrl, displayIndex);
+        await sendStoredPostMediaPreviews(bot, chatId, mediaItems.length ? mediaItems : [{ url: postImageUrl }], displayIndex);
         await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
       const detailRows = buildPostDetailActionRows({
-        hasImage: Boolean(postImageUrl),
+        hasImage: mediaItems.length > 0 || Boolean(postImageUrl),
         publishCallback: "post_action",
         deleteCallback: "post_delete_action",
         archiveId: action.archiveId,
@@ -16312,6 +16367,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         linkPresentation: getTweetStyleLinkPresentation(archive.setup),
         inlineKeyboard: detailRows,
       })) {
+        if (mediaItems.length > 1) {
+          await sendStoredPostMediaPreviews(bot, chatId, mediaItems.slice(1), displayIndex);
+        }
         await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }

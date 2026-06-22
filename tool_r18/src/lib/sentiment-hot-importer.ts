@@ -1046,7 +1046,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
     }
     if (all.length >= args.limit) break;
   }
-  return sortUsefulHotCandidates(await enrichThreadsCandidateEngagement(all), args.limit);
+  return sortUsefulHotCandidates(await enrichThreadsCandidateDetails(all), args.limit);
 }
 
 function decodeMarkdownLinkText(value: string): string {
@@ -1189,8 +1189,40 @@ export function parseThreadsDetailEngagementMarkdown(text: string): NonNullable<
   return engagement;
 }
 
-async function fetchThreadsDetailEngagement(sourceUrl: string): Promise<NonNullable<SentimentHotCandidate["engagement"]>> {
-  if (!/^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(sourceUrl)) return {};
+function extractThreadsMediaFromMarkdown(text: string, limit = 12): SentimentHotMedia[] {
+  const media: SentimentHotMedia[] = [];
+  for (const imageMatch of String(text || "").matchAll(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/g)) {
+    const url = imageMatch[1];
+    if (/profile_pic|profile|s150x150/i.test(url)) continue;
+    if (media.some((item) => item.url === url)) continue;
+    const type = /\.(mp4|mov|webm)(?:$|[?#])/i.test(url) || /video/i.test(url) ? "video" : "image";
+    media.push({ type, url });
+    if (media.length >= limit) break;
+  }
+  return media;
+}
+
+function mergeCandidateMedia(base: SentimentHotMedia[], extra: SentimentHotMedia[]): SentimentHotMedia[] {
+  const out: SentimentHotMedia[] = [];
+  for (const item of [...base, ...extra]) {
+    const url = String(item?.url || item?.localPath || "").trim();
+    if (!url) continue;
+    if (out.some((existing) => existing.url === item.url || (item.localPath && existing.localPath === item.localPath))) continue;
+    out.push(item);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+export function parseThreadsDetailMediaMarkdown(text: string): SentimentHotMedia[] {
+  return extractThreadsMediaFromMarkdown(text, 12);
+}
+
+async function fetchThreadsDetailData(sourceUrl: string): Promise<{
+  engagement: NonNullable<SentimentHotCandidate["engagement"]>;
+  media: SentimentHotMedia[];
+}> {
+  if (!/^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(sourceUrl)) return { engagement: {}, media: [] };
   try {
     const response = await fetch(`${JINA_READER_PREFIX}${sourceUrl}`, {
       headers: {
@@ -1200,30 +1232,37 @@ async function fetchThreadsDetailEngagement(sourceUrl: string): Promise<NonNulla
       },
       signal: AbortSignal.timeout(12_000),
     });
-    if (!response.ok) return {};
-    return parseThreadsDetailEngagementMarkdown(await response.text());
+    if (!response.ok) return { engagement: {}, media: [] };
+    const text = await response.text();
+    return {
+      engagement: parseThreadsDetailEngagementMarkdown(text),
+      media: parseThreadsDetailMediaMarkdown(text),
+    };
   } catch {
-    return {};
+    return { engagement: {}, media: [] };
   }
 }
 
-async function enrichThreadsCandidateEngagement(candidates: SentimentHotCandidate[]): Promise<SentimentHotCandidate[]> {
+async function enrichThreadsCandidateDetails(candidates: SentimentHotCandidate[]): Promise<SentimentHotCandidate[]> {
   const targets = candidates
     .map((candidate, index) => ({ candidate, index }))
-    .filter(({ candidate }) => candidate.platform === "threads" && !hasNamedEngagementMetrics(candidate.engagement) && /^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(candidate.sourceUrl))
+    .filter(({ candidate }) => candidate.platform === "threads" && /^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(candidate.sourceUrl))
     .slice(0, 10);
   if (!targets.length) return candidates;
   const enriched = [...candidates];
   await Promise.all(targets.map(async ({ candidate, index }) => {
-    const detailEngagement = await fetchThreadsDetailEngagement(candidate.sourceUrl);
-    if (!hasNamedEngagementMetrics(detailEngagement) && !detailEngagement.rawSignals?.length) return;
-    const engagement = mergeEngagementMetrics(candidate.engagement || {}, detailEngagement);
+    const detail = await fetchThreadsDetailData(candidate.sourceUrl);
+    if (!hasNamedEngagementMetrics(detail.engagement) && !detail.engagement.rawSignals?.length && !detail.media.length) return;
+    const engagement = mergeEngagementMetrics(candidate.engagement || {}, detail.engagement);
+    const media = mergeCandidateMedia(candidate.media || [], detail.media);
     enriched[index] = {
       ...candidate,
       hotScore: Math.max(candidate.hotScore, engagement.viewCount || 0, engagement.likeCount || 0),
+      media,
       engagement,
       metrics: {
         ...(candidate.metrics || {}),
+        mediaCount: media.length,
         ...compactEngagementMetrics(engagement),
       },
     };
@@ -1269,14 +1308,7 @@ export function parseThreadsReaderSearchMarkdownCandidates(args: {
     const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
     if (needles.length && matchedNeedles.length === 0) continue;
     const engagement = extractEngagementMetricsFromText(block);
-    const media: SentimentHotMedia[] = [];
-    for (const imageMatch of block.matchAll(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/g)) {
-      const url = imageMatch[1];
-      if (/profile_pic|profile|s150x150/i.test(url)) continue;
-      if (media.some((item) => item.url === url)) continue;
-      media.push({ type: "image", url });
-      if (media.length >= 4) break;
-    }
+    const media = extractThreadsMediaFromMarkdown(block, 12);
     const id = buildSentimentCandidateId({ platform: "threads", sourceUrl, content });
     out.push({
       id,
@@ -1311,7 +1343,7 @@ async function readThreadsSearchPageText(page: any, query: string): Promise<{ te
 }
 
 const THREADS_SEARCH_CACHE_FILE = resolveRuntimeFile("sentiment_threads_search_cache.json");
-const THREADS_SEARCH_CACHE_VERSION = 2;
+const THREADS_SEARCH_CACHE_VERSION = 3;
 
 function threadsSearchCacheKeys(keywords: string[]): string[] {
   return buildThreadsSearchQueries(keywords).slice(0, 8).map((keyword) => keyword.toLowerCase());
@@ -1716,7 +1748,7 @@ function readMediaForSentiment(db: any, sentimentId: number): SentimentHotMedia[
       FROM sentiment_visual_assets
       WHERE sentiment_id = ?
       ORDER BY datetime(captured_at) DESC, id DESC
-      LIMIT 4
+      LIMIT 12
     `).all(sentimentId);
     return rows.map((row: any) => {
       const url = cleanText(row.image_url || row.thumbnail_url);
@@ -1757,6 +1789,44 @@ export async function downloadCandidatePrimaryMedia(candidate: SentimentHotCandi
   } catch {
     return primary;
   }
+}
+
+export async function downloadCandidateMedia(candidate: SentimentHotCandidate, limit = 12): Promise<SentimentHotMedia[]> {
+  const media = (candidate.media || []).slice(0, limit);
+  const downloaded: SentimentHotMedia[] = [];
+  for (let index = 0; index < media.length; index += 1) {
+    const item = media[index];
+    if (item.localPath && fs.existsSync(item.localPath)) {
+      downloaded.push(item);
+      continue;
+    }
+    if (!/^https?:\/\//i.test(item.url)) {
+      downloaded.push(item);
+      continue;
+    }
+    try {
+      const response = await fetch(item.url, { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) {
+        downloaded.push(item);
+        continue;
+      }
+      const contentType = response.headers.get("content-type") || "";
+      if (!/^image\/|^video\//i.test(contentType)) {
+        downloaded.push(item);
+        continue;
+      }
+      const ext = extensionFromContentType(contentType, item.type);
+      const mediaDir = path.dirname(resolveRuntimeFile(`sentiment-hot-media/${candidate.id}-${index + 1}${ext}`));
+      fs.mkdirSync(mediaDir, { recursive: true });
+      const localPath = path.join(mediaDir, `${candidate.id}-${index + 1}${ext}`);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      fs.writeFileSync(localPath, buffer);
+      downloaded.push({ ...item, localPath, warning: undefined });
+    } catch {
+      downloaded.push(item);
+    }
+  }
+  return downloaded;
 }
 
 function extensionFromContentType(contentType: string, type: string): string {

@@ -7,6 +7,7 @@ import {
   isChineseSentimentCandidate,
   parseThreadsReaderSearchMarkdownCandidates,
   parseThreadsDetailEngagementMarkdown,
+  parseThreadsDetailMediaMarkdown,
   parseThreadsSearchTextCandidates,
 } from "@/lib/sentiment-hot-importer";
 
@@ -154,6 +155,21 @@ Demo post body
     expect(engagement.commentCount).toBe(355);
     expect(engagement.shareCount).toBe(713);
     expect(engagement.rawSignals).toEqual([31900, 355, 713, 5600]);
+  });
+
+  it("keeps all media files from Threads detail markdown", () => {
+    const media = parseThreadsDetailMediaMarkdown(`
+![Image 1: demo profile picture](https://cdn.example.com/profile_pic.jpg)
+![Image 2](https://cdn.example.com/a.jpg)
+![Image 3](https://cdn.example.com/b.webp)
+![Image 4](https://cdn.example.com/c.jpg)
+`);
+
+    expect(media.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/a.jpg",
+      "https://cdn.example.com/b.webp",
+      "https://cdn.example.com/c.jpg",
+    ]);
   });
 
   it("creates stable candidate ids from platform, url, and content", () => {
