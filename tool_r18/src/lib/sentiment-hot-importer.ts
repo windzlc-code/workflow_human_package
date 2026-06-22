@@ -847,16 +847,11 @@ function backfillSentimentModelSelection(args: {
     add(candidate);
     if (out.length >= args.limit) return out.slice(0, args.limit);
   }
-  for (const candidate of args.candidates) {
-    add(candidate);
-    if (out.length >= args.limit) break;
-  }
-  if (args.selected.length > 0 && out.length > args.selected.length) {
-    args.warnings.push(`${args.reason}；已用同人设强相关候选补齐到 ${out.length}/${args.limit} 篇。`);
+  if (args.selected.length > 0 && out.length < args.limit) {
+    args.warnings.push(`模型筛选保留 ${out.length}/${args.limit} 篇；不会为凑满数量补入模型未选中的候选。`);
   }
   return out.slice(0, args.limit);
 }
-
 async function filterSentimentCandidatesWithModel(args: {
   archive?: PersonaArchive;
   keywords: string[];
@@ -912,8 +907,8 @@ ${cleanText(candidate.content).slice(0, 280)}`;
     );
     const modelText = extractText(result.data);
     if (/^\s*```(?:json)?\s*\[\s*]\s*```?\s*$/i.test(modelText) || /^\s*\[\s*]\s*$/.test(modelText)) {
-      args.warnings.push("模型筛选未返回可用候选，已使用同人设强相关规则候选补齐。");
-      return candidates.slice(0, args.limit);
+      args.warnings.push("模型筛选未返回可用候选；不会为凑满数量补入未通过筛选的内容。");
+      return [];
     }
     const indexes = parseModelIndexList(modelText, candidates.length);
     const selected = indexes.map((index) => candidates[index]).filter(Boolean);
@@ -1198,9 +1193,9 @@ async function fetchThreadsSearchPageCandidates(args: {
   } catch {
     // Playwright is only a fallback. Missing browser binaries must not break the Telegram flow.
   }
-  const sorted = sortUsefulHotCandidates(results, args.limit);
+  const sorted = sortRelevantHotCandidates(results, args.keywords, args.limit);
   if (sorted.length > 0) writeThreadsSearchCandidateCache(args.keywords, sorted);
-  return sorted.length > 0 ? sortRelevantHotCandidates(sorted, args.keywords, args.limit) : readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit, args.refresh === true);
+  return sorted.length > 0 ? sorted : readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit, args.refresh === true);
 }
 
 const JINA_READER_PREFIX = "https://r.jina.ai/http://r.jina.ai/http://";
