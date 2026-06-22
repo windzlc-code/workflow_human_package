@@ -679,6 +679,10 @@ type StoredPostMediaItem = {
   warning?: string;
 };
 
+function isSentimentHotImportedPost(post: Pick<PersonaArchive["posts"][number], "sourceMeta"> | null | undefined) {
+  return post?.sourceMeta?.source === "sentiment_hot_import";
+}
+
 type PendingPostMediaSelection = {
   archiveId: string;
   postId: string;
@@ -4111,6 +4115,7 @@ async function saveStoredPostCustomEdit(args: {
         archiveId: args.archiveId,
         postIndex: archive.posts.findIndex((item) => item.id === updated.id),
         groupContentType: args.groupContentType,
+        allowSentimentEditControls: isSentimentHotImportedPost(updated),
       }),
     },
   });
@@ -10173,6 +10178,7 @@ export function buildPostDetailActionRows(args: {
   archiveId: string;
   postIndex?: number;
   groupContentType?: TelegramGroupContentType;
+  allowSentimentEditControls?: boolean;
 }) {
   const imageRegenCallback = typeof args.postIndex === "number"
     ? `post_img_regen_${args.archiveId}_${args.postIndex}`
@@ -10180,8 +10186,8 @@ export function buildPostDetailActionRows(args: {
   return [
     [{ text: "🚀 发布这篇", callback_data: args.publishCallback }],
     ...(args.hasImage ? [[{ text: "🖼 查看配圖/視頻", callback_data: "post_media_preview" }]] : []),
-    ...(args.hasImage ? [[{ text: "🧩 管理媒体", callback_data: "post_media_manage" }]] : []),
-    [{ text: "编辑文案/媒体", callback_data: "post_edit_custom" }],
+    ...(args.allowSentimentEditControls && args.hasImage ? [[{ text: "🧩 管理媒体", callback_data: "post_media_manage" }]] : []),
+    ...(args.allowSentimentEditControls ? [[{ text: "编辑文案/媒体", callback_data: "post_edit_custom" }]] : []),
     [{ text: "🔄 重新生成推文", callback_data: "post_regen" }],
     [{ text: args.hasImage ? "🖼 重新生成图片" : "🖼 单独生成图片", callback_data: imageRegenCallback }],
     [{ text: "🗑 删除这篇", callback_data: args.deleteCallback }],
@@ -16494,6 +16500,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId,
         postIndex: archiveIndex,
         groupContentType: selected?.groupContentType,
+        allowSentimentEditControls: isSentimentHotImportedPost(post),
       });
       if (mediaItems.length > 1) {
         await sendStoredPostMediaPreviews(bot, chatId, mediaItems, displayIndex);
@@ -16759,6 +16766,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      if (!isSentimentHotImportedPost(post)) {
+        await safeEditOrSend(bot, chatId, msgId, "普通生成推文不提供媒体管理；如需更换内容，请使用重新生成推文或重新生成图片。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+        });
+        return;
+      }
       const mediaItems = getStoredPostMediaItems(post);
       const current = pendingPostMediaSelections.get(chatId);
       let selectedIndexes = current?.archiveId === action.archiveId && current.postId === action.postId
@@ -16844,6 +16857,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (!archive || !post) {
         await safeEditOrSend(bot, chatId, msgId, "没有找到这篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+        });
+        return;
+      }
+      if (!isSentimentHotImportedPost(post)) {
+        await safeEditOrSend(bot, chatId, msgId, "普通生成推文不提供手动编辑文案/媒体；如需调整，请使用重新生成推文或重新生成图片。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
         });
         return;
       }
@@ -16950,6 +16969,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 archiveId: action.archiveId,
                 postIndex: archive.posts.findIndex((item) => item.id === updated.id),
                 groupContentType: action.groupContentType,
+                allowSentimentEditControls: isSentimentHotImportedPost(updated),
               }),
             },
           });
@@ -17004,6 +17024,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId: action.archiveId,
         postIndex: archive.posts.findIndex((item) => item.id === post.id),
         groupContentType: action.groupContentType,
+        allowSentimentEditControls: isSentimentHotImportedPost(post),
       });
       if (mediaItems.length > 1) {
         await sendStoredPostMediaPreviews(bot, chatId, mediaItems, displayIndex);

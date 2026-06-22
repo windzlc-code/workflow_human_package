@@ -356,7 +356,7 @@ describe("buildPostDetailActionRows", () => {
     expect(texts).not.toContain("🖼 重新生成图片");
   });
 
-  it("shows image regeneration for posts that already have images", () => {
+  it("shows image regeneration for ordinary posts that already have images", () => {
     const rows = buildPostDetailActionRows({
       hasImage: true,
       publishCallback: "post_action",
@@ -367,9 +367,24 @@ describe("buildPostDetailActionRows", () => {
 
     expect(texts).toContain("🔄 重新生成推文");
     expect(texts).toContain("🖼 查看配圖/視頻");
-    expect(texts).toContain("🧩 管理媒体");
+    expect(texts).not.toContain("🧩 管理媒体");
+    expect(texts).not.toContain("编辑文案/媒体");
     expect(texts).toContain("🖼 重新生成图片");
     expect(texts).not.toContain("🖼 单独生成图片");
+  });
+
+  it("shows media management and custom editing only for sentiment-imported posts", () => {
+    const rows = buildPostDetailActionRows({
+      hasImage: true,
+      publishCallback: "post_action",
+      deleteCallback: "post_delete_action",
+      archiveId: "archive-1",
+      allowSentimentEditControls: true,
+    });
+    const texts = flattenButtonTexts(rows);
+
+    expect(texts).toContain("🧩 管理媒体");
+    expect(texts).toContain("编辑文案/媒体");
   });
 });
 
