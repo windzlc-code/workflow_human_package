@@ -5,6 +5,7 @@ import {
   candidateMatchesCurrentKeywords,
   cleanSentimentCandidateContent,
   isChineseSentimentCandidate,
+  parseInstagramReaderSearchMarkdownCandidates,
   parseThreadsReaderSearchMarkdownCandidates,
   parseThreadsDetailEngagementMarkdown,
   parseThreadsDetailMediaMarkdown,
@@ -131,6 +132,31 @@ Search • Threads
     expect(candidates.length).toBe(1);
     expect(candidates[0].metrics.raw_engagement_signals).toEqual([12000, 340, 88]);
     expect(candidates[0].engagement?.rawSignals).toEqual([12000, 340, 88]);
+  });
+
+  it("parses Instagram reader candidates as extra sentiment sources", () => {
+    const candidates = parseInstagramReaderSearchMarkdownCandidates({
+      query: "醫療",
+      keywords: ["醫療", "醫生", "醫院"],
+      sourceUrl: "https://www.instagram.com/explore/search/keyword/?q=%E9%86%AB%E7%99%82",
+      text: `
+Title: Instagram
+
+[Demo Doctor](https://www.instagram.com/demo_doctor/)
+[View post](https://www.instagram.com/p/abc123/)
+急診醫生分享醫療現場，今天醫院等候區真的塞滿人，病人等待和醫療流程都被拿出來討論。
+1.1K likes
+82 comments
+![Image 1](https://cdn.example.com/ig-a.jpg)
+`,
+    });
+
+    expect(candidates.length).toBe(1);
+    expect(candidates[0].platform).toBe("instagram");
+    expect(candidates[0].sourceUrl).toBe("https://www.instagram.com/p/abc123/");
+    expect(candidates[0].engagement?.likeCount).toBe(1100);
+    expect(candidates[0].engagement?.commentCount).toBe(82);
+    expect(candidates[0].media.map((item) => item.url)).toEqual(["https://cdn.example.com/ig-a.jpg"]);
   });
 
   it("parses Threads detail metrics from reader markdown", () => {
