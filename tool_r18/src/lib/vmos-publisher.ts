@@ -395,7 +395,8 @@ function saveThreadsAutoReplySampleStep(input: {
   meta?: Record<string, unknown>;
 }): string | null {
   try {
-    const outputDir = path.join(process.cwd(), ".runtime", "threads-auto-reply-samples");
+    const outputDir = process.env.THREADS_AUTO_REPLY_SAMPLE_DIR?.trim()
+      || path.join(process.cwd(), ".runtime", "threads-auto-reply-samples");
     fs.mkdirSync(outputDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const base = `${stamp}-${safeThreadsAutoReplySampleLabel(input.step)}`;
@@ -1213,8 +1214,8 @@ function shouldUseAcpThreadsFastTextPath(padCode: string, mediaUrl?: string): bo
 export function shouldUseThreadsShareIntentPath(padCode: string, mediaUrl?: string): boolean {
   void padCode;
   void mediaUrl;
-  // 所有云机的 Threads 发布统一走系统分享入口，避开应用内首页/图库
-  // 在不同账号语言、键盘态、滚动位置和工具栏布局下的坐标漂移。
+  // Threads 发布统一走系统分享入口，保持和已跑通的服务器测试链路一致。
+  // 这条路径避开应用内首页/图库/键盘态差异导致的坐标漂移。
   return true;
 }
 
@@ -6973,13 +6974,10 @@ async function captureThreadsPublishedEvidenceScreenshot(
 ): Promise<string> {
   onProgress?.({ step: "返回 Threads 個人頁截圖取證...", done: false });
   const capturePresentationShot = async (): Promise<string | null> => {
-    await tapViaAdbReferencePoint(config, padCode, { x: 614, y: 1516 }, 900, FIXED_VMOS_SCREEN)
-      .catch(async () => {
-        await tapThreadsProfileTab(config, padCode, 900).catch(() => undefined);
-      });
-    await delay(350);
-    let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-    if (!shotUrl) return null;
+    let shotUrl = await captureThreadsProfileContentScreenshot(config, padCode, { skipInitialSwipe: true });
+    if (!await isThreadsProfileScreenshot(config, padCode, shotUrl).catch(() => false)) {
+      throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__未能進入 Threads 個人主頁｜debug=${formatThreadsDebugTargets([shotUrl])}`);
+    }
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
     // 发布后的取证只做一轮固定首滑：进入个人页后让首条帖文露出用户名、
     // 发布时间和正文即可，不再多轮校验或大幅补滑。
@@ -6987,18 +6985,15 @@ async function captureThreadsPublishedEvidenceScreenshot(
     await delay(500);
     shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
+    if (!await isThreadsProfileScreenshot(config, padCode, shotUrl).catch(() => false)) {
+      throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__取證滑動後已離開 Threads 個人主頁｜debug=${formatThreadsDebugTargets([shotUrl])}`);
+    }
     return shotUrl;
   };
-  const presentationShot = await capturePresentationShot().catch(() => null);
+  const presentationShot = await capturePresentationShot();
   if (presentationShot) {
     onProgress?.({ step: "已定位到 Threads 個人頁最新帖文位置並截圖。", done: false });
     return presentationShot;
-  }
-
-  const fallbackUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-  if (fallbackUrl) {
-    onProgress?.({ step: "未完成固定取證滑動，回傳當前 Threads 截圖。", done: false });
-    return fallbackUrl;
   }
   throw new Error("未能取得 Threads 發布後截圖");
 }
@@ -7019,7 +7014,9 @@ async function tapThreadsProfileTab(
     if (await detectThreadsHomeFeedLocally(screenshotUrl).catch(() => null)) {
       await simulateClick(config, padCode, 620, 1510, FIXED_VMOS_SCREEN.width, FIXED_VMOS_SCREEN.height);
       await delay(waitMs);
-      return;
+      const afterTapUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+      if (afterTapUrl && await isThreadsProfileScreenshot(config, padCode, afterTapUrl).catch(() => false)) return;
+      continue;
     }
     const image = await loadImage(screenshotUrl).catch(() => null);
     const visualTarget = await locateThreadsButtonByVision(
@@ -7221,8 +7218,7 @@ async function verifyThreadsPublishLocally(
           throw new Error("Threads 本機快驗未取得可用圖片候選");
         }
         if (isThreadsProfileReferenceImageMatch(localMatch)) {
-          const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
-            .catch(() => afterProfileUrl);
+          const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress);
           return {
             state: "verified",
             detail: `發布完成 ✓（本機快驗：Threads 主頁已命中參考圖，diff=${localMatch.diff.toFixed(1)}${localMatch.mode ? `, mode=${localMatch.mode}` : ""}）`,
@@ -7364,10 +7360,11 @@ async function verifyThreadsTextPublishQuickly(
     });
 
     if (diffScore >= THREADS_TEXT_QUICK_DIFF_THRESHOLD) {
+      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress);
       return {
         state: "verified",
         detail: `發布完成 ✓（本機快驗：Threads 主頁貼文區已變化 diff=${diffScore.toFixed(1)}）`,
-        screenshotUrl: afterProfileUrl,
+        screenshotUrl: evidenceUrl,
       };
     }
   }
@@ -13134,8 +13131,8 @@ async function verifyThreadsProfileContainsPost(
   const captureEvidenceForDisplay = async (fallbackUrl: string): Promise<string> => {
     const freshEvidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption).catch(() => "");
     if (freshEvidenceUrl) return freshEvidenceUrl;
-    const currentUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-    return currentUrl || fallbackUrl;
+    if (await isThreadsProfileScreenshot(config, padCode, fallbackUrl).catch(() => false)) return fallbackUrl;
+    throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__未能取得 Threads 個人頁取證截圖｜debug=${formatThreadsDebugTargets([fallbackUrl])}`);
   };
 
   if (!profileTop || !profileMid || !profileLow) {
@@ -13966,8 +13963,7 @@ async function verifyThreadsPublish(
       || await detectExplicitSuccessToast("threads", [immediateShot]);
     const bottomToastSuccess = toastSuccess;
     if (bottomToastSuccess) {
-      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
-        .catch(() => immediateUrl);
+      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress);
       return {
         state: "verified",
         detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
@@ -14031,7 +14027,7 @@ async function verifyThreadsPublish(
       return {
         state: "verified",
         detail: "發布完成 ✓（已校驗：影片已送出並返回最新主頁截圖）",
-        screenshotUrl: evidenceUrl || lateUrl || settledUrl || immediateUrl,
+        screenshotUrl: evidenceUrl,
       };
     }
 
@@ -14068,8 +14064,7 @@ async function verifyThreadsPublish(
       const fullToastSuccess = localFullToastSuccess
         || await detectExplicitSuccessToast("threads", [immediateShot, settledShot, lateShot]);
       if (fullToastSuccess) {
-        const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
-          .catch(() => lateUrl);
+        const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress);
         return {
           state: "verified",
           detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
@@ -14117,8 +14112,7 @@ UNKNOWN|原因
 
       const parsed = parsePublishVisionResult(extractText(raw));
       if (parsed.status === "PUBLISHED" && hasExplicitSuccessCue(parsed.reason, "threads")) {
-        const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
-          .catch(() => lateUrl);
+        const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress);
         return {
           state: "verified",
           detail: parsed.reason
@@ -14191,8 +14185,7 @@ UNKNOWN|原因
     const fullToastSuccess = localFullToastSuccess
       || await detectExplicitSuccessToast("threads", [immediateShot, settledShot, lateShot]);
     if (fullToastSuccess) {
-      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
-        .catch(() => lateUrl);
+      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress);
       return {
         state: "verified",
         detail: "發布完成 ✓（已校驗：檢測到 Threads 成功提示）",
@@ -14253,8 +14246,7 @@ UNKNOWN|原因
 
     const parsed = parsePublishVisionResult(extractText(raw));
     if (parsed.status === "PUBLISHED" && hasExplicitSuccessCue(parsed.reason, "threads")) {
-      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress)
-        .catch(() => lateUrl);
+      const evidenceUrl = await captureThreadsPublishedEvidenceScreenshot(config, padCode, caption, onProgress);
       return {
         state: "verified",
         detail: parsed.reason
@@ -16168,6 +16160,8 @@ async function publishThreads(
       needsLocalProfileBaseline,
       onProgress
     );
+    await tapViaAdbReferencePoint(config, padCode, { x: 72, y: 1516 }, 1800, FIXED_VMOS_SCREEN).catch(() => undefined);
+    await delay(600);
 
     // Step 2: 點選 "+" 新建貼文按鈕
     onProgress({ step: "點選新建貼文...", done: false });
@@ -16186,11 +16180,11 @@ async function publishThreads(
         ["compose_editor"],
         {
           fallbackTapFromScreenshotRatio: { x: 0.5, y: isAcpPad(padCode) ? 0.945 : 0.935 },
-          waitMs: 3000,
-          preTapDelayMs: 1800,
-          waitAttempts: 8,
-          waitDelayMs: 1600,
-          tapAttempts: 3,
+          waitMs: 2400,
+          preTapDelayMs: 700,
+          waitAttempts: 3,
+          waitDelayMs: 900,
+          tapAttempts: 2,
           requireBeforePages: ["home_feed", "profile_page", "compose_editor"],
           sampleScenario: "open-text-composer",
           mediaKind: "text",
@@ -19784,7 +19778,18 @@ async function openThreadsEditProfilePage(
     editTarget = await locateThreadsButtonByVision(
       editVisionShotUrl,
       "Threads 自己个人主页上的「编辑个人档案 / 编辑个人资料 / 编辑主页 / Edit profile」按钮中心点；不要选分享个人档案、关注、返回键或底部导航",
-    ).catch(() => null);
+    ).catch((error) => {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-next-comment-badge-scan-retry-error",
+        screenshotUrl: shotUrl,
+        meta: {
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return null;
+    });
     if (editTarget) editTargetSource = "vision";
   }
   if (!editTarget && profile.profileLikely) {
@@ -24181,7 +24186,7 @@ function extractThreadsAutoReplyVisibleComments(
     // above the media/post action row. Keep the lower cutoff, but do not
     // discard mid-screen comments; otherwise the automation reaches the
     // correct page and still reports zero candidates.
-    if (centerY < 260 || centerY > 1440) continue;
+    if (centerY < 260 || centerY > 1510) continue;
     if (rect.width < 28 || rect.height < 16) continue;
 
     const text = normalizeSingleLine([
@@ -24790,6 +24795,21 @@ async function openThreadsLatestOwnPostFromProfile(
     profile.screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode))
   ));
 
+  // Threads keeps the profile feed scroll position between runs. Reset toward the
+  // newest posts first, otherwise a run may start from older visible posts and
+  // incorrectly report "no comments" while newer posts above have replies.
+  for (let resetAttempt = 0; resetAttempt < 2; resetAttempt += 1) {
+    await threadsAdbInputNoWait(config, padCode, "input swipe 360 520 360 1320 520", 900).catch(() => undefined);
+    await delay(450);
+  }
+  shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+  saveThreadsAutoReplySampleStep({
+    padCode,
+    step: "profile-top-reset",
+    screenshotUrl: shotUrl,
+    meta: { resetSwipes: 2, mode: "newest_posts_first" },
+  });
+
   let lastOpenError: { ok: false; error: string; screenshotUrl?: string } | null = null;
   for (let openAttempt = 0; openAttempt < 2; openAttempt += 1) {
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
@@ -24798,7 +24818,9 @@ async function openThreadsLatestOwnPostFromProfile(
       const profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
       const hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
       const hasProfileSetupCardByPixels = await detectThreadsProfileSetupCardLocally(shotUrl).catch(() => false);
-      if (!hasProfileSetupCard && !hasProfileSetupCardByPixels) break;
+      const hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText)
+        || await locateThreadsProfileTopCountedCommentTargetLocally(shotUrl).catch(() => null);
+      if ((!hasProfileSetupCard && !hasProfileSetupCardByPixels) || hasVisiblePostOrActionRow) break;
       await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 520", 1000);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
       shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
@@ -24813,7 +24835,18 @@ async function openThreadsLatestOwnPostFromProfile(
       }),
       6_000,
       "threadsAutoReply locate visible post timeout",
-    ).catch(() => null);
+    ).catch((error) => {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-comment-badge-scan-error",
+        screenshotUrl: shotUrl,
+        meta: {
+          openAttempt,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return null;
+    });
     if (!target && isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(profileUiXml, maxAgeDays)) {
       return {
         ok: false,
@@ -24836,8 +24869,48 @@ async function openThreadsLatestOwnPostFromProfile(
         }),
         6_000,
         "threadsAutoReply locate visible post retry timeout",
-      ).catch(() => null);
+      ).catch((error) => {
+        saveThreadsAutoReplySampleStep({
+          padCode,
+          step: "profile-comment-badge-scan-retry-error",
+          screenshotUrl: shotUrl,
+          meta: {
+            openAttempt,
+            attempt,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+        return null;
+      });
       if (!target && isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(profileUiXml, maxAgeDays)) break;
+    }
+    if (!target) {
+      await threadsAdbInputNoWait(config, padCode, "input swipe 360 460 360 1220 520", 1000);
+      await delay(500);
+      shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+      target = await withTimeout(
+        locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
+          requireCommentBadge,
+          padCode,
+          sampleStep: "profile-comment-badge-scan-backtrack",
+          maxAgeDays,
+        }),
+        6_000,
+        "threadsAutoReply locate visible post backtrack timeout",
+      ).catch((error) => {
+        saveThreadsAutoReplySampleStep({
+          padCode,
+          step: "profile-comment-badge-scan-backtrack-error",
+          screenshotUrl: shotUrl,
+          meta: {
+            openAttempt,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+        return null;
+      });
     }
     if (!target) {
       return {
@@ -24871,6 +24944,9 @@ async function openThreadsLatestOwnPostFromProfile(
       screenshotUrl: shotUrl,
       meta: { target, openAttempt },
     });
+    if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
+      return { ok: true, screenshotUrl: shotUrl };
+    }
     const stillSuggestionAfterTap = await detectThreadsProfileSuggestionOverlayLocally(shotUrl).catch(() => false);
     if (stillSuggestionAfterTap) {
       shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
@@ -24977,7 +25053,17 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     }),
     6_000,
     "threadsAutoReply locate next visible post timeout",
-  ).catch(() => null);
+  ).catch((error) => {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: "profile-next-comment-badge-scan-error",
+      screenshotUrl: shotUrl,
+      meta: {
+        error: error instanceof Error ? error.message : String(error),
+      },
+    });
+    return null;
+  });
   if (!target && isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(profileUiXml, maxAgeDays)) {
     return {
       ok: false,
@@ -24999,7 +25085,18 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
       }),
       6_000,
       "threadsAutoReply locate next visible post retry timeout",
-    ).catch(() => null);
+    ).catch((error) => {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-next-comment-badge-scan-retry-error",
+        screenshotUrl: shotUrl,
+        meta: {
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return null;
+    });
     if (!target && isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(profileUiXml, maxAgeDays)) break;
   }
   if (!target) {
@@ -25381,7 +25478,22 @@ async function locateThreadsVisibleOwnPostContentTarget(
   const profileLooksReadable = line && looksLikeThreadsProfileUiXml(uiXml);
   const hasProfileChrome = /串文.*(?:回覆|回复|影音內容|影音内容|轉發|转发)|查看個人檔案|查看个人档案|編輯個人檔案|编辑个人资料/.test(line);
   const hasProfileSetupCardByPixels = await detectThreadsProfileSetupCardLocally(screenshotUrl).catch(() => false);
-  if ((hasProfileSetupCard && !hasVisiblePostText) || hasProfileSetupCardByPixels) {
+  const countedCommentTarget = await locateThreadsProfileTopCountedCommentTargetLocally(screenshotUrl).catch((error) => {
+    if (options.padCode && options.requireCommentBadge) {
+      saveThreadsAutoReplySampleStep({
+        padCode: options.padCode,
+        step: options.sampleStep || "profile-comment-badge-scan",
+        screenshotUrl,
+        meta: {
+          targetFound: false,
+          skippedReason: "comment_badge_locator_error",
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+    return null;
+  });
+  if (((hasProfileSetupCard || hasProfileSetupCardByPixels) && !hasVisiblePostText && !countedCommentTarget)) {
     if (options.padCode && options.requireCommentBadge) {
       saveThreadsAutoReplySampleStep({
         padCode: options.padCode,
@@ -25392,7 +25504,6 @@ async function locateThreadsVisibleOwnPostContentTarget(
     }
     return null;
   }
-  const countedCommentTarget = await locateThreadsProfileTopCountedCommentTargetLocally(screenshotUrl).catch(() => null);
   if (options.padCode && options.requireCommentBadge) {
     saveThreadsAutoReplySampleStep({
       padCode: options.padCode,
@@ -25401,6 +25512,7 @@ async function locateThreadsVisibleOwnPostContentTarget(
       meta: {
         targetFound: Boolean(countedCommentTarget),
         target: countedCommentTarget || null,
+        locator: countedCommentTarget && "debugReason" in countedCommentTarget ? countedCommentTarget.debugReason : undefined,
         mode: "require_comment_badge",
       },
     });
@@ -25556,13 +25668,16 @@ function isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(uiXml: string, 
 
 async function locateThreadsProfileTopCountedCommentTargetLocally(
   screenshotUrl: string,
-): Promise<{ x: number; y: number } | null> {
+): Promise<{ x: number; y: number; debugReason?: string } | null> {
+  const startedAt = Date.now();
   const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
   if (!pixels) return null;
   const { data, width, height } = pixels;
   const minX = Math.floor(width * 0.20);
   const maxX = Math.floor(width * 0.48);
-  const minY = Math.floor(height * 0.34);
+  const baseMinY = Math.floor(height * 0.34);
+  const minY = baseMinY;
+  const quickMinY = baseMinY;
   const maxY = Math.floor(height * 0.86);
   const visited = new Uint8Array(width * height);
   const isDark = (x: number, y: number) => {
@@ -25607,10 +25722,15 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
   if (fixedRowTarget) return fixedRowTarget;
   const rowTarget = locateThreadsProfileCommentCountDigitTargetByPixels();
   if (rowTarget) return rowTarget;
+  const iconTarget = locateThreadsProfileCommentIconWithCountByPixels();
+  if (iconTarget) return iconTarget;
+  if (!process.env.THREADS_AUTO_REPLY_SLOW_PIXEL_SCAN) return null;
 
   const candidates: Array<{ x: number; y: number; score: number }> = [];
   for (let y = minY; y <= maxY; y += 1) {
+    if (Date.now() - startedAt > 2200) return null;
     for (let x = minX; x <= maxX; x += 1) {
+      if ((x & 31) === 0 && Date.now() - startedAt > 2200) return null;
       const start = y * width + x;
       if (visited[start]) continue;
       visited[start] = 1;
@@ -25690,11 +25810,11 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
     }
   }
   candidates.sort((a, b) => a.y - b.y || b.score - a.score);
-  return candidates[0] ? { x: candidates[0].x, y: candidates[0].y } : null;
+  return candidates[0] ? { x: candidates[0].x, y: candidates[0].y, debugReason: "slow_component_counted_comment_row" } : null;
 
-  function locateThreadsProfileFixedCountedCommentRowByPixels(): { x: number; y: number } | null {
+  function locateThreadsProfileFixedCountedCommentRowByPixels(): { x: number; y: number; debugReason?: string } | null {
     const rows: Array<{ x: number; y: number; score: number }> = [];
-    const top = Math.floor(height * 0.34);
+    const top = Math.max(quickMinY, Math.floor(height * 0.34));
     const bottom = Math.floor(height * 0.88);
     const rowStep = Math.max(2, Math.round(height / 800));
     const windowY = Math.max(18, Math.round(height * 0.017));
@@ -25752,7 +25872,7 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
         && belowRowText <= 0.040
       ) {
         rows.push({
-          x: Math.round(width * 0.405),
+          x: Math.round(width * 0.34),
           y,
           score: rowScore + Math.max(0, height - y) / height,
         });
@@ -25761,19 +25881,21 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
     if (!rows.length) return null;
     rows.sort((a, b) => a.y - b.y || b.score - a.score);
     const selected = rows[0];
-    return { x: selected.x, y: selected.y };
+    return { x: selected.x, y: selected.y, debugReason: "fixed_counted_comment_row" };
   }
 
-  function locateThreadsProfileCommentCountDigitTargetByPixels(): { x: number; y: number } | null {
+  function locateThreadsProfileCommentCountDigitTargetByPixels(): { x: number; y: number; debugReason?: string } | null {
     const scanMinX = Math.floor(width * 0.36);
     const scanMaxX = Math.floor(width * 0.48);
-    const scanMinY = Math.floor(height * 0.34);
+    const scanMinY = Math.max(quickMinY, Math.floor(height * 0.34));
     const scanMaxY = Math.floor(height * 0.88);
     const localVisited = new Uint8Array(width * height);
     const digits: Array<{ x: number; y: number; width: number; height: number; count: number; score: number }> = [];
 
     for (let y = scanMinY; y <= scanMaxY; y += 1) {
+      if (Date.now() - startedAt > 1200) return null;
       for (let x = scanMinX; x <= scanMaxX; x += 1) {
+        if ((x & 31) === 0 && Date.now() - startedAt > 1200) return null;
         const start = y * width + x;
         if (localVisited[start]) continue;
         localVisited[start] = 1;
@@ -25875,7 +25997,7 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
           continue;
         }
         digits.push({
-          x: Math.round(digitX),
+          x: Math.round(commentX),
           y: rowY,
           width: boxW,
           height: boxH,
@@ -25886,19 +26008,21 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
     }
 
     digits.sort((a, b) => a.y - b.y || b.score - a.score);
-    return digits[0] ? { x: digits[0].x, y: digits[0].y } : null;
+    return digits[0] ? { x: digits[0].x, y: digits[0].y, debugReason: "count_digit_comment_row" } : null;
   }
 
-  function locateThreadsProfileCommentIconWithCountByPixels(): { x: number; y: number } | null {
+  function locateThreadsProfileCommentIconWithCountByPixels(): { x: number; y: number; debugReason?: string } | null {
     const scanMinX = Math.floor(width * 0.06);
     const scanMaxX = Math.floor(width * 0.48);
-    const scanMinY = Math.floor(height * 0.34);
+    const scanMinY = Math.max(quickMinY, Math.floor(height * 0.34));
     const scanMaxY = Math.floor(height * 0.90);
     const localVisited = new Uint8Array(width * height);
     const components: Array<{ x: number; y: number; width: number; height: number; count: number }> = [];
 
     for (let y = scanMinY; y <= scanMaxY; y += 1) {
+      if (Date.now() - startedAt > 1800) return null;
       for (let x = scanMinX; x <= scanMaxX; x += 1) {
+        if ((x & 31) === 0 && Date.now() - startedAt > 1800) return null;
         const start = y * width + x;
         if (localVisited[start]) continue;
         localVisited[start] = 1;
@@ -25995,7 +26119,7 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
         || rowUiBackground < 0.52
         || !hasLikelyCommentCountDigits(comment.x, rowY)
       ) continue;
-      return { x: Math.round(comment.x + width * 0.070), y: rowY };
+      return { x: Math.round(comment.x + width * 0.070), y: rowY, debugReason: "comment_icon_with_count_row" };
     }
     return null;
   }
@@ -26009,7 +26133,9 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
     let digitLikeComponents = 0;
 
     for (let y = top; y <= bottom; y += 1) {
+      if (Date.now() - startedAt > 2200) return false;
       for (let x = left; x <= right; x += 1) {
+        if ((x & 15) === 0 && Date.now() - startedAt > 2200) return false;
         const start = y * width + x;
         if (regionVisited[start]) continue;
         regionVisited[start] = 1;
@@ -26066,6 +26192,7 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
 
     return false;
   }
+
 }
 
 async function detectThreadsProfileSetupCardLocally(screenshotUrl?: string): Promise<boolean> {
@@ -26122,6 +26249,21 @@ async function validateThreadsAutoReplyDetailReady(
 ): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
   const initialUiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
   const initialUiText = normalizeSingleLine(decodeXmlAttr(initialUiXml));
+  if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
+    return { ok: true, screenshotUrl: shotUrl };
+  }
+  if (
+    /串文/.test(initialUiText)
+    && /(熱門|热门|新增到串文|新增至串文|添加到串文|次瀏覽|次浏览|瀏覽|浏览)/.test(initialUiText)
+  ) {
+    return { ok: true, screenshotUrl: shotUrl };
+  }
+  if (await detectThreadsMediaCommentSheetLocally(shotUrl).catch(() => false)) {
+    return { ok: true, screenshotUrl: shotUrl };
+  }
+  if (await detectThreadsBlankReplyRatingPageLocally(shotUrl).catch(() => false)) {
+    return { ok: true, screenshotUrl: shotUrl };
+  }
   if (
     findThreadsReplyComposerInputTarget(initialUiXml)
     || looksLikeThreadsReplyComposerUiXml(initialUiXml)
@@ -26133,21 +26275,6 @@ async function validateThreadsAutoReplyDetailReady(
       error: "误入 Threads 回复编辑器，已停止当前帖扫描以避免发到错误位置",
       screenshotUrl: shotUrl,
     };
-  }
-  if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
-    return { ok: true, screenshotUrl: shotUrl };
-  }
-  if (
-    /串文/.test(initialUiText)
-    && /(熱門|热门|新增到串文|添加到串文|次瀏覽|次浏览|瀏覽|浏览)/.test(initialUiText)
-  ) {
-    return { ok: true, screenshotUrl: shotUrl };
-  }
-  if (await detectThreadsMediaCommentSheetLocally(shotUrl).catch(() => false)) {
-    return { ok: true, screenshotUrl: shotUrl };
-  }
-  if (await detectThreadsBlankReplyRatingPageLocally(shotUrl).catch(() => false)) {
-    return { ok: true, screenshotUrl: shotUrl };
   }
   const uiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
   const uiText = normalizeSingleLine(decodeXmlAttr(uiXml));
@@ -26233,12 +26360,12 @@ async function openThreadsMediaOverlayCommentsIfVisible(
   const imageWidth = image?.width || BASE_SCREEN.width;
   const imageHeight = image?.height || BASE_SCREEN.height;
   const points = [
-    { x: Math.round(imageWidth * 0.417), y: Math.round(imageHeight * 0.933) },
     mediaActions?.comment,
     ...(mediaActions?.alternateComments || []),
-    { x: Math.round(imageWidth * 0.418), y: Math.round(imageHeight * 0.870) },
     { x: Math.round(imageWidth * 0.415), y: Math.round(imageHeight * 0.885) },
+    { x: Math.round(imageWidth * 0.418), y: Math.round(imageHeight * 0.870) },
     { x: Math.round(imageWidth * 0.445), y: Math.round(imageHeight * 0.923) },
+    { x: Math.round(imageWidth * 0.417), y: Math.round(imageHeight * 0.933) },
   ].filter(Boolean) as Array<{ x: number; y: number }>;
   for (const point of points) {
     await tapViaAdbAbsoluteQuick(
@@ -26251,6 +26378,12 @@ async function openThreadsMediaOverlayCommentsIfVisible(
     await delay(900);
     const nextShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
     if (await detectThreadsMediaCommentSheetLocally(nextShotUrl).catch(() => false)) {
+      return nextShotUrl;
+    }
+    const nextUiText = normalizeSingleLine(decodeXmlAttr(
+      await dumpUiXmlQuick(config, padCode, 2_000).catch(() => ""),
+    ));
+    if (/(熱門|热门|新增到串文|新增至串文|Add to thread)/i.test(nextUiText)) {
       return nextShotUrl;
     }
     const stillMedia = Boolean(
@@ -26562,14 +26695,12 @@ async function collectThreadsAutoReplyPostContext(
   let firstShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   firstShotUrl = await openThreadsMediaOverlayCommentsIfVisible(config, padCode, firstShotUrl).catch(() => firstShotUrl) || firstShotUrl;
   if (await detectAndroidKeyboardVisibleLocally(firstShotUrl).catch(() => false)) {
-    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 400).catch(() => "");
-    await delay(850);
-    firstShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => firstShotUrl);
+    // Threads 的底部回覆欄容易被誤判成鍵盤；采集階段按 BACK 會退出串文詳情。
     saveThreadsAutoReplySampleStep({
       padCode,
-      step: "collect-dismiss-keyboard",
+      step: "collect-skip-keyboard-dismiss",
       screenshotUrl: firstShotUrl || undefined,
-      meta: { reason: "keyboard_visible_before_comment_collect" },
+      meta: { reason: "avoid_back_from_thread_detail_before_comment_collect" },
     });
   }
   let firstUiXml = await dumpUiXmlStable(
@@ -26697,14 +26828,11 @@ async function collectThreadsAutoReplyPostContext(
       ? firstShotUrl
       : await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
     if (await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false)) {
-      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 400).catch(() => "");
-      await delay(850);
-      shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
       saveThreadsAutoReplySampleStep({
         padCode,
-        step: `collect-page-${page + 1}-dismiss-keyboard`,
+        step: `collect-page-${page + 1}-skip-keyboard-dismiss`,
         screenshotUrl: shotUrl || undefined,
-        meta: { reason: "keyboard_visible_during_comment_collect" },
+        meta: { reason: "avoid_back_from_thread_detail_during_comment_collect" },
       });
     }
     const uiXml = xmlAvailable ? await dumpUiXmlStable(
@@ -26713,6 +26841,48 @@ async function collectThreadsAutoReplyPostContext(
       "threadsAutoReply page ui dump",
     ) : "";
     const visibleTexts = extractThreadsAutoReplyVisibleTexts(uiXml);
+    if (!visibleTexts.length && shotUrl) {
+      const visualCandidates = await extractThreadsAutoReplyVisibleCommentsByVision(
+        shotUrl,
+        persona,
+        postOwnIdentifiers,
+      ).catch(() => []);
+      const postHashForVisual = buildThreadsAutoReplyPostHash(padCode, "comment-collect-visual-fallback", [
+        buildThreadsAutoReplyScreenshotSeed(shotUrl),
+        ...visualCandidates.slice(0, 4).map((item) => normalizeSingleLine(item.text).slice(0, 80)),
+      ]);
+      const rankedVisualCandidates = rankThreadsAutoReplyVisibleComments(visualCandidates, persona)
+        .filter((item) => Boolean(item.replyPoint) && !isThreadsAutoReplyIgnoredText(item.text))
+        .map((item) => ({
+          ...item,
+          key: buildThreadsAutoReplyCommentKey(padCode, postHashForVisual, item.text),
+        }))
+        .filter((item) => !item.key || !repliedKeys.has(item.key));
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: `collect-page-${page + 1}-visual-fallback`,
+        screenshotUrl: shotUrl || undefined,
+        meta: {
+          visualCandidateCount: visualCandidates.length,
+          candidateCount: rankedVisualCandidates.length,
+          candidatePreview: rankedVisualCandidates.slice(0, 6).map((item) => ({
+            text: item.text,
+            author: item.author,
+            score: item.score,
+            replyPoint: item.replyPoint,
+            debugReason: item.debugReason,
+          })),
+        },
+      });
+      if (rankedVisualCandidates.length) {
+        return {
+          postPreview,
+          postHash: postHashForVisual,
+          candidates: rankedVisualCandidates,
+          sourceScreenshotUrl: shotUrl || undefined,
+        };
+      }
+    }
     if (
       looksLikeThreadsProfileUiXml(uiXml)
     ) {
@@ -27013,7 +27183,7 @@ export async function autoReplyThreadsAccount(
     ? { ok: true as const, screenshotUrl: currentShotBeforeOpen }
     : await withTimeout(
       openThreadsLatestOwnPostFromProfile(config, padCode, maxAgeDays),
-      30_000,
+      150_000,
       "threadsAutoReply open latest post timeout",
     ).catch((error) => ({
       ok: false as const,
@@ -27034,6 +27204,7 @@ export async function autoReplyThreadsAccount(
       replyScreenshots,
       done: true,
       error: `${maxAgeDays} 天内未找到带评论角标的正常本人推文`,
+      details: openedError.error,
     };
     onProgress?.(result);
     return result;
