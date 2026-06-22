@@ -11400,17 +11400,26 @@ async function openThreadsComposerFromHomePromptIfVisible(
   const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
   if (!state || state.page !== "home_feed") return false;
 
+  if (options.mediaKind === "text") {
+    options.onProgress?.({ step: "點選首頁發帖輸入框...", done: false });
+    await tapViaAdbReferencePoint(config, padCode, { x: 250, y: 320 }, 2600, FIXED_VMOS_SCREEN);
+    const fixedAfter = await waitForThreadsPageSettled(config, padCode, {
+      timeoutMs: 3600,
+      intervalMs: 650,
+      stableSamples: 2,
+    }).catch(() => null);
+    if (fixedAfter && expectedPages.includes(fixedAfter.page)) return true;
+    if (fixedAfter && isThreadsTerminalPage(fixedAfter.page)) {
+      throw new Error(buildThreadsBlockedError(fixedAfter.reason, fixedAfter.screenshotUrl));
+    }
+  }
+
   const uiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
   const target = findThreadsComposerInputTarget(uiXml);
-  const inputTarget = target || (options.mediaKind === "text" ? { x: 250, y: 320 } : null);
-  if (!inputTarget) return false;
+  if (!target) return false;
 
   options.onProgress?.({ step: "點選首頁發帖輸入框...", done: false });
-  if (target) {
-    await tapScreenshotPointViaAdb(config, padCode, state.screenshotUrl, inputTarget, 2600);
-  } else {
-    await tapViaAdbReferencePoint(config, padCode, inputTarget, 2600, FIXED_VMOS_SCREEN);
-  }
+  await tapScreenshotPointViaAdb(config, padCode, state.screenshotUrl, target, 2600);
   const after = await waitForThreadsPageSettled(config, padCode, {
     timeoutMs: 3600,
     intervalMs: 650,
