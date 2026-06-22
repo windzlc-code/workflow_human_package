@@ -3722,6 +3722,71 @@ async function sendSentimentHotCandidatePicker(args: {
   });
 }
 
+function truncateTelegramPhotoCaption(text: string) {
+  return text.length > 980 ? `${text.slice(0, 970)}...` : text;
+}
+
+function buildSentimentHotCandidateDetailText(args: {
+  pending: NonNullable<ReturnType<typeof pendingSentimentHotImports.get>>;
+  candidate: SentimentHotCandidate;
+  index: number;
+}) {
+  const platform = args.candidate.platform === "threads" ? "Threads" : "Instagram";
+  const mediaLabel = args.candidate.media.some((item) => item.type === "video")
+    ? `视频/图片 ${args.candidate.media.length}`
+    : args.candidate.media.length
+      ? `图片 ${args.candidate.media.length}`
+      : "纯文字";
+  const warnings = args.candidate.warnings?.length ? ["", "提示:", ...args.candidate.warnings.map((item) => `- ${item}`)] : [];
+  return [
+    `🔥 舆情热点详情 #${args.index + 1}`,
+    "",
+    `人设: ${args.pending.archiveName}`,
+    `来源: ${platform}`,
+    `作者: ${args.candidate.author || "-"}`,
+    `媒体: ${mediaLabel}`,
+    `数据: ${formatSentimentMetricLine(args.candidate)}`,
+    `原帖: ${args.candidate.sourceUrl || "-"}`,
+    "",
+    "正文:",
+    cleanSentimentCandidateContent(args.candidate.content) || "-",
+    ...warnings,
+  ].join("\n");
+}
+
+async function sendSentimentCandidateMediaPanel(args: {
+  bot: TelegramBot;
+  chatId: number;
+  messageId?: number;
+  text: string;
+  keyboard: Array<Array<{ text: string; callback_data: string }>>;
+  media: SentimentHotCandidate["media"];
+  selectedDeleteIndexes?: Set<number>;
+}) {
+  const preview = await buildSentimentCandidateMediaGridPreview(args.media, {
+    selectedDeleteIndexes: args.selectedDeleteIndexes,
+  }).catch((error: any) => {
+    console.warn(`[sentiment_hot][media_grid_failed] chat=${args.chatId} error=${error?.message || String(error)}`);
+    return null;
+  });
+  if (!preview) {
+    await safeEditOrSend(args.bot, args.chatId, args.messageId, args.text.slice(0, 3900), {
+      reply_markup: { inline_keyboard: args.keyboard },
+    });
+    return;
+  }
+  if (args.messageId) await args.bot.deleteMessage(args.chatId, args.messageId).catch(() => undefined);
+  await args.bot.sendPhoto(args.chatId, preview, {
+    caption: truncateTelegramPhotoCaption(args.text),
+    reply_markup: { inline_keyboard: args.keyboard },
+  }).catch(async (error: any) => {
+    console.warn(`[sentiment_hot][media_panel_send_failed] chat=${args.chatId} error=${error?.message || String(error)}`);
+    await safeEditOrSend(args.bot, args.chatId, undefined, args.text.slice(0, 3900), {
+      reply_markup: { inline_keyboard: args.keyboard },
+    });
+  });
+}
+
 async function showSentimentHotCandidateDetail(args: {
   bot: TelegramBot;
   chatId: number;
@@ -3738,34 +3803,21 @@ async function showSentimentHotCandidateDetail(args: {
     });
     return;
   }
-  const platform = candidate.platform === "threads" ? "Threads" : "Instagram";
-  const mediaLabel = candidate.media.some((item) => item.type === "video") ? "視頻" : candidate.media.length ? `圖片 ${candidate.media.length}` : "純文字";
-  const warnings = candidate.warnings?.length ? ["", "提示:", ...candidate.warnings.map((item) => `- ${item}`)] : [];
-  const text = [
-    `🔥 舆情热点详情 #${args.index + 1}`,
-    "",
-    `人设: ${pending.archiveName}`,
-    `来源: ${platform}`,
-    `作者: ${candidate.author || "-"}`,
-    `媒体: ${mediaLabel}`,
-    `数据: ${formatSentimentMetricLine(candidate)}`,
-    `原帖: ${candidate.sourceUrl || "-"}`,
-    "",
-    "正文:",
-    cleanSentimentCandidateContent(candidate.content) || "-",
-    ...warnings,
-  ].join("\n");
-  await safeEditOrSend(args.bot, args.chatId, args.messageId, text.slice(0, 3900), {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: `✅ 使用第 ${args.index + 1} 篇`, callback_data: `shuse_${args.actionKey}_${args.index}` }],
-        [{ text: "✏️ 编辑后使用", callback_data: `shedit_${args.actionKey}_${args.index}` }],
-        [{ text: "返回候选列表", callback_data: `shlist_${args.actionKey}` }],
-        [{ text: "刷新抓取", callback_data: `shrf_${args.actionKey}` }],
-        [{ text: "返回新建推文", callback_data: `genpost_branch_${pending.archiveId}` }],
-      ],
-    },
+  await sendSentimentCandidateMediaPanel({
+    bot: args.bot,
+    chatId: args.chatId,
+    messageId: args.messageId,
+    text: buildSentimentHotCandidateDetailText({ pending, candidate, index: args.index }),
+    media: candidate.media,
+    keyboard: [
+      [{ text: `✅ 使用第 ${args.index + 1} 篇`, callback_data: `shuse_${args.actionKey}_${args.index}` }],
+      [{ text: "✏️ 编辑后使用", callback_data: `shedit_${args.actionKey}_${args.index}` }],
+      [{ text: "返回候选列表", callback_data: `shlist_${args.actionKey}` }],
+      [{ text: "刷新抓取", callback_data: `shrf_${args.actionKey}` }],
+      [{ text: "返回新建推文", callback_data: `genpost_branch_${pending.archiveId}` }],
+    ],
   });
+  return;
 }
 
 async function showSentimentHotPendingList(args: {
@@ -3873,19 +3925,25 @@ async function renderSentimentHotEditPanel(bot: TelegramBot, chatId: number, mes
   }
   const selected = state.deleteMediaIndexes || [];
   const keptCount = Math.max(0, state.candidate.media.length - selected.length);
-  await safeEditOrSend(bot, chatId, messageId, [
-    "✏️ 编辑舆情推文",
-    "",
-    `人设: ${state.archiveName}`,
-    `数据: ${formatSentimentMetricLine(state.candidate)}`,
-    `媒体: ${state.candidate.media.length} 个，已选删除 ${selected.length} 个，保存后保留 ${keptCount} 个`,
-    "",
-    "可以直接发送新的文案。",
-    "也可以勾选要删除的图片/视频，最后点“保存并使用”。",
-    "如需整体替换媒体，请发送图片/视频并附带文案；只发送媒体则保留原文案并替换媒体。",
-  ].join("\n"), {
-    reply_markup: { inline_keyboard: buildSentimentHotEditMediaKeyboard(state) },
+  await sendSentimentCandidateMediaPanel({
+    bot,
+    chatId,
+    messageId,
+    text: [
+      "✏️ 编辑舆情推文",
+      "",
+      `人设: ${state.archiveName}`,
+      `数据: ${formatSentimentMetricLine(state.candidate)}`,
+      `媒体: ${state.candidate.media.length} 个，已选删除 ${selected.length} 个，保存后保留 ${keptCount} 个`,
+      "",
+      "图片已按媒体编号排版；下方按钮可多选删除，红色标记表示保存时会删除。",
+      "可以直接发送新文案；也可以发送图片/视频+文案来整体替换媒体。",
+    ].join("\n"),
+    media: state.candidate.media,
+    selectedDeleteIndexes: new Set(selected),
+    keyboard: buildSentimentHotEditMediaKeyboard(state),
   });
+  return;
 }
 
 async function importSentimentHotCandidate(args: {
@@ -9335,6 +9393,92 @@ async function buildPostImageCandidateGridPreview(imageUrls: string[]) {
       background: "#f1f5f1",
     },
   }).composite(composites).jpeg({ quality: 90 }).toBuffer();
+}
+
+function escapeSvgText(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function sentimentCandidateMediaSource(item: SentimentHotCandidate["media"][number]) {
+  return item.localPath || item.url || "";
+}
+
+function sentimentCandidateMediaBadgeSvg(args: { label: string; selected: boolean; size: number }) {
+  const fill = args.selected ? "#dc2626" : "#111827";
+  const subtitle = args.selected ? "DELETE" : "";
+  return Buffer.from(`
+<svg width="${args.size}" height="${args.size}" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="${args.size}" height="${args.size}" rx="14" fill="${fill}" opacity="0.88"/>
+  <text x="${Math.round(args.size / 2)}" y="${subtitle ? Math.round(args.size * 0.45) : Math.round(args.size * 0.66)}" text-anchor="middle" font-family="Arial, sans-serif" font-size="${Math.round(args.size * 0.36)}" font-weight="700" fill="#fff">${escapeSvgText(args.label)}</text>
+  ${subtitle ? `<text x="${Math.round(args.size / 2)}" y="${Math.round(args.size * 0.74)}" text-anchor="middle" font-family="Arial, sans-serif" font-size="${Math.round(args.size * 0.18)}" font-weight="700" fill="#fff">${subtitle}</text>` : ""}
+</svg>`);
+}
+
+function sentimentCandidateMediaDeleteOverlaySvg(width: number, height: number) {
+  return Buffer.from(`
+<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="${width}" height="${height}" fill="#dc2626" opacity="0.28"/>
+  <rect x="8" y="8" width="${width - 16}" height="${height - 16}" fill="none" stroke="#dc2626" stroke-width="12"/>
+</svg>`);
+}
+
+async function buildSentimentCandidateMediaGridPreview(
+  media: SentimentHotCandidate["media"],
+  options: { selectedDeleteIndexes?: Set<number>; maxItems?: number } = {},
+) {
+  const selectedDeleteIndexes = options.selectedDeleteIndexes || new Set<number>();
+  const maxItems = options.maxItems || 20;
+  const imageMedia = media
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.type !== "video" && sentimentCandidateMediaSource(item))
+    .slice(0, maxItems);
+  if (!imageMedia.length) return null;
+
+  const tileSize = imageMedia.length > 12 ? 260 : 320;
+  const gap = 8;
+  const badgeSize = 66;
+  const columns = Math.min(imageMedia.length > 12 ? 4 : 3, imageMedia.length);
+  const rows = Math.ceil(imageMedia.length / columns);
+  const composites: sharp.OverlayOptions[] = [];
+
+  for (let visualIndex = 0; visualIndex < imageMedia.length; visualIndex += 1) {
+    const { item, index } = imageMedia[visualIndex];
+    try {
+      const source = sentimentCandidateMediaSource(item);
+      const buffer = await loadTelegramMediaBuffer(source);
+      const input = await sharp(buffer)
+        .rotate()
+        .resize(tileSize, tileSize, { fit: "cover" })
+        .jpeg({ quality: 86 })
+        .toBuffer();
+      const left = (visualIndex % columns) * (tileSize + gap);
+      const top = Math.floor(visualIndex / columns) * (tileSize + gap);
+      const selected = selectedDeleteIndexes.has(index);
+      composites.push({ input, left, top });
+      if (selected) composites.push({ input: sentimentCandidateMediaDeleteOverlaySvg(tileSize, tileSize), left, top });
+      composites.push({
+        input: sentimentCandidateMediaBadgeSvg({ label: String(index + 1), selected, size: badgeSize }),
+        left: left + 10,
+        top: top + 10,
+      });
+    } catch (error: any) {
+      console.warn(`[sentiment_hot][media_grid_skip] index=${index} error=${error?.message || String(error)}`);
+    }
+  }
+
+  if (!composites.length) return null;
+  return sharp({
+    create: {
+      width: columns * tileSize + (columns - 1) * gap,
+      height: rows * tileSize + (rows - 1) * gap,
+      channels: 3,
+      background: "#eef7ea",
+    },
+  }).composite(composites).jpeg({ quality: 88 }).toBuffer();
 }
 
 export type CloudAccountStateKind = "phone_verification" | "captcha" | "login_required" | "onboarding" | "blocked";
