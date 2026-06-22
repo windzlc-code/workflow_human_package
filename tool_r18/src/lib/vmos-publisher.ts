@@ -6983,9 +6983,7 @@ async function captureThreadsPublishedEvidenceScreenshot(
     // 发布后的取证只做一轮固定首滑：进入个人页后让首条帖文露出用户名、
     // 发布时间和正文即可，不再多轮校验或大幅补滑。
     await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1220, endX: 360, endY: 600 });
-    await delay(350);
-    shotUrl = await waitThreadsScreenshotChangedAfterAction(config, padCode, beforeSwipeUrl, 2200)
-      .catch(async () => freezeScreenshotUrl(await screenshot(config, padCode)));
+    shotUrl = await captureFreshThreadsScreenshotAfterAction(config, padCode, beforeSwipeUrl, 2600);
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
     if (!await isThreadsProfileScreenshot(config, padCode, shotUrl).catch(() => false)) {
       throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__取證滑動後已離開 Threads 個人主頁｜debug=${formatThreadsDebugTargets([shotUrl])}`);
@@ -6998,6 +6996,37 @@ async function captureThreadsPublishedEvidenceScreenshot(
     return presentationShot;
   }
   throw new Error("未能取得 Threads 發布後截圖");
+}
+
+async function captureFreshThreadsScreenshotAfterAction(
+  config: VmosConfig,
+  padCode: string,
+  beforeUrl: string,
+  timeoutMs = 2600,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let lastUrl = "";
+  await delay(500);
+  while (Date.now() < deadline) {
+    lastUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    if (!lastUrl) {
+      await delay(250);
+      continue;
+    }
+    const diff = await getRegionDiffScore(beforeUrl, lastUrl, {
+      x: 0,
+      y: 180,
+      width: FIXED_VMOS_SCREEN.width,
+      height: 1180,
+    }).catch(() => 0);
+    if (diff >= 2.5) {
+      await delay(300);
+      const finalUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => lastUrl);
+      return finalUrl || lastUrl;
+    }
+    await delay(250);
+  }
+  throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__取證截圖未刷新，拒絕復用舊截圖｜debug=${formatThreadsDebugTargets([beforeUrl, lastUrl])}`);
 }
 
 async function waitThreadsScreenshotChangedAfterAction(
