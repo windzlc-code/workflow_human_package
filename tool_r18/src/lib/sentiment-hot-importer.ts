@@ -32,6 +32,13 @@ export interface SentimentCookieStatus {
   health: SentimentCookieHealth;
   label: string;
   message: string;
+  validCookieCount?: number;
+  expiredCookieCount?: number;
+  sessionCookieCount?: number;
+  expiringSoonCookieCount?: number;
+  authorizationNeedsRefresh?: boolean;
+  recommendedAction?: string;
+  lastAuthorizedAt?: string | null;
 }
 
 export interface FetchSentimentHotCandidatesResult {
@@ -497,6 +504,13 @@ export async function fetchSentimentCookieStatuses(): Promise<SentimentCookieSta
         platform,
         health,
         label: platform === "threads" ? "Threads" : "Instagram",
+        validCookieCount: valid,
+        expiredCookieCount: expired,
+        sessionCookieCount: Number(profile?.sessionCookieCount || 0),
+        expiringSoonCookieCount: Number(profile?.expiringSoonCookieCount || 0),
+        authorizationNeedsRefresh: profile?.authorizationNeedsRefresh === true,
+        recommendedAction: typeof profile?.recommendedAction === "string" ? profile.recommendedAction : "",
+        lastAuthorizedAt: profile?.lastAuthorizedAt || null,
         message: profile
           ? `有效 Cookie ${valid} 個，過期 ${expired} 個。`
           : "缺少授權 Cookie，請到快捷配置頁面刷新。",
@@ -522,6 +536,140 @@ function sentimentCookiePlatformLabel(platform: SentimentHotPlatform): string {
   return platform === "threads" ? "Threads" : "Instagram";
 }
 
+function sentimentCookieStatusNeedsRefresh(status: SentimentCookieStatus): boolean {
+  if (!sentimentCookieStatusHasUsableCookies(status)) return false;
+  if (status.authorizationNeedsRefresh === true) return true;
+  if (Number(status.expiredCookieCount || 0) > 0) return true;
+  if (Number(status.expiringSoonCookieCount || 0) > 0) return true;
+  return status.recommendedAction === "refresh-profile-cookies";
+}
+
+function normalizeCookieForBrowserAuth(cookie: any, fallbackDomain: string) {
+  if (!cookie?.name || !cookie?.value) return null;
+  const expires = Number(cookie.expires);
+  const sameSite = ["Strict", "Lax", "None"].includes(cookie.sameSite) ? cookie.sameSite : undefined;
+  return {
+    name: String(cookie.name),
+    value: String(cookie.value),
+    domain: String(cookie.domain || fallbackDomain || ".threads.net"),
+    path: String(cookie.path || "/"),
+    expires: Number.isFinite(expires) ? expires : -1,
+    httpOnly: Boolean(cookie.httpOnly || cookie.http_only),
+    secure: cookie.secure !== false,
+    sameSite,
+  };
+}
+
+async function refreshSentimentBrowserCookiesForPlatform(platform: SentimentHotPlatform): Promise<{ ok: boolean; message: string }> {
+  const configPath = path.join(resolveSentimentDataDir(), "sentiment-config.json");
+  if (!fs.existsSync(configPath)) return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} Cookie 配置不存在。` };
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const profiles = config?.sentimentSearch?.browserFallback?.profiles || config?.browserFallback?.profiles || [];
+  const profile = Array.isArray(profiles)
+    ? profiles.find((item: any) => item?.platform === platform || item?.sourceKey === platform || item?.key === platform)
+    : null;
+  if (!profile) return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} Cookie 配置不存在。` };
+
+  const cookies = readSentimentBrowserAuthCookies(platform)
+    .map((cookie: any) => normalizeCookieForBrowserAuth(cookie, profile.domain || `${platform}.net`))
+    .filter(Boolean);
+  if (!cookies.length) return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} 缺少有效 Cookie，无法自动刷新；需要先人工重新授权登录。` };
+
+  const authUrl = cleanText(Array.isArray(profile.authUrls) ? profile.authUrls[0] : profile.authUrl)
+    || (platform === "threads" ? "https://www.threads.net/" : "https://www.instagram.com/");
+  const cookieUrls = [
+    authUrl,
+    platform === "threads" ? "https://www.threads.net/" : "https://www.instagram.com/",
+    platform === "threads" ? "https://www.threads.com/" : "",
+  ].filter(Boolean);
+
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+  try {
+    const context = await browser.newContext({
+      locale: "zh-TW",
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    });
+    await context.addCookies(cookies as any[]);
+    const page = await context.newPage();
+    await page.goto(authUrl, { waitUntil: "domcontentloaded", timeout: 25_000 }).catch(() => undefined);
+    await page.waitForTimeout(2500);
+    const title = await page.title().catch(() => "");
+    const href = page.url();
+    const stillLoggedOut = /login|登入|登录|log in|accounts\/login/i.test(`${title} ${href}`);
+    const refreshedCookies = activeUniqueCookies((await context.cookies(cookieUrls)).map((cookie) => normalizeCookieForBrowserAuth(cookie, profile.domain || `${platform}.net`)).filter(Boolean));
+    await context.close().catch(() => undefined);
+    if (stillLoggedOut || refreshedCookies.length === 0) {
+      return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} 自动刷新未保持登录态，需要人工重新登录授权。` };
+    }
+    const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/browser-auth/cookies`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        profileKey: profile.key || platform,
+        sourceKey: profile.sourceKey || platform,
+        domain: profile.domain || new URL(authUrl).hostname,
+        cookies: refreshedCookies,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} Cookie 回写失败：HTTP ${response.status}` };
+    return { ok: true, message: `${sentimentCookiePlatformLabel(platform)} Cookie 已自动刷新。` };
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+}
+
+function activeUniqueCookies(cookies: any[]): any[] {
+  const nowSeconds = Date.now() / 1000;
+  const byKey = new Map<string, any>();
+  for (const cookie of cookies) {
+    const expires = Number(cookie?.expires);
+    if (Number.isFinite(expires) && expires > 0 && expires <= nowSeconds) continue;
+    if (!cookie?.name || !cookie?.value) continue;
+    byKey.set(`${cookie.name}|${cookie.domain}|${cookie.path || "/"}`, cookie);
+  }
+  return [...byKey.values()].slice(0, 120);
+}
+
+async function refreshSentimentBrowserCookies(statuses: SentimentCookieStatus[], warnings: string[]) {
+  const targets = statuses.filter(sentimentCookieStatusNeedsRefresh).slice(0, 2);
+  if (!targets.length) return statuses;
+  const refreshed: SentimentHotPlatform[] = [];
+  for (const status of targets) {
+    const result = await refreshSentimentBrowserCookiesForPlatform(status.platform).catch((error) => ({
+      ok: false,
+      message: `${sentimentCookiePlatformLabel(status.platform)} Cookie 自动刷新失败：${error instanceof Error ? error.message : String(error)}`,
+    }));
+    warnings.push(result.message);
+    if (result.ok) refreshed.push(status.platform);
+  }
+  if (!refreshed.length) return statuses;
+  const nextStatuses = await fetchSentimentCookieStatuses().catch(() => statuses);
+  return nextStatuses;
+}
+
+async function triggerRealtimeSentimentScan(platforms: SentimentHotPlatform[], warnings: string[]) {
+  const sources = [...new Set(platforms)].filter((platform) => platform === "threads" || platform === "instagram");
+  if (!sources.length) return;
+  try {
+    const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/scan-start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "manual", mode: "fast", sources, days: 2 }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      warnings.push(`实时扫描触发失败：HTTP ${response.status}`);
+      return;
+    }
+    const json = await response.json().catch(() => ({}));
+    warnings.push(json?.alreadyRunning ? "舆情后端已有实时扫描在运行，已复用当前任务。" : "已触发舆情后端实时扫描，结果会持续进入候选库。");
+  } catch (error) {
+    warnings.push("实时扫描触发失败：" + (error instanceof Error ? error.message : String(error)));
+  }
+}
+
 export async function fetchSentimentHotCandidates(args: {
   archive?: PersonaArchive;
   prompt?: string;
@@ -534,7 +682,7 @@ export async function fetchSentimentHotCandidates(args: {
   const archiveId = cleanText(archive?.id) || "default";
   const keywords = buildSentimentHotKeywords({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries });
   const limit = args.limit || 10;
-  const poolLimit = Math.max(limit * 2, 20);
+  const poolLimit = Math.max(limit * 6, 60);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
 
   let candidates = hasSearchKeywords
@@ -559,13 +707,19 @@ export async function fetchSentimentHotCandidates(args: {
   });
   if (!runtime.ok && runtime.warning) warnings.push(runtime.warning);
 
-  const cookieStatuses = await withSentimentTimeout(fetchSentimentCookieStatuses(), 6_000, [
+  let cookieStatuses = await withSentimentTimeout(fetchSentimentCookieStatuses(), 6_000, [
     { platform: "threads" as const, health: "unknown" as const, label: "Threads", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
     { platform: "instagram" as const, health: "unknown" as const, label: "Instagram", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
   ]);
+  if (args.refresh === true && runtime.ok) {
+    cookieStatuses = await withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), 35_000, cookieStatuses);
+  }
   const usableSources = cookieStatuses
     .filter(sentimentCookieStatusHasUsableCookies)
     .map((status) => status.platform);
+  if (args.refresh === true && runtime.ok && usableSources.length > 0) {
+    await withSentimentTimeout(triggerRealtimeSentimentScan(usableSources, warnings), 6_000, undefined);
+  }
 
   if (hasSearchKeywords && candidates.length < limit) {
     const databaseCandidates = await readCandidatesFromDatabase({ archiveId, keywords, limit: poolLimit, excludeShown: args.refresh === true });
@@ -682,7 +836,7 @@ async function filterSentimentCandidatesWithModel(args: {
   limit: number;
   warnings: string[];
 }): Promise<SentimentHotCandidate[]> {
-  const candidates = sortRelevantHotCandidates(args.candidates, args.keywords, Math.max(args.limit * 2, 20));
+  const candidates = sortRelevantHotCandidates(args.candidates, args.keywords, Math.max(args.limit * 6, 60));
   if (candidates.length <= args.limit) return candidates;
   const personaText = [
     args.archive?.name ? `Name: ${args.archive.name}` : "",
@@ -690,7 +844,7 @@ async function filterSentimentCandidatesWithModel(args: {
     args.archive?.setup ? `Setup: ${JSON.stringify(args.archive.setup)}` : "",
     `Keywords: ${args.keywords.join(" / ")}`,
   ].filter(Boolean).join("\n");
-  const candidateText = candidates.slice(0, 20).map((candidate, index) => {
+  const candidateText = candidates.slice(0, 40).map((candidate, index) => {
     const media = candidate.media?.length ? ` media=${candidate.media.length}` : "";
     return `${index + 1}. score=${candidate.hotScore}${media}
 ${cleanText(candidate.content).slice(0, 280)}`;
@@ -709,7 +863,8 @@ ${cleanText(candidate.content).slice(0, 280)}`;
             "2. \u9010\u6761\u5224\u65ad\u5019\u9009\u662f\u5426\u548c\u4eba\u8bbe\u7684\u6838\u5fc3\u8bbe\u5b9a\u4e00\u81f4\uff1b\u53ea\u6709\u5f31\u5173\u952e\u8bcd\uff08\u5982\u5206\u4eab\u3001\u65e5\u5e38\u3001\u751f\u6d3b\u3001\u5973\u751f\u3001\u70ed\u95e8\uff09\u4e0d\u80fd\u901a\u8fc7\u3002",
             "3. \u6392\u9664\u4e0e\u4eba\u8bbe\u8eab\u4efd\u3001\u4e16\u754c\u89c2\u3001\u5185\u5bb9\u65b9\u5411\u51b2\u7a81\u7684\u5019\u9009\uff1b\u5373\u4f7f\u70ed\u5ea6\u5f88\u9ad8\u4e5f\u4e0d\u8981\u9009\u3002",
             "4. \u4f18\u5148\u4fdd\u7559\u70ed\u5ea6\u9ad8\u3001\u4e2d\u6587\u5185\u5bb9\u3001\u4e3b\u9898\u660e\u786e\u3001\u80fd\u88ab\u8be5\u4eba\u8bbe\u81ea\u7136\u53d1\u5e03\u6216\u6539\u5199\u7684\u5019\u9009\u3002",
-            `5. \u6700\u591a\u8fd4\u56de ${args.limit} \u4e2a\u5e8f\u53f7\uff1b\u5b81\u53ef\u5c11\u8fd4\u56de\uff0c\u4e5f\u4e0d\u8981\u51d1\u65e0\u5173\u5185\u5bb9\u3002\u5982\u679c\u6ca1\u6709\u5408\u683c\u5019\u9009\uff0c\u8fd4\u56de []\u3002`,
+            "5. \u5982\u679c\u5f3a\u76f8\u5173\u5019\u9009\u4e0d\u8db3\uff0c\u53ef\u4ee5\u88dc\u5145\u300c\u4e0d\u51b2\u7a81\u3001\u53ef\u88ab\u8a72\u4eba\u8a2d\u6539\u5beb\u3001\u540c\u9818\u57df\u6216\u540c\u53d7\u773e\u6703\u611f\u8208\u8da3\u300d\u7684\u5019\u9078\uff1b\u4f46\u4ecd\u7136\u5fc5\u9808\u6392\u9664\u7121\u95dc\u6216\u885d\u7a81\u5167\u5bb9\u3002",
+            `6. \u8acb\u76e1\u91cf\u8fd4\u56de ${args.limit} \u500b\u5e8f\u865f\uff1b\u53ea\u6709\u5b8c\u5168\u6c92\u6709\u4e0d\u885d\u7a81\u4e14\u53ef\u6539\u5beb\u7684\u5019\u9078\u6642\uff0c\u624d\u8fd4\u56de []\u3002`,
             "\u53ea\u8f93\u51fa JSON \u6570\u7ec4\uff0c\u4f8b\u5982\uff1a[1,3,5]\u6216[]\u3002\u4e0d\u8981\u89e3\u91ca\u3002",
             "",
             "\u4eba\u8bbe\uff1a",
@@ -720,7 +875,7 @@ ${cleanText(candidate.content).slice(0, 280)}`;
           ].join("\n"),
         }],
       }],
-      { temperature: 0.1, maxOutputTokens: 160 },
+      { temperature: 0.1, maxOutputTokens: 320 },
       AbortSignal.timeout(10_000),
       {
         isUsableResponse: (data) => Boolean(extractText(data).trim()),
