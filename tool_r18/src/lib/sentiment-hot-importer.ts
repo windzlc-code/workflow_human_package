@@ -171,11 +171,57 @@ const DOMAIN_RELEVANCE_KEYWORDS = new Set([
   "女生",
 ]);
 
+const PRIORITY_DOMAIN_KEYWORDS = new Set([
+  "醫療",
+  "医疗",
+  "醫生",
+  "医生",
+  "醫院",
+  "医院",
+  "診所",
+  "诊所",
+  "醫美",
+  "医美",
+  "護理",
+  "护理",
+  "護士",
+  "护士",
+  "急診",
+  "急诊",
+  "AI",
+  "人工智慧",
+  "人工智能",
+  "自動化",
+  "自动化",
+  "護膚",
+  "护肤",
+  "美妝",
+  "美妆",
+  "穿搭",
+  "遊戲",
+  "游戏",
+  "動漫",
+  "动漫",
+  "二次元",
+  "職場",
+  "职场",
+]);
+
 const BROAD_THREADS_SEARCH_QUERIES = ["生活", "日常", "熱門", "分享", "台灣", "心情", "今天", "最近", "穿搭", "美食", "遊戲", "戀愛"];
 
 function isGenericSentimentKeyword(value: string): boolean {
   const key = cleanText(value).toLowerCase();
   return GENERIC_SENTIMENT_KEYWORDS.has(key) && !DOMAIN_RELEVANCE_KEYWORDS.has(key);
+}
+
+function isWeakRelevanceKeyword(value: string): boolean {
+  const keyword = cleanText(value);
+  const key = keyword.toLowerCase();
+  if (!keyword) return true;
+  if (PRIORITY_DOMAIN_KEYWORDS.has(keyword)) return false;
+  if (WEAK_RELEVANCE_STOPWORDS.has(keyword) || WEAK_RELEVANCE_STOPWORDS.has(key)) return true;
+  if (isGenericSentimentKeyword(keyword)) return true;
+  return /^(?:日常|生活|分享|心情|今天|最近|話題|话题|熱門|热门|推薦|推荐|女生|男生|故事|內容|内容)$/u.test(keyword);
 }
 
 const DYNAMIC_KEYWORD_STOPWORDS = new Set([
@@ -307,9 +353,23 @@ function buildSearchKeywordCandidates(args: {
     if (args.archiveName && item.includes(args.archiveName)) continue;
     out.push(item);
   }
-  return [...new Set(out)]
+  return rankSearchKeywords([...new Set(out)]
     .filter((item) => item.length >= 2 && item.length <= 12 && !isGenericSentimentKeyword(item))
-    .slice(0, 10);
+  ).slice(0, 10);
+}
+
+function rankSearchKeywords(keywords: string[]): string[] {
+  return keywords
+    .map((keyword, index) => {
+      let score = 0;
+      if (PRIORITY_DOMAIN_KEYWORDS.has(keyword)) score += 100;
+      if (!isWeakRelevanceKeyword(keyword)) score += 30;
+      if (keyword.length <= 4) score += 20;
+      if (keyword.length > 8) score -= 25;
+      return { keyword, index, score };
+    })
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((item) => item.keyword);
 }
 
 function extractDirectHanKeywords(args: { archiveName: string; text: string }): string[] {
@@ -370,7 +430,7 @@ export function buildSentimentHotKeywords(args: {
     ...buildSearchKeywordCandidates({ archiveName: personaName, pieces }),
     ...extractDirectHanKeywords({ archiveName: personaName, text: joined }),
   ];
-  return [...new Set(extracted.filter(Boolean))].slice(0, 10);
+  return rankSearchKeywords([...new Set(extracted.filter(Boolean))]).slice(0, 10);
 }
 
 export function cleanSentimentCandidateContent(value: unknown): string {
@@ -511,7 +571,6 @@ export async function fetchSentimentHotCandidates(args: {
   if (!hasSearchKeywords) {
     warnings.push("\u7576\u524d\u4eba\u8a2d\u6c92\u6709\u89e3\u6790\u51fa\u53ef\u641c\u7d22\u95dc\u9375\u8a5e\uff0c\u5df2\u505c\u6b62\u6cdb\u5316\u641c\u7d22\uff1b\u8acb\u5148\u5728\u4eba\u8a2d\u7c21\u4ecb\u88dc\u5145\u660e\u78ba\u7684\u9818\u57df\u3001\u8208\u8da3\u6216\u8077\u696d\u8a2d\u5b9a\u3002");
   } else {
-    candidates = await filterSentimentCandidatesWithModel({ archive, keywords, candidates, limit, warnings });
     candidates = await fillSentimentHotCandidatesToLimit({
       archiveId,
       keywords,
@@ -519,6 +578,7 @@ export async function fetchSentimentHotCandidates(args: {
       limit,
       warnings,
     });
+    candidates = await filterSentimentCandidatesWithModel({ archive, keywords, candidates, limit, warnings });
   }
   if (runtime.ok && usableSources.length > 0) {
     void syncSentimentKeywords(keywords).catch(() => undefined);
@@ -579,17 +639,6 @@ async function fillSentimentHotCandidatesToLimit(args: {
     return out.slice(0, args.limit);
   }
 
-  if (out.length > 0) {
-    const base = out.slice();
-    let index = 0;
-    while (out.length < args.limit) {
-      out.push(base[index % base.length]);
-      index += 1;
-    }
-    args.warnings.push("\u540c\u4e3b\u984c\u9ad8\u71b1\u5ea6\u5019\u9078\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u91cd\u8907\u540c\u4eba\u8a2d\u76f8\u95dc\u5019\u9078\u88dc\u9f4a\uff1b\u6c92\u6709\u5f15\u5165\u4e0d\u76f8\u95dc\u95dc\u9375\u8a5e\u3002");
-    return out.slice(0, args.limit);
-  }
-
   return out;
 }
 
@@ -637,14 +686,15 @@ ${cleanText(candidate.content).slice(0, 280)}`;
         role: "user",
         parts: [{
           text: [
-            "\u4f60\u662f\u793e\u4ea4\u70ed\u70b9\u5185\u5bb9\u7b5b\u9009\u5668\u3002",
-            "\u4efb\u52a1\uff1a\u4ece\u5019\u9009 Threads/Instagram \u70ed\u70b9\u4e2d\uff0c\u9009\u51fa\u4e0e\u5f53\u524d\u4eba\u8bbe\u6700\u76f8\u5173\u3001\u53ef\u4ee5\u76f4\u63a5\u4f5c\u4e3a\u8be5\u4eba\u8bbe\u8206\u60c5\u7d20\u6750\u7684\u5185\u5bb9\u3002",
-            "\u8981\u6c42\uff1a",
-            "1. \u5fc5\u987b\u7b26\u5408\u4eba\u8bbe\u4e3b\u9898\u3001\u804c\u4e1a\u3001\u5174\u8da3\u6216\u5185\u5bb9\u9886\u57df\uff1b\u4e0d\u8981\u53ea\u56e0\u4e3a\u5076\u7136\u51fa\u73b0\u4e00\u4e2a\u5f31\u5173\u952e\u8bcd\u5c31\u901a\u8fc7\u3002",
-            "2. \u6392\u9664\u65c5\u6e38\u3001\u4ea4\u53cb\u3001\u5e7f\u544a\u3001\u62db\u8058\u3001\u7eaf\u6cdb\u751f\u6d3b\u7b49\u4e0e\u4eba\u8bbe\u4e3b\u8f74\u65e0\u5173\u7684\u5185\u5bb9\u3002",
-            "3. \u4f18\u5148\u4fdd\u7559\u70ed\u5ea6\u9ad8\u3001\u4e2d\u6587\u5185\u5bb9\u3001\u4e3b\u9898\u660e\u786e\u7684\u5019\u9009\u3002",
-            `4. \u6700\u591a\u8fd4\u56de ${args.limit} \u4e2a\u5e8f\u53f7\uff1b\u5982\u679c\u4e0d\u8db3\uff0c\u4e5f\u53ea\u8fd4\u56de\u786e\u5b9e\u76f8\u5173\u7684\u5e8f\u53f7\u3002`,
-            "\u53ea\u8f93\u51fa JSON \u6570\u7ec4\uff0c\u4f8b\u5982\uff1a[1,3,5]\u3002\u4e0d\u8981\u89e3\u91ca\u3002",
+            "\u4f60\u662f\u4eba\u8bbe\u8206\u60c5\u7d20\u6750\u5ba1\u6838\u5668\u3002\u4f60\u9700\u8981\u5148\u7406\u89e3\u4eba\u8bbe\uff0c\u518d\u7b5b\u9009\u70ed\u70b9\uff0c\u800c\u4e0d\u662f\u673a\u68b0\u5339\u914d\u5173\u952e\u8bcd\u3002",
+            "\u4efb\u52a1\uff1a\u4ece\u5019\u9009 Threads/Instagram \u70ed\u70b9\u4e2d\uff0c\u9009\u51fa\u4e0e\u5f53\u524d\u4eba\u8bbe\u771f\u6b63\u76f8\u5173\u3001\u4e0d\u51b2\u7a81\u3001\u53ef\u4ee5\u76f4\u63a5\u4f5c\u4e3a\u8be5\u4eba\u8bbe\u521b\u4f5c\u7d20\u6750\u7684\u5185\u5bb9\u3002",
+            "\u5ba1\u6838\u6b65\u9aa4\uff08\u4e0d\u8981\u8f93\u51fa\u8fc7\u7a0b\uff09\uff1a",
+            "1. \u4ece\u4eba\u8bbe\u4e2d\u63a8\u65ad\uff1a\u6838\u5fc3\u9886\u57df\u3001\u804c\u4e1a/\u8eab\u4efd\u3001\u5174\u8da3\u3001\u8bed\u6c14\u3001\u4e0d\u5e94\u8be5\u78b0\u7684\u51b2\u7a81\u4e3b\u9898\u3002",
+            "2. \u9010\u6761\u5224\u65ad\u5019\u9009\u662f\u5426\u548c\u4eba\u8bbe\u7684\u6838\u5fc3\u8bbe\u5b9a\u4e00\u81f4\uff1b\u53ea\u6709\u5f31\u5173\u952e\u8bcd\uff08\u5982\u5206\u4eab\u3001\u65e5\u5e38\u3001\u751f\u6d3b\u3001\u5973\u751f\u3001\u70ed\u95e8\uff09\u4e0d\u80fd\u901a\u8fc7\u3002",
+            "3. \u6392\u9664\u4e0e\u4eba\u8bbe\u8eab\u4efd\u3001\u4e16\u754c\u89c2\u3001\u5185\u5bb9\u65b9\u5411\u51b2\u7a81\u7684\u5019\u9009\uff1b\u5373\u4f7f\u70ed\u5ea6\u5f88\u9ad8\u4e5f\u4e0d\u8981\u9009\u3002",
+            "4. \u4f18\u5148\u4fdd\u7559\u70ed\u5ea6\u9ad8\u3001\u4e2d\u6587\u5185\u5bb9\u3001\u4e3b\u9898\u660e\u786e\u3001\u80fd\u88ab\u8be5\u4eba\u8bbe\u81ea\u7136\u53d1\u5e03\u6216\u6539\u5199\u7684\u5019\u9009\u3002",
+            `5. \u6700\u591a\u8fd4\u56de ${args.limit} \u4e2a\u5e8f\u53f7\uff1b\u5b81\u53ef\u5c11\u8fd4\u56de\uff0c\u4e5f\u4e0d\u8981\u51d1\u65e0\u5173\u5185\u5bb9\u3002\u5982\u679c\u6ca1\u6709\u5408\u683c\u5019\u9009\uff0c\u8fd4\u56de []\u3002`,
+            "\u53ea\u8f93\u51fa JSON \u6570\u7ec4\uff0c\u4f8b\u5982\uff1a[1,3,5]\u6216[]\u3002\u4e0d\u8981\u89e3\u91ca\u3002",
             "",
             "\u4eba\u8bbe\uff1a",
             personaText,
@@ -661,7 +711,12 @@ ${cleanText(candidate.content).slice(0, 280)}`;
         isRetryableError: () => false,
       },
     );
-    const indexes = parseModelIndexList(extractText(result.data), candidates.length);
+    const modelText = extractText(result.data);
+    if (/^\s*```(?:json)?\s*\[\s*]\s*```?\s*$/i.test(modelText) || /^\s*\[\s*]\s*$/.test(modelText)) {
+      args.warnings.push("\u6a21\u578b\u76f8\u5173\u6027\u8fc7\u6ee4\u8ba4\u4e3a\u6ca1\u6709\u5019\u9009\u4e0e\u4eba\u8bbe\u8db3\u591f\u76f8\u5173\u3002");
+      return [];
+    }
+    const indexes = parseModelIndexList(modelText, candidates.length);
     const selected = indexes.map((index) => candidates[index]).filter(Boolean);
     if (selected.length > 0) return selected.slice(0, args.limit);
     args.warnings.push("\u6a21\u578b\u76f8\u5173\u6027\u8fc7\u6ee4\u672a\u8fd4\u56de\u53ef\u7528\u5e8f\u53f7\uff0c\u5df2\u4f7f\u7528\u5f3a\u5173\u952e\u8bcd\u8fc7\u6ee4\u5019\u9009\u3002");
@@ -787,6 +842,10 @@ function buildRelevanceNeedles(keywords: string[]): string[] {
     .slice(0, 32);
 }
 
+function buildStrongRelevanceNeedles(keywords: string[]): string[] {
+  return buildRelevanceNeedles(keywords).filter((keyword) => !isWeakRelevanceKeyword(keyword));
+}
+
 function isUsefulHotCandidate(candidate: SentimentHotCandidate): boolean {
   return Number(candidate.hotScore || 0) >= MIN_SENTIMENT_HOT_SCORE;
 }
@@ -823,13 +882,17 @@ function countMatchedNeedles(candidate: SentimentHotCandidate, needles: string[]
   return needles.filter((needle) => haystack.includes(needle.toLowerCase())).length;
 }
 
-function candidateMatchesCurrentKeywords(candidate: SentimentHotCandidate, keywords: string[]): boolean {
+export function candidateMatchesCurrentKeywords(candidate: SentimentHotCandidate, keywords: string[]): boolean {
   const needles = buildRelevanceNeedles(keywords);
-  if (needles.length === 0) return true;
+  if (needles.length === 0) return false;
+  const strongNeedles = buildStrongRelevanceNeedles(keywords);
   const matchedCount = countMatchedNeedles(candidate, needles);
+  const matchedStrongCount = countMatchedNeedles(candidate, strongNeedles);
   if (matchedCount <= 0) return false;
-  if (candidateLooksOffTopic(candidate) && matchedCount < 2) return false;
-  return true;
+  if (strongNeedles.length > 0 && matchedStrongCount <= 0 && matchedCount < 2) return false;
+  if (candidateLooksOffTopic(candidate) && matchedStrongCount < 1 && matchedCount < 2) return false;
+
+  return matchedStrongCount > 0 || matchedCount >= 2;
 }
 
 async function fetchThreadsSearchPageCandidates(args: {
@@ -1028,6 +1091,49 @@ function parseThreadsReaderHotScore(block: string): number {
   return score;
 }
 
+function parseMetricNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const text = cleanText(value).replace(/,/g, "");
+  if (!text) return undefined;
+  const match = text.match(/(\d+(?:\.\d+)?)\s*([Kk萬万])?/);
+  if (!match) return undefined;
+  const base = Number(match[1]);
+  if (!Number.isFinite(base)) return undefined;
+  const unit = match[2] || "";
+  const valueNumber = /[Kk]/.test(unit) ? base * 1000 : /[萬万]/.test(unit) ? base * 10000 : base;
+  return Math.max(0, Math.round(valueNumber));
+}
+
+function extractEngagementMetricsFromText(value: string): NonNullable<SentimentHotCandidate["engagement"]> {
+  const text = String(value || "");
+  const engagement: NonNullable<SentimentHotCandidate["engagement"]> = {};
+  const assign = (key: keyof NonNullable<SentimentHotCandidate["engagement"]>, pattern: RegExp) => {
+    const match = text.match(pattern);
+    const count = parseMetricNumber(match?.[1] || match?.[0]);
+    if (typeof count === "number") (engagement as any)[key] = count;
+  };
+  assign("likeCount", /(?:like|likes|liked|讚|赞|喜歡|喜欢|愛心|爱心|點讚|点赞)\D{0,8}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)/i);
+  assign("commentCount", /(?:comment|comments|reply|replies|留言|評論|评论|回覆|回复)\D{0,8}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)/i);
+  assign("viewCount", /(?:view|views|watch|play|plays|瀏覽|浏览|觀看|观看|播放|閱讀|阅读|流量)\D{0,8}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)/i);
+  assign("shareCount", /(?:share|shares|repost|reposts|轉發|转发|分享)\D{0,8}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)/i);
+  const rawSignals = Array.from(text.matchAll(/(?:^|\n)\s*\[?(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)\]?\s*(?=\n|$)/g))
+    .map((match) => parseMetricNumber(match[1]))
+    .filter((item): item is number => typeof item === "number" && item > 0)
+    .slice(0, 6);
+  if (rawSignals.length) engagement.rawSignals = rawSignals;
+  return engagement;
+}
+
+function compactEngagementMetrics(engagement: NonNullable<SentimentHotCandidate["engagement"]>): Record<string, number | number[]> {
+  const out: Record<string, number | number[]> = {};
+  if (typeof engagement.likeCount === "number") out.like_count = engagement.likeCount;
+  if (typeof engagement.commentCount === "number") out.comment_count = engagement.commentCount;
+  if (typeof engagement.viewCount === "number") out.view_count = engagement.viewCount;
+  if (typeof engagement.shareCount === "number") out.share_count = engagement.shareCount;
+  if (engagement.rawSignals?.length) out.raw_engagement_signals = engagement.rawSignals;
+  return out;
+}
+
 export function parseThreadsReaderSearchMarkdownCandidates(args: {
   text: string;
   query: string;
@@ -1055,6 +1161,7 @@ export function parseThreadsReaderSearchMarkdownCandidates(args: {
     const haystack = [content, author].join(" ").toLowerCase();
     const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
     if (needles.length && matchedNeedles.length === 0) continue;
+    const engagement = extractEngagementMetricsFromText(block);
     const media: SentimentHotMedia[] = [];
     for (const imageMatch of block.matchAll(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/g)) {
       const url = imageMatch[1];
@@ -1077,7 +1184,9 @@ export function parseThreadsReaderSearchMarkdownCandidates(args: {
         query: args.query,
         matchedKeywords: matchedNeedles,
         mediaCount: media.length,
+        ...compactEngagementMetrics(engagement),
       },
+      engagement,
       capturedAt: new Date().toISOString(),
       warnings: [],
     });
@@ -1359,6 +1468,7 @@ export function parseThreadsSearchTextCandidates(args: {
     const haystack = [content, chunk.author].join(" ").toLowerCase();
     const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
     if (needles.length && matchedNeedles.length === 0) continue;
+    const engagement = extractEngagementMetricsFromText(chunk.lines.join("\n"));
     const sourceUrl = `${args.sourceUrl}#candidate-${index + 1}`;
     const id = buildSentimentCandidateId({ platform: "threads", sourceUrl, content });
     out.push({
@@ -1372,7 +1482,9 @@ export function parseThreadsSearchTextCandidates(args: {
       metrics: {
         source: "threads-search-page",
         matchedKeywords: matchedNeedles,
+        ...compactEngagementMetrics(engagement),
       },
+      engagement,
       capturedAt: new Date().toISOString(),
       warnings: ["Threads 搜索页面未暴露稳定媒体地址，已先保留文字热点。"],
     });
@@ -1433,10 +1545,15 @@ async function readCandidatesFromDatabase(args: { archiveId: string; keywords: s
       const id = buildSentimentCandidateId({ platform, sourceUrl, content });
       if (excluded.has(id)) continue;
       const haystack = [content, row.title, row.author, row.keyword, row.keywords, row.extracted_keywords].map(cleanText).join(" ").toLowerCase();
-      const matchedNeedles = needles.filter((needle) => haystack.includes(needle));
+      const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
       if (needles.length && matchedNeedles.length === 0) continue;
       const relevance = Math.min(60, matchedNeedles.length * 20);
       const media = readMediaForSentiment(db, Number(row.id));
+      const engagement = {
+        likeCount: parseMetricNumber((safeJson(row.keywords) as any)?.like_count || (safeJson(row.extracted_keywords) as any)?.like_count),
+        commentCount: parseMetricNumber((safeJson(row.keywords) as any)?.comment_count || (safeJson(row.extracted_keywords) as any)?.comment_count),
+        viewCount: parseMetricNumber((safeJson(row.keywords) as any)?.view_count || row.seen_count),
+      };
       const hotScore = Math.round(
         Number(row.spread_score || 0)
         + Number(row.influence_score || 0)
@@ -1460,7 +1577,9 @@ async function readCandidatesFromDatabase(args: { archiveId: string; keywords: s
           kolScore: Number(row.kol_score || 0),
           emotions: safeJson(row.emotions),
           keywords: safeJson(row.keywords),
+          ...compactEngagementMetrics(engagement),
         },
+        engagement,
         capturedAt: cleanText(row.last_seen_at || row.found_at || row.first_seen_at) || new Date().toISOString(),
         warnings: media.filter((item) => item.warning).map((item) => item.warning as string),
       });

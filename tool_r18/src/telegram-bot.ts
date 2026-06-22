@@ -1055,6 +1055,15 @@ type PendingSentimentHotImportState = {
 };
 
 const pendingSentimentHotImports = new Map<number, PendingSentimentHotImportState>();
+const pendingSentimentHotEdits = new Map<number, {
+  actionKey: string;
+  index: number;
+  archiveId: string;
+  archiveName: string;
+  contentBranch?: GeneratePostContentBranch;
+  candidate: SentimentHotCandidate;
+  stage: "await_input";
+}>();
 const sentimentHotActionKeys = new Map<string, { chatId: number; archiveId: string }>();
 
 const PENDING_GENERATE_POSTS_FILE = resolveRuntimeFile("pending_generate_posts.json");
@@ -3510,6 +3519,73 @@ function rememberSentimentHotAction(chatId: number, archiveId: string) {
   return key;
 }
 
+function numberFromMetric(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const text = String(value || "").replace(/,/g, "").trim();
+  if (!text) return undefined;
+  const match = text.match(/(\d+(?:\.\d+)?)\s*([Kk萬万])?/);
+  if (!match) return undefined;
+  const base = Number(match[1]);
+  if (!Number.isFinite(base)) return undefined;
+  const unit = match[2] || "";
+  return Math.max(0, Math.round(/[Kk]/.test(unit) ? base * 1000 : /[萬万]/.test(unit) ? base * 10000 : base));
+}
+
+function pickMetricNumber(metrics: Record<string, unknown> | undefined, keys: string[]): number | undefined {
+  if (!metrics) return undefined;
+  for (const key of keys) {
+    const value = numberFromMetric((metrics as any)[key]);
+    if (typeof value === "number") return value;
+  }
+  return undefined;
+}
+
+function formatCompactCount(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1).replace(/\.0$/, "")}万`;
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1).replace(/\.0$/, "")}k`;
+  return String(value);
+}
+
+function sentimentEngagementMetrics(candidateOrMeta: Pick<SentimentHotCandidate, "hotScore" | "metrics" | "engagement"> | { hotScore?: number; metrics?: Record<string, unknown>; engagement?: Record<string, unknown> }) {
+  const metrics = candidateOrMeta.metrics || {};
+  const engagement = (candidateOrMeta as any).engagement || {};
+  const likeCount = numberFromMetric(engagement.likeCount ?? engagement.like_count)
+    ?? pickMetricNumber(metrics, ["like_count", "likes", "favorite_count", "reaction_count", "score"]);
+  const commentCount = numberFromMetric(engagement.commentCount ?? engagement.comment_count)
+    ?? pickMetricNumber(metrics, ["comment_count", "comments", "reply_count", "replies"]);
+  const viewCount = numberFromMetric(engagement.viewCount ?? engagement.view_count)
+    ?? pickMetricNumber(metrics, ["view_count", "views", "play_count", "plays", "impression_count", "seenCount"]);
+  const shareCount = numberFromMetric(engagement.shareCount ?? engagement.share_count)
+    ?? pickMetricNumber(metrics, ["share_count", "shares", "repost_count", "reposts"]);
+  const spreadScore = pickMetricNumber(metrics, ["spreadScore", "spread_score"]);
+  const influenceScore = pickMetricNumber(metrics, ["influenceScore", "influence_score"]);
+  const kolScore = pickMetricNumber(metrics, ["kolScore", "kol_score"]);
+  const rawSignals = Array.isArray((metrics as any).raw_engagement_signals)
+    ? (metrics as any).raw_engagement_signals.map(numberFromMetric).filter((item: unknown): item is number => typeof item === "number")
+    : Array.isArray((engagement as any).rawSignals)
+      ? (engagement as any).rawSignals.map(numberFromMetric).filter((item: unknown): item is number => typeof item === "number")
+      : [];
+  return { likeCount, commentCount, viewCount, shareCount, spreadScore, influenceScore, kolScore, rawSignals };
+}
+
+function formatSentimentMetricLine(candidateOrMeta: Pick<SentimentHotCandidate, "hotScore" | "metrics" | "engagement"> | { hotScore?: number; metrics?: Record<string, unknown>; engagement?: Record<string, unknown> }) {
+  const metrics = sentimentEngagementMetrics(candidateOrMeta);
+  const parts = [
+    `热度 ${formatCompactCount(Number(candidateOrMeta.hotScore || 0))}`,
+    `赞 ${formatCompactCount(metrics.likeCount)}`,
+    `评 ${formatCompactCount(metrics.commentCount)}`,
+    `浏览 ${formatCompactCount(metrics.viewCount)}`,
+  ];
+  if (typeof metrics.shareCount === "number") parts.push(`转发 ${formatCompactCount(metrics.shareCount)}`);
+  const traffic = [metrics.spreadScore, metrics.influenceScore, metrics.kolScore]
+    .filter((item): item is number => typeof item === "number" && item > 0)
+    .map(formatCompactCount);
+  if (traffic.length) parts.push(`流量 ${traffic.join("/")}`);
+  if (!traffic.length && metrics.rawSignals.length) parts.push(`互动线索 ${metrics.rawSignals.map(formatCompactCount).join("/")}`);
+  return parts.join(" · ");
+}
+
 function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index: number) {
   const platform = candidate.platform === "threads" ? "Threads" : "Instagram";
   const content = cleanSentimentCandidateContent(candidate.content);
@@ -3517,7 +3593,7 @@ function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index
   const media = candidate.media.some((item) => item.type === "video") ? "視頻" : candidate.media.length ? "圖片" : "純文字";
   return [
     "────────────",
-    `${index + 1}. [${platform}/${media}] 熱度 ${candidate.hotScore}`,
+    `${index + 1}. [${platform}/${media}] ${formatSentimentMetricLine(candidate)}`,
     `${text}${content.length > 72 ? "..." : ""}`,
   ].join("\n");
 }
@@ -3625,7 +3701,7 @@ async function showSentimentHotCandidateDetail(args: {
     `来源: ${platform}`,
     `作者: ${candidate.author || "-"}`,
     `媒体: ${mediaLabel}`,
-    `热度: ${candidate.hotScore}`,
+    `数据: ${formatSentimentMetricLine(candidate)}`,
     `原帖: ${candidate.sourceUrl || "-"}`,
     "",
     "正文:",
@@ -3636,6 +3712,7 @@ async function showSentimentHotCandidateDetail(args: {
     reply_markup: {
       inline_keyboard: [
         [{ text: `✅ 使用第 ${args.index + 1} 篇`, callback_data: `shuse_${args.actionKey}_${args.index}` }],
+        [{ text: "✏️ 编辑后使用", callback_data: `shedit_${args.actionKey}_${args.index}` }],
         [{ text: "返回候选列表", callback_data: `shlist_${args.actionKey}` }],
         [{ text: "刷新抓取", callback_data: `shrf_${args.actionKey}` }],
         [{ text: "返回新建推文", callback_data: `genpost_branch_${pending.archiveId}` }],
@@ -3687,7 +3764,7 @@ async function showSentimentHotPendingList(args: {
   });
 }
 
-async function importSentimentHotCandidate(args: {
+async function startSentimentHotEdit(args: {
   bot: TelegramBot;
   chatId: number;
   messageId?: number;
@@ -3703,15 +3780,58 @@ async function importSentimentHotCandidate(args: {
     });
     return;
   }
+  pendingSentimentHotEdits.set(args.chatId, {
+    actionKey: args.actionKey,
+    index: args.index,
+    archiveId: pending.archiveId,
+    archiveName: pending.archiveName,
+    contentBranch: pending.contentBranch,
+    candidate,
+    stage: "await_input",
+  });
+  await safeEditOrSend(args.bot, args.chatId, args.messageId, [
+    "✏️ 编辑舆情推文",
+    "",
+    `人设: ${pending.archiveName}`,
+    `数据: ${formatSentimentMetricLine(candidate)}`,
+    "",
+    "请直接发送新的文案。",
+    "如需替换媒体，请发送图片/视频并附带文案；只发送媒体则保留原文案并替换媒体。",
+  ].join("\n"), {
+    reply_markup: { inline_keyboard: [[{ text: "返回候选详情", callback_data: `shdet_${args.actionKey}_${args.index}` }]] },
+  });
+}
+
+async function importSentimentHotCandidate(args: {
+  bot: TelegramBot;
+  chatId: number;
+  messageId?: number;
+  actionKey: string;
+  index: number;
+  overrideContent?: string;
+  overrideMediaUrl?: string;
+  overrideMediaType?: "image" | "video" | "unknown";
+  edited?: boolean;
+}) {
+  const action = sentimentHotActionKeys.get(args.actionKey);
+  const pending = pendingSentimentHotImports.get(args.chatId);
+  const candidate = pending?.candidates[args.index];
+  if (!action || !pending || action.chatId !== args.chatId || action.archiveId !== pending.archiveId || !candidate) {
+    await safeEditOrSend(args.bot, args.chatId, args.messageId, "舆情候选已过期，请重新刷新抓取。", {
+      reply_markup: { inline_keyboard: [[{ text: "返回新建推文", callback_data: pending ? `genpost_branch_${pending.archiveId}` : "list_personas" }]] },
+    });
+    return;
+  }
 
   rememberSentimentHotSelected(pending.archiveId, candidate.id);
-  const primaryMedia = await downloadCandidatePrimaryMedia(candidate).catch(() => undefined);
-  const mediaUrl = primaryMedia?.localPath || primaryMedia?.url || candidate.media[0]?.localPath || candidate.media[0]?.url || "";
-  const mediaType = primaryMedia?.type || candidate.media[0]?.type || (mediaUrl ? "unknown" : undefined);
+  const primaryMedia = args.overrideMediaUrl ? undefined : await downloadCandidatePrimaryMedia(candidate).catch(() => undefined);
+  const mediaUrl = args.overrideMediaUrl || primaryMedia?.localPath || primaryMedia?.url || candidate.media[0]?.localPath || candidate.media[0]?.url || "";
+  const mediaType = args.overrideMediaType || primaryMedia?.type || candidate.media[0]?.type || (mediaUrl ? "unknown" : undefined);
+  const finalContent = cleanSentimentCandidateContent(args.overrideContent || candidate.content);
   await appendCustomPersonaArchivePost({
     archiveId: pending.archiveId,
     title: `舆情热点 #${args.index + 1}`,
-    content: cleanSentimentCandidateContent(candidate.content),
+    content: finalContent,
     mediaUrl: mediaUrl || undefined,
     mediaType,
     telegramGroupContentType: pending.contentBranch === "r18" ? "paid" : pending.contentBranch === "nonr18" ? "free" : undefined,
@@ -3721,21 +3841,35 @@ async function importSentimentHotCandidate(args: {
       sourceUrl: candidate.sourceUrl,
       hotScore: candidate.hotScore,
       metrics: candidate.metrics,
+      engagement: candidate.engagement,
       capturedAt: candidate.capturedAt,
+      originalContent: cleanSentimentCandidateContent(candidate.content),
+      originalMediaUrl: candidate.media[0]?.localPath || candidate.media[0]?.url,
+      edited: args.edited === true,
       warnings: [
         ...(candidate.warnings || []),
         ...(primaryMedia?.warning ? [primaryMedia.warning] : []),
       ],
     },
   });
+  await addSummariesToMemoryAsync(pending.archiveId, [
+    [
+      "舆情热点素材",
+      `平台:${candidate.platform}`,
+      `数据:${formatSentimentMetricLine(candidate)}`,
+      `内容:${finalContent.slice(0, 160)}`,
+    ].join(" | "),
+  ]).catch(() => undefined);
   rememberSentimentHotImported(pending.archiveId, candidate.id);
   pending.candidates.splice(args.index, 1);
   pendingSentimentHotImports.set(args.chatId, pending);
   await safeEditOrSend(args.bot, args.chatId, args.messageId, [
-    "✅ 已导入舆情热点推文",
+    args.edited ? "✅ 已导入编辑后的舆情热点推文" : "✅ 已导入舆情热点推文",
     `人设: ${pending.archiveName}`,
     `来源: ${candidate.platform}`,
+    `数据: ${formatSentimentMetricLine(candidate)}`,
     mediaUrl ? `媒体: ${mediaType || "unknown"}` : "媒体: 无",
+    "已写入人设记忆。",
   ].join("\n"), {
     reply_markup: {
       inline_keyboard: [
@@ -9353,9 +9487,27 @@ function moveLinkPresentationToEnd(content: string, linkPresentation: { url: str
   return `${withoutLink}\n${linkUrl}`.trim();
 }
 
-export function buildPostDetailText(displayIndex: number, content: string, imageUrl: string, linkPresentation: { url: string; text: string } | null = null) {
+function buildSentimentSourceInfoHtml(sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"]): string[] {
+  if (sourceMeta?.source !== "sentiment_hot_import") return [];
+  const lines = [
+    "",
+    "<b>舆情来源</b>",
+    `平台: ${escapeHtmlText(String(sourceMeta.platform || "-"))}`,
+    `数据: ${escapeHtmlText(formatSentimentMetricLine({
+      hotScore: sourceMeta.hotScore,
+      metrics: sourceMeta.metrics,
+      engagement: sourceMeta.engagement,
+    }))}`,
+  ];
+  if (sourceMeta.sourceUrl) lines.push(`原帖: ${escapeHtmlText(sourceMeta.sourceUrl)}`);
+  if (sourceMeta.edited) lines.push("状态: 已自定义编辑");
+  return lines;
+}
+
+export function buildPostDetailText(displayIndex: number, content: string, imageUrl: string, linkPresentation: { url: string; text: string } | null = null, sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"]) {
   const lines = [
     `📝 <b>第 ${displayIndex} 篇推文</b>`,
+    ...buildSentimentSourceInfoHtml(sourceMeta),
     "",
     formatPostContentForTelegramHtml(moveLinkPresentationToEnd(content, linkPresentation), linkPresentation),
   ];
@@ -9376,13 +9528,14 @@ export function buildPostDetailText(displayIndex: number, content: string, image
   return lines.join("\n");
 }
 
-function buildPostDetailTextWithArchive(displayIndex: number, content: string, imageUrl: string, archive: Pick<PersonaArchive, "setup"> | null | undefined) {
-  return buildPostDetailText(displayIndex, content, imageUrl, getTweetStyleLinkPresentation(archive?.setup));
+function buildPostDetailTextWithArchive(displayIndex: number, content: string, imageUrl: string, archive: Pick<PersonaArchive, "setup"> | null | undefined, sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"]) {
+  return buildPostDetailText(displayIndex, content, imageUrl, getTweetStyleLinkPresentation(archive?.setup), sourceMeta);
 }
 
-function buildPostPhotoDetailCaption(displayIndex: number, content: string, linkPresentation: { url: string; text: string } | null = null) {
+function buildPostPhotoDetailCaption(displayIndex: number, content: string, linkPresentation: { url: string; text: string } | null = null, sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"]) {
   const escapedContent = formatPostContentForTelegramHtml(moveLinkPresentationToEnd(content, linkPresentation), linkPresentation);
-  const caption = `📝 <b>第 ${displayIndex} 篇推文</b>\n\n${escapedContent}`;
+  const sourceInfo = buildSentimentSourceInfoHtml(sourceMeta).join("\n");
+  const caption = `📝 <b>第 ${displayIndex} 篇推文</b>${sourceInfo}\n\n${escapedContent}`;
   return caption.length <= 950 ? caption : null;
 }
 
@@ -9406,13 +9559,14 @@ async function sendPostPhotoDetail(
     displayIndex: number;
     content: string;
     imageUrl: string;
+    sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"];
     linkPresentation?: { url: string; text: string } | null;
     inlineKeyboard: Array<Array<{ text: string; callback_data: string }>>;
   },
 ) {
   const mediaKind = inferStoredPostMediaKind(args.imageUrl);
   if (mediaKind !== "image" && mediaKind !== "video") return false;
-  const caption = buildPostPhotoDetailCaption(args.displayIndex, args.content, args.linkPresentation || null);
+  const caption = buildPostPhotoDetailCaption(args.displayIndex, args.content, args.linkPresentation || null, args.sourceMeta);
   if (!caption) return false;
   const mediaInput = resolveTelegramMediaInput(args.imageUrl);
   try {
@@ -14722,6 +14876,22 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data.startsWith("shedit_")) {
+      const match = data.match(/^shedit_([a-f0-9]+)_(\d+)$/);
+      if (!match) {
+        await safeEditOrSend(bot, chatId, msgId, "舆情候选参数无效，请重新刷新抓取。");
+        return;
+      }
+      await startSentimentHotEdit({
+        bot,
+        chatId,
+        messageId: msgId,
+        actionKey: match[1],
+        index: Number(match[2]),
+      });
+      return;
+    }
+
     if (
       data.startsWith("genpost_")
       && !data.startsWith("genpost_branch_")
@@ -15767,13 +15937,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         displayIndex,
         content: post.content,
         imageUrl: postImageUrl,
+        sourceMeta: post.sourceMeta,
         linkPresentation: getTweetStyleLinkPresentation(archive.setup),
         inlineKeyboard: detailRows,
       })) {
         await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive), {
+      await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive, post.sourceMeta), {
         parse_mode: "HTML",
         ...buildPostImagePreviewOptions(postImageUrl),
         reply_markup: {
@@ -16068,7 +16239,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           const updated = await regenerateArchivePostContent(action);
           stopTyping();
           const displayIndex = (updated.orderIndex ?? archive.posts.findIndex((item) => item.id === updated.id)) + 1;
-          await bot.sendMessage(chatId, `✅ 推文已重新生成\n\n${buildPostDetailTextWithArchive(displayIndex, updated.content, String(updated.imageUrl || ""), archive)}`, {
+          await bot.sendMessage(chatId, `✅ 推文已重新生成\n\n${buildPostDetailTextWithArchive(displayIndex, updated.content, String(updated.imageUrl || ""), archive, updated.sourceMeta)}`, {
             parse_mode: "HTML",
             ...buildPostImagePreviewOptions(String(updated.imageUrl || "")),
             reply_markup: {
@@ -16137,13 +16308,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         displayIndex,
         content: post.content,
         imageUrl: postImageUrl,
+        sourceMeta: post.sourceMeta,
         linkPresentation: getTweetStyleLinkPresentation(archive.setup),
         inlineKeyboard: detailRows,
       })) {
         await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive), {
+      await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive, post.sourceMeta), {
         parse_mode: "HTML",
         ...buildPostImagePreviewOptions(postImageUrl),
         reply_markup: {
@@ -18199,6 +18371,42 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     const customPersonaPost = pendingCustomPersonaPosts.get(chatId);
+    const sentimentHotEdit = pendingSentimentHotEdits.get(chatId);
+    if (sentimentHotEdit?.stage === "await_input") {
+      const editedText = String(text || "").trim();
+      let overrideMediaUrl = "";
+      let overrideMediaType: "image" | "video" | "unknown" | undefined;
+      if (media?.file_id) {
+        const downloaded = await downloadToolR18TelegramMedia(bot, msg, media).catch(() => null);
+        if (!downloaded?.hostPath) {
+          await bot.sendMessage(chatId, "❌ 媒体读取失败，请重新上传一次。", {
+            reply_markup: { inline_keyboard: [[{ text: "返回候选详情", callback_data: `shdet_${sentimentHotEdit.actionKey}_${sentimentHotEdit.index}` }]] },
+          });
+          return;
+        }
+        overrideMediaUrl = downloaded.hostPath;
+        overrideMediaType = video ? "video" : photo ? "image" : "unknown";
+      }
+      if (!editedText && !overrideMediaUrl) {
+        await bot.sendMessage(chatId, "请发送新的文案，或发送图片/视频替换媒体。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回候选详情", callback_data: `shdet_${sentimentHotEdit.actionKey}_${sentimentHotEdit.index}` }]] },
+        });
+        return;
+      }
+      pendingSentimentHotEdits.delete(chatId);
+      await importSentimentHotCandidate({
+        bot,
+        chatId,
+        actionKey: sentimentHotEdit.actionKey,
+        index: sentimentHotEdit.index,
+        overrideContent: editedText || cleanSentimentCandidateContent(sentimentHotEdit.candidate.content),
+        overrideMediaUrl: overrideMediaUrl || undefined,
+        overrideMediaType,
+        edited: true,
+      });
+      return;
+    }
+
     if (customPersonaPost?.stage === "await_input") {
       await handlePendingCustomPersonaPostInput(
         bot,

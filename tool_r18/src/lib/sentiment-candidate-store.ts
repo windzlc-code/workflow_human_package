@@ -22,6 +22,13 @@ export interface SentimentHotCandidate {
   media: SentimentHotMedia[];
   hotScore: number;
   metrics: Record<string, unknown>;
+  engagement?: {
+    likeCount?: number;
+    commentCount?: number;
+    viewCount?: number;
+    shareCount?: number;
+    rawSignals?: number[];
+  };
   capturedAt: string;
   warnings?: string[];
 }

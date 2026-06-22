@@ -1137,8 +1137,12 @@ export async function appendCustomPersonaArchivePost(args: {
     sourceUrl?: string;
     hotScore?: number;
     metrics?: Record<string, unknown>;
+    engagement?: Record<string, unknown>;
     capturedAt?: string;
     warnings?: string[];
+    originalContent?: string;
+    originalMediaUrl?: string;
+    edited?: boolean;
   };
   title?: string;
   telegramGroupContentType?: "free" | "paid";
