@@ -670,6 +670,7 @@ const pendingStoredPostEdits = new Map<number, {
   displayIndex?: number;
   currentContent: string;
   replaceMediaIndexes?: number[];
+  textOnly?: boolean;
 }>();
 
 type StoredPostMediaItem = {
@@ -16889,7 +16890,80 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_regen" || data === "post_img_regen" || data.startsWith("post_img_regen_")) {
+    if (data === "post_regen") {
+      const action = pendingPostActions.get(chatId);
+      if (!action?.archiveId || !action.postId) {
+        await safeEditOrSend(bot, chatId, msgId, "請先從推文列表打開一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(action.archiveId);
+      const post = archive?.posts.find((item) => item.id === action.postId);
+      if (!archive || !post) {
+        await safeEditOrSend(bot, chatId, msgId, "沒有找到這篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+        });
+        return;
+      }
+      const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔄 重新生成推文",
+        "",
+        `推文: 第 ${displayIndex} 篇`,
+        "",
+        "请选择处理方式：",
+      ].join("\n"), {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🤖 AI 重新生成", callback_data: "post_regen_ai" }],
+            [{ text: "✍️ 自定义发送文字", callback_data: "post_regen_custom" }],
+            [{ text: "返回查看推文", callback_data: "post_action_view" }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data === "post_regen_custom") {
+      const action = pendingPostActions.get(chatId);
+      if (!action?.archiveId || !action.postId) {
+        await safeEditOrSend(bot, chatId, msgId, "請先從推文列表打開一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(action.archiveId);
+      const post = archive?.posts.find((item) => item.id === action.postId);
+      if (!archive || !post) {
+        await safeEditOrSend(bot, chatId, msgId, "沒有找到這篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+        });
+        return;
+      }
+      const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+      pendingStoredPostEdits.set(chatId, {
+        archiveId: action.archiveId,
+        postId: action.postId,
+        groupContentType: action.groupContentType,
+        displayIndex,
+        currentContent: post.content,
+        textOnly: true,
+      });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "✍️ 自定义发送文字",
+        "",
+        `推文: 第 ${displayIndex} 篇`,
+        "",
+        "请直接发送新的文字文案。",
+        "这里只修改文案，原有图片/视频会保留。",
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+      });
+      return;
+    }
+
+    if (data === "post_regen_ai" || data === "post_img_regen" || data.startsWith("post_img_regen_")) {
       let action = pendingPostActions.get(chatId);
       let explicitPostIndex: number | null = null;
       if (data.startsWith("post_img_regen_")) {
@@ -19110,6 +19184,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
       let mediaUrl = "";
       let mediaType: "image" | "video" | "unknown" | undefined;
       if (media?.file_id) {
+        if (storedPostEdit.textOnly) {
+          await bot.sendMessage(chatId, "这里只接收文字文案；原有图片/视频会保留。请直接发送新的文字。", {
+            reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          });
+          return;
+        }
         const downloaded = await downloadToolR18TelegramMedia(bot, msg, media).catch(() => null);
         if (!downloaded?.hostPath) {
           await bot.sendMessage(chatId, "媒体读取失败，请重新上传一次。", {
@@ -19121,7 +19201,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         mediaType = video ? "video" : photo ? "image" : "unknown";
       }
       if (!editedText && !mediaUrl) {
-        await bot.sendMessage(chatId, "请发送新的文案，或发送图片/视频替换媒体。", {
+        await bot.sendMessage(chatId, storedPostEdit.textOnly
+          ? "请发送新的文字文案。"
+          : "请发送新的文案，或发送图片/视频替换媒体。", {
           reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
         });
         return;
