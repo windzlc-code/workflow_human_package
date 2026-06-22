@@ -1323,7 +1323,7 @@ describe("Threads publish verification", () => {
     expect(command).not.toContain("android.intent.extra.TEXT");
   });
 
-  it("routes Threads media posts from every cloud phone class through system share", () => {
+  it("routes Threads posts from every cloud phone class through system share", () => {
     const mediaUrls = ["data:image/png;base64,abc", "data:video/mp4;base64,abc"];
     const padCodes = [
       "ACP250322677KIRJ",
@@ -1336,7 +1336,7 @@ describe("Threads publish verification", () => {
       for (const mediaUrl of mediaUrls) {
         expect(shouldUseThreadsShareIntentPath(padCode, mediaUrl)).toBe(true);
       }
-      expect(shouldUseThreadsShareIntentPath(padCode)).toBe(false);
+      expect(shouldUseThreadsShareIntentPath(padCode)).toBe(true);
     }
   });
 });

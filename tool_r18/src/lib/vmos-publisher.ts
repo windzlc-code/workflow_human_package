@@ -1212,9 +1212,10 @@ function shouldUseAcpThreadsFastTextPath(padCode: string, mediaUrl?: string): bo
 
 export function shouldUseThreadsShareIntentPath(padCode: string, mediaUrl?: string): boolean {
   void padCode;
-  // 所有云机的 Threads 图片/视频统一走系统分享入口，避开应用内图库
-  // 在不同账号语言、键盘态和工具栏布局下的坐标漂移。
-  return Boolean(mediaUrl);
+  void mediaUrl;
+  // 所有云机的 Threads 发布统一走系统分享入口，避开应用内首页/图库
+  // 在不同账号语言、键盘态、滚动位置和工具栏布局下的坐标漂移。
+  return true;
 }
 
 function isAcpPad(padCode: string): boolean {
