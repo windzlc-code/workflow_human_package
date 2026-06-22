@@ -829,6 +829,34 @@ function parseModelIndexList(text: string, max: number): number[] {
     .map((value) => value - 1);
 }
 
+function backfillSentimentModelSelection(args: {
+  selected: SentimentHotCandidate[];
+  candidates: SentimentHotCandidate[];
+  limit: number;
+  warnings: string[];
+  reason: string;
+}): SentimentHotCandidate[] {
+  const out: SentimentHotCandidate[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: SentimentHotCandidate | undefined) => {
+    if (!candidate?.id || seen.has(candidate.id)) return;
+    seen.add(candidate.id);
+    out.push(candidate);
+  };
+  for (const candidate of args.selected) {
+    add(candidate);
+    if (out.length >= args.limit) return out.slice(0, args.limit);
+  }
+  for (const candidate of args.candidates) {
+    add(candidate);
+    if (out.length >= args.limit) break;
+  }
+  if (args.selected.length > 0 && out.length > args.selected.length) {
+    args.warnings.push(`${args.reason}；已用同人设强相关候选补齐到 ${out.length}/${args.limit} 篇。`);
+  }
+  return out.slice(0, args.limit);
+}
+
 async function filterSentimentCandidatesWithModel(args: {
   archive?: PersonaArchive;
   keywords: string[];
@@ -884,12 +912,20 @@ ${cleanText(candidate.content).slice(0, 280)}`;
     );
     const modelText = extractText(result.data);
     if (/^\s*```(?:json)?\s*\[\s*]\s*```?\s*$/i.test(modelText) || /^\s*\[\s*]\s*$/.test(modelText)) {
-      args.warnings.push("\u6a21\u578b\u76f8\u5173\u6027\u8fc7\u6ee4\u8ba4\u4e3a\u6ca1\u6709\u5019\u9009\u4e0e\u4eba\u8bbe\u8db3\u591f\u76f8\u5173\u3002");
-      return [];
+      args.warnings.push("模型筛选未返回可用候选，已使用同人设强相关规则候选补齐。");
+      return candidates.slice(0, args.limit);
     }
     const indexes = parseModelIndexList(modelText, candidates.length);
     const selected = indexes.map((index) => candidates[index]).filter(Boolean);
-    if (selected.length > 0) return selected.slice(0, args.limit);
+    if (selected.length > 0) {
+      return backfillSentimentModelSelection({
+        selected,
+        candidates,
+        limit: args.limit,
+        warnings: args.warnings,
+        reason: `模型筛选返回 ${selected.length}/${args.limit} 篇`,
+      });
+    }
     args.warnings.push("\u6a21\u578b\u76f8\u5173\u6027\u8fc7\u6ee4\u672a\u8fd4\u56de\u53ef\u7528\u5e8f\u53f7\uff0c\u5df2\u4f7f\u7528\u5f3a\u5173\u952e\u8bcd\u8fc7\u6ee4\u5019\u9009\u3002");
   } catch (error) {
     args.warnings.push("\u6a21\u578b\u76f8\u5173\u6027\u8fc7\u6ee4\u5931\u8d25\uff0c\u5df2\u4f7f\u7528\u5f3a\u5173\u952e\u8bcd\u8fc7\u6ee4\u5019\u9009\uff1a" + (error instanceof Error ? error.message : String(error)));
@@ -1075,7 +1111,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   const baseQueries = buildThreadsSearchQueries(args.keywords);
   const shownIds = getSentimentHotShownIds(args.archiveId);
   const selectedOrImportedIds = getSentimentHotExcludedIds(args.archiveId);
-  const primaryExcluded = args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : selectedOrImportedIds;
+  const primaryExcluded = selectedOrImportedIds;
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;

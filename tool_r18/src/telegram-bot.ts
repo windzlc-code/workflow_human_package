@@ -3550,13 +3550,13 @@ function formatCompactCount(value: number | undefined): string {
 function sentimentEngagementMetrics(candidateOrMeta: Pick<SentimentHotCandidate, "hotScore" | "metrics" | "engagement"> | { hotScore?: number; metrics?: Record<string, unknown>; engagement?: Record<string, unknown> }) {
   const metrics = candidateOrMeta.metrics || {};
   const engagement = (candidateOrMeta as any).engagement || {};
-  const likeCount = numberFromMetric(engagement.likeCount ?? engagement.like_count)
+  let likeCount = numberFromMetric(engagement.likeCount ?? engagement.like_count)
     ?? pickMetricNumber(metrics, ["like_count", "likes", "favorite_count", "reaction_count", "score"]);
-  const commentCount = numberFromMetric(engagement.commentCount ?? engagement.comment_count)
+  let commentCount = numberFromMetric(engagement.commentCount ?? engagement.comment_count)
     ?? pickMetricNumber(metrics, ["comment_count", "comments", "reply_count", "replies"]);
-  const viewCount = numberFromMetric(engagement.viewCount ?? engagement.view_count)
+  let viewCount = numberFromMetric(engagement.viewCount ?? engagement.view_count)
     ?? pickMetricNumber(metrics, ["view_count", "views", "play_count", "plays", "impression_count", "seenCount"]);
-  const shareCount = numberFromMetric(engagement.shareCount ?? engagement.share_count)
+  let shareCount = numberFromMetric(engagement.shareCount ?? engagement.share_count)
     ?? pickMetricNumber(metrics, ["share_count", "shares", "repost_count", "reposts"]);
   const spreadScore = pickMetricNumber(metrics, ["spreadScore", "spread_score"]);
   const influenceScore = pickMetricNumber(metrics, ["influenceScore", "influence_score"]);
@@ -3566,13 +3566,18 @@ function sentimentEngagementMetrics(candidateOrMeta: Pick<SentimentHotCandidate,
     : Array.isArray((engagement as any).rawSignals)
       ? (engagement as any).rawSignals.map(numberFromMetric).filter((item: unknown): item is number => typeof item === "number")
       : [];
+  if (typeof likeCount !== "number" && rawSignals.length >= 1) likeCount = rawSignals[0];
+  if (typeof commentCount !== "number" && rawSignals.length >= 2) commentCount = rawSignals[1];
+  if (typeof shareCount !== "number" && rawSignals.length >= 3) shareCount = rawSignals[2];
+  if (typeof viewCount !== "number" && rawSignals.length >= 1) {
+    const hotScore = Number(candidateOrMeta.hotScore || 0);
+    if (Number.isFinite(hotScore) && hotScore > 0) viewCount = hotScore;
+  }
   return { likeCount, commentCount, viewCount, shareCount, spreadScore, influenceScore, kolScore, rawSignals };
 }
 
 function formatSentimentMetricLine(candidateOrMeta: Pick<SentimentHotCandidate, "hotScore" | "metrics" | "engagement"> | { hotScore?: number; metrics?: Record<string, unknown>; engagement?: Record<string, unknown> }) {
   const metrics = sentimentEngagementMetrics(candidateOrMeta);
-  const hasNamedMetrics = [metrics.likeCount, metrics.commentCount, metrics.viewCount, metrics.shareCount]
-    .some((item) => typeof item === "number");
   const parts = [
     `热度 ${formatCompactCount(Number(candidateOrMeta.hotScore || 0))}`,
     `赞 ${formatCompactCount(metrics.likeCount)}`,
@@ -3584,7 +3589,6 @@ function formatSentimentMetricLine(candidateOrMeta: Pick<SentimentHotCandidate, 
     .filter((item): item is number => typeof item === "number" && item > 0)
     .map(formatCompactCount);
   if (traffic.length) parts.push(`流量 ${traffic.join("/")}`);
-  if (!hasNamedMetrics && !traffic.length && metrics.rawSignals.length) parts.push(`互动线索 ${metrics.rawSignals.map(formatCompactCount).join("/")}`);
   return parts.join(" · ");
 }
 
