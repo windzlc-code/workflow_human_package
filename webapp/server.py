@@ -900,6 +900,13 @@ def _sentiment_browser_auth_profiles_for_extension() -> list[dict[str, Any]]:
     for profile in profiles:
         key = str(profile.get("key") or profile.get("platform") or "").strip()
         domain = str(profile.get("domain") or "").strip().lstrip(".")
+        if not domain:
+            for value in [profile.get("authUrl"), *(profile.get("authUrls") if isinstance(profile.get("authUrls"), list) else [])]:
+                with contextlib.suppress(Exception):
+                    host = urlsplit(str(value or "")).netloc.lower().split("@")[-1].split(":")[0]
+                    domain = host.removeprefix("www.").lstrip(".")
+                    if domain:
+                        break
         if not key or not domain:
             continue
         row: dict[str, Any] = {
