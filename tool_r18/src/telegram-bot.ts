@@ -3571,6 +3571,8 @@ function sentimentEngagementMetrics(candidateOrMeta: Pick<SentimentHotCandidate,
 
 function formatSentimentMetricLine(candidateOrMeta: Pick<SentimentHotCandidate, "hotScore" | "metrics" | "engagement"> | { hotScore?: number; metrics?: Record<string, unknown>; engagement?: Record<string, unknown> }) {
   const metrics = sentimentEngagementMetrics(candidateOrMeta);
+  const hasNamedMetrics = [metrics.likeCount, metrics.commentCount, metrics.viewCount, metrics.shareCount]
+    .some((item) => typeof item === "number");
   const parts = [
     `热度 ${formatCompactCount(Number(candidateOrMeta.hotScore || 0))}`,
     `赞 ${formatCompactCount(metrics.likeCount)}`,
@@ -3582,7 +3584,7 @@ function formatSentimentMetricLine(candidateOrMeta: Pick<SentimentHotCandidate, 
     .filter((item): item is number => typeof item === "number" && item > 0)
     .map(formatCompactCount);
   if (traffic.length) parts.push(`流量 ${traffic.join("/")}`);
-  if (!traffic.length && metrics.rawSignals.length) parts.push(`互动线索 ${metrics.rawSignals.map(formatCompactCount).join("/")}`);
+  if (!hasNamedMetrics && !traffic.length && metrics.rawSignals.length) parts.push(`互动线索 ${metrics.rawSignals.map(formatCompactCount).join("/")}`);
   return parts.join(" · ");
 }
 

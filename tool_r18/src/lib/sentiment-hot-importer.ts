@@ -512,6 +512,16 @@ export async function fetchSentimentCookieStatuses(): Promise<SentimentCookieSta
   }
 }
 
+function sentimentCookieStatusHasUsableCookies(status: SentimentCookieStatus): boolean {
+  if (status.health === "healthy" || status.health === "watch") return true;
+  const match = status.message.match(/有效 Cookie\s*(\d+)/);
+  return Boolean(match && Number(match[1]) > 0);
+}
+
+function sentimentCookiePlatformLabel(platform: SentimentHotPlatform): string {
+  return platform === "threads" ? "Threads" : "Instagram";
+}
+
 export async function fetchSentimentHotCandidates(args: {
   archive?: PersonaArchive;
   prompt?: string;
@@ -554,7 +564,7 @@ export async function fetchSentimentHotCandidates(args: {
     { platform: "instagram" as const, health: "unknown" as const, label: "Instagram", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
   ]);
   const usableSources = cookieStatuses
-    .filter((status) => status.health === "healthy" || status.health === "watch")
+    .filter(sentimentCookieStatusHasUsableCookies)
     .map((status) => status.platform);
 
   if (hasSearchKeywords && candidates.length < limit) {
@@ -582,6 +592,12 @@ export async function fetchSentimentHotCandidates(args: {
   }
   if (runtime.ok && usableSources.length > 0) {
     void syncSentimentKeywords(keywords).catch(() => undefined);
+    const missingSources = cookieStatuses
+      .filter((status) => !sentimentCookieStatusHasUsableCookies(status))
+      .map((status) => sentimentCookiePlatformLabel(status.platform));
+    if (missingSources.length > 0 && missingSources.length < cookieStatuses.length) {
+      warnings.push(`${missingSources.join(" / ")} 缺少有效 Cookie，已跳过对应平台真实扫描；其余平台仍会继续使用。`);
+    }
   } else if (runtime.ok) {
     warnings.push("\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u002f\u0020\u0049\u006e\u0073\u0074\u0061\u0067\u0072\u0061\u006d\u0020\u7f3a\u5c11\u6709\u6548\u0020\u0043\u006f\u006f\u006b\u0069\u0065\uff0c\u5df2\u8df3\u904e\u771f\u5be6\u6383\u63cf\uff1b\u8acb\u5148\u5728\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u914d\u7f6e\u4e2d\u6388\u6b0a\u5f8c\u518d\u5237\u65b0\u6293\u53d6\u3002");
   }
