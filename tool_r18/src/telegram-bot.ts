@@ -4058,7 +4058,7 @@ async function saveStoredPostCustomEdit(args: {
   mediaType?: "image" | "video" | "unknown";
   replaceMediaIndexes?: number[];
 }) {
-  const archive = await loadPersonaForThisBot(args.archiveId);
+  const archive = await loadPersonaArchive(args.archiveId);
   const post = archive?.posts.find((item) => item.id === args.postId);
   if (!archive || !post) {
     await args.bot.sendMessage(args.chatId, "没有找到这篇推文，请返回推文列表重新打开。");
@@ -19210,20 +19210,26 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      pendingStoredPostEdits.delete(chatId);
-      clearToolR18TransientState(chatId);
-      await saveStoredPostCustomEdit({
-        bot,
-        chatId,
-        archiveId: storedPostEdit.archiveId,
-        postId: storedPostEdit.postId,
-        groupContentType: storedPostEdit.groupContentType,
-        displayIndex: storedPostEdit.displayIndex,
-        content: editedText || storedPostEdit.currentContent,
-        mediaUrl: mediaUrl || undefined,
-        mediaType,
-        replaceMediaIndexes: storedPostEdit.replaceMediaIndexes,
-      });
+      try {
+        await saveStoredPostCustomEdit({
+          bot,
+          chatId,
+          archiveId: storedPostEdit.archiveId,
+          postId: storedPostEdit.postId,
+          groupContentType: storedPostEdit.groupContentType,
+          displayIndex: storedPostEdit.displayIndex,
+          content: editedText || storedPostEdit.currentContent,
+          mediaUrl: mediaUrl || undefined,
+          mediaType,
+          replaceMediaIndexes: storedPostEdit.replaceMediaIndexes,
+        });
+        pendingStoredPostEdits.delete(chatId);
+        clearToolR18TransientState(chatId);
+      } catch (error: any) {
+        await bot.sendMessage(chatId, "保存失败：" + formatUserFacingError(error, "请重新发送文字，或返回查看推文后再试。"), {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+        });
+      }
       return;
     }
 
