@@ -2415,11 +2415,41 @@ function renderSentimentCookieProfiles(payload) {
           <td>${Number(profile.expiringSoonCookieCount || 0)}<div class="small">${escapeHtml(profile.nearestExpiresAt || "")}</div></td>
           <td>${escapeHtml(formatAdminDate(profile.lastAuthorizedAt))}</td>
           <td class="sentiment-cookie-names">${escapeHtml(nameText)}</td>
-          <td><button type="button" class="ghost" data-act="sentiment_cookie_pick" data-id="${escapeHtml(key)}">授权</button></td>
+          <td class="sentiment-cookie-actions">
+            <button type="button" class="ghost" data-act="sentiment_cookie_pick" data-id="${escapeHtml(key)}">授权</button>
+            <button type="button" class="ghost" data-act="sentiment_cookie_open" data-id="${escapeHtml(key)}">打开</button>
+          </td>
         </tr>
       `;
     }).join("");
   }
+}
+
+function selectedSentimentCookieProfile(profileKey = "") {
+  const key = String(profileKey || el("sentimentCookieProfile")?.value || "").trim();
+  const profiles = Array.isArray(adminState.sentimentCookieProfiles) ? adminState.sentimentCookieProfiles : [];
+  return profiles.find((profile) => String(profile.key || profile.platform || "") === key) || profiles[0] || null;
+}
+
+function sentimentCookieAuthUrl(profile) {
+  if (!profile) return "";
+  const urls = Array.isArray(profile.authUrls) ? profile.authUrls.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  return urls[0] || String(profile.authUrl || "").trim() || (profile.domain ? `https://${String(profile.domain).replace(/^\.+/, "")}/` : "");
+}
+
+function openSentimentCookieAuthPage(profileKey = "") {
+  const profile = selectedSentimentCookieProfile(profileKey);
+  const url = sentimentCookieAuthUrl(profile);
+  if (!url) throw new Error("当前平台没有配置授权页。");
+  if (el("sentimentCookieProfile") && profile) el("sentimentCookieProfile").value = String(profile.key || profile.platform || "");
+  window.open(url, "_blank", "noopener");
+  setMsg("sentimentCookieMsg", `已打开 ${profile?.label || profile?.key || "当前平台"} 授权页。登录完成后在浏览器授权助手中同步当前站点。`, true);
+}
+
+async function copySentimentCookieHelperBase() {
+  const base = window.location.origin;
+  await navigator.clipboard.writeText(base);
+  setMsg("sentimentCookieMsg", `已复制助手接口地址：${base}`, true);
 }
 
 async function loadSentimentCookieProfiles() {
@@ -3142,6 +3172,24 @@ function bindActions() {
       }
     });
   }
+  if (el("btnSentimentCookieOpenAuth")) {
+    el("btnSentimentCookieOpenAuth").addEventListener("click", () => {
+      try {
+        openSentimentCookieAuthPage();
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnSentimentCookieCopyBase")) {
+    el("btnSentimentCookieCopyBase").addEventListener("click", async () => {
+      try {
+        await copySentimentCookieHelperBase();
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
   if (el("btnSentimentCookieSave")) {
     el("btnSentimentCookieSave").addEventListener("click", async () => {
       setMsg("sentimentCookieMsg", "正在保存授权 Cookie...");
@@ -3347,6 +3395,15 @@ function bindActions() {
     if (act === "sentiment_cookie_pick") {
       if (el("sentimentCookieProfile")) el("sentimentCookieProfile").value = id;
       if (el("sentimentCookieText")) el("sentimentCookieText").focus();
+      setActiveAdminPage("sentimentCookies");
+      return;
+    }
+    if (act === "sentiment_cookie_open") {
+      try {
+        openSentimentCookieAuthPage(id);
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
       setActiveAdminPage("sentimentCookies");
       return;
     }

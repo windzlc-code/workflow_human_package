@@ -787,6 +787,112 @@ def _sentiment_profiles_container(config: dict[str, Any]) -> list[dict[str, Any]
     return profiles
 
 
+def _sentiment_browser_fallback_config(config: dict[str, Any]) -> dict[str, Any]:
+    sentiment_search = config.setdefault("sentimentSearch", {})
+    browser_fallback = sentiment_search.setdefault("browserFallback", {})
+    if not isinstance(browser_fallback, dict):
+        raise HTTPException(status_code=500, detail="舆情 Cookie browserFallback 配置格式异常。")
+    return browser_fallback
+
+
+def _sentiment_browser_auth_token(config: dict[str, Any], *, create: bool = False) -> str:
+    browser_fallback = _sentiment_browser_fallback_config(config)
+    token = str(browser_fallback.get("authHelperToken") or "").strip()
+    if not token and create:
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        browser_fallback["authHelperToken"] = token
+        _write_sentiment_config_file(config)
+    return token
+
+
+def _sentiment_browser_auth_extension_dir() -> Path:
+    return ROOT_DIR / "tool_r18" / "vendor" / "opinx-sentiment" / "standalone" / "sentiment-backend" / "public" / "browser-auth-extension"
+
+
+def _request_public_origin(request: Request) -> str:
+    proto = str(request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",", 1)[0].strip() or "http"
+    host = str(request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",", 1)[0].strip()
+    if not host:
+        host = request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _sentiment_browser_auth_text(file_name: str, request: Request) -> tuple[bytes, str]:
+    allowed = {
+        "manifest.json": "application/json; charset=utf-8",
+        "background.js": "application/javascript; charset=utf-8",
+        "popup.html": "text/html; charset=utf-8",
+        "popup.js": "application/javascript; charset=utf-8",
+        "install.html": "text/html; charset=utf-8",
+    }
+    if file_name not in allowed:
+        raise HTTPException(status_code=404, detail="not found")
+    file_path = (_sentiment_browser_auth_extension_dir() / file_name).resolve()
+    base_dir = _sentiment_browser_auth_extension_dir().resolve()
+    if base_dir not in file_path.parents or not file_path.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    body = file_path.read_text(encoding="utf-8")
+    origin = _request_public_origin(request)
+    if file_name == "background.js":
+        auth_token = _sentiment_browser_auth_token(_read_sentiment_config_file(), create=True)
+        body = body.replace('const DEFAULT_API_BASE = "http://47.250.188.76";', f'const DEFAULT_API_BASE = "{origin}";')
+        body = body.replace(
+            'headers: { "Content-Type": "application/json" },',
+            f'headers: {{ "Content-Type": "application/json", "X-Sentiment-Browser-Auth": "{auth_token}" }},',
+        )
+    elif file_name == "popup.js":
+        body = body.replace('$("apiBase").value = values.apiBase || "http://47.250.188.76";', f'$("apiBase").value = values.apiBase || "{origin}";')
+    elif file_name == "manifest.json":
+        with contextlib.suppress(Exception):
+            parsed = json.loads(body)
+            permissions = parsed.setdefault("host_permissions", [])
+            current_permission = f"{origin}/*"
+            if current_permission not in permissions:
+                permissions.insert(0, current_permission)
+            for permission in _sentiment_browser_auth_host_permissions():
+                if permission not in permissions:
+                    permissions.append(permission)
+            body = json.dumps(parsed, ensure_ascii=False, indent=2) + "\n"
+    return body.encode("utf-8"), allowed[file_name]
+
+
+def _sentiment_browser_auth_host_permissions() -> list[str]:
+    try:
+        config = _read_sentiment_config_file()
+    except HTTPException:
+        return []
+    domains: list[str] = []
+    for profile in _sentiment_profiles_container(config):
+        for value in [profile.get("domain"), *(profile.get("cookieDomains") if isinstance(profile.get("cookieDomains"), list) else []), *(profile.get("matchDomains") if isinstance(profile.get("matchDomains"), list) else [])]:
+            domain = str(value or "").strip().lower().lstrip(".")
+            if domain and domain not in domains:
+                domains.append(domain)
+        for value in [profile.get("authUrl"), *(profile.get("authUrls") if isinstance(profile.get("authUrls"), list) else [])]:
+            with contextlib.suppress(Exception):
+                host = urlsplit(str(value or "")).netloc.lower().split("@")[-1].split(":")[0]
+                host = host.removeprefix("www.").lstrip(".")
+                if host and host not in domains:
+                    domains.append(host)
+    permissions: list[str] = []
+    for domain in domains[:80]:
+        for item in (f"https://{domain}/*", f"https://www.{domain}/*", f"https://*.{domain}/*"):
+            if item not in permissions:
+                permissions.append(item)
+    return permissions
+
+
+def _build_sentiment_browser_auth_extension_zip(request: Request) -> bytes:
+    file_names = ["manifest.json", "background.js", "popup.html", "popup.js", "install.html"]
+    from io import BytesIO
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name in file_names:
+            body, _ = _sentiment_browser_auth_text(name, request)
+            zf.writestr(f"opinx-browser-auth-helper/{name}", body)
+    return buffer.getvalue()
+
+
 def _find_sentiment_profile(profiles: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
     target = str(key or "").strip()
     return next(
@@ -15770,6 +15876,13 @@ class SentimentBrowserAuthCookiePayload(BaseModel):
     note: str = ""
 
 
+class SentimentBrowserAuthExtensionCookiePayload(BaseModel):
+    profileKey: str = ""
+    sourceKey: str = ""
+    domain: str = ""
+    cookies: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class InternalTgSubmitPayload(BaseModel):
     task_type: str
     tg_chat_id: int
@@ -17783,6 +17896,74 @@ def create_app() -> FastAPI:
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"ok": True, "runtime_config": merged}
+
+    @app.get("/browser-auth-extension/download")
+    def browser_auth_extension_download(request: Request, user: dict[str, Any] = Depends(require_admin)):
+        zip_body = _build_sentiment_browser_auth_extension_zip(request)
+        return Response(
+            content=zip_body,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="opinx-browser-auth-helper.zip"',
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    @app.get("/browser-auth-extension/{file_name}")
+    def browser_auth_extension_file(file_name: str, request: Request, user: dict[str, Any] = Depends(require_admin)):
+        body, media_type = _sentiment_browser_auth_text(file_name, request)
+        return Response(content=body, media_type=media_type, headers={"Cache-Control": "no-cache"})
+
+    @app.options("/api/sentiment/browser-auth/cookies")
+    def api_sentiment_browser_auth_cookies_options():
+        return Response(
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Content-Type, X-Sentiment-Browser-Auth",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+
+    @app.post("/api/sentiment/browser-auth/cookies")
+    def api_sentiment_browser_auth_cookies(payload: SentimentBrowserAuthExtensionCookiePayload, request: Request):
+        cors_headers = {"Access-Control-Allow-Origin": "*"}
+        config = _read_sentiment_config_file()
+        expected_token = _sentiment_browser_auth_token(config, create=False)
+        provided_token = str(request.headers.get("x-sentiment-browser-auth") or "").strip()
+        if not expected_token or provided_token != expected_token:
+            return JSONResponse({"ok": False, "error": "invalid browser auth token"}, status_code=403, headers=cors_headers)
+        profiles = _sentiment_profiles_container(config)
+        profile_key = str(payload.profileKey or payload.sourceKey or "").strip()
+        profile = _find_sentiment_profile(profiles, profile_key)
+        if not profile:
+            return JSONResponse({"ok": False, "error": "sentiment cookie profile not found"}, status_code=404, headers=cors_headers)
+        fallback_domain = str(payload.domain or profile.get("domain") or _cookie_default_domain(str(profile.get("platform") or profile_key))).strip()
+        cookies: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in payload.cookies[:160]:
+            cookie = _normalize_manual_cookie(item, fallback_domain)
+            if not cookie:
+                continue
+            key = (cookie["name"], cookie.get("domain") or "", cookie.get("path") or "/")
+            if key in seen:
+                continue
+            seen.add(key)
+            cookies.append(cookie)
+            if len(cookies) >= 120:
+                break
+        if not cookies:
+            return JSONResponse({"ok": False, "error": "no valid cookies"}, status_code=400, headers=cors_headers)
+        profile["cookies"] = cookies
+        profile["lastAuthorizedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        profile["lastAuthorizedBy"] = "browser-auth-helper"
+        profile["lastAuthorizationNote"] = f"synced by browser auth helper for {fallback_domain}"[:240]
+        _write_sentiment_config_file(config)
+        return JSONResponse(
+            {"ok": True, "profileKey": str(profile.get("key") or profile_key), "savedCookieCount": len(cookies)},
+            headers=cors_headers,
+        )
 
     @app.get("/api/admin/sentiment/browser_auth/profiles")
     def api_admin_sentiment_browser_auth_profiles(user: dict[str, Any] = Depends(require_admin)):

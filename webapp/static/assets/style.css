@@ -226,6 +226,25 @@ a {
   margin-bottom: 14px;
 }
 
+.sentiment-cookie-automation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.sentiment-cookie-automation-actions,
+.sentiment-cookie-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .sentiment-cookie-editor textarea {
   width: 100%;
   min-height: 160px;
@@ -259,6 +278,11 @@ a {
 @media (max-width: 900px) {
   .sentiment-cookie-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sentiment-cookie-automation {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 
