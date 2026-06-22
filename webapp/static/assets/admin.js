@@ -2416,7 +2416,7 @@ function renderSentimentCookieProfiles(payload) {
           <td>${escapeHtml(formatAdminDate(profile.lastAuthorizedAt))}</td>
           <td class="sentiment-cookie-names">${escapeHtml(nameText)}</td>
           <td class="sentiment-cookie-actions">
-            <button type="button" class="ghost" data-act="sentiment_cookie_pick" data-id="${escapeHtml(key)}">授权</button>
+            <button type="button" class="ghost" data-act="sentiment_cookie_pick" data-id="${escapeHtml(key)}">手动填 Cookie</button>
             <button type="button" class="ghost" data-act="sentiment_cookie_open" data-id="${escapeHtml(key)}">打开</button>
           </td>
         </tr>
@@ -2450,6 +2450,11 @@ async function copySentimentCookieHelperBase() {
   const base = window.location.origin;
   await navigator.clipboard.writeText(base);
   setMsg("sentimentCookieMsg", `已复制助手接口地址：${base}`, true);
+}
+
+async function copySentimentCookieExtensionUrl() {
+  await navigator.clipboard.writeText("chrome://extensions/");
+  setMsg("sentimentCookieMsg", "已复制扩展管理页地址：chrome://extensions/。浏览器限制网页直接打开该地址，请粘贴到地址栏进入。", true);
 }
 
 function sentimentDownloadFilename(disposition) {
@@ -3233,6 +3238,15 @@ function bindActions() {
     el("btnSentimentCookieCopyBase").addEventListener("click", async () => {
       try {
         await copySentimentCookieHelperBase();
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnSentimentCookieCopyExtensionUrl")) {
+    el("btnSentimentCookieCopyExtensionUrl").addEventListener("click", async () => {
+      try {
+        await copySentimentCookieExtensionUrl();
       } catch (err) {
         setMsg("sentimentCookieMsg", getErrorMessage(err), false);
       }

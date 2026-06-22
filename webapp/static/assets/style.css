@@ -245,6 +245,14 @@ a {
   gap: 8px;
 }
 
+.sentiment-cookie-steps {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
 .sentiment-cookie-editor textarea {
   width: 100%;
   min-height: 160px;
