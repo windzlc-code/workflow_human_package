@@ -1613,6 +1613,9 @@ type StoredPostListItem = {
   content: string;
   telegramGroupContentType?: "free" | "paid";
   imageUrl?: string;
+  mediaUrl?: string;
+  mediaItems?: PersonaArchive["posts"][number]["mediaItems"];
+  sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"];
   imageHistory?: Array<{ imageUrl?: string | null }>;
 };
 
@@ -1633,6 +1636,16 @@ function getStoredPostTypeLabelForList(post: StoredPostListItem) {
   return "媒體";
 }
 
+function buildStoredPostSourceMetricLine(post: StoredPostListItem): string {
+  const sourceMeta = post.sourceMeta;
+  if (sourceMeta?.source !== "sentiment_hot_import") return "";
+  return `数据: ${escapeHtmlText(formatSentimentMetricLine({
+    hotScore: sourceMeta.hotScore,
+    metrics: sourceMeta.metrics,
+    engagement: sourceMeta.engagement,
+  }))}`;
+}
+
 export function buildStoredPostsListView(
   archiveId: string,
   posts: StoredPostListItem[],
@@ -1650,7 +1663,8 @@ export function buildStoredPostsListView(
     const displayIndex = start + idx + 1;
     const typeLabel = getStoredPostTypeLabelForList(post);
     const preview = buildStoredPostPreviewHtml(post.content, linkPresentation);
-    return `<b>\u3010${displayIndex}\u3011</b> <b>類型：${escapeHtmlText(typeLabel)}</b>\n${preview}`;
+    const metricLine = buildStoredPostSourceMetricLine(post);
+    return `<b>【${displayIndex}】</b> <b>类型: ${escapeHtmlText(typeLabel)}</b>${metricLine ? `\n${metricLine}` : ""}\n${preview}`;
   });
   const keyboard = visiblePosts.flatMap((post, idx) => {
     const postIndex = start + idx;
@@ -3848,7 +3862,8 @@ async function importSentimentHotCandidate(args: {
       localPath: item.localPath,
       warning: item.warning,
     }))
-    .filter((item) => item.url);
+    .filter((item) => item.url)
+    .slice(0, 1);
   const primaryMedia = mediaItems[0];
   const mediaUrl = primaryMedia?.url || "";
   const mediaType = args.overrideMediaType || primaryMedia?.type || (mediaUrl ? "unknown" : undefined);
@@ -3871,7 +3886,7 @@ async function importSentimentHotCandidate(args: {
       capturedAt: candidate.capturedAt,
       originalContent: cleanSentimentCandidateContent(candidate.content),
       originalMediaUrl: candidate.media[0]?.localPath || candidate.media[0]?.url,
-      originalMediaUrls: candidate.media.map((item) => item.localPath || item.url).filter(Boolean),
+      originalMediaUrls: candidate.media.map((item) => item.localPath || item.url).filter(Boolean).slice(0, 1),
       mediaItems,
       edited: args.edited === true,
       warnings: [
@@ -9562,7 +9577,7 @@ function getStoredPostMediaItems(post: Pick<PersonaArchive["posts"][number], "im
   add(post.mediaUrl);
   const history = Array.isArray(post.imageHistory) ? post.imageHistory : [];
   add(history.length ? history[history.length - 1]?.imageUrl : "");
-  return out;
+  return out.slice(0, 1);
 }
 
 function formatPostContentForTelegramHtml(content: string, linkPresentation: { url: string; text: string } | null) {
@@ -9610,7 +9625,7 @@ function buildSentimentSourceInfoHtml(sourceMeta?: PersonaArchive["posts"][numbe
     : Array.isArray(sourceMeta.originalMediaUrls)
       ? sourceMeta.originalMediaUrls.length
       : 0;
-  if (mediaCount > 1) lines.push(`濯掍綋: ${mediaCount} 个`);
+  if (mediaCount > 1) lines.push("媒体: 已保留 1 个");
   return lines;
 }
 
@@ -9765,7 +9780,7 @@ async function sendStoredPostMediaPreviews(
   mediaItems: Array<{ url: string; type?: "image" | "video" | "unknown" }>,
   displayIndex: number,
 ) {
-  const items = mediaItems.filter((item) => item.url);
+  const items = mediaItems.filter((item) => item.url).slice(0, 1);
   for (let index = 0; index < items.length; index += 1) {
     await sendPostImagePreviewFallback(bot, chatId, items[index].url, displayIndex);
     if (items.length > 1) {

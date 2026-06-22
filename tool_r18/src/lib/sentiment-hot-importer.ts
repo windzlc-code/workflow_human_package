@@ -1998,7 +1998,7 @@ export async function downloadCandidatePrimaryMedia(candidate: SentimentHotCandi
   }
 }
 
-export async function downloadCandidateMedia(candidate: SentimentHotCandidate, limit = 12): Promise<SentimentHotMedia[]> {
+export async function downloadCandidateMedia(candidate: SentimentHotCandidate, limit = 1): Promise<SentimentHotMedia[]> {
   const media = (candidate.media || []).slice(0, limit);
   const downloaded: SentimentHotMedia[] = [];
   for (let index = 0; index < media.length; index += 1) {
