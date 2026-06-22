@@ -6,6 +6,7 @@ import {
   cleanSentimentCandidateContent,
   isChineseSentimentCandidate,
   parseThreadsReaderSearchMarkdownCandidates,
+  parseThreadsDetailEngagementMarkdown,
   parseThreadsSearchTextCandidates,
 } from "@/lib/sentiment-hot-importer";
 
@@ -129,6 +130,30 @@ Search • Threads
     expect(candidates.length).toBe(1);
     expect(candidates[0].metrics.raw_engagement_signals).toEqual([12000, 340, 88]);
     expect(candidates[0].engagement?.rawSignals).toEqual([12000, 340, 88]);
+  });
+
+  it("parses Threads detail metrics from reader markdown", () => {
+    const engagement = parseThreadsDetailEngagementMarkdown(`
+Title: Demo on Threads
+
+# [Thread 978K views](https://www.threads.net/@demo/post/abc)
+
+Demo post body
+
+31.9K
+
+355
+
+713
+
+5.6K
+`);
+
+    expect(engagement.viewCount).toBe(978000);
+    expect(engagement.likeCount).toBe(31900);
+    expect(engagement.commentCount).toBe(355);
+    expect(engagement.shareCount).toBe(713);
+    expect(engagement.rawSignals).toEqual([31900, 355, 713, 5600]);
   });
 
   it("creates stable candidate ids from platform, url, and content", () => {

@@ -1046,7 +1046,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
     }
     if (all.length >= args.limit) break;
   }
-  return sortUsefulHotCandidates(all, args.limit);
+  return sortUsefulHotCandidates(await enrichThreadsCandidateEngagement(all), args.limit);
 }
 
 function decodeMarkdownLinkText(value: string): string {
@@ -1104,6 +1104,25 @@ function parseMetricNumber(value: unknown): number | undefined {
   return Math.max(0, Math.round(valueNumber));
 }
 
+function parseMetricNumberLoose(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const text = cleanText(value).replace(/,/g, "");
+  if (!text) return undefined;
+  const match = text.match(/(\d+(?:\.\d+)?)\s*([KkMm\u842c\u4e07])?/);
+  if (!match) return undefined;
+  const base = Number(match[1]);
+  if (!Number.isFinite(base)) return undefined;
+  const unit = match[2] || "";
+  const valueNumber = /[Kk]/.test(unit)
+    ? base * 1000
+    : /[Mm]/.test(unit)
+      ? base * 1_000_000
+      : /[\u842c\u4e07]/.test(unit)
+        ? base * 10000
+        : base;
+  return Math.max(0, Math.round(valueNumber));
+}
+
 function extractEngagementMetricsFromText(value: string): NonNullable<SentimentHotCandidate["engagement"]> {
   const text = String(value || "");
   const engagement: NonNullable<SentimentHotCandidate["engagement"]> = {};
@@ -1122,6 +1141,94 @@ function extractEngagementMetricsFromText(value: string): NonNullable<SentimentH
     .slice(0, 6);
   if (rawSignals.length) engagement.rawSignals = rawSignals;
   return engagement;
+}
+
+function mergeEngagementMetrics(
+  base: NonNullable<SentimentHotCandidate["engagement"]>,
+  extra: NonNullable<SentimentHotCandidate["engagement"]>,
+): NonNullable<SentimentHotCandidate["engagement"]> {
+  const merged: NonNullable<SentimentHotCandidate["engagement"]> = { ...base };
+  if (typeof merged.likeCount !== "number" && typeof extra.likeCount === "number") merged.likeCount = extra.likeCount;
+  if (typeof merged.commentCount !== "number" && typeof extra.commentCount === "number") merged.commentCount = extra.commentCount;
+  if (typeof merged.viewCount !== "number" && typeof extra.viewCount === "number") merged.viewCount = extra.viewCount;
+  if (typeof merged.shareCount !== "number" && typeof extra.shareCount === "number") merged.shareCount = extra.shareCount;
+  const rawSignals = [...(base.rawSignals || []), ...(extra.rawSignals || [])]
+    .filter((item): item is number => typeof item === "number" && Number.isFinite(item) && item > 0);
+  if (rawSignals.length) merged.rawSignals = [...new Set(rawSignals)].slice(0, 8);
+  return merged;
+}
+
+function hasNamedEngagementMetrics(engagement?: SentimentHotCandidate["engagement"]) {
+  return Boolean(
+    engagement
+      && (
+        typeof engagement.likeCount === "number"
+        || typeof engagement.commentCount === "number"
+        || typeof engagement.viewCount === "number"
+        || typeof engagement.shareCount === "number"
+      ),
+  );
+}
+
+export function parseThreadsDetailEngagementMarkdown(text: string): NonNullable<SentimentHotCandidate["engagement"]> {
+  const value = String(text || "");
+  const engagement = extractEngagementMetricsFromText(value);
+  const viewMatch = value.match(/Thread\s+(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s+views/i);
+  const viewCount = parseMetricNumberLoose(viewMatch?.[1]);
+  if (typeof viewCount === "number") engagement.viewCount = viewCount;
+  const rawSignals = Array.from(value.matchAll(/(?:^|\n)\s*(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*(?=\n|$)/g))
+    .map((match) => parseMetricNumberLoose(match[1]))
+    .filter((item): item is number => typeof item === "number" && item > 0)
+    .slice(0, 8);
+  if (rawSignals.length) {
+    engagement.rawSignals = [...new Set([...(engagement.rawSignals || []), ...rawSignals])].slice(0, 8);
+    if (typeof engagement.likeCount !== "number") engagement.likeCount = rawSignals[0];
+    if (typeof engagement.commentCount !== "number" && rawSignals.length >= 2) engagement.commentCount = rawSignals[1];
+    if (typeof engagement.shareCount !== "number" && rawSignals.length >= 3) engagement.shareCount = rawSignals[2];
+  }
+  return engagement;
+}
+
+async function fetchThreadsDetailEngagement(sourceUrl: string): Promise<NonNullable<SentimentHotCandidate["engagement"]>> {
+  if (!/^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(sourceUrl)) return {};
+  try {
+    const response = await fetch(`${JINA_READER_PREFIX}${sourceUrl}`, {
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "text/plain, text/markdown, */*",
+        "cache-control": "max-age=300",
+      },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!response.ok) return {};
+    return parseThreadsDetailEngagementMarkdown(await response.text());
+  } catch {
+    return {};
+  }
+}
+
+async function enrichThreadsCandidateEngagement(candidates: SentimentHotCandidate[]): Promise<SentimentHotCandidate[]> {
+  const targets = candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(({ candidate }) => candidate.platform === "threads" && !hasNamedEngagementMetrics(candidate.engagement) && /^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(candidate.sourceUrl))
+    .slice(0, 10);
+  if (!targets.length) return candidates;
+  const enriched = [...candidates];
+  await Promise.all(targets.map(async ({ candidate, index }) => {
+    const detailEngagement = await fetchThreadsDetailEngagement(candidate.sourceUrl);
+    if (!hasNamedEngagementMetrics(detailEngagement) && !detailEngagement.rawSignals?.length) return;
+    const engagement = mergeEngagementMetrics(candidate.engagement || {}, detailEngagement);
+    enriched[index] = {
+      ...candidate,
+      hotScore: Math.max(candidate.hotScore, engagement.viewCount || 0, engagement.likeCount || 0),
+      engagement,
+      metrics: {
+        ...(candidate.metrics || {}),
+        ...compactEngagementMetrics(engagement),
+      },
+    };
+  }));
+  return enriched;
 }
 
 function compactEngagementMetrics(engagement: NonNullable<SentimentHotCandidate["engagement"]>): Record<string, number | number[]> {
@@ -1204,12 +1311,13 @@ async function readThreadsSearchPageText(page: any, query: string): Promise<{ te
 }
 
 const THREADS_SEARCH_CACHE_FILE = resolveRuntimeFile("sentiment_threads_search_cache.json");
+const THREADS_SEARCH_CACHE_VERSION = 2;
 
 function threadsSearchCacheKeys(keywords: string[]): string[] {
   return buildThreadsSearchQueries(keywords).slice(0, 8).map((keyword) => keyword.toLowerCase());
 }
 
-function readThreadsSearchCacheState(): Record<string, { at: string; candidates: SentimentHotCandidate[] }> {
+function readThreadsSearchCacheState(): Record<string, { at: string; version?: number; candidates: SentimentHotCandidate[] }> {
   try {
     if (!fs.existsSync(THREADS_SEARCH_CACHE_FILE)) return {};
     const parsed = JSON.parse(fs.readFileSync(THREADS_SEARCH_CACHE_FILE, "utf8"));
@@ -1221,7 +1329,7 @@ function readThreadsSearchCacheState(): Record<string, { at: string; candidates:
 
 function writeThreadsSearchCandidateCache(keywords: string[], candidates: SentimentHotCandidate[]) {
   const state = readThreadsSearchCacheState();
-  const row = { at: new Date().toISOString(), candidates: candidates.slice(0, 20) };
+  const row = { at: new Date().toISOString(), version: THREADS_SEARCH_CACHE_VERSION, candidates: candidates.slice(0, 20) };
   for (const key of threadsSearchCacheKeys(keywords)) state[key] = row;
   fs.mkdirSync(path.dirname(THREADS_SEARCH_CACHE_FILE), { recursive: true });
   fs.writeFileSync(THREADS_SEARCH_CACHE_FILE, JSON.stringify(state, null, 2), "utf8");
@@ -1234,6 +1342,7 @@ function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], 
   const maxAgeMs = 24 * 60 * 60 * 1000;
   for (const key of threadsSearchCacheKeys(keywords)) {
     const row = state[key];
+    if (row?.version !== THREADS_SEARCH_CACHE_VERSION) continue;
     if (!row || Date.now() - new Date(row.at).getTime() > maxAgeMs) continue;
     for (const candidate of row.candidates || []) {
       if (!candidate?.id || excluded.has(candidate.id)) continue;
@@ -1250,7 +1359,7 @@ function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], 
   }
   if (byId.size < limit) {
     const recentKeys = Object.entries(state)
-      .filter(([, row]) => row && Date.now() - new Date(row.at).getTime() <= maxAgeMs)
+      .filter(([, row]) => row && row.version === THREADS_SEARCH_CACHE_VERSION && Date.now() - new Date(row.at).getTime() <= maxAgeMs)
       .sort((a, b) => new Date(b[1].at).getTime() - new Date(a[1].at).getTime())
       .map(([key]) => key);
     for (const key of recentKeys) {
