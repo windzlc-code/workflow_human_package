@@ -240,8 +240,8 @@ describe("stored posts pagination", () => {
 
     expect(view.visiblePostIds).toEqual(["post-6", "post-7", "post-8"]);
     expect(view.postIds).toEqual(posts.map((post) => post.id));
-    expect(view.text).toContain("<b>【6】</b>第6篇内容");
-    expect(view.keyboard.flat().map((button) => button.text)).toContain("👁 查看第6篇");
+    expect(view.text).toContain("<b>【6】</b> <b>类型: 純文字</b>\n第6篇内容");
+    expect(view.keyboard.flat().map((button) => button.text)).toContain("👁 查看第6篇（純文字）");
     expect(view.keyboard.flat().map((button) => button.text)).toContain("◀️ 上一頁");
   });
 
@@ -249,7 +249,7 @@ describe("stored posts pagination", () => {
     const view = buildStoredPostsListView("archive-1", posts, 1);
     const buttons = view.keyboard.flat();
 
-    expect(buttons.find((button) => button.text === "👁 查看第8篇")?.callback_data).toBe("vp_7");
+    expect(buttons.find((button) => button.text === "👁 查看第8篇（純文字）")?.callback_data).toBe("vp_7");
     expect(buttons.find((button) => button.text === "🚀 发布第8篇")).toBeUndefined();
     expect(buttons.find((button) => button.text === "🗑 删除第8篇")).toBeUndefined();
     expect(buttons.find((button) => button.text === "🚀 發布推文")?.callback_data).toBe("bulkpub_archive-1_p1");
@@ -367,6 +367,7 @@ describe("buildPostDetailActionRows", () => {
 
     expect(texts).toContain("🔄 重新生成推文");
     expect(texts).toContain("🖼 查看配圖/視頻");
+    expect(texts).toContain("🧩 管理媒体");
     expect(texts).toContain("🖼 重新生成图片");
     expect(texts).not.toContain("🖼 单独生成图片");
   });

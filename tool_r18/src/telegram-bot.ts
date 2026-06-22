@@ -669,7 +669,25 @@ const pendingStoredPostEdits = new Map<number, {
   groupContentType?: TelegramGroupContentType;
   displayIndex?: number;
   currentContent: string;
+  replaceMediaIndexes?: number[];
 }>();
+
+type StoredPostMediaItem = {
+  url: string;
+  type?: "image" | "video" | "unknown";
+  localPath?: string;
+  warning?: string;
+};
+
+type PendingPostMediaSelection = {
+  archiveId: string;
+  postId: string;
+  groupContentType?: TelegramGroupContentType;
+  selectedIndexes: number[];
+  createdAt: number;
+};
+
+const pendingPostMediaSelections = new Map<number, PendingPostMediaSelection>();
 
 type PendingBulkPostAction = {
   archiveId: string;
@@ -1620,11 +1638,11 @@ type StoredPostListItem = {
 };
 
 function getStoredPostMediaUrlForList(post: StoredPostListItem) {
-  const direct = String(post.imageUrl || "").trim();
-  if (direct) return direct;
-  const history = Array.isArray(post.imageHistory) ? post.imageHistory : [];
-  const latest = history.length ? String(history[history.length - 1]?.imageUrl || "").trim() : "";
-  return latest;
+  return getStoredPostPrimaryMediaUrl(post);
+}
+
+function getStoredPostPrimaryMediaUrl(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">): string {
+  return String(getStoredPostMediaItems(post)[0]?.url || "").trim();
 }
 
 function getStoredPostTypeLabelForList(post: StoredPostListItem) {
@@ -3862,8 +3880,7 @@ async function importSentimentHotCandidate(args: {
       localPath: item.localPath,
       warning: item.warning,
     }))
-    .filter((item) => item.url)
-    .slice(0, 1);
+    .filter((item) => item.url);
   const primaryMedia = mediaItems[0];
   const mediaUrl = primaryMedia?.url || "";
   const mediaType = args.overrideMediaType || primaryMedia?.type || (mediaUrl ? "unknown" : undefined);
@@ -3886,7 +3903,7 @@ async function importSentimentHotCandidate(args: {
       capturedAt: candidate.capturedAt,
       originalContent: cleanSentimentCandidateContent(candidate.content),
       originalMediaUrl: candidate.media[0]?.localPath || candidate.media[0]?.url,
-      originalMediaUrls: candidate.media.map((item) => item.localPath || item.url).filter(Boolean).slice(0, 1),
+      originalMediaUrls: candidate.media.map((item) => item.localPath || item.url).filter(Boolean),
       mediaItems,
       edited: args.edited === true,
       warnings: [
@@ -3934,6 +3951,7 @@ async function saveStoredPostCustomEdit(args: {
   content?: string;
   mediaUrl?: string;
   mediaType?: "image" | "video" | "unknown";
+  replaceMediaIndexes?: number[];
 }) {
   const archive = await loadPersonaForThisBot(args.archiveId);
   const post = archive?.posts.find((item) => item.id === args.postId);
@@ -3941,13 +3959,26 @@ async function saveStoredPostCustomEdit(args: {
     await args.bot.sendMessage(args.chatId, "没有找到这篇推文，请返回推文列表重新打开。");
     return;
   }
-  const mediaItems = args.mediaUrl
-    ? [{ url: args.mediaUrl, type: args.mediaType || "unknown", localPath: args.mediaUrl }]
-    : post.mediaItems;
+  let mediaItems = post.mediaItems;
+  if (args.mediaUrl) {
+    const replacement = { url: args.mediaUrl, type: args.mediaType || "unknown", localPath: args.mediaUrl };
+    const replaceIndexes = new Set((args.replaceMediaIndexes || []).filter((index) => Number.isInteger(index) && index >= 0));
+    if (replaceIndexes.size > 0) {
+      const currentItems = getStoredPostMediaItems(post);
+      const insertAt = Math.min(...replaceIndexes);
+      mediaItems = currentItems.filter((_, index) => !replaceIndexes.has(index));
+      mediaItems.splice(Math.min(insertAt, mediaItems.length), 0, replacement);
+    } else {
+      mediaItems = [replacement];
+    }
+  }
+  const primaryMedia = mediaItems?.[0];
+  const primaryMediaUrl = primaryMedia?.url || primaryMedia?.localPath || "";
   const updated = await updatePersonaArchivePostDraft(args.archiveId, args.postId, {
     content: args.content || post.content,
-    mediaUrl: args.mediaUrl,
-    mediaType: args.mediaUrl ? args.mediaType : post.mediaType,
+    imageUrl: args.mediaUrl ? primaryMediaUrl : undefined,
+    mediaUrl: args.mediaUrl ? primaryMediaUrl : undefined,
+    mediaType: args.mediaUrl ? primaryMedia?.type || args.mediaType : post.mediaType,
     mediaItems,
     sourceMetaPatch: {
       edited: true,
@@ -9564,20 +9595,25 @@ function isTelegramPreviewableImageUrl(imageUrl: string) {
   return /^https?:\/\//i.test(imageUrl) && inferStoredPostMediaKind(imageUrl) === "image";
 }
 
-function getStoredPostMediaItems(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">): Array<{ url: string; type?: "image" | "video" | "unknown" }> {
-  const out: Array<{ url: string; type?: "image" | "video" | "unknown" }> = [];
-  const add = (url: unknown, type?: "image" | "video" | "unknown") => {
-    const text = String(url || "").trim();
+function getStoredPostMediaItems(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">): StoredPostMediaItem[] {
+  const out: StoredPostMediaItem[] = [];
+  const add = (url: unknown, type?: "image" | "video" | "unknown", localPath?: unknown, warning?: unknown) => {
+    const text = String(localPath || url || "").trim();
     if (!text || out.some((item) => item.url === text)) return;
-    out.push({ url: text, type });
+    out.push({
+      url: text,
+      type,
+      localPath: typeof localPath === "string" && localPath.trim() ? localPath : undefined,
+      warning: typeof warning === "string" && warning.trim() ? warning : undefined,
+    });
   };
-  for (const item of Array.isArray(post.mediaItems) ? post.mediaItems : []) add(item.localPath || item.url, item.type);
-  for (const item of Array.isArray(post.sourceMeta?.mediaItems) ? post.sourceMeta.mediaItems : []) add(item.localPath || item.url, item.type);
+  for (const item of Array.isArray(post.mediaItems) ? post.mediaItems : []) add(item.url, item.type, item.localPath, item.warning);
+  for (const item of Array.isArray(post.sourceMeta?.mediaItems) ? post.sourceMeta.mediaItems : []) add(item.url, item.type, item.localPath, item.warning);
   add(post.imageUrl);
   add(post.mediaUrl);
   const history = Array.isArray(post.imageHistory) ? post.imageHistory : [];
   add(history.length ? history[history.length - 1]?.imageUrl : "");
-  return out.slice(0, 1);
+  return out;
 }
 
 function formatPostContentForTelegramHtml(content: string, linkPresentation: { url: string; text: string } | null) {
@@ -9777,16 +9813,171 @@ async function sendPostImagePreviewFallback(
 async function sendStoredPostMediaPreviews(
   bot: TelegramBot,
   chatId: number,
-  mediaItems: Array<{ url: string; type?: "image" | "video" | "unknown" }>,
+  mediaItems: StoredPostMediaItem[],
   displayIndex: number,
 ) {
-  const items = mediaItems.filter((item) => item.url).slice(0, 1);
-  for (let index = 0; index < items.length; index += 1) {
-    await sendPostImagePreviewFallback(bot, chatId, items[index].url, displayIndex);
-    if (items.length > 1) {
-      await bot.sendMessage(chatId, `Media ${index + 1}/${items.length}`).catch(() => undefined);
+  const items = mediaItems.filter((item) => item.url);
+  if (!items.length) return;
+  const groupable = items.filter((item) => {
+    const kind = item.type && item.type !== "unknown" ? item.type : inferStoredPostMediaKind(item.url);
+    return kind === "image" || kind === "video";
+  });
+  const nonGroupable = items.filter((item) => !groupable.some((groupItem) => groupItem.url === item.url));
+  const chunks: StoredPostMediaItem[][] = [];
+  for (let index = 0; index < groupable.length; index += 10) {
+    chunks.push(groupable.slice(index, index + 10));
+  }
+  if (chunks.length >= 2 && chunks[chunks.length - 1].length === 1 && chunks[chunks.length - 2].length > 2) {
+    chunks[chunks.length - 1].unshift(chunks[chunks.length - 2].pop()!);
+  }
+  let sentGrouped = false;
+  for (const chunk of chunks) {
+    if (chunk.length < 2) continue;
+    const start = groupable.findIndex((item) => item.url === chunk[0].url) + 1;
+    const end = start + chunk.length - 1;
+    const mediaGroup = chunk.map((item, index) => {
+      const kind = item.type && item.type !== "unknown" ? item.type : inferStoredPostMediaKind(item.url);
+      return {
+        type: kind === "video" ? "video" : "photo",
+        media: resolveTelegramMediaInput(item.url),
+        ...(index === 0 ? { caption: `第 ${displayIndex} 篇媒体 ${start}-${end}/${groupable.length}` } : {}),
+      };
+    });
+    try {
+      await bot.sendMediaGroup(chatId, mediaGroup as any);
+      sentGrouped = true;
+    } catch (error) {
+      console.warn("[telegram][post_media_group_failed]", error instanceof Error ? error.message : error);
+      for (const item of chunk) {
+        await sendPostImagePreviewFallback(bot, chatId, item.url, displayIndex);
+      }
     }
   }
+  const groupedUrls = new Set(chunks.filter((chunk) => chunk.length >= 2).flat().map((item) => item.url));
+  for (const item of [...groupable.filter((item) => !groupedUrls.has(item.url)), ...nonGroupable]) {
+    if (sentGrouped && groupable.length > 1) {
+      await bot.sendMessage(chatId, `第 ${displayIndex} 篇还有 1 个媒体无法并入相册，已单独发送。`).catch(() => undefined);
+    }
+    await sendPostImagePreviewFallback(bot, chatId, item.url, displayIndex);
+  }
+}
+
+function buildStoredPostMediaManageKeyboard(args: {
+  mediaItems: StoredPostMediaItem[];
+  selectedIndexes: number[];
+}) {
+  const selected = new Set(args.selectedIndexes);
+  const mediaRows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let index = 0; index < args.mediaItems.length; index += 2) {
+    mediaRows.push(args.mediaItems.slice(index, index + 2).map((item, offset) => {
+      const mediaIndex = index + offset;
+      const kind = item.type && item.type !== "unknown" ? item.type : inferStoredPostMediaKind(item.url);
+      return {
+        text: `${selected.has(mediaIndex) ? "☑️" : "⬜️"} ${mediaIndex + 1}.${kind === "video" ? "视频" : "图片"}`,
+        callback_data: `post_media_toggle_${mediaIndex}`,
+      };
+    }));
+  }
+  return [
+    ...mediaRows,
+    [
+      { text: "全选", callback_data: "post_media_select_all" },
+      { text: "清空", callback_data: "post_media_clear" },
+    ],
+    [
+      { text: `删除选中 ${selected.size}`, callback_data: "post_media_delete_selected" },
+      { text: `替换选中 ${selected.size}`, callback_data: "post_media_replace_selected" },
+    ],
+    [{ text: "返回查看推文", callback_data: "post_action_view" }],
+  ];
+}
+
+async function renderStoredPostMediaManager(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number | undefined,
+  action: { archiveId: string; postId: string; groupContentType?: TelegramGroupContentType },
+) {
+  const archive = await loadPersonaForThisBot(action.archiveId);
+  const post = archive?.posts.find((item) => item.id === action.postId);
+  if (!archive || !post) {
+    await safeEditOrSend(bot, chatId, messageId, "没有找到这篇推文。", {
+      reply_markup: { inline_keyboard: [[{ text: "返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+    });
+    return;
+  }
+  const mediaItems = getStoredPostMediaItems(post);
+  if (!mediaItems.length) {
+    await safeEditOrSend(bot, chatId, messageId, "这篇推文当前没有媒体。", {
+      reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+    });
+    return;
+  }
+  const existing = pendingPostMediaSelections.get(chatId);
+  const selectedIndexes = existing?.archiveId === action.archiveId && existing.postId === action.postId
+    ? existing.selectedIndexes.filter((index) => index >= 0 && index < mediaItems.length)
+    : [];
+  pendingPostMediaSelections.set(chatId, {
+    archiveId: action.archiveId,
+    postId: action.postId,
+    groupContentType: action.groupContentType,
+    selectedIndexes,
+    createdAt: Date.now(),
+  });
+  const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+  await safeEditOrSend(bot, chatId, messageId, [
+    "媒体管理",
+    "",
+    `推文: 第 ${displayIndex} 篇`,
+    `媒体: ${mediaItems.length} 个`,
+    `已选: ${selectedIndexes.length} 个`,
+    "",
+    "点击编号可单选/多选；可删除选中媒体，或上传一张图片/视频替换选中媒体。",
+  ].join("\n"), {
+    reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes }) },
+  });
+}
+
+async function updateStoredPostMediaItems(args: {
+  bot: TelegramBot;
+  chatId: number;
+  archiveId: string;
+  postId: string;
+  groupContentType?: TelegramGroupContentType;
+  mediaItems: StoredPostMediaItem[];
+  successText: string;
+}) {
+  const archive = await loadPersonaForThisBot(args.archiveId);
+  const post = archive?.posts.find((item) => item.id === args.postId);
+  if (!archive || !post) {
+    await args.bot.sendMessage(args.chatId, "没有找到这篇推文，请返回推文列表重新打开。");
+    return;
+  }
+  const primary = args.mediaItems[0];
+  const primaryUrl = primary?.url || primary?.localPath || "";
+  const updated = await updatePersonaArchivePostDraft(args.archiveId, args.postId, {
+    imageUrl: primaryUrl,
+    mediaUrl: primaryUrl,
+    mediaType: primary?.type,
+    mediaItems: args.mediaItems,
+    sourceMetaPatch: {
+      edited: true,
+      mediaItems: args.mediaItems,
+      warnings: [
+        ...(post.sourceMeta?.warnings || []),
+        args.successText,
+      ],
+    },
+  });
+  if (!updated) {
+    await args.bot.sendMessage(args.chatId, "保存媒体修改失败，请稍后重试。");
+    return;
+  }
+  pendingPostActions.set(args.chatId, { archiveId: args.archiveId, postId: args.postId, groupContentType: args.groupContentType });
+  pendingPostMediaSelections.delete(args.chatId);
+  await args.bot.sendMessage(args.chatId, `${args.successText}\n当前媒体: ${args.mediaItems.length} 个`, {
+    reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+  });
 }
 
 export function buildPostDetailActionRows(args: {
@@ -9803,6 +9994,7 @@ export function buildPostDetailActionRows(args: {
   return [
     [{ text: "🚀 发布这篇", callback_data: args.publishCallback }],
     ...(args.hasImage ? [[{ text: "🖼 查看配圖/視頻", callback_data: "post_media_preview" }]] : []),
+    ...(args.hasImage ? [[{ text: "🧩 管理媒体", callback_data: "post_media_manage" }]] : []),
     [{ text: "编辑文案/媒体", callback_data: "post_edit_custom" }],
     [{ text: "🔄 重新生成推文", callback_data: "post_regen" }],
     [{ text: args.hasImage ? "🖼 重新生成图片" : "🖼 单独生成图片", callback_data: imageRegenCallback }],
@@ -12111,15 +12303,17 @@ async function applyScheduledTimeSelection(chatId: number, msgId: number | undef
   }
 }
 
-function describePostMedia(post: { imageUrl?: string | null }) {
-  if (!post.imageUrl) return "純文字";
-  const url = String(post.imageUrl).toLowerCase();
+function describePostMedia(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">) {
+  const mediaItem = getStoredPostMediaItems(post)[0];
+  const url = String(mediaItem?.url || "").toLowerCase();
+  if (!url) return "純文字";
+  if (mediaItem?.type === "video") return "視頻";
   if (/\.(mp4|mov|m4v|webm)(\?|$)/.test(url)) return "視頻";
   if (/\.(jpg|jpeg|png|gif|webp)(\?|$)/.test(url)) return "圖文";
   return "帶媒體";
 }
 
-function summarizeManualPublishSelection(posts: Array<{ content: string; imageUrl?: string | null }>, startIndex: number, count: number) {
+function summarizeManualPublishSelection(posts: PersonaArchive["posts"], startIndex: number, count: number) {
   const selected = posts.slice(startIndex, startIndex + count);
   const mediaKinds = new Set(selected.map((post) => describePostMedia(post)));
   const preview = selected.slice(0, 3).map((post, idx) => `【第${startIndex + idx + 1}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`);
@@ -16075,6 +16269,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
         postIndex: archiveIndex,
         groupContentType: selected?.groupContentType,
       });
+      if (mediaItems.length > 1) {
+        await sendStoredPostMediaPreviews(bot, chatId, mediaItems, displayIndex);
+        await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive, post.sourceMeta), {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: detailRows,
+          },
+        });
+        await deleteTemporaryMessage(bot, chatId, loadingMessage);
+        return;
+      }
       if (postImageUrl && await sendPostPhotoDetail(bot, chatId, msgId, {
         displayIndex,
         content: post.content,
@@ -16083,9 +16288,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         linkPresentation: getTweetStyleLinkPresentation(archive.setup),
         inlineKeyboard: detailRows,
       })) {
-        if (mediaItems.length > 1) {
-          await sendStoredPostMediaPreviews(bot, chatId, mediaItems.slice(1), displayIndex);
-        }
         await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
@@ -16315,6 +16517,94 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data === "post_media_manage" || data.startsWith("post_media_toggle_") || data === "post_media_select_all" || data === "post_media_clear" || data === "post_media_delete_selected" || data === "post_media_replace_selected") {
+      const action = pendingPostActions.get(chatId);
+      if (!action?.archiveId || !action.postId) {
+        await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "人设列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(action.archiveId);
+      const post = archive?.posts.find((item) => item.id === action.postId);
+      if (!archive || !post) {
+        await safeEditOrSend(bot, chatId, msgId, "没有找到这篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+        });
+        return;
+      }
+      const mediaItems = getStoredPostMediaItems(post);
+      const current = pendingPostMediaSelections.get(chatId);
+      let selectedIndexes = current?.archiveId === action.archiveId && current.postId === action.postId
+        ? current.selectedIndexes.filter((index) => index >= 0 && index < mediaItems.length)
+        : [];
+      if (data.startsWith("post_media_toggle_")) {
+        const mediaIndex = Number(data.slice("post_media_toggle_".length));
+        if (Number.isInteger(mediaIndex) && mediaIndex >= 0 && mediaIndex < mediaItems.length) {
+          selectedIndexes = selectedIndexes.includes(mediaIndex)
+            ? selectedIndexes.filter((index) => index !== mediaIndex)
+            : [...selectedIndexes, mediaIndex].sort((a, b) => a - b);
+        }
+      } else if (data === "post_media_select_all") {
+        selectedIndexes = mediaItems.map((_, index) => index);
+      } else if (data === "post_media_clear") {
+        selectedIndexes = [];
+      } else if (data === "post_media_delete_selected") {
+        if (!selectedIndexes.length) {
+          await safeEditOrSend(bot, chatId, msgId, "请先选择要删除的媒体。", {
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes }) },
+          });
+          return;
+        }
+        const selectedSet = new Set(selectedIndexes);
+        const nextMediaItems = mediaItems.filter((_, index) => !selectedSet.has(index));
+        await updateStoredPostMediaItems({
+          bot,
+          chatId,
+          archiveId: action.archiveId,
+          postId: action.postId,
+          groupContentType: action.groupContentType,
+          mediaItems: nextMediaItems,
+          successText: `已删除 ${selectedIndexes.length} 个媒体`,
+        });
+        return;
+      } else if (data === "post_media_replace_selected") {
+        if (!selectedIndexes.length) {
+          await safeEditOrSend(bot, chatId, msgId, "请先选择要替换的媒体。", {
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes }) },
+          });
+          return;
+        }
+        const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+        pendingStoredPostEdits.set(chatId, {
+          archiveId: action.archiveId,
+          postId: action.postId,
+          groupContentType: action.groupContentType,
+          displayIndex,
+          currentContent: post.content,
+          replaceMediaIndexes: selectedIndexes,
+        });
+        await safeEditOrSend(bot, chatId, msgId, [
+          "替换选中媒体",
+          "",
+          `已选择: ${selectedIndexes.map((index) => index + 1).join(", ")}`,
+          "请发送一张图片或一个视频。新媒体会替换当前选中的媒体；caption 可同时作为新文案。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: "post_media_manage" }]] },
+        });
+        return;
+      }
+      pendingPostMediaSelections.set(chatId, {
+        archiveId: action.archiveId,
+        postId: action.postId,
+        groupContentType: action.groupContentType,
+        selectedIndexes,
+        createdAt: Date.now(),
+      });
+      await renderStoredPostMediaManager(bot, chatId, msgId, action);
+      return;
+    }
+
     if (data === "post_edit_custom") {
       const action = pendingPostActions.get(chatId);
       if (!action?.archiveId || !action.postId) {
@@ -16489,6 +16779,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
         postIndex: archive.posts.findIndex((item) => item.id === post.id),
         groupContentType: action.groupContentType,
       });
+      if (mediaItems.length > 1) {
+        await sendStoredPostMediaPreviews(bot, chatId, mediaItems, displayIndex);
+        await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive, post.sourceMeta), {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: detailRows,
+          },
+        });
+        await deleteTemporaryMessage(bot, chatId, loadingMessage);
+        return;
+      }
       if (postImageUrl && await sendPostPhotoDetail(bot, chatId, msgId, {
         displayIndex,
         content: post.content,
@@ -16497,9 +16798,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         linkPresentation: getTweetStyleLinkPresentation(archive.setup),
         inlineKeyboard: detailRows,
       })) {
-        if (mediaItems.length > 1) {
-          await sendStoredPostMediaPreviews(bot, chatId, mediaItems.slice(1), displayIndex);
-        }
         await deleteTemporaryMessage(bot, chatId, loadingMessage);
         return;
       }
@@ -18592,6 +18890,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         content: editedText || storedPostEdit.currentContent,
         mediaUrl: mediaUrl || undefined,
         mediaType,
+        replaceMediaIndexes: storedPostEdit.replaceMediaIndexes,
       });
       return;
     }

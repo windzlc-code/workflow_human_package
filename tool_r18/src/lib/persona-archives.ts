@@ -1057,6 +1057,7 @@ export async function updatePersonaArchivePostDraft(
   archivePostId: string,
   patch: {
     content?: string;
+    imageUrl?: string;
     mediaUrl?: string;
     mediaType?: PersonaArchivePost["mediaType"];
     mediaItems?: PersonaArchivePost["mediaItems"];
@@ -1070,6 +1071,7 @@ export async function updatePersonaArchivePostDraft(
     if (post.id !== archivePostId) return post;
     const content = typeof patch.content === "string" ? patch.content.trim() : post.content;
     const mediaUrl = patch.mediaUrl !== undefined ? patch.mediaUrl : post.mediaUrl;
+    const imageUrl = patch.imageUrl !== undefined ? patch.imageUrl : post.imageUrl;
     const mediaItems = patch.mediaItems !== undefined ? patch.mediaItems : post.mediaItems;
     const sourceMeta = patch.sourceMetaPatch
       ? { ...(post.sourceMeta || {}), ...patch.sourceMetaPatch }
@@ -1078,7 +1080,7 @@ export async function updatePersonaArchivePostDraft(
       ...post,
       content,
       wordCount: content.length,
-      imageUrl: mediaUrl || post.imageUrl,
+      imageUrl: imageUrl || undefined,
       mediaUrl,
       mediaType: patch.mediaType !== undefined ? patch.mediaType : post.mediaType,
       mediaItems,
