@@ -16868,6 +16868,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+      clearToolR18TransientState(chatId);
       pendingStoredPostEdits.set(chatId, {
         archiveId: action.archiveId,
         postId: action.postId,
@@ -16942,6 +16943,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+      clearToolR18TransientState(chatId);
       pendingStoredPostEdits.set(chatId, {
         archiveId: action.archiveId,
         postId: action.postId,
@@ -19109,7 +19111,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    const pendingToolR18 = pendingToolR18Tasks.get(chatId);
+    const pendingToolR18 = pendingStoredPostEdits.has(chatId) ? undefined : pendingToolR18Tasks.get(chatId);
     if (pendingToolR18) {
       if (pendingToolR18.stage === "await_paid_post_count") {
         const count = Number(text.match(/\d+/)?.[0] || 0);
@@ -19209,6 +19211,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       pendingStoredPostEdits.delete(chatId);
+      clearToolR18TransientState(chatId);
       await saveStoredPostCustomEdit({
         bot,
         chatId,
