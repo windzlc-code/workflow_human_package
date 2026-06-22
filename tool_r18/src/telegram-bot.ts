@@ -3765,6 +3765,17 @@ async function showSentimentHotCandidateDetail(args: {
       ],
     },
   });
+  const previewMediaItems = candidate.media
+    .map((item) => ({
+      url: item.localPath || item.url,
+      type: item.type || "unknown",
+      localPath: item.localPath,
+      warning: item.warning,
+    }))
+    .filter((item) => item.url);
+  if (previewMediaItems.length) {
+    await sendStoredPostMediaPreviews(args.bot, args.chatId, previewMediaItems, args.index + 1);
+  }
 }
 
 async function showSentimentHotPendingList(args: {
