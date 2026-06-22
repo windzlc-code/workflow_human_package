@@ -11698,7 +11698,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       });
       const publishScreenshotUrl = result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl
         ? result.screenshotUrl
-        : await screenshot(credentials, padCode).catch(() => undefined);
+        : undefined;
       if (publishScreenshotUrl) {
         await sendOriginalScreenshotDocument(
           bot,
@@ -16000,7 +16000,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             );
             publishedIds.push(post.id);
             publishedOriginals[post.id] = post.content;
-            const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
+            const publishScreenshotUrl = result.screenshotUrl;
             publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
             if (publishScreenshotUrl) {
               await sendOriginalScreenshotDocument(
@@ -17464,7 +17464,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           );
           if (isPublishWarning(result)) publishWarnings.push(`第 ${startIndex + index + 1} 篇：${result.detail}`);
           publishedIds.push(post.id);
-          const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
+          const publishScreenshotUrl = result.screenshotUrl;
           publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
           if (publishScreenshotUrl) {
             await sendOriginalScreenshotDocument(
@@ -17573,7 +17573,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
         );
         stopTyping();
-        const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
+        const publishScreenshotUrl = result.screenshotUrl;
         await markArchiveEpisodesPublished(
           id,
           [post.id],
@@ -18260,7 +18260,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
         );
         stopTyping();
-        const publishScreenshotUrl = result.screenshotUrl || await screenshot(credentials, padCode).catch(() => undefined);
+        const publishScreenshotUrl = result.screenshotUrl;
         await markArchiveEpisodesPublished(
           archiveId,
           [postId],

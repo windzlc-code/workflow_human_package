@@ -6979,11 +6979,13 @@ async function captureThreadsPublishedEvidenceScreenshot(
       throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__未能進入 Threads 個人主頁｜debug=${formatThreadsDebugTargets([shotUrl])}`);
     }
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
+    const beforeSwipeUrl = shotUrl;
     // 发布后的取证只做一轮固定首滑：进入个人页后让首条帖文露出用户名、
     // 发布时间和正文即可，不再多轮校验或大幅补滑。
     await swipe(config, padCode, "BOTTOM_TO_TOP", { startX: 360, startY: 1220, endX: 360, endY: 600 });
-    await delay(500);
-    shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+    await delay(350);
+    shotUrl = await waitThreadsScreenshotChangedAfterAction(config, padCode, beforeSwipeUrl, 2200)
+      .catch(async () => freezeScreenshotUrl(await screenshot(config, padCode)));
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
     if (!await isThreadsProfileScreenshot(config, padCode, shotUrl).catch(() => false)) {
       throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__取證滑動後已離開 Threads 個人主頁｜debug=${formatThreadsDebugTargets([shotUrl])}`);
@@ -6996,6 +6998,29 @@ async function captureThreadsPublishedEvidenceScreenshot(
     return presentationShot;
   }
   throw new Error("未能取得 Threads 發布後截圖");
+}
+
+async function waitThreadsScreenshotChangedAfterAction(
+  config: VmosConfig,
+  padCode: string,
+  beforeUrl: string,
+  timeoutMs = 2200,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let lastUrl = "";
+  while (Date.now() < deadline) {
+    await delay(250);
+    lastUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    if (!lastUrl) continue;
+    const diff = await getRegionDiffScore(beforeUrl, lastUrl, {
+      x: 0,
+      y: 180,
+      width: FIXED_VMOS_SCREEN.width,
+      height: 1180,
+    }).catch(() => 0);
+    if (diff >= 2.5) return lastUrl;
+  }
+  throw new Error(`__THREADS_PROFILE_CAPTURE_FAILED__滑動後截圖未刷新｜debug=${formatThreadsDebugTargets([beforeUrl, lastUrl])}`);
 }
 
 async function tapThreadsProfileTab(
@@ -13468,7 +13493,6 @@ async function verifyThreadsProfileContainsPostWithRetries(
     return {
       state: "warning",
       detail: `已執行發布，待人工確認（個人頁截圖取證失敗：${msg}）`,
-      screenshotUrl: await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined),
     };
   }
 }
