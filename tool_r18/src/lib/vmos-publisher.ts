@@ -1573,20 +1573,64 @@ export function findThreadsBottomSearchTabTarget(uiXml: string): { x: number; y:
     const bounds = getXmlAttr(node, "bounds");
     const center = parseBoundsCenter(bounds);
     if (!center) continue;
+    if (center.y < 1000) continue;
 
     let score = 0;
     if (/^(Search|搜尋|搜索|Explore|探索)$/i.test(text)) score += 10;
     if (/(Search|搜尋|搜索|Explore|探索)/i.test(text)) score += 4;
     if (/true/i.test(getXmlAttr(node, "clickable"))) score += 2;
     if (/Button|ImageView|TextView|FrameLayout|ViewGroup/i.test(className)) score += 1;
-    if (center.y >= 900) score += 3;
+    score += 3;
     if (center.x >= 90 && center.x <= 330) score += 2;
-    if (/Home|首頁|主页|主頁|Post|Create|Activity|Profile|個人|个人/i.test(text)) score -= 10;
+    if (/Home|首頁|主页|主頁|Post|Create|Activity|Notifications?|動態消息|动态消息|通知|Profile|個人|个人/i.test(text)) score -= 10;
     if (score >= 10) candidates.push({ ...center, score });
   }
 
   const best = candidates.sort((a, b) => b.score - a.score || b.y - a.y)[0];
   return best ? { x: best.x, y: best.y } : null;
+}
+
+export function findThreadsTopSearchButtonTarget(uiXml: string): { x: number; y: number } | null {
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    const text = `${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`.trim();
+    const bounds = getXmlAttr(node, "bounds");
+    const center = parseBoundsCenter(bounds);
+    if (!center) continue;
+    if (center.y > 260 || center.x < 520) continue;
+
+    let score = 0;
+    if (/^(Search|搜尋|搜索|Explore|探索)$/i.test(text)) score += 10;
+    if (/(Search|搜尋|搜索|Explore|探索)/i.test(text)) score += 4;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 2;
+    if (/Button|ImageView|TextView|FrameLayout|ViewGroup/i.test(className)) score += 1;
+    if (/Home|首頁|主页|主頁|Post|Create|Activity|Notifications?|動態消息|动态消息|通知|Profile|個人|个人/i.test(text)) score -= 10;
+    if (score >= 10) candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || b.x - a.x)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+export function looksLikeThreadsActivityUiXml(uiXml: string): boolean {
+  const text = normalizeSingleLine(decodeXmlAttr(uiXml));
+  return /(Activity|Notifications?|動態消息|动态消息|通知)/i.test(text)
+    && /(For you|Following|為你推薦|为你推荐|追蹤中|关注中|附帶原始貼文的回覆內容|附带原始贴文的回复内容|Follow requests?|Mentions?)/i.test(text);
+}
+
+export function looksLikeThreadsPostOptionsSheetUiXml(uiXml: string): boolean {
+  const text = normalizeSingleLine(decodeXmlAttr(uiXml));
+  return /(複製連結|复制链接|Copy link)/i.test(text)
+    && /(使用標籤建立|使用标签建立|儲存|储存|沒興趣|没兴趣|Not interested|檢舉|举报|Report)/i.test(text);
+}
+
+export function looksLikeThreadsThreadDetailUiXml(uiXml: string): boolean {
+  const text = normalizeSingleLine(decodeXmlAttr(uiXml));
+  return /(串文|Thread)/i.test(text)
+    && /(追蹤|关注|Follow|分鐘|分钟|min|回覆|回复|Reply)/i.test(text);
 }
 
 export function findThreadsSearchInputTarget(uiXml: string): { x: number; y: number } | null {
@@ -1611,6 +1655,56 @@ export function findThreadsSearchInputTarget(uiXml: string): { x: number; y: num
 
   const best = candidates.sort((a, b) => b.score - a.score || a.y - b.y)[0];
   return best ? { x: best.x, y: best.y } : null;
+}
+
+function findThreadsSearchSuggestionTarget(uiXml: string, keyword: string): { x: number; y: number } | null {
+  const normalizedKeyword = normalizeSingleLine(keyword).replace(/\s+/g, "");
+  if (!normalizedKeyword) return null;
+  const candidates: Array<{ x: number; y: number; score: number }> = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const text = normalizeSingleLine(`${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`)
+      .replace(/\s+/g, "");
+    if (!text || !text.includes(normalizedKeyword)) continue;
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center) continue;
+    if (center.y < 190 || center.y > 920) continue;
+    let score = 0;
+    if (/true/i.test(getXmlAttr(node, "clickable"))) score += 4;
+    if (center.y >= 220 && center.y <= 520) score += 5;
+    if (center.x >= 70 && center.x <= 520) score += 2;
+    if (/搜尋|搜索|Search/.test(text) && center.y < 220) score -= 8;
+    candidates.push({ ...center, score });
+  }
+
+  const best = candidates.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+function threadsSearchInputContainsKeyword(uiXml: string, keyword: string): boolean {
+  const normalizedKeyword = normalizeSingleLine(keyword).replace(/\s+/g, "");
+  if (!normalizedKeyword) return false;
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  for (const node of nodes) {
+    const className = getXmlAttr(node, "class");
+    if (!className.includes("EditText")) continue;
+    const text = normalizeSingleLine(`${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`)
+      .replace(/\s+/g, "");
+    if (text.includes(normalizedKeyword)) return true;
+  }
+  return false;
+}
+
+export function looksLikeThreadsSearchResultsUiXml(uiXml: string, keyword?: string): boolean {
+  const normalizedXmlText = normalizeSingleLine(decodeXmlAttr(uiXml)).replace(/\s+/g, "");
+  if (!normalizedXmlText) return false;
+  const normalizedKeyword = normalizeSingleLine(keyword || "").replace(/\s+/g, "");
+  if (normalizedKeyword && !normalizedXmlText.includes(normalizedKeyword)) return false;
+  const hasSearchTabs = /(熱門貼文|热门贴文|最新貼文|最新贴文|相關個人檔案|相关个人档案|Top|Latest|Profiles)/i.test(normalizedXmlText);
+  const hasResultContent = /(小時|小时|分鐘|分钟|天|回覆|回复|讚|赞|轉發|转发|熱門|热门|最新)/i.test(normalizedXmlText);
+  const hasSearchChrome = /(搜尋|搜索|Search|熱門貼文|热门贴文|相關個人檔案|相关个人档案)/i.test(normalizedXmlText);
+  return hasSearchTabs && hasResultContent && hasSearchChrome;
 }
 
 export function findThreadsProfileVideoTabTarget(uiXml: string): { x: number; y: number } | null {
@@ -2501,9 +2595,9 @@ async function detectAcpReplyInputHasDraftLocally(screenshotUrl: string | undefi
   if (!pixels) return false;
   if (!(await detectAndroidKeyboardVisibleLocally(screenshotUrl).catch(() => false))) return false;
   const { data, width, height } = pixels;
-  const left = Math.max(0, Math.floor(width * 0.05));
-  const right = Math.min(width - 1, Math.floor(width * 0.76));
-  const top = Math.max(0, Math.floor(height * 0.56));
+  const left = Math.max(0, Math.floor(width * 0.04));
+  const right = Math.min(width - 1, Math.floor(width * 0.80));
+  const top = Math.max(0, Math.floor(height * 0.50));
   const bottom = Math.min(height - 1, Math.floor(height * 0.69));
   let dark = 0;
   let total = 0;
@@ -2518,7 +2612,7 @@ async function detectAcpReplyInputHasDraftLocally(screenshotUrl: string | undefi
     }
   }
   if (total < 200) return false;
-  return dark >= 95 && dark / total >= 0.018;
+  return dark >= 95 && dark / total >= 0.014;
 }
 
 export async function detectAcpReplyBarClearedAfterSendLocally(screenshotUrl: string | undefined): Promise<boolean> {
@@ -4400,6 +4494,46 @@ export async function detectThreadsSearchOverlayLocally(screenshotUrl: string | 
     && searchTextOrIcon >= 90
     && (fullHeightSearchOverlay || keyboardSearchOverlay)
     && composerTitleArea < 1400;
+}
+
+async function detectThreadsSearchResultsPageLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  if (await detectAndroidKeyboardVisibleLocally(screenshotUrl).catch(() => false)) return false;
+  if (await detectThreadsSideDrawerLocally(screenshotUrl).catch(() => false)) return false;
+  if (await detectThreadsProfilePageLocally(screenshotUrl).catch(() => false)) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) count += 1;
+      }
+    }
+    return count;
+  };
+  const isPillGray = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return a > 220 && avg > 214 && avg < 246 && spread < 24;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 95;
+  const searchPill = countRegion(0.14, 0.045, 0.72, 0.115, isPillGray);
+  const resultContent = countRegion(0.04, 0.16, 0.98, 0.86, isDark);
+  const bottomNav = countRegion(0.04, 0.91, 0.96, 0.99, isDark);
+  return searchPill >= 2400 && resultContent >= 3200 && bottomNav >= 1000;
 }
 
 export async function detectThreadsReplyComposerLocally(screenshotUrl: string | undefined): Promise<string | null> {
@@ -21056,29 +21190,37 @@ export interface WarmupConfig {
   commentChance?: number;
   maxComments?: number;
   minRequiredComments?: number;
+  minRequiredInteractions?: number;
   commentTemplates?: string[];
   commentPersona?: WarmupCommentPersona;
   keywords?: string[];
   searchChance?: number;
+  requireRelevantContent?: boolean;
+  relevanceProbePosts?: number;
+  relevanceSearchAttempts?: number;
   riskManaged?: boolean;
   stopOnRiskLimit?: boolean;
   strictCompletion?: boolean;
   requireReadablePostForComment?: boolean;
 }
 
-function assertWarmupMinimumCompletion(
+export function assertWarmupMinimumCompletion(
   platformLabel: string,
   result: { liked: number; commented: number },
-  cfg: Pick<WarmupConfig, "minRequiredLikes" | "minRequiredComments">,
+  cfg: Pick<WarmupConfig, "minRequiredLikes" | "minRequiredComments" | "minRequiredInteractions">,
 ) {
   const minRequiredLikes = Math.max(0, Math.floor(cfg.minRequiredLikes || 0));
   const minRequiredComments = Math.max(0, Math.floor(cfg.minRequiredComments || 0));
+  const minRequiredInteractions = Math.max(0, Math.floor(cfg.minRequiredInteractions || 0));
   const missing: string[] = [];
   if (minRequiredLikes > 0 && result.liked < minRequiredLikes) {
     missing.push(`要求点赞至少 ${minRequiredLikes} 个，实际成功 ${result.liked} 个`);
   }
   if (minRequiredComments > 0 && result.commented < minRequiredComments) {
     missing.push(`要求回复/留言至少 ${minRequiredComments} 个，实际成功 ${result.commented} 个`);
+  }
+  if (minRequiredInteractions > 0 && result.liked + result.commented < minRequiredInteractions) {
+    missing.push(`要求点赞或留言至少成功 ${minRequiredInteractions} 次，实际成功 ${result.liked + result.commented} 次`);
   }
   if (missing.length) {
     throw new Error(`${platformLabel} 养号未完成：${missing.join("；")}`);
@@ -21239,6 +21381,7 @@ export function planRiskManagedWarmupConfig(
       commentChance: Math.max(0, Math.min(Number(cfg.commentChance || 0), commentCap > 0 ? 15 : 0)),
       maxComments: Math.min(plannedComments, commentCap),
       minRequiredComments: Math.min(Math.max(0, Math.floor(cfg.minRequiredComments || 0)), commentCap),
+      minRequiredInteractions: Math.min(Math.max(0, Math.floor(cfg.minRequiredInteractions || 0)), likeCap + commentCap),
       riskManaged: true,
       stopOnRiskLimit: cfg.stopOnRiskLimit ?? true,
       strictCompletion: false,
@@ -21274,6 +21417,62 @@ function warmupRandom(min: number, max: number) {
 
 function warmupRandomInt(min: number, max: number) {
   return Math.floor(warmupRandom(min, max + 1));
+}
+
+type WarmupInteractionChoice = "like" | "comment";
+
+export function chooseWarmupTimedInteraction(params: {
+  liked: number;
+  commented: number;
+  minRequiredLikes: number;
+  minRequiredComments: number;
+  minRequiredInteractions: number;
+  likeChance: number;
+  commentChance: number;
+  maxLikes: number;
+  maxComments: number;
+  likeFailures: number;
+  commentFailures: number;
+  maxCommentFailures: number;
+  pickIndex?: (count: number) => number;
+}): WarmupInteractionChoice | null {
+  const canLike = params.likeChance > 0 && params.liked < params.maxLikes && params.likeFailures < 3;
+  const canComment = params.commentChance > 0 && params.commented < params.maxComments && params.commentFailures < params.maxCommentFailures;
+  const requiredChoices: WarmupInteractionChoice[] = [];
+  if (params.minRequiredLikes > params.liked && canLike) requiredChoices.push("like");
+  if (params.minRequiredComments > params.commented && canComment) requiredChoices.push("comment");
+  if (params.liked + params.commented < params.minRequiredInteractions) {
+    if (canLike) requiredChoices.push("like");
+    if (canComment) requiredChoices.push("comment");
+  }
+
+  if (params.minRequiredLikes > params.liked && requiredChoices.includes("like")) return "like";
+  if (params.minRequiredComments > params.commented && requiredChoices.includes("comment")) return "comment";
+  if (
+    params.minRequiredInteractions > params.liked + params.commented
+    && params.minRequiredLikes <= params.liked
+    && params.minRequiredComments <= params.commented
+    && canComment
+  ) {
+    return "comment";
+  }
+  if (
+    params.minRequiredInteractions > 0
+    && params.liked >= params.minRequiredLikes
+    && params.commented >= params.minRequiredComments
+    && params.liked + params.commented >= params.minRequiredInteractions
+  ) {
+    return null;
+  }
+
+  const choices = Array.from(new Set(requiredChoices.length ? requiredChoices : [
+    ...(canLike ? ["like" as const] : []),
+    ...(canComment ? ["comment" as const] : []),
+  ]));
+  if (!choices.length) return null;
+  const pickIndex = params.pickIndex || ((count: number) => warmupRandomInt(0, count - 1));
+  const index = Math.max(0, Math.min(choices.length - 1, Math.floor(pickIndex(choices.length))));
+  return choices[index] || null;
 }
 
 function warmupHumanOffset(radius = 5) {
@@ -21891,7 +22090,7 @@ function isTrustedWarmupCommentDebugReason(debugReason: string | undefined, padC
 }
 
 export function isThreadsWarmupCommentExpectedSkipMessage(message: string): boolean {
-  return /私密主页限制回复非粉丝|Private profiles can only reply to their followers|To respond to the author|Update profile privacy|Switch to public to reply to anyone|留言目标不够可靠|视觉识别找不到评论按钮|未打开回复输入框|点留言误入|留言证据为侧栏|留言输入未确认|留言发布失败：评论仍停留在输入框|留言发布结果未确认|留言输入未能被 UI 确认|留言生成失败：生成内容为空|留言候选缺少模板|已跳过/.test(message);
+  return /私密主页限制回复非粉丝|Private profiles can only reply to their followers|To respond to the author|Update profile privacy|Switch to public to reply to anyone|留言目标不够可靠|视觉识别找不到评论按钮|未打开回复输入框|点留言误入|留言证据为侧栏|留言输入未确认|留言发布失败：评论仍停留在输入框|留言发布结果未确认|留言输入未能被 UI 确认|留言生成失败：生成内容为空|留言候选缺少模板|留言内容和本轮已用内容高度重复|当前帖子可见区域已有相似留言|已跳过/.test(message);
 }
 
 function parseWarmupGeometryRowY(debugRaw: string | undefined): number | null {
@@ -23274,9 +23473,6 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
   if (await detectThreadsSideDrawerLocally(shotUrl).catch(() => false)) {
     return { screenshotUrl: shotUrl, debugReason: "acp_side_drawer_detected" };
   }
-  if (await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
-    return { screenshotUrl: shotUrl, debugReason: "profile_ui:acp_local_screenshot" };
-  }
   const mediaOverlayActions = await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null);
   if (mediaOverlayActions?.like || mediaOverlayActions?.comment) {
     return { screenshotUrl: shotUrl, ...mediaOverlayActions };
@@ -23297,10 +23493,26 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
         ].join(" | "),
       };
     }
+    if (detailReason || inlineReplyBar) {
+      const image = await getImageDimensions(shotUrl).catch(() => null);
+      const width = image?.width || BASE_SCREEN.width;
+      const height = image?.height || BASE_SCREEN.height;
+      return {
+        screenshotUrl: shotUrl,
+        comment: { x: Math.round(width * 0.18), y: Math.round(height * 0.948) },
+        debugReason: [
+          `thread_detail_visual:${detailReason || "LOCAL_INLINE_REPLY_BAR"}`,
+          "acp_detail_reply_input_fallback",
+        ].join(" | "),
+      };
+    }
     return {
       screenshotUrl: shotUrl,
       debugReason: `thread_detail_no_action_row:${detailReason || (inlineReplyBar ? "LOCAL_INLINE_REPLY_BAR" : "LOCAL_THREAD_DETAIL_SHELL")}`,
     };
+  }
+  if (await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "profile_ui:acp_local_screenshot" };
   }
   if (await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) {
     return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_local_screenshot" };
@@ -23632,6 +23844,65 @@ function warmupCommentContentLength(comment: string): number {
   return comment.replace(/\s+/g, "").length;
 }
 
+function warmupCompactSemanticText(text: string): string {
+  return sanitizeWarmupComment(text)
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[#@][^\s，。,.!?！？]+/g, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+function warmupTextSimilarity(a: string, b: string): number {
+  const left = warmupCompactSemanticText(a);
+  const right = warmupCompactSemanticText(b);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  if (left.includes(right) || right.includes(left)) {
+    return Math.min(left.length, right.length) / Math.max(left.length, right.length);
+  }
+  const grams = (value: string) => {
+    const result = new Set<string>();
+    for (let i = 0; i < value.length - 1; i += 1) result.add(value.slice(i, i + 2));
+    if (!result.size) result.add(value);
+    return result;
+  };
+  const aGrams = grams(left);
+  const bGrams = grams(right);
+  let shared = 0;
+  for (const gram of aGrams) {
+    if (bGrams.has(gram)) shared++;
+  }
+  return shared / Math.max(aGrams.size, bGrams.size);
+}
+
+export function isNearDuplicateWarmupComment(comment: string, previous: Iterable<string>): boolean {
+  const current = warmupCompactSemanticText(comment);
+  if (!current) return true;
+  for (const old of previous) {
+    if (warmupTextSimilarity(current, old) >= 0.72) return true;
+  }
+  return false;
+}
+
+function warmupPostPreviewKey(preview: string): string {
+  return warmupCompactSemanticText(preview).slice(0, 80);
+}
+
+async function warmupVisibleTextContainsNearDuplicateComment(
+  config: VmosConfig,
+  padCode: string,
+  comment: string,
+): Promise<boolean> {
+  const current = warmupCompactSemanticText(comment);
+  if (!current || current.length < 4) return false;
+  const uiXml = await dumpUiXml(config, padCode, 5_500).catch(() => "");
+  if (!uiXml) return false;
+  const visibleTexts = extractUiTexts(uiXml)
+    .map((text) => sanitizeWarmupComment(text))
+    .filter((text) => text.length >= 4 && text.length <= 80);
+  return isNearDuplicateWarmupComment(comment, visibleTexts);
+}
+
 function isShortLowInfoWarmupPost(postPreview: string): boolean {
   const compact = normalizeSingleLine(postPreview)
     .replace(/https?:\/\/\S+/g, "")
@@ -23754,62 +24025,516 @@ export function buildWarmupInterestKeywords(
     .slice(0, 8);
 }
 
-async function warmupMaybeSearchInterest(
+type WarmupRelevanceResult = {
+  relevant: boolean;
+  score: number;
+  matched: string[];
+  keywords: string[];
+  reason: string;
+};
+
+function normalizeWarmupRelevanceText(value: string): string {
+  return normalizeSingleLine(value)
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[#@][^\s，。,.!?！？]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .trim();
+}
+
+function buildWarmupRelevanceKeywordSet(
+  persona?: WarmupCommentPersona,
+  explicitKeywords: string[] = [],
+): string[] {
+  const base = buildWarmupInterestKeywords(persona, explicitKeywords);
+  const personaText = warmupCommentPersonaText(persona);
+  const expanded = [...base];
+  const addIf = (pattern: RegExp, values: string[]) => {
+    if (pattern.test(personaText) || base.some((item) => pattern.test(item))) expanded.push(...values);
+  };
+  addIf(/理財|理财|投資|投资|股票|台股|港股|金融|財經|财经|交易|market|stock/i, ["股市", "股票", "投資", "投资", "財經", "财经", "市場", "市场", "行情", "財報", "财报"]);
+  addIf(/咖啡|咖啡館|咖啡馆|手搖|手摇|飲料|饮料|甜點|甜点|下午茶/i, ["咖啡", "甜點", "甜点", "下午茶", "飲料", "饮料", "手搖", "手摇"]);
+  addIf(/瑜伽|健身|運動|运动|跑步|健康|減脂|减脂|养生|養生/i, ["瑜伽", "健身", "運動", "运动", "跑步", "健康", "減脂", "减脂"]);
+  addIf(/穿搭|時尚|时尚|美妝|美妆|保養|保养|髮型|发型|日系|可愛|可爱/i, ["穿搭", "時尚", "时尚", "美妝", "美妆", "保養", "保养", "髮型", "发型"]);
+  addIf(/旅行|旅遊|旅游|風景|风景|城市|日本|韓國|韩国|台北|生活/i, ["旅行", "旅遊", "旅游", "風景", "风景", "台北", "城市", "生活"]);
+  addIf(/職場|职场|主管|創業|创业|生意|銷售|销售|管理|上班/i, ["職場", "职场", "上班", "創業", "创业", "管理", "生意", "工作"]);
+  addIf(/媽媽|妈妈|家庭|孩子|親子|亲子|阿姨|熟齡|熟龄/i, ["家庭", "孩子", "親子", "亲子", "熟齡", "熟龄", "媽媽", "妈妈"]);
+  addIf(/房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地/i, ["房產", "房产", "房仲", "房屋", "房子", "不動產", "不动产", "地產", "地产", "中介", "仲介", "買房", "买房", "租屋", "租房", "工地"]);
+
+  const seen = new Set<string>();
+  return expanded
+    .map((item) => normalizeWarmupRelevanceText(String(item || "")).replace(/\s+/g, ""))
+    .filter((item) => item.length >= 2 && item.length <= 16)
+    .filter((item) => !/^(人設|人设|人格|自然口語|自然口语|繁體中文|简体中文|台灣地區|台湾地区|不限|真實|真实|風格|风格)$/.test(item))
+    .filter((item) => {
+      if (seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    })
+    .slice(0, 24);
+}
+
+export function buildWarmupSearchKeywordCandidates(
+  persona?: WarmupCommentPersona,
+  explicitKeywords: string[] = [],
+): string[] {
+  const personaText = warmupCommentPersonaText(persona);
+  const interestKeywords = buildWarmupInterestKeywords(persona, explicitKeywords);
+  const candidates: string[] = [];
+  const addIf = (pattern: RegExp, values: string[]) => {
+    if (pattern.test(personaText) || interestKeywords.some((item) => pattern.test(item))) candidates.push(...values);
+  };
+  addIf(/房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地/i, [
+    "房产中介",
+    "不動產",
+    "買房",
+    "房屋買賣",
+    "租房",
+    "看房",
+  ]);
+  addIf(/理財|理财|投資|投资|股票|台股|港股|金融|財經|财经|交易|market|stock/i, ["台股", "投資", "財經", "股市", "理財"]);
+  addIf(/咖啡|咖啡館|咖啡馆|手搖|手摇|飲料|饮料|甜點|甜点|下午茶/i, ["咖啡", "甜點", "下午茶", "手搖飲"]);
+  addIf(/瑜伽|健身|運動|运动|跑步|健康|減脂|减脂|养生|養生/i, ["瑜伽", "健身", "健康", "減脂"]);
+  addIf(/穿搭|時尚|时尚|美妝|美妆|保養|保养|髮型|发型|日系|可愛|可爱/i, ["穿搭", "時尚", "美妝", "保養"]);
+  addIf(/旅行|旅遊|旅游|風景|风景|城市|日本|韓國|韩国|台北|生活/i, ["旅行", "台北生活", "風景", "城市生活"]);
+  addIf(/職場|职场|主管|創業|创业|生意|銷售|销售|管理|上班/i, ["職場", "創業", "管理", "上班日常"]);
+  addIf(/媽媽|妈妈|家庭|孩子|親子|亲子|阿姨|熟齡|熟龄/i, ["親子", "家庭", "熟齡生活", "媽媽"]);
+  candidates.push(...explicitKeywords, ...interestKeywords);
+
+  const banned = /^(人設|人设|人格|自然口語|自然口语|繁體中文|简体中文|台灣地區|台湾地区|不限|真實|真实|風格|风格|直接|故事化)$/i;
+  const seen = new Set<string>();
+  return candidates
+    .map((item) => normalizeSingleLine(String(item || "")).replace(/^#/, "").trim())
+    .map((item) => item.replace(/^\d{1,3}\s*(?:歲|岁|years?\s*old)\s*/i, "").trim())
+    .filter((item) => item.length >= 2 && item.length <= 24)
+    .filter((item) => /\p{Script=Han}/u.test(item))
+    .filter((item) => !banned.test(item))
+    .filter((item) => {
+      const key = item.toLowerCase().replace(/\s+/g, " ");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 12);
+}
+
+async function buildWarmupSearchKeywords(
+  persona?: WarmupCommentPersona,
+  explicitKeywords: string[] = [],
+): Promise<string[]> {
+  const fallback = buildWarmupSearchKeywordCandidates(persona, explicitKeywords);
+  const personaText = warmupCommentPersonaText(persona);
+  if (!personaText || !getGeminiEndpoint().apiKey) return fallback;
+  const request = createTimeoutSignal(6_500);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [{
+          text: `根据这个 Threads 养号人设，生成 3-5 个最适合搜索相关内容的短关键词。
+要求：
+- 关键词必须直接对应人设兴趣/行业，不要抽取年龄、语言、语气、人格描述。
+- 优先可在 Threads 搜索命中的自然短语。
+- 必须全部是中文关键词，禁止英文、拼音、数字年龄、语言风格词。
+- 只返回 JSON：{"keywords":["..."]}
+
+人设：${personaText}
+显式关键词：${explicitKeywords.join(", ")}`,
+        }],
+      }],
+      { maxOutputTokens: 160, temperature: 0.2 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw)).replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
+    const jsonText = text.match(/\{[\s\S]*\}/)?.[0] || "";
+    const parsed = jsonText ? JSON.parse(jsonText) : null;
+    const modelKeywords = Array.isArray(parsed?.keywords) ? parsed.keywords.map((item: unknown) => String(item || "")) : [];
+    const merged = [...modelKeywords, ...fallback];
+    const seen = new Set<string>();
+    return merged
+      .map((item) => normalizeSingleLine(item).replace(/^#/, "").trim())
+      .filter((item) => item.length >= 2 && item.length <= 24)
+      .filter((item) => /\p{Script=Han}/u.test(item))
+      .filter((item) => {
+        const key = item.toLowerCase().replace(/\s+/g, " ");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 12);
+  } catch {
+    return fallback;
+  } finally {
+    request.cleanup();
+  }
+}
+
+export function scoreWarmupPostRelevance(
+  postPreview: string,
+  persona?: WarmupCommentPersona,
+  explicitKeywords: string[] = [],
+): WarmupRelevanceResult {
+  const normalized = normalizeWarmupRelevanceText(postPreview).replace(/\s+/g, "");
+  const keywords = buildWarmupRelevanceKeywordSet(persona, explicitKeywords);
+  const matched: string[] = [];
+  if (!normalized || normalized.length < 4 || !keywords.length) {
+    return { relevant: false, score: 0, matched, keywords, reason: !normalized ? "empty-preview" : "no-keywords" };
+  }
+
+  let score = 0;
+  for (const keyword of keywords) {
+    if (keyword.length >= 2 && normalized.includes(keyword)) {
+      matched.push(keyword);
+      score += keyword.length >= 4 ? 5 : 3;
+    }
+  }
+
+  const personaText = warmupCommentPersonaText(persona);
+  const categoryHit = (personaPattern: RegExp, postPattern: RegExp, weight: number, label: string) => {
+    if ((personaPattern.test(personaText) || keywords.some((item) => personaPattern.test(item))) && postPattern.test(normalized)) {
+      matched.push(label);
+      score += weight;
+    }
+  };
+  categoryHit(/理財|理财|投資|投资|股票|台股|港股|金融|財經|财经|交易|market|stock/i, /股|投資|投资|市場|市场|財報|财报|量能|行情|金融|台股|港股|基金|美股|買|卖|買|賣|漲|涨|跌/, 5, "finance-domain");
+  categoryHit(/咖啡|咖啡館|咖啡馆|手搖|手摇|飲料|饮料|甜點|甜点|下午茶/i, /咖啡|甜點|甜点|下午茶|飲料|饮料|手搖|手摇|拿鐵|拿铁|奶茶|店|餐廳|餐厅/, 5, "cafe-domain");
+  categoryHit(/瑜伽|健身|運動|运动|跑步|健康|減脂|减脂|养生|養生/i, /瑜伽|健身|運動|运动|跑步|健康|減脂|减脂|肌肉|飲食|饮食|體態|体态/, 5, "fitness-domain");
+  categoryHit(/穿搭|時尚|时尚|美妝|美妆|保養|保养|髮型|发型|日系|可愛|可爱/i, /穿搭|時尚|时尚|美妝|美妆|保養|保养|髮型|发型|裙|妝|妆|可愛|可爱/, 5, "style-domain");
+  categoryHit(/旅行|旅遊|旅游|風景|风景|城市|日本|韓國|韩国|台北|生活/i, /旅行|旅遊|旅游|風景|风景|城市|台北|日本|韓國|韩国|景點|景点|生活|日常/, 4, "life-domain");
+  categoryHit(/職場|职场|主管|創業|创业|生意|銷售|销售|管理|上班/i, /職場|职场|上班|工作|主管|創業|创业|生意|銷售|销售|管理|同事|會議|会议/, 5, "work-domain");
+  categoryHit(/媽媽|妈妈|家庭|孩子|親子|亲子|阿姨|熟齡|熟龄/i, /媽媽|妈妈|家庭|孩子|小孩|親子|亲子|熟齡|熟龄|生活|家人/, 5, "family-domain");
+  categoryHit(/房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地/i, /房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地|建案|建商|屋主|看房|看屋|貸款|贷款|裝修|装修|豪宅/, 6, "real-estate-domain");
+
+  const uniqueMatched = Array.from(new Set(matched)).slice(0, 8);
+  const relevant = score >= 5 || uniqueMatched.some((item) => item.length >= 4 && !/-domain$/.test(item));
+  return {
+    relevant,
+    score,
+    matched: uniqueMatched,
+    keywords,
+    reason: relevant ? `matched:${uniqueMatched.join(",")}` : "below-threshold",
+  };
+}
+
+async function warmupSearchInterestSurface(
   config: VmosConfig,
   padCode: string,
-  cfg: WarmupConfig,
+  keyword: string,
   report: (step: string) => void,
-) {
-  const browseCount = Math.max(0, Math.floor(Number(cfg.browseCount) || 0));
-  if (browseCount < 5) return;
-
-  const keywords = buildWarmupInterestKeywords(cfg.commentPersona, cfg.keywords || []);
-  if (!keywords.length) return;
-
-  const riskManaged = cfg.riskManaged !== false;
-  const chance = Math.max(0, Math.min(100, cfg.searchChance ?? (riskManaged ? 16 : 24)));
-  if (chance <= 0 || Math.random() * 100 >= chance) return;
-
-  const keyword = keywords[warmupRandomInt(0, keywords.length - 1)];
+): Promise<void> {
   const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
   const point = (xRatio: number, yRatio: number) => ({
     x: Math.round(screen.width * xRatio),
     y: Math.round(screen.height * yRatio),
   });
 
-  report(`按人设兴趣搜索阅读：${keyword}`);
-  try {
-    const beforeXml = await dumpUiXml(config, padCode).catch(() => "");
-    const searchTab = beforeXml ? findThreadsBottomSearchTabTarget(beforeXml) : null;
-    await warmupTapAbsoluteHuman(config, padCode, searchTab || point(0.28, 0.955), warmupRandomInt(900, 1400), 8);
-
-    const searchXml = await dumpUiXml(config, padCode).catch(() => "");
-    const searchInput = searchXml ? findThreadsSearchInputTarget(searchXml) : null;
-    await warmupTapAbsoluteHuman(config, padCode, searchInput || point(0.42, 0.09), warmupRandomInt(650, 1050), 8);
-    await typeText(config, padCode, keyword, warmupRandomInt(1000, 1600));
-    await execAdbForText(config, padCode, "input keyevent KEYCODE_ENTER", 8_000, 700).catch(() => "");
-    await warmupWaitForScrollSettle(1800, 3200);
-    await warmupDwellLikeHuman(config, padCode, warmupRandomInt(1800, 4200)).catch(() => undefined);
-    if (Math.random() < 0.70) {
-      await warmupScrollDown(config, padCode).catch(() => undefined);
-      await warmupDwellLikeHuman(config, padCode, warmupRandomInt(1500, 3600)).catch(() => undefined);
+  report(`按人设关键词搜索相关内容：${keyword}`);
+  let searchInput: { x: number; y: number } | null = null;
+  for (let attempt = 0; attempt < 3 && !searchInput; attempt += 1) {
+    let openedSearchDirectly = false;
+    if (isAcpPad(padCode)) {
+      report(`ACP 使用 Threads 搜索 deep link ${attempt + 1}/3`);
+      await execAdbForText(
+        config,
+        padCode,
+        "am start -a android.intent.action.VIEW -d 'barcelona://search' com.instagram.barcelona",
+        15_000,
+        1200,
+      ).catch((error) => {
+        report(`ACP 搜索 deep link 失败，回退到界面导航：${error instanceof Error ? error.message : String(error)}`);
+      });
+      await delay(warmupRandomInt(2200, 3200));
+      openedSearchDirectly = true;
+    } else {
+      report(`搜索前确认 Threads 首页 ${attempt + 1}/3`);
+      await withTimeout(
+        ensureThreadsHomeFeed(config, padCode, (p) => report(p.step)),
+        25_000,
+        "warmup search ensure home timeout",
+      ).catch((error) => {
+        report(`搜索前回首页失败，继续尝试导航：${error instanceof Error ? error.message : String(error)}`);
+      });
     }
-  } catch (error) {
-    report(`兴趣搜索失败，回推荐流继续：${error instanceof Error ? error.message : String(error)}`);
+
+    if (!openedSearchDirectly) {
+      report(`打开搜索入口 ${attempt + 1}/3`);
+      const beforeState = await withTimeout(
+        classifyThreadsPageOnDevice(config, padCode),
+        10_000,
+        "warmup search before open classify timeout",
+      ).catch(() => null);
+      if (beforeState?.reason === "LOCAL_ANDROID_LAUNCHER") {
+        report(`搜索入口前在桌面，重启 Threads 后重试 ${attempt + 1}/3`);
+        await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+        await delay(warmupRandomInt(900, 1400));
+        continue;
+      }
+      const beforeXml = await dumpUiXml(config, padCode).catch(() => "");
+      if (looksLikeThreadsPostOptionsSheetUiXml(beforeXml) || looksLikeThreadsThreadDetailUiXml(beforeXml)) {
+        report(`搜索入口前仍不在首页，返回后重试 ${attempt + 1}/3`);
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 700).catch(() => "");
+        await delay(warmupRandomInt(900, 1400));
+        continue;
+      }
+      const searchTab = beforeXml
+        ? (findThreadsBottomSearchTabTarget(beforeXml) || findThreadsTopSearchButtonTarget(beforeXml))
+        : null;
+      const fallbackSearchPoint = searchTab ? null : point(0.28, 0.955);
+      await warmupTapAbsoluteHuman(config, padCode, searchTab || fallbackSearchPoint, warmupRandomInt(900, 1400), 8);
+      await delay(warmupRandomInt(900, 1300));
+    }
+
+    report(`等待搜索输入框 ${attempt + 1}/3`);
+    const searchXml = await dumpUiXml(config, padCode).catch(() => "");
+    searchInput = searchXml ? findThreadsSearchInputTarget(searchXml) : null;
+    if (!searchInput && openedSearchDirectly && isAcpPad(padCode)) {
+      searchInput = point(0.24, 0.147);
+      report(`ACP 搜索页使用固定输入框坐标 ${attempt + 1}/3`);
+    }
+    if (searchInput) break;
+
+    if (looksLikeThreadsActivityUiXml(searchXml)) {
+      report(`搜索入口误入动态消息页，回首页重试 ${attempt + 1}/3`);
+      await warmupTapAbsoluteHuman(config, padCode, point(0.10, 0.955), warmupRandomInt(900, 1300), 8).catch(() => undefined);
+      await delay(warmupRandomInt(900, 1400));
+      continue;
+    }
+
+    report(`搜索输入框未出现，重试打开搜索页 ${attempt + 1}/3`);
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+    await delay(warmupRandomInt(900, 1400));
+  }
+
+  if (!searchInput) {
+    throw new Error("未能打开 Threads 搜索页，未执行关键词输入");
+  }
+
+  await warmupTapAbsoluteHuman(config, padCode, searchInput, warmupRandomInt(650, 1050), 8);
+  if (isAcpPad(padCode)) {
+    await tapViaAdbAbsoluteQuick(config, padCode, searchInput.x, searchInput.y, 450).catch(() => undefined);
+  }
+  await clearFocusedTextInput(config, padCode, 350).catch(() => undefined);
+  report(`输入搜索关键词：${keyword}`);
+  await typeText(config, padCode, keyword, isAcpPad(padCode) ? warmupRandomInt(1800, 2600) : warmupRandomInt(1000, 1600));
+  const waitForKeywordWrittenOrResults = async (timeoutMs = 8_000) => {
+    const deadline = Date.now() + timeoutMs;
+    let lastXml = "";
+    while (Date.now() < deadline) {
+      const xml = await dumpUiXml(config, padCode).catch(() => "");
+      lastXml = xml || lastXml;
+      if (threadsSearchInputContainsKeyword(xml, keyword)) return { ok: true, xml };
+      if (looksLikeThreadsSearchResultsUiXml(xml, keyword)) return { ok: true, xml };
+      const text = normalizeSingleLine(decodeXmlAttr(xml));
+      if (/EditText|搜索|搜尋|Search/i.test(xml) && text.includes(keyword) && scoreWarmupPostRelevance(text, undefined, [keyword]).relevant) {
+        return { ok: true, xml };
+      }
+      await delay(900);
+    }
+    return { ok: false, xml: lastXml };
+  };
+  const initialWritten = await waitForKeywordWrittenOrResults(isAcpPad(padCode) ? 8_000 : 4_000);
+  if (initialWritten.ok && looksLikeThreadsSearchResultsUiXml(initialWritten.xml, keyword)) {
+    report(`搜索结果页已显示中文关键词，继续浏览：${keyword}`);
+    await warmupWaitForScrollSettle(1200, 2200);
+    await delay(warmupRandomInt(700, 1300));
+    return;
+  }
+  if (isAcpPad(padCode) && !initialWritten.ok) {
+    report(`搜索关键词首次未确认，重试中文输入：${keyword}`);
+    await warmupTapAbsoluteHuman(config, padCode, searchInput, warmupRandomInt(650, 950), 8);
+    await tapViaAdbAbsoluteQuick(config, padCode, searchInput.x, searchInput.y, 450).catch(() => undefined);
+    await clearFocusedTextInput(config, padCode, 350).catch(() => undefined);
+    await typeTextViaAdbBase64Broadcast(config, padCode, keyword, warmupRandomInt(1800, 2600), 12_000);
+  }
+  const afterRetryWritten = await waitForKeywordWrittenOrResults(isAcpPad(padCode) ? 8_000 : 4_000);
+  if (isAcpPad(padCode) && !afterRetryWritten.ok) {
+    report(`搜索关键词暂未从 UI XML 确认，已输入中文关键词并提交搜索验证：${keyword}`);
+  }
+  const afterInputXml = afterRetryWritten.xml || await dumpUiXml(config, padCode).catch(() => "");
+  if (looksLikeThreadsSearchResultsUiXml(afterInputXml, keyword)) {
+    report(`搜索结果页已显示中文关键词，继续浏览：${keyword}`);
+    await warmupWaitForScrollSettle(1200, 2200);
+    await delay(warmupRandomInt(700, 1300));
+    return;
+  }
+  await execAdbForText(config, padCode, "input keyevent KEYCODE_ENTER", 8_000, 900).catch(() => "");
+  await warmupWaitForScrollSettle(2800, 5200);
+  await delay(isAcpPad(padCode) ? warmupRandomInt(1800, 3200) : warmupRandomInt(900, 1600));
+}
+
+async function warmupAssessPostRelevanceByModel(
+  screenshotUrl: string | undefined,
+  preview: string,
+  cfg: WarmupConfig,
+  keyword?: string,
+): Promise<{ relevant: boolean; reason: string; preview?: string } | null> {
+  if (!screenshotUrl || !getGeminiEndpoint().apiKey) return null;
+  const inlineData = await getInlineData(screenshotUrl).catch(() => null);
+  if (!inlineData) return null;
+  const personaText = warmupCommentPersonaText(cfg.commentPersona);
+  const request = createTimeoutSignal(9_000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [
+          {
+            text: `判断这张 Threads 截图中的当前主要内容是否适合这个养号人设浏览/互动。
+只根据内容主题是否相关判断；不要因为语言不同就判不相关。
+如果是搜索页，也可以判断可见搜索结果是否整体与人设相关。
+如果主要内容明显不相关，例如体育/娱乐与房产人设无关，应判 false。
+返回 JSON：{"relevant":true|false,"reason":"简短原因","preview":"你识别出的主要内容"}
+
+人设：${personaText}
+搜索关键词：${keyword || ""}
+本地抽取正文：${preview || ""}`,
+          },
+          { inlineData },
+        ],
+      }],
+      { maxOutputTokens: 180, temperature: 0 },
+      request.signal,
+    );
+    const text = normalizeSingleLine(extractText(raw)).replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
+    const jsonText = text.match(/\{[\s\S]*\}/)?.[0] || "";
+    if (!jsonText) return null;
+    const parsed = JSON.parse(jsonText);
+    return {
+      relevant: Boolean(parsed?.relevant),
+      reason: normalizeSingleLine(String(parsed?.reason || "model")).slice(0, 120),
+      preview: normalizeSingleLine(String(parsed?.preview || "")).slice(0, 120),
+    };
+  } catch {
+    return null;
   } finally {
-    await relaunchThreads(config, padCode, 2800).catch(() => undefined);
-    const afterScreen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-    await warmupTapAbsoluteHuman(
-      config,
-      padCode,
-      { x: Math.round(afterScreen.width * 0.11), y: Math.round(afterScreen.height * 0.955) },
-      warmupRandomInt(700, 1200),
-      8,
-    ).catch(() => undefined);
-    if (!isAcpPad(padCode)) {
-      await ensureThreadsHomeFeed(config, padCode, () => undefined).catch(() => undefined);
+    request.cleanup();
+  }
+}
+
+async function warmupCurrentPostRelevance(
+  config: VmosConfig,
+  padCode: string,
+  cfg: WarmupConfig,
+  options: { allowVisionFallback?: boolean; report?: (step: string) => void; label?: string; keyword?: string; useModelMatch?: boolean } = {},
+): Promise<{ preview: string; relevance: WarmupRelevanceResult; screenshotUrl?: string; modelMatch?: { relevant: boolean; reason: string; preview?: string } | null }> {
+  if (options.report) options.report(`人设相关性检测中：${options.label || "读取当前内容"}，正在截图...`);
+  const screenshotUrl = await withTimeout(
+    screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+    10_000,
+    "warmup relevance screenshot timeout",
+  ).catch(() => "");
+  if (options.report) options.report(`人设相关性检测中：${options.label || "读取当前内容"}，正在解析推文...`);
+  const preview = await withTimeout(
+    warmupExtractPostPreview(config, padCode, screenshotUrl, { allowVisionFallback: options.allowVisionFallback }),
+    options.allowVisionFallback ? 12_000 : 7_000,
+    "warmup relevance preview timeout",
+  ).catch(() => "");
+  let relevance = scoreWarmupPostRelevance(preview, cfg.commentPersona, cfg.keywords || []);
+  const modelMatch = (!relevance.relevant && options.useModelMatch)
+    ? await withTimeout(
+      warmupAssessPostRelevanceByModel(screenshotUrl, preview, cfg, options.keyword),
+      10_000,
+      "warmup model relevance timeout",
+    ).catch(() => null)
+    : null;
+  if (modelMatch?.relevant) {
+    relevance = {
+      relevant: true,
+      score: Math.max(5, relevance.score),
+      matched: Array.from(new Set([...relevance.matched, "model-match"])).slice(0, 8),
+      keywords: relevance.keywords,
+      reason: `model:${modelMatch.reason}`,
+    };
+  }
+  return {
+    preview: preview || modelMatch?.preview || "",
+    relevance,
+    screenshotUrl,
+    modelMatch,
+  };
+}
+
+async function warmupEnsureRelevantSurface(
+  config: VmosConfig,
+  padCode: string,
+  cfg: WarmupConfig,
+  report: (step: string) => void,
+  options: { phase?: "preflight" | "browse"; allowSearch?: boolean } = {},
+): Promise<{ ok: boolean; preview: string; reason: string }> {
+  if (cfg.requireRelevantContent === false) return { ok: true, preview: "", reason: "disabled" };
+  const keywords = buildWarmupInterestKeywords(cfg.commentPersona, cfg.keywords || []);
+  if (!keywords.length) return { ok: true, preview: "", reason: "no-keywords" };
+
+  const probePosts = Math.max(1, Math.min(5, Math.floor(cfg.relevanceProbePosts || (options.phase === "preflight" ? 3 : 2))));
+  for (let attempt = 0; attempt < probePosts; attempt += 1) {
+    const current = await warmupCurrentPostRelevance(config, padCode, cfg, {
+      allowVisionFallback: attempt === probePosts - 1,
+      report,
+      label: `首页探测 ${attempt + 1}/${probePosts}`,
+    });
+    if (current.relevance.relevant) {
+      report(`已定位人设相关内容：${current.preview.slice(0, 42) || current.relevance.reason}`);
+      return { ok: true, preview: current.preview, reason: current.relevance.reason };
+    }
+    report(`当前内容和人设不匹配，继续探测 ${attempt + 1}/${probePosts}：${current.preview.slice(0, 36) || current.relevance.reason}`);
+    await warmupDwellLikeHuman(config, padCode, warmupRandomInt(900, 1800)).catch(() => undefined);
+    await warmupScrollDown(config, padCode).catch(() => undefined);
+    await delay(warmupRandomInt(900, 1800));
+  }
+
+  if (options.allowSearch === false) return { ok: false, preview: "", reason: "probe-unmatched" };
+
+  const searchAttempts = Math.max(1, Math.min(5, Math.floor(cfg.relevanceSearchAttempts || 3)));
+  const rawSearchKeywords = await buildWarmupSearchKeywords(cfg.commentPersona, cfg.keywords || []);
+  const searchKeywords = rawSearchKeywords.slice(0, Math.max(searchAttempts, 3));
+  for (let attempt = 0; attempt < Math.min(searchAttempts, searchKeywords.length); attempt += 1) {
+    const keyword = searchKeywords[attempt];
+    if (!keyword) continue;
+    try {
+      report(`选择人设搜索关键词 ${attempt + 1}/${Math.min(searchAttempts, searchKeywords.length)}：${keyword}`);
+      await warmupSearchInterestSurface(config, padCode, keyword, report);
+      if (isAcpPad(padCode) && /\p{Script=Han}/u.test(keyword)) {
+        report(`ACP 已进入中文人设关键词搜索结果页，按关键词相关继续：${keyword}`);
+        return { ok: true, preview: keyword, reason: `search-acp-query:${keyword}` };
+      }
+      for (let scan = 0; scan < 3; scan += 1) {
+        const current = await warmupCurrentPostRelevance(config, padCode, cfg, {
+          allowVisionFallback: true,
+          report,
+          label: `搜索结果 ${keyword} ${scan + 1}/3`,
+          keyword,
+          useModelMatch: true,
+        });
+        if (current.relevance.relevant) {
+          report(`搜索命中人设相关内容：${keyword}｜${current.preview.slice(0, 42) || current.relevance.reason}`);
+          return { ok: true, preview: current.preview, reason: `search:${keyword}:${current.relevance.reason}` };
+        }
+        if (current.modelMatch?.relevant !== false) {
+          const searchXml = await dumpUiXml(config, padCode).catch(() => "");
+          if (threadsSearchInputContainsKeyword(searchXml, keyword)) {
+            report(`搜索页关键词已锁定人设相关内容，按搜索词继续：${keyword}`);
+            return { ok: true, preview: current.preview || keyword, reason: `search-query:${keyword}` };
+          }
+        }
+        const keywordScore = current.preview ? scoreWarmupPostRelevance(current.preview, cfg.commentPersona, [keyword]) : null;
+        if (scan === 0 && keywordScore?.relevant && current.modelMatch?.relevant !== false) {
+          report(`搜索页已按人设关键词打开且内容相关，按关键词相关继续：${keyword}`);
+          return { ok: true, preview: current.preview, reason: `search-keyword:${keyword}` };
+        }
+        report(`搜索结果仍不匹配：${keyword} ${scan + 1}/3${current.modelMatch ? `｜模型：${current.modelMatch.reason}` : ""}`);
+        await warmupScrollDown(config, padCode).catch(() => undefined);
+        await delay(warmupRandomInt(1600, 2800));
+      }
+    } catch (error) {
+      report(`人设关键词搜索失败：${keyword}｜${error instanceof Error ? error.message : String(error)}`);
+      await relaunchThreads(config, padCode, 2200).catch(() => undefined);
     }
   }
+
+  return { ok: false, preview: "", reason: `no-relevant-content:${keywords.slice(0, 4).join("/")}` };
 }
 
 function resolveWarmupCommentLanguage(persona?: WarmupCommentPersona): string {
@@ -27458,6 +28183,73 @@ async function warmupExecuteLikeAtPoint(
   return await warmupTapAbsoluteHuman(config, padCode, point, warmupRandom(1500, 2200), 4);
 }
 
+function detectAcpThreadDetailExpectedSlotRow(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  isDarkPixel: (index: number) => boolean,
+): { like: { x: number; y: number }; comment: { x: number; y: number }; debugRaw: string } | null {
+  const countSlot = (x1Ratio: number, x2Ratio: number, centerY: number) => {
+    const left = Math.max(0, Math.floor(width * x1Ratio));
+    const right = Math.min(width - 1, Math.ceil(width * x2Ratio));
+    const halfHeight = Math.max(12, Math.round(height * 0.012));
+    const top = Math.max(0, centerY - halfHeight);
+    const bottom = Math.min(height - 1, centerY + halfHeight);
+    let count = 0;
+    let sumX = 0;
+    let sumY = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (!isDarkPixel(index)) continue;
+        count += 1;
+        sumX += x;
+        sumY += y;
+      }
+    }
+    return {
+      count,
+      x: count ? Math.round(sumX / count) : Math.round(width * ((x1Ratio + x2Ratio) / 2)),
+      y: count ? Math.round(sumY / count) : centerY,
+    };
+  };
+
+  let best: { score: number; like: { x: number; y: number }; comment: { x: number; y: number }; debugRaw: string } | null = null;
+  for (let y = Math.floor(height * 0.59); y <= Math.floor(height * 0.78); y += 4) {
+    const like = countSlot(0.025, 0.145, y);
+    const comment = countSlot(0.165, 0.345, y);
+    const repost = countSlot(0.36, 0.53, y);
+    const share = countSlot(0.54, 0.72, y);
+    const support = (repost.count >= 14 ? 1 : 0) + (share.count >= 14 ? 1 : 0);
+    if (like.count < 18 || comment.count < 18 || support < 1) continue;
+
+    const rowY = Math.round((like.y + comment.y) / 2);
+    const likePoint = { x: like.x, y: rowY };
+    const commentPoint = { x: comment.x, y: rowY };
+    if (!isPlausibleAcpThreadDetailActionPoint("like", likePoint, width, height)) continue;
+    if (!isPlausibleAcpThreadDetailActionPoint("comment", commentPoint, width, height)) continue;
+
+    const cappedLike = Math.min(120, like.count);
+    const cappedComment = Math.min(120, comment.count);
+    const cappedRepost = Math.min(90, repost.count);
+    const cappedShare = Math.min(90, share.count);
+    const lowerRowBonus = (rowY / height) * 220;
+    const oversizedTextPenalty = Math.max(0, like.count - 520) * 0.16 + Math.max(0, comment.count - 620) * 0.14;
+    const score = cappedLike * 1.3 + cappedComment * 1.2 + cappedRepost + cappedShare + lowerRowBonus - oversizedTextPenalty;
+    if (!best || score > best.score) {
+      best = {
+        score,
+        like: likePoint,
+        comment: commentPoint,
+        debugRaw: `slot_row_score=${Math.round(score)};rowY=${rowY};like=${like.x},${like.y},c${like.count};comment=${comment.x},${comment.y},c${comment.count};repost_c=${repost.count};share_c=${share.count}`,
+      };
+    }
+  }
+  return best
+    ? { like: best.like, comment: best.comment, debugRaw: best.debugRaw }
+    : null;
+}
+
 export async function detectThreadsDetailActionRowLocally(
   screenshotUrl: string,
 ): Promise<{ like?: { x: number; y: number }; comment?: { x: number; y: number }; debugRaw?: string } | null> {
@@ -27573,7 +28365,7 @@ export async function detectThreadsDetailActionRowLocally(
     }).filter(Boolean) as Array<{ y: number; icons: typeof components; score: number }>;
 
     const best = rows.sort((a, b) => b.score - a.score || a.y - b.y)[0];
-    if (!best || best.score < 120) return null;
+    if (!best || best.score < 120) return detectAcpThreadDetailExpectedSlotRow(data, width, height, isDarkPixel);
     const preview = best.icons.slice(0, 5).map((item) => `${item.x},${item.y},${item.width}x${item.height},c${item.count}`).join(";");
     const likeIcon = best.icons[0];
     const commentIcon = best.icons[1];
@@ -27893,22 +28685,61 @@ async function warmupAttemptLikeOnCurrentScreen(
     const beforeInlineReplyBar = beforeShotUrl && !beforeReplyComposerReason
       ? await detectThreadsInlineReplyBarLocally(beforeShotUrl).catch(() => false)
       : false;
+    const beforeReplyHasDraft = beforeShotUrl
+      && (beforeReplyComposerReason || beforeInlineReplyBar)
+      ? await detectAcpReplyInputHasDraftLocally(beforeShotUrl).catch(() => false)
+      : false;
     if (
       beforeShotUrl
       && (beforeReplyComposerReason || beforeInlineReplyBar)
       && !/thread_detail_visual|acp_detail_action_row/.test(currentActions.debugReason || "")
     ) {
+      if (!beforeReplyHasDraft) {
+        const detailTargets = await detectThreadsDetailActionRowLocally(beforeShotUrl).catch(() => null);
+        const detailLike = [detailTargets?.like]
+          .filter((candidate): candidate is { x: number; y: number } => Boolean(candidate))
+          .find((candidate) => isPlausibleAcpThreadDetailActionPoint("like", candidate, candidateWidth, candidateHeight));
+        if (detailLike) {
+          currentActions = {
+            screenshotUrl: beforeShotUrl,
+            ...currentActions,
+            ...detailTargets,
+            like: detailLike,
+            debugReason: [
+              `thread_detail_visual:${beforeReplyComposerReason || "LOCAL_INLINE_REPLY_BAR"}`,
+              "acp_detail_action_row",
+              "acp_like_recovered_before_click",
+              detailTargets?.debugRaw,
+            ].filter(Boolean).join(" | "),
+          };
+        } else {
+          const fallbackDetailLike = {
+            x: Math.round(candidateWidth * 0.085),
+            y: Math.round(candidateHeight * 0.602),
+          };
+          currentActions = {
+            screenshotUrl: beforeShotUrl,
+            ...currentActions,
+            like: fallbackDetailLike,
+            debugReason: [
+              `thread_detail_visual:${beforeReplyComposerReason || "LOCAL_INLINE_REPLY_BAR"}`,
+              "acp_detail_like_fixed_fallback",
+            ].join(" | "),
+          };
+        }
+      } else {
       return {
         ok: false,
         message: `thread_detail_no_action_row:${beforeReplyComposerReason || "LOCAL_INLINE_REPLY_BAR"}_BEFORE_LIKE`,
         screenshotUrl: beforeShotUrl,
         movedToDetail: true,
       };
+      }
     }
     if (
       beforeShotUrl
       && (beforeReplyComposerReason || beforeInlineReplyBar)
-      && await detectAcpReplyInputHasDraftLocally(beforeShotUrl).catch(() => false)
+      && beforeReplyHasDraft
     ) {
       return {
         ok: false,
@@ -28684,9 +29515,24 @@ async function warmupExecuteCommentAtPoint(
     }
     let typedTextConfirmed = hasThreadsReplyComposerText(typedUiXml, comment);
     let typedTextConfirmedByDraftOnly = false;
+    const acceptAcpVisualDraftWithSendButton = async (shotUrl: string | undefined) => {
+      if (!shotUrl) return false;
+      const hasDraft = await detectAcpReplyInputHasDraftLocally(shotUrl).catch(() => false);
+      if (!hasDraft) return false;
+      if (await findAcpReplySendButtonPointFromScreenshot(shotUrl).catch(() => null)) return true;
+      return await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false);
+    };
     if (!typedTextConfirmed) {
       typedTextConfirmedByDraftOnly = await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
       typedTextConfirmed = !commentRequiresExactTextConfirmation && typedTextConfirmedByDraftOnly;
+    }
+    if (
+      !typedTextConfirmed
+      && commentRequiresExactTextConfirmation
+      && await acceptAcpVisualDraftWithSendButton(typedShotUrl)
+    ) {
+      typedTextConfirmed = true;
+      typedTextConfirmedByDraftOnly = true;
     }
     if (typedTextConfirmedByDraftOnly && !(await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null))) {
       typedTextConfirmed = false;
@@ -28755,6 +29601,14 @@ async function warmupExecuteCommentAtPoint(
         typedTextConfirmed = !commentRequiresExactTextConfirmation
           && typedTextConfirmedByDraftOnly
           && Boolean(await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null));
+        if (
+          !typedTextConfirmed
+          && commentRequiresExactTextConfirmation
+          && await acceptAcpVisualDraftWithSendButton(typedShotUrl)
+        ) {
+          typedTextConfirmed = true;
+          typedTextConfirmedByDraftOnly = true;
+        }
       }
     }
     if (!typedTextConfirmed && /[^\x20-\x7E]/.test(comment)) {
@@ -28803,6 +29657,14 @@ async function warmupExecuteCommentAtPoint(
         typedTextConfirmed = !commentRequiresExactTextConfirmation
           && typedTextConfirmedByDraftOnly
           && Boolean(await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null));
+        if (
+          !typedTextConfirmed
+          && commentRequiresExactTextConfirmation
+          && await acceptAcpVisualDraftWithSendButton(typedShotUrl)
+        ) {
+          typedTextConfirmed = true;
+          typedTextConfirmedByDraftOnly = true;
+        }
       }
     }
     if (
@@ -28858,6 +29720,14 @@ async function warmupExecuteCommentAtPoint(
         typedTextConfirmed = !commentRequiresExactTextConfirmation
           && typedTextConfirmedByDraftOnly
           && Boolean(await findAcpReplySendButtonPointFromScreenshot(typedShotUrl).catch(() => null));
+        if (
+          !typedTextConfirmed
+          && commentRequiresExactTextConfirmation
+          && await acceptAcpVisualDraftWithSendButton(typedShotUrl)
+        ) {
+          typedTextConfirmed = true;
+          typedTextConfirmedByDraftOnly = true;
+        }
       }
     }
     if (typedTextConfirmed && hasThreadsReplyComposerRepeatedText(typedUiXml, comment)) {
@@ -28873,6 +29743,14 @@ async function warmupExecuteCommentAtPoint(
       }
       typedTextConfirmed = !commentRequiresExactTextConfirmation
         && await detectAcpReplyInputHasDraftLocally(typedShotUrl).catch(() => false);
+      if (
+        !typedTextConfirmed
+        && commentRequiresExactTextConfirmation
+        && await acceptAcpVisualDraftWithSendButton(typedShotUrl)
+      ) {
+        typedTextConfirmed = true;
+        typedTextConfirmedByDraftOnly = true;
+      }
     }
     if (commentRequiresExactTextConfirmation && !typedTextConfirmed) {
       const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-unicode-unconfirmed");
@@ -28929,6 +29807,18 @@ async function warmupExecuteCommentAtPoint(
       const visualSendButton = await findAcpReplySendButtonPointFromScreenshot(shotUrl).catch(() => null);
       if (visualSendButton && shotUrl) {
         await tapSourceScreenshotPointQuick(shotUrl, visualSendButton, waitMs);
+        return true;
+      }
+      if (
+        shotUrl
+        && await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false)
+        && await detectAcpReplyInputHasDraftLocally(shotUrl).catch(() => false)
+      ) {
+        const image = await getImageDimensions(shotUrl).catch(() => null);
+        await tapSourceScreenshotPointQuick(shotUrl, {
+          x: Math.round((image?.width || BASE_SCREEN.width) * 0.90),
+          y: Math.round((image?.height || BASE_SCREEN.height) * 0.555),
+        }, waitMs);
         return true;
       }
       return false;
@@ -29094,6 +29984,13 @@ async function warmupExecuteCommentAtPoint(
     let postedCueInUi = detectThreadsWarmupCommentPostedCueFromUiXml(immediatePostSendXml)
       || detectThreadsWarmupCommentPostedCueFromUiXml(settledPostSendXml);
     let postedToastVisible = await detectThreadsPostSuccessToastLocally(postSendEvidenceUrl).catch(() => false);
+    const returnedToSearchResultsAfterSend = Boolean(
+      postSendEvidenceUrl
+      && await detectThreadsSearchResultsPageLocally(postSendEvidenceUrl).catch(() => false)
+      && !(await detectAcpReplyInputHasDraftLocally(postSendEvidenceUrl).catch(() => false))
+      && !(await detectThreadsReplyComposerLocally(postSendEvidenceUrl).catch(() => null))
+      && !looksLikeThreadsRestrictedReplyNoticeUiXml(settledPostSendXml)
+    );
     const screenshotOnlyReplyBarClearedAfterSend = Boolean(
       postSendEvidenceUrl
       && await detectAcpReplyBarClearedAfterSendLocally(postSendEvidenceUrl).catch(() => false)
@@ -29123,9 +30020,9 @@ async function warmupExecuteCommentAtPoint(
       )
     );
     let postedVisually = false;
-    let postSendLooksPosted = postedTextInUi || postedCueInUi || postedVisually || postedToastVisible || replyComposerClearedAfterSend;
+    let postSendLooksPosted = postedTextInUi || postedCueInUi || postedVisually || postedToastVisible || replyComposerClearedAfterSend || returnedToSearchResultsAfterSend;
     let postedTextEvidence = postedTextInUi;
-    let postedVisualEvidence = postedTextInUi || postedVisually || replyComposerClearedAfterSend;
+    let postedVisualEvidence = postedTextInUi || postedVisually || replyComposerClearedAfterSend || returnedToSearchResultsAfterSend;
     if (!postSendLooksPosted && await handleThreadsWarmupCommentPrivacyPrompt(config, padCode, { switchToPublic: true }).catch(() => false)) {
       await delay(1400);
       let privacyPostSendShotUrl = await captureReplyScreenshotFast("warmup comment privacy-postsend")
@@ -29727,6 +30624,7 @@ export async function warmupThreadsAccount(
     commentChance = 0,
     maxComments = 0,
     minRequiredComments = 0,
+    minRequiredInteractions = 0,
     commentTemplates = [],
     commentPersona,
     strictCompletion = !riskManaged,
@@ -29751,6 +30649,11 @@ export async function warmupThreadsAccount(
   const candidates: WarmupCandidate[] = [];
   const likeScreenshots: string[] = [];
   const commentScreenshots: string[] = [];
+  let activeRelevantSurfaceReason = "";
+  let searchResultOpenAttempts = 0;
+  const visitedWarmupPostKeys = new Set<string>();
+  const commentedWarmupPostKeys = new Set<string>();
+  const usedWarmupComments = new Set<string>();
 
   const report = (step: string, done = false, error?: string): WarmupProgress => {
     const p: WarmupProgress = {
@@ -29766,6 +30669,53 @@ export async function warmupThreadsAccount(
     };
     onProgress(p);
     return p;
+  };
+
+  const revealAcpSearchResultActionRow = async () => {
+    const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+    const didHumanSwipe = await withTimeout(
+      warmupHumanSwipeByRatio(
+        config,
+        padCode,
+        0.50,
+        0.78,
+        0.50,
+        0.45,
+        warmupRandomInt(430, 680),
+        warmupRandomInt(600, 1000),
+      ).then(() => true),
+      8_000,
+      "ACP search result reveal swipe timeout",
+    ).catch(() => false);
+    if (didHumanSwipe) return;
+    await execAdbForText(
+      config,
+      padCode,
+      `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.78)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.45)} 520`,
+      8_000,
+      500,
+    ).catch(() => "");
+  };
+  const prepareAcpSearchResultForInteraction = async (options: { avoidTopResult?: boolean } = {}) => {
+    const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+    const openAttempt = searchResultOpenAttempts++;
+    if (options.avoidTopResult) {
+      await revealAcpSearchResultActionRow().catch(() => undefined);
+      await delay(warmupRandomInt(500, 900));
+    }
+    const rowRatios = options.avoidTopResult
+      ? [0.43, 0.58, 0.72, 0.34]
+      : [0.43, 0.58, 0.72, 0.34];
+    const yRatio = rowRatios[openAttempt % rowRatios.length];
+    await tapViaAdbAbsoluteQuick(
+      config,
+      padCode,
+      Math.round(screen.width * 0.44),
+      Math.round(screen.height * yRatio),
+      900,
+    ).catch(() => undefined);
+    await delay(700);
+    await revealAcpSearchResultActionRow();
   };
 
   const locateFeedActionsForWarmup = async (
@@ -29811,6 +30761,9 @@ export async function warmupThreadsAccount(
           await warmupDismissAcpSideDrawerAndCapture(config, padCode, current.screenshotUrl).catch(() => "");
         } else if (/threads_not_foreground|acp_still_android_launcher/.test(reason)) {
           await warmupRecoverAcpInteractionSurface(config, padCode, reason);
+        } else if (/profile_ui/.test(reason) && /^search/.test(activeRelevantSurfaceReason)) {
+          report("搜索结果页未露出互动栏，换一条结果点开后重试...");
+          await prepareAcpSearchResultForInteraction({ avoidTopResult: true });
         } else if (/thread_detail_no_action_row|profile_ui|acp_external_webview|acp_messages|acp_status_message|media_viewer|acp_local_snapshot_no_actions|acp_local_action_row_missing|local_geometry_actions_missing|fallback_like_missing|fallback_comment_missing/.test(reason)) {
           await warmupRecoverAcpInteractionSurface(config, padCode, reason);
 	        } else {
@@ -29886,41 +30839,70 @@ export async function warmupThreadsAccount(
       });
     }
 
-    await warmupMaybeSearchInterest(
+    const initialRelevant = await warmupEnsureRelevantSurface(
       config,
       padCode,
       effectiveCfg,
       (step) => report(step),
+      { phase: "preflight", allowSearch: true },
     ).catch((error) => {
-      report(`兴趣搜索分支已跳过：${error instanceof Error ? error.message : String(error)}`);
+      report(`人设相关内容前置检测失败：${error instanceof Error ? error.message : String(error)}`);
+      return { ok: false, preview: "", reason: error instanceof Error ? error.message : String(error) };
     });
+    if (!initialRelevant.ok) {
+      throw new Error(`本轮养号未找到和人设相关的内容，已停止避免无关互动：${initialRelevant.reason}`);
+    }
 
     report(timedSession
       ? `开始低频浏览：目标滑动 ${Math.round(targetSessionMs / 60_000)} 分钟，每 ${interactionMinPosts}-${interactionMaxPosts} 篇最多随机互动 1 次`
       : `开始低频浏览：本次最多点赞 ${maxLikes} 个，最多留言 ${maxComments} 个`);
 
-  const firstInteractionIndex = riskManaged ? warmupRandomInt(1, Math.min(3, Math.max(1, browseCount - 1))) : 0;
+  const firstInteractionIndex = minRequiredInteractions > 0 || minRequiredLikes > 0 || minRequiredComments > 0
+    ? Math.min(Math.max(1, warmupRandomInt(1, 2)), Math.max(0, browseCount - 1))
+    : riskManaged
+      ? warmupRandomInt(1, Math.min(3, Math.max(1, browseCount - 1)))
+      : 0;
   let nextInteractionAfterBrowsed = warmupRandomInt(interactionMinPosts, interactionMaxPosts);
   const commentTurnSchedule = !timedSession && maxComments > 0
     ? buildWarmupCommentTurnSchedule(browseCount, maxComments, firstInteractionIndex)
     : [];
   const commentTurnSet = new Set(commentTurnSchedule);
   let consecutiveAcpLocateMisses = 0;
+  let carriedRelevantSurface: { ok: boolean; preview: string; reason: string } | null = initialRelevant.reason.startsWith("search")
+    ? initialRelevant
+    : null;
+  activeRelevantSurfaceReason = initialRelevant.reason;
 
   for (let i = 0; i < browseCount && (!timedSession || Date.now() < sessionDeadline); i++) {
     const interactionTargetsDone = (maxLikes <= 0 || liked >= maxLikes)
       && (maxComments <= 0 || commented >= maxComments)
       && (maxLikes > 0 || maxComments > 0);
-    const minimumInteractionsDone = liked >= minRequiredLikes && commented >= minRequiredComments;
+    const minimumInteractionsDone = liked >= minRequiredLikes
+      && commented >= minRequiredComments
+      && liked + commented >= minRequiredInteractions;
+    const hasMinimumInteractionRequirement = minRequiredLikes > 0 || minRequiredComments > 0 || minRequiredInteractions > 0;
     if (
-      interactionTargetsDone
+      (interactionTargetsDone || (hasMinimumInteractionRequirement && minimumInteractionsDone))
       && minimumInteractionsDone
       && browsed >= Math.min(browseCount, 2)
-      && (!timedSession || strictCompletion || minRequiredLikes > 0 || minRequiredComments > 0)
+      && (!timedSession || strictCompletion || minRequiredLikes > 0 || minRequiredComments > 0 || minRequiredInteractions > 0)
     ) {
       report(`互动目标已完成，提前结束浏览：已浏览 ${browsed}/${browseCount} 条`);
       break;
     }
+
+    const relevantSurface = carriedRelevantSurface || await warmupEnsureRelevantSurface(
+      config,
+      padCode,
+      effectiveCfg,
+      (step) => report(step),
+      { phase: "browse", allowSearch: true },
+    ).catch((error) => ({ ok: false, preview: "", reason: error instanceof Error ? error.message : String(error) }));
+    carriedRelevantSurface = /^search/.test(relevantSurface.reason) ? relevantSurface : null;
+    if (!relevantSurface.ok) {
+      throw new Error(`当前推荐流未找到和人设相关的内容，已停止避免无关互动：${relevantSurface.reason}`);
+    }
+    activeRelevantSurfaceReason = relevantSurface.reason;
 
     report(timedSession
       ? `滑动浏览中：已浏览约 ${browsed} 篇，已执行 ${Math.round((targetSessionMs - Math.max(0, sessionDeadline - Date.now())) / 60_000)} / ${Math.round(targetSessionMs / 60_000)} 分钟...`
@@ -29940,39 +30922,87 @@ export async function warmupThreadsAccount(
       : commentChance;
     let shouldLike = interactionAllowed && likeFailures < 3 && likeChanceThisTurn > 0 && liked < maxLikes && Math.random() * 100 < likeChanceThisTurn;
     let shouldComment = interactionAllowed && commentFailures < maxCommentFailuresThisRun && commentChanceThisTurn > 0 && commented < maxComments && Math.random() * 100 < commentChanceThisTurn;
+    if (minimumInteractionsDone) {
+      shouldLike = false;
+      shouldComment = false;
+    }
     if (timedSession) {
       shouldLike = false;
       shouldComment = false;
       if (interactionAllowed) {
-        const requiredChoices: Array<"like" | "comment"> = [];
-        if (minRequiredLikes > liked && likeChance > 0 && liked < maxLikes && likeFailures < 3) requiredChoices.push("like");
-        if (minRequiredComments > commented && commentChance > 0 && commented < maxComments && commentFailures < maxCommentFailuresThisRun) requiredChoices.push("comment");
-        const choices: Array<"like" | "comment"> = [...requiredChoices];
-        if (likeChance > 0 && liked < maxLikes && likeFailures < 3) choices.push("like");
-        if (commentChance > 0 && commented < maxComments && commentFailures < maxCommentFailuresThisRun) choices.push("comment");
-        if (choices.length === 0 && (likeChance > 0 || commentChance > 0)) {
+        const choice = chooseWarmupTimedInteraction({
+          liked,
+          commented,
+          minRequiredLikes,
+          minRequiredComments,
+          minRequiredInteractions,
+          likeChance,
+          commentChance,
+          maxLikes,
+          maxComments,
+          likeFailures,
+          commentFailures,
+          maxCommentFailures: maxCommentFailuresThisRun,
+        });
+        const minimumInteractionsDone = liked >= minRequiredLikes
+          && commented >= minRequiredComments
+          && liked + commented >= minRequiredInteractions;
+        if (!choice && !minimumInteractionsDone && (likeChance > 0 || commentChance > 0)) {
           throw new Error("当前页面连续互动失败，请检查页面状态后重试");
         }
-	        let choice: "like" | "comment" | null = null;
-	        if (requiredChoices.length) {
-	          if (minRequiredLikes > liked && requiredChoices.includes("like")) {
-	            choice = "like";
-	          } else if (minRequiredComments > commented && requiredChoices.includes("comment")) {
-	            choice = "comment";
-	          }
-	        } else {
-	          choice = choices.length ? choices[warmupRandomInt(0, choices.length - 1)] : null;
-	        }
-	        shouldLike = choice === "like";
-	        shouldComment = choice === "comment";
-	      }
+        shouldLike = choice === "like";
+        shouldComment = choice === "comment";
+      }
+    }
+    if (
+      !timedSession
+      && interactionAllowed
+      && isAcpPad(padCode)
+      && /^search/.test(relevantSurface.reason)
+      && minRequiredInteractions > liked + commented
+      && minRequiredLikes <= liked
+      && minRequiredComments <= commented
+      && commentChanceThisTurn > 0
+      && commented < maxComments
+      && commentFailures < maxCommentFailuresThisRun
+    ) {
+      shouldLike = false;
+      shouldComment = true;
     }
     let feedActions: WarmupFeedActionTargets | null = null;
     if (shouldLike || shouldComment) {
+      if (isAcpPad(padCode) && /^search/.test(relevantSurface.reason)) {
+        report("搜索结果页轮换点开候选结果并露出互动栏...");
+        await prepareAcpSearchResultForInteraction({
+          avoidTopResult: true,
+        });
+      }
       if (isAcpPad(padCode) && shouldComment && !shouldLike) {
         await warmupAlignToReadablePost(config, padCode).catch(() => undefined);
       }
       feedActions = await locateFeedActionsForWarmup(isAcpPad(padCode) && shouldComment && !shouldLike ? 24_000 : undefined);
+    }
+    if (
+      isAcpPad(padCode)
+      && feedActions?.comment
+      && /acp_detail_reply_input_fallback/.test(feedActions.debugReason || "")
+    ) {
+      shouldLike = false;
+      shouldComment = true;
+    }
+    if (
+      isAcpPad(padCode)
+      && shouldComment
+      && !shouldLike
+      && feedActions?.like
+      && /acp_media_overlay_actions/.test(feedActions.debugReason || "")
+      && minRequiredInteractions > liked + commented
+      && minRequiredLikes <= liked
+      && minRequiredComments <= commented
+    ) {
+      report("媒体浮层留言入口不稳定，改用点赞满足最低互动要求");
+      shouldLike = true;
+      shouldComment = false;
     }
     if ((shouldLike || shouldComment) && (!feedActions?.like && !feedActions?.comment)) {
 	      report(`互动按钮识别为空：${feedActions?.debugReason ?? "warmupLocateHomeFeedActions returned null"}${feedActions?.debugRaw ? ` | ${feedActions.debugRaw}` : ""}${feedActions?.screenshotUrl ? " | screenshot_captured" : ""}`);
@@ -30099,10 +31129,29 @@ export async function warmupThreadsAccount(
           throw new Error("留言目标不够可靠，已跳过");
         }
         await warmupWaitForScrollSettle(650, 1100);
+        const currentPreviewBeforeComment = await getPostPreview(true).catch(() => "");
+        const currentPostKey = warmupPostPreviewKey(currentPreviewBeforeComment || `${commentActions.debugReason || ""}:${Math.round(commentActions.comment.x)},${Math.round(commentActions.comment.y)}`);
+        if (currentPostKey) {
+          if (commentedWarmupPostKeys.has(currentPostKey)) {
+            report("当前帖子本轮已经留言过，跳过避免重复进入同一篇");
+            await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
+            await warmupScrollDown(config, padCode).catch(() => undefined);
+            await delay(warmupRandom(900, 1800));
+            continue;
+          }
+          if (visitedWarmupPostKeys.has(currentPostKey) && /^search/.test(activeRelevantSurfaceReason)) {
+            report("搜索结果疑似重复打开同一篇，跳过并换下一条");
+            await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+            await delay(warmupRandom(900, 1400));
+            await revealAcpSearchResultActionRow().catch(() => undefined);
+            continue;
+          }
+          visitedWarmupPostKeys.add(currentPostKey);
+        }
         report(`准备自动留言：target=${Math.round(commentActions.comment.x)},${Math.round(commentActions.comment.y)} ${commentActions.debugReason || ""}`);
         let commentReferencePreview = "";
         const generateCommentAfterOpen = async () => {
-          const preview = await getPostPreview(true);
+          const preview = currentPreviewBeforeComment || await getPostPreview(true);
           const currentShot = preview
             ? undefined
             : await withTimeout(
@@ -30127,12 +31176,26 @@ export async function warmupThreadsAccount(
           if (requireReadablePostForComment && normalizeSingleLine(effectivePreview).length < 6 && !hasSpecificScreenshotComment) {
             report("未读到足够明确的帖子正文，改用保守短评继续留言");
           }
-          return screenshotComment?.comment
+          const generatedComment = screenshotComment?.comment
             || await withTimeout(
               warmupGenerateCommentForPost(effectivePreview, commentTemplates, commentPersona),
               6_500,
               "warmupGenerateCommentForPost timeout",
             ).catch(() => fallbackWarmupComment(effectivePreview, commentTemplates, commentPersona));
+          let finalComment = finalizeWarmupComment(generatedComment, effectivePreview, commentTemplates, commentPersona);
+          if (isNearDuplicateWarmupComment(finalComment, usedWarmupComments)) {
+            for (let attempt = 0; attempt < 4 && isNearDuplicateWarmupComment(finalComment, usedWarmupComments); attempt += 1) {
+              finalComment = finalizeWarmupComment(fallbackWarmupComment(`${effectivePreview} ${attempt}`, [], commentPersona), effectivePreview, [], commentPersona);
+            }
+          }
+          if (isNearDuplicateWarmupComment(finalComment, usedWarmupComments)) {
+            throw new Error(`留言内容和本轮已用内容高度重复，跳过避免机器感回复：${finalComment.slice(0, 24)}`);
+          }
+          const pageAlreadyHasSimilarComment = await warmupVisibleTextContainsNearDuplicateComment(config, padCode, finalComment);
+          if (pageAlreadyHasSimilarComment) {
+            throw new Error(`当前帖子可见区域已有相似留言，跳过避免重复留言：${finalComment.slice(0, 24)}`);
+          }
+          return finalComment;
         };
         const commentResult = await withTimeout(
           warmupExecuteCommentAtPoint(
@@ -30143,9 +31206,9 @@ export async function warmupThreadsAccount(
             {
               likeBeforeSend: combineLikeWithComment,
               alreadyInReplyComposer: isAcpPad(padCode)
-                && /thread_detail_visual:LOCAL_REPLY_COMPOSER/.test(commentActions.debugReason || ""),
+                && /thread_detail_visual:LOCAL_REPLY_COMPOSER|acp_detail_reply_input_fallback/.test(commentActions.debugReason || ""),
               preferBottomReplyInput: isAcpPad(padCode)
-                && /thread_detail_visual:LOCAL_REPLY_COMPOSER/.test(commentActions.debugReason || ""),
+                && /thread_detail_visual:LOCAL_REPLY_COMPOSER|acp_detail_reply_input_fallback/.test(commentActions.debugReason || ""),
               sourceScreenshotUrl: commentActions.screenshotUrl,
               debugReason: commentActions.debugReason,
               skipAbsoluteOpenRetry: isAcpPad(padCode)
@@ -30154,9 +31217,12 @@ export async function warmupThreadsAccount(
                 && /acp_fast_screenshot_action_row|acp_safe_geometry_action_row|acp_verified_common_action_row_fallback/.test(commentActions.debugReason || ""),
             },
           ),
-          isAcpPad(padCode) ? 170_000 : 25_000,
+          isAcpPad(padCode) ? 110_000 : 25_000,
           "warmupExecuteCommentAtPoint timeout",
         );
+        const completedPostKey = warmupPostPreviewKey(commentReferencePreview || currentPreviewBeforeComment || `${commentActions.debugReason || ""}:${Math.round(commentActions.comment.x)},${Math.round(commentActions.comment.y)}`);
+        if (completedPostKey) commentedWarmupPostKeys.add(completedPostKey);
+        usedWarmupComments.add(commentResult.comment);
         if (commentResult.liked && liked < maxLikes) {
           liked++;
           likeScreenshots.push(await annotateWarmupActionScreenshot(
@@ -30169,7 +31235,7 @@ export async function warmupThreadsAccount(
         commented++;
         if (commentResult.screenshotUrl) commentScreenshots.push(commentResult.screenshotUrl);
         report(`已自动留言第 ${commented} 个：${commentResult.comment}${commentReferencePreview ? `（参考：${commentReferencePreview.slice(0, 42)}）` : ""}`);
-        if (liked < maxLikes) {
+        if (liked < minRequiredLikes) {
           report("留言完成后继续补点赞...");
           if (isAcpPad(padCode)) {
             await warmupRecoverAcpInteractionSurface(config, padCode, "LOCAL_REPLY_COMPOSER_AFTER_COMMENT_SUCCESS");
@@ -30217,15 +31283,18 @@ export async function warmupThreadsAccount(
   const shouldRecoverLikes = likeChance > 0
     && maxLikes > 0
     && liked < maxLikes
-    && (!timedSession || strictCompletion || minRequiredLikes > liked);
+    && (strictCompletion || minRequiredLikes > liked || liked + commented < minRequiredInteractions);
   if (shouldRecoverLikes) {
     const maxRecoveries = Math.max(2, Math.min(4, maxLikes * 2 + 1));
-    report(`自动点赞未达标，继续补点 ${liked}/${maxLikes}...`);
+    const likeRecoveryTarget = !strictCompletion && (minRequiredLikes > 0 || minRequiredInteractions > 0)
+      ? Math.max(minRequiredLikes, Math.min(maxLikes, minRequiredInteractions - commented))
+      : maxLikes;
+    report(`${likeRecoveryTarget < maxLikes ? "自动点赞最低要求未达成" : "自动点赞未达标"}，继续补点 ${liked}/${likeRecoveryTarget}（风险上限 ${maxLikes}）...`);
     await relaunchThreads(config, padCode, 3500).catch(() => undefined);
     if (!isAcpPad(padCode)) {
       await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
     }
-    for (let attempt = 0; attempt < maxRecoveries && liked < maxLikes; attempt += 1) {
+    for (let attempt = 0; attempt < maxRecoveries && liked < likeRecoveryTarget; attempt += 1) {
       const actions = await locateFeedActionsForWarmup(isAcpPad(padCode) ? 24_000 : 14_000).catch(() => null);
       if (/profile_ui|profile_menu/.test(actions?.debugReason || "")) {
         report("补点时停在个人页，重新打开 Threads...");
@@ -30259,7 +31328,7 @@ export async function warmupThreadsAccount(
 	          await warmupRecoverAcpInteractionSurface(config, padCode, [result.message, actions?.debugReason].filter(Boolean).join(" | "));
 	        }
 	      }
-      if (liked < maxLikes) {
+      if (liked < likeRecoveryTarget) {
         await warmupScrollDown(config, padCode).catch(() => undefined);
         await delay(warmupRandom(1200, 2600));
       }
@@ -30272,15 +31341,18 @@ export async function warmupThreadsAccount(
   const shouldRecoverComments = commentChance > 0
     && maxComments > 0
     && commented < maxComments
-    && (!timedSession || strictCompletion || minRequiredComments > commented);
+    && (strictCompletion || minRequiredComments > commented || liked + commented < minRequiredInteractions);
   if (shouldRecoverComments) {
     const maxRecoveries = isAcpPad(padCode)
       ? (timedSession ? 6 : 4)
       : Math.max(2, Math.min(4, maxComments * 2 + 1));
     const plannedTurns = commentTurnSchedule.length ? `，计划留言轮次：${commentTurnSchedule.map((turn) => turn + 1).join(", ")}` : "";
-    report(`自动留言未达标，进入尾部补漏 ${commented}/${maxComments}${plannedTurns}...`);
+    const commentRecoveryTarget = !strictCompletion && (minRequiredComments > 0 || minRequiredInteractions > 0)
+      ? Math.max(minRequiredComments, Math.min(maxComments, minRequiredInteractions - liked))
+      : maxComments;
+    report(`${commentRecoveryTarget < maxComments ? "自动留言最低要求未达成" : "自动留言未达标"}，进入尾部补漏 ${commented}/${commentRecoveryTarget}（风险上限 ${maxComments}）${plannedTurns}...`);
     await relaunchThreads(config, padCode, 3500).catch(() => undefined);
-    for (let attempt = 0; attempt < maxRecoveries && commented < maxComments; attempt += 1) {
+    for (let attempt = 0; attempt < maxRecoveries && commented < commentRecoveryTarget; attempt += 1) {
 	      const actions = await locateFeedActionsForWarmup(isAcpPad(padCode) ? 24_000 : 14_000).catch(() => null);
 	      if (!actions?.comment) {
 	        report(`补留言定位失败：${actions?.debugReason || "no_comment_target"}${actions?.debugRaw ? ` | ${actions.debugRaw}` : ""}`);
@@ -30318,9 +31390,9 @@ export async function warmupThreadsAccount(
             },
             {
               alreadyInReplyComposer: isAcpPad(padCode)
-                && /thread_detail_visual:LOCAL_REPLY_COMPOSER/.test(actions.debugReason || ""),
+                && /thread_detail_visual:LOCAL_REPLY_COMPOSER|acp_detail_reply_input_fallback/.test(actions.debugReason || ""),
               preferBottomReplyInput: isAcpPad(padCode)
-                && /thread_detail_visual:LOCAL_REPLY_COMPOSER/.test(actions.debugReason || ""),
+                && /thread_detail_visual:LOCAL_REPLY_COMPOSER|acp_detail_reply_input_fallback/.test(actions.debugReason || ""),
               sourceScreenshotUrl: actions.screenshotUrl,
               debugReason: actions.debugReason,
               skipAbsoluteOpenRetry: isAcpPad(padCode)
@@ -30329,13 +31401,13 @@ export async function warmupThreadsAccount(
                 && /acp_fast_screenshot_action_row|acp_safe_geometry_action_row|acp_verified_common_action_row_fallback/.test(actions.debugReason || ""),
             },
           ),
-          isAcpPad(padCode) ? 170_000 : 25_000,
+          isAcpPad(padCode) ? 110_000 : 25_000,
           "warmupRecoveryExecuteComment timeout",
       );
       commented++;
       if (commentResult.screenshotUrl) commentScreenshots.push(commentResult.screenshotUrl);
       report(`补留言成功第 ${commented} 个：${commentResult.comment}`);
-      if (isAcpPad(padCode) && liked < maxLikes) {
+      if (isAcpPad(padCode) && liked < minRequiredLikes) {
         report("补留言完成后恢复推荐流继续补点赞...");
         await warmupRecoverAcpInteractionSurface(config, padCode, "LOCAL_REPLY_COMPOSER_AFTER_COMMENT_RECOVERY_SUCCESS");
       }
@@ -30356,7 +31428,7 @@ export async function warmupThreadsAccount(
   if (strictCompletion && commentChance >= 100 && maxComments > 0 && commented < maxComments) {
     throw new Error(`养号未完成：要求自动留言 ${maxComments} 个，实际成功 ${commented} 个`);
   }
-  assertWarmupMinimumCompletion("Threads", { liked, commented }, { minRequiredLikes, minRequiredComments });
+  assertWarmupMinimumCompletion("Threads", { liked, commented }, { minRequiredLikes, minRequiredComments, minRequiredInteractions });
 
     const result = report(`养号完成：浏览 ${browsed} 条，自动点赞 ${liked} 个，自动留言 ${commented} 个`, true);
     if (riskManaged) recordWarmupRiskResult(padCode, result);

@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  assertWarmupMinimumCompletion,
   buildAcpWarmupFallbackRows,
   buildWarmupCommentTurnSchedule,
   buildWarmupInterestKeywords,
+  buildWarmupSearchKeywordCandidates,
+  chooseWarmupTimedInteraction,
+  scoreWarmupPostRelevance,
   buildThreadsPublishSampleLabel,
   buildThreadsShareIntentCommand,
   detectAndroidCameraFromUiXml,
@@ -32,6 +36,7 @@ import {
   findThreadsReplyComposerInputTarget,
   findThreadsReplySendButtonTarget,
   findThreadsSearchInputTarget,
+  findThreadsTopSearchButtonTarget,
   findAcpReplySendButtonPointFromScreenshot,
   findThreadsProfileVideoTabTarget,
   finalizeWarmupComment,
@@ -43,9 +48,14 @@ import {
   hasRepeatedWarmupCommentText,
   hasThreadsReplyComposerText,
   hasExplicitSuccessCue,
+  isNearDuplicateWarmupComment,
   isUsableWarmupComment,
   isThreadsWarmupCommentExpectedSkipMessage,
+  looksLikeThreadsActivityUiXml,
+  looksLikeThreadsPostOptionsSheetUiXml,
   looksLikeThreadsReplyComposerUiXml,
+  looksLikeThreadsSearchResultsUiXml,
+  looksLikeThreadsThreadDetailUiXml,
   parsePublishVisionResult,
   planRiskManagedWarmupConfig,
   sanitizeWarmupComment,
@@ -225,6 +235,31 @@ describe("Threads publish verification", () => {
     expect(buildWarmupInterestKeywords({
       description: "喜歡咖啡館、下午茶和城市生活",
     })).toEqual(expect.arrayContaining(["咖啡", "甜點", "手搖飲"]));
+  });
+
+  it("scores warmup post relevance against persona keywords", () => {
+    const financePersona = {
+      description: "台股投资与财经观察",
+      personality: "理性但口语",
+    };
+
+    const financeResult = scoreWarmupPostRelevance("今天台股量能回温，半导体财报和市场行情都值得继续观察", financePersona);
+    expect(financeResult.relevant).toBe(true);
+    expect(financeResult.score).toBeGreaterThanOrEqual(5);
+
+    const cafeResult = scoreWarmupPostRelevance("周末去巷口咖啡馆喝拿铁，甜点和下午茶都很放松", financePersona);
+    expect(cafeResult.relevant).toBe(false);
+  });
+
+  it("scores real estate search results as relevant for a property agent persona", () => {
+    const propertyPersona = {
+      description: "房产中介，分享买房、租屋、不动产和工地人生观察",
+      personality: "专业但自然",
+    };
+
+    const result = scoreWarmupPostRelevance("50歲紐約富豪年賺1億美金，真正的財富是世代持有不動產。你是做什麼才買得起這房子的？", propertyPersona);
+    expect(result.relevant).toBe(true);
+    expect(result.matched).toEqual(expect.arrayContaining(["real-estate-domain"]));
   });
 
   it("builds ACP warmup fallback rows in the fixed 720x1600 coordinate grid", () => {
@@ -902,6 +937,64 @@ describe("Threads publish verification", () => {
         <node text="Cancel" class="android.widget.TextView" bounds="[654,72][710,150]" />
       </hierarchy>
     `)).toEqual({ x: 366, y: 111 });
+
+    expect(findThreadsTopSearchButtonTarget(`
+      <hierarchy>
+        <node text="" content-desc="Search" class="android.widget.ImageView" clickable="true" bounds="[620,74][692,146]" />
+      </hierarchy>
+    `)).toEqual({ x: 656, y: 110 });
+  });
+
+  it("does not treat Threads activity page controls as search navigation", () => {
+    const activityXml = `
+      <hierarchy>
+        <node text="動態消息" content-desc="" class="android.widget.TextView" bounds="[46,114][266,166]" />
+        <node text="" content-desc="Search" class="android.widget.ImageView" clickable="true" bounds="[154,238][236,320]" />
+        <node text="為你推薦" class="android.widget.TextView" bounds="[88,402][232,450]" />
+        <node text="追蹤中" class="android.widget.TextView" bounds="[88,542][202,590]" />
+        <node text="附帶原始貼文的回覆內容" class="android.widget.TextView" bounds="[88,680][410,730]" />
+      </hierarchy>
+    `;
+
+    expect(looksLikeThreadsActivityUiXml(activityXml)).toBe(true);
+    expect(findThreadsBottomSearchTabTarget(activityXml)).toBeNull();
+    expect(findThreadsTopSearchButtonTarget(activityXml)).toBeNull();
+    expect(findThreadsSearchInputTarget(activityXml)).toBeNull();
+  });
+
+  it("recognizes a Threads search results page after Chinese keyword submission", () => {
+    const resultsXml = `
+      <hierarchy>
+        <node text="買房" class="android.widget.TextView" bounds="[128,74][244,134]" />
+        <node text="熱門貼文" class="android.widget.TextView" bounds="[44,210][180,260]" />
+        <node text="最新貼文" class="android.widget.TextView" bounds="[88,420][220,470]" />
+        <node text="相關個人檔案" class="android.widget.TextView" bounds="[452,210][650,260]" />
+        <node text="1小時" class="android.widget.TextView" bounds="[338,330][424,382]" />
+        <node text="5月我提醒過的國巨，買到的人都買車買房了。" class="android.widget.TextView" bounds="[116,456][690,620]" />
+      </hierarchy>
+    `;
+
+    expect(findThreadsSearchInputTarget(resultsXml)).toBeNull();
+    expect(looksLikeThreadsSearchResultsUiXml(resultsXml, "買房")).toBe(true);
+    expect(looksLikeThreadsSearchResultsUiXml(resultsXml, "咖啡")).toBe(false);
+  });
+
+  it("detects Threads detail pages and post option sheets before warmup search", () => {
+    expect(looksLikeThreadsThreadDetailUiXml(`
+      <hierarchy>
+        <node text="串文" class="android.widget.TextView" bounds="[137,96][218,146]" />
+        <node text="olina810 › 世界盃 46 分鐘" class="android.widget.TextView" bounds="[154,218][516,285]" />
+        <node text="追蹤" class="android.widget.Button" bounds="[576,218][685,290]" />
+      </hierarchy>
+    `)).toBe(true);
+
+    expect(looksLikeThreadsPostOptionsSheetUiXml(`
+      <hierarchy>
+        <node text="複製連結" class="android.widget.TextView" bounds="[72,648][260,700]" />
+        <node text="使用標籤建立" class="android.widget.TextView" bounds="[72,788][360,840]" />
+        <node text="沒興趣" class="android.widget.TextView" bounds="[72,1030][210,1082]" />
+      </hierarchy>
+    `)).toBe(true);
   });
 
   it("locates Threads publish button from UIAutomator XML", () => {
@@ -1114,6 +1207,13 @@ describe("Threads publish verification", () => {
       .toBe(false);
   });
 
+  it("detects near duplicate warmup comments in one run", () => {
+    expect(isNearDuplicateWarmupComment("戶型這裡可以再拆細", ["戶型這邊可以再拆細"]))
+      .toBe(true);
+    expect(isNearDuplicateWarmupComment("採光和動線要一起看", ["戶型這邊可以再拆細"]))
+      .toBe(false);
+  });
+
   it("requires warmup comments to be complete enough after punctuation removal", () => {
     expect(isUsableWarmupComment("真的強")).toBe(false);
     expect(isUsableWarmupComment("這點我也有感")).toBe(false);
@@ -1167,6 +1267,67 @@ describe("Threads publish verification", () => {
     expect(plan.cfg.maxComments).toBeLessThanOrEqual(1);
     expect(plan.cfg.strictCompletion).toBe(false);
     expect(plan.cfg.requireReadablePostForComment).toBe(true);
+  });
+
+  it("requires at least one requested warmup interaction without treating risk caps as required targets", () => {
+    expect(() => assertWarmupMinimumCompletion("Threads", { liked: 0, commented: 0 }, { minRequiredInteractions: 1 })).toThrow(
+      /要求点赞或留言至少成功 1 次/,
+    );
+
+    expect(() => assertWarmupMinimumCompletion("Threads", { liked: 1, commented: 0 }, { minRequiredInteractions: 1 })).not.toThrow();
+    expect(() => assertWarmupMinimumCompletion("Threads", { liked: 0, commented: 1 }, { minRequiredInteractions: 1 })).not.toThrow();
+    expect(() => assertWarmupMinimumCompletion("Threads", { liked: 1, commented: 0 }, { minRequiredLikes: 1 })).not.toThrow();
+    expect(() => assertWarmupMinimumCompletion("Threads", { liked: 0, commented: 1 }, { minRequiredComments: 1 })).not.toThrow();
+  });
+
+  it("builds persona-specific warmup search keywords instead of slicing generic persona text", () => {
+    const keywords = buildWarmupSearchKeywordCandidates({
+      name: "房产中介",
+      description: "35岁房产中介，关注买房、租房、不动产和客户看房经验",
+      style: "自然口语",
+      language: "繁體中文",
+      interests: ["不動產", "買房"],
+    });
+
+    expect(keywords.slice(0, 4)).toEqual(expect.arrayContaining(["房产中介", "不動產", "買房"]));
+    expect(keywords).toContain("房产中介");
+    expect(keywords.some((item) => /^[\x20-\x7E]+$/.test(item))).toBe(false);
+    expect(keywords).not.toContain("35岁房产中介");
+    expect(keywords).not.toContain("自然口语");
+  });
+
+  it("selects an interaction when timed warmup only requires total interactions", () => {
+    expect(chooseWarmupTimedInteraction({
+      liked: 0,
+      commented: 0,
+      minRequiredLikes: 0,
+      minRequiredComments: 0,
+      minRequiredInteractions: 1,
+      likeChance: 100,
+      commentChance: 100,
+      maxLikes: 16,
+      maxComments: 8,
+      likeFailures: 0,
+      commentFailures: 0,
+      maxCommentFailures: 4,
+      pickIndex: () => 0,
+    })).toBe("comment");
+
+    expect(chooseWarmupTimedInteraction({
+      liked: 1,
+      commented: 0,
+      minRequiredLikes: 0,
+      minRequiredComments: 0,
+      minRequiredInteractions: 1,
+      likeChance: 100,
+      commentChance: 100,
+      maxLikes: 16,
+      maxComments: 8,
+      likeFailures: 0,
+      commentFailures: 0,
+      maxCommentFailures: 4,
+      pickIndex: () => 0,
+    })).toBeNull();
   });
 
   it("spreads warmup comment turns across browsing instead of concentrating at the end", () => {
