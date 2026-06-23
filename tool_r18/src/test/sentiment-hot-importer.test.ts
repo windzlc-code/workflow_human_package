@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildSentimentCandidateId } from "@/lib/sentiment-candidate-store";
 import {
   buildSentimentHotKeywords,
@@ -9,7 +9,12 @@ import {
   parseThreadsDetailEngagementMarkdown,
   parseThreadsDetailMediaMarkdown,
   parseThreadsSearchTextCandidates,
+  refreshSentimentSourceMetrics,
 } from "@/lib/sentiment-hot-importer";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("sentiment hot importer", () => {
   it("builds persona-specific search keywords", () => {
@@ -155,6 +160,55 @@ Demo post body
     expect(engagement.commentCount).toBe(355);
     expect(engagement.shareCount).toBe(713);
     expect(engagement.rawSignals).toEqual([31900, 355, 713, 5600]);
+  });
+
+  it("overwrites existing named metrics when refreshing a stored Threads source", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      text: async () => `
+Title: Demo on Threads
+
+# [Thread 250 views](https://www.threads.net/@demo/post/abc)
+
+Demo post body
+
+20
+
+5
+
+3
+
+88
+`,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const refreshed = await refreshSentimentSourceMetrics({
+      platform: "threads",
+      sourceUrl: "https://www.threads.net/@demo/post/abc",
+      existingHotScore: 100,
+      existingEngagement: {
+        viewCount: 100,
+        likeCount: 10,
+        commentCount: 1,
+        shareCount: 1,
+        rawSignals: [100, 10, 1],
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(refreshed.ok, JSON.stringify(refreshed)).toBe(true);
+    expect(refreshed.engagement?.viewCount).toBe(250);
+    expect(refreshed.engagement?.likeCount).toBe(20);
+    expect(refreshed.engagement?.commentCount).toBe(5);
+    expect(refreshed.engagement?.shareCount).toBe(3);
+    expect(refreshed.metrics).toMatchObject({
+      view_count: 250,
+      like_count: 20,
+      comment_count: 5,
+      share_count: 3,
+    });
+    expect(refreshed.hotScore).toBe(250);
   });
 
   it("keeps all media files from Threads detail markdown", () => {

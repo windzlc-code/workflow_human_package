@@ -97,6 +97,19 @@ export interface PersonaPublishRecord {
   imageUrl?: string;
   screenshotUrl?: string;
   telegramGroupContentType?: "free" | "paid";
+  sourceMeta?: PersonaArchivePost["sourceMeta"];
+  publishedUrl?: string;
+  publishedMeta?: PersonaArchivePost["sourceMeta"];
+  publishedTargets?: PersonaPublishTarget[];
+}
+
+export interface PersonaPublishTarget {
+  platform?: string;
+  padCode?: string;
+  padName?: string;
+  publishedUrl?: string;
+  publishedMeta?: PersonaArchivePost["sourceMeta"];
+  screenshotUrl?: string;
 }
 
 export interface PersonaPublishMeta {
@@ -106,6 +119,10 @@ export interface PersonaPublishMeta {
   mediaUrl?: string;
   imageUrl?: string;
   screenshotUrl?: string;
+  sourceMeta?: PersonaArchivePost["sourceMeta"];
+  publishedUrl?: string;
+  publishedMeta?: PersonaArchivePost["sourceMeta"];
+  publishedTargets?: PersonaPublishTarget[];
 }
 
 export interface PersonaArchive {

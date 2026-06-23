@@ -1360,6 +1360,27 @@ function mergeEngagementMetrics(
   return merged;
 }
 
+function refreshEngagementMetrics(
+  base: NonNullable<SentimentHotCandidate["engagement"]>,
+  latest: NonNullable<SentimentHotCandidate["engagement"]>,
+): NonNullable<SentimentHotCandidate["engagement"]> {
+  const refreshed = mergeEngagementMetrics(base, latest);
+  if (typeof latest.likeCount === "number") refreshed.likeCount = latest.likeCount;
+  if (typeof latest.commentCount === "number") refreshed.commentCount = latest.commentCount;
+  if (typeof latest.viewCount === "number") refreshed.viewCount = latest.viewCount;
+  if (typeof latest.shareCount === "number") refreshed.shareCount = latest.shareCount;
+  return refreshed;
+}
+
+function buildAbortSignalTimeout(ms: number): AbortSignal | undefined {
+  const timeout = (AbortSignal as any)?.timeout;
+  if (typeof timeout === "function") return timeout(ms);
+  if (typeof AbortController !== "function") return undefined;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms).unref?.();
+  return controller.signal;
+}
+
 function hasNamedEngagementMetrics(engagement?: SentimentHotCandidate["engagement"]) {
   return Boolean(
     engagement
@@ -1424,15 +1445,17 @@ async function fetchThreadsDetailData(sourceUrl: string): Promise<{
   engagement: NonNullable<SentimentHotCandidate["engagement"]>;
   media: SentimentHotMedia[];
 }> {
-  if (!/^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(sourceUrl)) return { engagement: {}, media: [] };
+  const normalizedSourceUrl = String(sourceUrl || "").replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/");
+  if (!/^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(normalizedSourceUrl)) return { engagement: {}, media: [] };
   try {
-    const response = await fetch(`${JINA_READER_PREFIX}${sourceUrl}`, {
+    const response = await fetch(`${JINA_READER_PREFIX}${normalizedSourceUrl}`, {
       headers: {
         "user-agent": "Mozilla/5.0",
         accept: "text/plain, text/markdown, */*",
-        "cache-control": "max-age=300",
+        "cache-control": "no-cache",
+        pragma: "no-cache",
       },
-      signal: AbortSignal.timeout(12_000),
+      signal: buildAbortSignalTimeout(12_000),
     });
     if (!response.ok) return { engagement: {}, media: [] };
     const text = await response.text();
@@ -1443,6 +1466,53 @@ async function fetchThreadsDetailData(sourceUrl: string): Promise<{
   } catch {
     return { engagement: {}, media: [] };
   }
+}
+
+export async function refreshSentimentSourceMetrics(args: {
+  platform?: string;
+  sourceUrl: string;
+  existingEngagement?: SentimentHotCandidate["engagement"];
+  existingMedia?: SentimentHotMedia[];
+  existingHotScore?: number;
+}): Promise<{
+  ok: boolean;
+  message: string;
+  hotScore?: number;
+  metrics?: Record<string, unknown>;
+  engagement?: NonNullable<SentimentHotCandidate["engagement"]>;
+  media?: SentimentHotMedia[];
+}> {
+  const platform = String(args.platform || "").toLowerCase();
+  const sourceUrl = String(args.sourceUrl || "").trim();
+  if (!sourceUrl) return { ok: false, message: "缺少原帖链接，无法刷新热度。" };
+  if (platform && platform !== "threads") {
+    return { ok: false, message: "目前仅支持 Threads 原帖实时刷新热度。" };
+  }
+  const detail = await fetchThreadsDetailData(sourceUrl);
+  const hasMetrics = hasNamedEngagementMetrics(detail.engagement) || Boolean(detail.engagement.rawSignals?.length);
+  if (!hasMetrics && !detail.media.length) {
+    return { ok: false, message: "暂时没有从原帖读取到新的热度数据，请稍后重试。" };
+  }
+  const engagement = refreshEngagementMetrics(args.existingEngagement || {}, detail.engagement);
+  const media = mergeCandidateMedia(args.existingMedia || [], detail.media);
+  const hotScore = Math.max(
+    Number(args.existingHotScore || 0),
+    engagement.viewCount || 0,
+    engagement.likeCount || 0,
+    engagement.commentCount || 0,
+    engagement.shareCount || 0,
+  );
+  return {
+    ok: true,
+    message: "已刷新原帖热度。",
+    hotScore,
+    engagement,
+    media,
+    metrics: {
+      mediaCount: media.length,
+      ...compactEngagementMetrics(engagement),
+    },
+  };
 }
 
 async function enrichThreadsCandidateDetails(candidates: SentimentHotCandidate[]): Promise<SentimentHotCandidate[]> {

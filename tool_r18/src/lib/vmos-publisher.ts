@@ -79,6 +79,7 @@ export interface PublishResult {
   state: "verified" | "warning";
   detail: string;
   screenshotUrl?: string;
+  publishedUrl?: string;
 }
 
 export interface PublishCancellationToken {
@@ -4590,7 +4591,101 @@ async function detectThreadsSearchResultContentLoadedLocally(screenshotUrl: stri
   const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 105;
   const textDensity = countRegion(0.07, 0.18, 0.94, 0.86, isDark);
   const lowerTextDensity = countRegion(0.07, 0.42, 0.94, 0.86, isDark);
-  return textDensity >= 2200 || lowerTextDensity >= 1100;
+  const actionRowDensity = countRegion(0.08, 0.55, 0.90, 0.78, isDark);
+  return textDensity >= 1500 || lowerTextDensity >= 720 || actionRowDensity >= 520;
+}
+
+async function detectThreadsSearchResultsVisualGateLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) count += 1;
+      }
+    }
+    return count;
+  };
+  const isPillGray = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return a > 220 && avg > 214 && avg < 247 && spread < 28;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 110;
+  const searchPill = countRegion(0.14, 0.045, 0.72, 0.115, isPillGray);
+  const tabText = countRegion(0.05, 0.13, 0.95, 0.19, isDark);
+  const midContent = countRegion(0.06, 0.20, 0.96, 0.62, isDark);
+  return searchPill >= 1500 && tabText >= 120 && midContent >= 900;
+}
+
+async function detectThreadsSparseSearchResultsLocally(
+  screenshotUrl: string | undefined,
+): Promise<{ sparse: boolean; reason: string }> {
+  if (!screenshotUrl) return { sparse: false, reason: "no-screenshot" };
+  if (await detectAndroidKeyboardVisibleLocally(screenshotUrl).catch(() => false)) {
+    const searchResultsGate = await detectThreadsSearchResultsVisualGateLocally(screenshotUrl).catch(() => false);
+    if (!searchResultsGate) return { sparse: false, reason: "keyboard-visible" };
+  }
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return { sparse: false, reason: "no-pixels" };
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) count += 1;
+      }
+    }
+    return count;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 110;
+  const isWhite = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return a > 220 && avg > 246 && spread < 16;
+  };
+  const isPillGray = (r: number, g: number, b: number, a: number) => {
+    const avg = (r + g + b) / 3;
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    return a > 220 && avg > 214 && avg < 247 && spread < 28;
+  };
+  const searchPill = countRegion(0.14, 0.045, 0.72, 0.115, isPillGray);
+  const upperContent = countRegion(0.05, 0.18, 0.96, 0.64, isDark);
+  const lowerContent = countRegion(0.05, 0.74, 0.96, 0.89, isDark);
+  const lowerBlank = countRegion(0.05, 0.76, 0.96, 0.90, isWhite);
+  const feedbackBar = countRegion(0.16, 0.66, 0.94, 0.76, isPillGray);
+  const hasSingleVisiblePost = searchPill >= 1600 && upperContent >= 950;
+  const bottomLooksEmpty = lowerBlank >= 5200 && lowerContent < 360;
+  const sparse = hasSingleVisiblePost && bottomLooksEmpty;
+  return {
+    sparse,
+    reason: `searchPill=${searchPill},upper=${upperContent},lower=${lowerContent},blank=${lowerBlank},feedback=${feedbackBar}`,
+  };
 }
 
 export async function detectThreadsReplyComposerLocally(screenshotUrl: string | undefined): Promise<string | null> {
@@ -7189,6 +7284,71 @@ async function captureThreadsPublishedEvidenceScreenshot(
   throw new Error("未能取得 Threads 發布後截圖");
 }
 
+const THREADS_READER_PREFIX = "https://r.jina.ai/http://r.jina.ai/http://";
+
+async function resolveThreadsPublishedUrlFromReader(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<string | undefined> {
+  onProgress?.({ step: "讀取 Threads 發布帖連結...", done: false });
+  let username = "";
+  const uiXml = await dumpUiXml(config, padCode).catch(() => "");
+  username = extractThreadsProfileUsernameFromUiXml(uiXml) || "";
+  if (!username) {
+    const accountManagerAccount = await queryThreadsAccountFromAndroidAccountManager(config, padCode, 4_000).catch(() => null);
+    username = accountManagerAccount?.username || "";
+  }
+  if (!username) {
+    const account = await queryThreadsAccount(config, padCode).catch(() => null);
+    username = account?.username || "";
+  }
+  username = normalizeThreadsProfileUsername(username || "") || "";
+  if (!username) return undefined;
+
+  const profileUrl = `https://www.threads.net/@${username}`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const readerUrl = `${THREADS_READER_PREFIX}${profileUrl}${attempt ? `?__r=${Date.now().toString(36)}${attempt}` : ""}`;
+    const response = await fetchWithTimeout(
+      readerUrl,
+      {
+        headers: {
+          "user-agent": "Mozilla/5.0",
+          accept: "text/plain, text/markdown, */*",
+          "cache-control": "no-cache",
+          pragma: "no-cache",
+        },
+      },
+      18_000,
+    ).catch(() => null);
+    if (!response?.ok) {
+      await delay(1200);
+      continue;
+    }
+    const markdown = await response.text().catch(() => "");
+    const url = extractThreadsPublishedPostUrlFromReaderMarkdown({ markdown, username, caption });
+    if (url) return url;
+    await delay(1500);
+  }
+  return undefined;
+}
+
+async function attachThreadsPublishedUrl(
+  config: VmosConfig,
+  padCode: string,
+  caption: string,
+  verification: PublishResult,
+  onProgress?: (p: PublishProgress) => void,
+): Promise<PublishResult> {
+  if (verification.publishedUrl || verification.state !== "verified") return verification;
+  const publishedUrl = await resolveThreadsPublishedUrlFromReader(config, padCode, caption, onProgress).catch((error) => {
+    console.warn(`[threads-publish][published_url_lookup_failed] pad=${padCode} error=${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  });
+  return publishedUrl ? { ...verification, publishedUrl } : verification;
+}
+
 async function captureFreshThreadsScreenshotAfterAction(
   config: VmosConfig,
   padCode: string,
@@ -8640,59 +8800,6 @@ async function clearThreadsComposerDraft(
   }
 }
 
-async function recoverThreadsLoginRequiredPage(
-  config: VmosConfig,
-  padCode: string,
-  onProgress?: (p: PublishProgress) => void,
-): Promise<{ page: ThreadsPageState; reason: string; screenshotUrl: string } | null> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    onProgress?.({
-      step: `Threads 顯示 Instagram 帳號選擇頁，嘗試點選已登入帳號（第 ${attempt + 1}/2 次）...`,
-      done: false,
-    });
-    let before = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
-    const dialogDismissTarget = before?.screenshotUrl
-      ? await locateThreadsButtonByVision(
-          before.screenshotUrl,
-          "Threads 畫面中央錯誤彈窗底部的取消/關閉按鈕中心點；如果沒有錯誤彈窗就輸出 NOT_FOUND",
-        ).catch(() => null)
-      : null;
-    if (dialogDismissTarget) {
-      await tapAbsolute(config, padCode, dialogDismissTarget.x, dialogDismissTarget.y, 1200);
-      before = await classifyThreadsPageOnDevice(config, padCode).catch(() => before);
-    }
-
-    const accountPrompt = attempt === 0
-      ? "Threads 登入/歡迎頁中間的第一個白色 Instagram 已登入帳號卡片中心點，卡片內有 Instagram 圖標、帳號名稱和右側箭頭；不要選下面的「使用其他帳戶」"
-      : "Threads 登入/歡迎頁中間偏下的另一個白色 Instagram 已登入帳號卡片中心點，優先選擇不是最上方剛剛失敗的第二個帳號；不要選「使用其他帳戶」";
-    const accountTarget = before?.screenshotUrl
-      ? await locateThreadsButtonByVision(
-          before.screenshotUrl,
-          accountPrompt,
-        ).catch(() => null)
-      : null;
-    if (accountTarget) {
-      await tapAbsolute(config, padCode, accountTarget.x, accountTarget.y, 5500);
-    } else {
-      await tapAbsolute(config, padCode, 360, attempt === 0 ? 805 : 1025, 5500);
-    }
-    const after = await classifyThreadsPageOnDevice(config, padCode);
-    if (after.page === "login_required" || after.page === "challenge" || after.page === "system_dialog") {
-      continue;
-    }
-    const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
-    if (currentFocus && !currentFocus.includes(THREADS_PACKAGE)) {
-      continue;
-    }
-    const screenshotInput = await getInlineData(after.screenshotUrl).catch(() => null);
-    const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, screenshotInput).catch(() => null);
-    if (!blockedReason) {
-      return after;
-    }
-  }
-  return null;
-}
-
 async function closeThreadsReportSheetIfPresent(
   config: VmosConfig,
   padCode: string,
@@ -8761,63 +8868,15 @@ async function routeThreadsPreflightPage(
   }
 
   if (current.page === "system_dialog") {
-    onProgress({ step: "Threads 出現系統彈窗，嘗試關閉...", done: false });
-    const dismissed = await dismissThreadsSystemCrashDialogIfPossible(config, padCode, current.screenshotUrl).catch(() => false);
-    if (dismissed) {
-      await delay(1600);
-      const afterDismiss = await classifyThreadsPageOnDevice(config, padCode);
-      if (afterDismiss.page === "home_feed" || afterDismiss.page === "profile_page" || afterDismiss.page === "compose_editor") {
-        return;
-      }
-      const afterFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
-      const afterShot = await getInlineData(afterDismiss.screenshotUrl).catch(() => null);
-      const afterBlocked = await detectThreadsBlockedScreenOnDevice(config, padCode, afterShot).catch(() => null);
-      if (afterFocus.includes(THREADS_PACKAGE) && !afterBlocked) {
-        onProgress({ step: `Threads 系統彈窗已關閉，頁面分類不穩定（${afterDismiss.reason}），按正常狀態繼續...`, done: false });
-        return;
-      }
-      const savedPath = saveThreadsDebugScreenshot(afterDismiss.screenshotUrl, "preflight-system-dialog");
-      throw new Error(`Threads 前置系統彈窗已關閉，但仍未回到可發布狀態：${afterDismiss.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
-    }
-
-    await execAdbAndWait(config, padCode, "input keyevent KEYCODE_BACK", 15000);
-    await delay(1600);
-    const afterBack = await classifyThreadsPageOnDevice(config, padCode);
-    if (afterBack.page === "home_feed" || afterBack.page === "profile_page" || afterBack.page === "compose_editor") {
-      return;
-    }
-    const afterFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
-    const afterShot = await getInlineData(afterBack.screenshotUrl).catch(() => null);
-    const afterBlocked = await detectThreadsBlockedScreenOnDevice(config, padCode, afterShot).catch(() => null);
-    if (afterFocus.includes(THREADS_PACKAGE) && !afterBlocked) {
-      onProgress({ step: `Threads 系統彈窗已關閉，頁面分類不穩定（${afterBack.reason}），按正常狀態繼續...`, done: false });
-      return;
-    }
-    const savedPath = saveThreadsDebugScreenshot(afterBack.screenshotUrl, "preflight-system-dialog");
-    throw new Error(`Threads 前置系統彈窗未解除：${afterBack.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
+    throwThreadsTerminalPage(current, "发布流程启动后检测到系统弹窗阻断");
   }
 
   if (current.page === "login_required") {
-    if (current.reason === "LOCAL_PHONE_VERIFICATION_PAGE") {
-      const savedPath = saveThreadsDebugScreenshot(current.screenshotUrl, "preflight-phone-verification");
-      throw new Error(`Threads 目前需要完成手机号验证码登录：${current.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
-    }
-    if (!blockedReason) {
-      onProgress({ step: "Threads classifier 疑似誤判登入頁，按首頁狀態繼續...", done: false });
-      return;
-    }
-    const recovered = await recoverThreadsLoginRequiredPage(config, padCode, onProgress);
-    if (recovered) {
-      onProgress({ step: `Threads 已用現有 Instagram 帳號恢復：${recovered.reason}`, done: false });
-      return;
-    }
-    const savedPath = saveThreadsDebugScreenshot(current.screenshotUrl, "preflight-login");
-    throw new Error(`Threads 目前需要重新登入 Instagram：${current.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
+    throwThreadsTerminalPage(current, "发布流程启动后检测到未登录");
   }
 
   if (current.page === "challenge") {
-    const savedPath = saveThreadsDebugScreenshot(current.screenshotUrl, "preflight-challenge");
-    throw new Error(`Threads 目前停在驗證或風控頁：${current.reason}${savedPath ? `｜debug=${savedPath}` : ""}`);
+    throwThreadsTerminalPage(current, "发布流程启动后检测到验证阻断");
   }
 
   if (!focusInsideThreads) {
@@ -8838,11 +8897,7 @@ async function routeThreadsPreflightPage(
   }
 
   if (looksLikeThreadsLoginChooser(`${current.reason} ${blockedReason}`)) {
-    const recovered = await recoverThreadsLoginRequiredPage(config, padCode, onProgress);
-    if (recovered) {
-      onProgress({ step: `Threads 已從帳號選擇頁恢復：${recovered.reason}`, done: false });
-      return;
-    }
+    throw new Error(buildThreadsBlockedError(`Threads 发布流程启动后检测到未登录：${current.reason || blockedReason}`, current.screenshotUrl));
   }
 
   if (/keeps stopping|has stopped|stopped responding|close app|app info|已停止|停止運作|停止运行|AutoTakeoff/i.test(`${current.reason} ${blockedReason}`)) {
@@ -10330,6 +10385,50 @@ function summarizeCaption(caption: string, maxLen = 80): string {
   return singleLine.length > maxLen ? `${singleLine.slice(0, maxLen)}...` : singleLine;
 }
 
+function normalizeThreadsTextForMatch(text: string): string {
+  return normalizeSingleLine(String(text || ""))
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[#*_`\[\]()]/g, " ")
+    .toLowerCase();
+}
+
+export function extractThreadsPublishedPostUrlFromReaderMarkdown(args: {
+  markdown: string;
+  username: string;
+  caption: string;
+}): string | null {
+  const markdown = String(args.markdown || "");
+  const username = normalizeThreadsProfileUsername(args.username || "");
+  if (!markdown || !username) return null;
+  const captionNeedles = extractThreadsVerificationCues(args.caption)
+    .map((cue) => normalizeThreadsTextForMatch(cue).slice(0, 48))
+    .filter((cue) => cue.length >= 4);
+  const fallbackNeedle = normalizeThreadsTextForMatch(args.caption).slice(0, 48);
+  if (!captionNeedles.length && fallbackNeedle.length >= 4) captionNeedles.push(fallbackNeedle);
+  const escapedUsername = username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const postUrlPattern = new RegExp(`https://www\\.threads\\.net/@${escapedUsername}/post/[^)\\s]+`, "gi");
+  const postMatches: Array<{ url: string; index: number }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = postUrlPattern.exec(markdown)) !== null) {
+    const url = match[0].replace(/[.,;]+$/g, "");
+    postMatches.push({ url, index: match.index });
+  }
+  const candidates: Array<{ url: string; score: number; index: number }> = [];
+  for (let index = 0; index < postMatches.length; index += 1) {
+    const current = postMatches[index];
+    const nextIndex = postMatches[index + 1]?.index ?? markdown.length;
+    const block = markdown.slice(current.index, Math.min(nextIndex, current.index + 1400));
+    const normalizedBlock = normalizeThreadsTextForMatch(block);
+    const score = captionNeedles.reduce((sum, needle) => sum + (needle && normalizedBlock.includes(needle) ? 10 : 0), 0);
+    candidates.push({ url: current.url, score, index: current.index });
+  }
+  if (!candidates.length) return null;
+  const matched = candidates
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0];
+  return matched?.url || null;
+}
+
 function extractThreadsVerificationCues(caption: string): string[] {
   const lines = caption
     .split(/\r?\n/)
@@ -11163,6 +11262,21 @@ function assertThreadsSnapshotNotTerminal(snapshot: ThreadsPageSnapshot, context
   throw new Error(buildThreadsBlockedError(`Threads ${context}：${snapshot.reason}`, snapshot.screenshotUrl));
 }
 
+function throwThreadsTerminalPage(snapshot: { page: ThreadsPageState; reason?: string; screenshotUrl?: string }, context: string): never {
+  throw new Error(buildThreadsBlockedError(`Threads ${context}：${snapshot.reason || snapshot.page}`, snapshot.screenshotUrl));
+}
+
+async function assertThreadsActionNotBlocked(
+  config: VmosConfig,
+  padCode: string,
+  context: string,
+): Promise<void> {
+  const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+  if (state && isThreadsTerminalPage(state.page)) {
+    throwThreadsTerminalPage(state, context);
+  }
+}
+
 function threadsSnapshotStableKey(snapshot: ThreadsPageSnapshot): string {
   const focusPackage = isAndroidCameraFocus(snapshot.focus)
     ? "camera"
@@ -11260,18 +11374,6 @@ async function runThreadsObservedStep<T>(
   assertThreadsSnapshotNotTerminal(before, `${input.step}前置頁阻斷`);
   await input.action();
   return input.verify(before);
-}
-
-async function assertThreadsNoImmediateAccountBlock(
-  config: VmosConfig,
-  padCode: string,
-  context: string,
-): Promise<void> {
-  const state = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
-  if (!state) return;
-  if (isThreadsTerminalPage(state.page)) {
-    throw new Error(buildThreadsBlockedError(`Threads ${context}前置页阻断：${state.reason}`, state.screenshotUrl));
-  }
 }
 
 async function locateThreadsButtonByVision(
@@ -11386,39 +11488,8 @@ async function waitForThreadsExpectedPage(
       }
       continue;
     }
-    if (after.page === "login_required") {
-      const screenshotInput = await getInlineData(after.screenshotUrl).catch(() => null);
-      const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, screenshotInput).catch(() => null);
-      if (blockedReason) {
-        const recovered = await recoverThreadsLoginRequiredPage(config, padCode);
-        if (recovered) {
-          if (expectedPages.includes(recovered.page)) return recovered;
-          if (options.allowUnknownWhenUnblocked) {
-            return {
-              page: expectedPages[0] ?? recovered.page,
-              reason: `登入頁已用現有 Instagram 帳號恢復：${recovered.reason}`,
-              screenshotUrl: recovered.screenshotUrl,
-            };
-          }
-          lastState = recovered;
-          continue;
-        }
-        throw new Error(buildThreadsBlockedError(`Threads 前置頁阻斷：${blockedReason}`, after.screenshotUrl));
-      }
-      const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
-      if (!currentFocus.includes(THREADS_PACKAGE) && currentFocus) {
-        throw new Error(`Threads 前置頁阻斷：${currentFocus}`);
-      }
-      if (options.allowUnknownWhenUnblocked) {
-        return {
-          page: expectedPages[0] ?? "unknown",
-          reason: `登入頁分類疑似誤判，但未檢出阻斷：${after.reason}`,
-          screenshotUrl: after.screenshotUrl,
-        };
-      }
-    }
-    if (after.page === "challenge" || after.page === "system_dialog") {
-      throw new Error(buildThreadsBlockedError(`Threads 前置頁阻斷：${after.reason}`, after.screenshotUrl));
+    if (isThreadsTerminalPage(after.page)) {
+      throwThreadsTerminalPage(after, "执行中检测到账号状态阻断");
     }
     if (expectedPages.includes(after.page)) {
       return after;
@@ -11839,17 +11910,11 @@ async function ensureThreadsHomeFeed(
     }
 
     if (current.page === "login_required") {
-      if (current.reason === "LOCAL_PHONE_VERIFICATION_PAGE") {
-        throw new Error(`Threads 当前不适合养号：需要完成手机号验证码登录（${current.reason}）`);
-      }
-      const recovered = await recoverThreadsLoginRequiredPage(config, padCode, onProgress);
-      if (recovered?.page === "home_feed") return;
-      if (recovered) continue;
-      throw new Error(`Threads 当前不适合养号：${current.reason}`);
+      throwThreadsTerminalPage(current, "恢复首页时检测到未登录");
     }
 
     if (current.page === "challenge" || current.page === "system_dialog") {
-      throw new Error(`Threads 当前不适合养号：${current.reason}`);
+      throwThreadsTerminalPage(current, "恢复首页时检测到账号状态阻断");
     }
 
     if (current.page === "unknown" && current.reason === "LOCAL_ANDROID_LAUNCHER") {
@@ -11912,17 +11977,8 @@ async function ensureThreadsHomeFeed(
       await relaunchThreads(config, padCode, 4500);
       const relaunched = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
       if (await isConfirmedHome(relaunched)) return;
-      if (relaunched?.page === "login_required") {
-        if (relaunched.reason === "LOCAL_PHONE_VERIFICATION_PAGE") {
-          throw new Error(`Threads 当前不适合养号：需要完成手机号验证码登录（${relaunched.reason}）`);
-        }
-        const recovered = await recoverThreadsLoginRequiredPage(config, padCode, onProgress);
-        if (recovered?.page === "home_feed") return;
-        if (recovered) continue;
-        throw new Error(`Threads 当前不适合养号：${relaunched.reason}`);
-      }
-      if (relaunched?.page === "challenge" || relaunched?.page === "system_dialog") {
-        throw new Error(`Threads 当前不适合养号：${relaunched.reason}`);
+      if (relaunched && isThreadsTerminalPage(relaunched.page)) {
+        throwThreadsTerminalPage(relaunched, "重启后检测到账号状态阻断");
       }
       const relaunchedHome = await tapAndVerifyThreadsPage(
         config,
@@ -12045,6 +12101,9 @@ async function ensureThreadsHomeFeedForPublish(
       stableSamples: 2,
     }).catch(() => null);
     options.throwIfCancelled?.();
+    if (state && isThreadsTerminalPage(state.page)) {
+      throwThreadsTerminalPage(state, "发布前恢复首页时检测到账号状态阻断");
+    }
     const focus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
     const shotUrl = state?.screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => undefined);
     const localHomeReason = await detectThreadsHomeFeedLocally(shotUrl).catch(() => null);
@@ -14579,7 +14638,7 @@ UNKNOWN|原因
       throw new Error(`發布校驗失敗：${msg.replace("__THREADS_STILL_COMPOSING__", "")}`);
     }
     if (msg.startsWith("__THREADS_BLOCKED__")) {
-      throw new Error(`發布校驗失敗：${msg.replace("__THREADS_BLOCKED__", "")}`);
+      throw new Error(msg);
     }
     if (isPublishVerifierAuthError(msg)) {
       throw new Error(`發布校驗失敗：AI 校驗 API 金鑰無效，且本機校驗未能確認 Threads 已發布：${msg}`);
@@ -15639,10 +15698,6 @@ async function publishThreads(
   let beforeProfileVideoTabUrl: string | undefined;
 
   if (useShareIntentPath) {
-    if (mediaUrl) {
-      throwIfCancelled();
-      await assertThreadsNoImmediateAccountBlock(config, padCode, "媒体发布");
-    }
     const pendingMedia = mediaUrl
       ? startDeviceMediaStaging(
         config,
@@ -15769,12 +15824,13 @@ async function publishThreads(
         mediaUrl,
         onProgress,
       );
+    const finalVerification = await attachThreadsPublishedUrl(config, padCode, normalizedCaption.trim(), verification, onProgress);
     onProgress({
-      step: verification.detail,
+      step: finalVerification.detail,
       done: true,
-      warning: verification.state === "warning" ? verification.detail : undefined,
+      warning: finalVerification.state === "warning" ? finalVerification.detail : undefined,
     });
-    return verification;
+    return finalVerification;
   }
 
   if (mediaUrl) {
@@ -15786,9 +15842,8 @@ async function publishThreads(
     // - 文字輸入框：(415, 262)
     // - "發布"按鈕：(633, 1180)
 
-    // Step 1: 先快速检查当前画面是否已是账号阻断页；确认没有阻断后再背景准备媒体。
+    // Step 1: 准备媒体；账号状态由后续打开 Threads / 进入发布页流程同步阻断。
     throwIfCancelled();
-    await assertThreadsNoImmediateAccountBlock(config, padCode, "媒体发布");
     const mediaLabel = getDeviceMediaLabel(mediaUrl);
     const remotePath = buildStableDeviceMediaRemotePath("threads_post", mediaUrl);
     const pendingMedia = startDeviceMediaStaging(config, padCode, mediaUrl, remotePath, onProgress);
@@ -16387,12 +16442,13 @@ async function publishThreads(
         mediaUrl,
         onProgress,
       );
+    const finalVerification = await attachThreadsPublishedUrl(config, padCode, normalizedCaption.trim(), verification, onProgress);
     onProgress({
-      step: verification.detail,
+      step: finalVerification.detail,
       done: true,
-      warning: verification.state === "warning" ? verification.detail : undefined,
+      warning: finalVerification.state === "warning" ? finalVerification.detail : undefined,
     });
-    return verification;
+    return finalVerification;
   } else {
     // ── 模式 B：純文字貼文（已實測驗證）────────────────────────────────────
 
@@ -16501,12 +16557,13 @@ async function publishThreads(
       undefined,
       onProgress,
     );
+    const finalVerification = await attachThreadsPublishedUrl(config, padCode, normalizedCaption.trim(), verification, onProgress);
     onProgress({
-      step: verification.detail,
+      step: finalVerification.detail,
       done: true,
-      warning: verification.state === "warning" ? verification.detail : undefined,
+      warning: finalVerification.state === "warning" ? finalVerification.detail : undefined,
     });
-    return verification;
+    return finalVerification;
   }
 }
 
@@ -18301,6 +18358,7 @@ async function login_tapAndWait(config: VmosConfig, padCode: string, x: number, 
 }
 
 async function login_inputText(config: VmosConfig, padCode: string, text: string) {
+  console.log(`[threads-login][input_start] pad=${padCode} chars=${String(text || "").length}`);
   try {
     const taskId = await Promise.race([
       inputText(config, padCode, text),
@@ -18312,10 +18370,13 @@ async function login_inputText(config: VmosConfig, padCode: string, text: string
       }),
     ]);
     const numericTaskId = Number(taskId);
+    console.log(`[threads-login][input_task] pad=${padCode} task=${Number.isFinite(numericTaskId) ? numericTaskId : "none"}`);
     if (Number.isFinite(numericTaskId) && numericTaskId > 0) {
       await waitTask(config, numericTaskId, 30000, 1000).catch(() => undefined);
     }
-  } catch {
+    console.log(`[threads-login][input_done] pad=${padCode}`);
+  } catch (error: any) {
+    console.log(`[threads-login][input_fallback] pad=${padCode} reason=${error?.message || error}`);
     await execAdbAndWait(
       config,
       padCode,
@@ -18323,6 +18384,7 @@ async function login_inputText(config: VmosConfig, padCode: string, text: string
       20000,
       1000,
     );
+    console.log(`[threads-login][input_fallback_done] pad=${padCode}`);
   }
   await delay(1200);
 }
@@ -18350,13 +18412,46 @@ const THREADS_LOGIN_ADB_POINTS = {
   usernameField: { x: 360, y: 600 },
   passwordField: { x: 360, y: 760 },
   submitButton: { x: 360, y: 895 },
-  saveLoginButton: { x: 360, y: 1035 },
+  saveLoginButton: { x: 360, y: 1328 },
   setupContinueButton: { x: 360, y: 1180 },
   instagramLoginCard: { x: 360, y: 790 },
 } as const;
 
 function isThreadsSaveLoginInfoText(text: string | undefined | null): boolean {
   return /儲存登入資料|储存登录资料|保存登录信息|保存登入資訊|登入資料|登录资料|Save login info|Save your login info/i.test(text || "");
+}
+
+async function detectThreadsSaveLoginInfoLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) count += 1;
+      }
+    }
+    return count;
+  };
+  const isBlue = (r: number, g: number, b: number, a: number) => a > 220 && b > 160 && g > 90 && r < 70;
+  const isDarkText = (r: number, g: number, b: number, a: number) => a > 220 && r < 80 && g < 80 && b < 80;
+  const blueButton = countRegion(0.06, 0.76, 0.94, 0.88, isBlue);
+  const titleText = countRegion(0.18, 0.15, 0.82, 0.28, isDarkText);
+  const bodyText = countRegion(0.05, 0.25, 0.95, 0.40, isDarkText);
+  return blueButton >= 2500 && titleText >= 600 && bodyText >= 600;
 }
 
 function findThreadsSaveLoginTargetFromUiXml(uiXml: string): { x: number; y: number } | null {
@@ -18388,7 +18483,8 @@ async function handleThreadsSaveLoginInfoIfPresent(config: VmosConfig, padCode: 
 
   const target = findThreadsSaveLoginTargetFromUiXml(windowText);
   if (target) {
-    await login_tapAdbPoint(config, padCode, target, 3000);
+    await simulateClick(config, padCode, target.x, target.y, FIXED_VMOS_SCREEN.width, FIXED_VMOS_SCREEN.height);
+    await delay(3000);
     return true;
   }
 
@@ -18403,7 +18499,8 @@ async function handleThreadsSaveLoginInfoIfPresent(config: VmosConfig, padCode: 
     return true;
   }
 
-  await login_tapAndWait(config, padCode, 360, 1148, 3000);
+  await simulateClick(config, padCode, 360, 1328, FIXED_VMOS_SCREEN.width, FIXED_VMOS_SCREEN.height);
+  await delay(3000);
   return true;
 }
 
@@ -18418,11 +18515,22 @@ const TELEGRAM_LOGIN_ADB_POINTS = {
 } as const;
 
 async function login_clearAppData(config: VmosConfig, padCode: string) {
-  await execAdbForText(config, padCode, `pm clear ${PKG_THREADS}`, 30000, 1000).catch(() => "");
+  console.log(`[threads-login][clear_start] pad=${padCode}`);
+  await execAdbForText(config, padCode, `am force-stop ${PKG_THREADS}; am force-stop ${INSTAGRAM_PACKAGE}`, 10000, 500)
+    .then(() => console.log(`[threads-login][force_stop_done] pad=${padCode}`))
+    .catch((error: any) => console.log(`[threads-login][force_stop_error] pad=${padCode} error=${error?.message || error}`));
+  await execAdbForText(config, padCode, `pm clear ${PKG_THREADS}`, 30000, 1000)
+    .then((out) => console.log(`[threads-login][clear_threads_done] pad=${padCode} out=${normalizeSingleLine(out).slice(0, 120)}`))
+    .catch((error: any) => console.log(`[threads-login][clear_threads_error] pad=${padCode} error=${error?.message || error}`));
+  await execAdbForText(config, padCode, `pm clear ${INSTAGRAM_PACKAGE}`, 30000, 1000)
+    .then((out) => console.log(`[threads-login][clear_instagram_done] pad=${padCode} out=${normalizeSingleLine(out).slice(0, 120)}`))
+    .catch((error: any) => console.log(`[threads-login][clear_instagram_error] pad=${padCode} error=${error?.message || error}`));
   await delay(2000);
+  console.log(`[threads-login][clear_done] pad=${padCode}`);
 }
 
 async function login_launchThreads(config: VmosConfig, padCode: string) {
+  console.log(`[threads-login][launch_start] pad=${padCode}`);
   await execAdbForText(
     config,
     padCode,
@@ -18431,6 +18539,7 @@ async function login_launchThreads(config: VmosConfig, padCode: string) {
     1000,
   ).catch(() => "");
   await delay(4000);
+  console.log(`[threads-login][launch_done] pad=${padCode}`);
 }
 
 async function login_dismissKeyboard(config: VmosConfig, padCode: string) {
@@ -18523,14 +18632,17 @@ export async function loginThreadsAccount(
   config: VmosConfig,
   padCode: string,
   credential: ThreadsLoginInput,
+  options: { forceFreshLogin?: boolean } = {},
 ): Promise<ThreadsLoginResult> {
   const handle = credential.username;
   const password = credential.password;
 
   // Step 0: 每次都真实确认云机当前账号；不直接使用缓存，避免云机被别人改过后误判。
-  const precheck = await confirmThreadsAccountBeforeLogin(config, padCode, handle);
-  if (precheck.action === "already_logged_in") return precheck.result;
-  if (precheck.action === "blocked") return precheck.result;
+  if (!options.forceFreshLogin) {
+    const precheck = await confirmThreadsAccountBeforeLogin(config, padCode, handle);
+    if (precheck.action === "already_logged_in") return precheck.result;
+    if (precheck.action === "blocked") return precheck.result;
+  }
 
   clearThreadsAccountQueryCache(padCode);
 
@@ -18673,10 +18785,15 @@ export async function loginThreadsAccount(
         "Instagram 登录表单底部的「登录 / Log in / 登入 / Sign in」蓝色填充按钮",
         15000,
       );
-      if (!loginPos) {
-        return { ok: false, state: "failed", message: "找不到登录按钮" };
+      if (loginPos) {
+        console.log(`[threads-login][submit_tap] pad=${padCode} mode=combined x=${loginPos.x} y=${loginPos.y}`);
+        await login_tapAndWait(config, padCode, loginPos.x, loginPos.y, 6000);
+      } else {
+        console.log(`[threads-login][submit_tap_fallback] pad=${padCode} mode=combined x=360 y=865`);
+        await simulateClick(config, padCode, 360, 865, FIXED_VMOS_SCREEN.width, FIXED_VMOS_SCREEN.height);
+        await delay(6000);
       }
-      await login_tapAndWait(config, padCode, loginPos.x, loginPos.y, 6000);
+      console.log(`[threads-login][submit_done] pad=${padCode} mode=combined`);
     } else {
       // wizard 模式：先填用户名，再下一步，再填密码
       await login_tapAndWait(config, padCode, uPos.x, uPos.y, 600);
@@ -18723,10 +18840,15 @@ export async function loginThreadsAccount(
         "Instagram 密码表单底部的「登录 / Log in / 登入 / Sign in」按钮",
         15000,
       );
-      if (!loginPos2) {
-        return { ok: false, state: "failed", message: "密码表单找不到登录按钮" };
+      if (loginPos2) {
+        console.log(`[threads-login][submit_tap] pad=${padCode} mode=wizard x=${loginPos2.x} y=${loginPos2.y}`);
+        await login_tapAndWait(config, padCode, loginPos2.x, loginPos2.y, 6000);
+      } else {
+        console.log(`[threads-login][submit_tap_fallback] pad=${padCode} mode=wizard x=360 y=865`);
+        await simulateClick(config, padCode, 360, 865, FIXED_VMOS_SCREEN.width, FIXED_VMOS_SCREEN.height);
+        await delay(6000);
       }
-      await login_tapAndWait(config, padCode, loginPos2.x, loginPos2.y, 6000);
+      console.log(`[threads-login][submit_done] pad=${padCode} mode=wizard`);
     }
     }
   } else {
@@ -18736,9 +18858,18 @@ export async function loginThreadsAccount(
   // Step 5: 验证登录结果（最多 4 轮）
   let saveLoginTapTried = false;
   for (let round = 0; round < 4; round++) {
+    console.log(`[threads-login][verify_round] pad=${padCode} round=${round + 1}`);
     const loginWindowText = await getThreadsWindowText(config, padCode).catch(() => "");
     if (isThreadsSaveLoginInfoText(loginWindowText)) {
+      console.log(`[threads-login][save_login_detected_text] pad=${padCode} round=${round + 1}`);
       await handleThreadsSaveLoginInfoIfPresent(config, padCode);
+      continue;
+    }
+    const roundShot = await screenshot(config, padCode).catch(() => undefined);
+    const roundShotLooksSaveLogin = await detectThreadsSaveLoginInfoLocally(roundShot).catch(() => false);
+    if (roundShotLooksSaveLogin) {
+      console.log(`[threads-login][save_login_detected_visual] pad=${padCode} round=${round + 1}`);
+      await handleThreadsSaveLoginInfoIfPresent(config, padCode, true);
       continue;
     }
     if (/密碼錯誤|密码错误|密碼不正確|密码不正确|password.*incorrect|incorrect.*password|請再試一次|请再试一次/i.test(loginWindowText)) {
@@ -18753,7 +18884,8 @@ export async function loginThreadsAccount(
     if (await detectThreadsModalActivityInFocus(config, padCode)) {
       if (!saveLoginTapTried) {
         saveLoginTapTried = true;
-        await login_tapAdbPoint(config, padCode, THREADS_LOGIN_ADB_POINTS.saveLoginButton, 3500);
+        await simulateClick(config, padCode, THREADS_LOGIN_ADB_POINTS.saveLoginButton.x, THREADS_LOGIN_ADB_POINTS.saveLoginButton.y, FIXED_VMOS_SCREEN.width, FIXED_VMOS_SCREEN.height);
+        await delay(3500);
         continue;
       }
       const transition = await classifyThreadsLoginTransitionVisually(config, padCode).catch(() => null);
@@ -19949,7 +20081,7 @@ async function openThreadsEditProfilePage(
   padCode: string,
   onProgress?: (progress: PublishProgress) => void,
 ): Promise<{ uiXml: string; screenshotUrl?: string }> {
-  onProgress?.({ step: "启动 Threads 并打开个人主页...", done: false });
+  onProgress?.({ step: "啟動 Threads 並開啟個人主頁...", done: false });
   if (isAcpPad(padCode)) {
     const tryFastOpenEditProfile = async (): Promise<{ uiXml: string; screenshotUrl?: string } | null> => {
       onProgress?.({ step: "启动 Threads App...", done: false });
@@ -19964,6 +20096,10 @@ async function openThreadsEditProfilePage(
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         onProgress?.({ step: `检查 Threads 当前页面 (${attempt + 1}/2)...`, done: false });
+        const currentState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+        if (currentState && isThreadsTerminalPage(currentState.page)) {
+          throwThreadsTerminalPage(currentState, "资料管理启动后检测到账号状态阻断");
+        }
         let currentShot = await screenshot(config, padCode).catch(() => undefined);
         if (await detectThreadsEditProfilePageByScreenshotHeuristic(currentShot).catch(() => false)) {
           return { uiXml: "", screenshotUrl: currentShot };
@@ -20051,6 +20187,7 @@ async function openThreadsEditProfilePage(
   await delay(900);
   await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
   await delay(700);
+  await assertThreadsActionNotBlocked(config, padCode, "資料管理點擊編輯個人資料後檢測到帳號狀態阻斷");
 
   const recoverFromEditSubPage = async (): Promise<{ ok: boolean; uiXml: string; screenshotUrl?: string }> => {
     let currentXml = await dumpUiXml(config, padCode).catch(() => "");
@@ -20090,6 +20227,7 @@ async function openThreadsEditProfilePage(
       if (recovered.ok) return recovered;
       return { ok: false, uiXml: recovered.uiXml, screenshotUrl: recovered.screenshotUrl };
     }
+    await assertThreadsActionNotBlocked(config, padCode, "資料管理等待編輯頁時檢測到帳號狀態阻斷");
     const heuristic = await detectThreadsEditProfilePageByScreenshotHeuristic(currentShot).catch(() => false);
     if (heuristic) return { ok: true, uiXml: currentXml, screenshotUrl: currentShot };
     const visual = await detectThreadsEditProfilePageByVision(currentShot).catch(() => false);
@@ -20137,6 +20275,7 @@ async function openThreadsEditProfilePage(
       }
     }
     editProfileScreenshotUrl = await screenshot(config, padCode).catch(() => editProfileScreenshotUrl);
+    await assertThreadsActionNotBlocked(config, padCode, "資料管理等待編輯頁時檢測到帳號狀態阻斷");
     if (await detectThreadsEditProfilePageByScreenshotHeuristic(editProfileScreenshotUrl).catch(() => false)) {
       visuallyOnEditProfile = true;
       break;
@@ -20156,6 +20295,7 @@ async function openThreadsEditProfilePage(
       uiXml = await dumpUiXml(config, padCode).catch(() => "");
       if (isThreadsEditProfilePageUiXml(uiXml)) break;
       editProfileScreenshotUrl = await screenshot(config, padCode).catch(() => editProfileScreenshotUrl);
+      await assertThreadsActionNotBlocked(config, padCode, "資料管理等待編輯頁時檢測到帳號狀態阻斷");
       if (await detectThreadsEditProfilePageByScreenshotHeuristic(editProfileScreenshotUrl).catch(() => false)) {
         visuallyOnEditProfile = true;
         break;
@@ -20756,9 +20896,11 @@ export async function updateThreadsProfileLink(
   await delay(900);
   await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
   await delay(700);
+  await assertThreadsActionNotBlocked(config, padCode, "連結修改點擊編輯個人資料後檢測到帳號狀態阻斷");
   for (let attempt = 0; attempt < 6; attempt += 1) {
     uiXml = await dumpUiXml(config, padCode).catch(() => "");
     if (isThreadsEditProfilePageUiXml(uiXml)) break;
+    await assertThreadsActionNotBlocked(config, padCode, "連結修改等待編輯頁時檢測到帳號狀態阻斷");
     await delay(700);
   }
   let preResolvedAddLinkTarget: { x: number; y: number } | null = null;
@@ -20829,10 +20971,12 @@ export async function updateThreadsProfileLink(
   await tapViaAdbAbsolute(config, padCode, addLinkTapPoint.x, addLinkTapPoint.y, 2400);
   await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
   await delay(700);
+  await assertThreadsActionNotBlocked(config, padCode, "連結修改點擊 Links 後檢測到帳號狀態阻斷");
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     uiXml = await dumpUiXml(config, padCode).catch(() => "");
     if (isThreadsProfileLinksPageUiXml(uiXml) || findThreadsProfileLinkInputTarget(uiXml) || findThreadsProfileAddLinkRowTarget(uiXml)) break;
+    await assertThreadsActionNotBlocked(config, padCode, "連結修改等待 Links 頁時檢測到帳號狀態阻斷");
     await delay(700);
   }
   if (uiXml && isThreadsPostOptionsOrThreadDetailUiXml(uiXml)) {
@@ -20848,6 +20992,7 @@ export async function updateThreadsProfileLink(
       await tapViaAdbAbsolute(config, padCode, addLinkRowTapPoint.x, addLinkRowTapPoint.y, 1800);
       await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
       await delay(900);
+      await assertThreadsActionNotBlocked(config, padCode, "連結修改點擊新增連結後檢測到帳號狀態阻斷");
       uiXml = await dumpUiXml(config, padCode).catch(() => "");
       inputTarget = findThreadsProfileLinkInputTarget(uiXml);
       if (inputTarget) inputTargetSource = "xml";
@@ -20875,6 +21020,7 @@ export async function updateThreadsProfileLink(
       await tapViaAdbAbsolute(config, padCode, addLinkRowTarget.x, addLinkRowTarget.y, 1800);
       await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
       await delay(900);
+      await assertThreadsActionNotBlocked(config, padCode, "連結修改點擊新增連結後檢測到帳號狀態阻斷");
       uiXml = await dumpUiXml(config, padCode).catch(() => "");
       inputTarget = findThreadsProfileLinkInputTarget(uiXml);
       if (inputTarget) inputTargetSource = "xml";
@@ -20895,6 +21041,7 @@ export async function updateThreadsProfileLink(
     await tapViaAdbAbsolute(config, padCode, addLinkFallback.x, addLinkFallback.y, 1800);
     await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
     await delay(900);
+    await assertThreadsActionNotBlocked(config, padCode, "連結修改 fallback 點擊新增連結後檢測到帳號狀態阻斷");
     uiXml = await dumpUiXml(config, padCode).catch(() => "");
     inputTarget = findThreadsProfileLinkInputTarget(uiXml);
     if (inputTarget) inputTargetSource = "xml";
@@ -20923,6 +21070,7 @@ export async function updateThreadsProfileLink(
     await tapViaAdbAbsolute(config, padCode, lowerLinkTarget.x, lowerLinkTarget.y, 2200);
     await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
     await delay(900);
+    await assertThreadsActionNotBlocked(config, padCode, "連結修改重試點擊 Links 後檢測到帳號狀態阻斷");
     uiXml = await dumpUiXml(config, padCode).catch(() => "");
     inputTarget = findThreadsProfileLinkInputTarget(uiXml);
     if (inputTarget) inputTargetSource = "xml";
@@ -20933,6 +21081,7 @@ export async function updateThreadsProfileLink(
         await tapViaAdbAbsolute(config, padCode, addLinkRowTapPoint.x, addLinkRowTapPoint.y, 1800);
         await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
         await delay(900);
+        await assertThreadsActionNotBlocked(config, padCode, "連結修改重試點擊新增連結後檢測到帳號狀態阻斷");
         uiXml = await dumpUiXml(config, padCode).catch(() => "");
         inputTarget = findThreadsProfileLinkInputTarget(uiXml);
         if (inputTarget) inputTargetSource = "xml";
@@ -20960,12 +21109,14 @@ export async function updateThreadsProfileLink(
   await tapViaAdbAbsolute(config, padCode, inputTapPoint.x, inputTapPoint.y, 700);
   await clearFocusedTextInput(config, padCode, 300);
   await typeTextViaAndroidInputText(config, padCode, targetLink, 1600);
+  await assertThreadsActionNotBlocked(config, padCode, "連結修改輸入網址後檢測到帳號狀態阻斷");
 
   let afterInputXml = await dumpUiXml(config, padCode).catch(() => "");
   if (hasReadableUiXml(afterInputXml) && !threadsProfileLinkAcceptedTextPresent(afterInputXml, targetLink)) {
     await tapViaAdbAbsolute(config, padCode, inputTapPoint.x, inputTapPoint.y, 500);
     await clearFocusedTextInput(config, padCode, 300);
     await typeTextViaAndroidInputText(config, padCode, targetLink, 1600);
+    await assertThreadsActionNotBlocked(config, padCode, "連結修改重新輸入網址後檢測到帳號狀態阻斷");
     afterInputXml = await dumpUiXml(config, padCode).catch(() => "");
   }
 
@@ -20973,9 +21124,11 @@ export async function updateThreadsProfileLink(
   const keyboardConfirmTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 666, y: 1515 }, FIXED_VMOS_SCREEN);
   await tapViaAdbAbsolute(config, padCode, keyboardConfirmTarget.x, keyboardConfirmTarget.y, 1200).catch(() => undefined);
   await delay(700);
+  await assertThreadsActionNotBlocked(config, padCode, "連結修改準備保存時檢測到帳號狀態阻斷");
   const savePatterns = [/^完成$|^Done$|^儲存$|^保存$|^Save$|^新增$|^添加$|^Add$/i];
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const currentXml = await dumpUiXml(config, padCode).catch(() => "");
+    await assertThreadsActionNotBlocked(config, padCode, "連結修改保存時檢測到帳號狀態阻斷");
     if (isThreadsPostOptionsOrThreadDetailUiXml(currentXml)) {
       const currentShot = await screenshot(config, padCode).catch(() => undefined);
       throw new Error(`保存链接前已离开链接编辑页面${currentShot ? `，截图：${currentShot}` : ""}`);
@@ -20989,6 +21142,7 @@ export async function updateThreadsProfileLink(
       await tapViaAdbAbsolute(config, padCode, saveTapPoint.x, saveTapPoint.y, 2600);
     }
     const nextXml = await dumpUiXml(config, padCode).catch(() => "");
+    await assertThreadsActionNotBlocked(config, padCode, "連結修改保存後檢測到帳號狀態阻斷");
     if (/編輯個人檔案|编辑个人档案|Edit profile/i.test(normalizeSingleLine(nextXml)) && threadsProfileLinkAcceptedTextPresent(nextXml, targetLink)) {
       continue;
     }
@@ -21001,6 +21155,7 @@ export async function updateThreadsProfileLink(
   if (/新增連結|新增链接|Add link|URL|網址|网址|編輯個人檔案|编辑个人档案|Edit profile/i.test(normalizeSingleLine(beforeFinalXml))) {
     await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 800).catch(() => "");
     await delay(1800);
+    await assertThreadsActionNotBlocked(config, padCode, "連結修改返回資料頁後檢測到帳號狀態阻斷");
   }
   await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
   await delay(700);
@@ -22881,7 +23036,7 @@ async function warmupLocateHomeFeedActions(
   const state = await classifyThreadsPageOnDevice(config, padCode);
   if (state.page !== "home_feed") {
     if (state.page === "login_required" || state.page === "challenge" || state.page === "system_dialog") {
-      throw new Error(`Threads 当前不适合养号：${state.reason}`);
+      throwThreadsTerminalPage(state, "养号定位互动按钮时检测到账号状态阻断");
     }
     await withTimeout(
       ensureThreadsHomeFeed(config, padCode),
@@ -23504,6 +23659,7 @@ async function warmupLocateCurrentAcpActions(
 async function warmupLocateCurrentAcpActionsLocalSnapshot(
   config: VmosConfig,
   padCode: string,
+  options: { preferActionRowBeforeProfile?: boolean } = {},
 ): Promise<WarmupFeedActionTargets | null> {
   const focusBefore = normalizeSingleLine(await getAndroidCurrentFocusQuick(config, padCode).catch(() => ""));
   if (focusBefore && !focusBefore.includes(THREADS_PACKAGE)) {
@@ -23524,15 +23680,21 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
   if (await detectAndroidLauncherLocally(shotUrl).catch(() => false)) {
     return { screenshotUrl: shotUrl, debugReason: "acp_still_android_launcher" };
   }
+  const mediaOverlayActions = await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null);
+  if (mediaOverlayActions?.like || mediaOverlayActions?.comment) {
+    return { screenshotUrl: shotUrl, ...mediaOverlayActions };
+  }
+  if (await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_local_screenshot" };
+  }
+  if (await detectThreadsWarmupBlackLetterboxMedia(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_local_black_letterbox" };
+  }
   if (await detectThreadsExternalWebViewLocally(shotUrl).catch(() => false)) {
     return { screenshotUrl: shotUrl, debugReason: "acp_external_webview_detected" };
   }
   if (await detectThreadsSideDrawerLocally(shotUrl).catch(() => false)) {
     return { screenshotUrl: shotUrl, debugReason: "acp_side_drawer_detected" };
-  }
-  const mediaOverlayActions = await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null);
-  if (mediaOverlayActions?.like || mediaOverlayActions?.comment) {
-    return { screenshotUrl: shotUrl, ...mediaOverlayActions };
   }
   const detailReason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
   const inlineReplyBar = detailReason ? false : await detectThreadsInlineReplyBarLocally(shotUrl).catch(() => false);
@@ -23568,16 +23730,9 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
       debugReason: `thread_detail_no_action_row:${detailReason || (inlineReplyBar ? "LOCAL_INLINE_REPLY_BAR" : "LOCAL_THREAD_DETAIL_SHELL")}`,
     };
   }
-  if (await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+  if (!options.preferActionRowBeforeProfile && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
     return { screenshotUrl: shotUrl, debugReason: "profile_ui:acp_local_screenshot" };
   }
-  if (await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) {
-    return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_local_screenshot" };
-  }
-  if (await detectThreadsWarmupBlackLetterboxMedia(shotUrl).catch(() => false)) {
-    return { screenshotUrl: shotUrl, debugReason: "media_viewer:acp_local_black_letterbox" };
-  }
-
   const localOnlyOptions: LocateThreadsWarmupActionsOptions = { allowRemoteVision: false };
   let localTargets = await locateThreadsWarmupActionsWithFallback(shotUrl, undefined, localOnlyOptions).catch(() => null);
   const image = await getImageDimensions(shotUrl).catch(() => null);
@@ -23604,11 +23759,10 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
       debugReason: [localTargets.debugReason, "acp_local_snapshot_action_row"].filter(Boolean).join(" | "),
     };
   }
-
 	  const acpFallbackRows = buildAcpWarmupFallbackRows(image?.width || BASE_SCREEN.width, image?.height || BASE_SCREEN.height);
 	  const homeCueForCommonFallback = await detectThreadsHomeFeedLocally(shotUrl).catch(() => null);
 	  const topBackNavigationVisible = await detectThreadsTopBackNavigationLocally(shotUrl).catch(() => false);
-	  const allowCommonFallbackRows = Boolean(homeCueForCommonFallback) || !topBackNavigationVisible;
+	  const allowCommonFallbackRows = Boolean(homeCueForCommonFallback) || !topBackNavigationVisible || options.preferActionRowBeforeProfile;
 	  const verifiedFallbackRows = (await Promise.all(acpFallbackRows.map(async (row) => (
 	    await isLikelyWarmupActionRowAtPoint(shotUrl, row.like).catch(() => false) ? row : null
 	  )))).filter((row): row is { like: { x: number; y: number }; comment: { x: number; y: number } } => Boolean(row));
@@ -23632,6 +23786,9 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
 	      debugRaw: `fallback=${chosen.like.x},${chosen.like.y};comment=${countAwareComment.x},${countAwareComment.y};verified=${verifiedFallbackRows.map((row) => `${row.like.x},${row.like.y}`).join("|")}`,
 	    };
 	  }
+  if (options.preferActionRowBeforeProfile && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+    return { screenshotUrl: shotUrl, debugReason: "profile_ui:acp_local_screenshot" };
+  }
 	  return {
 	    screenshotUrl: shotUrl,
     debugReason: [
@@ -23682,7 +23839,7 @@ async function warmupLocateHomeFeedTarget(
   const state = await classifyThreadsPageOnDevice(config, padCode);
   if (state.page !== "home_feed") {
     if (state.page === "login_required" || state.page === "challenge" || state.page === "system_dialog") {
-      throw new Error(`Threads 当前不适合养号：${state.reason}`);
+      throwThreadsTerminalPage(state, "养号定位目标时检测到账号状态阻断");
     }
     await ensureThreadsHomeFeed(config, padCode);
     const homeState = await classifyThreadsPageOnDevice(config, padCode);
@@ -23767,17 +23924,13 @@ async function warmupFindCommentSendButton(
 }
 
 export function extractWarmupPostPreviewFromUiXml(uiXml: string): string {
-  const values = Array.from(uiXml.matchAll(/\btext="([^"]+)"/g))
-    .map((match) => match[1]
-      .replace(/&quot;/g, "\"")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .trim())
+  const values = Array.from(uiXml.matchAll(/\b(?:text|content-desc)="([^"]*)"/g))
+    .map((match) => decodeXmlAttr(match[1] || "").trim())
     .filter(Boolean);
-  const ignored = /^(关注|已关注|热门|查看动态|分享新鲜事|回复|转发|申文|取消|公开主页|私密主页|\d+|\d+[,.]?\d*次观看)$/;
+  const ignored = /^(关注|關注|已关注|已關注|热门|熱門|最新|最新貼文|熱門貼文|相关个人档案|相關個人檔案|查看动态|查看動態|分享新鲜事|分享新鮮事|回复|回覆|转发|轉發|申文|串文|取消|公開主頁|公开主页|私密主页|私密主頁|赞|讚|点赞|按讚|\d+|\d+[,.]?\d*次观看|\d+[,.]?\d*次觀看)$/;
   const candidates = values
-    .filter((value) => value.length >= 8 && !ignored.test(value))
+    .map((value) => normalizeSingleLine(value))
+    .filter((value) => value.length >= 4 && !ignored.test(value))
     .filter((value) => !/^[@#]?[a-z0-9_.-]+\s*(\d+\s*(分钟|小时|天)|\d+[mhds])?$/i.test(value));
   return normalizeSingleLine(candidates.join(" ")).slice(0, 120);
 }
@@ -23954,7 +24107,8 @@ async function warmupVisibleTextContainsNearDuplicateComment(
   if (!current || current.length < 4) return false;
   const uiXml = await dumpUiXml(config, padCode, 5_500).catch(() => "");
   if (!uiXml) return false;
-  const visibleTexts = extractUiTexts(uiXml)
+  const visibleTexts = Array.from(uiXml.matchAll(/\b(?:text|content-desc)="([^"]*)"/g))
+    .map((match) => decodeXmlAttr(match[1] || ""))
     .map((text) => sanitizeWarmupComment(text))
     .filter((text) => text.length >= 4 && text.length <= 80);
   return isNearDuplicateWarmupComment(comment, visibleTexts);
@@ -24042,6 +24196,16 @@ function warmupCommentPersonaText(persona?: WarmupCommentPersona): string {
   ].filter(Boolean).join(" "));
 }
 
+function isCleanWarmupSearchKeywordToken(keyword: string): boolean {
+  const cleaned = normalizeSingleLine(String(keyword || "")).replace(/^#/, "").trim();
+  if (cleaned.length < 2 || cleaned.length > 8 || !/\p{Script=Han}/u.test(cleaned)) return false;
+  if (/[，。,.!?！？、：:；;（）()[\]{}]/.test(cleaned)) return false;
+  if (/\d/.test(cleaned)) return false;
+  if (/是|為|为|一位|一個|一个|的人|歲|岁|喜歡|喜欢|常提到|分享|觀察|观察|自然|專業|专业|擅長|擅长|清楚|務實|务实|地帶|地带|帶看|带看|語氣|语气|口語|口语/.test(cleaned)) return false;
+  if (/^(人設|人设|人格|自然口語|自然口语|繁體中文|简体中文|台灣地區|台湾地区|不限|真實|真实|風格|风格|直接|故事化|左右|附近|最近|日常|分享)$/.test(cleaned)) return false;
+  return true;
+}
+
 export function buildWarmupInterestKeywords(
   persona?: WarmupCommentPersona,
   explicitKeywords: string[] = [],
@@ -24061,11 +24225,13 @@ export function buildWarmupInterestKeywords(
   addIf(/旅行|風景|城市|日本|韓國|台北|生活/i, ["台北生活", "旅行", "風景"]);
   addIf(/職場|主管|創業|生意|銷售|管理|上班/i, ["職場", "創業", "上班日常"]);
   addIf(/媽媽|家庭|孩子|親子|阿姨|熟齡/i, ["熟齡生活", "家庭", "親子"]);
+  addIf(/房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地/i, ["房产中介", "不動產", "房仲", "房源", "看房", "房屋買賣", "租房"]);
 
   const inlineMatches = compact.match(/[\p{Script=Han}A-Za-z0-9]{2,10}/gu) || [];
   for (const token of inlineMatches) {
     if (/^(人設|人格|台灣地區|繁體中文|自然口語|故事化|真實|直接|風格|性格|不限)$/.test(token)) continue;
     if (/^[A-Za-z0-9]{1,3}$/.test(token)) continue;
+    if (!isCleanWarmupSearchKeywordToken(token)) continue;
     candidates.push(token);
   }
 
@@ -24073,6 +24239,7 @@ export function buildWarmupInterestKeywords(
   return candidates
     .map((item) => normalizeSingleLine(String(item || "")).replace(/^#/, "").trim())
     .filter((item) => item.length >= 2 && item.length <= 12)
+    .filter((item) => isCleanWarmupSearchKeywordToken(item))
     .filter((item) => {
       const key = item.toLowerCase();
       if (seen.has(key)) return false;
@@ -24080,6 +24247,58 @@ export function buildWarmupInterestKeywords(
       return true;
     })
     .slice(0, 8);
+}
+
+function isWarmupSearchKeywordRelevantToPersona(
+  keyword: string,
+  persona?: WarmupCommentPersona,
+  explicitKeywords: string[] = [],
+): boolean {
+  const cleaned = normalizeSingleLine(String(keyword || "")).replace(/^#/, "").trim();
+  if (!isCleanWarmupSearchKeywordToken(cleaned)) return false;
+  const personaText = warmupCommentPersonaText(persona);
+  const explicitText = explicitKeywords.join(" ");
+  const sourceText = `${personaText} ${explicitText}`;
+  const domainRules: Array<{ persona: RegExp; keyword: RegExp }> = [
+    {
+      persona: /房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地/i,
+      keyword: /房產|房产|房仲|房屋|房子|房源|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地|建案|建商|屋主|看房|看屋|貸款|贷款|裝修|装修|豪宅|房屋買賣|房屋买卖/i,
+    },
+    {
+      persona: /理財|理财|投資|投资|股票|台股|港股|金融|財經|财经|交易|market|stock/i,
+      keyword: /理財|理财|投資|投资|股票|台股|港股|金融|財經|财经|股市|市場|市场|行情/i,
+    },
+    {
+      persona: /咖啡|咖啡館|咖啡馆|手搖|手摇|飲料|饮料|甜點|甜点|下午茶/i,
+      keyword: /咖啡|咖啡館|咖啡馆|手搖|手摇|飲料|饮料|甜點|甜点|下午茶/i,
+    },
+    {
+      persona: /瑜伽|健身|運動|运动|跑步|健康|減脂|减脂|养生|養生/i,
+      keyword: /瑜伽|健身|運動|运动|跑步|健康|減脂|减脂|养生|養生/i,
+    },
+    {
+      persona: /穿搭|時尚|时尚|美妝|美妆|保養|保养|髮型|发型|日系|可愛|可爱/i,
+      keyword: /穿搭|時尚|时尚|美妝|美妆|保養|保养|髮型|发型|日系/i,
+    },
+    {
+      persona: /旅行|旅遊|旅游|風景|风景|城市|日本|韓國|韩国|台北|生活/i,
+      keyword: /旅行|旅遊|旅游|風景|风景|城市|日本|韓國|韩国|台北生活|城市生活/i,
+    },
+    {
+      persona: /職場|职场|主管|創業|创业|生意|銷售|销售|管理|上班/i,
+      keyword: /職場|职场|主管|創業|创业|生意|銷售|销售|管理|上班|上班日常/i,
+    },
+    {
+      persona: /媽媽|妈妈|家庭|孩子|親子|亲子|阿姨|熟齡|熟龄/i,
+      keyword: /媽媽|妈妈|家庭|孩子|親子|亲子|熟齡|熟龄/i,
+    },
+  ];
+  const activeRule = domainRules.find((rule) => rule.persona.test(sourceText));
+  if (activeRule) {
+    if (/^(買房|买房)$/.test(cleaned)) return false;
+    return activeRule.keyword.test(cleaned);
+  }
+  return scoreWarmupPostRelevance(`${cleaned} ${cleaned}`, persona, explicitKeywords).relevant;
 }
 
 type WarmupRelevanceResult = {
@@ -24145,7 +24364,8 @@ export function buildWarmupSearchKeywordCandidates(
   addIf(/房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地/i, [
     "房产中介",
     "不動產",
-    "買房",
+    "房仲",
+    "房源",
     "房屋買賣",
     "租房",
     "看房",
@@ -24167,6 +24387,7 @@ export function buildWarmupSearchKeywordCandidates(
     .filter((item) => item.length >= 2 && item.length <= 24)
     .filter((item) => /\p{Script=Han}/u.test(item))
     .filter((item) => !banned.test(item))
+    .filter((item) => isWarmupSearchKeywordRelevantToPersona(item, persona, explicitKeywords))
     .filter((item) => {
       const key = item.toLowerCase().replace(/\s+/g, " ");
       if (seen.has(key)) return false;
@@ -24214,6 +24435,7 @@ async function buildWarmupSearchKeywords(
       .map((item) => normalizeSingleLine(item).replace(/^#/, "").trim())
       .filter((item) => item.length >= 2 && item.length <= 24)
       .filter((item) => /\p{Script=Han}/u.test(item))
+      .filter((item) => isWarmupSearchKeywordRelevantToPersona(item, persona, explicitKeywords))
       .filter((item) => {
         const key = item.toLowerCase().replace(/\s+/g, " ");
         if (seen.has(key)) return false;
@@ -24226,6 +24448,15 @@ async function buildWarmupSearchKeywords(
   } finally {
     request.cleanup();
   }
+}
+
+function shuffleWarmupList<T>(items: T[]): T[] {
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i -= 1) {
+    const j = warmupRandomInt(0, i);
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
 }
 
 export function scoreWarmupPostRelevance(
@@ -24286,41 +24517,64 @@ async function warmupSearchInterestSurface(
     x: Math.round(screen.width * xRatio),
     y: Math.round(screen.height * yRatio),
   });
-  const refreshAcpSearchResultsIfSparse = async () => {
-    if (!isAcpPad(padCode)) return;
-    const beforeXml = await dumpUiXml(config, padCode).catch(() => "");
-    const beforeCount = estimateVisibleThreadsSearchResultCount(beforeXml);
-    const beforeShot = await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "");
-    const visuallyLoaded = beforeShot
-      ? await detectThreadsSearchResultContentLoadedLocally(beforeShot).catch(() => false)
-      : false;
-    if (beforeCount >= 2) {
-      report(`搜索结果推文数量正常，继续浏览：${beforeCount} 条`);
-      return;
+  const inspectAcpSearchResultsByVision = async (): Promise<boolean> => {
+    if (!isAcpPad(padCode)) return true;
+    report("搜索结果视觉检查中...");
+    const captureSearchResultShot = async () => {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const shot = await withTimeout(
+          screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)),
+          7_500,
+          "ACP search result screenshot timeout",
+        ).catch(() => "");
+        if (!shot) {
+          await delay(warmupRandomInt(900, 1400));
+          continue;
+        }
+        const searchResultsVisualGate = await detectThreadsSearchResultsVisualGateLocally(shot).catch(() => false);
+        const keyboardVisible = await detectAndroidKeyboardVisibleLocally(shot).catch(() => false);
+        const searchResultsPage = keyboardVisible && !searchResultsVisualGate
+          ? false
+          : await detectThreadsSearchResultsPageLocally(shot).catch(() => false);
+        const contentLoaded = keyboardVisible && !searchResultsVisualGate
+          ? false
+          : await detectThreadsSearchResultContentLoadedLocally(shot).catch(() => false);
+        if (searchResultsVisualGate || (!keyboardVisible && (searchResultsPage || contentLoaded))) return shot;
+        if (keyboardVisible) {
+          report(`搜索结果视觉仍在等待键盘收起 ${attempt + 1}/6`);
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_SEARCH", 8_000, 450).catch(() => "");
+        } else {
+          report(`搜索结果视觉等待结果页稳定 ${attempt + 1}/6`);
+        }
+        await delay(warmupRandomInt(1200, 1800));
+      }
+      return "";
+    };
+    await delay(warmupRandomInt(2400, 3200));
+    const shotUrl = await captureSearchResultShot();
+    if (!shotUrl) {
+      report("搜索结果截图未等到稳定结果页，按加载异常重新搜索");
+      return false;
     }
-    if (visuallyLoaded) {
-      report(`搜索结果视觉内容已加载，跳过 XML 数量误判：${beforeCount} 条`);
-      return;
+    const xml = await dumpUiXml(config, padCode, 5_500).catch(() => "");
+    if (looksLikeThreadsSearchResultsUiXml(xml, keyword)) {
+      report(`搜索结果页 XML 已确认，继续视觉稀疏检查：${keyword}`);
+    } else {
+      report(`搜索结果页 XML 未确认，但截图已确认结果页，继续视觉稀疏检查：${keyword}`);
     }
-    report(`搜索结果推文数量偏少，执行一次下拉刷新：${beforeCount} 条`);
-    await execAdbForText(
-      config,
-      padCode,
-      `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.30)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.66)} 520`,
-      8_000,
-      1200,
-    ).catch(() => "");
-    await delay(1600);
-    const afterXml = await dumpUiXml(config, padCode).catch(() => "");
-    const afterCount = estimateVisibleThreadsSearchResultCount(afterXml);
-    report(`搜索结果刷新后可见推文估算：${afterCount} 条`);
-    await execAdbForText(
-      config,
-      padCode,
-      `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.70)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.50)} 360`,
-      8_000,
-      500,
-    ).catch(() => "");
+    const sparse = shotUrl
+      ? await withTimeout(
+        detectThreadsSparseSearchResultsLocally(shotUrl),
+        5_500,
+        "ACP sparse search result visual check timeout",
+      ).catch(() => ({ sparse: true, reason: "visual-timeout" }))
+      : { sparse: false, reason: "screenshot-unavailable" };
+    if (sparse.sparse) {
+      report(`搜索结果视觉判断加载异常，准备重新搜索：${sparse.reason}`);
+      return false;
+    }
+    report(`搜索结果视觉判断正常，直接进入浏览：${sparse.reason}`);
+    return true;
   };
 
   report(`按人设关键词搜索相关内容：${keyword}`);
@@ -24412,21 +24666,33 @@ async function warmupSearchInterestSurface(
   report(`输入搜索关键词：${keyword}`);
   await typeText(config, padCode, keyword, isAcpPad(padCode) ? warmupRandomInt(1800, 2600) : warmupRandomInt(1000, 1600));
   if (isAcpPad(padCode)) {
+    const submitAndInspectAcpSearch = async () => {
+      await delay(700);
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_SEARCH", 8_000, 700).catch(() => "");
+      await delay(700);
+      await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.88), Math.round(screen.height * 0.94), 450).catch(() => undefined);
+      report(`等待搜索结果稳定后进行视觉检查：${keyword}`);
+      await delay(warmupRandomInt(6500, 8500));
+      return inspectAcpSearchResultsByVision();
+    };
     report(`ACP 已输入中文关键词，直接提交并浏览搜索结果：${keyword}`);
-    await delay(700);
-    await execAdbForText(config, padCode, "input keyevent KEYCODE_SEARCH", 8_000, 700).catch(() => "");
-    await delay(900);
-    await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.56), Math.round(screen.height * 0.18), 450).catch(() => undefined);
-    await delay(350);
-    await refreshAcpSearchResultsIfSparse();
-    await execAdbForText(
-      config,
-      padCode,
-      `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.76)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.47)} 420`,
-      8_000,
-      700,
-    ).catch(() => "");
-    await delay(warmupRandomInt(700, 1100));
+    let resultLooksHealthy = await submitAndInspectAcpSearch();
+    if (!resultLooksHealthy) {
+      report(`搜索结果加载异常，重新搜索一次：${keyword}`);
+      const resultSearchInput = point(0.43, 0.085);
+      await tapViaAdbAbsoluteQuick(config, padCode, resultSearchInput.x, resultSearchInput.y, 500).catch(() => undefined);
+      await delay(500);
+      await clearFocusedTextInput(config, padCode, 350).catch(() => undefined);
+      report(`重新输入搜索关键词：${keyword}`);
+      await typeText(config, padCode, keyword, warmupRandomInt(1800, 2600));
+      resultLooksHealthy = await submitAndInspectAcpSearch();
+      report(`重新搜索后视觉判断：${resultLooksHealthy ? "正常" : "仍疑似异常，切换下一个关键词"}`);
+      if (!resultLooksHealthy) {
+        throw new Error(`搜索结果视觉判断持续异常：${keyword}`);
+      }
+    }
+    report("搜索结果视觉检查完成，停留搜索结果页交给浏览链路接管");
+    await delay(warmupRandomInt(1600, 2400));
     return;
   }
   const waitForKeywordWrittenOrResults = async (timeoutMs = 8_000) => {
@@ -24474,14 +24740,7 @@ async function warmupSearchInterestSurface(
     report(`搜索结果页已可继续浏览（${reason}）：${keyword}`);
     if (isAcpPad(padCode)) {
       await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.56), Math.round(screen.height * 0.18), 450).catch(() => undefined);
-      await delay(350);
-      await execAdbForText(
-        config,
-        padCode,
-        `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.76)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.47)} 420`,
-        8_000,
-        700,
-      ).catch(() => "");
+      await delay(warmupRandomInt(900, 1300));
     }
     await delay(isAcpPad(padCode) ? warmupRandomInt(700, 1100) : warmupRandomInt(500, 900));
   };
@@ -24547,19 +24806,17 @@ async function warmupAssessPostRelevanceByModel(
   cfg: WarmupConfig,
   keyword?: string,
 ): Promise<{ relevant: boolean; reason: string; preview?: string } | null> {
-  if (!screenshotUrl || !getGeminiEndpoint().apiKey) return null;
+  const primaryTimeoutMs = 12_000;
+  const fallbackTotalTimeoutMs = 24_000;
+  const fallbackPerModelTimeoutMs = 9_000;
+  if (!screenshotUrl) return null;
   const inlineData = await getInlineData(screenshotUrl).catch(() => null);
-  if (!inlineData) return null;
+  if (!inlineData) {
+    console.warn("[threads][warmup][relevance-model] unavailable: screenshot-inline-data-missing");
+    return null;
+  }
   const personaText = warmupCommentPersonaText(cfg.commentPersona);
-  const request = createTimeoutSignal(9_000);
-  try {
-    const raw = await callGemini(
-      PUBLISH_VERIFY_MODEL,
-      [{
-        role: "user",
-        parts: [
-          {
-            text: `判断这张 Threads 截图中的当前主要内容是否适合这个养号人设浏览/互动。
+  const prompt = `判断这张 Threads 截图中的当前主要内容是否适合这个养号人设浏览/互动。
 只根据内容主题是否相关判断；不要因为语言不同就判不相关。
 如果是搜索页，也可以判断可见搜索结果是否整体与人设相关。
 如果主要内容明显不相关，例如体育/娱乐与房产人设无关，应判 false。
@@ -24567,35 +24824,91 @@ async function warmupAssessPostRelevanceByModel(
 
 人设：${personaText}
 搜索关键词：${keyword || ""}
-本地抽取正文：${preview || ""}`,
-          },
-          { inlineData },
-        ],
-      }],
-      { maxOutputTokens: 180, temperature: 0 },
-      request.signal,
-    );
-    const text = normalizeSingleLine(extractText(raw)).replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
+本地抽取正文：${preview || ""}`;
+  const parseModelResult = (rawText: string): { relevant: boolean; reason: string; preview?: string } | null => {
+    const text = normalizeSingleLine(rawText).replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
     const jsonText = text.match(/\{[\s\S]*\}/)?.[0] || "";
-    if (!jsonText) return null;
-    const parsed = JSON.parse(jsonText);
-    return {
-      relevant: Boolean(parsed?.relevant),
-      reason: normalizeSingleLine(String(parsed?.reason || "model")).slice(0, 120),
-      preview: normalizeSingleLine(String(parsed?.preview || "")).slice(0, 120),
-    };
-  } catch {
+    if (jsonText) {
+      try {
+        const parsed = JSON.parse(jsonText);
+        return {
+          relevant: Boolean(parsed?.relevant),
+          reason: normalizeSingleLine(String(parsed?.reason || "model")).slice(0, 120),
+          preview: normalizeSingleLine(String(parsed?.preview || "")).slice(0, 120),
+        };
+      } catch {
+        // Fall through to parse short natural-language model replies.
+      }
+    }
+    const negative = /不相关|不相關|无关|無關|不符合|不適合|不适合|irrelevant|not relevant|false/i.test(text);
+    const positive = /相关|相關|符合|適合|适合|relevant|true/i.test(text);
+    if (negative || positive) {
+      return {
+        relevant: positive && !negative,
+        reason: normalizeSingleLine(text || "model-text").slice(0, 120),
+        preview: "",
+      };
+    }
     return null;
-  } finally {
-    request.cleanup();
+  };
+  let lastError = "";
+  if (getGeminiEndpoint().apiKey) {
+    const primaryRequest = createTimeoutSignal(primaryTimeoutMs);
+    try {
+      const raw = await callGemini(
+        PUBLISH_VERIFY_MODEL,
+        [{
+          role: "user",
+          parts: [
+            { text: prompt },
+            { inlineData },
+          ],
+        }],
+        { maxOutputTokens: 180, temperature: 0 },
+        primaryRequest.signal,
+      );
+      const parsed = parseModelResult(extractText(raw));
+      if (parsed) return parsed;
+      lastError = "primary-json-empty";
+    } catch (error) {
+      lastError = `primary:${error instanceof Error ? error.message : String(error)}`.slice(0, 180);
+    } finally {
+      primaryRequest.cleanup();
+    }
+  } else {
+    lastError = "primary-api-key-missing";
   }
+
+  const fallbackRequest = createTimeoutSignal(fallbackTotalTimeoutMs);
+  try {
+    const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, fallbackRequest.signal, {
+      maxTokens: 220,
+      perModelTimeoutMs: fallbackPerModelTimeoutMs,
+    });
+    const parsed = parseModelResult(raw);
+    if (parsed) return parsed;
+    lastError = `${lastError || "fallback"};fallback-json-empty`;
+  } catch (error) {
+    lastError = `${lastError || "fallback"};fallback:${error instanceof Error ? error.message : String(error)}`.slice(0, 220);
+  } finally {
+    fallbackRequest.cleanup();
+  }
+  if (lastError) console.warn(`[threads][warmup][relevance-model] unavailable: ${lastError}`);
+  return null;
 }
 
 async function warmupCurrentPostRelevance(
   config: VmosConfig,
   padCode: string,
   cfg: WarmupConfig,
-  options: { allowVisionFallback?: boolean; report?: (step: string) => void; label?: string; keyword?: string; useModelMatch?: boolean } = {},
+  options: {
+    allowVisionFallback?: boolean;
+    report?: (step: string) => void;
+    label?: string;
+    keyword?: string;
+    useModelMatch?: boolean;
+    requireModelMatch?: boolean;
+  } = {},
 ): Promise<{ preview: string; relevance: WarmupRelevanceResult; screenshotUrl?: string; modelMatch?: { relevant: boolean; reason: string; preview?: string } | null }> {
   if (options.report) options.report(`人设相关性检测中：${options.label || "读取当前内容"}，正在截图...`);
   const screenshotUrl = await withTimeout(
@@ -24610,13 +24923,16 @@ async function warmupCurrentPostRelevance(
     "warmup relevance preview timeout",
   ).catch(() => "");
   let relevance = scoreWarmupPostRelevance(preview, cfg.commentPersona, cfg.keywords || []);
-  const modelMatch = (!relevance.relevant && options.useModelMatch)
-    ? await withTimeout(
+  const shouldUseModelMatch = options.requireModelMatch || options.useModelMatch || (!relevance.relevant && options.useModelMatch);
+  let modelMatch: { relevant: boolean; reason: string; preview?: string } | null = null;
+  if (shouldUseModelMatch) {
+    if (options.report) options.report(`人设相关性检测中：${options.label || "读取当前内容"}，等待模型判定...`);
+    modelMatch = await withTimeout(
       warmupAssessPostRelevanceByModel(screenshotUrl, preview, cfg, options.keyword),
-      10_000,
+      40_000,
       "warmup model relevance timeout",
-    ).catch(() => null)
-    : null;
+    ).catch(() => null);
+  }
   if (modelMatch?.relevant) {
     relevance = {
       relevant: true,
@@ -24624,6 +24940,28 @@ async function warmupCurrentPostRelevance(
       matched: Array.from(new Set([...relevance.matched, "model-match"])).slice(0, 8),
       keywords: relevance.keywords,
       reason: `model:${modelMatch.reason}`,
+    };
+  }
+  if (options.requireModelMatch && modelMatch?.relevant === false) {
+    relevance = {
+      relevant: false,
+      score: 0,
+      matched: relevance.matched,
+      keywords: relevance.keywords,
+      reason: `model-reject:${modelMatch.reason}`,
+    };
+  } else if (options.requireModelMatch && !modelMatch && relevance.relevant) {
+    relevance = {
+      ...relevance,
+      reason: `local-strong-fallback:model-unavailable:${relevance.reason}`,
+    };
+  } else if (options.requireModelMatch && !modelMatch && !relevance.relevant) {
+    relevance = {
+      relevant: false,
+      score: 0,
+      matched: relevance.matched,
+      keywords: relevance.keywords,
+      reason: "model-unavailable",
     };
   }
   return {
@@ -24639,34 +24977,38 @@ async function warmupEnsureRelevantSurface(
   padCode: string,
   cfg: WarmupConfig,
   report: (step: string) => void,
-  options: { phase?: "preflight" | "browse"; allowSearch?: boolean } = {},
+  options: { phase?: "preflight" | "browse"; allowSearch?: boolean; forceSearch?: boolean } = {},
 ): Promise<{ ok: boolean; preview: string; reason: string }> {
   if (cfg.requireRelevantContent === false) return { ok: true, preview: "", reason: "disabled" };
   const keywords = buildWarmupInterestKeywords(cfg.commentPersona, cfg.keywords || []);
   if (!keywords.length) return { ok: true, preview: "", reason: "no-keywords" };
 
-  const probePosts = Math.max(1, Math.min(5, Math.floor(cfg.relevanceProbePosts || (options.phase === "preflight" ? 3 : 2))));
-  for (let attempt = 0; attempt < probePosts; attempt += 1) {
-    const current = await warmupCurrentPostRelevance(config, padCode, cfg, {
-      allowVisionFallback: attempt === probePosts - 1,
-      report,
-      label: `首页探测 ${attempt + 1}/${probePosts}`,
-    });
-    if (current.relevance.relevant) {
-      report(`已定位人设相关内容：${current.preview.slice(0, 42) || current.relevance.reason}`);
-      return { ok: true, preview: current.preview, reason: current.relevance.reason };
+  if (!options.forceSearch) {
+    const probePosts = Math.max(1, Math.min(5, Math.floor(cfg.relevanceProbePosts || (options.phase === "preflight" ? 3 : 2))));
+    for (let attempt = 0; attempt < probePosts; attempt += 1) {
+      const current = await warmupCurrentPostRelevance(config, padCode, cfg, {
+        allowVisionFallback: attempt === probePosts - 1,
+        report,
+        label: `首页探测 ${attempt + 1}/${probePosts}`,
+      });
+      if (current.relevance.relevant) {
+        report(`已定位人设相关内容：${current.preview.slice(0, 42) || current.relevance.reason}`);
+        return { ok: true, preview: current.preview, reason: current.relevance.reason };
+      }
+      report(`当前内容和人设不匹配，继续探测 ${attempt + 1}/${probePosts}：${current.preview.slice(0, 36) || current.relevance.reason}`);
+      await warmupDwellLikeHuman(config, padCode, warmupRandomInt(900, 1800)).catch(() => undefined);
+      await warmupScrollDown(config, padCode).catch(() => undefined);
+      await delay(warmupRandomInt(900, 1800));
     }
-    report(`当前内容和人设不匹配，继续探测 ${attempt + 1}/${probePosts}：${current.preview.slice(0, 36) || current.relevance.reason}`);
-    await warmupDwellLikeHuman(config, padCode, warmupRandomInt(900, 1800)).catch(() => undefined);
-    await warmupScrollDown(config, padCode).catch(() => undefined);
-    await delay(warmupRandomInt(900, 1800));
+  } else {
+    report("按补点策略重新执行中文人设关键词搜索，避免在当前推荐流直接互动");
   }
 
   if (options.allowSearch === false) return { ok: false, preview: "", reason: "probe-unmatched" };
 
   const searchAttempts = Math.max(1, Math.min(5, Math.floor(cfg.relevanceSearchAttempts || 3)));
   const rawSearchKeywords = await buildWarmupSearchKeywords(cfg.commentPersona, cfg.keywords || []);
-  const searchKeywords = rawSearchKeywords.slice(0, Math.max(searchAttempts, 3));
+  const searchKeywords = shuffleWarmupList(rawSearchKeywords).slice(0, Math.max(searchAttempts, 3));
   for (let attempt = 0; attempt < Math.min(searchAttempts, searchKeywords.length); attempt += 1) {
     const keyword = searchKeywords[attempt];
     if (!keyword) continue;
@@ -24746,9 +25088,36 @@ function fallbackWarmupComment(
   }
   const personaText = warmupCommentPersonaText(persona);
   const personaIsFinance = /理財|投資|金融|股|財經|财经|market|stock|trade/i.test(personaText);
+  const personaIsRealEstate = /房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|看房|看屋/i.test(personaText);
   const personaIsElegant = /知性|優雅|优雅|細膩|细腻|克制|專業|专业/i.test(personaText);
   const personaIsCasual = /口語|口语|生活|碎碎念|幽默|搞笑|日常|鬆弛|松弛/i.test(personaText);
 
+  if (personaIsRealEstate || /房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|看房|看屋|建案|屋主|貸款|贷款|成交|帶看|带看/.test(text)) {
+    const comments = /AI|科技|工具|數據|数据|分析/i.test(postPreview)
+      ? [
+          "房仲也要跟上AI工具",
+          "用AI輔助服務會更有感",
+          "房仲持續學新工具很重要",
+        ]
+      : /市場|市场|成長|成长|淘汰|改變|改变/.test(postPreview)
+        ? [
+            "市場變快房仲也要成長",
+            "房仲服務真的不能停在原地",
+            "房市變化快專業要跟上",
+          ]
+        : /帶看|带看|看房|看屋|客戶|客户|屋主/.test(postPreview)
+          ? [
+              "帶看前把需求對齊很重要",
+              "客戶需求抓準才省時間",
+              "房仲細節服務真的關鍵",
+            ]
+          : [
+              "房仲服務細節真的關鍵",
+              "房市資訊透明很重要",
+              "買房前多比較才安心",
+            ];
+    return comments[warmupRandomInt(0, comments.length - 1)];
+  }
   if (/朋友|同事|大家|你們|你们/.test(text) && /賺|赚|獲利|获利|飆|涨|漲/.test(text)) {
     const comments = [
       "大家都賺時更要看風險",
@@ -24813,6 +25182,67 @@ function fallbackWarmupComment(
   return defaults[warmupRandomInt(0, defaults.length - 1)];
 }
 
+function warmupExtractCommentGroundingTerms(text: string): string[] {
+  const normalized = normalizeSingleLine(text);
+  const terms = new Set<string>();
+  for (const match of normalized.matchAll(/[#＃]([\p{Script=Han}A-Za-z0-9_]{2,12})/gu)) {
+    if (match[1]) terms.add(match[1]);
+  }
+  for (const match of normalized.matchAll(/[A-Z][A-Z0-9]{1,8}/g)) {
+    terms.add(match[0]);
+  }
+  const knownTerms = [
+    "房仲", "房產", "房产", "房屋", "房子", "不動產", "不动产", "地產", "地产", "中介", "仲介", "買房", "买房", "租屋", "租房", "看房", "看屋", "建案", "屋主", "貸款", "贷款", "成交", "帶看", "带看", "房市", "AI",
+    "投資", "投资", "股票", "台股", "美股", "市場", "市场", "財報", "财报", "量能", "行情", "基金", "回撤", "部位",
+    "職場", "职场", "工作", "上班", "會議", "会议", "同事", "主管", "創業", "创业", "銷售", "销售",
+  ];
+  for (const term of knownTerms) {
+    if (normalized.includes(term)) terms.add(term);
+  }
+  return Array.from(terms).filter((term) => term.length >= 2);
+}
+
+function isWarmupCommentGroundedInPostAndPersona(
+  commentText: string,
+  postPreview: string,
+  persona?: WarmupCommentPersona,
+): boolean {
+  const comment = sanitizeWarmupComment(commentText);
+  const preview = normalizeSingleLine(postPreview);
+  if (!comment || !preview || warmupCommentContentLength(preview) < 6) return false;
+  if (isShortLowInfoWarmupPost(preview) || isShortMarketMoodWarmupPost(preview)) return true;
+
+  const personaText = warmupCommentPersonaText(persona);
+  const commentCompact = comment.replace(/\s+/g, "");
+  const postTerms = warmupExtractCommentGroundingTerms(preview);
+  if (postTerms.some((term) => commentCompact.includes(term))) return true;
+
+  const domainGrounded = (personaPattern: RegExp, postPattern: RegExp, commentPattern: RegExp) => (
+    (!personaText || personaPattern.test(personaText) || postPattern.test(preview))
+    && postPattern.test(preview)
+    && commentPattern.test(comment)
+  );
+  if (domainGrounded(
+    /房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|看房|看屋/i,
+    /房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|看房|看屋|建案|屋主|貸款|贷款|成交|帶看|带看|房市|AI/i,
+    /房產|房产|房仲|房屋|房子|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|看房|看屋|建案|屋主|貸款|贷款|成交|帶看|带看|房市|AI/i,
+  )) return true;
+  if (domainGrounded(
+    /理財|理财|投資|投资|股票|台股|港股|金融|財經|财经|交易|market|stock/i,
+    /股|投資|投资|市場|市场|財報|财报|量能|行情|金融|台股|港股|基金|美股|買|賣|买|卖|漲|涨|跌/i,
+    /股|投資|投资|市場|市场|財報|财报|量能|行情|金融|台股|港股|基金|美股|部位|風險|风险|回撤|熱度|热度/i,
+  )) return true;
+
+  const previewCompact = sanitizeWarmupComment(preview).replace(/\s+/g, "");
+  for (let i = 0; i < commentCompact.length - 1; i += 1) {
+    const gram = commentCompact.slice(i, i + 2);
+    if (previewCompact.includes(gram) && !/這個|这个|真的|可以|重要|關鍵|关键|後續|后续|比較|比较|服務|服务/.test(gram)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function fallbackAcpAsciiWarmupComment(postPreview: string): string {
   const text = postPreview.toLowerCase();
   if (/stock|market|price|invest|trade|股|投資|投资|買|卖|市場|市场/.test(text)) {
@@ -24852,8 +25282,15 @@ export function finalizeWarmupComment(
     return shortMarketComment || fallbackWarmupComment(postPreview, templates, persona);
   }
   if (isShortLowInfoWarmupPost(postPreview) && isUsableShortWarmupReaction(comment)) return comment;
-  if (comment && isUsableWarmupComment(comment) && !isGenericWarmupComment(comment)) return comment;
-  return fallbackWarmupComment(postPreview, templates, persona);
+  if (
+    comment
+    && isUsableWarmupComment(comment)
+    && !isGenericWarmupComment(comment)
+    && isWarmupCommentGroundedInPostAndPersona(comment, postPreview, persona)
+  ) return comment;
+  const fallback = fallbackWarmupComment(postPreview, templates, persona);
+  if (isWarmupCommentGroundedInPostAndPersona(fallback, postPreview, persona)) return fallback;
+  return "";
 }
 
 async function warmupGenerateCommentForPost(
@@ -24882,6 +25319,8 @@ async function warmupGenerateCommentForPost(
 要求：
 - 只輸出留言本身，不要解釋。
 - 語言：${language}；若人設明確指定其他語言，以人設為準，否則使用台灣地區繁體中文。
+- 留言必須同時符合留言帳號人設和目標推文內容；不能只符合其中一邊。
+- 必須提到或呼應推文中的具體名詞、場景、問題、風險、情緒或判斷；如果無法判斷具體內容，輸出空字串。
 - 如果原帖本身很短或只是情緒句，可以只回 2 到 8 個有效字的自然語氣反應，例如「真的欸」「哈哈真的」「也太懂」，不要硬拉長。
 - 如果原帖只是短句祝願行情變好，例如「明天股市心情會變好」，只回「期待」「希望明天股市大漲」「希望明天轉好」這類簡單短句，不要硬湊比喻或奇怪名詞。
 - 如果原帖有明確資訊量，回 8 到 28 個有效字即可，留言要帶出原帖中的具體名詞、場景、風險、情緒或判斷。
@@ -24889,6 +25328,7 @@ async function warmupGenerateCommentForPost(
 - 不要重複同一個詞或同一句話，不可輸出「這個角度很自然這個角度很自然」這類拼接內容。
 - 內容必須貼合推文內容，不要泛泛說“不錯”“支持”“這個角度很自然”“這段分享蠻有共鳴”。
 - 語氣要符合留言帳號人設：${personaHint || "未指定，使用台灣 Threads 自然口語"}。
+- 不要寫和人設領域無關的回覆；例如房產中介人設只能回房產、房仲、買房、租房、房市、客戶服務、看房、AI 輔助房仲等相關角度。
 - 不要使用 hashtag、@、連結、表情符號、逗號、句號、問號、驚嘆號或任何標點符號。
 - 不要提到你是 AI 或自動化。
 ${templateHint}
@@ -24934,9 +25374,12 @@ async function warmupGenerateCommentFromScreenshot(
             text: `看圖，基於 Threads 畫面中最適合互動的一條帖子寫一句自然留言，並提取帖子摘要。
 留言語言：${language}；若人設沒有明確指定語言，預設台灣地區繁體中文。
 留言人設：${personaHint || "未指定，使用台灣 Threads 自然口語"}。
+評論必須同時貼合畫面中的帖子內容和留言人設；不能只寫人設口吻，也不能回和人設無關的內容。
+必須提到或呼應帖子中的具體名詞、場景、問題、風險、情緒或判斷；如果畫面看不清楚或無法判斷具體內容，評論留空。
 如果帖子本身很短或只是情緒句，可以只回 2 到 8 個有效字的自然語氣反應，例如「真的欸」「哈哈真的」「也太懂」，不要硬拉長。
 如果帖子有明確資訊量，評論必須貼合具體內容，8 到 28 個有效字即可，要帶出畫面中的具體名詞、場景、風險、情緒或判斷。
 不要 hashtag、@、連結、表情符號、逗號、句號、問號、驚嘆號或任何標點符號，不要泛泛說“這個角度很有意思”“這個點我認同”“值得參考”“這個角度很自然”“這段分享蠻有共鳴”。
+房產中介人設只能回房產、房仲、買房、租房、房市、客戶服務、看房、AI 輔助房仲等相關角度。
 不要重複同一個詞或同一句話，不可輸出「這個角度很自然這個角度很自然」這類拼接內容。
 留言必須是完整短句，不要停在“的”“和”“在”這類未完成語尾。
 ${templateHint}
@@ -25201,6 +25644,7 @@ async function callThreadsAutoReplyVisionOcrModel(
   prompt: string,
   inlineData: { data: string; mimeType?: string },
   signal?: AbortSignal,
+  options: { maxTokens?: number; perModelTimeoutMs?: number } = {},
 ): Promise<string> {
   const config = readRuntimeApiConfig();
   const apiKey = normalizeSingleLine(config.geminiTextKey || config.geminiKey || config.zhanhuKey || process.env.GEMINI_TEXT_API_KEY || process.env.GEMINI_API_KEY || "");
@@ -25210,10 +25654,12 @@ async function callThreadsAutoReplyVisionOcrModel(
   const endpoint = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const models = resolveThreadsAutoReplyVisionModels();
   let lastError: unknown;
+  const perModelTimeoutMs = Math.max(3_000, Math.min(30_000, Math.round(options.perModelTimeoutMs || 7_000)));
+  const maxTokens = Math.max(20, Math.min(900, Math.round(options.maxTokens || 900)));
   for (const model of models) {
     if (signal?.aborted) throw new Error("文字視覺 OCR 已取消");
     const modelController = new AbortController();
-    const timeout = globalThis.setTimeout(() => modelController.abort(), 7_000);
+    const timeout = globalThis.setTimeout(() => modelController.abort(), perModelTimeoutMs);
     const abortForwarder = () => modelController.abort();
     signal?.addEventListener("abort", abortForwarder, { once: true });
     try {
@@ -25231,7 +25677,7 @@ async function callThreadsAutoReplyVisionOcrModel(
             },
           ],
         }],
-        max_tokens: 900,
+        max_tokens: maxTokens,
         temperature: 0,
       });
       const response = await proxiedFetch(
@@ -27803,8 +28249,13 @@ async function collectThreadsAutoReplyPostContext(
   let replyTarget: WarmupFeedActionTargets | null = null;
   let visibleCommentCandidates: ThreadsAutoReplyCandidate[] = [];
   let latestCommentShotUrl = firstShotUrl;
+  const commentCollectScrolls = [
+    "input swipe 360 1250 360 850 450",
+    "input swipe 360 1180 360 650 550",
+    "input swipe 360 1080 360 480 650",
+  ];
 
-  for (let page = 0; page < 2; page += 1) {
+  for (let page = 0; page < commentCollectScrolls.length + 1; page += 1) {
     let shotUrl = page === 0 && firstShotUrl
       ? firstShotUrl
       : await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
@@ -27889,7 +28340,15 @@ async function collectThreadsAutoReplyPostContext(
       }
     }
     let pageVisibleComments = extractThreadsAutoReplyVisibleComments(uiXml, shotUrl || firstShotUrl, postOwnIdentifiers);
-    if (!pageVisibleComments.length && shotUrl) {
+    const shouldUseVisionFallback = Boolean(
+      shotUrl
+      && !pageVisibleComments.length
+      && (
+        !visibleTexts.length
+        || page >= commentCollectScrolls.length
+      )
+    );
+    if (shouldUseVisionFallback) {
       const visionComments = await extractThreadsAutoReplyVisibleCommentsByVision(shotUrl, persona, postOwnIdentifiers).catch(() => []);
       if (visionComments.length) pageVisibleComments = visionComments;
     }
@@ -27907,6 +28366,7 @@ async function collectThreadsAutoReplyPostContext(
           replyPoint: item.replyPoint,
           debugReason: item.debugReason,
         })),
+        skippedVisionFallback: !shouldUseVisionFallback && !pageVisibleComments.length,
         usedVisionFallback: pageVisibleComments.some((item) => /vision_ocr/.test(item.debugReason || "")),
       },
     });
@@ -27914,15 +28374,16 @@ async function collectThreadsAutoReplyPostContext(
       visibleCommentCandidates = pageVisibleComments;
       latestCommentShotUrl = shotUrl || latestCommentShotUrl;
     }
-    if (page < 1) {
-      await execAdbForText(config, padCode, "input swipe 360 1000 360 300 700", 8_000, 700).catch(() => "");
+    const scrollCommand = commentCollectScrolls[page];
+    if (scrollCommand) {
+      await execAdbForText(config, padCode, scrollCommand, 8_000, 700).catch(() => "");
       await delay(850);
       const afterSwipeShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl || firstShotUrl);
       saveThreadsAutoReplySampleStep({
         padCode,
         step: `collect-after-swipe-${page + 1}`,
         screenshotUrl: afterSwipeShotUrl || undefined,
-        meta: { swipe: "input swipe 360 1000 360 300 700" },
+        meta: { swipe: scrollCommand },
       });
     }
   }
@@ -28092,6 +28553,9 @@ export async function autoReplyThreadsAccount(
     errors.push(error instanceof Error ? error.message : String(error));
     return null;
   });
+  if (preflightState && isThreadsTerminalPage(preflightState.page)) {
+    throwThreadsTerminalPage(preflightState, "自动回复启动后检测到账号状态阻断");
+  }
   if (preflightState?.page === "compose_editor" || preflightState?.page === "reply_composer") {
     preflightState = await closeThreadsComposerLayer(config, padCode, (progress) => {
       report({ step: progress.step || "清理 Threads 当前编辑状态" });
@@ -28099,6 +28563,9 @@ export async function autoReplyThreadsAccount(
       errors.push(error instanceof Error ? error.message : String(error));
       return preflightState;
     });
+    if (preflightState && isThreadsTerminalPage(preflightState.page)) {
+      throwThreadsTerminalPage(preflightState, "自动回复清理编辑器后检测到账号状态阻断");
+    }
   }
   report({ step: `前置检查完成，开始查找 ${maxAgeDays} 天内带评论角标的本人推文` });
   for (let forceCloseAttempt = 0; forceCloseAttempt < 4; forceCloseAttempt += 1) {
@@ -28124,6 +28591,9 @@ export async function autoReplyThreadsAccount(
     await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.095), Math.round(screen.height * 0.07), 1400).catch(() => undefined);
     await delay(900);
     preflightState = await classifyThreadsPageOnDevice(config, padCode).catch(() => preflightState);
+    if (preflightState && isThreadsTerminalPage(preflightState.page)) {
+      throwThreadsTerminalPage(preflightState, "自动回复执行中检测到账号状态阻断");
+    }
   }
   if (preflightState?.page === "compose_editor" || preflightState?.page === "reply_composer") {
     await rememberEvidenceScreenshot("auto-reply-still-in-composer", {
@@ -28843,7 +29313,7 @@ async function warmupAttemptLikeOnCurrentScreen(
   config: VmosConfig,
   padCode: string,
   actions?: WarmupFeedActionTargets | null,
-  options: { avoidHomeRecovery?: boolean } = {},
+  options: { avoidHomeRecovery?: boolean; preferActionRowBeforeProfile?: boolean; requireVisibleActionRow?: boolean } = {},
 ): Promise<{ ok: boolean; message: string; point?: { x: number; y: number }; screenshotUrl?: string; movedToDetail?: boolean }> {
   let currentActions = actions;
   const errors: string[] = [];
@@ -28862,7 +29332,9 @@ async function warmupAttemptLikeOnCurrentScreen(
     }
     await warmupWaitForScrollSettle(650, 1100);
     const freshActions = await withTimeout(
-      warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode),
+      warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode, {
+        preferActionRowBeforeProfile: options.preferActionRowBeforeProfile,
+      }),
       9_000,
       "warmup ACP like fast relocalize timeout",
     ).catch((error: any) => {
@@ -28897,6 +29369,14 @@ async function warmupAttemptLikeOnCurrentScreen(
       && (beforeReplyComposerReason || beforeInlineReplyBar)
       && !/thread_detail_visual|acp_detail_action_row/.test(currentActions.debugReason || "")
     ) {
+      if (options.requireVisibleActionRow) {
+        return {
+          ok: false,
+          message: `thread_detail_no_visible_action_row:${beforeReplyComposerReason || "LOCAL_INLINE_REPLY_BAR"}_BEFORE_LIKE`,
+          screenshotUrl: beforeShotUrl,
+          movedToDetail: true,
+        };
+      }
       if (!beforeReplyHasDraft) {
         const detailTargets = await detectThreadsDetailActionRowLocally(beforeShotUrl).catch(() => null);
         const detailLike = [detailTargets?.like]
@@ -28979,6 +29459,15 @@ async function warmupAttemptLikeOnCurrentScreen(
     ).catch(() => currentActions?.screenshotUrl);
 	    const verified = await detectThreadsWarmupLikeConfirmedVisually(shotUrl, tapPoint).catch(() => false);
 	    if (!verified) {
+        if (options.requireVisibleActionRow) {
+          const debugPath = saveThreadsDebugScreenshot(shotUrl, "warmup-acp-like-unconfirmed-visible-row-required");
+          return {
+            ok: false,
+            message: `ACP 可见互动栏点赞未确认，禁止详情页兜底（target=${Math.round(point.x)},${Math.round(point.y)} tap=${Math.round(tapPoint.x)},${Math.round(tapPoint.y)}${debugPath ? ` debug=${debugPath}` : ""}）`,
+            point: tapPoint,
+            screenshotUrl: shotUrl,
+          };
+        }
 	      const detailLike = await withTimeout(
 	        warmupTryLikeFromThreadDetail(config, padCode, shotUrl),
 	        7_500,
@@ -30226,6 +30715,24 @@ async function warmupExecuteCommentAtPoint(
     let postSendLooksPosted = postedTextInUi || postedCueInUi || postedVisually || postedToastVisible || replyComposerClearedAfterSend || returnedToSearchResultsAfterSend;
     let postedTextEvidence = postedTextInUi;
     let postedVisualEvidence = postedTextInUi || postedVisually || replyComposerClearedAfterSend || returnedToSearchResultsAfterSend;
+    if (!postSendLooksPosted && isAcpPad(padCode) && postSendEvidenceUrl) {
+      const postSendDraftCleared = !hasThreadsReplyComposerText(settledPostSendXml, comment)
+        && !(await detectAcpReplyInputHasDraftLocally(postSendEvidenceUrl).catch(() => false));
+      const postSendSafeDetail = !looksLikeThreadsRestrictedReplyNoticeUiXml(settledPostSendXml)
+        && !looksLikeThreadsStatusMessageUiXml(settledPostSendXml)
+        && !(await detectThreadsSideDrawerLocally(postSendEvidenceUrl).catch(() => false))
+        && !(await detectThreadsProfilePageLocally(postSendEvidenceUrl).catch(() => false));
+      const postSendEmptyReplySurface = Boolean(
+        await detectThreadsInlineReplyBarLocally(postSendEvidenceUrl).catch(() => false)
+        || await detectAcpReplyBarClearedAfterSendLocally(postSendEvidenceUrl).catch(() => false)
+        || await detectThreadsReplyComposerLocally(postSendEvidenceUrl).catch(() => null)
+      );
+      if (postSendDraftCleared && postSendSafeDetail && postSendEmptyReplySurface) {
+        logAcpCommentStage("post-send-empty-reply-bar-confirmed");
+        postSendLooksPosted = true;
+        postedVisualEvidence = true;
+      }
+    }
     if (!postSendLooksPosted && await handleThreadsWarmupCommentPrivacyPrompt(config, padCode, { switchToPublic: true }).catch(() => false)) {
       await delay(1400);
       let privacyPostSendShotUrl = await captureReplyScreenshotFast("warmup comment privacy-postsend")
@@ -30853,7 +31360,15 @@ export async function warmupThreadsAccount(
   const likeScreenshots: string[] = [];
   const commentScreenshots: string[] = [];
   let activeRelevantSurfaceReason = "";
+  let carriedRelevantSurface: { ok: boolean; preview: string; reason: string } | null = null;
   let searchResultOpenAttempts = 0;
+  let acpSearchRejectedCandidates = 0;
+  let acpSearchBrowseStallTurns = 0;
+  let acpSearchLastBrowsed = 0;
+  let acpSearchKeywordHitCandidates = 0;
+  let acpSearchKeywordHitKeyword = "";
+  let acpSearchLenientInteractionArmed = false;
+  let acpSearchKeywordFallbackLikeOnly = false;
   const visitedWarmupPostKeys = new Set<string>();
   const commentedWarmupPostKeys = new Set<string>();
   const usedWarmupComments = new Set<string>();
@@ -30899,26 +31414,185 @@ export async function warmupThreadsAccount(
       500,
     ).catch(() => "");
   };
-  const prepareAcpSearchResultForInteraction = async (options: { avoidTopResult?: boolean } = {}) => {
+  const resetAcpSearchSurface = async (reason: string) => {
+    if (!isAcpPad(padCode) || !/^search/.test(activeRelevantSurfaceReason)) return;
+    report(reason);
+    carriedRelevantSurface = null;
+    activeRelevantSurfaceReason = "";
+    searchResultOpenAttempts = 0;
+    acpSearchRejectedCandidates = 0;
+    acpSearchBrowseStallTurns = 0;
+    acpSearchLastBrowsed = browsed;
+    acpSearchKeywordHitCandidates = 0;
+    acpSearchKeywordHitKeyword = "";
+    acpSearchLenientInteractionArmed = false;
+    acpSearchKeywordFallbackLikeOnly = false;
+    await relaunchThreads(config, padCode, 2600).catch(() => undefined);
+  };
+  const searchCandidateHasKeywordHit = (
+    current: { preview: string; relevance: WarmupRelevanceResult; modelMatch?: { preview?: string } | null },
+    keyword: string,
+  ) => {
+    const normalizedKeyword = normalizeWarmupRelevanceText(keyword).replace(/\s+/g, "");
+    const preview = normalizeWarmupRelevanceText(`${current.preview || ""} ${current.modelMatch?.preview || ""}`).replace(/\s+/g, "");
+    if (normalizedKeyword.length >= 2 && preview.includes(normalizedKeyword)) return true;
+    const matched = current.relevance.matched || [];
+    if (matched.some((item) => normalizeWarmupRelevanceText(item).replace(/\s+/g, "") === normalizedKeyword)) return true;
+    const keywordScore = scoreWarmupPostRelevance(current.preview || current.modelMatch?.preview || "", effectiveCfg.commentPersona, [keyword]);
+    return keywordScore.relevant || keywordScore.matched.includes("real-estate-domain");
+  };
+  const markAcpSearchKeywordHit = (keyword: string) => {
+    if (!keyword) return 0;
+    if (acpSearchKeywordHitKeyword !== keyword) {
+      acpSearchKeywordHitKeyword = keyword;
+      acpSearchKeywordHitCandidates = 0;
+      acpSearchLenientInteractionArmed = false;
+    }
+    acpSearchKeywordHitCandidates += 1;
+    return acpSearchKeywordHitCandidates;
+  };
+  const markAcpSearchCandidateRejected = async (reason: string) => {
+    if (!isAcpPad(padCode) || !/^search/.test(activeRelevantSurfaceReason)) return;
+    acpSearchRejectedCandidates += 1;
+    if (acpSearchRejectedCandidates >= 3 && acpSearchKeywordHitCandidates < 3) {
+      await resetAcpSearchSurface(`当前搜索词连续 ${acpSearchRejectedCandidates} 次候选不相关，重新随机选择中文关键词：${reason}`);
+    }
+  };
+  const searchResultPageRelevantBeforeOpen = async () => {
+    if (!isAcpPad(padCode) || !/^search/.test(activeRelevantSurfaceReason)) return true;
+    const keyword = keywordFromRelevantSurface();
+    const current = await warmupCurrentPostRelevance(config, padCode, effectiveCfg, {
+      allowVisionFallback: true,
+      report: (step) => report(step),
+      label: "搜索结果点击前校验",
+      keyword,
+      requireModelMatch: true,
+    }).catch((error) => ({
+      preview: "",
+      relevance: {
+        relevant: false,
+        score: 0,
+        matched: [],
+        keywords: [],
+        reason: error instanceof Error ? error.message : String(error),
+      },
+      screenshotUrl: undefined,
+      modelMatch: null,
+    }));
+    if (current.relevance.relevant) {
+      acpSearchRejectedCandidates = 0;
+      if (searchCandidateHasKeywordHit(current, keyword)) markAcpSearchKeywordHit(keyword);
+      report(`搜索结果点击前确认人设相关：${current.preview.slice(0, 42) || current.relevance.reason}`);
+      return true;
+    }
+    const modelUnavailable = /model-unavailable/.test(current.relevance.reason || current.modelMatch?.reason || "");
+    if (
+      modelUnavailable
+      && isWarmupSearchKeywordRelevantToPersona(keyword, effectiveCfg.commentPersona, effectiveCfg.keywords || [])
+    ) {
+      acpSearchKeywordFallbackLikeOnly = true;
+      acpSearchRejectedCandidates = 0;
+      report(`模型暂不可用，但搜索关键词「${keyword}」已通过人设领域筛选，本次只允许低频点赞不留言`);
+      return true;
+    }
+    if (searchCandidateHasKeywordHit(current, keyword)) {
+      const keywordHits = markAcpSearchKeywordHit(keyword);
+      if (keywordHits >= 3) {
+        acpSearchLenientInteractionArmed = true;
+        acpSearchRejectedCandidates = 0;
+        report(`搜索结果连续 ${keywordHits} 个候选提到关键词「${keyword}」，放宽模型门槛并选择当前候选互动`);
+        return true;
+      }
+      report(`搜索结果候选提到关键词「${keyword}」但模型未放行，累计 ${keywordHits}/3 后再放宽`);
+    }
+    const modelReason = current.modelMatch?.reason || current.relevance.reason;
+    report(`搜索结果点击前判定不相关，滑走换候选：${modelReason}${current.preview ? `｜${current.preview.slice(0, 42)}` : ""}`);
+    await warmupScrollDown(config, padCode).catch(() => undefined);
+    await delay(warmupRandomInt(900, 1500));
+    await markAcpSearchCandidateRejected(modelReason);
+    return false;
+  };
+  const prepareAcpSearchResultForInteraction = async (options: { avoidTopResult?: boolean } = {}): Promise<boolean> => {
     const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
-    const openAttempt = searchResultOpenAttempts++;
     if (options.avoidTopResult) {
       await revealAcpSearchResultActionRow().catch(() => undefined);
       await delay(warmupRandomInt(500, 900));
     }
+    if (!(await searchResultPageRelevantBeforeOpen())) return false;
     const rowRatios = options.avoidTopResult
-      ? [0.43, 0.58, 0.72, 0.34]
-      : [0.43, 0.58, 0.72, 0.34];
-    const yRatio = rowRatios[openAttempt % rowRatios.length];
-    await tapViaAdbAbsoluteQuick(
-      config,
-      padCode,
-      Math.round(screen.width * 0.44),
-      Math.round(screen.height * yRatio),
-      900,
-    ).catch(() => undefined);
-    await delay(700);
+      ? [0.38, 0.48, 0.30, 0.58]
+      : [0.34, 0.43, 0.53, 0.62];
+    const xRatios = options.avoidTopResult
+      ? [0.31, 0.30, 0.32, 0.29]
+      : [0.31, 0.30, 0.32, 0.29];
+    const isMediaOverlay = async (shotUrl: string | undefined) => Boolean(
+      shotUrl && (
+        await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null)
+        || await detectThreadsWarmupBlackLetterboxMedia(shotUrl).catch(() => false)
+        || await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)
+      )
+    );
+    for (let attempt = 0; attempt < Math.min(4, rowRatios.length); attempt += 1) {
+      const openAttempt = searchResultOpenAttempts++;
+      const yRatio = rowRatios[openAttempt % rowRatios.length];
+      const xRatio = xRatios[openAttempt % xRatios.length] || 0.31;
+      await tapViaAdbAbsoluteQuick(
+        config,
+        padCode,
+        Math.round(screen.width * xRatio),
+        Math.round(screen.height * yRatio),
+        900,
+      ).catch(() => undefined);
+      await delay(900);
+      const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+      if (await isMediaOverlay(shotUrl)) {
+        report("搜索结果候选误入媒体浮层，返回结果流换一条...");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 700).catch(() => "");
+        await delay(900);
+        await execAdbForText(
+          config,
+          padCode,
+          `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.78)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.34)} 560`,
+          8_000,
+          700,
+        ).catch(() => "");
+        await delay(900);
+        await revealAcpSearchResultActionRow().catch(() => undefined);
+        continue;
+      }
+      await revealAcpSearchResultActionRow();
+      return true;
+    }
     await revealAcpSearchResultActionRow();
+    return false;
+  };
+  const locateAcpSearchResultVisibleActions = async (): Promise<WarmupFeedActionTargets | null> => {
+    if (!isAcpPad(padCode) || !/^search/.test(activeRelevantSurfaceReason)) return null;
+    if (!(await searchResultPageRelevantBeforeOpen())) return null;
+    await revealAcpSearchResultActionRow().catch(() => undefined);
+    await delay(warmupRandomInt(650, 1100));
+    const current = await withTimeout(
+      warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode, { preferActionRowBeforeProfile: true }),
+      10_000,
+      "warmup ACP search visible action locate timeout",
+    ).catch((error) => ({
+      debugReason: `search_visible_action_locate_error:${error instanceof Error ? error.message : String(error)}`,
+    } as WarmupFeedActionTargets));
+    if (current?.screenshotUrl && await detectThreadsProfilePageLocally(current.screenshotUrl).catch(() => false)) {
+      report("搜索结果页当前候选进入个人页，跳过换下一条，避免无关互动");
+      return {
+        ...current,
+        like: undefined,
+        comment: undefined,
+        debugReason: "profile_ui:search_visible_action_candidate",
+      };
+    }
+    if (current?.like || current?.comment) {
+      report(`搜索结果页直接识别可见互动栏：${current.debugReason || "visible_action_row"}`);
+      return current;
+    }
+    report(`搜索结果页当前屏未找到可见互动栏，准备换候选：${current?.debugReason || "missing"}`);
+    return current || null;
   };
 
   const locateFeedActionsForWarmup = async (
@@ -30930,19 +31604,15 @@ export async function warmupThreadsAccount(
         report(`当前屏出现 Threads 页面验证提示，先尝试关闭：${currentState.reason || currentState.page}`);
         const afterDismiss = await dismissThreadsChallengeIfPossible(config, padCode, currentState).catch(() => currentState);
         if (afterDismiss.page === "challenge") {
-          return {
-            screenshotUrl: afterDismiss.screenshotUrl,
-            debugReason: `threads_challenge_blocked:${afterDismiss.reason || "challenge"}`,
-          };
+          throwThreadsTerminalPage(afterDismiss, "养号互动定位时检测到验证阻断");
         }
       } else if (currentState?.page === "login_required" || currentState?.page === "system_dialog") {
-        return {
-          screenshotUrl: currentState.screenshotUrl,
-          debugReason: `threads_blocked:${currentState.reason || currentState.page}`,
-        };
+        throwThreadsTerminalPage(currentState, "养号互动定位时检测到账号状态阻断");
       }
       const locateOnce = () => withTimeout(
-        warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode),
+        warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode, {
+          preferActionRowBeforeProfile: /^search/.test(activeRelevantSurfaceReason),
+        }),
         timeoutMs,
         "warmupLocateCurrentAcpActionsLocalSnapshot timeout",
       );
@@ -30953,20 +31623,37 @@ export async function warmupThreadsAccount(
           report(`当前屏互动识别超时，尝试恢复后重试：${message}`);
           return null;
         });
+        const reason = current?.debugReason || "warmupLocateCurrentAcpActionsLocalSnapshot returned null";
+        if (/acp_media_overlay_actions|media_viewer/.test(reason) && /^search/.test(activeRelevantSurfaceReason)) {
+          last = current || last;
+          report(`搜索结果候选打开了媒体浮层，返回后换目标：${reason}`);
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 700).catch(() => "");
+          await delay(900);
+          const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+          await execAdbForText(
+            config,
+            padCode,
+            `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.72)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.42)} 420`,
+            8_000,
+            700,
+          ).catch(() => "");
+          await delay(900);
+          await revealAcpSearchResultActionRow().catch(() => undefined);
+          continue;
+        }
         if (current?.like || current?.comment) return current;
         last = current || last;
 
-        const reason = current?.debugReason || "warmupLocateCurrentAcpActionsLocalSnapshot returned null";
-        if (/threads_challenge_blocked|threads_blocked/.test(reason)) return current;
-        report(`当前屏不可互动，恢复到推荐流后重试：${reason}${current?.screenshotUrl ? " | screenshot_captured" : ""}`);
+        report(`当前屏不可互动，恢复后重试：${reason}${current?.screenshotUrl ? " | screenshot_captured" : ""}`);
 
         if (/acp_side_drawer/.test(reason) && current?.screenshotUrl) {
           await warmupDismissAcpSideDrawerAndCapture(config, padCode, current.screenshotUrl).catch(() => "");
         } else if (/threads_not_foreground|acp_still_android_launcher/.test(reason)) {
           await warmupRecoverAcpInteractionSurface(config, padCode, reason);
         } else if (/profile_ui/.test(reason) && /^search/.test(activeRelevantSurfaceReason)) {
-          report("搜索结果页未露出互动栏，换一条结果点开后重试...");
-          await prepareAcpSearchResultForInteraction({ avoidTopResult: true });
+          await restoreAcpSearchResultsForNextCandidate(`搜索结果候选进入个人页，返回结果列表换下一条：${reason}`);
+        } else if (/thread_detail_no_action_row|profile_ui|acp_external_webview|acp_messages|acp_status_message|media_viewer|acp_local_snapshot_no_actions|acp_local_action_row_missing|local_geometry_actions_missing|fallback_like_missing|fallback_comment_missing/.test(reason) && /^search/.test(activeRelevantSurfaceReason)) {
+          await restoreAcpSearchResultsForNextCandidate(`搜索结果候选不可互动，换下一条：${reason}`);
         } else if (/thread_detail_no_action_row|profile_ui|acp_external_webview|acp_messages|acp_status_message|media_viewer|acp_local_snapshot_no_actions|acp_local_action_row_missing|local_geometry_actions_missing|fallback_like_missing|fallback_comment_missing/.test(reason)) {
           await warmupRecoverAcpInteractionSurface(config, padCode, reason);
 	        } else {
@@ -30982,10 +31669,161 @@ export async function warmupThreadsAccount(
       "warmupLocateHomeFeedActions timeout",
     ).catch(async (error) => {
       const message = error instanceof Error ? error.message : String(error);
+      if (/__THREADS_BLOCKED__|login_required|system_dialog|challenge|未登录|未登入|需要登录|需要登入|验证码|驗證碼|验证|驗證/i.test(message)) throw error;
       report(`互动按钮识别超时，恢复页面后继续浏览：${message}`);
       await warmupSafeBackOrRelaunchThreads(config, padCode, 800).catch(() => null);
       return null;
     });
+  };
+  const keywordFromRelevantSurface = () => {
+    const prefixes = ["search-acp-query:", "search-query:", "search-keyword:", "search:"];
+    for (const prefix of prefixes) {
+      if (activeRelevantSurfaceReason.startsWith(prefix)) {
+        return (activeRelevantSurfaceReason.slice(prefix.length).split(":")[0] || "").trim();
+      }
+    }
+    return "";
+  };
+  const isCurrentAcpSearchResultsSurface = async (keyword = keywordFromRelevantSurface()) => {
+    const [xml, shotUrl] = await Promise.all([
+      dumpUiXml(config, padCode, 4_500).catch(() => ""),
+      screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => ""),
+    ]);
+    const searchResultsByXml = looksLikeThreadsSearchResultsUiXml(xml, keyword);
+    const searchResultsByVisual = shotUrl
+      ? await detectThreadsSearchResultsPageLocally(shotUrl).catch(() => false)
+        || await detectThreadsSearchResultContentLoadedLocally(shotUrl).catch(() => false)
+        || await detectThreadsSearchResultsVisualGateLocally(shotUrl).catch(() => false)
+      : false;
+    const searchInputWithKeyword = threadsSearchInputContainsKeyword(xml, keyword);
+    return {
+      ok: !searchInputWithKeyword && (searchResultsByXml || searchResultsByVisual),
+      xml,
+      shotUrl,
+      searchInputWithKeyword,
+    };
+  };
+  const restoreAcpSearchResultsForNextCandidate = async (reason: string) => {
+    const keyword = keywordFromRelevantSurface();
+    report(reason);
+    const before = await isCurrentAcpSearchResultsSurface(keyword);
+    if (!before.ok) {
+      const onProfile = before.shotUrl && await detectThreadsProfilePageLocally(before.shotUrl).catch(() => false);
+      const onDetail = before.shotUrl && (
+        await detectThreadsReplyComposerLocally(before.shotUrl).catch(() => null)
+        || await detectThreadsInlineReplyBarLocally(before.shotUrl).catch(() => false)
+        || await detectThreadsThreadDetailShellLocally(before.shotUrl).catch(() => false)
+      );
+      const onMedia = before.shotUrl && (
+        await detectThreadsFullscreenMediaViewerLocally(before.shotUrl).catch(() => false)
+        || await detectThreadsWarmupBlackLetterboxMedia(before.shotUrl).catch(() => false)
+        || await detectThreadsWarmupMediaOverlayActions(before.shotUrl).catch(() => null)
+      );
+      const onExternal = before.shotUrl && await detectThreadsExternalWebViewLocally(before.shotUrl).catch(() => false);
+      if (onProfile || onDetail || onMedia || onExternal || /profile_ui|thread_detail|LOCAL_REPLY_COMPOSER|LOCAL_INLINE_REPLY_BAR|media_viewer|external_webview/i.test(reason)) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 600).catch(() => "");
+        await delay(warmupRandomInt(900, 1400));
+      }
+    }
+    const afterBack = await isCurrentAcpSearchResultsSurface(keyword);
+    if (afterBack.ok) {
+      await revealAcpSearchResultActionRow().catch(() => undefined);
+      await warmupScrollDown(config, padCode).catch(() => undefined);
+      await delay(warmupRandomInt(900, 1500));
+      return true;
+    }
+    if (keyword && (afterBack.searchInputWithKeyword || findThreadsSearchInputTarget(afterBack.xml))) {
+      report(`换目标时回到搜索输入页，重新提交中文关键词搜索：${keyword}`);
+      await warmupSearchInterestSurface(config, padCode, keyword, (step) => report(step)).catch(async (error) => {
+        report(`重新提交当前搜索关键词失败，下一轮将随机换词：${error instanceof Error ? error.message : String(error)}`);
+        await resetAcpSearchSurface("搜索结果恢复失败，重新随机选择中文关键词");
+      });
+      return true;
+    }
+    await resetAcpSearchSurface(`搜索结果上下文丢失，重新随机选择中文关键词：${reason}`);
+    return false;
+  };
+  const skipCurrentSearchCandidate = async (reason: string) => {
+    await restoreAcpSearchResultsForNextCandidate(reason);
+  };
+  const verifySearchCandidateBeforeInteraction = async () => {
+    if (!isAcpPad(padCode) || !/^search/.test(activeRelevantSurfaceReason)) return true;
+    const keyword = keywordFromRelevantSurface();
+    const current = await warmupCurrentPostRelevance(config, padCode, effectiveCfg, {
+      allowVisionFallback: true,
+      report: (step) => report(step),
+      label: "互动前模型校验",
+      keyword,
+      requireModelMatch: true,
+    }).catch((error) => ({
+      preview: "",
+      relevance: {
+        relevant: false,
+        score: 0,
+        matched: [],
+        keywords: [],
+        reason: error instanceof Error ? error.message : String(error),
+      },
+      screenshotUrl: undefined,
+      modelMatch: null,
+    }));
+    if (current.relevance.relevant) {
+      acpSearchRejectedCandidates = 0;
+      acpSearchLenientInteractionArmed = false;
+      acpSearchKeywordFallbackLikeOnly = false;
+      report(`互动前模型确认人设相关：${current.preview.slice(0, 42) || current.relevance.reason}`);
+      return true;
+    }
+    const modelUnavailable = /model-unavailable/.test(current.relevance.reason || current.modelMatch?.reason || "");
+    if (
+      acpSearchKeywordFallbackLikeOnly
+      && modelUnavailable
+      && isWarmupSearchKeywordRelevantToPersona(keyword, effectiveCfg.commentPersona, effectiveCfg.keywords || [])
+    ) {
+      report(`互动前模型仍不可用，按中文人设关键词「${keyword}」只允许点赞通过`);
+      return true;
+    }
+    if (acpSearchLenientInteractionArmed && searchCandidateHasKeywordHit(current, keyword)) {
+      acpSearchLenientInteractionArmed = false;
+      acpSearchRejectedCandidates = 0;
+      acpSearchKeywordFallbackLikeOnly = false;
+      report(`互动前模型偏严，但当前候选仍命中关键词「${keyword}」，按连续关键词命中规则允许一次低频互动`);
+      return true;
+    }
+    const modelReason = current.modelMatch?.reason || current.relevance.reason;
+    await skipCurrentSearchCandidate(`互动前模型判定不相关，跳过当前候选：${modelReason}${current.preview ? `｜${current.preview.slice(0, 42)}` : ""}`);
+    await markAcpSearchCandidateRejected(modelReason);
+    return false;
+  };
+  const ensureAcpSearchSurfaceForRecovery = async (label: string): Promise<boolean> => {
+    if (!isAcpPad(padCode)) return true;
+    acpSearchKeywordFallbackLikeOnly = false;
+    acpSearchLenientInteractionArmed = false;
+    carriedRelevantSurface = null;
+    activeRelevantSurfaceReason = "";
+    const relevantSurface = await warmupEnsureRelevantSurface(
+      config,
+      padCode,
+      effectiveCfg,
+      (step) => report(step),
+      { phase: "browse", allowSearch: true, forceSearch: true },
+    ).catch((error) => ({
+      ok: false,
+      preview: "",
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    if (!relevantSurface.ok || !/^search/.test(relevantSurface.reason)) {
+      report(`${label}前未能重新进入人设关键词搜索结果，跳过本次补点：${relevantSurface.reason}`);
+      return false;
+    }
+    carriedRelevantSurface = relevantSurface;
+    activeRelevantSurfaceReason = relevantSurface.reason;
+    searchResultOpenAttempts = 0;
+    acpSearchRejectedCandidates = 0;
+    acpSearchBrowseStallTurns = 0;
+    acpSearchLastBrowsed = browsed;
+    report(`${label}已重新进入人设关键词搜索结果：${relevantSurface.preview || relevantSurface.reason}`);
+    return true;
   };
 
   // 确保 Threads 在前台
@@ -31005,12 +31843,12 @@ export async function warmupThreadsAccount(
         report(`Threads 出现页面验证提示，先尝试关闭后再继续：${state.reason || state.page}`);
         const afterDismiss = await dismissThreadsChallengeIfPossible(config, padCode, state).catch(() => state);
         if (afterDismiss?.page === "challenge") {
-          throw new Error(`Threads 当前出现页面验证提示，本轮养号无法继续：${afterDismiss.reason || state.reason || "challenge"}`);
+          throwThreadsTerminalPage(afterDismiss, "养号启动后检测到验证阻断");
         }
         state = afterDismiss;
         report(`Threads 页面验证提示已关闭，当前页面：${afterDismiss?.reason || afterDismiss?.page || "unknown"}`);
       } else if (state?.page === "login_required" || state?.page === "system_dialog") {
-        throw new Error(`Threads 当前不适合养号：${state.reason || state.page}`);
+        throwThreadsTerminalPage(state, "养号启动后检测到账号状态阻断");
       }
       if (state?.page === "compose_editor") {
         report("Threads 停在新串文编辑页，先退出后直接继续养号...");
@@ -31023,10 +31861,16 @@ export async function warmupThreadsAccount(
         await warmupRecoverAcpInteractionSurface(config, padCode, state.reason || state.page).catch(() => undefined);
         await delay(900);
         state = await classifyThreadsPageOnDevice(config, padCode).catch(() => state);
+        if (state && isThreadsTerminalPage(state.page)) {
+          throwThreadsTerminalPage(state, "养号恢复页面后检测到账号状态阻断");
+        }
         if (state?.page !== "home_feed") {
           await relaunchThreads(config, padCode, 3500).catch(() => undefined);
           await tapViaAdbReferencePoint(config, padCode, { x: 72, y: 1540 }, 1800).catch(() => undefined);
           state = await classifyThreadsPageOnDevice(config, padCode).catch(() => state);
+          if (state && isThreadsTerminalPage(state.page)) {
+            throwThreadsTerminalPage(state, "养号重启后检测到账号状态阻断");
+          }
         }
       }
       report(`ACP 快速模式：跳过首页硬恢复，直接尝试当前页面互动${state?.reason ? `（${state.reason}）` : ""}`);
@@ -31037,6 +31881,7 @@ export async function warmupThreadsAccount(
         "Threads 首页恢复超时",
       ).catch(async (error) => {
         const message = error instanceof Error ? error.message : String(error);
+        if (/__THREADS_BLOCKED__/.test(message)) throw error;
         report(`首页恢复失败，跳过阻塞直接尝试当前页面互动：${message}`);
         await relaunchThreads(config, padCode, 2500).catch(() => undefined);
       });
@@ -31071,7 +31916,7 @@ export async function warmupThreadsAccount(
     : [];
   const commentTurnSet = new Set(commentTurnSchedule);
   let consecutiveAcpLocateMisses = 0;
-  let carriedRelevantSurface: { ok: boolean; preview: string; reason: string } | null = initialRelevant.reason.startsWith("search")
+  carriedRelevantSurface = initialRelevant.reason.startsWith("search")
     ? initialRelevant
     : null;
   activeRelevantSurfaceReason = initialRelevant.reason;
@@ -31106,6 +31951,22 @@ export async function warmupThreadsAccount(
       throw new Error(`当前推荐流未找到和人设相关的内容，已停止避免无关互动：${relevantSurface.reason}`);
     }
     activeRelevantSurfaceReason = relevantSurface.reason;
+    if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason)) {
+      if (browsed > acpSearchLastBrowsed) {
+        acpSearchLastBrowsed = browsed;
+        acpSearchBrowseStallTurns = 0;
+      } else if (i > 0) {
+        acpSearchBrowseStallTurns += 1;
+      }
+      if (acpSearchBrowseStallTurns >= 3 && liked + commented <= 0) {
+        await resetAcpSearchSurface(`当前搜索结果浏览计数连续 ${acpSearchBrowseStallTurns} 轮未增长，重新随机选择中文关键词`);
+        continue;
+      }
+    } else {
+      acpSearchRejectedCandidates = 0;
+      acpSearchBrowseStallTurns = 0;
+      acpSearchLastBrowsed = browsed;
+    }
 
     report(timedSession
       ? `滑动浏览中：已浏览约 ${browsed} 篇，已执行 ${Math.round((targetSessionMs - Math.max(0, sessionDeadline - Date.now())) / 60_000)} / ${Math.round(targetSessionMs / 60_000)} 分钟...`
@@ -31114,6 +31975,17 @@ export async function warmupThreadsAccount(
     // 随机停留观看
     const watchMs = warmupRandom(minWatchSeconds * 1000, maxWatchSeconds * 1000);
     const scrollPauseMs = warmupRandom(minAfterScrollPauseMs, maxAfterScrollPauseMs);
+    let countedThisTurn = false;
+    const markBrowsedThisTurn = (reason: string) => {
+      if (countedThisTurn) return;
+      browsed++;
+      countedThisTurn = true;
+      if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason)) {
+        acpSearchLastBrowsed = browsed;
+        acpSearchBrowseStallTurns = 0;
+      }
+      report(`已计入本轮浏览：${browsed}/${browseCount}（${reason}）`);
+    };
 
     const interactionAllowed = timedSession ? browsed >= nextInteractionAfterBrowsed : i >= firstInteractionIndex;
     const maxCommentFailuresThisRun = isAcpPad(padCode) ? 4 : 4;
@@ -31175,15 +32047,29 @@ export async function warmupThreadsAccount(
     let feedActions: WarmupFeedActionTargets | null = null;
     if (shouldLike || shouldComment) {
       if (isAcpPad(padCode) && /^search/.test(relevantSurface.reason)) {
-        report("搜索结果页轮换点开候选结果并露出互动栏...");
-        await prepareAcpSearchResultForInteraction({
-          avoidTopResult: true,
-        });
+        if (acpSearchKeywordFallbackLikeOnly && shouldComment) {
+          report("模型不可用关键词兜底模式下禁止留言，改为点赞满足最低互动");
+          shouldLike = true;
+          shouldComment = false;
+        }
+        report("搜索结果页优先检查当前可见互动栏，避免反复点进同一媒体...");
+        feedActions = await locateAcpSearchResultVisibleActions();
+        if (!feedActions?.like && !feedActions?.comment) {
+          report("当前搜索结果页没有稳定可见互动栏，使用原始 ACP 定位再试一次...");
+          feedActions = await locateFeedActionsForWarmup(14_000).catch(() => null);
+        }
+        if (!feedActions?.like && !feedActions?.comment) {
+          markBrowsedThisTurn("搜索候选已校验但未找到互动栏");
+          report("当前搜索结果页仍未找到稳定互动栏，滑走换下一条，避免点进个人页或媒体层...");
+          await warmupScrollDown(config, padCode).catch(() => undefined);
+          await delay(warmupRandomInt(900, 1500));
+          continue;
+        }
       }
       if (isAcpPad(padCode) && shouldComment && !shouldLike) {
         await warmupAlignToReadablePost(config, padCode).catch(() => undefined);
       }
-      feedActions = await locateFeedActionsForWarmup(isAcpPad(padCode) && shouldComment && !shouldLike ? 24_000 : undefined);
+      feedActions ||= await locateFeedActionsForWarmup(isAcpPad(padCode) && shouldComment && !shouldLike ? 24_000 : undefined);
     }
     if (
       isAcpPad(padCode)
@@ -31215,11 +32101,21 @@ export async function warmupThreadsAccount(
 	        continue;
 	      }
 	      if (isAcpPad(padCode) && /thread_detail_no_action_row/.test(feedActions?.debugReason || "")) {
+          if (/^search/.test(activeRelevantSurfaceReason)) {
+            await skipCurrentSearchCandidate(`搜索结果候选未露出稳定可见互动栏，跳过当前候选：${feedActions?.debugReason || "thread_detail_no_action_row"}`);
+            markBrowsedThisTurn("搜索候选无互动栏");
+            continue;
+          }
 	        await warmupRecoverAcpInteractionSurface(config, padCode, feedActions?.debugReason || "");
 	        await delay(900);
 	        continue;
 	      }
 	      if (isAcpPad(padCode) && /acp_local_snapshot_no_actions|acp_local_action_row_missing|fallback_like_missing/.test(feedActions?.debugReason || "")) {
+          if (/^search/.test(activeRelevantSurfaceReason)) {
+            await skipCurrentSearchCandidate(`搜索结果候选未露出稳定可见互动栏，跳过当前候选：${feedActions?.debugReason || "missing_action_row"}`);
+            markBrowsedThisTurn("搜索候选无稳定互动栏");
+            continue;
+          }
 	        await warmupRecoverAcpInteractionSurface(config, padCode, feedActions?.debugReason || "");
 	        await delay(900);
 	        continue;
@@ -31237,6 +32133,11 @@ export async function warmupThreadsAccount(
       consecutiveAcpLocateMisses = 0;
     }
     if ((shouldLike || shouldComment) && /profile_ui|profile_menu/.test(feedActions?.debugReason || "")) {
+      if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason)) {
+        await skipCurrentSearchCandidate(`搜索结果候选进入个人页，跳过当前候选：${feedActions?.debugReason || "profile_ui"}`);
+        markBrowsedThisTurn("搜索候选进入个人页");
+        continue;
+      }
       report("Threads 停在个人页，退回后继续换目标...");
       await relaunchThreads(config, padCode, 3500).catch(() => undefined);
       if (!isAcpPad(padCode)) {
@@ -31245,12 +32146,21 @@ export async function warmupThreadsAccount(
       continue;
     }
     if ((shouldLike || shouldComment) && /media_viewer/.test(feedActions?.debugReason || "")) {
+      if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason)) {
+        await restoreAcpSearchResultsForNextCandidate(`搜索结果候选进入媒体页，跳过当前候选：${feedActions?.debugReason || "media_viewer"}`);
+        markBrowsedThisTurn("搜索候选进入媒体页");
+        continue;
+      }
       report("Threads 停在图片查看页，返回后继续换目标...");
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
       await delay(900);
       if (!isAcpPad(padCode)) {
         await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
       }
+      continue;
+    }
+    if ((shouldLike || shouldComment) && feedActions && !(await verifySearchCandidateBeforeInteraction())) {
+      markBrowsedThisTurn("搜索候选互动前校验未通过");
       continue;
     }
     let postPreview: string | null = null;
@@ -31273,7 +32183,11 @@ export async function warmupThreadsAccount(
 
     if (shouldLike && !combineLikeWithComment) {
       const result = await withTimeout(
-        warmupAttemptLikeOnCurrentScreen(config, padCode, feedActions, { avoidHomeRecovery: isAcpPad(padCode) }),
+        warmupAttemptLikeOnCurrentScreen(config, padCode, feedActions, {
+          avoidHomeRecovery: isAcpPad(padCode),
+          preferActionRowBeforeProfile: isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason),
+          requireVisibleActionRow: isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason),
+        }),
         isAcpPad(padCode) ? 28_000 : 45_000,
         "warmupAttemptLikeOnCurrentScreen timeout",
       ).catch((error) => ({
@@ -31290,12 +32204,24 @@ export async function warmupThreadsAccount(
         shouldRelocateBeforeComment = Boolean(result.movedToDetail);
       } else {
         report(`自动点赞失败：${result.message}`);
+        if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason) && /thread_detail_no_action_row|thread_detail_no_visible_action_row|LOCAL_REPLY_COMPOSER|LOCAL_INLINE_REPLY_BAR|可见互动栏点赞未确认/.test(result.message || "")) {
+          await skipCurrentSearchCandidate(`搜索结果候选未露出稳定可见互动栏，跳过当前候选：${result.message || "missing_action_row"}`);
+          continue;
+        }
         if (isAcpPad(padCode) && /LOCAL_REPLY_COMPOSER|thread_detail_no_action_row|acp_local_snapshot_no_actions|acp_local_action_row_missing|fallback_like_missing|fallback_comment_missing/.test(result.message || "")) {
-          await warmupRecoverAcpInteractionSurface(config, padCode, result.message || "");
+          if (/^search/.test(activeRelevantSurfaceReason)) {
+            await restoreAcpSearchResultsForNextCandidate(`搜索结果候选点赞失败，换下一条：${result.message || "missing_action_row"}`);
+          } else {
+            await warmupRecoverAcpInteractionSurface(config, padCode, result.message || "");
+          }
           await delay(900);
           continue;
         }
         if (isAcpPad(padCode) && /profile_ui:acp_like_target_screenshot|acp_like_target_implausible/.test(result.message)) {
+          if (/^search/.test(activeRelevantSurfaceReason)) {
+            await skipCurrentSearchCandidate(`搜索结果候选进入个人页，跳过当前候选：${result.message || "profile_ui"}`);
+            continue;
+          }
           await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 900).catch(() => "");
           await delay(1400);
           continue;
@@ -31374,10 +32300,11 @@ export async function warmupThreadsAccount(
           const hasSpecificScreenshotComment = Boolean(
             screenshotComment?.comment
             && isUsableWarmupComment(screenshotComment.comment)
-            && !isGenericWarmupComment(screenshotComment.comment),
+            && !isGenericWarmupComment(screenshotComment.comment)
+            && isWarmupCommentGroundedInPostAndPersona(screenshotComment.comment, effectivePreview || screenshotComment?.preview || "", commentPersona),
           );
           if (requireReadablePostForComment && normalizeSingleLine(effectivePreview).length < 6 && !hasSpecificScreenshotComment) {
-            report("未读到足够明确的帖子正文，改用保守短评继续留言");
+            throw new Error("未读到足够明确的帖子正文，跳过留言避免无关回复");
           }
           const generatedComment = screenshotComment?.comment
             || await withTimeout(
@@ -31390,6 +32317,9 @@ export async function warmupThreadsAccount(
             for (let attempt = 0; attempt < 4 && isNearDuplicateWarmupComment(finalComment, usedWarmupComments); attempt += 1) {
               finalComment = finalizeWarmupComment(fallbackWarmupComment(`${effectivePreview} ${attempt}`, [], commentPersona), effectivePreview, [], commentPersona);
             }
+          }
+          if (!finalComment || !isWarmupCommentGroundedInPostAndPersona(finalComment, effectivePreview, commentPersona)) {
+            throw new Error("生成留言未同时贴合推文和人设，跳过留言避免无关回复");
           }
           if (isNearDuplicateWarmupComment(finalComment, usedWarmupComments)) {
             throw new Error(`留言内容和本轮已用内容高度重复，跳过避免机器感回复：${finalComment.slice(0, 24)}`);
@@ -31440,7 +32370,9 @@ export async function warmupThreadsAccount(
         report(`已自动留言第 ${commented} 个：${commentResult.comment}${commentReferencePreview ? `（参考：${commentReferencePreview.slice(0, 42)}）` : ""}`);
         if (liked < minRequiredLikes) {
           report("留言完成后继续补点赞...");
-          if (isAcpPad(padCode)) {
+          if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason)) {
+            await restoreAcpSearchResultsForNextCandidate("留言完成后继续留在搜索结果补点赞");
+          } else if (isAcpPad(padCode)) {
             await warmupRecoverAcpInteractionSurface(config, padCode, "LOCAL_REPLY_COMPOSER_AFTER_COMMENT_SUCCESS");
           } else if (!timedSession) {
             await relaunchThreads(config, padCode, 3500).catch(() => undefined);
@@ -31457,10 +32389,15 @@ export async function warmupThreadsAccount(
             interactionFailures++;
           }
         }
-	        await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
-	        if (isAcpPad(padCode)) {
-	          await warmupRecoverAcpInteractionSurface(config, padCode, errorMessage);
-	        } else {
+          if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason)) {
+            await restoreAcpSearchResultsForNextCandidate(`搜索结果候选留言失败，换下一条：${errorMessage}`);
+          } else {
+	          await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
+	          if (isAcpPad(padCode)) {
+	            await warmupRecoverAcpInteractionSurface(config, padCode, errorMessage);
+            }
+          }
+	        if (!isAcpPad(padCode)) {
 	          await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
 	        }
       }
@@ -31480,7 +32417,7 @@ export async function warmupThreadsAccount(
     await warmupDwellLikeHuman(config, padCode, watchMs);
     await warmupScrollDown(config, padCode);
     await delay(scrollPauseMs);
-    browsed++;
+    markBrowsedThisTurn("正常滑动浏览");
   }
 
   const shouldRecoverLikes = likeChance > 0
@@ -31493,13 +32430,29 @@ export async function warmupThreadsAccount(
       ? Math.max(minRequiredLikes, Math.min(maxLikes, minRequiredInteractions - commented))
       : maxLikes;
     report(`${likeRecoveryTarget < maxLikes ? "自动点赞最低要求未达成" : "自动点赞未达标"}，继续补点 ${liked}/${likeRecoveryTarget}（风险上限 ${maxLikes}）...`);
-    await relaunchThreads(config, padCode, 3500).catch(() => undefined);
     if (!isAcpPad(padCode)) {
+      await relaunchThreads(config, padCode, 3500).catch(() => undefined);
       await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
     }
     for (let attempt = 0; attempt < maxRecoveries && liked < likeRecoveryTarget; attempt += 1) {
-      const actions = await locateFeedActionsForWarmup(isAcpPad(padCode) ? 24_000 : 14_000).catch(() => null);
+      let actions: WarmupFeedActionTargets | null = null;
+      if (isAcpPad(padCode)) {
+        if (!(await ensureAcpSearchSurfaceForRecovery("补点"))) break;
+        actions = await locateAcpSearchResultVisibleActions();
+        if (!actions?.like) {
+          report(`补点搜索结果页未找到稳定可见点赞栏，换下一条：${actions?.debugReason || "missing"}`);
+          await warmupScrollDown(config, padCode).catch(() => undefined);
+          await delay(warmupRandom(1200, 2400));
+          continue;
+        }
+      } else {
+        actions = await locateFeedActionsForWarmup(14_000).catch(() => null);
+      }
       if (/profile_ui|profile_menu/.test(actions?.debugReason || "")) {
+        if (isAcpPad(padCode)) {
+          await restoreAcpSearchResultsForNextCandidate(`补点搜索候选进入个人页，换下一条：${actions?.debugReason || "profile_ui"}`);
+          continue;
+        }
         report("补点时停在个人页，重新打开 Threads...");
         await relaunchThreads(config, padCode, 3500).catch(() => undefined);
         if (!isAcpPad(padCode)) {
@@ -31508,7 +32461,11 @@ export async function warmupThreadsAccount(
         continue;
       }
       const result = await withTimeout(
-        warmupAttemptLikeOnCurrentScreen(config, padCode, actions, { avoidHomeRecovery: isAcpPad(padCode) }),
+        warmupAttemptLikeOnCurrentScreen(config, padCode, actions, {
+          avoidHomeRecovery: isAcpPad(padCode),
+          preferActionRowBeforeProfile: isAcpPad(padCode),
+          requireVisibleActionRow: isAcpPad(padCode),
+        }),
         isAcpPad(padCode) ? 28_000 : 45_000,
         "warmupAttemptLikeOnCurrentScreen timeout",
       ).catch((error) => ({
@@ -31521,14 +32478,14 @@ export async function warmupThreadsAccount(
           likeScreenshots.push(await annotateWarmupActionScreenshot(result.screenshotUrl, result.point, `LIKE ${liked}`));
         }
         const preview = await warmupExtractPostPreview(config, padCode, actions?.screenshotUrl, { allowVisionFallback: false }).catch(() => "");
-        report(`补点成功第 ${liked} 个：${preview || "当前推荐流帖子"}`);
+        report(`补点成功第 ${liked} 个：${preview || (isAcpPad(padCode) ? "当前搜索结果帖子" : "当前推荐流帖子")}`);
         if (result.movedToDetail && !isAcpPad(padCode)) {
           await ensureThreadsHomeFeed(config, padCode, (p) => report(p.step, p.done, p.error)).catch(() => undefined);
         }
 	      } else {
 	        report(`补点失败：${result.message}`);
-	        if (isAcpPad(padCode) && /acp_like_target_implausible|profile_ui|thread_detail_no_action_row|acp_external_webview|media_viewer|fallback_like_missing|fallback_comment_missing|acp_local_snapshot_no_actions|acp_local_action_row_missing/.test(result.message || actions?.debugReason || "")) {
-	          await warmupRecoverAcpInteractionSurface(config, padCode, [result.message, actions?.debugReason].filter(Boolean).join(" | "));
+	        if (isAcpPad(padCode) && /acp_like_target_implausible|profile_ui|thread_detail_no_action_row|thread_detail_no_visible_action_row|LOCAL_REPLY_COMPOSER|LOCAL_INLINE_REPLY_BAR|acp_external_webview|media_viewer|fallback_like_missing|fallback_comment_missing|acp_local_snapshot_no_actions|acp_local_action_row_missing|可见互动栏点赞未确认/.test(result.message || actions?.debugReason || "")) {
+	          await restoreAcpSearchResultsForNextCandidate(`补点搜索候选失败，换下一条：${[result.message, actions?.debugReason].filter(Boolean).join(" | ")}`);
 	        }
 	      }
       if (liked < likeRecoveryTarget) {
@@ -31554,13 +32511,27 @@ export async function warmupThreadsAccount(
       ? Math.max(minRequiredComments, Math.min(maxComments, minRequiredInteractions - liked))
       : maxComments;
     report(`${commentRecoveryTarget < maxComments ? "自动留言最低要求未达成" : "自动留言未达标"}，进入尾部补漏 ${commented}/${commentRecoveryTarget}（风险上限 ${maxComments}）${plannedTurns}...`);
-    await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+    if (!isAcpPad(padCode)) {
+      await relaunchThreads(config, padCode, 3500).catch(() => undefined);
+    }
     for (let attempt = 0; attempt < maxRecoveries && commented < commentRecoveryTarget; attempt += 1) {
-	      const actions = await locateFeedActionsForWarmup(isAcpPad(padCode) ? 24_000 : 14_000).catch(() => null);
+        let actions: WarmupFeedActionTargets | null = null;
+        if (isAcpPad(padCode)) {
+          if (!(await ensureAcpSearchSurfaceForRecovery("补留言"))) break;
+          actions = await locateAcpSearchResultVisibleActions();
+          if (!actions?.comment) {
+            report(`补留言搜索结果页未找到稳定可见留言栏，换下一条：${actions?.debugReason || "missing"}`);
+            await warmupScrollDown(config, padCode).catch(() => undefined);
+            await delay(warmupRandom(1200, 2400));
+            continue;
+          }
+        } else {
+	        actions = await locateFeedActionsForWarmup(14_000).catch(() => null);
+        }
 	      if (!actions?.comment) {
 	        report(`补留言定位失败：${actions?.debugReason || "no_comment_target"}${actions?.debugRaw ? ` | ${actions.debugRaw}` : ""}`);
 	        if (isAcpPad(padCode)) {
-	          await warmupRecoverAcpInteractionSurface(config, padCode, actions?.debugReason || "no_comment_target");
+	          await restoreAcpSearchResultsForNextCandidate(`补留言搜索候选定位失败，换下一条：${actions?.debugReason || "no_comment_target"}`);
 	        } else {
 	          await warmupScrollDown(config, padCode).catch(() => undefined);
 	        }
@@ -31611,15 +32582,16 @@ export async function warmupThreadsAccount(
       if (commentResult.screenshotUrl) commentScreenshots.push(commentResult.screenshotUrl);
       report(`补留言成功第 ${commented} 个：${commentResult.comment}`);
       if (isAcpPad(padCode) && liked < minRequiredLikes) {
-        report("补留言完成后恢复推荐流继续补点赞...");
-        await warmupRecoverAcpInteractionSurface(config, padCode, "LOCAL_REPLY_COMPOSER_AFTER_COMMENT_RECOVERY_SUCCESS");
+        report("补留言完成后留在搜索结果继续补点赞...");
+        await restoreAcpSearchResultsForNextCandidate("补留言完成后继续留在搜索结果补点赞");
       }
 	      } catch (error: any) {
 	        const errorMessage = error?.message || String(error);
 	        report(`${isThreadsWarmupCommentExpectedSkipMessage(errorMessage) ? "补留言跳过" : "补留言失败"}：${errorMessage}`);
-	        await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
 	        if (isAcpPad(padCode)) {
-	          await warmupRecoverAcpInteractionSurface(config, padCode, errorMessage);
+	          await restoreAcpSearchResultsForNextCandidate(`补留言搜索候选失败，换下一条：${errorMessage}`);
+	        } else {
+	          await warmupSafeBackOrRelaunchThreads(config, padCode, 700).catch(() => null);
 	        }
 	      }
       if (commented < maxComments) {

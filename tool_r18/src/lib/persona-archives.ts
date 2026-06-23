@@ -296,6 +296,25 @@ function normalizePublishRecord(raw: any, fallbackIndex: number): PersonaPublish
         : undefined,
     screenshotUrl: typeof raw?.screenshotUrl === "string" ? raw.screenshotUrl : undefined,
     telegramGroupContentType: raw?.telegramGroupContentType === "paid" ? "paid" : raw?.telegramGroupContentType === "free" ? "free" : undefined,
+    sourceMeta: raw?.sourceMeta && typeof raw.sourceMeta === "object"
+      ? raw.sourceMeta
+      : undefined,
+    publishedUrl: typeof raw?.publishedUrl === "string" ? raw.publishedUrl : undefined,
+    publishedMeta: raw?.publishedMeta && typeof raw.publishedMeta === "object"
+      ? raw.publishedMeta
+      : undefined,
+    publishedTargets: Array.isArray(raw?.publishedTargets)
+      ? raw.publishedTargets
+        .filter((target: any) => target && typeof target === "object")
+        .map((target: any) => ({
+          platform: typeof target.platform === "string" ? target.platform : undefined,
+          padCode: typeof target.padCode === "string" ? target.padCode : undefined,
+          padName: typeof target.padName === "string" ? target.padName : undefined,
+          publishedUrl: typeof target.publishedUrl === "string" ? target.publishedUrl : undefined,
+          publishedMeta: target.publishedMeta && typeof target.publishedMeta === "object" ? target.publishedMeta : undefined,
+          screenshotUrl: typeof target.screenshotUrl === "string" ? target.screenshotUrl : undefined,
+        }))
+      : undefined,
   };
 }
 
@@ -1162,6 +1181,7 @@ export async function requeuePublishRecord(
       createdAt: now,
       updatedAt: now,
       imageUrl: record.imageUrl,
+      sourceMeta: record.sourceMeta,
       telegramGroupContentType: record.telegramGroupContentType,
     },
     nextOrderIndex,
@@ -1289,6 +1309,10 @@ export async function markArchiveEpisodesPublished(
         imageUrl: meta.mediaUrl || meta.imageUrl || post.imageUrl,
         screenshotUrl: meta.screenshotUrl,
         telegramGroupContentType: post.telegramGroupContentType,
+        sourceMeta: meta.sourceMeta || post.sourceMeta,
+        publishedUrl: meta.publishedUrl,
+        publishedMeta: meta.publishedMeta,
+        publishedTargets: meta.publishedTargets,
       }, (archive.publishHistory?.length || 0) + index);
     })
     .filter((record) => record.content.trim());

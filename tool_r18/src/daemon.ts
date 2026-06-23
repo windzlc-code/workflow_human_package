@@ -161,6 +161,7 @@ async function notifyPublishManualIntervention(task: any, error: unknown, eviden
 }
 const TELEGRAM_LOCK_FILE = resolveRuntimeFile("telegram_bot.lock");
 const DAEMON_HEARTBEAT_FILE = resolveRuntimeFile("daemon.heartbeat.json");
+const PROCESS_STATUS_FILE = resolveRuntimeFile("process-status.json");
 const DAEMON_HEARTBEAT_STALE_MS = 90_000;
 const TELEGRAM_BOT_CONFIG_RELOAD_MS = Math.max(Number(process.env.TELEGRAM_BOT_CONFIG_RELOAD_MS || 5000), 2000);
 
@@ -218,10 +219,19 @@ function releaseTelegramBotLock() {
 }
 
 function writeDaemonHeartbeat(extra: Record<string, unknown> = {}) {
+  const state = String(extra.state || "running");
+  const now = new Date();
   try {
     fs.writeFileSync(
       DAEMON_HEARTBEAT_FILE,
-      JSON.stringify({ pid: process.pid, updatedAt: new Date().toISOString(), ...extra }, null, 2),
+      JSON.stringify({ pid: process.pid, updatedAt: now.toISOString(), ...extra }, null, 2),
+      "utf-8",
+    );
+  } catch {}
+  try {
+    fs.writeFileSync(
+      PROCESS_STATUS_FILE,
+      JSON.stringify({ state, pid: String(process.pid), updated_at: now.toISOString() }, null, 2),
       "utf-8",
     );
   } catch {}
@@ -407,6 +417,15 @@ async function main() {
                   padCode: task.pad_code,
                   mediaUrl: task.media_url,
                   screenshotUrl,
+                  publishedUrl: result.publishedUrl,
+                  publishedMeta: result.publishedUrl
+                    ? {
+                      source: "published_post",
+                      platform: task.platform,
+                      sourceUrl: result.publishedUrl,
+                      capturedAt: new Date().toISOString(),
+                    }
+                    : undefined,
                 },
               },
             ).catch(() => null);
@@ -444,6 +463,15 @@ async function main() {
               padCode: task.pad_code,
               mediaUrl: task.media_url,
               screenshotUrl,
+              publishedUrl: result && typeof result === "object" && "publishedUrl" in result ? result.publishedUrl : undefined,
+              publishedMeta: result && typeof result === "object" && "publishedUrl" in result && result.publishedUrl
+                ? {
+                  source: "published_post",
+                  platform: task.platform,
+                  sourceUrl: result.publishedUrl,
+                  capturedAt: new Date().toISOString(),
+                }
+                : undefined,
             },
           },
         ).catch(() => null);

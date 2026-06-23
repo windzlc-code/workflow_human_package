@@ -5,6 +5,7 @@ import {
   buildSimplePagedCallback,
   buildPersonaContentTypeCallback,
   buildPersonaContentTypePickerRows,
+  buildPublishPadSelectionRows,
   buildPostDetailText,
   buildPostImagePreviewOptions,
   buildPostImageRegenerateCallback,
@@ -46,6 +47,10 @@ function archiveForSettings(overrides: Partial<PersonaArchive> = {}): PersonaArc
 
 function flattenButtonTexts(rows: Array<Array<{ text: string }>>) {
   return rows.flat().map((button) => button.text);
+}
+
+function flattenButtonCallbacks(rows: Array<Array<{ callback_data: string }>>) {
+  return rows.flat().map((button) => button.callback_data);
 }
 
 describe("derivePersonaSpecFromPrompt", () => {
@@ -371,6 +376,41 @@ describe("buildPostDetailActionRows", () => {
     expect(texts).toContain("🖼 重新生成图片");
     expect(texts).not.toContain("🖼 单独生成图片");
   });
+  it("shows the source metrics refresh action only when enabled", () => {
+    const baseRows = buildPostDetailActionRows({
+      hasImage: true,
+      publishCallback: "post_action",
+      deleteCallback: "post_delete_action",
+      archiveId: "archive-1",
+    });
+    const refreshRows = buildPostDetailActionRows({
+      hasImage: true,
+      publishCallback: "post_action",
+      deleteCallback: "post_delete_action",
+      archiveId: "archive-1",
+      canRefreshMetrics: true,
+    });
+
+    expect(flattenButtonCallbacks(baseRows)).not.toContain("post_refresh_metrics");
+    expect(flattenButtonCallbacks(refreshRows)).toContain("post_refresh_metrics");
+  });
+});
+
+describe("buildPublishPadSelectionRows", () => {
+  it("builds selectable rows for multi-pad publishing", () => {
+    const rows = buildPublishPadSelectionRows({
+      pads: [
+        { padCode: "PAD1", padName: "Cloud 1" },
+        { padCode: "PAD2", padName: "Cloud 2" },
+      ],
+      selectedPadCodes: ["PAD2"],
+    });
+    const buttons = rows.flat();
+
+    expect(buttons[0]).toMatchObject({ text: "☐ Cloud 1", callback_data: "pubpad_toggle_0" });
+    expect(buttons[1]).toMatchObject({ text: "✅ Cloud 2", callback_data: "pubpad_toggle_1" });
+    expect(buttons.find((button) => button.callback_data === "pubpad_confirm")?.text).toContain("1 台云机");
+  });
 });
 
 describe("buildPostImageRegenerateCallback", () => {
@@ -390,8 +430,8 @@ describe("formatCloudAccountStateNotice", () => {
     );
 
     expect(notice?.kind).toBe("phone_verification");
-    expect(notice?.status).toContain("手机号验证码");
-    expect(notice?.text).toContain("这不是任务执行失败");
+    expect(notice?.status).toContain("手機號驗證碼");
+    expect(notice?.text).toContain("這不是任務執行失敗");
     expect(notice?.debugPath).toBe("D:\\tmp\\phone.jpg");
   });
 
@@ -402,7 +442,7 @@ describe("formatCloudAccountStateNotice", () => {
     );
 
     expect(notice?.kind).toBe("captcha");
-    expect(notice?.shortStatus).toContain("验证码");
+    expect(notice?.shortStatus).toContain("驗證碼");
     expect(notice?.text).toContain("F1 2.0");
   });
 
@@ -413,8 +453,8 @@ describe("formatCloudAccountStateNotice", () => {
     );
 
     expect(notice?.kind).toBe("onboarding");
-    expect(notice?.shortStatus).toContain("资料引导");
-    expect(notice?.text).not.toContain("验证码/真人验证页");
+    expect(notice?.shortStatus).toContain("資料引導");
+    expect(notice?.text).not.toContain("驗證碼/真人驗證頁");
   });
 
   it("keeps generic Threads blockers generic instead of calling them captcha", () => {
@@ -458,6 +498,19 @@ describe("formatUserFacingError", () => {
     expect(message).toContain("sample.json");
     expect(message).not.toContain("LOCAL_THREADS_POST_ACTION_SHEET");
     expect(message).not.toContain("D:\\GitHub");
+  });
+
+  it("hides container sample paths for unconfirmed Threads caption input failures", () => {
+    const message = formatUserFacingError(
+      "Threads 文案输入未确认，已停止发布以避免点击灰色发布按钮｜sample=/app/tool_r18/.runtime/automatic-script/publish-samples/threads/threads-video-publish-top-level-failure/threads-video-publish-top-level-failure-1782155131339.json",
+      "发布失败，请稍后重试。",
+    );
+
+    expect(message).toContain("Threads 文案没有确认输入成功");
+    expect(message).toContain("诊断样本已保存");
+    expect(message).toContain("threads-video-publish-top-level-failure-1782155131339.json");
+    expect(message).not.toContain("/app/tool_r18");
+    expect(message).not.toContain("sample=/app");
   });
 
   it("removes internal blocked markers and debug paths", () => {

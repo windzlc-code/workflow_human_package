@@ -36,6 +36,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.TELEGRAM_SELFTEST_REQUEST_TIMEOUT_
 const STEP_DELAY_MS = Number(process.env.TELEGRAM_SELFTEST_STEP_DELAY_MS || 900);
 const WARMUP_TIMEOUT_MS = Number(process.env.TELEGRAM_WARMUP_SELFTEST_TIMEOUT_MS || 8 * 60_000);
 const POLL_INTERVAL_MS = Number(process.env.TELEGRAM_WARMUP_SELFTEST_POLL_INTERVAL_MS || 3_000);
+const STALE_PROGRESS_TIMEOUT_MS = Number(process.env.TELEGRAM_WARMUP_SELFTEST_STALE_MS || 90_000);
 const FAST_COUNT_MODE = process.env.TELEGRAM_WARMUP_SELFTEST_FAST_COUNT !== "0";
 const LOG_PATH = path.resolve(
   process.env.TELEGRAM_WARMUP_SELFTEST_LOG_PATH || path.join(".runtime", "automatic-script", "warmup-progress.log"),
@@ -166,9 +167,32 @@ async function waitForWarmupResult(
   startedAt: number,
   logOffset: number,
 ): Promise<WarmupSelftestResult> {
+  let lastProgressCount = 0;
+  let lastProgressAt = startedAt;
   while (Date.now() - startedAt < WARMUP_TIMEOUT_MS) {
     const lines = readLogSince(logOffset).split(/\r?\n/).filter(Boolean);
     const parsed = parseProgress(lines);
+    if (parsed.progress.length > lastProgressCount) {
+      lastProgressCount = parsed.progress.length;
+      lastProgressAt = Date.now();
+      console.log(`[warmup-selftest][progress] ${parsed.progress.at(-1)}`);
+    } else if (Date.now() - lastProgressAt > STALE_PROGRESS_TIMEOUT_MS) {
+      return {
+        ok: false,
+        platform,
+        mode,
+        browseCount,
+        padCode: PAD_CODE,
+        padName: PAD_NAME,
+        elapsedMs: Date.now() - startedAt,
+        browsed: parsed.browsed,
+        liked: parsed.liked,
+        commented: parsed.commented,
+        finalStep: parsed.finalStep,
+        error: `stale warmup progress for ${Math.round(STALE_PROGRESS_TIMEOUT_MS / 1000)}s`,
+        progressLines: parsed.progress,
+      };
+    }
     if (Date.now() - startedAt > 60_000 && parsed.progress.length === 0 && parsed.otherPadLatest) {
       return {
         ok: false,
@@ -186,8 +210,10 @@ async function waitForWarmupResult(
       };
     }
     if (parsed.done) {
-      const interactionsOk = (mode === "browse" || mode === "comment" || parsed.liked > 0)
-        && (mode === "browse" || mode === "like" || parsed.commented > 0);
+      const interactionsOk = mode === "browse"
+        || (mode === "like" ? parsed.liked > 0
+          : mode === "comment" ? parsed.commented > 0
+            : parsed.liked + parsed.commented > 0);
       const browseOk = mode === "browse" ? parsed.browsed >= browseCount : parsed.browsed > 0;
       const ok = browseOk && interactionsOk;
       return {
@@ -202,7 +228,7 @@ async function waitForWarmupResult(
         liked: parsed.liked,
         commented: parsed.commented,
         finalStep: parsed.finalStep,
-        error: ok ? undefined : "warmup completed but required interactions were not both observed",
+        error: ok ? undefined : "warmup completed but required interactions were not observed",
         progressLines: parsed.progress,
       };
     }

@@ -29,6 +29,7 @@ import {
   detectThreadsWarmupCommentPostedCueFromUiXml,
   extractWarmupPostPreviewFromUiXml,
   extractThreadsProfileUsernameFromUiXml,
+  extractThreadsPublishedPostUrlFromReaderMarkdown,
   findThreadsHomeFeedActionTargetsFromUiXml,
   findThreadsComposerInputTarget,
   findThreadsComposerPublishButtonTarget,
@@ -159,6 +160,36 @@ async function runPromotedSampleAssertion(sample: PromotedSample, assertion: Pro
 }
 
 describe("Threads publish verification", () => {
+  it("extracts the matching published Threads URL from reader markdown", () => {
+    const markdown = [
+      "[06/23/2026](https://www.threads.net/@doctor_demo/post/OLD111)",
+      "unrelated older post",
+      "",
+      "[06/23/2026](https://www.threads.net/@doctor_demo/post/NEW222)",
+      "今天門診遇到一個焦慮的家屬，我想說的是先把檢查結果看完，再討論治療。",
+      "讚 12 · 回覆 3 · 瀏覽 900",
+    ].join("\n");
+
+    expect(extractThreadsPublishedPostUrlFromReaderMarkdown({
+      markdown,
+      username: "doctor_demo",
+      caption: "今天門診遇到一個焦慮的家屬，我想說的是先把檢查結果看完，再討論治療。",
+    })).toBe("https://www.threads.net/@doctor_demo/post/NEW222");
+  });
+
+  it("does not guess a published Threads URL when reader content does not match the caption", () => {
+    const markdown = [
+      "[06/23/2026](https://www.threads.net/@doctor_demo/post/OLD111)",
+      "unrelated older post",
+    ].join("\n");
+
+    expect(extractThreadsPublishedPostUrlFromReaderMarkdown({
+      markdown,
+      username: "doctor_demo",
+      caption: "今天門診遇到一個焦慮的家屬，我想說的是先把檢查結果看完。",
+    })).toBeNull();
+  });
+
   it("allows local visual verification in the Node daemon runtime", () => {
     expect(getLocalVisualVerificationSupport()).toEqual({ supported: true });
   });
@@ -261,6 +292,23 @@ describe("Threads publish verification", () => {
     const result = scoreWarmupPostRelevance("50歲紐約富豪年賺1億美金，真正的財富是世代持有不動產。你是做什麼才買得起這房子的？", propertyPersona);
     expect(result.relevant).toBe(true);
     expect(result.matched).toEqual(expect.arrayContaining(["real-estate-domain"]));
+  });
+
+  it("keeps real estate warmup search keywords domain-specific", () => {
+    const propertyPersona = {
+      description: "房产中介，分享买房、租屋、不动产和工地人生观察，常提到价格左右和客户日常",
+      personality: "专业但自然",
+    };
+
+    const keywords = buildWarmupSearchKeywordCandidates(propertyPersona);
+    expect(keywords).toEqual(expect.arrayContaining(["房产中介", "房仲", "房源", "看房"]));
+    expect(keywords).not.toContain("買房");
+    expect(keywords).not.toContain("买房");
+    expect(keywords).not.toContain("左右");
+    expect(keywords.some((item) => /是|一位|歲|岁|\d/.test(item))).toBe(false);
+    expect(keywords).not.toContain("房产中介是一位");
+    expect(keywords).not.toContain("擅长清楚务实地带看房");
+    expect(keywords.every((item) => /房|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地|看房|看屋/.test(item))).toBe(true);
   });
 
   it("builds ACP warmup fallback rows in the fixed 720x1600 coordinate grid", () => {
@@ -532,27 +580,28 @@ describe("Threads publish verification", () => {
       "samples",
       "threads-auto-reply-profile-setup-card-false-comment-row.jpg",
     );
-    const dataUrl = "data:image/jpeg;base64," + fs.readFileSync(samplePath).toString("base64");
-    const uiXml = [
-      "<hierarchy>",
-      "<node text=\"rick_y54088\" class=\"android.widget.TextView\" bounds=\"[26,197][253,239]\" />",
-      "<node text=\"\u4e32\u6587\" class=\"android.widget.TextView\" bounds=\"[74,720][146,760]\" />",
-      "<node text=\"\u56de\u8986\" class=\"android.widget.TextView\" bounds=\"[243,720][315,760]\" />",
-      "<node text=\"\u5f71\u97f3\u5167\u5bb9\" class=\"android.widget.TextView\" bounds=\"[397,720][525,760]\" />",
-      "<node text=\"\u8f49\u767c\" class=\"android.widget.TextView\" bounds=\"[598,720][670,760]\" />",
-      "<node text=\"\u5b8c\u6210\u500b\u4eba\u6a94\u6848\" class=\"android.widget.TextView\" bounds=\"[30,831][230,872]\" />",
-      "<node text=\"\u52692\u9805\" class=\"android.widget.TextView\" bounds=\"[250,838][316,870]\" />",
-      "<node text=\"\u8ffd\u8e64 10 \u500b\u500b\u4eba\u6a94\u6848\" class=\"android.widget.TextView\" bounds=\"[70,1007][315,1045]\" />",
-      "<node text=\"\u67e5\u770b\u500b\u4eba\u6a94\u6848\" class=\"android.widget.TextView\" bounds=\"[115,1235][330,1284]\" />",
-      "<node text=\"rick_y54088 4\u5929\" class=\"android.widget.TextView\" bounds=\"[87,1510][294,1558]\" />",
-      "</hierarchy>",
-    ].join("\n");
+    const dataUrl = `data:image/jpeg;base64,${fs.readFileSync(samplePath).toString("base64")}`;
+    const uiXml = `
+      <hierarchy>
+        <node text="rick_y54088" class="android.widget.TextView" bounds="[26,197][253,239]" />
+        <node text="串文" class="android.widget.TextView" bounds="[74,720][146,760]" />
+        <node text="回覆" class="android.widget.TextView" bounds="[243,720][315,760]" />
+        <node text="影音內容" class="android.widget.TextView" bounds="[397,720][525,760]" />
+        <node text="轉發" class="android.widget.TextView" bounds="[598,720][670,760]" />
+        <node text="完成個人檔案" class="android.widget.TextView" bounds="[30,831][230,872]" />
+        <node text="剩2項" class="android.widget.TextView" bounds="[250,838][316,870]" />
+        <node text="追蹤 10 個個人檔案" class="android.widget.TextView" bounds="[70,1007][315,1045]" />
+        <node text="查看個人檔案" class="android.widget.TextView" bounds="[115,1235][330,1284]" />
+        <node text="rick_y54088 4天" class="android.widget.TextView" bounds="[87,1510][294,1558]" />
+      </hierarchy>
+    `;
 
     await expect(locateThreadsVisibleOwnPostContentTarget(dataUrl, uiXml, {
       requireCommentBadge: true,
       maxAgeDays: 5,
     })).resolves.toBeNull();
   });
+
   it("does not classify captured fullscreen media viewer samples as gallery picker", async () => {
     const samplePath = path.resolve(
       ".runtime",
@@ -1255,7 +1304,7 @@ describe("Threads publish verification", () => {
     expect(finalizeWarmupComment("不错", "今天分享下班後整理心情的生活日常").length)
       .toBeGreaterThanOrEqual(6);
     expect(finalizeWarmupComment("不错", "", [], { language: "台灣地區繁體中文" }))
-      .toMatch(/後續|脈絡|細節/);
+      .toBe("");
     expect(finalizeWarmupComment("這個角度很自然這個角度很自然這個角度很自然", "朋友最近股票賺好多"))
       .not.toContain("這個角度很自然這個角度很自然");
     expect(finalizeWarmupComment("這個角度很自然", "朋友最近股票賺好多"))
@@ -1271,6 +1320,14 @@ describe("Threads publish verification", () => {
       .toBeLessThanOrEqual(8);
     expect(finalizeWarmupComment("哈哈", "華通今天高檔換手量能放大"))
       .not.toBe("哈哈");
+    expect(finalizeWarmupComment("這個角度很自然", "台南AI房仲分享房市服務與客戶信任", [], {
+      description: "房產中介，分享房市和客戶服務",
+    }))
+      .toMatch(/房仲|房市|買房|服务|服務|AI/);
+    expect(finalizeWarmupComment("今天午餐看起來好吃", "台南AI房仲分享房市服務與客戶信任", [], {
+      description: "房產中介，分享房市和客戶服務",
+    }))
+      .toMatch(/房仲|房市|買房|服务|服務|AI/);
   });
 
   it("uses simple hopeful replies for short market mood posts", () => {
@@ -1320,8 +1377,9 @@ describe("Threads publish verification", () => {
       interests: ["不動產", "買房"],
     });
 
-    expect(keywords.slice(0, 4)).toEqual(expect.arrayContaining(["房产中介", "不動產", "買房"]));
+    expect(keywords.slice(0, 5)).toEqual(expect.arrayContaining(["房产中介", "不動產", "房仲"]));
     expect(keywords).toContain("房产中介");
+    expect(keywords).not.toContain("買房");
     expect(keywords.some((item) => /^[\x20-\x7E]+$/.test(item))).toBe(false);
     expect(keywords).not.toContain("35岁房产中介");
     expect(keywords).not.toContain("自然口语");

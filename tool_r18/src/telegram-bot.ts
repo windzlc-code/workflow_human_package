@@ -26,7 +26,7 @@ import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinju
 import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
-import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
+import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, refreshSentimentSourceMetrics, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
 import { rememberSentimentHotImported, rememberSentimentHotSelected, type SentimentHotCandidate } from "@/lib/sentiment-candidate-store";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import { buildPersonaVisualIdentityCue } from "@/lib/persona-image-search";
@@ -72,6 +72,7 @@ const PAD_LIST_CACHE_TTL_MS = 60_000;
 const PAD_LIST_PERSIST_TTL_MS = 10 * 60_000;
 const PAD_LIST_BACKGROUND_REFRESH_MIN_INTERVAL_MS = 60_000;
 const PAD_LIST_FORCE_REFRESH_TIMEOUT_MS = 8_000;
+const THREADS_ACCOUNT_QUERY_TIMEOUT_MS = 12_000;
 let _padNameMapCache: Record<string, string> | null = null;
 let _padListRefreshInFlight: Promise<PadListItem[]> | null = null;
 let _lastPadListRefreshFallbackReason = "";
@@ -497,6 +498,7 @@ type PendingLoginAction = {
   username?: string;
   password?: string;
   returnCallback?: string;
+  archiveId?: string;
 };
 
 const pendingPersonaAccountActions = new Map<number, {
@@ -515,6 +517,17 @@ const pendingThreadsProfileActions = new Map<number, {
   padName?: string;
   stage: "await_link" | "await_bio" | "await_name" | "await_avatar";
   returnCallback?: string;
+  archiveId?: string;
+}>();
+
+const pendingThreadsProfileResumeActions = new Map<number, {
+  archiveId: string;
+  padCode: string;
+  padName?: string;
+  stage: "await_link" | "await_bio" | "await_name";
+  input: string;
+  returnCallback: string;
+  createdAt: number;
 }>();
 
 const pendingThreadsAutoReplyDaysInputs = new Map<number, {
@@ -604,6 +617,7 @@ const pendingScheduledPublishes = new Map<number, {
   postId?: string;
   postPreview?: string;
   padCode?: string;
+  padCodes?: string[];
   platform?: TelegramPublishPlatform;
   count?: number;
   scheduledAtText?: string;
@@ -631,6 +645,7 @@ type PendingCustomPublish = {
   archiveId?: string;
   archiveName?: string;
   padCode?: string;
+  padCodes?: string[];
   platform?: TelegramPublishPlatform;
   groupContentType?: TelegramGroupContentType;
   source?: "persona_detail" | "entry";
@@ -662,6 +677,26 @@ const pendingPostActions = new Map<number, {
   postId: string;
   groupContentType?: TelegramGroupContentType;
 }>();
+
+type PendingPublishPadSelection = {
+  mode: "single_post" | "bulk_posts" | "manual_posts" | "scheduled_post" | "custom_direct" | "custom_with_image";
+  archiveId?: string;
+  postId?: string;
+  platform: TelegramPublishPlatform;
+  selectedPostIds?: string[];
+  startIndex?: number;
+  count?: number;
+  page?: number;
+  groupContentType?: TelegramGroupContentType;
+  retryPostIdsByPad?: Record<string, string[]>;
+  completedPadCodesByPost?: Record<string, string[]>;
+  selectedPadCodes: string[];
+  availablePadCodes: string[];
+  backCallback?: string;
+  createdAt: number;
+};
+
+const pendingPublishPadSelections = new Map<number, PendingPublishPadSelection>();
 
 const pendingStoredPostEdits = new Map<number, {
   archiveId: string;
@@ -695,6 +730,7 @@ type PendingBulkPostAction = {
   selectedPostIds: string[];
   page: number;
   platform?: TelegramPublishPlatform;
+  padCodes?: string[];
   groupContentType?: TelegramGroupContentType;
 };
 
@@ -776,11 +812,20 @@ type PendingPublishHistoryRequeueAction = {
   createdAt: number;
 };
 
+type PendingPublishHistoryViewAction = {
+  archiveId: string;
+  recordId: string;
+  page?: number;
+  groupContentType?: TelegramGroupContentType;
+  createdAt: number;
+};
+
 const POST_IMAGE_REGEN_CALLBACK_PREFIX = "pimgregen_";
 const POST_IMAGE_SELECT_CALLBACK_PREFIX = "pimgpick_";
 const PAID_R18_FALLBACK_POST_CALLBACK_PREFIX = "pr18fb_";
 const PAID_R18_VIDEO_POST_CALLBACK_PREFIX = "pr18v_";
 const PUBLISH_HISTORY_REQUEUE_CALLBACK_PREFIX = "rh_";
+const PUBLISH_HISTORY_VIEW_CALLBACK_PREFIX = "hv_";
 const POST_IMAGE_REGEN_ACTION_TTL_MS = 6 * 60 * 60_000;
 const POST_IMAGE_REGEN_ACTION_MAX = 500;
 const pendingPostImageRatioActions = new Map<number, PendingPostImageRatioAction>();
@@ -792,6 +837,7 @@ const pendingPaidR18VideoCustomInputs = new Map<number, { actionKey: string; cre
 const pendingGeneratedPostImageGroupFlows = new Map<number, PendingGeneratedPostImageGroupFlow>();
 const pendingNoPersonaReferenceGenerates = new Map<number, PendingNoPersonaReferenceGenerate>();
 const pendingPublishHistoryRequeueActions = new Map<string, PendingPublishHistoryRequeueAction>();
+const pendingPublishHistoryViewActions = new Map<string, PendingPublishHistoryViewAction>();
 
 export function buildPostImageRegenerateCallback(actionKey: string): string {
   return `${POST_IMAGE_REGEN_CALLBACK_PREFIX}${actionKey}`;
@@ -842,6 +888,16 @@ function buildPublishHistoryRequeueCallback(actionKey: string): string {
 function parsePublishHistoryRequeueCallback(data: string): string | null {
   return data.startsWith(PUBLISH_HISTORY_REQUEUE_CALLBACK_PREFIX)
     ? data.slice(PUBLISH_HISTORY_REQUEUE_CALLBACK_PREFIX.length)
+    : null;
+}
+
+function buildPublishHistoryViewCallback(actionKey: string): string {
+  return `${PUBLISH_HISTORY_VIEW_CALLBACK_PREFIX}${actionKey}`;
+}
+
+function parsePublishHistoryViewCallback(data: string): string | null {
+  return data.startsWith(PUBLISH_HISTORY_VIEW_CALLBACK_PREFIX)
+    ? data.slice(PUBLISH_HISTORY_VIEW_CALLBACK_PREFIX.length)
     : null;
 }
 
@@ -902,6 +958,16 @@ function cleanupPostImageRegenerationActions() {
     if (!firstKey) break;
     pendingPublishHistoryRequeueActions.delete(firstKey);
   }
+  for (const [key, action] of pendingPublishHistoryViewActions.entries()) {
+    if (now - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
+      pendingPublishHistoryViewActions.delete(key);
+    }
+  }
+  while (pendingPublishHistoryViewActions.size > POST_IMAGE_REGEN_ACTION_MAX) {
+    const firstKey = pendingPublishHistoryViewActions.keys().next().value;
+    if (!firstKey) break;
+    pendingPublishHistoryViewActions.delete(firstKey);
+  }
 }
 
 function rememberPublishHistoryRequeueAction(args: Omit<PendingPublishHistoryRequeueAction, "createdAt">): string {
@@ -917,6 +983,24 @@ function getPublishHistoryRequeueAction(key: string): PendingPublishHistoryReque
   if (!action) return null;
   if (Date.now() - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
     pendingPublishHistoryRequeueActions.delete(key);
+    return null;
+  }
+  return action;
+}
+
+function rememberPublishHistoryViewAction(args: Omit<PendingPublishHistoryViewAction, "createdAt">): string {
+  cleanupPostImageRegenerationActions();
+  const key = `hv${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  pendingPublishHistoryViewActions.set(key, { ...args, createdAt: Date.now() });
+  return key;
+}
+
+function getPublishHistoryViewAction(key: string): PendingPublishHistoryViewAction | null {
+  cleanupPostImageRegenerationActions();
+  const action = pendingPublishHistoryViewActions.get(key);
+  if (!action) return null;
+  if (Date.now() - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
+    pendingPublishHistoryViewActions.delete(key);
     return null;
   }
   return action;
@@ -1368,8 +1452,119 @@ async function sendPadBusyNotice(bot: TelegramBot, chatId: number, padCode: stri
   const minutes = Math.max(1, Math.ceil((Date.now() - active.startedAt) / 60_000));
   await bot.sendMessage(
     chatId,
-    `⚠️ 云机正在执行任务\n\n云机：${padCode}\n当前任务：${active.label}\n已运行：约 ${minutes} 分钟\n\n同一台云机不能同时发布/养号/登录，请等当前任务结束后再试。`,
+    `⚠️ 雲機正在執行任務\n\n雲機：${padCode}\n目前任務：${active.label}\n已執行：約 ${minutes} 分鐘\n\n同一台雲機不能同時發布/養號/登入，請等目前任務結束後再試。`,
   ).catch(() => undefined);
+}
+
+async function resumePendingThreadsProfileAction(bot: TelegramBot, chatId: number, archiveId: string): Promise<boolean> {
+  const resume = pendingThreadsProfileResumeActions.get(chatId);
+  if (!resume || resume.archiveId !== archiveId) return false;
+  pendingThreadsProfileResumeActions.delete(chatId);
+
+  const opTitle = resume.stage === "await_name"
+    ? "Threads 名稱"
+    : resume.stage === "await_bio"
+      ? "Threads 簡介"
+      : "Threads 簡介連結";
+  const action = resume.stage === "await_name"
+    ? "名稱修改"
+    : resume.stage === "await_bio"
+      ? "簡介修改"
+      : "簡介新增連結";
+  const valueLabel = resume.stage === "await_name"
+    ? "名稱"
+    : resume.stage === "await_bio"
+      ? "簡介"
+      : "連結";
+  const progressTitle = resume.stage === "await_name"
+    ? "🏷 正在修改 Threads 名稱"
+    : resume.stage === "await_bio"
+      ? "📝 正在修改 Threads 簡介"
+      : "🔗 正在更新 Threads 簡介連結";
+  const opKey = `threads-profile-resume-${resume.stage}-${chatId}-${Date.now()}`;
+  const active = acquirePadOperation(chatId, resume.padCode, opKey, opTitle);
+  if (active) {
+    await sendPadBusyNotice(bot, chatId, resume.padCode, active);
+    return true;
+  }
+
+  const statusMsg = await bot.sendMessage(chatId, [
+    progressTitle,
+    "",
+    `雲機：${resume.padName || resume.padCode}`,
+    `${valueLabel}：${resume.input}`,
+    "",
+    "✅ Threads 登入流程已完成，正在繼續執行剛才的資料修改...",
+  ].join("\n"), {
+    reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: resume.returnCallback }]] },
+  });
+  const stopTyping = startTelegramTyping(bot, chatId);
+  const progress = (p: PublishProgress) => {
+    bot.editMessageText([
+      progressTitle,
+      "",
+      `雲機：${resume.padName || resume.padCode}`,
+      `${valueLabel}：${resume.input}`,
+      "",
+      `${p.done ? "✅" : "⏳"} ${p.step}`,
+    ].join("\n"), {
+      chat_id: chatId,
+      message_id: statusMsg.message_id,
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: resume.returnCallback }]] },
+    }).catch(() => undefined);
+  };
+
+  try {
+    const creds = resolveVmosCredentials();
+    const result = resume.stage === "await_name"
+      ? await updateThreadsProfileName(creds, resume.padCode, resume.input, progress)
+      : resume.stage === "await_bio"
+        ? await updateThreadsProfileBio(creds, resume.padCode, resume.input, progress)
+        : await updateThreadsProfileLink(creds, resume.padCode, resume.input, progress);
+    stopTyping();
+    await bot.sendMessage(chatId, [
+      result.state === "verified" ? `✅ Threads ${valueLabel}已更新` : `⚠️ Threads ${valueLabel}已提交`,
+      "",
+      `雲機：${resume.padName || resume.padCode}`,
+      `${valueLabel}：${resume.input}`,
+      result.detail,
+    ].join("\n"), {
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: resume.returnCallback }]] },
+    });
+    if (result.screenshotUrl) {
+      await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, `📸 Threads ${valueLabel}修改後截圖`).catch(() => undefined);
+    }
+    return true;
+  } catch (error) {
+    stopTyping();
+    const notice = formatCloudAccountStateNotice(rawErrorMessage(error), {
+      action,
+      padName: resume.padName,
+      padCode: resume.padCode,
+    });
+    await bot.editMessageText(notice?.kind === "login_required"
+      ? [
+          "⚠️ Threads 仍未登入，資料修改已停止",
+          "",
+          `雲機：${resume.padName || resume.padCode}`,
+          `${valueLabel}：${resume.input}`,
+          "",
+          "請完成登入後再次點擊修改動作。",
+        ].join("\n")
+      : [
+          `❌ Threads ${valueLabel}修改失敗`,
+          "",
+          `雲機：${resume.padName || resume.padCode}`,
+          `原因：${formatUserFacingError(error, "請稍後重試。")}`,
+        ].join("\n"), {
+      chat_id: chatId,
+      message_id: statusMsg.message_id,
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: resume.returnCallback }]] },
+    }).catch(() => undefined);
+    return true;
+  } finally {
+    releasePadOperation(resume.padCode, opKey);
+  }
 }
 
 function resolvePendingPostSelection(chatId: number, data: string, prefix: string) {
@@ -1840,6 +2035,29 @@ function resolveTelegramTargetForGroupContent(
     resolvedType === "paid" ? archive?.boundTelegramPaidGroupName || "" : archive?.boundTelegramFreeGroupName || "",
   ) || (chatId ? resolveKnownTelegramGroupName(chatId, resolvedType) : "");
   return { groupContentType: resolvedType, chatId, groupName };
+}
+
+function uniquePadCodes(codes: string[]): string[] {
+  return Array.from(new Set(codes.map((code) => String(code || "").trim()).filter(Boolean)));
+}
+
+export function buildPublishPadSelectionRows(args: {
+  pads: Array<{ padCode: string; padName?: string }>;
+  selectedPadCodes: string[];
+  confirmCallback?: string;
+  backCallback?: string;
+}) {
+  const selected = new Set(uniquePadCodes(args.selectedPadCodes));
+  const rows = args.pads.slice(0, 12).map((pad, index) => {
+    const checked = selected.has(pad.padCode);
+    return [{
+      text: `${checked ? "✅ " : "☐ "}${pad.padName || pad.padCode}`,
+      callback_data: `pubpad_toggle_${index}`,
+    }];
+  });
+  rows.push([{ text: `✅ 确认发布到 ${selected.size || 0} 台云机`, callback_data: args.confirmCallback || "pubpad_confirm" }]);
+  rows.push([{ text: "◀️ 返回", callback_data: args.backCallback || "pubpad_back" }]);
+  return rows;
 }
 for (const seed of WORKFLOW_PERSONA_SEEDS) {
   void seed;
@@ -2392,6 +2610,8 @@ export function formatUserFacingError(errorOrMessage: unknown, fallback = "操�
     message = "没有识别到新串文输入框或发布按钮。请确认当前已经进入 Threads 新串文编辑页后再重试。";
   } else if (/未能确认 Threads 首页|未能切回 Threads 首页|手机桌面/.test(message)) {
     message = "没有稳定回到 Threads 首页，可能停在手机桌面、侧边栏或其他页面。请先把云机切回 Threads 首页后重试。";
+  } else if (/Threads\s*\u6587\u6848\u8f93\u5165\u672a\u786e\u8ba4|\u7070\u8272\u53d1\u5e03\u6309\u94ae/i.test(rawForMatch)) { // captionNotConfirmed
+    message = "Threads \u6587\u6848\u6ca1\u6709\u786e\u8ba4\u8f93\u5165\u6210\u529f\uff0c\u7cfb\u7edf\u5df2\u505c\u6b62\u53d1\u5e03\uff0c\u907f\u514d\u8bef\u70b9\u7070\u8272\u53d1\u5e03\u6309\u94ae\u3002\u8bf7\u91cd\u8bd5\u53d1\u5e03\uff1b\u5982\u679c\u8fde\u7eed\u51fa\u73b0\uff0c\u8bf7\u5148\u5728\u4e91\u673a\u786e\u8ba4 Threads \u8f93\u5165\u6846\u548c\u952e\u76d8\u72b6\u6001\u3002";
   } else if (/timeout|timed out|超時|超时/i.test(message)) {
     message = "等待页面响应超时。可能是云机卡顿、网络慢，或当前页面没有按预期跳转。";
   } else if (/401\s+Unauthorized|unauthorized/i.test(message) && /OpenAI Codex|Codex|provider:\s*openai/i.test(message)) {
@@ -4053,6 +4273,7 @@ async function saveStoredPostCustomEdit(args: {
         archiveId: args.archiveId,
         postIndex: archive.posts.findIndex((item) => item.id === updated.id),
         groupContentType: args.groupContentType,
+        canRefreshMetrics: canRefreshSentimentPostMetrics(updated),
       }),
     },
   });
@@ -9411,36 +9632,36 @@ export function formatCloudAccountStateNotice(
           ? "login_required"
           : "blocked";
   const status = kind === "phone_verification"
-    ? "需要完成手机号验证码登录"
+    ? "需要完成手機號驗證碼登入"
     : kind === "onboarding"
-      ? "账号初始化/资料引导页"
+      ? "帳號初始化/資料引導頁"
     : kind === "captcha"
-      ? "停在验证码/真人验证页"
+      ? "停在驗證碼/真人驗證頁"
       : kind === "login_required"
-        ? "未登录或需要重新登录"
-        : "账号或页面被拦截，可能需要验证或重新登录";
+        ? "未登入或需要重新登入"
+        : "帳號或頁面被攔截，可能需要驗證或重新登入";
   const shortStatus = kind === "phone_verification"
-    ? "需要手机号验证"
+    ? "需要手機號驗證"
     : kind === "onboarding"
-      ? "账号初始化/资料引导"
+      ? "帳號初始化/資料引導"
     : kind === "captcha"
-      ? "验证码/真人验证页"
+      ? "驗證碼/真人驗證頁"
       : kind === "login_required"
-        ? "未登录/需重新登录"
-        : "账号状态被拦截";
-  const pad = context.padName || context.padCode || "当前云机";
+        ? "未登入/需重新登入"
+        : "帳號狀態被攔截";
+  const pad = context.padName || context.padCode || "目前雲機";
   const reason = normalizeInternalPageLabel(stripCloudAccountDebugSuffix(normalized))
     .replace(/\s+/g, " ")
     .slice(0, 180);
   const text = [
-    "⚠️ 账号状态需要处理",
+    "⚠️ 帳號狀態需要處理",
     "",
-    `云机：${pad}`,
+    `雲機：${pad}`,
     `操作：${context.action}`,
     `狀態：${status}`,
-    reason ? `识别信息：${reason}` : "",
+    reason ? `識別資訊：${reason}` : "",
     "",
-    "这不是任务执行失败。请先进入云机完成验证或重新登录 Threads，再回来重试当前操作。",
+    "這不是任務執行失敗。請先進入雲機完成驗證或重新登入 Threads，再回來重試目前操作。",
   ].filter(Boolean).join("\n");
 
   return {
@@ -9489,14 +9710,6 @@ async function sendCloudAccountStateNotice(
   await bot.sendMessage(chatId, notice.text, {
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
-  const evidenceInput = resolveCloudAccountEvidenceInput(notice.debugPath);
-  if (evidenceInput) {
-    if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 当前账号状态截图")) {
-      await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
-    }
-  } else if (context.padCode) {
-    await sendCurrentPadScreenshot(bot, chatId, context.padCode, "📸 当前账号状态截图").catch(() => undefined);
-  }
   return true;
 }
 
@@ -9707,6 +9920,218 @@ function buildSentimentSourceInfoHtml(sourceMeta?: PersonaArchive["posts"][numbe
   return lines;
 }
 
+function aggregatePublishedTargets(record: NonNullable<PersonaArchive["publishHistory"]>[number]): PersonaArchive["posts"][number]["sourceMeta"] | undefined {
+  const targets = Array.isArray(record.publishedTargets)
+    ? record.publishedTargets.filter((target) => target?.publishedMeta)
+    : [];
+  if (!targets.length) return record.publishedMeta;
+  const engagement: Record<string, number> = {};
+  const metrics: Record<string, number> = {};
+  for (const target of targets) {
+    const meta = target.publishedMeta;
+    const e = (meta?.engagement || {}) as Record<string, unknown>;
+    const m = (meta?.metrics || {}) as Record<string, unknown>;
+    for (const key of ["likeCount", "commentCount", "viewCount", "shareCount"] as const) {
+      const value = numberFromMetric((e as any)[key]);
+      if (typeof value === "number") engagement[key] = (engagement[key] || 0) + value;
+    }
+    for (const key of ["like_count", "comment_count", "view_count", "share_count"] as const) {
+      const value = numberFromMetric((m as any)[key]);
+      if (typeof value === "number") metrics[key] = (metrics[key] || 0) + value;
+    }
+  }
+  const hotScore = Math.max(
+    Number(record.publishedMeta?.hotScore || 0),
+    ...targets.map((target) => Number(target.publishedMeta?.hotScore || 0)),
+    Number(engagement.viewCount || 0),
+    Number(engagement.likeCount || 0),
+  );
+  return {
+    ...(record.publishedMeta || {}),
+    source: "published_post_aggregate",
+    platform: record.platform,
+    hotScore,
+    metrics: { ...(record.publishedMeta?.metrics || {}), ...metrics, target_count: targets.length },
+    engagement: { ...(record.publishedMeta?.engagement || {}), ...engagement },
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+function buildPublishedPostInfoHtml(record: NonNullable<PersonaArchive["publishHistory"]>[number]): string[] {
+  const publishedMeta = aggregatePublishedTargets(record);
+  const platform = String(record.platform || publishedMeta?.platform || "-").toLowerCase();
+  const lines = [
+    "",
+    "<b>发布帖数据</b>",
+    `平台: ${escapeHtmlText(String(record.platform || publishedMeta?.platform || "-"))}`,
+  ];
+  const targetCount = Array.isArray(record.publishedTargets) ? record.publishedTargets.length : 0;
+  if (targetCount > 0) lines.push(`云机发布数: ${targetCount}`);
+  const publishedUrl = String(record.publishedUrl || publishedMeta?.sourceUrl || "").trim();
+  if (publishedUrl) lines.push(`发布链接: ${escapeHtmlText(publishedUrl)}`);
+  if (publishedMeta) {
+    lines.push(`数据: ${escapeHtmlText(formatSentimentMetricLine({
+      hotScore: publishedMeta.hotScore,
+      metrics: publishedMeta.metrics,
+      engagement: publishedMeta.engagement,
+    }))}`);
+    if (publishedMeta.capturedAt) lines.push(`更新时间: ${escapeHtmlText(String(publishedMeta.capturedAt))}`);
+  } else if (platform === "threads") {
+    lines.push("数据: 暂无实际发布帖链接，不能实时刷新该发布帖热度");
+  } else if (platform === "telegram") {
+    lines.push("数据: Telegram 发布记录暂未保存消息链接/消息 ID，不能实时刷新群消息数据");
+  } else {
+    lines.push("数据: 暂无该平台发布帖数据");
+  }
+  return lines;
+}
+
+function canRefreshSentimentPostMetrics(post?: Pick<PersonaArchive["posts"][number], "sourceMeta"> | null) {
+  const sourceMeta = post?.sourceMeta;
+  return Boolean(
+    sourceMeta?.source === "sentiment_hot_import"
+      && String(sourceMeta.sourceUrl || "").trim()
+      && (!sourceMeta.platform || String(sourceMeta.platform).toLowerCase() === "threads"),
+  );
+}
+
+async function refreshStoredPostSentimentMetrics(args: {
+  archiveId: string;
+  postId: string;
+}): Promise<PersonaArchive["posts"][number] | null> {
+  const archive = await loadPersonaForThisBot(args.archiveId);
+  const post = archive?.posts.find((item) => item.id === args.postId);
+  const sourceMeta = post?.sourceMeta;
+  if (!post || sourceMeta?.source !== "sentiment_hot_import" || !sourceMeta.sourceUrl) return null;
+  const refreshed = await refreshSentimentSourceMetrics({
+    platform: sourceMeta.platform,
+    sourceUrl: sourceMeta.sourceUrl,
+    existingEngagement: sourceMeta.engagement as any,
+    existingMedia: sourceMeta.mediaItems as any,
+    existingHotScore: sourceMeta.hotScore,
+  });
+  if (!refreshed.ok) throw new Error(refreshed.message);
+  return updatePersonaArchivePostDraft(args.archiveId, args.postId, {
+    sourceMetaPatch: {
+      hotScore: refreshed.hotScore,
+      metrics: {
+        ...(sourceMeta.metrics || {}),
+        ...(refreshed.metrics || {}),
+      },
+      engagement: {
+        ...(sourceMeta.engagement || {}),
+        ...(refreshed.engagement || {}),
+      },
+      capturedAt: new Date().toISOString(),
+    },
+  });
+}
+
+function canRefreshPublishHistoryMetrics(record?: Pick<NonNullable<PersonaArchive["publishHistory"]>[number], "publishedMeta" | "publishedUrl" | "publishedTargets" | "platform"> | null) {
+  const publishedMeta = record?.publishedMeta;
+  const publishedUrl = String(record?.publishedUrl || publishedMeta?.sourceUrl || "").trim();
+  const targetUrl = Array.isArray(record?.publishedTargets)
+    ? record.publishedTargets.some((target) => String(target?.publishedUrl || target?.publishedMeta?.sourceUrl || "").trim())
+    : false;
+  return Boolean(
+    String(record?.platform || "").toLowerCase() === "threads"
+      && (publishedUrl || targetUrl),
+  );
+}
+
+async function refreshPublishHistorySentimentMetrics(args: {
+  archiveId: string;
+  recordId: string;
+}): Promise<NonNullable<PersonaArchive["publishHistory"]>[number] | null> {
+  const archive = await loadPersonaForThisBot(args.archiveId);
+  const record = archive?.publishHistory?.find((item) => item.id === args.recordId);
+  const publishedMeta = record?.publishedMeta;
+  const publishedUrl = String(record?.publishedUrl || publishedMeta?.sourceUrl || "").trim();
+  if (!archive || !record || !canRefreshPublishHistoryMetrics(record)) return null;
+  if (Array.isArray(record.publishedTargets) && record.publishedTargets.some((target) => String(target?.publishedUrl || target?.publishedMeta?.sourceUrl || "").trim())) {
+    const refreshedTargets = await Promise.all(record.publishedTargets.map(async (target) => {
+      const targetUrl = String(target.publishedUrl || target.publishedMeta?.sourceUrl || "").trim();
+      if (!targetUrl) return target;
+      const refreshed = await refreshSentimentSourceMetrics({
+        platform: target.publishedMeta?.platform || target.platform || record.platform,
+        sourceUrl: targetUrl,
+        existingEngagement: target.publishedMeta?.engagement as any,
+        existingMedia: target.publishedMeta?.mediaItems as any,
+        existingHotScore: target.publishedMeta?.hotScore,
+      });
+      if (!refreshed.ok) return target;
+      return {
+        ...target,
+        publishedUrl: targetUrl,
+        publishedMeta: {
+          ...(target.publishedMeta || {}),
+          source: "published_post",
+          platform: target.platform || record.platform,
+          sourceUrl: targetUrl,
+          hotScore: refreshed.hotScore,
+          metrics: {
+            ...(target.publishedMeta?.metrics || {}),
+            ...(refreshed.metrics || {}),
+          },
+          engagement: {
+            ...(target.publishedMeta?.engagement || {}),
+            ...(refreshed.engagement || {}),
+          },
+          mediaItems: refreshed.media || target.publishedMeta?.mediaItems,
+          capturedAt: new Date().toISOString(),
+        },
+      };
+    }));
+    const updatedRecord = {
+      ...record,
+      publishedTargets: refreshedTargets,
+      publishedMeta: aggregatePublishedTargets({ ...record, publishedTargets: refreshedTargets }),
+    };
+    await savePersonaArchive({
+      ...archive,
+      updatedAt: new Date().toISOString(),
+      publishHistory: (archive.publishHistory || []).map((item) => item.id === record.id ? updatedRecord : item),
+    });
+    return updatedRecord;
+  }
+  if (!publishedUrl) return null;
+  const refreshed = await refreshSentimentSourceMetrics({
+    platform: publishedMeta?.platform || record.platform,
+    sourceUrl: publishedUrl,
+    existingEngagement: publishedMeta?.engagement as any,
+    existingMedia: publishedMeta?.mediaItems as any,
+    existingHotScore: publishedMeta?.hotScore,
+  });
+  if (!refreshed.ok) throw new Error(refreshed.message);
+  const updatedRecord = {
+    ...record,
+    publishedUrl,
+    publishedMeta: {
+      ...(publishedMeta || {}),
+      source: "published_post",
+      platform: record.platform,
+      sourceUrl: publishedUrl,
+      hotScore: refreshed.hotScore,
+      metrics: {
+        ...(publishedMeta?.metrics || {}),
+        ...(refreshed.metrics || {}),
+      },
+      engagement: {
+        ...(publishedMeta?.engagement || {}),
+        ...(refreshed.engagement || {}),
+      },
+      mediaItems: refreshed.media || publishedMeta?.mediaItems,
+      capturedAt: new Date().toISOString(),
+    },
+  };
+  await savePersonaArchive({
+    ...archive,
+    updatedAt: new Date().toISOString(),
+    publishHistory: (archive.publishHistory || []).map((item) => item.id === record.id ? updatedRecord : item),
+  });
+  return updatedRecord;
+}
+
 export function buildPostDetailText(displayIndex: number, content: string, imageUrl: string, linkPresentation: { url: string; text: string } | null = null, sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"]) {
   const lines = [
     `📝 <b>第 ${displayIndex} 篇推文</b>`,
@@ -9733,6 +10158,48 @@ export function buildPostDetailText(displayIndex: number, content: string, image
 
 function buildPostDetailTextWithArchive(displayIndex: number, content: string, imageUrl: string, archive: Pick<PersonaArchive, "setup"> | null | undefined, sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"]) {
   return buildPostDetailText(displayIndex, content, imageUrl, getTweetStyleLinkPresentation(archive?.setup), sourceMeta);
+}
+
+function buildPublishHistoryDetailText(args: {
+  displayIndex: number;
+  record: NonNullable<PersonaArchive["publishHistory"]>[number];
+}) {
+  const record = args.record;
+  return [
+    `🕘 <b>第 ${args.displayIndex} 条发布历史</b>`,
+    `平台: ${escapeHtmlText(String(record.platform || "-"))}`,
+    `云机: ${escapeHtmlText(String(record.padName || record.padCode || "-"))}`,
+    `发布时间: ${escapeHtmlText(String(record.publishedAt || "-").slice(0, 16).replace("T", " "))}`,
+    ...buildPublishedPostInfoHtml(record),
+    ...buildSentimentSourceInfoHtml(record.sourceMeta),
+    "",
+    escapeHtmlText(record.content || "（无内容）"),
+  ].join("\n");
+}
+
+function buildPublishHistoryDetailRows(args: {
+  archiveId: string;
+  recordId: string;
+  page: number;
+  groupContentType?: TelegramGroupContentType;
+  canRefreshMetrics?: boolean;
+}) {
+  const viewKey = rememberPublishHistoryViewAction({
+    archiveId: args.archiveId,
+    recordId: args.recordId,
+    page: args.page,
+    groupContentType: args.groupContentType,
+  });
+  const requeueKey = rememberPublishHistoryRequeueAction({
+    archiveId: args.archiveId,
+    recordId: args.recordId,
+    groupContentType: args.groupContentType,
+  });
+  return [
+    ...(args.canRefreshMetrics ? [[{ text: "刷新热度", callback_data: buildPublishHistoryViewCallback(`${viewKey}_refresh`) }]] : []),
+    [{ text: "🔁 重入队", callback_data: buildPublishHistoryRequeueCallback(requeueKey) }],
+    [{ text: "◀️ 返回发布历史", callback_data: buildPersonaHistoryCallback(args.archiveId, args.groupContentType, args.page) }],
+  ];
 }
 
 function buildPostPhotoDetailCaption(displayIndex: number, content: string, linkPresentation: { url: string; text: string } | null = null, sourceMeta?: PersonaArchive["posts"][number]["sourceMeta"]) {
@@ -10029,12 +10496,14 @@ export function buildPostDetailActionRows(args: {
   archiveId: string;
   postIndex?: number;
   groupContentType?: TelegramGroupContentType;
+  canRefreshMetrics?: boolean;
 }) {
   const imageRegenCallback = typeof args.postIndex === "number"
     ? `post_img_regen_${args.archiveId}_${args.postIndex}`
     : "post_img_regen";
   return [
     [{ text: "🚀 发布这篇", callback_data: args.publishCallback }],
+    ...(args.canRefreshMetrics ? [[{ text: "\u5237\u65b0\u70ed\u5ea6", callback_data: "post_refresh_metrics" }]] : []),
     ...(args.hasImage ? [[{ text: "🖼 查看配圖/視頻", callback_data: "post_media_preview" }]] : []),
     ...(args.hasImage ? [[{ text: "🧩 管理媒体", callback_data: "post_media_manage" }]] : []),
     [{ text: "编辑文案/媒体", callback_data: "post_edit_custom" }],
@@ -11210,6 +11679,39 @@ function publishFinalTitle(result: PublishResult | void, completeTitle = "发布
   return isPublishWarning(result) ? "⚠️ 发布已提交，待人工确认" : `✅ ${completeTitle}`;
 }
 
+function buildPublishedMetaFromResult(platform: TelegramPublishPlatform, result: PublishResult | void): Pick<NonNullable<PersonaArchive["publishHistory"]>[number], "publishedUrl" | "publishedMeta"> {
+  const publishedUrl = result && typeof result === "object" && "publishedUrl" in result
+    ? String(result.publishedUrl || "").trim()
+    : "";
+  if (!publishedUrl) return {};
+  return {
+    publishedUrl,
+    publishedMeta: {
+      source: "published_post",
+      platform,
+      sourceUrl: publishedUrl,
+      capturedAt: new Date().toISOString(),
+    },
+  };
+}
+
+function buildPublishedTargetFromResult(args: {
+  platform: TelegramPublishPlatform;
+  padCode: string;
+  result: PublishResult | void;
+  screenshotUrl?: string;
+}): NonNullable<NonNullable<PersonaArchive["publishHistory"]>[number]["publishedTargets"]>[number] | null {
+  const meta = buildPublishedMetaFromResult(args.platform, args.result);
+  if (!meta.publishedUrl) return null;
+  return {
+    platform: args.platform,
+    padCode: args.padCode,
+    publishedUrl: meta.publishedUrl,
+    publishedMeta: meta.publishedMeta,
+    screenshotUrl: args.screenshotUrl,
+  };
+}
+
 async function resolveTelegramMediaUrl(bot: TelegramBot, fileId: string): Promise<string | null> {
   try {
     const url = await bot.getFileLink(fileId);
@@ -11236,18 +11738,26 @@ async function safeEditOrSend(
         chat_id: chatId,
         message_id: messageId,
         ...options,
-      }), TELEGRAM_API_TIMEOUT_MS, { rethrow: true });
+      }), TELEGRAM_API_TIMEOUT_MS, {
+        rethrow: true,
+        quietErrorPattern: /message to edit not found|message identifier is not specified|message can't be edited/i,
+      });
       rememberTelegramEditPayload(editKey, payloadKey);
       const elapsed = Date.now() - startedAt;
       if (elapsed >= 900) console.log(`[telegram][menu_edit_slow] chat=${chatId} msg=${messageId} ms=${elapsed}`);
       return typeof edited === "object" && edited ? edited as TelegramBot.Message : undefined;
     } catch (error: any) {
-      if (String(error?.message || error).includes("message is not modified")) {
+      const editErrorText = String(error?.message || error);
+      if (editErrorText.includes("message is not modified")) {
         rememberTelegramEditPayload(editKey, payloadKey);
         return undefined;
       }
-      console.warn(`[telegram][safe_edit_error] chat=${chatId} msg=${messageId} error=${error?.message || error}`);
-      await bot.deleteMessage(chatId, messageId).catch(() => undefined);
+      if (/message to edit not found|message identifier is not specified|message can't be edited/i.test(editErrorText)) {
+        console.log(`[telegram][safe_edit_fallback_send] chat=${chatId} msg=${messageId} reason=${editErrorText}`);
+      } else {
+        console.warn(`[telegram][safe_edit_error] chat=${chatId} msg=${messageId} error=${editErrorText}`);
+        await bot.deleteMessage(chatId, messageId).catch(() => undefined);
+      }
     }
   }
   try {
@@ -11334,7 +11844,7 @@ async function telegramBestEffort<T>(
   label: string,
   action: Promise<T>,
   timeoutMs = TELEGRAM_API_TIMEOUT_MS,
-  options: { rethrow?: boolean } = {},
+  options: { rethrow?: boolean; quietErrorPattern?: RegExp } = {},
 ): Promise<T | undefined> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -11345,7 +11855,10 @@ async function telegramBestEffort<T>(
       }),
     ]);
   } catch (error: any) {
-    console.warn(`[telegram][api_timeout_or_error] action=${label} error=${error?.message || error}`);
+    const errorText = String(error?.message || error);
+    if (!options.quietErrorPattern?.test(errorText)) {
+      console.warn(`[telegram][api_timeout_or_error] action=${label} error=${errorText}`);
+    }
     if (options.rethrow) throw error;
     return undefined;
   } finally {
@@ -11771,6 +12284,142 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     repo.releasePadLock(padCode, key);
   };
 
+  const resolvePublishPadOptions = async (defaultSelection?: string | string[]) => {
+    const pads = await listPadsForThisBot();
+    const runningPads = pads.filter((pad) => pad.padStatus === 10);
+    const candidates = (runningPads.length ? runningPads : pads).slice(0, 12);
+    const defaultCodes = uniquePadCodes(Array.isArray(defaultSelection) ? defaultSelection : [defaultSelection || defaultPadCode]);
+    const availableCodes = new Set(candidates.map((pad) => pad.padCode));
+    const selected = defaultCodes.filter((code) => availableCodes.has(code));
+    if (!selected.length && candidates[0]?.padCode) selected.push(candidates[0].padCode);
+    return { pads: candidates, selectedPadCodes: selected };
+  };
+
+  const showPublishPadSelection = async (
+    chatId: number,
+    msgId: number | undefined,
+    selection: Omit<PendingPublishPadSelection, "availablePadCodes" | "createdAt">,
+    text: string,
+    backCallback: string,
+  ) => {
+    const resolved = await resolvePublishPadOptions(selection.selectedPadCodes);
+    if (!resolved.pads.length) {
+      await safeEditOrSend(bot, chatId, msgId, "❌ 当前没有可用于发布的云机。", {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: backCallback }]] },
+      });
+      return;
+    }
+    const nextState: PendingPublishPadSelection = {
+      ...selection,
+      selectedPadCodes: uniquePadCodes(selection.selectedPadCodes).filter((code) => resolved.pads.some((pad) => pad.padCode === code)),
+      availablePadCodes: resolved.pads.map((pad) => pad.padCode),
+      backCallback,
+      createdAt: Date.now(),
+    };
+    if (!nextState.selectedPadCodes.length) nextState.selectedPadCodes = resolved.selectedPadCodes;
+    pendingPublishPadSelections.set(chatId, nextState);
+    await safeEditOrSend(bot, chatId, msgId, text, {
+      reply_markup: {
+        inline_keyboard: buildPublishPadSelectionRows({
+          pads: resolved.pads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
+          selectedPadCodes: nextState.selectedPadCodes,
+          backCallback,
+        }),
+      },
+    });
+  };
+
+  const publishPostsAcrossPads = async (args: {
+    chatId: number;
+    archive: PersonaArchive;
+    posts: PersonaArchive["posts"];
+    platform: TelegramPublishPlatform;
+    padCodes: string[];
+    label: string;
+    groupContentType?: TelegramGroupContentType;
+    statusPrefix?: string;
+    postsByPad?: Record<string, string[]>;
+  }) => {
+    const padCodes = uniquePadCodes(args.padCodes);
+    const results = await Promise.all(padCodes.map(async (padCode) => {
+      const padPostIdSet = args.postsByPad?.[padCode]?.length ? new Set(args.postsByPad[padCode]) : null;
+      const padPosts = padPostIdSet ? args.posts.filter((post) => padPostIdSet.has(post.id)) : args.posts;
+      if (!padPosts.length) {
+        return { padCode, ok: true, logs: [], screenshots: [], publishedPostIds: [] as string[] };
+      }
+      const publishLockKey = `${args.label}:${args.archive.id}:${args.platform}:${padCode}:${padPosts.map((post) => post.id).join(",")}`;
+      const publishScopeKey = `pad:${padCode}`;
+      if (!acquirePublishCommand(args.chatId, publishLockKey, args.label, publishScopeKey)) {
+        return { padCode, ok: false, logs: [], screenshots: [], publishedPostIds: [] as string[], error: "发布任务已在执行中。" };
+      }
+      const padOperationKey = `publish:${padCode}:${publishLockKey}`;
+      if (!(await acquireRuntimePadOperation(args.chatId, padCode, padOperationKey, args.label))) {
+        releasePublishCommand(args.chatId, publishLockKey, publishScopeKey);
+        return { padCode, ok: false, logs: [], screenshots: [], publishedPostIds: [] as string[], error: "云机正在执行其他任务。" };
+      }
+      const statusMessage = await sendTelegramPublishStatusMessage(bot, args.chatId, `${args.platform}/${padCode}`).catch(() => null);
+      const statusMessageId = statusMessage?.message_id;
+      const logs: string[] = [];
+      const screenshots: string[] = [];
+      const publishedPostIds: string[] = [];
+      const publishMetaByPost: Record<string, Pick<NonNullable<PersonaArchive["publishHistory"]>[number], "publishedUrl" | "publishedMeta">> = {};
+      const publishTargetByPost: Record<string, NonNullable<NonNullable<PersonaArchive["publishHistory"]>[number]["publishedTargets"]>[number]> = {};
+      try {
+        for (let index = 0; index < padPosts.length; index += 1) {
+          const post = padPosts[index];
+          assertPadOperationNotCancelled(padOperationKey);
+          logs.push(`▶️ ${args.statusPrefix || "发布"} ${index + 1}/${padPosts.length}`);
+          const result = await publishPost(
+            credentials,
+            {
+              padCode,
+              platform: args.platform as any,
+              caption: post.content,
+              mediaUrl: getStoredPostPrimaryMediaUrl(post),
+              telegramChatId: args.chatId,
+              telegramTargetGroupName: args.platform === "telegram" ? resolveTelegramTargetGroupNameForPost(args.archive, post, args.groupContentType) : undefined,
+              telegramGroupContentType: args.platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, args.groupContentType) : undefined,
+            },
+            (progress) => {
+              assertPadOperationNotCancelled(padOperationKey);
+              logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
+              if (statusMessageId) {
+                void updateTelegramPublishStatus(bot, args.chatId, statusMessageId, `${args.platform}/${padCode}`, logs.slice(-8), progress.step);
+              }
+              assertPadOperationNotCancelled(padOperationKey);
+            },
+            { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
+          );
+          publishedPostIds.push(post.id);
+          publishMetaByPost[post.id] = buildPublishedMetaFromResult(args.platform, result);
+          const publishedTarget = buildPublishedTargetFromResult({
+            platform: args.platform,
+            padCode,
+            result,
+            screenshotUrl: result?.screenshotUrl,
+          });
+          if (publishedTarget) publishTargetByPost[post.id] = publishedTarget;
+          if (result?.screenshotUrl) {
+            screenshots.push(result.screenshotUrl);
+            await sendOriginalScreenshotDocument(
+              bot,
+              args.chatId,
+              result.screenshotUrl,
+              `📸 发布验证截图：${args.platform}，云机 ${padCode}，第 ${index + 1}/${padPosts.length} 篇`,
+            ).catch(() => undefined);
+          }
+        }
+        return { padCode, ok: true, logs, screenshots, publishedPostIds, publishMetaByPost, publishTargetByPost };
+      } catch (error: any) {
+        return { padCode, ok: false, logs, screenshots, publishedPostIds, error: formatUserFacingError(error, "发布失败，请人工检查当前界面后重试。") };
+      } finally {
+        releaseRuntimePadOperation(padCode, padOperationKey);
+        releasePublishCommand(args.chatId, publishLockKey, publishScopeKey);
+      }
+    }));
+    return results;
+  };
+
   const customPublishBackToMethodButton = (state: PendingCustomPublish) => ({
     text: "◀️ 返回发布方式",
     callback_data: state.archiveId ? `custom_publish_platform_${state.platform || effectiveDefaultPublishPlatform}` : "custom_publish",
@@ -11893,6 +12542,43 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       releasePublishCommand(chatId, publishLockKey, publishScopeKey);
       return;
     }
+
+    releasePublishCommand(chatId, publishLockKey, publishScopeKey);
+    const targetPadCodes = uniquePadCodes(state.padCodes?.length ? state.padCodes : [padCode]);
+    const customPost = {
+      id: `custom-${Date.now()}`,
+      content: caption,
+      imageUrl: mediaUrl || "",
+      mediaUrl: mediaUrl || "",
+    } as PersonaArchive["posts"][number];
+    const customArchive = archive || ({
+      id: state.archiveId || `custom-${chatId}`,
+      name: state.archiveName || "自定义发布",
+      content: "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      setup: {},
+      posts: [customPost],
+    } as PersonaArchive);
+    const stopTypingMulti = startTelegramTyping(bot, chatId);
+    const results = await publishPostsAcrossPads({
+      chatId,
+      archive: customArchive,
+      posts: [customPost],
+      platform: customPlatform,
+      padCodes: targetPadCodes,
+      label: "自定义发布",
+      groupContentType: state.groupContentType,
+    });
+    stopTypingMulti();
+    pendingCustomPublishes.delete(chatId);
+    const failures = results.filter((item) => !item.ok);
+    await bot.sendMessage(chatId, failures.length
+      ? `⚠️ 自定义发布部分失败\n\n成功：${results.filter((item) => item.ok).map((item) => item.padCode).join(", ") || "-"}\n失败：${failures.map((item) => `${item.padCode}：${item.error}`).join("\n")}`
+      : `✅ 已完成自定义发布\n平台：${customPlatform}\n云机：${targetPadCodes.join(", ")}`, {
+      reply_markup: { inline_keyboard: [[{ text: "🏠 主菜单", callback_data: "back_main" }]] },
+    });
+    return;
 
     const padOperationKey = `publish:${padCode}:${publishLockKey}`;
     if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "自定义发布"))) {
@@ -12129,13 +12815,15 @@ function buildScheduledPublishSummary(state: {
   archiveName?: string;
   platform?: string;
   padCode?: string;
+  padCodes?: string[];
   postPreview?: string;
   scheduledAtText?: string;
 }) {
+  const padLine = uniquePadCodes(state.padCodes?.length ? state.padCodes : [state.padCode || defaultPadCode]).join(", ");
   return [
     `人設：${state.archiveName || "-"}`,
     `平台：${state.platform || "-"}`,
-    `雲機：${state.padCode || defaultPadCode}`,
+    `雲機：${padLine || defaultPadCode}`,
     `時間：${state.scheduledAtText || "-"}`,
     state.postPreview ? `推文：${state.postPreview}` : undefined,
   ].filter(Boolean).join("\n");
@@ -12321,16 +13009,17 @@ async function applyScheduledTimeSelection(chatId: number, msgId: number | undef
     return;
   }
   try {
-    const task = await enqueueScheduledArchivePost({
-      archiveId: state.archiveId,
-      postId: state.postId,
-      platform: state.platform,
-      padCode: state.padCode || defaultPadCode,
+    const padCodes = uniquePadCodes(state.padCodes?.length ? state.padCodes : [state.padCode || defaultPadCode]);
+    const tasks = await Promise.all(padCodes.map((padCode) => enqueueScheduledArchivePost({
+      archiveId: state.archiveId!,
+      postId: state.postId!,
+      platform: state.platform!,
+      padCode,
       scheduledAt,
       telegramChatId: chatId,
-    });
+    })));
     pendingScheduledPublishes.delete(chatId);
-    await safeEditOrSend(bot, chatId, msgId, `✅ 已加入定時發佈佇列\n\n${buildScheduledPublishSummary({ ...state, scheduledAtText: formatScheduledTaskTime(scheduledAt) })}\n任務ID：${task.id.slice(0, 8)}`, {
+    await safeEditOrSend(bot, chatId, msgId, `✅ 已加入定時發佈佇列\n\n${buildScheduledPublishSummary({ ...state, padCodes, scheduledAtText: formatScheduledTaskTime(scheduledAt) })}\n任務數：${tasks.length}\n任務ID：${tasks.map((task) => task.id.slice(0, 8)).join(", ")}`, {
       reply_markup: {
         inline_keyboard: [
           [{ text: "📋 查看待發佈", callback_data: "queue_pending" }],
@@ -13579,59 +14268,64 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const padCode = data.slice("pad_login_confirm_".length);
       const loginState = pendingLoginActions.get(chatId);
       if (!loginState || loginState.padCode !== padCode || !loginState.username || !loginState.password) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 登录狀態已失效，請重新开始。", {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 登入狀態已失效，請重新開始。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `pad_detail_${padCode}` }]] },
         });
         return;
       }
       const loginReturnCallback = loginState.returnCallback || `pad_detail_${padCode}`;
       const padName = loginState.padName || padCode;
-      await safeEditOrSend(bot, chatId, msgId, `🔄 *正在登录 Threads*\n\n雲機：${padName}\n帳號：${loginState.username}\n\n⏳ 正在清除旧数据并启动登录流程，請稍候（约 30-60 秒）...`, {
+      void safeEditOrSend(bot, chatId, msgId, `🔄 *正在登入 Threads*\n\n雲機：${padName}\n帳號：${loginState.username}\n\n⏳ 正在清除舊資料並啟動登入流程，請稍候（約 30-60 秒）...`, {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
       });
       const padOperationKey = `login:${padCode}:${chatId}:${Date.now()}`;
-      if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "切换登录帳號"))) return;
+      if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "切換登入帳號"))) return;
       const stopTyping = startTelegramTyping(bot, chatId);
       try {
+        console.log(`[telegram][threads_login_start] chat=${chatId} pad=${padCode}`);
         const creds = resolveVmosCredentials();
         const result = await loginThreadsAccount(
           creds,
           padCode,
           { username: loginState.username, password: loginState.password },
+          { forceFreshLogin: true },
         );
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
         pendingLoginActions.delete(chatId);
         if (result.ok) {
-          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 Threads 登录成功确认画面");
-          await bot.sendMessage(chatId, `✅ Threads 登录成功并已确认\n\n雲機：${padName}\n帳號：${loginState.username}\n\n${result.message}`, {
+          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 Threads 登入成功確認畫面");
+          await bot.sendMessage(chatId, `✅ Threads 登入成功並已確認\n\n雲機：${padName}\n帳號：${loginState.username}\n\n${result.message}`, {
             reply_markup: {
               inline_keyboard: loginReturnCallback.startsWith("acctplatform_threads_")
                 ? [[{ text: "◀️ 返回 Threads 帳號", callback_data: loginReturnCallback }]]
-                : [[{ text: "🔍 验证帳號", callback_data: `pad_query_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]],
+                : [[{ text: "🔍 驗證帳號", callback_data: `pad_query_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]],
             },
           });
+          if (loginState.archiveId) {
+            await resumePendingThreadsProfileAction(bot, chatId, loginState.archiveId);
+          }
         } else if (result.state === "challenge_otp") {
           pendingLoginActions.set(chatId, { ...loginState, stage: "await_otp" });
-          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 当前验证码画面");
-          await bot.sendMessage(chatId, `📱 Threads 需要驗證碼\n\n雲機：${padName}\n\n${result.message}\n\n⭐ 請直接回复 6 位驗證碼 ⭐\n　　　只需要發送數字即可。`, {
-            reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: loginReturnCallback }]] },
+          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 目前驗證碼畫面");
+          await bot.sendMessage(chatId, `📱 Threads 需要驗證碼\n\n雲機：${padName}\n\n${result.message}\n\n⭐ 請直接回覆 6 位驗證碼 ⭐\n　　　只需要發送數字即可。`, {
+            reply_markup: { inline_keyboard: [[{ text: "❌ 取消登入", callback_data: loginReturnCallback }]] },
           });
         } else {
-          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 Threads 登录失败画面");
-          await bot.sendMessage(chatId, `❌ Threads 登录失败\n\n云机：${padName}\n\n${result.message}`, {
-            reply_markup: { inline_keyboard: [[{ text: "🔄 重试", callback_data: `pad_switch_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
+          await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 Threads 登入失敗畫面");
+          await bot.sendMessage(chatId, `❌ Threads 登入失敗\n\n雲機：${padName}\n\n${result.message}`, {
+            reply_markup: { inline_keyboard: [[{ text: "🔄 重試", callback_data: `pad_switch_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
           });
         }
       } catch (error: any) {
         stopTyping();
         pendingLoginActions.delete(chatId);
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止登录任务\n\n云机：${padName}`);
+          await bot.sendMessage(chatId, `🛑 已中止登入任務\n\n雲機：${padName}`);
           return;
         }
-        await bot.sendMessage(chatId, `❌ 登录异常: ${formatUserFacingError(error, "登录流程异常，请稍后重试。")}`, {
+        await bot.sendMessage(chatId, `❌ 登入異常：${formatUserFacingError(error, "登入流程異常，請稍後重試。")}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
         });
       } finally {
@@ -13767,6 +14461,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data.startsWith("acctplatform_threads_") || data.startsWith("acctplatform_telegram_")) {
       pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsProfileActions.delete(chatId);
       const platform: PersonaAccountPlatform = data.startsWith("acctplatform_threads_") ? "threads" : "telegram";
       const id = data.slice((platform === "threads" ? "acctplatform_threads_" : "acctplatform_telegram_").length);
       const archive = await loadPersonaForThisBot(id);
@@ -13780,6 +14475,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     const accountProfileMatch = data.match(/^acctprofile_(link|bio|name|avatar)_(.+)$/);
     if (accountProfileMatch) {
       pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsProfileActions.delete(chatId);
       const kind = accountProfileMatch[1] as "link" | "bio" | "name" | "avatar";
       const id = accountProfileMatch[2];
       const archive = await loadPersonaForThisBot(id);
@@ -13793,7 +14489,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const stage = kind === "link" ? "await_link" : kind === "bio" ? "await_bio" : kind === "name" ? "await_name" : "await_avatar";
-      pendingThreadsProfileActions.set(chatId, { padCode: boundPad.padCode, padName: boundPad.padName, stage, returnCallback });
+      pendingThreadsProfileActions.set(chatId, { padCode: boundPad.padCode, padName: boundPad.padName, stage, returnCallback, archiveId: id });
       const title = kind === "link" ? "🔗 Threads 簡介新增連結" : kind === "bio" ? "📝 修改 Threads 簡介" : kind === "name" ? "🏷 修改 Threads 名稱" : "🖼 修改 Threads 頭像";
       const hint = kind === "link"
         ? "請直接發送要添加到 Threads 個人簡介裡的完整連結。\n例如：https://example.com"
@@ -14037,11 +14733,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
 
-      if (action === "login" && platform === "threads") {
-        await beginPersonaThreadsSwitchLoginFromTelegram(bot, chatId, msgId, id);
-        return;
-      }
-
       if (false && action === "login" && platform === "telegram") {
         await safeEditOrSend(bot, chatId, msgId, [
           "⚠️ Telegram 自動登入尚未接入底層腳本。",
@@ -14134,11 +14825,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
 
-      const opLabel = `${platformLabel}${action === "query" ? "状态检测" : action === "login" ? "登录" : "登出"}`;
+      const opLabel = `${platformLabel}${action === "query" ? "狀態檢測" : action === "login" ? "登入" : "登出"}`;
       const opKey = `account:${action}:${platform}:${boundPad.padCode}:${chatId}:${Date.now()}`;
       if (action === "query") {
-        await safeEditOrSend(bot, chatId, msgId, `🔍 正在檢測 ${platformLabel} 登录状态，請稍候...`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回平台设置", callback_data: `acctplatform_${platform}_${id}` }]] },
+        await safeEditOrSend(bot, chatId, msgId, `🔍 正在檢測 ${platformLabel} 登入狀態，請稍候...`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回平台設定", callback_data: `acctplatform_${platform}_${id}` }]] },
         });
       } else {
         await safeEditOrSend(bot, chatId, msgId, `⏳ 正在執行 ${opLabel}...\n\n人設：${archive.name}\n雲機：${boundPad.padName}`, {
@@ -14151,7 +14842,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const creds = resolveVmosCredentials();
         if (platform === "threads") {
           if (action === "query") {
-            const result = await queryThreadsAccount(creds, boundPad.padCode).catch((e: any) => ({
+            const result = await withTimeout(
+              queryThreadsAccount(creds, boundPad.padCode),
+              THREADS_ACCOUNT_QUERY_TIMEOUT_MS,
+              `Threads 帳號狀態檢測超時（${THREADS_ACCOUNT_QUERY_TIMEOUT_MS / 1000} 秒未返回）`,
+            ).catch((e: any) => ({
               padCode: boundPad.padCode,
               platform: "threads" as const,
               method: "failed" as const,
@@ -14166,28 +14861,27 @@ function sendMainMenu(chatId: number, msgId?: number) {
               status = {
                 state: "logged_out",
                 message: result.error
-                  ? `未确认已登录：${formatUserFacingError(result.error, "当前页面没有识别到 Threads 账号信息。")}`
-                  : "未确认已登录。",
+                  ? `未確認已登入：${formatUserFacingError(result.error, "目前頁面沒有識別到 Threads 帳號資訊。")}`
+                  : "未確認已登入。",
               };
             } else if (matchedSavedAccount) {
               status = {
                 state: "logged_in",
-                message: `已确认登录${detectedAccount ? `：${detectedAccount}` : ""}。`,
+                message: `已確認登入${detectedAccount ? `：${detectedAccount}` : ""}。`,
               };
             } else {
               const mismatchMessage = result.loggedIn && detectedAccount && expectedThreads
-                ? `已打开 Threads，但当前识别账号 ${detectedAccount} 与保存账号 ${maskAccountSecret(expectedThreads)} 不一致。`
+                ? `已開啟 Threads，但目前識別帳號 ${detectedAccount} 與保存帳號 ${maskAccountSecret(expectedThreads)} 不一致。`
                 : result.loggedIn
-                  ? "已打开 Threads，但当前页面未识别到可核对的账号信息。"
+                  ? "已開啟 Threads，但目前頁面未識別到可核對的帳號資訊。"
                   : undefined;
               status = {
                 state: result.loggedIn ? "unknown" : "logged_out",
                 message: mismatchMessage || (result.error
-                  ? `未确认已登录：${formatUserFacingError(result.error, "当前页面没有识别到 Threads 账号信息。")}`
-                  : "未确认已登录。"),
+                  ? `未確認已登入：${formatUserFacingError(result.error, "目前頁面沒有識別到 Threads 帳號資訊。")}`
+                  : "未確認已登入。"),
               };
             }
-            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, status.state === "logged_in" ? "📸 Threads 已登录确认画面" : "📸 Threads 当前画面");
             await bot.sendMessage(chatId, buildPersonaPlatformAccountText(archive, platform, status), {
               reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, platform, status, archive) },
             }).catch((error: any) => {
@@ -14208,24 +14902,59 @@ function sendMainMenu(chatId: number, msgId?: number) {
             return;
           }
 
+          if (action === "login") {
+            stopTyping();
+            pendingPersonaAccountActions.delete(chatId);
+            pendingLoginActions.set(chatId, {
+              archiveId: id,
+              padCode: boundPad.padCode,
+              padName: boundPad.padName,
+              stage: "await_username",
+              returnCallback: `acctplatform_threads_${id}`,
+            });
+            await bot.sendMessage(chatId, [
+              "🔄 *臨時登入 Threads*",
+              "",
+              `人設：${archive.name}`,
+              `雲機：${boundPad.padName}`,
+              "",
+              "步驟 1/2：請輸入 Threads / Instagram 使用者名、信箱或手機號。",
+              "",
+              "此流程只用於本次登入，不會保存到人設帳號資料。",
+            ].join("\n"), {
+              parse_mode: "Markdown",
+              reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `acctplatform_threads_${id}` }]] },
+            });
+            return;
+          }
+
           const accounts = getPersonaAccountManagement(archive);
           const threads = accounts.threads;
           if (!threads?.handle || !threads?.password) {
             stopTyping();
-            await bot.sendMessage(chatId, `❌ 尚未設定 Threads 登入資料。\n\n請先點「設定 Threads 登入資料」保存帳號與密碼。`, {
-              reply_markup: { inline_keyboard: buildPersonaPlatformAccountRows(id, "threads", undefined, archive) },
+            pendingPersonaAccountActions.set(chatId, { archiveId: id, platform: "threads", stage: "await_threads_handle" });
+            await bot.sendMessage(chatId, [
+              "🔐 Threads 登入",
+              "",
+              `人設：${archive.name}`,
+              `雲機：${boundPad.padName}`,
+              "",
+              "步驟 1/2：請發送 Threads / Instagram 登入帳號。",
+            ].join("\n"), {
+              reply_markup: { inline_keyboard: [[{ text: "取消", callback_data: `acctplatform_threads_${id}` }]] },
             });
             return;
           }
           const result = await loginThreadsAccount(creds, boundPad.padCode, { username: threads.handle, password: threads.password });
           stopTyping();
           if (result.ok) {
-            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 登录成功确认画面");
-            await bot.sendMessage(chatId, `✅ Threads 登录成功并已确认\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}`, {
-              reply_markup: { inline_keyboard: [[{ text: "🔍 检测 Threads 状态", callback_data: `acctquery_threads_${id}` }], ...rows] },
+            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 登入成功確認畫面");
+            await bot.sendMessage(chatId, `✅ Threads 登入成功並已確認\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}`, {
+              reply_markup: { inline_keyboard: [[{ text: "🔍 檢測 Threads 狀態", callback_data: `acctquery_threads_${id}` }], ...rows] },
             }).catch((error: any) => {
               console.warn(`[telegram][threads_login_message_failed] chat=${chatId} error=${error?.message || error}`);
             });
+            await resumePendingThreadsProfileAction(bot, chatId, id);
             return;
           }
           if (result.state === "challenge_otp") {
@@ -14237,11 +14966,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
               password: threads.password,
               returnCallback: `acctplatform_threads_${id}`,
             });
-            await bot.sendMessage(chatId, `📱 *Threads 需要验证码*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}\n\n請直接回复 6 位验证码，系统会继续提交。`, {
+            await bot.sendMessage(chatId, `📱 *Threads 需要驗證碼*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}\n\n請直接回覆 6 位驗證碼，系統會繼續提交。`, {
               parse_mode: "Markdown",
-              reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: `acctplatform_threads_${id}` }]] },
+              reply_markup: { inline_keyboard: [[{ text: "❌ 取消登入", callback_data: `acctplatform_threads_${id}` }]] },
             });
-            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 当前验证码画面");
+            await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 目前驗證碼畫面");
             return;
           }
           if (result.state === "challenge_manual") {
@@ -14252,11 +14981,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
             await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 人工處理畫面");
             return;
           }
-          await bot.sendMessage(chatId, `❌ *Threads 登录未完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}`, {
+          await bot.sendMessage(chatId, `❌ *Threads 登入未完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}`, {
             parse_mode: "Markdown",
-            reply_markup: { inline_keyboard: [[{ text: "🔄 重试登录", callback_data: `acctlogin_threads_${id}` }], ...rows] },
+            reply_markup: { inline_keyboard: [[{ text: "🔄 重試登入", callback_data: `acctlogin_threads_${id}` }], ...rows] },
           });
-          await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 登录失败画面");
+          await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 登入失敗畫面");
           return;
         }
 
@@ -15927,13 +16656,25 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const displayIndex = start + idx + 1;
         const when = item.publishedAt ? String(item.publishedAt).slice(0, 16).replace("T", " ") : "-";
         const content = String(item.content || item.caption || "\uFF08\u7121\u5167\u5BB9\uFF09");
+        const aggregatedPublishedMeta = aggregatePublishedTargets(item);
+        const metricSource = aggregatedPublishedMeta || item.sourceMeta;
+        const metricLabel = aggregatedPublishedMeta ? "发布帖汇总" : item.sourceMeta ? "来源" : "";
+        const metricLine = metricSource ? `\n${escapeHtmlText(metricLabel)}: ${escapeHtmlText(formatSentimentMetricLine({
+          hotScore: metricSource.hotScore,
+          metrics: metricSource.metrics,
+          engagement: metricSource.engagement,
+        }))}` : "";
         const preview = content.slice(0, 100) + (content.length > 100 ? "..." : "");
-        return `<b>\u3010${displayIndex}\u3011</b>${escapeHtmlText(when)} \u00B7 ${escapeHtmlText(String(item.platform || "-"))}\n${escapeHtmlText(preview)}`;
+        return `<b>\u3010${displayIndex}\u3011</b>${escapeHtmlText(when)} \u00B7 ${escapeHtmlText(String(item.platform || "-"))}${metricLine}\n${escapeHtmlText(preview)}`;
       });
       const keyboard = visibleHistory.map((item: any, idx: number) => {
         const itemId = String(item.id || item.archivePostId || idx);
-        const key = rememberPublishHistoryRequeueAction({ archiveId: id, recordId: itemId, groupContentType: parsedHistory?.groupContentType });
-        return [{ text: `\uD83D\uDD01 \u91CD\u5165\u968A\u7B2C${start + idx + 1}\u689D`, callback_data: buildPublishHistoryRequeueCallback(key) }];
+        const viewKey = rememberPublishHistoryViewAction({ archiveId: id, recordId: itemId, page: safePage, groupContentType: parsedHistory?.groupContentType });
+        const requeueKey = rememberPublishHistoryRequeueAction({ archiveId: id, recordId: itemId, groupContentType: parsedHistory?.groupContentType });
+        return [
+          { text: `👁 查看第${start + idx + 1}条`, callback_data: buildPublishHistoryViewCallback(viewKey) },
+          { text: `🔁 重入队`, callback_data: buildPublishHistoryRequeueCallback(requeueKey) },
+        ];
       });
       keyboard.push(...buildListPaginationRows({
         page: safePage,
@@ -15946,6 +16687,59 @@ function sendMainMenu(chatId: number, msgId?: number) {
         parse_mode: "HTML",
         reply_markup: { inline_keyboard: keyboard },
       });
+      return;
+    }
+
+    const historyViewRawKey = parsePublishHistoryViewCallback(data);
+    if (historyViewRawKey) {
+      const shouldRefresh = historyViewRawKey.endsWith("_refresh");
+      const historyViewKey = shouldRefresh ? historyViewRawKey.slice(0, -"_refresh".length) : historyViewRawKey;
+      const action = getPublishHistoryViewAction(historyViewKey);
+      if (!action) {
+        await safeEditOrSend(bot, chatId, msgId, "发布历史详情操作已过期，请重新打开发布历史。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人设", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const loadingMessage = shouldRefresh ? await sendTemporaryLoadingMessage(bot, chatId) : undefined;
+      try {
+        if (shouldRefresh) {
+          await refreshPublishHistorySentimentMetrics({
+            archiveId: action.archiveId,
+            recordId: action.recordId,
+          });
+        }
+        const archive = await loadPersonaForThisBot(action.archiveId);
+        const history = filterByTelegramGroupContentType(
+          (archive?.publishHistory || []).filter(
+            (item: any) => item && (typeof item.content === "string" || typeof item.caption === "string"),
+          ),
+          action.groupContentType,
+        );
+        const recordIndex = history.findIndex((item) => item.id === action.recordId);
+        const record = recordIndex >= 0 ? history[recordIndex] : null;
+        if (!archive || !record) throw new Error("没有找到这条发布历史。");
+        const displayIndex = recordIndex + 1;
+        await safeEditOrSend(bot, chatId, msgId, buildPublishHistoryDetailText({ displayIndex, record }), {
+          parse_mode: "HTML",
+          ...buildPostImagePreviewOptions(String(record.imageUrl || "")),
+          reply_markup: {
+            inline_keyboard: buildPublishHistoryDetailRows({
+              archiveId: action.archiveId,
+              recordId: record.id,
+              page: action.page || 0,
+              groupContentType: action.groupContentType,
+              canRefreshMetrics: canRefreshPublishHistoryMetrics(record),
+            }),
+          },
+        });
+      } catch (error) {
+        await bot.sendMessage(chatId, `发布历史查看/刷新失败：${formatUserFacingError(error, "请稍后重试。")}`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回发布历史", callback_data: buildPersonaHistoryCallback(action.archiveId, action.groupContentType, action.page || 0) }]] },
+        });
+      } finally {
+        if (loadingMessage) await deleteTemporaryMessage(bot, chatId, loadingMessage);
+      }
       return;
     }
 
@@ -16062,6 +16856,218 @@ function sendMainMenu(chatId: number, msgId?: number) {
         reply_markup: { inline_keyboard: view.keyboard },
       });
       return;
+    }
+
+    if (data.startsWith("pubpad_toggle_") || data === "pubpad_confirm" || data === "pubpad_back") {
+      const state = pendingPublishPadSelections.get(chatId);
+      if (!state) {
+        await safeEditOrSend(bot, chatId, msgId, "发布云机选择已过期，请重新进入发布流程。", {
+          reply_markup: { inline_keyboard: [[{ text: "🏠 主菜单", callback_data: "fresh_main_menu" }]] },
+        });
+        return;
+      }
+      const pads = await listPadsForThisBot();
+      const visiblePads = state.availablePadCodes
+        .map((code) => pads.find((pad) => pad.padCode === code) || { padCode: code, padName: getRememberedPadName(code), padStatus: 0 })
+        .filter((pad) => pad.padCode);
+      const selectedPads = new Set(state.selectedPadCodes);
+      const backCallback = state.backCallback || (state.mode === "bulk_posts" ? "bconfirm"
+        : state.mode === "manual_posts" ? `mpage_${Math.floor((state.startIndex || 0) / 8)}`
+        : state.mode === "scheduled_post" ? "post_action"
+        : state.mode === "single_post" ? "post_action"
+        : state.archiveId ? `custom_publish_platform_${state.platform}` : "custom_publish");
+      if (data === "pubpad_back") {
+        pendingPublishPadSelections.delete(chatId);
+        data = backCallback;
+      } else if (data.startsWith("pubpad_toggle_")) {
+        const index = Math.max(0, Number(data.slice("pubpad_toggle_".length) || 0));
+        const padCode = visiblePads[index]?.padCode;
+        if (padCode) {
+          if (selectedPads.has(padCode)) selectedPads.delete(padCode);
+          else selectedPads.add(padCode);
+        }
+        const nextState = { ...state, selectedPadCodes: [...selectedPads] };
+        pendingPublishPadSelections.set(chatId, nextState);
+        await safeEditOrSend(bot, chatId, msgId, "请选择要同时发布的云机：", {
+          reply_markup: {
+            inline_keyboard: buildPublishPadSelectionRows({
+              pads: visiblePads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
+              selectedPadCodes: nextState.selectedPadCodes,
+              backCallback,
+            }),
+          },
+        });
+        return;
+      } else if (data === "pubpad_confirm") {
+        const selectedPadCodes = uniquePadCodes([...selectedPads]);
+        if (!selectedPadCodes.length) {
+          await safeEditOrSend(bot, chatId, msgId, "请至少选择一台云机。", {
+            reply_markup: {
+              inline_keyboard: buildPublishPadSelectionRows({
+                pads: visiblePads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
+                selectedPadCodes,
+                backCallback,
+              }),
+            },
+          });
+          return;
+        }
+        if (!credentials.ak || !credentials.sk) {
+          await safeEditOrSend(bot, chatId, msgId, "❌ VMOS 凭据未配置。", {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: backCallback }]] },
+          });
+          return;
+        }
+        if (state.mode === "custom_direct" || state.mode === "custom_with_image") {
+          const custom = pendingCustomPublishes.get(chatId);
+          if (!custom) {
+            pendingPublishPadSelections.delete(chatId);
+            sendMainMenu(chatId, msgId);
+            return;
+          }
+          pendingCustomPublishes.set(chatId, {
+            ...custom,
+            padCode: selectedPadCodes[0],
+            padCodes: selectedPadCodes,
+            stage: "ready_to_publish",
+            publishWithGeneratedImage: state.mode === "custom_with_image",
+            text: undefined,
+            fileId: undefined,
+            fileKind: undefined,
+            mimeType: undefined,
+          });
+          pendingPublishPadSelections.delete(chatId);
+          const nextState = pendingCustomPublishes.get(chatId)!;
+          await safeEditOrSend(bot, chatId, msgId, `${state.mode === "custom_with_image" ? "🖼" : "✅"} 已确认发布云机：${selectedPadCodes.join(", ")}\n${customPublishContentSummary(nextState)}\n\n请继续发送要发布的内容。`, {
+            reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
+          });
+          return;
+        }
+        const archive = state.archiveId ? await loadPersonaForThisBot(state.archiveId).catch(() => null) : null;
+        if (!archive) {
+          await safeEditOrSend(bot, chatId, msgId, "没有找到要发布的人设。", {
+            reply_markup: { inline_keyboard: [[{ text: "🏠 主菜单", callback_data: "fresh_main_menu" }]] },
+          });
+          return;
+        }
+        const scopedPosts = filterByTelegramGroupContentType(archive.posts || [], state.groupContentType);
+        const requestedRetryPostIds = state.retryPostIdsByPad
+          ? uniquePadCodes(Object.values(state.retryPostIdsByPad).flat())
+          : [];
+        const posts = requestedRetryPostIds.length
+          ? scopedPosts.filter((post) => requestedRetryPostIds.includes(post.id))
+          : state.mode === "single_post"
+          ? scopedPosts.filter((post) => post.id === state.postId)
+          : state.mode === "manual_posts"
+            ? scopedPosts.slice(state.startIndex || 0, (state.startIndex || 0) + Math.max(1, state.count || 1))
+            : scopedPosts.filter((post) => state.selectedPostIds?.includes(post.id));
+        if (!posts.length) {
+          await safeEditOrSend(bot, chatId, msgId, "没有找到要发布的推文。", {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: backCallback }]] },
+          });
+          return;
+        }
+        if (state.mode === "scheduled_post") {
+          const post = posts[0];
+          pendingScheduledPublishes.set(chatId, {
+            stage: "choose_time",
+            archiveId: archive.id,
+            archiveName: archive.name,
+            postId: post.id,
+            postPreview: `${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`,
+            platform: state.platform,
+            padCode: selectedPadCodes[0],
+            padCodes: selectedPadCodes,
+          });
+          pendingPublishPadSelections.delete(chatId);
+          await showScheduledTimePicker(chatId, msgId, pendingScheduledPublishes.get(chatId)!);
+          return;
+        }
+        await safeEditOrSend(bot, chatId, msgId, `🚀 正在发布到 ${selectedPadCodes.length} 台云机...\n\n云机：${selectedPadCodes.join(", ")}\n推文：${posts.length} 篇`, {
+          reply_markup: { inline_keyboard: [[{ text: "🏠 主菜单", callback_data: "fresh_main_menu" }]] },
+        });
+        const stopTyping = startTelegramTyping(bot, chatId);
+        const results = await publishPostsAcrossPads({
+          chatId,
+          archive,
+          posts,
+          platform: state.platform,
+          padCodes: selectedPadCodes,
+          label: state.mode === "bulk_posts" ? "批量发布" : state.mode === "manual_posts" ? "人工发布" : "发布",
+          groupContentType: state.groupContentType,
+          postsByPad: state.retryPostIdsByPad,
+        });
+        stopTyping();
+        const failures = results.filter((item) => !item.ok);
+        const publishedIdsByPad = Object.fromEntries(results.map((item) => [
+          item.padCode,
+          new Set(item.publishedPostIds || []),
+        ]));
+        const completedPadCodesByPost = Object.fromEntries(posts.map((post) => [
+          post.id,
+          uniquePadCodes([
+            ...(state.completedPadCodesByPost?.[post.id] || []),
+            ...selectedPadCodes.filter((padCode) => publishedIdsByPad[padCode]?.has(post.id)),
+          ]),
+        ]));
+        const fullyPublishedPosts = posts.filter((post) =>
+          selectedPadCodes.every((padCode) => publishedIdsByPad[padCode]?.has(post.id)),
+        );
+        if (fullyPublishedPosts.length) {
+          const meta = Object.fromEntries(fullyPublishedPosts.map((post) => [post.id, {
+            platform: state.platform,
+            padCode: completedPadCodesByPost[post.id]?.join(",") || selectedPadCodes.join(","),
+            imageUrl: getStoredPostPrimaryMediaUrl(post),
+            screenshotUrl: results.find((item) => item.ok && item.screenshots?.length)?.screenshots?.[0],
+            sourceMeta: post.sourceMeta,
+            publishedTargets: results
+              .map((item) => item.publishTargetByPost?.[post.id])
+              .filter(Boolean),
+            ...results.map((item) => item.publishMetaByPost?.[post.id]).find((item) => item?.publishedUrl),
+          }]));
+          await markArchiveEpisodesPublished(
+            archive.id,
+            fullyPublishedPosts.map((post) => post.id),
+            Object.fromEntries(fullyPublishedPosts.map((post) => [post.id, post.content])),
+            meta,
+          ).catch(() => null);
+          invalidatePersonaListCache();
+        }
+        const retryPostIdsByPad = Object.fromEntries(selectedPadCodes
+          .map((padCode) => [
+            padCode,
+            posts.filter((post) => !publishedIdsByPad[padCode]?.has(post.id)).map((post) => post.id),
+          ] as const)
+          .filter(([, postIds]) => postIds.length > 0));
+        const retryPostIds = uniquePadCodes(Object.values(retryPostIdsByPad).flat());
+        if (!retryPostIds.length) {
+          pendingPublishPadSelections.delete(chatId);
+          pendingBulkPostActions.delete(chatId);
+          pendingManualPublishes.delete(chatId);
+          await bot.sendMessage(chatId, `✅ 发布完成\n\n平台：${state.platform}\n云机：${selectedPadCodes.join(", ")}\n推文：${posts.length} 篇`, {
+            reply_markup: { inline_keyboard: [[{ text: "📝 查看剩余推文", callback_data: buildStoredPostsPageCallback(archive.id, state.page || 0, state.groupContentType) }]] },
+          });
+          return;
+        }
+        pendingPublishPadSelections.set(chatId, {
+          ...state,
+          selectedPadCodes: Object.keys(retryPostIdsByPad),
+          selectedPostIds: retryPostIds,
+          retryPostIdsByPad,
+          completedPadCodesByPost,
+          availablePadCodes: state.availablePadCodes,
+          createdAt: Date.now(),
+        });
+        await bot.sendMessage(chatId, `⚠️ 部分内容未发布完成\n\n已完成推文：${fullyPublishedPosts.length}/${posts.length} 篇\n待重试推文：${retryPostIds.length} 篇\n待重试云机：${Object.keys(retryPostIdsByPad).join(", ")}\n\n失败：${failures.map((item) => `${item.padCode}：${item.error}`).join("\n") || "-"}`, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🔄 只重试失败/未完成项", callback_data: "pubpad_confirm" }],
+              [{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(archive.id, state.page || 0, state.groupContentType) }],
+            ],
+          },
+        });
+        return;
+      }
     }
 
     if (
@@ -16185,6 +17191,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return `【第${displayIndex}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`;
         }).join("\n\n");
         const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, selectedPosts[0], state.groupContentType);
+        await showPublishPadSelection(chatId, msgId, {
+          mode: "bulk_posts",
+          archiveId: state.archiveId,
+          platform,
+          selectedPostIds: selectedPosts.map((post) => post.id),
+          page: visiblePage,
+          groupContentType: state.groupContentType,
+          selectedPadCodes: state.padCodes || [archive.boundPadCode || defaultPadCode],
+        }, `🚀 *批量发布前确认*\n\n人设：${archive.name}\n平台：${platform}${targetGroupLine}\n发布数量：${selectedPosts.length} 篇\n\n${preview}\n\n请选择要同时发布的云机：`, "bconfirm");
+        return;
         await safeEditOrSend(bot, chatId, msgId, `👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n云机：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
           parse_mode: "Markdown",
           reply_markup: {
@@ -16277,7 +17293,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             publishedIds.push(post.id);
             publishedOriginals[post.id] = post.content;
             const publishScreenshotUrl = result.screenshotUrl;
-            publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
+            publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl, sourceMeta: post.sourceMeta, ...buildPublishedMetaFromResult(platform, result) };
             if (publishScreenshotUrl) {
               await sendOriginalScreenshotDocument(
                 bot,
@@ -16350,6 +17366,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId,
         postIndex: archiveIndex,
         groupContentType: selected?.groupContentType,
+        canRefreshMetrics: canRefreshSentimentPostMetrics(post),
       });
       if (mediaItems.length > 1) {
         await sendStoredPostMediaPreviews(bot, chatId, mediaItems, displayIndex);
@@ -16806,6 +17823,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 archiveId: action.archiveId,
                 postIndex: archive.posts.findIndex((item) => item.id === updated.id),
                 groupContentType: action.groupContentType,
+                canRefreshMetrics: canRefreshSentimentPostMetrics(updated),
               }),
             },
           });
@@ -16814,6 +17832,53 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await bot.sendMessage(chatId, `❌ ${isImageOnly ? "图片生成失败" : "重新生成推文失败"}：${formatUserFacingError(error, isImageOnly ? "图片生成失败，请稍后重试。" : "推文生成失敗，請稍後重試。")}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
         });
+      }
+      return;
+    }
+
+    if (data === "post_refresh_metrics") {
+      const action = pendingPostActions.get(chatId);
+      if (!action) {
+        await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "人设列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const loadingMessage = await sendTemporaryLoadingMessage(bot, chatId);
+      try {
+        const updated = await refreshStoredPostSentimentMetrics({
+          archiveId: action.archiveId,
+          postId: action.postId,
+        });
+        const archive = await loadPersonaForThisBot(action.archiveId);
+        const post = updated || archive?.posts.find((item) => item.id === action.postId);
+        if (!archive || !post) throw new Error("没有找到这篇推文。");
+        const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+        const imageHistory = Array.isArray((post as any).imageHistory) ? (post as any).imageHistory : [];
+        const latestHistoryImage = imageHistory.length ? imageHistory[imageHistory.length - 1]?.imageUrl : "";
+        const mediaItems = getStoredPostMediaItems(post);
+        const postImageUrl = String(mediaItems[0]?.url || post.imageUrl || latestHistoryImage || "").trim();
+        await safeEditOrSend(bot, chatId, msgId, buildPostDetailTextWithArchive(displayIndex, post.content, postImageUrl, archive, post.sourceMeta), {
+          parse_mode: "HTML",
+          ...buildPostImagePreviewOptions(postImageUrl),
+          reply_markup: {
+            inline_keyboard: buildPostDetailActionRows({
+              hasImage: mediaItems.length > 0 || Boolean(postImageUrl),
+              publishCallback: "post_action",
+              deleteCallback: "post_delete_action",
+              archiveId: action.archiveId,
+              postIndex: archive.posts.findIndex((item) => item.id === post.id),
+              groupContentType: action.groupContentType,
+              canRefreshMetrics: canRefreshSentimentPostMetrics(post),
+            }),
+          },
+        });
+      } catch (error) {
+        await bot.sendMessage(chatId, `刷新热度失败：${formatUserFacingError(error, "请稍后重试。")}`, {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+        });
+      } finally {
+        await deleteTemporaryMessage(bot, chatId, loadingMessage);
       }
       return;
     }
@@ -16860,6 +17925,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId: action.archiveId,
         postIndex: archive.posts.findIndex((item) => item.id === post.id),
         groupContentType: action.groupContentType,
+        canRefreshMetrics: canRefreshSentimentPostMetrics(post),
       });
       if (mediaItems.length > 1) {
         await sendStoredPostMediaPreviews(bot, chatId, mediaItems, displayIndex);
@@ -17440,7 +18506,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       });
       const creds = resolveVmosCredentials();
       const results = await Promise.all(
-        targets.map((p) => queryThreadsAccount(creds, p.padCode).catch((e) => ({
+        targets.map((p) => withTimeout(
+          queryThreadsAccount(creds, p.padCode),
+          THREADS_ACCOUNT_QUERY_TIMEOUT_MS,
+          `Threads 帳號狀態檢測超時（${THREADS_ACCOUNT_QUERY_TIMEOUT_MS / 1000} 秒未返回）`,
+        ).catch((e) => ({
           padCode: p.padCode,
           platform: "threads" as const,
           method: "failed" as const,
@@ -17489,7 +18559,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `queryaccounts_${archiveId}` }]] },
       });
       const creds = resolveVmosCredentials();
-      const result = await queryThreadsAccount(creds, padCode).catch((e) => ({
+      const result = await withTimeout(
+        queryThreadsAccount(creds, padCode),
+        THREADS_ACCOUNT_QUERY_TIMEOUT_MS,
+        `Threads 帳號狀態檢測超時（${THREADS_ACCOUNT_QUERY_TIMEOUT_MS / 1000} 秒未返回）`,
+      ).catch((e) => ({
         padCode,
         platform: "threads" as const,
         method: "failed" as const,
@@ -17497,18 +18571,18 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }));
       let msg: string;
       if (!result.loggedIn && (result.method === "failed" || (!result.username && !result.email))) {
-        const accountState = formatCloudAccountStateNotice(result.error || "", { action: "账号查询", padName, padCode });
+        const accountState = formatCloudAccountStateNotice(result.error || "", { action: "帳號查詢", padName, padCode });
         msg = accountState
-          ? `🔍 *云机账号查询*\n\n云机：${padName}\n平台：Threads\n\n⚠️ ${accountState.status}\n\n请先进入云机处理账号状态，再回来重试查询或操作。`
-          : `🔍 *云机账号查询*\n\n云机：${padName}\n平台：Threads\n\n❌ 未识别到账号${result.error ? `\n原因：${formatUserFacingError(result.error, "当前页面没有识别到 Threads 账号信息。")}` : ""}`;
+          ? `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n⚠️ ${accountState.status}\n\n請先進入雲機處理帳號狀態，再回來重試查詢或操作。`
+          : `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n❌ 未識別到帳號${result.error ? `\n原因：${formatUserFacingError(result.error, "目前頁面沒有識別到 Threads 帳號資訊。")}` : ""}`;
       } else {
-        msg = `🔍 *云机账号查询*\n\n云机：${padName}\n平台：Threads\n\n✅ 已登录账号：\n${result.username ? `用户名：@${result.username}\n` : ""}${result.email ? `邮箱：${result.email}\n` : ""}识别方式：${result.method === "adb" ? "ADB 直读" : "截图识别"}`;
+        msg = `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n✅ 已登入帳號：\n${result.username ? `使用者名：@${result.username}\n` : ""}${result.email ? `信箱：${result.email}\n` : ""}識別方式：${result.method === "adb" ? "ADB 直讀" : "截圖識別"}`;
       }
       await bot.sendMessage(chatId, msg, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "📱 绑定这台云机", callback_data: `selectpad_${archiveId}_${padCode}` }],
+            [{ text: "📱 綁定這台雲機", callback_data: `selectpad_${archiveId}_${padCode}` }],
             [{ text: "◀️ 返回", callback_data: `queryaccounts_${archiveId}` }],
           ],
         },
@@ -17786,6 +18860,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const manualPosts = scopedPosts.slice(startIndex, startIndex + Math.max(1, Math.min(count, scopedPosts.length - startIndex)));
+      await showPublishPadSelection(chatId, msgId, {
+        mode: "manual_posts",
+        archiveId,
+        platform,
+        startIndex,
+        count: manualPosts.length,
+        groupContentType,
+        selectedPadCodes: [archive.boundPadCode || defaultPadCode],
+      }, `🚀 *人工发布前确认*\n\n人设：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布数量：${manualPosts.length} 篇\n\n请选择要同时发布的云机：`, `mpage_${Math.floor(startIndex / 8)}`);
+      return;
       if (!credentials.ak || !credentials.sk) {
         await safeEditOrSend(bot, chatId, msgId, "❌ VMOS 凭据未配置", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: buildPersonaPublishCallback(archiveId, groupContentType) }]] },
@@ -17845,7 +18930,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           if (isPublishWarning(result)) publishWarnings.push(`第 ${startIndex + index + 1} 篇：${result.detail}`);
           publishedIds.push(post.id);
           const publishScreenshotUrl = result.screenshotUrl;
-          publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl };
+          publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl, sourceMeta: post.sourceMeta, ...buildPublishedMetaFromResult(platform, result) };
           if (publishScreenshotUrl) {
             await sendOriginalScreenshotDocument(
               bot,
@@ -17916,6 +19001,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
 
+      await showPublishPadSelection(chatId, msgId, {
+        mode: "single_post",
+        archiveId: id,
+        postId: post.id,
+        platform,
+        selectedPadCodes: [padCode],
+      }, `🚀 *发布前确认*\n\n人设：${archive.name || id}\n平台：${platform}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n请选择要同时发布的云机：`, "sp");
+      return;
+
       const publishLockKey = `dopub:${id}:${platform}:${post.id}`;
       const publishScopeKey = `pad:${padCode}`;
       if (!acquirePublishCommand(chatId, publishLockKey, "发布", publishScopeKey)) {
@@ -17964,6 +19058,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
               padCode,
               imageUrl: post.imageUrl,
               screenshotUrl: publishScreenshotUrl,
+              sourceMeta: post.sourceMeta,
+              ...buildPublishedMetaFromResult(platform, result),
             },
           },
         ).catch(() => null);
@@ -18205,6 +19301,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         sendMainMenu(chatId, msgId);
         return;
       }
+      await showPublishPadSelection(chatId, msgId, {
+        mode: "custom_direct",
+        archiveId: prev.archiveId,
+        platform: prev.platform || effectiveDefaultPublishPlatform,
+        groupContentType: prev.groupContentType,
+        selectedPadCodes: prev.padCodes || [prev.padCode || defaultPadCode],
+      }, "请选择要同时发布的云机：", `custom_publish_platform_${prev.platform || effectiveDefaultPublishPlatform}`);
+      return;
       const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: false, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
       pendingCustomPublishes.set(chatId, nextState);
       await safeEditOrSend(bot, chatId, msgId, `✅ 已確認直發模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送內容\n\n請發送其中一種：\n1) 純文字推文\n2) 圖片/視頻 + caption\n3) 先發圖片/視頻，下一步再補文字\n4) 先發文字，下一步再補圖片/視頻\n\n收到完整內容後會先讓你確認，不會直接發布。`, {
@@ -18219,6 +19323,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         sendMainMenu(chatId, msgId);
         return;
       }
+      await showPublishPadSelection(chatId, msgId, {
+        mode: "custom_with_image",
+        archiveId: prev.archiveId,
+        platform: prev.platform || effectiveDefaultPublishPlatform,
+        groupContentType: prev.groupContentType,
+        selectedPadCodes: prev.padCodes || [prev.padCode || defaultPadCode],
+      }, "请选择要同时发布的云机：", `custom_publish_platform_${prev.platform || effectiveDefaultPublishPlatform}`);
+      return;
       const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: true, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
       pendingCustomPublishes.set(chatId, nextState);
       await safeEditOrSend(bot, chatId, msgId, `🖼 已確認配圖發布模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送文字文案\n\n請只發送純文字推文內容。我會根據文字生成配圖，下一步再讓你確認發布。\n如果此時發圖片或視頻，會被攔截，不會誤發布。`, {
@@ -18424,6 +19536,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       pendingPostActions.set(chatId, { archiveId, postId });
+      await showPublishPadSelection(chatId, msgId, {
+        mode: "scheduled_post",
+        archiveId,
+        postId,
+        platform,
+        groupContentType: action?.groupContentType,
+        selectedPadCodes: [archive.boundPadCode || defaultPadCode],
+      }, `⏰ *定時發佈前確認*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action?.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "post_action");
+      return;
       const nextState = {
         stage: "choose_time" as const,
         archiveId,
@@ -18501,6 +19622,22 @@ function sendMainMenu(chatId: number, msgId?: number) {
         sendMainMenu(chatId, msgId);
         return;
       }
+      const archive = await loadPersonaForThisBot(prev.archiveId);
+      const post = archive?.posts.find((item) => item.id === prev.postId);
+      if (!archive || !post) {
+        await safeEditOrSend(bot, chatId, msgId, "没有找到要定時發佈的推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "schedule_publish" }]] },
+        });
+        return;
+      }
+      await showPublishPadSelection(chatId, msgId, {
+        mode: "scheduled_post",
+        archiveId: prev.archiveId,
+        postId: prev.postId,
+        platform,
+        selectedPadCodes: prev.padCodes || [prev.padCode || archive.boundPadCode || defaultPadCode],
+      }, `⏰ *定時發佈前確認*\n\n人設：${archive.name}\n平台：${platform}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "schedule_publish");
+      return;
       const nextState = { ...prev, stage: "choose_time" as const, platform };
       pendingScheduledPublishes.set(chatId, nextState);
       void showScheduledTimePicker(chatId, msgId, nextState);
@@ -18651,6 +19788,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
               padCode,
               imageUrl: post.imageUrl,
               screenshotUrl: publishScreenshotUrl,
+              sourceMeta: post.sourceMeta,
+              ...buildPublishedMetaFromResult(platform, result),
             },
           },
         ).catch(() => null);
@@ -19278,7 +20417,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (pendingThreadsProfile?.stage === "await_avatar") {
       const profileReturnCallback = pendingThreadsProfile.returnCallback || `pad_detail_${pendingThreadsProfile.padCode}`;
       if (!media?.file_id || video) {
-        await bot.sendMessage(chatId, "❌ 请发送一张图片作为 Threads 头像，不要发送视频或純文字。", {
+        await bot.sendMessage(chatId, "❌ 請發送一張圖片作為 Threads 頭像，不要發送影片或純文字。", {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
         });
         return;
@@ -19288,13 +20427,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const downloaded = await downloadToolR18TelegramMedia(bot, msg, media);
         imageUrl = downloaded.hostPath || "";
       } catch (error) {
-        await bot.sendMessage(chatId, `❌ 头像图片下载失败，请重新上传一次。\n原因：${formatUserFacingError(error, "Telegram 文件下载失败")}`, {
+        await bot.sendMessage(chatId, `❌ 頭像圖片下載失敗，請重新上傳一次。\n原因：${formatUserFacingError(error, "Telegram 文件下載失敗")}`, {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
         });
         return;
       }
       if (!imageUrl) {
-        await bot.sendMessage(chatId, "❌ 头像图片读取失败，请重新上传一次。", {
+        await bot.sendMessage(chatId, "❌ 頭像圖片讀取失敗，請重新上傳一次。", {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
         });
         return;
@@ -19302,19 +20441,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
       pendingThreadsProfileActions.delete(chatId);
       const opKey = `threads-profile-avatar-${chatId}-${Date.now()}`;
-      const active = acquirePadOperation(chatId, pendingThreadsProfile.padCode, opKey, "Threads 头像修改");
+      const active = acquirePadOperation(chatId, pendingThreadsProfile.padCode, opKey, "Threads 頭像修改");
       if (active) {
         await sendPadBusyNotice(bot, chatId, pendingThreadsProfile.padCode, active);
         return;
       }
 
-      const statusMsg = await bot.sendMessage(chatId, `🖼 正在修改 Threads 头像\n\n云机：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n⏳ 正在准备头像图片...`, {
+      const statusMsg = await bot.sendMessage(chatId, `🖼 正在修改 Threads 頭像\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n⏳ 正在準備頭像圖片...`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
       });
       const stopTyping = startTelegramTyping(bot, chatId);
       const progress = (p: PublishProgress) => {
         bot.editMessageText(
-          `🖼 正在修改 Threads 头像\n\n云机：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
+          `🖼 正在修改 Threads 頭像\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
           {
             chat_id: chatId,
             message_id: statusMsg.message_id,
@@ -19329,30 +20468,30 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const result = await updateThreadsProfileAvatar(creds, pendingThreadsProfile.padCode, imageUrl, progress);
         assertPadOperationNotCancelled(opKey);
         stopTyping();
-        await bot.sendMessage(chatId, `✅ Threads 头像已提交\n\n云机：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n${result.detail}`, {
+        await bot.sendMessage(chatId, `✅ Threads 頭像已提交\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n${result.detail}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
         if (result.screenshotUrl) {
-          await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, "📸 Threads 头像修改后截图").catch(() => undefined);
+          await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, "📸 Threads 頭像修改後截圖").catch(() => undefined);
         }
       } catch (error) {
         stopTyping();
         const errorRaw = rawErrorMessage(error);
         const notice = formatCloudAccountStateNotice(errorRaw, {
-          action: "头像修改",
+          action: "頭像修改",
           padName: pendingThreadsProfile.padName,
           padCode: pendingThreadsProfile.padCode,
         });
         const message = notice
           ? notice.text
-          : `❌ Threads 头像修改失败\n\n云机：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n原因：${formatUserFacingError(error, "头像修改失败，请稍后重试。")}`;
+          : `❌ Threads 頭像修改失敗\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n原因：${formatUserFacingError(error, "頭像修改失敗，請稍後重試。")}`;
         await bot.sendMessage(chatId, message, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
-        const evidenceInput = resolveCloudAccountEvidenceInput(notice?.debugPath || extractInlineDebugPath(errorRaw));
+        const evidenceInput = notice ? null : resolveCloudAccountEvidenceInput(extractInlineDebugPath(errorRaw));
         if (evidenceInput) {
-          if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 当前账号状态截图")) {
-            await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
+          if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 目前帳號狀態截圖")) {
+            await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 目前帳號狀態截圖" }).catch(() => undefined);
           }
         }
       } finally {
@@ -19584,7 +20723,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
       const statusMsg = await bot.sendMessage(
         chatId,
-        `${operation.progressTitle}\n\n云机：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n⏳ 正在打开个人主页...`,
+        `${operation.progressTitle}\n\n雲機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n⏳ 正在開啟 Threads...`,
         {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         },
@@ -19592,7 +20731,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const stopTyping = startTelegramTyping(bot, chatId);
       const progress = (p: PublishProgress) => {
         bot.editMessageText(
-          `${operation.progressTitle}\n\n云机：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
+          `${operation.progressTitle}\n\n雲機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
           {
             chat_id: chatId,
             message_id: statusMsg.message_id,
@@ -19608,7 +20747,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         assertPadOperationNotCancelled(opKey);
         stopTyping();
         const title = result.state === "verified" ? operation.successVerified : operation.successSubmitted;
-        await bot.sendMessage(chatId, `${title}\n\n云机：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n${result.detail}`, {
+        await bot.sendMessage(chatId, `${title}\n\n雲機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n${result.detail}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
         if (result.screenshotUrl) {
@@ -19621,16 +20760,49 @@ function sendMainMenu(chatId: number, msgId?: number) {
           padName: profileState.padName,
           padCode: profileState.padCode,
         });
+        if (notice?.kind === "login_required" && profileState.archiveId && profileState.stage !== "await_avatar") {
+          pendingThreadsProfileResumeActions.set(chatId, {
+            archiveId: profileState.archiveId,
+            padCode: profileState.padCode,
+            padName: profileState.padName,
+            stage: profileState.stage,
+            input: operation.input,
+            returnCallback: profileReturnCallback,
+            createdAt: Date.now(),
+          });
+        }
+        const accountStateRows = notice?.kind === "login_required" && profileState.archiveId
+          ? [
+              [{ text: "登入 Threads", callback_data: `acctlogin_threads_${profileState.archiveId}` }],
+              [{ text: "返回 Threads 帳號", callback_data: profileReturnCallback }],
+            ]
+          : [[{ text: "返回", callback_data: profileReturnCallback }]];
+        if (notice?.kind === "login_required") {
+          await bot.editMessageText([
+            "⚠️ Threads 未登入，目前動作已停止",
+            "",
+            `雲機：${profileState.padName || profileState.padCode}`,
+            `操作：${operation.action}`,
+            `${operation.valueLabel}：${operation.input}`,
+            "",
+            "請點擊「登入 Threads」，依提示輸入帳號和密碼。登入完成後，系統會繼續執行剛才的修改。",
+          ].join("\n"), {
+            chat_id: chatId,
+            message_id: statusMsg.message_id,
+            reply_markup: { inline_keyboard: accountStateRows },
+          }).catch(() => undefined);
+          return;
+        }
         const message = notice
           ? notice.text
-          : `${operation.failureTitle}\n\n云机：${profileState.padName || profileState.padCode}\n原因：${formatUserFacingError(error, `${operation.title}失败，请稍后重试。`)}`;
+          : `${operation.failureTitle}\n\n雲機：${profileState.padName || profileState.padCode}\n原因：${formatUserFacingError(error, `${operation.title}失敗，請稍後重試。`)}`;
         await bot.sendMessage(chatId, message, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
-        const evidenceInput = resolveCloudAccountEvidenceInput(notice?.debugPath);
+        const evidenceInput = notice ? null : resolveCloudAccountEvidenceInput(extractInlineDebugPath(rawErrorMessage(error)));
         if (evidenceInput) {
-          if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 当前账号状态截图")) {
-            await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 当前账号状态截图" }).catch(() => undefined);
+          if (!await sendOriginalScreenshotDocument(bot, chatId, evidenceInput, "📸 目前帳號狀態截圖")) {
+            await bot.sendPhoto(chatId, evidenceInput, { caption: "📸 目前帳號狀態截圖" }).catch(() => undefined);
           }
         }
       } finally {
@@ -19706,29 +20878,29 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (loginState.stage === "await_username") {
         const username = text.replace(/^@/, "").trim();
         pendingLoginActions.set(chatId, { ...loginState, stage: "await_password", username });
-        await bot.sendMessage(chatId, `✅ 用户名：${username}\n\n⭐ 请输入密码 ⭐`, {
+        await telegramBestEffort("threadsLogin.usernamePrompt", bot.sendMessage(chatId, `✅ 使用者名：${username}\n\n⭐ 請輸入密碼 ⭐`, {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: loginReturnCallback }]] },
-        });
+        }));
         return;
       }
       if (loginState.stage === "await_password") {
         const password = text.trim();
         pendingLoginActions.set(chatId, { ...loginState, stage: "await_password", password });
-        await bot.sendMessage(chatId, `✅ 已收到密码\n\n云机：${loginState.padName || loginState.padCode}\n账号：${loginState.username}\n\n确认开始登录？`, {
+        await telegramBestEffort("threadsLogin.confirmPrompt", bot.sendMessage(chatId, `✅ 已收到密碼\n\n雲機：${loginState.padName || loginState.padCode}\n帳號：${loginState.username}\n\n確認開始登入？`, {
           reply_markup: {
             inline_keyboard: [
-              [{ text: "✅ 确认登录", callback_data: `pad_login_confirm_${loginState.padCode}` }],
+              [{ text: "✅ 確認登入", callback_data: `pad_login_confirm_${loginState.padCode}` }],
               [{ text: "❌ 取消", callback_data: loginReturnCallback }],
             ],
           },
-        });
+        }));
         return;
       }
       if (loginState.stage === "await_otp") {
         const otp = text.trim().replace(/\s/g, "");
         if (!/^\d{6}$/.test(otp)) {
-          await bot.sendMessage(chatId, "❌ 验证码格式不对。\n\n⭐ 请输入 6 位数字 ⭐\n　　　只需要發送數字即可。", {
-            reply_markup: { inline_keyboard: [[{ text: "❌ 取消登录", callback_data: loginReturnCallback }]] },
+          await bot.sendMessage(chatId, "❌ 驗證碼格式不對。\n\n⭐ 請輸入 6 位數字 ⭐\n　　　只需要發送數字即可。", {
+            reply_markup: { inline_keyboard: [[{ text: "❌ 取消登入", callback_data: loginReturnCallback }]] },
           });
           return;
         }
@@ -19795,6 +20967,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return;
         }
         pendingPersonaAccountActions.delete(chatId);
+        const resumeAction = pendingThreadsProfileResumeActions.get(chatId);
         await updatePersonaArchiveProfile(pendingPersonaAccount.archiveId, {
           setup: {
             ...archive.setup,
@@ -19810,8 +20983,53 @@ function sendMainMenu(chatId: number, msgId?: number) {
         },
         }).catch(() => null);
         invalidatePersonaListCache();
+        if (resumeAction && resumeAction.archiveId === pendingPersonaAccount.archiveId) {
+          await bot.sendMessage(chatId, [
+            "✅ Threads 登入資料已保存",
+            `帳號：${maskAccountSecret(pendingPersonaAccount.handle)}`,
+            "",
+            "正在登入 Threads，登入成功後會繼續剛才的資料修改...",
+          ].join("\n"), {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }]] },
+          });
+          const loginResult = await loginThreadsAccount(resolveVmosCredentials(), resumeAction.padCode, {
+            username: pendingPersonaAccount.handle!,
+            password: value,
+          }, { forceFreshLogin: true });
+          if (loginResult.ok) {
+            await bot.sendMessage(chatId, `✅ Threads 登入成功\n\n${loginResult.message}`, {
+              reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }]] },
+            });
+            await resumePendingThreadsProfileAction(bot, chatId, pendingPersonaAccount.archiveId);
+            return;
+          }
+          if (loginResult.state === "challenge_otp") {
+            pendingLoginActions.set(chatId, {
+              padCode: resumeAction.padCode,
+              padName: resumeAction.padName,
+              stage: "await_otp",
+              username: pendingPersonaAccount.handle,
+              password: value,
+              returnCallback: `acctplatform_threads_${pendingPersonaAccount.archiveId}`,
+            });
+            await bot.sendMessage(chatId, [
+              "📱 Threads 需要驗證碼",
+              "",
+              loginResult.message,
+              "",
+              "請直接發送 6 位驗證碼，系統會繼續提交；完成後會繼續剛才的資料修改。",
+            ].join("\n"), {
+              reply_markup: { inline_keyboard: [[{ text: "取消登入", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }]] },
+            });
+            return;
+          }
+          await bot.sendMessage(chatId, `❌ Threads 登入未完成\n\n${loginResult.message}`, {
+            reply_markup: { inline_keyboard: [[{ text: "重新登入", callback_data: `acctlogin_threads_${pendingPersonaAccount.archiveId}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: `acctplatform_threads_${pendingPersonaAccount.archiveId}` }]] },
+          });
+          return;
+        }
         await bot.sendMessage(chatId, `✅ Threads 登入資料已保存\n帳號：${maskAccountSecret(pendingPersonaAccount.handle)}`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${pendingPersonaAccount.archiveId}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回帳號管理", callback_data: `acctmgmt_${pendingPersonaAccount.archiveId}` }]] },
         });
         return;
       }

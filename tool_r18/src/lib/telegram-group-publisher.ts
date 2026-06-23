@@ -24,6 +24,7 @@ export interface TelegramGroupPublishResult {
   state: "verified" | "warning";
   detail: string;
   screenshotUrl?: string;
+  publishedUrl?: string;
 }
 
 export interface TelegramGroupIdentifyTask {

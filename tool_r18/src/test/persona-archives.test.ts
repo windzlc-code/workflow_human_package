@@ -496,6 +496,100 @@ describe("persona archives migration", () => {
     expect(getPersonaMemory(archive.id).entries[0].summary).not.toContain("發布紀錄需要保留的完整細節發布紀錄需要保留的完整細節");
   });
 
+  it("keeps sentiment source metrics in publish history and requeued posts", async () => {
+    const archive = await createPersonaArchive({
+      id: "publish-history-source-meta",
+      name: "source meta publish history",
+      content: "test persona",
+    });
+    const withPost = await appendCustomPersonaArchivePost({
+      archiveId: archive.id,
+      content: "published from sentiment source",
+      sourceMeta: {
+        source: "sentiment_hot_import",
+        platform: "threads",
+        sourceUrl: "https://www.threads.net/@example/post/abc",
+        hotScore: 1234,
+        engagement: { likeCount: 12, commentCount: 3, viewCount: 1234 },
+        metrics: { like_count: 12, comment_count: 3, view_count: 1234 },
+      },
+    });
+    const postId = withPost?.posts[0].id!;
+
+    const published = await markArchiveEpisodesPublished(archive.id, [postId], {
+      [postId]: "published from sentiment source",
+    }, {
+      [postId]: {
+        platform: "threads",
+        padCode: "PAD-1",
+        publishedUrl: "https://www.threads.net/@mine/post/new",
+        publishedMeta: {
+          source: "published_post",
+          platform: "threads",
+          sourceUrl: "https://www.threads.net/@mine/post/new",
+          hotScore: 50,
+          engagement: { likeCount: 5, commentCount: 1, viewCount: 50 },
+          metrics: { like_count: 5, comment_count: 1, view_count: 50 },
+        },
+        publishedTargets: [
+          {
+            platform: "threads",
+            padCode: "PAD-1",
+            publishedUrl: "https://www.threads.net/@mine/post/new",
+            publishedMeta: {
+              source: "published_post",
+              platform: "threads",
+              sourceUrl: "https://www.threads.net/@mine/post/new",
+              hotScore: 50,
+              engagement: { likeCount: 5, commentCount: 1, viewCount: 50 },
+              metrics: { like_count: 5, comment_count: 1, view_count: 50 },
+            },
+          },
+          {
+            platform: "threads",
+            padCode: "PAD-2",
+            publishedUrl: "https://www.threads.net/@mine/post/new2",
+            publishedMeta: {
+              source: "published_post",
+              platform: "threads",
+              sourceUrl: "https://www.threads.net/@mine/post/new2",
+              hotScore: 70,
+              engagement: { likeCount: 7, commentCount: 2, viewCount: 70 },
+              metrics: { like_count: 7, comment_count: 2, view_count: 70 },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(published?.publishHistory?.[0].sourceMeta).toMatchObject({
+      source: "sentiment_hot_import",
+      platform: "threads",
+      sourceUrl: "https://www.threads.net/@example/post/abc",
+      hotScore: 1234,
+    });
+    expect(published?.publishHistory?.[0].publishedUrl).toBe("https://www.threads.net/@mine/post/new");
+    expect(published?.publishHistory?.[0].publishedMeta).toMatchObject({
+      source: "published_post",
+      platform: "threads",
+      sourceUrl: "https://www.threads.net/@mine/post/new",
+      hotScore: 50,
+    });
+    expect(published?.publishHistory?.[0].publishedTargets).toHaveLength(2);
+    expect(published?.publishHistory?.[0].publishedTargets?.[1]).toMatchObject({
+      padCode: "PAD-2",
+      publishedUrl: "https://www.threads.net/@mine/post/new2",
+    });
+
+    const recordId = published?.publishHistory?.[0].id!;
+    const requeued = await requeuePublishRecord(archive.id, recordId);
+    expect(requeued?.posts[0].sourceMeta).toMatchObject({
+      source: "sentiment_hot_import",
+      sourceUrl: "https://www.threads.net/@example/post/abc",
+      hotScore: 1234,
+    });
+  });
+
   it("keeps platform publish queues independent after one platform publishes", async () => {
     const archive = await createPersonaArchive({
       id: "platform-independent-queues",
