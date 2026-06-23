@@ -1707,6 +1707,31 @@ export function looksLikeThreadsSearchResultsUiXml(uiXml: string, keyword?: stri
   return hasSearchTabs && hasResultContent && hasSearchChrome;
 }
 
+function estimateVisibleThreadsSearchResultCount(uiXml: string): number {
+  const rows: number[] = [];
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+
+  for (const node of nodes) {
+    const text = normalizeSingleLine(`${decodeXmlAttr(getXmlAttr(node, "text"))} ${decodeXmlAttr(getXmlAttr(node, "content-desc"))}`);
+    if (text.length < 4) continue;
+    if (/(熱門貼文|热门贴文|最新貼文|最新贴文|相關個人檔案|相关个人档案|Search|搜尋|搜索|首頁|主页|Home|個人檔案|个人档案)/i.test(text)) continue;
+    if (!/(#|＃|回覆|回复|讚|赞|轉發|转发|小時|小时|分鐘|分钟|天|週|周|\/\d{1,2}\/\d{2,4})/i.test(text)) continue;
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (!center || center.y < 210 || center.y > 1420) continue;
+    rows.push(center.y);
+  }
+
+  rows.sort((a, b) => a - b);
+  const clusters: number[] = [];
+  for (const y of rows) {
+    const last = clusters[clusters.length - 1];
+    if (last === undefined || Math.abs(y - last) > 150) {
+      clusters.push(y);
+    }
+  }
+  return clusters.length;
+}
+
 export function findThreadsProfileVideoTabTarget(uiXml: string): { x: number; y: number } | null {
   const candidates: Array<{ x: number; y: number; score: number }> = [];
   const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
@@ -24229,6 +24254,27 @@ async function warmupSearchInterestSurface(
     x: Math.round(screen.width * xRatio),
     y: Math.round(screen.height * yRatio),
   });
+  const refreshAcpSearchResultsIfSparse = async () => {
+    if (!isAcpPad(padCode)) return;
+    const beforeXml = await dumpUiXml(config, padCode).catch(() => "");
+    const beforeCount = estimateVisibleThreadsSearchResultCount(beforeXml);
+    if (beforeCount >= 2) {
+      report(`搜索结果推文数量正常，继续浏览：${beforeCount} 条`);
+      return;
+    }
+    report(`搜索结果推文数量偏少，执行一次下拉刷新：${beforeCount} 条`);
+    await execAdbForText(
+      config,
+      padCode,
+      `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.30)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.66)} 520`,
+      8_000,
+      1200,
+    ).catch(() => "");
+    await delay(1600);
+    const afterXml = await dumpUiXml(config, padCode).catch(() => "");
+    const afterCount = estimateVisibleThreadsSearchResultCount(afterXml);
+    report(`搜索结果刷新后可见推文估算：${afterCount} 条`);
+  };
 
   report(`按人设关键词搜索相关内容：${keyword}`);
   let searchInput: { x: number; y: number } | null = null;
@@ -24325,6 +24371,7 @@ async function warmupSearchInterestSurface(
     await delay(900);
     await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.56), Math.round(screen.height * 0.18), 450).catch(() => undefined);
     await delay(350);
+    await refreshAcpSearchResultsIfSparse();
     await execAdbForText(
       config,
       padCode,
