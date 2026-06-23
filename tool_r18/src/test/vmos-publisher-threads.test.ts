@@ -35,6 +35,7 @@ import {
   findAcpReplySendButtonPointFromScreenshot,
   findThreadsProfileVideoTabTarget,
   finalizeWarmupComment,
+  locateThreadsVisibleOwnPostContentTarget,
   chooseThreadsGalleryMarkerToKeep,
   getLocalVisualVerificationSupport,
   getThreadsProfileReferenceImageBestMatchForTest,
@@ -487,6 +488,36 @@ describe("Threads publish verification", () => {
     expect(match.mode).not.toBe("full");
   });
 
+  it("does not open auto-reply from a profile setup card false comment row", async () => {
+    const samplePath = path.resolve(
+      "src",
+      "test",
+      "fixtures",
+      "threads-publish-samples",
+      "samples",
+      "threads-auto-reply-profile-setup-card-false-comment-row.jpg",
+    );
+    const dataUrl = "data:image/jpeg;base64," + fs.readFileSync(samplePath).toString("base64");
+    const uiXml = [
+      "<hierarchy>",
+      "<node text=\"rick_y54088\" class=\"android.widget.TextView\" bounds=\"[26,197][253,239]\" />",
+      "<node text=\"\u4e32\u6587\" class=\"android.widget.TextView\" bounds=\"[74,720][146,760]\" />",
+      "<node text=\"\u56de\u8986\" class=\"android.widget.TextView\" bounds=\"[243,720][315,760]\" />",
+      "<node text=\"\u5f71\u97f3\u5167\u5bb9\" class=\"android.widget.TextView\" bounds=\"[397,720][525,760]\" />",
+      "<node text=\"\u8f49\u767c\" class=\"android.widget.TextView\" bounds=\"[598,720][670,760]\" />",
+      "<node text=\"\u5b8c\u6210\u500b\u4eba\u6a94\u6848\" class=\"android.widget.TextView\" bounds=\"[30,831][230,872]\" />",
+      "<node text=\"\u52692\u9805\" class=\"android.widget.TextView\" bounds=\"[250,838][316,870]\" />",
+      "<node text=\"\u8ffd\u8e64 10 \u500b\u500b\u4eba\u6a94\u6848\" class=\"android.widget.TextView\" bounds=\"[70,1007][315,1045]\" />",
+      "<node text=\"\u67e5\u770b\u500b\u4eba\u6a94\u6848\" class=\"android.widget.TextView\" bounds=\"[115,1235][330,1284]\" />",
+      "<node text=\"rick_y54088 4\u5929\" class=\"android.widget.TextView\" bounds=\"[87,1510][294,1558]\" />",
+      "</hierarchy>",
+    ].join("\n");
+
+    await expect(locateThreadsVisibleOwnPostContentTarget(dataUrl, uiXml, {
+      requireCommentBadge: true,
+      maxAgeDays: 5,
+    })).resolves.toBeNull();
+  });
   it("does not classify captured fullscreen media viewer samples as gallery picker", async () => {
     const samplePath = path.resolve(
       ".runtime",

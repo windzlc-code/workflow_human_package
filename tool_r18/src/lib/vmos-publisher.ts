@@ -24871,8 +24871,13 @@ async function openThreadsLatestOwnPostFromProfile(
       const profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
       const hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
       const hasProfileSetupCardByPixels = await detectThreadsProfileSetupCardLocally(shotUrl).catch(() => false);
+      const setupCardCommentTarget = await locateThreadsProfileTopCountedCommentTargetLocally(shotUrl).catch(() => null);
+      const setupCardImage = await getImageDimensions(shotUrl).catch(() => null);
       const hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText)
-        || await locateThreadsProfileTopCountedCommentTargetLocally(shotUrl).catch(() => null);
+        || Boolean(setupCardCommentTarget && !isThreadsProfileSetupCardBlockingActionTarget(
+          setupCardCommentTarget,
+          { width: setupCardImage?.width || BASE_SCREEN.width, height: setupCardImage?.height || BASE_SCREEN.height },
+        ));
       if ((!hasProfileSetupCard && !hasProfileSetupCardByPixels) || hasVisiblePostOrActionRow) break;
       await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 520", 1000);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
@@ -25476,7 +25481,7 @@ async function detectThreadsProfileSuggestionOverlayLocally(screenshotUrl: strin
     && darkBottomDone > 0.16;
 }
 
-async function locateThreadsVisibleOwnPostContentTarget(
+export async function locateThreadsVisibleOwnPostContentTarget(
   screenshotUrl: string,
   uiXml = "",
   options: {
@@ -25546,6 +25551,11 @@ async function locateThreadsVisibleOwnPostContentTarget(
     }
     return null;
   });
+  const setupCardBlocksCountedTarget = Boolean(
+    countedCommentTarget
+    && (hasProfileSetupCard || hasProfileSetupCardByPixels)
+    && isThreadsProfileSetupCardBlockingActionTarget(countedCommentTarget, { width, height }),
+  );
   if (((hasProfileSetupCard || hasProfileSetupCardByPixels) && !hasVisiblePostText && !countedCommentTarget)) {
     if (options.padCode && options.requireCommentBadge) {
       saveThreadsAutoReplySampleStep({
@@ -25567,8 +25577,12 @@ async function locateThreadsVisibleOwnPostContentTarget(
         target: countedCommentTarget || null,
         locator: countedCommentTarget && "debugReason" in countedCommentTarget ? countedCommentTarget.debugReason : undefined,
         mode: "require_comment_badge",
+        skippedReason: setupCardBlocksCountedTarget ? "profile_setup_card_action_row" : undefined,
       },
     });
+  }
+  if (setupCardBlocksCountedTarget) {
+    return null;
   }
   if (
     countedCommentTarget
@@ -25627,6 +25641,18 @@ async function locateThreadsVisibleOwnPostContentTarget(
     };
   }
   return null;
+}
+
+function isThreadsProfileSetupCardBlockingActionTarget(
+  target: { x: number; y: number },
+  image: { width: number; height: number },
+): boolean {
+  const width = image.width || BASE_SCREEN.width;
+  const height = image.height || BASE_SCREEN.height;
+  return target.y >= height * 0.52
+    && target.y <= height * 0.88
+    && target.x >= width * 0.06
+    && target.x <= width * 0.78;
 }
 
 function parseThreadsRelativeAgeDays(text: string): number | null {
