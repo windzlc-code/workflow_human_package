@@ -3238,7 +3238,7 @@ async function runPersonaThreadsAutoReplyFromTelegram(
   archiveId: string,
   maxAgeDays = 2,
 ): Promise<void> {
-  const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
+  const archive = await loadPersonaArchive(archiveId).catch(() => null);
   if (!archive) {
     await sendMainMenu(chatId);
     return;
@@ -3443,7 +3443,7 @@ function resolvePersonaBoundPadForAccountAction(archive: PersonaArchive, pads: A
 
 async function beginPersonaThreadsSwitchLoginFromTelegram(bot: TelegramBot, chatId: number, messageId: number | undefined, archiveId: string): Promise<void> {
   pendingPersonaAccountActions.delete(chatId);
-  const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
+  const archive = await loadPersonaArchive(archiveId).catch(() => null);
   if (!archive) {
     await sendMainMenu(chatId, messageId);
     return;
@@ -10367,7 +10367,7 @@ async function refreshStoredPostSentimentMetrics(args: {
   archiveId: string;
   postId: string;
 }): Promise<PersonaArchive["posts"][number] | null> {
-  const archive = await loadPersonaForThisBot(args.archiveId);
+  const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const post = archive?.posts.find((item) => item.id === args.postId);
   const sourceMeta = post?.sourceMeta;
   if (!post || sourceMeta?.source !== "sentiment_hot_import" || !sourceMeta.sourceUrl) return null;
@@ -10406,7 +10406,7 @@ async function refreshPublishHistorySentimentMetrics(args: {
   archiveId: string;
   recordId: string;
 }): Promise<NonNullable<PersonaArchive["publishHistory"]>[number] | null> {
-  const archive = await loadPersonaForThisBot(args.archiveId);
+  const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const originalRecord = archive?.publishHistory?.find((item) => item.id === args.recordId);
   if (!archive || !originalRecord || !canRefreshPublishHistoryMetrics(originalRecord)) return null;
   const record = hasPublishHistoryPadLookup(originalRecord)
@@ -10776,7 +10776,7 @@ async function renderStoredPostMediaManager(
   messageId: number | undefined,
   action: { archiveId: string; postId: string; groupContentType?: TelegramGroupContentType },
 ) {
-  const archive = await loadPersonaForThisBot(action.archiveId);
+  const archive = await loadPersonaArchive(action.archiveId).catch(() => null);
   const post = archive?.posts.find((item) => item.id === action.postId);
   if (!archive || !post) {
     await safeEditOrSend(bot, chatId, messageId, "没有找到这篇推文。", {
@@ -10825,7 +10825,7 @@ async function updateStoredPostMediaItems(args: {
   mediaItems: StoredPostMediaItem[];
   successText: string;
 }) {
-  const archive = await loadPersonaForThisBot(args.archiveId);
+  const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   const post = archive?.posts.find((item) => item.id === args.postId);
   if (!archive || !post) {
     await args.bot.sendMessage(args.chatId, "没有找到这篇推文，请返回推文列表重新打开。");
