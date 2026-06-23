@@ -26901,8 +26901,13 @@ async function collectThreadsAutoReplyPostContext(
   let replyTarget: WarmupFeedActionTargets | null = null;
   let visibleCommentCandidates: ThreadsAutoReplyCandidate[] = [];
   let latestCommentShotUrl = firstShotUrl;
+  const commentCollectScrolls = [
+    "input swipe 360 1250 360 850 450",
+    "input swipe 360 1180 360 650 550",
+    "input swipe 360 1080 360 480 650",
+  ];
 
-  for (let page = 0; page < 2; page += 1) {
+  for (let page = 0; page < commentCollectScrolls.length + 1; page += 1) {
     let shotUrl = page === 0 && firstShotUrl
       ? firstShotUrl
       : await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
@@ -26987,7 +26992,15 @@ async function collectThreadsAutoReplyPostContext(
       }
     }
     let pageVisibleComments = extractThreadsAutoReplyVisibleComments(uiXml, shotUrl || firstShotUrl, postOwnIdentifiers);
-    if (!pageVisibleComments.length && shotUrl) {
+    const shouldUseVisionFallback = Boolean(
+      shotUrl
+      && !pageVisibleComments.length
+      && (
+        !visibleTexts.length
+        || page >= commentCollectScrolls.length
+      )
+    );
+    if (shouldUseVisionFallback) {
       const visionComments = await extractThreadsAutoReplyVisibleCommentsByVision(shotUrl, persona, postOwnIdentifiers).catch(() => []);
       if (visionComments.length) pageVisibleComments = visionComments;
     }
@@ -27005,6 +27018,7 @@ async function collectThreadsAutoReplyPostContext(
           replyPoint: item.replyPoint,
           debugReason: item.debugReason,
         })),
+        skippedVisionFallback: !shouldUseVisionFallback && !pageVisibleComments.length,
         usedVisionFallback: pageVisibleComments.some((item) => /vision_ocr/.test(item.debugReason || "")),
       },
     });
@@ -27012,15 +27026,16 @@ async function collectThreadsAutoReplyPostContext(
       visibleCommentCandidates = pageVisibleComments;
       latestCommentShotUrl = shotUrl || latestCommentShotUrl;
     }
-    if (page < 1) {
-      await execAdbForText(config, padCode, "input swipe 360 1000 360 300 700", 8_000, 700).catch(() => "");
+    const scrollCommand = commentCollectScrolls[page];
+    if (scrollCommand) {
+      await execAdbForText(config, padCode, scrollCommand, 8_000, 700).catch(() => "");
       await delay(850);
       const afterSwipeShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl || firstShotUrl);
       saveThreadsAutoReplySampleStep({
         padCode,
         step: `collect-after-swipe-${page + 1}`,
         screenshotUrl: afterSwipeShotUrl || undefined,
-        meta: { swipe: "input swipe 360 1000 360 300 700" },
+        meta: { swipe: scrollCommand },
       });
     }
   }
