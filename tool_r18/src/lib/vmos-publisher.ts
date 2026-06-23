@@ -32315,7 +32315,7 @@ export async function warmupThreadsAccount(
     if (
       (interactionTargetsDone || (hasMinimumInteractionRequirement && minimumInteractionsDone))
       && minimumInteractionsDone
-      && browsed >= Math.min(browseCount, 2)
+      && browsed >= browseCount
       && (!timedSession || strictCompletion || minRequiredLikes > 0 || minRequiredComments > 0 || minRequiredInteractions > 0)
     ) {
       report(`互动目标已完成，提前结束浏览：已浏览 ${browsed}/${browseCount} 条`);
