@@ -24359,9 +24359,57 @@ async function warmupSearchInterestSurface(
     await delay(warmupRandomInt(700, 1300));
     return;
   }
-  await execAdbForText(config, padCode, "input keyevent KEYCODE_ENTER", 8_000, 900).catch(() => "");
-  await warmupWaitForScrollSettle(2800, 5200);
-  await delay(isAcpPad(padCode) ? warmupRandomInt(1800, 3200) : warmupRandomInt(900, 1600));
+  const waitForSubmittedSearchResults = async (timeoutMs = isAcpPad(padCode) ? 15_000 : 8_000) => {
+    const deadline = Date.now() + timeoutMs;
+    let lastXml = "";
+    while (Date.now() < deadline) {
+      const xml = await dumpUiXml(config, padCode).catch(() => "");
+      lastXml = xml || lastXml;
+      if (looksLikeThreadsSearchResultsUiXml(xml, keyword)) return { ok: true, xml };
+      const shotUrl = isAcpPad(padCode)
+        ? await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "")
+        : "";
+      if (shotUrl && await detectThreadsSearchResultsPageLocally(shotUrl).catch(() => false)) return { ok: true, xml };
+      await delay(1000);
+    }
+    return { ok: false, xml: lastXml };
+  };
+  const submitAttempts: Array<{ label: string; run: () => Promise<void> }> = [
+    {
+      label: "系统搜索键",
+      run: async () => {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_SEARCH", 8_000, 900).catch(() => "");
+      },
+    },
+    {
+      label: "软键盘搜索键",
+      run: async () => {
+        const keyPoint = point(0.91, 0.92);
+        await tapViaAdbAbsoluteQuick(config, padCode, keyPoint.x, keyPoint.y, 1100).catch(() => undefined);
+      },
+    },
+    {
+      label: "回车键",
+      run: async () => {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_ENTER", 8_000, 900).catch(() => "");
+      },
+    },
+  ];
+  let submitted = await waitForSubmittedSearchResults(1200);
+  for (const attempt of submitAttempts) {
+    if (submitted.ok) break;
+    report(`提交搜索关键词并等待结果页（${attempt.label}）：${keyword}`);
+    await attempt.run();
+    await warmupWaitForScrollSettle(900, 1500);
+    submitted = await waitForSubmittedSearchResults(isAcpPad(padCode) ? 7_000 : 4_000);
+  }
+  if (submitted.ok) {
+    report(`搜索提交后已进入结果页：${keyword}`);
+    await delay(isAcpPad(padCode) ? warmupRandomInt(900, 1500) : warmupRandomInt(700, 1200));
+    return;
+  }
+  const stillInSearchInput = threadsSearchInputContainsKeyword(submitted.xml || "", keyword);
+  throw new Error(`搜索提交后未进入结果页：${keyword}${stillInSearchInput ? "（仍停留在搜索输入框）" : ""}`);
 }
 
 async function warmupAssessPostRelevanceByModel(
