@@ -24318,6 +24318,23 @@ async function warmupSearchInterestSurface(
   await clearFocusedTextInput(config, padCode, 350).catch(() => undefined);
   report(`输入搜索关键词：${keyword}`);
   await typeText(config, padCode, keyword, isAcpPad(padCode) ? warmupRandomInt(1800, 2600) : warmupRandomInt(1000, 1600));
+  if (isAcpPad(padCode)) {
+    report(`ACP 已输入中文关键词，直接提交并浏览搜索结果：${keyword}`);
+    await delay(700);
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_SEARCH", 8_000, 700).catch(() => "");
+    await delay(900);
+    await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.56), Math.round(screen.height * 0.18), 450).catch(() => undefined);
+    await delay(350);
+    await execAdbForText(
+      config,
+      padCode,
+      `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.76)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.47)} 420`,
+      8_000,
+      700,
+    ).catch(() => "");
+    await delay(warmupRandomInt(700, 1100));
+    return;
+  }
   const waitForKeywordWrittenOrResults = async (timeoutMs = 8_000) => {
     const deadline = Date.now() + timeoutMs;
     let lastXml = "";
