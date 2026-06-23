@@ -32493,14 +32493,14 @@ export async function warmupThreadsAccount(
           allowKeywordOnlyLike: shouldLike && !shouldComment,
           allowKeywordComment: shouldComment,
         });
-        const actionDebug = `${feedActions?.debugReason || ""} ${feedActions?.debugRaw || ""}`;
-        const likeGeometryConfirmed = /geometry_like_shape_override|geometry_like_shape_confirmed/.test(actionDebug);
+        let actionDebug = `${feedActions?.debugReason || ""} ${feedActions?.debugRaw || ""}`;
+        let likeGeometryConfirmed = /geometry_like_shape_override|geometry_like_shape_confirmed/.test(actionDebug);
         const onlyLikeIsNeeded = shouldLike && !shouldComment;
         const minSafeSearchLikeX = Math.round(BASE_SCREEN.width * 0.18);
         const maxSafeSearchLikeX = Math.round(BASE_SCREEN.width * 0.30);
         const minSafeSearchLikeY = Math.round(BASE_SCREEN.height * 0.22);
         const maxSafeSearchLikeY = Math.round(BASE_SCREEN.height * 0.885);
-        const searchLikePointLooksSafe = Boolean(
+        let searchLikePointLooksSafe = Boolean(
           feedActions?.like
           && feedActions.like.x >= minSafeSearchLikeX
           && feedActions.like.x <= maxSafeSearchLikeX
@@ -32535,7 +32535,34 @@ export async function warmupThreadsAccount(
         if (
           /acp_verified_common_action_row_fallback/.test(feedActions?.debugReason || "")
           && /fallback_like_missing|fallback_comment_missing|primary_like_shape_rejected|primary_comment_shape_rejected/.test(actionDebug)
-          && !(onlyLikeIsNeeded && feedActions?.like && (likeGeometryConfirmed || searchLikePointLooksSafe))
+          && onlyLikeIsNeeded
+          && /fallback_like_missing|primary_like_shape_rejected/.test(actionDebug)
+        ) {
+          report("搜索结果点赞仅来自不稳定几何点，先显露互动栏并重新截图定位，避免误点正文");
+          await revealAcpSearchResultActionRow().catch(() => undefined);
+          await warmupWaitForScrollSettle(900, 1500);
+          const retryActions = await withTimeout(
+            warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode, { preferActionRowBeforeProfile: true }),
+            8_000,
+            "warmup ACP search visible action retry after unsafe geometry timeout",
+          ).catch(() => null);
+          if (retryActions?.like) {
+            feedActions = retryActions;
+            actionDebug = `${feedActions.debugReason || ""} ${feedActions.debugRaw || ""}`;
+            likeGeometryConfirmed = /geometry_like_shape_override|geometry_like_shape_confirmed/.test(actionDebug);
+            searchLikePointLooksSafe = Boolean(
+              feedActions.like.x >= minSafeSearchLikeX
+              && feedActions.like.x <= maxSafeSearchLikeX
+              && feedActions.like.y >= minSafeSearchLikeY
+              && feedActions.like.y <= maxSafeSearchLikeY,
+            );
+            report(`搜索结果重新定位点赞候选：${feedActions.debugReason || "retry_action_row"}`);
+          }
+        }
+        if (
+          /acp_verified_common_action_row_fallback/.test(feedActions?.debugReason || "")
+          && /fallback_like_missing|fallback_comment_missing|primary_like_shape_rejected|primary_comment_shape_rejected/.test(actionDebug)
+          && !(onlyLikeIsNeeded && feedActions?.like && likeGeometryConfirmed && !/fallback_like_missing|primary_like_shape_rejected/.test(actionDebug))
         ) {
           report(`搜索结果候选互动栏仅为不稳定兜底，跳过当前候选：${feedActions?.debugReason || "unstable_action_row"}`);
           markBrowsedThisTurn("搜索候选互动栏不稳定");
@@ -32548,6 +32575,7 @@ export async function warmupThreadsAccount(
           && searchLikePointLooksSafe
           && /acp_verified_common_action_row_fallback/.test(feedActions?.debugReason || "")
           && /geometry_action_row_detected/.test(actionDebug)
+          && !/fallback_like_missing|primary_like_shape_rejected/.test(actionDebug)
         ) {
           feedActions.debugReason = [
             feedActions.debugReason,
