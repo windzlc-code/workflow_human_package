@@ -24359,18 +24359,33 @@ async function warmupSearchInterestSurface(
     await delay(warmupRandomInt(700, 1300));
     return;
   }
-  const waitForSubmittedSearchResults = async (timeoutMs = isAcpPad(padCode) ? 15_000 : 8_000) => {
+  const proceedFromSearchResults = async (reason: string) => {
+    report(`搜索结果页已可继续浏览（${reason}）：${keyword}`);
+    if (isAcpPad(padCode)) {
+      await tapViaAdbAbsoluteQuick(config, padCode, Math.round(screen.width * 0.56), Math.round(screen.height * 0.18), 450).catch(() => undefined);
+      await delay(350);
+      await execAdbForText(
+        config,
+        padCode,
+        `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.76)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.47)} 420`,
+        8_000,
+        700,
+      ).catch(() => "");
+    }
+    await delay(isAcpPad(padCode) ? warmupRandomInt(700, 1100) : warmupRandomInt(500, 900));
+  };
+  const waitForSubmittedSearchResults = async (timeoutMs = isAcpPad(padCode) ? 2_500 : 5_000) => {
     const deadline = Date.now() + timeoutMs;
     let lastXml = "";
     while (Date.now() < deadline) {
       const xml = await dumpUiXml(config, padCode).catch(() => "");
       lastXml = xml || lastXml;
       if (looksLikeThreadsSearchResultsUiXml(xml, keyword)) return { ok: true, xml };
-      const shotUrl = isAcpPad(padCode)
-        ? await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "")
-        : "";
-      if (shotUrl && await detectThreadsSearchResultsPageLocally(shotUrl).catch(() => false)) return { ok: true, xml };
-      await delay(1000);
+      if (!isAcpPad(padCode)) {
+        const shotUrl = await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "");
+        if (shotUrl && await detectThreadsSearchResultsPageLocally(shotUrl).catch(() => false)) return { ok: true, xml };
+      }
+      await delay(isAcpPad(padCode) ? 350 : 800);
     }
     return { ok: false, xml: lastXml };
   };
@@ -24395,17 +24410,20 @@ async function warmupSearchInterestSurface(
       },
     },
   ];
-  let submitted = await waitForSubmittedSearchResults(1200);
+  let submitted = await waitForSubmittedSearchResults(isAcpPad(padCode) ? 700 : 1200);
   for (const attempt of submitAttempts) {
     if (submitted.ok) break;
     report(`提交搜索关键词并等待结果页（${attempt.label}）：${keyword}`);
     await attempt.run();
-    await warmupWaitForScrollSettle(900, 1500);
-    submitted = await waitForSubmittedSearchResults(isAcpPad(padCode) ? 7_000 : 4_000);
+    await delay(isAcpPad(padCode) ? 700 : 1200);
+    submitted = await waitForSubmittedSearchResults(isAcpPad(padCode) ? 1600 : 4_000);
   }
   if (submitted.ok) {
-    report(`搜索提交后已进入结果页：${keyword}`);
-    await delay(isAcpPad(padCode) ? warmupRandomInt(900, 1500) : warmupRandomInt(700, 1200));
+    await proceedFromSearchResults("短确认通过");
+    return;
+  }
+  if (isAcpPad(padCode)) {
+    await proceedFromSearchResults("ACP 搜索提交后跳过长确认");
     return;
   }
   const stillInSearchInput = threadsSearchInputContainsKeyword(submitted.xml || "", keyword);
