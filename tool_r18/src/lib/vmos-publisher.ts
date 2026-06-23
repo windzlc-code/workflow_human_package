@@ -23713,15 +23713,12 @@ async function warmupLocateCurrentAcpActionsLocalSnapshot(
       };
     }
     if (detailReason || inlineReplyBar) {
-      const image = await getImageDimensions(shotUrl).catch(() => null);
-      const width = image?.width || BASE_SCREEN.width;
-      const height = image?.height || BASE_SCREEN.height;
       return {
         screenshotUrl: shotUrl,
-        comment: { x: Math.round(width * 0.18), y: Math.round(height * 0.948) },
         debugReason: [
           `thread_detail_visual:${detailReason || "LOCAL_INLINE_REPLY_BAR"}`,
           "acp_detail_reply_input_fallback",
+          "acp_bottom_reply_input_not_safe_for_comment_tap",
         ].join(" | "),
       };
     }
