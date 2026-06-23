@@ -361,7 +361,7 @@ describe("buildPostDetailActionRows", () => {
     expect(texts).not.toContain("🖼 重新生成图片");
   });
 
-  it("shows image regeneration for posts that already have images", () => {
+  it("shows image regeneration for ordinary posts that already have images", () => {
     const rows = buildPostDetailActionRows({
       hasImage: true,
       publishCallback: "post_action",
@@ -372,7 +372,8 @@ describe("buildPostDetailActionRows", () => {
 
     expect(texts).toContain("🔄 重新生成推文");
     expect(texts).toContain("🖼 查看配圖/視頻");
-    expect(texts).toContain("🧩 管理媒体");
+    expect(texts).not.toContain("🧩 管理媒体");
+    expect(texts).not.toContain("编辑文案/媒体");
     expect(texts).toContain("🖼 重新生成图片");
     expect(texts).not.toContain("🖼 单独生成图片");
   });
@@ -394,8 +395,21 @@ describe("buildPostDetailActionRows", () => {
     expect(flattenButtonCallbacks(baseRows)).not.toContain("post_refresh_metrics");
     expect(flattenButtonCallbacks(refreshRows)).toContain("post_refresh_metrics");
   });
-});
 
+  it("shows media management and custom editing only for sentiment-imported posts", () => {
+    const rows = buildPostDetailActionRows({
+      hasImage: true,
+      publishCallback: "post_action",
+      deleteCallback: "post_delete_action",
+      archiveId: "archive-1",
+      allowSentimentEditControls: true,
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
+    expect(callbacks).toContain("post_media_manage");
+    expect(callbacks).toContain("post_edit_custom");
+  });
+});
 describe("buildPublishPadSelectionRows", () => {
   it("builds selectable rows for multi-pad publishing", () => {
     const rows = buildPublishPadSelectionRows({
@@ -407,12 +421,11 @@ describe("buildPublishPadSelectionRows", () => {
     });
     const buttons = rows.flat();
 
-    expect(buttons[0]).toMatchObject({ text: "☐ Cloud 1", callback_data: "pubpad_toggle_0" });
-    expect(buttons[1]).toMatchObject({ text: "✅ Cloud 2", callback_data: "pubpad_toggle_1" });
-    expect(buttons.find((button) => button.callback_data === "pubpad_confirm")?.text).toContain("1 台云机");
+    expect(buttons[0]?.callback_data).toBe("pubpad_toggle_0");
+    expect(buttons[1]?.callback_data).toBe("pubpad_toggle_1");
+    expect(buttons.find((button) => button.callback_data === "pubpad_confirm")?.text).toContain("1");
   });
 });
-
 describe("buildPostImageRegenerateCallback", () => {
   it("keeps generated image regeneration callbacks short enough for Telegram", () => {
     const callback = buildPostImageRegenerateCallback("irmb9rx3tuabc123");

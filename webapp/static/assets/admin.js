@@ -2416,7 +2416,7 @@ function renderSentimentCookieProfiles(payload) {
           <td>${escapeHtml(formatAdminDate(profile.lastAuthorizedAt))}</td>
           <td class="sentiment-cookie-names">${escapeHtml(nameText)}</td>
           <td class="sentiment-cookie-actions">
-            <button type="button" class="ghost" data-act="sentiment_cookie_pick" data-id="${escapeHtml(key)}">授权</button>
+            <button type="button" class="ghost" data-act="sentiment_cookie_pick" data-id="${escapeHtml(key)}">手动填 Cookie</button>
             <button type="button" class="ghost" data-act="sentiment_cookie_open" data-id="${escapeHtml(key)}">打开</button>
           </td>
         </tr>
@@ -2450,6 +2450,50 @@ async function copySentimentCookieHelperBase() {
   const base = window.location.origin;
   await navigator.clipboard.writeText(base);
   setMsg("sentimentCookieMsg", `已复制助手接口地址：${base}`, true);
+}
+
+async function copySentimentCookieExtensionUrl() {
+  await navigator.clipboard.writeText("chrome://extensions/");
+  setMsg("sentimentCookieMsg", "已复制扩展管理页地址：chrome://extensions/。浏览器限制网页直接打开该地址，请粘贴到地址栏进入。", true);
+}
+
+function sentimentDownloadFilename(disposition) {
+  const text = String(disposition || "");
+  const utf8Match = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const match = text.match(/filename="?([^";]+)"?/i);
+  return match ? match[1] : "opinx-browser-auth-helper.zip";
+}
+
+async function downloadSentimentCookieHelper() {
+  setMsg("sentimentCookieMsg", "正在生成授权助手下载包...");
+  const response = await fetch("/browser-auth-extension/download", {
+    credentials: "include",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    if (response.status === 401) throw new Error("登录已过期，请重新登录后台后再下载授权助手。");
+    if (response.status === 403) throw new Error("当前账号没有管理员权限，无法下载授权助手。");
+    const text = await response.text().catch(() => "");
+    throw new Error(text || `授权助手下载失败：HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  if (!blob.size) throw new Error("授权助手下载包为空，请刷新页面后重试。");
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  link.href = url;
+  link.download = sentimentDownloadFilename(response.headers.get("content-disposition"));
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  setMsg("sentimentCookieMsg", "授权助手已开始下载。浏览器不允许网页直接一键安装未上架扩展，请解压后在扩展管理页加载该目录。", true);
 }
 
 async function loadSentimentCookieProfiles() {
@@ -3181,10 +3225,28 @@ function bindActions() {
       }
     });
   }
+  if (el("btnSentimentCookieDownloadHelper")) {
+    el("btnSentimentCookieDownloadHelper").addEventListener("click", async () => {
+      try {
+        await downloadSentimentCookieHelper();
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
   if (el("btnSentimentCookieCopyBase")) {
     el("btnSentimentCookieCopyBase").addEventListener("click", async () => {
       try {
         await copySentimentCookieHelperBase();
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnSentimentCookieCopyExtensionUrl")) {
+    el("btnSentimentCookieCopyExtensionUrl").addEventListener("click", async () => {
+      try {
+        await copySentimentCookieExtensionUrl();
       } catch (err) {
         setMsg("sentimentCookieMsg", getErrorMessage(err), false);
       }

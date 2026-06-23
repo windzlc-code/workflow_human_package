@@ -836,6 +836,15 @@ def _sentiment_browser_auth_text(file_name: str, request: Request) -> tuple[byte
     if file_name == "background.js":
         auth_token = _sentiment_browser_auth_token(_read_sentiment_config_file(), create=True)
         body = body.replace('const DEFAULT_API_BASE = "http://47.250.188.76";', f'const DEFAULT_API_BASE = "{origin}";')
+        extension_profiles = _sentiment_browser_auth_profiles_for_extension()
+        if extension_profiles:
+            profiles_js = json.dumps(extension_profiles, ensure_ascii=False, indent=2)
+            body = re.sub(
+                r"const PROFILES = \[[\s\S]*?\];\n\nfunction storageGet",
+                f"const PROFILES = {profiles_js};\n\nfunction storageGet",
+                body,
+                count=1,
+            )
         body = body.replace(
             'headers: { "Content-Type": "application/json" },',
             f'headers: {{ "Content-Type": "application/json", "X-Sentiment-Browser-Auth": "{auth_token}" }},',
@@ -879,6 +888,49 @@ def _sentiment_browser_auth_host_permissions() -> list[str]:
             if item not in permissions:
                 permissions.append(item)
     return permissions
+
+
+def _sentiment_browser_auth_profiles_for_extension() -> list[dict[str, Any]]:
+    try:
+        config = _read_sentiment_config_file()
+        profiles = _sentiment_profiles_container(config)
+    except HTTPException:
+        return []
+    rows: list[dict[str, Any]] = []
+    for profile in profiles:
+        key = str(profile.get("key") or profile.get("platform") or "").strip()
+        domain = str(profile.get("domain") or "").strip().lstrip(".")
+        if not domain:
+            for value in [profile.get("authUrl"), *(profile.get("authUrls") if isinstance(profile.get("authUrls"), list) else [])]:
+                with contextlib.suppress(Exception):
+                    host = urlsplit(str(value or "")).netloc.lower().split("@")[-1].split(":")[0]
+                    domain = host.removeprefix("www.").lstrip(".")
+                    if domain:
+                        break
+        if not key or not domain:
+            continue
+        row: dict[str, Any] = {
+            "key": key,
+            "sourceKey": str(profile.get("sourceKey") or key).strip() or key,
+            "domain": domain,
+        }
+        label = str(profile.get("label") or "").strip()
+        if label:
+            row["label"] = label
+        for field in ("authUrl",):
+            value = str(profile.get(field) or "").strip()
+            if value:
+                row[field] = value
+        for field in ("authUrls", "cookieDomains", "matchDomains"):
+            values = [
+                str(item or "").strip()
+                for item in (profile.get(field) if isinstance(profile.get(field), list) else [])
+                if str(item or "").strip()
+            ]
+            if values:
+                row[field] = values
+        rows.append(row)
+    return rows
 
 
 def _build_sentiment_browser_auth_extension_zip(request: Request) -> bytes:

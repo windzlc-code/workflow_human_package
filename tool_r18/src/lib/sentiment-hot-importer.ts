@@ -25,7 +25,7 @@ const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3");
 const MIN_SENTIMENT_HOT_SCORE = 1000;
 
-export type SentimentCookieHealth = "healthy" | "watch" | "expired" | "missing" | "unknown";
+export type SentimentCookieHealth = "healthy" | "watch" | "degraded" | "expired" | "missing" | "unknown";
 
 export interface SentimentCookieStatus {
   platform: SentimentHotPlatform;
@@ -71,6 +71,87 @@ function splitKeywords(value: string): string[] {
 
 function hasHan(value: unknown): boolean {
   return /[\u3400-\u9fff]/u.test(String(value || ""));
+}
+
+function readSentimentBrowserFallbackConfig() {
+  const configPath = path.join(resolveSentimentDataDir(), "sentiment-config.json");
+  if (!fs.existsSync(configPath)) return {};
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const fallback = config?.sentimentSearch?.browserFallback || config?.browserFallback || {};
+    return fallback && typeof fallback === "object" ? fallback : {};
+  } catch {
+    return {};
+  }
+}
+
+function readSentimentBrowserAuthProfilesConfig(): any[] {
+  const fallback = readSentimentBrowserFallbackConfig();
+  return Array.isArray((fallback as any).profiles) ? (fallback as any).profiles : [];
+}
+
+function readSentimentBrowserAuthToken(): string {
+  const fallback = readSentimentBrowserFallbackConfig();
+  return cleanText((fallback as any).authHelperToken || "");
+}
+
+function sentimentProfileMatchesPlatform(profile: any, platform: SentimentHotPlatform) {
+  return profile?.platform === platform || profile?.sourceKey === platform || profile?.key === platform;
+}
+
+function buildSentimentCookieStatusFromProfile(platform: SentimentHotPlatform, profile: any): SentimentCookieStatus {
+  const cookies = Array.isArray(profile?.cookies) ? profile.cookies.filter((item: any) => item && typeof item === "object") : [];
+  const nowSeconds = Date.now() / 1000;
+  let valid = 0;
+  let expired = 0;
+  let session = 0;
+  let expiringSoon = 0;
+  for (const cookie of cookies) {
+    if (!cookie?.name || !cookie?.value) continue;
+    const expires = Number(cookie.expires);
+    if (!Number.isFinite(expires) || expires <= 0) {
+      valid += 1;
+      session += 1;
+    } else if (expires <= nowSeconds) {
+      expired += 1;
+    } else {
+      valid += 1;
+      if (expires <= nowSeconds + 7 * 24 * 60 * 60) expiringSoon += 1;
+    }
+  }
+  const health: SentimentCookieHealth = cookies.length === 0
+    ? "missing"
+    : valid <= 0
+      ? "expired"
+      : expired > 0
+        ? "degraded"
+        : expiringSoon > 0
+          ? "watch"
+          : "healthy";
+  const recommendedAction = health === "missing"
+    ? "authorize-profile"
+    : health === "expired"
+      ? "reauthorize-profile"
+      : health === "degraded"
+        ? "refresh-profile-cookies"
+        : health === "watch"
+          ? "refresh-before-expiry"
+          : "keep";
+  return {
+    platform,
+    health,
+    label: platform === "threads" ? "Threads" : "Instagram",
+    validCookieCount: valid,
+    expiredCookieCount: expired,
+    sessionCookieCount: session,
+    expiringSoonCookieCount: expiringSoon,
+    authorizationNeedsRefresh: recommendedAction !== "keep",
+    recommendedAction,
+    lastAuthorizedAt: profile?.lastAuthorizedAt || null,
+    message: profile
+      ? `有效 Cookie ${valid} 個，過期 ${expired} 個。`
+      : "缺少授權 Cookie，請到快捷配置頁面刷新。",
+  };
 }
 
 function segmentPersonaWords(value: string): string[] {
@@ -489,45 +570,13 @@ export async function fetchSentimentCookieStatuses(): Promise<SentimentCookieSta
       { platform: "instagram", health: "unknown", label: "Instagram", message: runtime.warning || "舆情後端未啟動，無法讀取 Cookie 狀態。" },
     ];
   }
-  try {
-    const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/browser-auth/profiles`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    const json = await response.json().catch(() => ({}));
-    const profiles = Array.isArray(json?.profiles) ? json.profiles : [];
-    return (["threads", "instagram"] as SentimentHotPlatform[]).map((platform) => {
-      const profile = profiles.find((item: any) => item?.platform === platform || item?.sourceKey === platform || item?.key === platform);
-      const health = (profile?.authHealth || (profile ? "healthy" : "missing")) as SentimentCookieHealth;
-      const valid = Number(profile?.validCookieCount || 0);
-      const expired = Number(profile?.expiredCookieCount || 0);
-      return {
-        platform,
-        health,
-        label: platform === "threads" ? "Threads" : "Instagram",
-        validCookieCount: valid,
-        expiredCookieCount: expired,
-        sessionCookieCount: Number(profile?.sessionCookieCount || 0),
-        expiringSoonCookieCount: Number(profile?.expiringSoonCookieCount || 0),
-        authorizationNeedsRefresh: profile?.authorizationNeedsRefresh === true,
-        recommendedAction: typeof profile?.recommendedAction === "string" ? profile.recommendedAction : "",
-        lastAuthorizedAt: profile?.lastAuthorizedAt || null,
-        message: profile
-          ? `有效 Cookie ${valid} 個，過期 ${expired} 個。`
-          : "缺少授權 Cookie，請到快捷配置頁面刷新。",
-      };
-    });
-  } catch {
-    return [
-      { platform: "threads", health: "unknown", label: "Threads", message: "無法讀取 Cookie 狀態。" },
-      { platform: "instagram", health: "unknown", label: "Instagram", message: "無法讀取 Cookie 狀態。" },
-    ];
-  } finally {
-    scheduleSentimentRuntimeShutdown();
-  }
+  const profiles = readSentimentBrowserAuthProfilesConfig();
+  scheduleSentimentRuntimeShutdown();
+  return (["threads", "instagram"] as SentimentHotPlatform[]).map((platform) => buildSentimentCookieStatusFromProfile(platform, profiles.find((item) => sentimentProfileMatchesPlatform(item, platform))));
 }
 
 function sentimentCookieStatusHasUsableCookies(status: SentimentCookieStatus): boolean {
-  if (status.health === "healthy" || status.health === "watch") return true;
+  if (status.health === "healthy" || status.health === "watch" || status.health === "degraded") return true;
   const match = status.message.match(/有效 Cookie\s*(\d+)/);
   return Boolean(match && Number(match[1]) > 0);
 }
@@ -563,11 +612,7 @@ function normalizeCookieForBrowserAuth(cookie: any, fallbackDomain: string) {
 async function refreshSentimentBrowserCookiesForPlatform(platform: SentimentHotPlatform): Promise<{ ok: boolean; message: string }> {
   const configPath = path.join(resolveSentimentDataDir(), "sentiment-config.json");
   if (!fs.existsSync(configPath)) return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} Cookie 配置不存在。` };
-  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  const profiles = config?.sentimentSearch?.browserFallback?.profiles || config?.browserFallback?.profiles || [];
-  const profile = Array.isArray(profiles)
-    ? profiles.find((item: any) => item?.platform === platform || item?.sourceKey === platform || item?.key === platform)
-    : null;
+  const profile = readSentimentBrowserAuthProfilesConfig().find((item: any) => sentimentProfileMatchesPlatform(item, platform));
   if (!profile) return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} Cookie 配置不存在。` };
 
   const cookies = readSentimentBrowserAuthCookies(platform)
@@ -604,7 +649,10 @@ async function refreshSentimentBrowserCookiesForPlatform(platform: SentimentHotP
     }
     const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/browser-auth/cookies`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-sentiment-browser-auth": readSentimentBrowserAuthToken(),
+      },
       body: JSON.stringify({
         profileKey: profile.key || platform,
         sourceKey: profile.sourceKey || platform,
@@ -698,6 +746,28 @@ export async function fetchSentimentHotCandidates(args: {
     : [];
   if (candidates.length > 0) {
     warnings.push(args.refresh ? "\u5df2\u5373\u6642\u5237\u65b0\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u4e2d\u6587\u71b1\u9ede\u3002" : "\u5df2\u4f7f\u7528\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u6293\u53d6\u4e2d\u6587\u71b1\u9ede\u3002");
+  }
+
+  if (hasSearchKeywords && candidates.length < poolLimit) {
+    const instagramCandidates = await fetchInstagramReaderSearchCandidates({
+      archiveId,
+      keywords,
+      queries: buildOrderedSentimentQueries(buildThreadsSearchQueries(keywords), args.refresh ? Date.now() + candidates.length : candidates.length, args.refresh === true).slice(0, 12),
+      limit: poolLimit,
+      refresh: args.refresh === true,
+    }).catch((error) => {
+      warnings.push("Instagram reader 抓取失敗：" + (error instanceof Error ? error.message : String(error)));
+      return [];
+    });
+    if (instagramCandidates.length > 0) {
+      const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+      for (const candidate of instagramCandidates) {
+        if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+        if (byId.size >= poolLimit) break;
+      }
+      candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
+      warnings.push(args.refresh ? `已即時刷新 Instagram reader 候選 ${instagramCandidates.length} 篇。` : `已加入 Instagram reader 候選 ${instagramCandidates.length} 篇。`);
+    }
   }
 
   const runtime = await withSentimentTimeout(ensureSentimentRuntime(), 6_000, {
@@ -1251,6 +1321,64 @@ async function fetchThreadsReaderSearchCandidates(args: {
   return sortUsefulHotCandidates(await enrichThreadsCandidateDetails(all), args.limit);
 }
 
+async function fetchInstagramReaderSearchCandidates(args: {
+  archiveId: string;
+  keywords: string[];
+  queries: string[];
+  limit: number;
+  refresh?: boolean;
+  excludeIds?: Set<string>;
+}): Promise<SentimentHotCandidate[]> {
+  const excluded = args.excludeIds || (args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : getSentimentHotExcludedIds(args.archiveId));
+  const all: SentimentHotCandidate[] = [];
+  const searches = await Promise.all(
+    args.queries.map(async (query, index) => {
+      const normalizedQuery = cleanText(query).replace(/^#/, "");
+      const targets = [
+        `https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent(normalizedQuery)}`,
+        hasHan(normalizedQuery) ? `https://www.instagram.com/explore/tags/${encodeURIComponent(normalizedQuery)}/` : "",
+      ].filter(Boolean);
+      const texts: Array<{ query: string; targetUrl: string; text: string }> = [];
+      for (const targetUrl of targets) {
+        const readerTargetUrl = args.refresh ? `${targetUrl}${targetUrl.includes("?") ? "&" : "?"}__r=${Date.now().toString(36)}${index}` : targetUrl;
+        try {
+          const response = await fetch(`${JINA_READER_PREFIX}${readerTargetUrl}`, {
+            headers: {
+              "user-agent": "Mozilla/5.0",
+              accept: "text/plain, text/markdown, */*",
+              "cache-control": args.refresh ? "no-cache" : "max-age=300",
+              pragma: args.refresh ? "no-cache" : "",
+            },
+            signal: AbortSignal.timeout(18_000),
+          });
+          if (response.ok) texts.push({ query, targetUrl, text: await response.text() });
+        } catch {
+          // Instagram reader is an opportunistic extra source.
+        }
+      }
+      return texts;
+    }),
+  );
+  for (const search of searches.flat()) {
+    const parsed = parseInstagramReaderSearchMarkdownCandidates({
+      text: search.text,
+      query: search.query,
+      keywords: args.keywords,
+      sourceUrl: search.targetUrl,
+      limit: args.limit,
+    });
+    for (const candidate of parsed) {
+      if (excluded.has(candidate.id)) continue;
+      if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) continue;
+      if (all.some((item) => item.id === candidate.id || item.sourceUrl === candidate.sourceUrl || item.content === candidate.content)) continue;
+      all.push(candidate);
+      if (all.length >= args.limit) break;
+    }
+    if (all.length >= args.limit) break;
+  }
+  return sortUsefulHotCandidates(all, args.limit);
+}
+
 function decodeMarkdownLinkText(value: string): string {
   return cleanText(
     value
@@ -1342,6 +1470,18 @@ function extractEngagementMetricsFromText(value: string): NonNullable<SentimentH
     .filter((item): item is number => typeof item === "number" && item > 0)
     .slice(0, 6);
   if (rawSignals.length) engagement.rawSignals = rawSignals;
+  return engagement;
+}
+
+function extractInstagramEngagementMetricsFromText(value: string): NonNullable<SentimentHotCandidate["engagement"]> {
+  const text = String(value || "");
+  const engagement: NonNullable<SentimentHotCandidate["engagement"]> = {};
+  const likeCount = parseMetricNumberLoose(text.match(/(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*(?:likes?|讚|赞|喜歡|喜欢)/i)?.[1]);
+  const commentCount = parseMetricNumberLoose(text.match(/(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*(?:comments?|留言|評論|评论)/i)?.[1]);
+  const viewCount = parseMetricNumberLoose(text.match(/(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*(?:views?|plays?|觀看|观看|播放|瀏覽|浏览)/i)?.[1]);
+  if (typeof likeCount === "number") engagement.likeCount = likeCount;
+  if (typeof commentCount === "number") engagement.commentCount = commentCount;
+  if (typeof viewCount === "number") engagement.viewCount = viewCount;
   return engagement;
 }
 
@@ -1606,6 +1746,73 @@ export function parseThreadsReaderSearchMarkdownCandidates(args: {
   return out;
 }
 
+export function parseInstagramReaderSearchMarkdownCandidates(args: {
+  text: string;
+  query: string;
+  keywords?: string[];
+  limit?: number;
+  sourceUrl: string;
+}): SentimentHotCandidate[] {
+  const text = String(args.text || "");
+  if (!text || !/Instagram/i.test(text)) return [];
+  const needleSource = args.keywords?.length ? args.keywords : [args.query];
+  const needles = buildRelevanceNeedles(needleSource);
+  const out: SentimentHotCandidate[] = [];
+  const postMatches = [...text.matchAll(/https:\/\/www\.instagram\.com\/(?:p|reel|tv)\/[A-Za-z0-9_-]+\/?/g)];
+  const seenUrls = new Set<string>();
+  for (const match of postMatches) {
+    const sourceUrl = match[0].replace(/[)\].,]+$/g, "");
+    if (seenUrls.has(sourceUrl)) continue;
+    seenUrls.add(sourceUrl);
+    const matchIndex = match.index || 0;
+    const block = text.slice(Math.max(0, matchIndex - 900), Math.min(text.length, matchIndex + 1400));
+    const authorMatches = [...block.matchAll(/\[([^\]\n@][^\]\n]{1,80})]\(https:\/\/www\.instagram\.com\/([^/)#?]+)\/?\)/g)]
+      .filter((item) => isLikelyInstagramAuthor(item[2]));
+    const author = cleanText(authorMatches.at(-1)?.[1] || authorMatches.at(-1)?.[2] || "Instagram");
+    const content = cleanThreadsReaderContent(block
+      .replace(/https:\/\/www\.instagram\.com\/(?:p|reel|tv)\/[A-Za-z0-9_-]+\/?/g, " ")
+      .replace(/(?:Log in|Sign up|Explore|Search|Instagram)\s*/gi, " "));
+    if (isLowQualitySentimentContent(content)) continue;
+    if (!isChineseSentimentCandidate(content)) continue;
+    if ((content.match(/[\u3400-\u9fff]/gu) || []).length < 12) continue;
+    const haystack = [content, author].join(" ").toLowerCase();
+    const matchedNeedles = needles.filter((needle) => haystack.includes(needle.toLowerCase()));
+    if (needles.length && matchedNeedles.length === 0) continue;
+    const engagement = mergeEngagementMetrics(
+      extractInstagramEngagementMetricsFromText(block),
+      extractEngagementMetricsFromText(block),
+    );
+    const media = extractThreadsMediaFromMarkdown(block, 12);
+    const id = buildSentimentCandidateId({ platform: "instagram", sourceUrl, content });
+    out.push({
+      id,
+      platform: "instagram",
+      sourceUrl,
+      author,
+      content,
+      media,
+      hotScore: parseThreadsReaderHotScore(block) + matchedNeedles.length * 30,
+      metrics: {
+        source: "instagram-reader-search",
+        query: args.query,
+        matchedKeywords: matchedNeedles,
+        mediaCount: media.length,
+        ...compactEngagementMetrics(engagement),
+      },
+      engagement,
+      capturedAt: new Date().toISOString(),
+      warnings: [],
+    });
+    if (out.length >= (args.limit || 10)) break;
+  }
+  return out;
+}
+
+function isLikelyInstagramAuthor(value: string) {
+  const text = cleanText(value).replace(/^@/, "");
+  return Boolean(text && /^[A-Za-z0-9._]{2,30}$/.test(text) && !/^(?:p|reel|tv|explore|accounts|direct|stories|about|developer|legal|privacy)$/i.test(text));
+}
+
 async function readThreadsSearchPageText(page: any, query: string): Promise<{ text: string; url: string }> {
   const searchUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
   await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
@@ -1691,14 +1898,8 @@ function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], 
 }
 
 function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
-  const configPath = path.join(resolveSentimentDataDir(), "sentiment-config.json");
-  if (!fs.existsSync(configPath)) return [];
   try {
-    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    const profiles = config?.sentimentSearch?.browserFallback?.profiles || config?.browserFallback?.profiles || [];
-    const profile = Array.isArray(profiles)
-      ? profiles.find((item: any) => item?.platform === platform || item?.sourceKey === platform || item?.key === platform)
-      : null;
+    const profile = readSentimentBrowserAuthProfilesConfig().find((item: any) => sentimentProfileMatchesPlatform(item, platform));
     const nowSeconds = Date.now() / 1000;
     const cookies = (Array.isArray(profile?.cookies) ? profile.cookies : [])
       .filter((cookie: any) => {
