@@ -21414,7 +21414,6 @@ export interface WarmupConfig {
   stopOnRiskLimit?: boolean;
   strictCompletion?: boolean;
   requireReadablePostForComment?: boolean;
-  assumeCurrentSearchKeyword?: string;
 }
 
 export function assertWarmupMinimumCompletion(
@@ -31888,25 +31887,16 @@ export async function warmupThreadsAccount(
       });
     }
 
-    const assumedSearchKeyword = isAcpPad(padCode) && effectiveCfg.assumeCurrentSearchKeyword?.trim()
-      ? effectiveCfg.assumeCurrentSearchKeyword.trim()
-      : "";
-    const initialRelevant = assumedSearchKeyword
-      ? {
-          ok: true,
-          preview: assumedSearchKeyword,
-          reason: `search-acp-query:${assumedSearchKeyword}`,
-        }
-      : await warmupEnsureRelevantSurface(
-        config,
-        padCode,
-        effectiveCfg,
-        (step) => report(step),
-        { phase: "preflight", allowSearch: true },
-      ).catch((error) => {
-        report(`人设相关内容前置检测失败：${error instanceof Error ? error.message : String(error)}`);
-        return { ok: false, preview: "", reason: error instanceof Error ? error.message : String(error) };
-      });
+    const initialRelevant = await warmupEnsureRelevantSurface(
+      config,
+      padCode,
+      effectiveCfg,
+      (step) => report(step),
+      { phase: "preflight", allowSearch: true },
+    ).catch((error) => {
+      report(`人设相关内容前置检测失败：${error instanceof Error ? error.message : String(error)}`);
+      return { ok: false, preview: "", reason: error instanceof Error ? error.message : String(error) };
+    });
     if (!initialRelevant.ok) {
       throw new Error(`本轮养号未找到和人设相关的内容，已停止避免无关互动：${initialRelevant.reason}`);
     }
