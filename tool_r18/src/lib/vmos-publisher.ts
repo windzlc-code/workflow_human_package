@@ -32205,11 +32205,13 @@ export async function warmupThreadsAccount(
       } else {
         report(`自动点赞失败：${result.message}`);
         if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason) && /thread_detail_no_action_row|thread_detail_no_visible_action_row|LOCAL_REPLY_COMPOSER|LOCAL_INLINE_REPLY_BAR|可见互动栏点赞未确认/.test(result.message || "")) {
+          markBrowsedThisTurn("搜索候选点赞前未露出互动栏");
           await skipCurrentSearchCandidate(`搜索结果候选未露出稳定可见互动栏，跳过当前候选：${result.message || "missing_action_row"}`);
           continue;
         }
         if (isAcpPad(padCode) && /LOCAL_REPLY_COMPOSER|thread_detail_no_action_row|acp_local_snapshot_no_actions|acp_local_action_row_missing|fallback_like_missing|fallback_comment_missing/.test(result.message || "")) {
           if (/^search/.test(activeRelevantSurfaceReason)) {
+            markBrowsedThisTurn("搜索候选点赞失败");
             await restoreAcpSearchResultsForNextCandidate(`搜索结果候选点赞失败，换下一条：${result.message || "missing_action_row"}`);
           } else {
             await warmupRecoverAcpInteractionSurface(config, padCode, result.message || "");
@@ -32219,6 +32221,7 @@ export async function warmupThreadsAccount(
         }
         if (isAcpPad(padCode) && /profile_ui:acp_like_target_screenshot|acp_like_target_implausible/.test(result.message)) {
           if (/^search/.test(activeRelevantSurfaceReason)) {
+            markBrowsedThisTurn("搜索候选点赞进入个人页");
             await skipCurrentSearchCandidate(`搜索结果候选进入个人页，跳过当前候选：${result.message || "profile_ui"}`);
             continue;
           }
