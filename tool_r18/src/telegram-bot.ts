@@ -456,6 +456,80 @@ const TELEGRAM_INSTANCE_TAG = process.env.TELEGRAM_INSTANCE_TAG || `A-${process.
 const TELEGRAM_REQUEST_MODE = TELEGRAM_PROXY_URL ? `proxy ${TELEGRAM_PROXY_URL}` : "direct";
 const TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query"] as const;
 const TELEGRAM_ALLOWED_UPDATES_JSON = JSON.stringify(TELEGRAM_ALLOWED_UPDATES);
+const TELEGRAM_ALLOWED_CHAT_IDS = new Set(
+  String(process.env.TELEGRAM_ALLOWED_CHAT_IDS || process.env.TELEGRAM_ALLOWED_CHAT_ID || "")
+    .split(/[,\s]+/)
+    .map((id) => id.trim())
+    .filter(Boolean),
+);
+
+function isTelegramChatAllowed(chatId: number | string | undefined | null): boolean {
+  if (TELEGRAM_ALLOWED_CHAT_IDS.size === 0) return true;
+  if (chatId === undefined || chatId === null) return false;
+  return TELEGRAM_ALLOWED_CHAT_IDS.has(String(chatId));
+}
+
+function telegramUpdateChatId(update: any): string | undefined {
+  const chatId = update?.message?.chat?.id
+    ?? update?.edited_message?.chat?.id
+    ?? update?.channel_post?.chat?.id
+    ?? update?.edited_channel_post?.chat?.id
+    ?? update?.callback_query?.message?.chat?.id
+    ?? update?.callback_query?.from?.id
+    ?? update?.my_chat_member?.chat?.id
+    ?? update?.chat_member?.chat?.id;
+  return chatId === undefined || chatId === null ? undefined : String(chatId);
+}
+
+function installTelegramChatAllowlist(bot: TelegramBot) {
+  if (TELEGRAM_ALLOWED_CHAT_IDS.size === 0) return;
+  const allowlist = Array.from(TELEGRAM_ALLOWED_CHAT_IDS).join(",");
+  console.log(`[telegram][chat_allowlist] enabled chats=${allowlist}`);
+
+  const wrapChatFirstMethod = (method: string) => {
+    const original = (bot as any)[method];
+    if (typeof original !== "function") return;
+    (bot as any)[method] = function patchedTelegramChatFirstMethod(chatId: any, ...args: any[]) {
+      if (!isTelegramChatAllowed(chatId)) {
+        console.warn(`[telegram][chat_allowlist_blocked_send] method=${method} chat=${chatId}`);
+        return Promise.resolve(undefined);
+      }
+      return original.call(this, chatId, ...args);
+    };
+  };
+
+  for (const method of [
+    "sendMessage",
+    "sendPhoto",
+    "sendDocument",
+    "sendVideo",
+    "sendMediaGroup",
+    "sendChatAction",
+    "deleteMessage",
+    "pinChatMessage",
+    "unpinChatMessage",
+  ]) {
+    wrapChatFirstMethod(method);
+  }
+
+  const wrapOptionsChatIdMethod = (method: string) => {
+    const original = (bot as any)[method];
+    if (typeof original !== "function") return;
+    (bot as any)[method] = function patchedTelegramOptionsChatMethod(...args: any[]) {
+      const options = args.find((item) => item && typeof item === "object" && "chat_id" in item);
+      const chatId = options?.chat_id;
+      if (!isTelegramChatAllowed(chatId)) {
+        console.warn(`[telegram][chat_allowlist_blocked_send] method=${method} chat=${chatId ?? "missing"}`);
+        return Promise.resolve(undefined);
+      }
+      return original.apply(this, args);
+    };
+  };
+
+  for (const method of ["editMessageText", "editMessageCaption", "editMessageMedia", "editMessageReplyMarkup"]) {
+    wrapOptionsChatIdMethod(method);
+  }
+}
 
 export async function stopTelegramPolling(token: string): Promise<void> {
   try {
@@ -1973,11 +2047,13 @@ function buildBulkStoredPostsSelectView(args: {
     totalPages,
     callbackForPage: (targetPage) => `bpage_${targetPage}`,
   }));
-  keyboard.push([{ text: `✅ 确认${actionText}（已选${selected.size}篇）`, callback_data: "bconfirm" }]);
+  keyboard.push([{ text: args.mode === "publish" ? `✅ 确认发布选择（已选${selected.size}篇）` : `✅ 确认${actionText}（已选${selected.size}篇）`, callback_data: "bconfirm" }]);
   keyboard.push([{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(args.archiveId, safePage, args.groupContentType) }]);
   return {
     page: safePage,
-    text: `请选择要${actionText}的推文：\n已選：${selected.size} 篇\n\n${lines.join("\n\n")}`,
+    text: args.mode === "publish"
+      ? `请选择要发布的推文：\n已選：${selected.size} 篇\n下一步选择平台；确认页可选择绑定云机发布或多云机发布。\n\n${lines.join("\n\n")}`
+      : `请选择要${actionText}的推文：\n已選：${selected.size} 篇\n\n${lines.join("\n\n")}`,
     keyboard,
   };
 }
@@ -2314,6 +2390,13 @@ function startTelegramWebhookServer(bot: TelegramBot) {
 
     try {
       const update = await parseTelegramBody(req);
+      const chatId = telegramUpdateChatId(update);
+      if (!isTelegramChatAllowed(chatId)) {
+        console.warn(`[telegram][chat_allowlist_blocked_update] source=webhook chat=${chatId ?? "unknown"}`);
+        res.statusCode = 200;
+        res.end("ignored");
+        return;
+      }
       await (bot as any).processUpdate(update);
       res.statusCode = 200;
       res.end("ok");
@@ -11830,7 +11913,9 @@ function publishFinalTitle(result: PublishResult | void, completeTitle = "发布
   return isPublishWarning(result) ? "⚠️ 发布已提交，待人工确认" : `✅ ${completeTitle}`;
 }
 
-function buildPublishedMetaFromResult(platform: TelegramPublishPlatform, result: PublishResult | void): Pick<NonNullable<PersonaArchive["publishHistory"]>[number], "publishedUrl" | "publishedMeta"> {
+type PublishedMetaPatch = Pick<NonNullable<PersonaArchive["publishHistory"]>[number], "publishedUrl" | "publishedMeta">;
+
+function buildPublishedMetaFromResult(platform: TelegramPublishPlatform, result: PublishResult | void): PublishedMetaPatch {
   const publishedUrl = result && typeof result === "object" && "publishedUrl" in result
     ? String(result.publishedUrl || "").trim()
     : "";
@@ -11846,13 +11931,46 @@ function buildPublishedMetaFromResult(platform: TelegramPublishPlatform, result:
   };
 }
 
-function buildPublishedTargetFromResult(args: {
+async function buildPublishedMetaFromResultWithInitialMetrics(platform: TelegramPublishPlatform, result: PublishResult | void): Promise<PublishedMetaPatch> {
+  const meta = buildPublishedMetaFromResult(platform, result);
+  if (platform !== "threads" || !meta.publishedUrl) return meta;
+  const refreshed = await refreshSentimentSourceMetrics({
+    platform,
+    sourceUrl: meta.publishedUrl,
+    existingHotScore: meta.publishedMeta?.hotScore,
+    existingEngagement: meta.publishedMeta?.engagement as any,
+    existingMedia: meta.publishedMeta?.mediaItems as any,
+  }).catch(() => null);
+  if (!refreshed?.ok) return meta;
+  return {
+    publishedUrl: meta.publishedUrl,
+    publishedMeta: {
+      ...(meta.publishedMeta || {}),
+      source: "published_post",
+      platform,
+      sourceUrl: meta.publishedUrl,
+      hotScore: refreshed.hotScore,
+      metrics: {
+        ...(meta.publishedMeta?.metrics || {}),
+        ...(refreshed.metrics || {}),
+      },
+      engagement: {
+        ...(meta.publishedMeta?.engagement || {}),
+        ...(refreshed.engagement || {}),
+      },
+      mediaItems: refreshed.media || meta.publishedMeta?.mediaItems,
+      capturedAt: new Date().toISOString(),
+    },
+  };
+}
+
+function buildPublishedTargetFromMeta(args: {
   platform: TelegramPublishPlatform;
   padCode: string;
-  result: PublishResult | void;
+  meta: PublishedMetaPatch;
   screenshotUrl?: string;
 }): NonNullable<NonNullable<PersonaArchive["publishHistory"]>[number]["publishedTargets"]>[number] | null {
-  const meta = buildPublishedMetaFromResult(args.platform, args.result);
+  const meta = args.meta;
   if (!meta.publishedUrl) return null;
   return {
     platform: args.platform,
@@ -12385,6 +12503,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       },
     } as any,
   });
+  installTelegramChatAllowlist(bot);
   void ensureTelegramCommandMenu(bot).catch((error) => {
     console.warn("[telegram][command_menu_error]", error?.message || error);
   });
@@ -12542,11 +12661,12 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
             { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
           );
           publishedPostIds.push(post.id);
-          publishMetaByPost[post.id] = buildPublishedMetaFromResult(args.platform, result);
-          const publishedTarget = buildPublishedTargetFromResult({
+          const publishMeta = await buildPublishedMetaFromResultWithInitialMetrics(args.platform, result);
+          publishMetaByPost[post.id] = publishMeta;
+          const publishedTarget = buildPublishedTargetFromMeta({
             platform: args.platform,
             padCode,
-            result,
+            meta: publishMeta,
             screenshotUrl: result?.screenshotUrl,
           });
           if (publishedTarget) publishTargetByPost[post.id] = publishedTarget;
@@ -13249,8 +13369,8 @@ function buildManualPostChoiceRows(
 }
 
 function buildManualPostChoiceIntro(postCount: number) {
-  if (postCount === 1) return "請選擇發佈操作：";
-  return "請選擇要發佈的推文編號：\n- 单篇按钮：只發佈该編號\n- 批量按钮：从第 1 篇开始连续發佈";
+  if (postCount === 1) return "請選擇發佈操作，下一步可选择一台或多台云机：";
+  return "請選擇要發佈的推文編號：\n- 单篇按钮：只發佈该編號\n- 批量按钮：从第 1 篇开始连续發佈\n- 下一步可选择一台或多台云机同时发布";
 }
 
 function buildManualPostChoicePreview(posts: Array<{ content: string; imageUrl?: string | null }>, page = 0, pageSize = 8) {
@@ -13264,7 +13384,8 @@ function buildManualPostChoicePreview(posts: Array<{ content: string; imageUrl?:
 
 function buildManualPreviewRows(archiveId: string, platform: TelegramPublishPlatform, startIndex: number, count: number) {
   return [
-    [{ text: "✅ 確認开始發佈", callback_data: buildManualConfirmCallback(archiveId, platform, startIndex, count) }],
+    [{ text: "✅ 确认发布到绑定云机", callback_data: buildManualConfirmCallback(archiveId, platform, startIndex, count) }],
+    [{ text: "📱 选择多云机发布", callback_data: "mconfirm_multi" }],
     [{ text: "◀️ 返回改數量", callback_data: `ms_${startIndex + 1}` }],
     [{ text: "🔢 重新选編號", callback_data: `mpage_${Math.floor(startIndex / 8)}` }],
   ];
@@ -13699,6 +13820,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const chatId = query.message!.chat.id;
       const msgId = query.message!.message_id;
       let data = query.data || "";
+      if (!isTelegramChatAllowed(chatId)) {
+        console.warn(`[telegram][chat_allowlist_blocked_update] source=callback chat=${chatId}`);
+        if (query.id) void acknowledgeCallbackQueryFast(bot, query.id);
+        return;
+      }
       console.log(`[telegram][callback] chat=${chatId} msg=${msgId} data=${data} len=${data.length}`);
       // 先回应 Telegram，避免后续菜单编辑或外部 API 调用占住使用者端按钮 loading。
       if (query.id) {
@@ -17229,6 +17355,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       || data === "bconfirm"
       || data.startsWith("bpubplat_")
       || data === "bpublish_confirm"
+      || data === "bmulti_confirm"
       || data === "bdelete_confirm"
     ) {
       const state = pendingBulkPostActions.get(chatId);
@@ -17342,6 +17469,26 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return `【第${displayIndex}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`;
         }).join("\n\n");
         const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, selectedPosts[0], state.groupContentType);
+        await safeEditOrSend(bot, chatId, msgId, `👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n云机：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: `✅ 发布到绑定云机 ${selectedPosts.length} 篇`, callback_data: "bpublish_confirm" }],
+              [{ text: "📱 选择多云机发布", callback_data: "bmulti_confirm" }],
+              [{ text: "◀️ 返回选平台", callback_data: "bconfirm" }],
+            ],
+          },
+        });
+        return;
+      }
+      if (data === "bmulti_confirm") {
+        const platform = state.platform;
+        const selectedPosts = scopedPosts.filter((post) => selected.has(post.id));
+        if (!platform || !selectedPosts.length) {
+          await renderSelection({ ...state, selectedPostIds: [...selected], page: visiblePage });
+          return;
+        }
+        if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
         await showPublishPadSelection(chatId, msgId, {
           mode: "bulk_posts",
           archiveId: state.archiveId,
@@ -17350,17 +17497,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           page: visiblePage,
           groupContentType: state.groupContentType,
           selectedPadCodes: state.padCodes || [archive.boundPadCode || defaultPadCode],
-        }, `🚀 *批量发布前确认*\n\n人设：${archive.name}\n平台：${platform}${targetGroupLine}\n发布数量：${selectedPosts.length} 篇\n\n${preview}\n\n请选择要同时发布的云机：`, "bconfirm");
-        return;
-        await safeEditOrSend(bot, chatId, msgId, `👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n云机：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: `✅ 确认发布 ${selectedPosts.length} 篇`, callback_data: "bpublish_confirm" }],
-              [{ text: "◀️ 返回选平台", callback_data: "bconfirm" }],
-            ],
-          },
-        });
+        }, `🚀 *多云机批量发布*\n\n人设：${archive.name}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, selectedPosts[0], state.groupContentType)}\n发布数量：${selectedPosts.length} 篇\n\n请选择要同时发布的云机：`, "bconfirm");
         return;
       }
       if (data === "bdelete_confirm") {
@@ -17444,7 +17581,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
             publishedIds.push(post.id);
             publishedOriginals[post.id] = post.content;
             const publishScreenshotUrl = result.screenshotUrl;
-            publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl, sourceMeta: post.sourceMeta, ...buildPublishedMetaFromResult(platform, result) };
+            publishMeta[post.id] = {
+              platform,
+              padCode,
+              imageUrl: post.imageUrl,
+              screenshotUrl: publishScreenshotUrl,
+              sourceMeta: post.sourceMeta,
+              ...(await buildPublishedMetaFromResultWithInitialMetrics(platform, result)),
+            };
             if (publishScreenshotUrl) {
               await sendOriginalScreenshotDocument(
                 bot,
@@ -18232,8 +18376,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
               callback_data: `dop_${platform}`,
             }])),
             ...allowedPublishPlatforms.map((platform) => ([{
+              text: `📱 多云机发 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
+              callback_data: `dopm_${platform}`,
+            }])),
+            ...allowedPublishPlatforms.map((platform) => ([{
               text: `⏰ 定时发 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
               callback_data: `sch_${platform}`,
+            }])),
+            ...allowedPublishPlatforms.map((platform) => ([{
+              text: `📱 多云机定时发 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
+              callback_data: `schm_${platform}`,
             }])),
             [{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(archiveId, 0, groupContentType) }],
           ],
@@ -18866,12 +19018,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stage: "choose_platform",
         groupContentType: parsedPublish?.groupContentType,
       });
-      await safeEditOrSend(bot, chatId, msgId, `🚀 *发布推文*\n\n人設：${archive.name}\n${branchTitle ? `內容類型：${branchTitle}\n` : ""}待发布推文：${scopedPosts.length} 篇\n\n请选择发布方式：`, {
+      await safeEditOrSend(bot, chatId, msgId, `🚀 *发布推文*\n\n人設：${archive.name}\n${branchTitle ? `內容類型：${branchTitle}\n` : ""}待发布推文：${scopedPosts.length} 篇\n\n请选择发布方式：\n多云机发布会在选择平台后选择云机。`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🖼 自定义发布", callback_data: `custom_publish_persona_${id}` }],
-            [{ text: "📚 从存储推文选择发布", callback_data: "sp" }],
+            [{ text: "🖼 自定义发布（可多云机）", callback_data: `custom_publish_persona_${id}` }],
+            [{ text: "📚 从存储推文选择发布（可多云机）", callback_data: "sp" }],
             [{ text: "◀️ 返回", callback_data: parsedPublish?.groupContentType ? `pub_branch_${id}` : `pd_${id}` }],
           ],
         },
@@ -19080,9 +19232,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith(MANUAL_CONFIRM_PREFIX) || data.startsWith(MANUAL_CONFIRM_COMPACT_PREFIX) || data === "mconfirm") {
+    if (data.startsWith(MANUAL_CONFIRM_PREFIX) || data.startsWith(MANUAL_CONFIRM_COMPACT_PREFIX) || data === "mconfirm" || data === "mconfirm_multi") {
       const prevManual = pendingManualPublishes.get(chatId);
-      const confirm = parseManualConfirmCallback(data, prevManual);
+      const multiPadManual = data === "mconfirm_multi";
+      const confirm = parseManualConfirmCallback(multiPadManual ? "mconfirm" : data, prevManual);
       if (!confirm) {
         await safeEditOrSend(bot, chatId, msgId, "这条重试按钮的临时发布状态已失效，请从推文列表重新选择要发布的编号。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回主菜单", callback_data: "fresh_main_menu" }]] },
@@ -19102,16 +19255,18 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const manualPosts = scopedPosts.slice(startIndex, startIndex + Math.max(1, Math.min(count, scopedPosts.length - startIndex)));
-      await showPublishPadSelection(chatId, msgId, {
-        mode: "manual_posts",
-        archiveId,
-        platform,
-        startIndex,
-        count: manualPosts.length,
-        groupContentType,
-        selectedPadCodes: [archive.boundPadCode || defaultPadCode],
-      }, `🚀 *人工发布前确认*\n\n人设：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布数量：${manualPosts.length} 篇\n\n请选择要同时发布的云机：`, `mpage_${Math.floor(startIndex / 8)}`);
-      return;
+      if (multiPadManual) {
+        await showPublishPadSelection(chatId, msgId, {
+          mode: "manual_posts",
+          archiveId,
+          platform,
+          startIndex,
+          count: manualPosts.length,
+          groupContentType,
+          selectedPadCodes: [archive.boundPadCode || defaultPadCode],
+        }, `🚀 *多云机人工发布*\n\n人设：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布数量：${manualPosts.length} 篇\n\n请选择要同时发布的云机：`, `mpage_${Math.floor(startIndex / 8)}`);
+        return;
+      }
       if (!credentials.ak || !credentials.sk) {
         await safeEditOrSend(bot, chatId, msgId, "❌ VMOS 凭据未配置", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: buildPersonaPublishCallback(archiveId, groupContentType) }]] },
@@ -19171,7 +19326,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
           if (isPublishWarning(result)) publishWarnings.push(`第 ${startIndex + index + 1} 篇：${result.detail}`);
           publishedIds.push(post.id);
           const publishScreenshotUrl = result.screenshotUrl;
-          publishMeta[post.id] = { platform, padCode, imageUrl: post.imageUrl, screenshotUrl: publishScreenshotUrl, sourceMeta: post.sourceMeta, ...buildPublishedMetaFromResult(platform, result) };
+          publishMeta[post.id] = {
+            platform,
+            padCode,
+            imageUrl: post.imageUrl,
+            screenshotUrl: publishScreenshotUrl,
+            sourceMeta: post.sourceMeta,
+            ...(await buildPublishedMetaFromResultWithInitialMetrics(platform, result)),
+          };
           if (publishScreenshotUrl) {
             await sendOriginalScreenshotDocument(
               bot,
@@ -19242,15 +19404,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
 
-      await showPublishPadSelection(chatId, msgId, {
-        mode: "single_post",
-        archiveId: id,
-        postId: post.id,
-        platform,
-        selectedPadCodes: [padCode],
-      }, `🚀 *发布前确认*\n\n人设：${archive.name || id}\n平台：${platform}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n请选择要同时发布的云机：`, "sp");
-      return;
-
       const publishLockKey = `dopub:${id}:${platform}:${post.id}`;
       const publishScopeKey = `pad:${padCode}`;
       if (!acquirePublishCommand(chatId, publishLockKey, "发布", publishScopeKey)) {
@@ -19300,7 +19453,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               imageUrl: post.imageUrl,
               screenshotUrl: publishScreenshotUrl,
               sourceMeta: post.sourceMeta,
-              ...buildPublishedMetaFromResult(platform, result),
+              ...(await buildPublishedMetaFromResultWithInitialMetrics(platform, result)),
             },
           },
         ).catch(() => null);
@@ -19527,7 +19680,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         reply_markup: {
           inline_keyboard: [
             [{ text: "✅ 图/视频/文字推文直发", callback_data: "custom_publish_confirm_pad" }],
+            [{ text: "📱 多云机图/视频/文字直发", callback_data: "custom_publish_multi_pad" }],
             [{ text: "🖼 根据文字内容生成图片再发布", callback_data: "custom_publish_confirm_pad_with_image" }],
+            [{ text: "📱 多云机生成图片再发布", callback_data: "custom_publish_multi_pad_with_image" }],
             [{ text: "📱 修改云机", callback_data: `bindpad_${nextState.archiveId}` }],
             [{ text: "◀️ 返回选平台", callback_data: `custom_publish_persona_${nextState.archiveId}` }],
           ],
@@ -19542,14 +19697,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         sendMainMenu(chatId, msgId);
         return;
       }
-      await showPublishPadSelection(chatId, msgId, {
-        mode: "custom_direct",
-        archiveId: prev.archiveId,
-        platform: prev.platform || effectiveDefaultPublishPlatform,
-        groupContentType: prev.groupContentType,
-        selectedPadCodes: prev.padCodes || [prev.padCode || defaultPadCode],
-      }, "请选择要同时发布的云机：", `custom_publish_platform_${prev.platform || effectiveDefaultPublishPlatform}`);
-      return;
       const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: false, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
       pendingCustomPublishes.set(chatId, nextState);
       await safeEditOrSend(bot, chatId, msgId, `✅ 已確認直發模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送內容\n\n請發送其中一種：\n1) 純文字推文\n2) 圖片/視頻 + caption\n3) 先發圖片/視頻，下一步再補文字\n4) 先發文字，下一步再補圖片/視頻\n\n收到完整內容後會先讓你確認，不會直接發布。`, {
@@ -19558,7 +19705,37 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data === "custom_publish_multi_pad") {
+      const prev = pendingCustomPublishes.get(chatId);
+      if (!prev) {
+        sendMainMenu(chatId, msgId);
+        return;
+      }
+      await showPublishPadSelection(chatId, msgId, {
+        mode: "custom_direct",
+        archiveId: prev.archiveId,
+        platform: prev.platform || effectiveDefaultPublishPlatform,
+        groupContentType: prev.groupContentType,
+        selectedPadCodes: prev.padCodes || [prev.padCode || defaultPadCode],
+      }, "请选择要同时发布的云机：", `custom_publish_platform_${prev.platform || effectiveDefaultPublishPlatform}`);
+      return;
+    }
+
     if (data === "custom_publish_confirm_pad_with_image") {
+      const prev = pendingCustomPublishes.get(chatId);
+      if (!prev) {
+        sendMainMenu(chatId, msgId);
+        return;
+      }
+      const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: true, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
+      pendingCustomPublishes.set(chatId, nextState);
+      await safeEditOrSend(bot, chatId, msgId, `🖼 已確認配圖發布模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送文字文案\n\n請只發送純文字推文內容。我會根據文字生成配圖，下一步再讓你確認發布。\n如果此時發圖片或視頻，會被攔截，不會誤發布。`, {
+        reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
+      });
+      return;
+    }
+
+    if (data === "custom_publish_multi_pad_with_image") {
       const prev = pendingCustomPublishes.get(chatId);
       if (!prev) {
         sendMainMenu(chatId, msgId);
@@ -19571,12 +19748,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         groupContentType: prev.groupContentType,
         selectedPadCodes: prev.padCodes || [prev.padCode || defaultPadCode],
       }, "请选择要同时发布的云机：", `custom_publish_platform_${prev.platform || effectiveDefaultPublishPlatform}`);
-      return;
-      const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: true, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
-      pendingCustomPublishes.set(chatId, nextState);
-      await safeEditOrSend(bot, chatId, msgId, `🖼 已確認配圖發布模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送文字文案\n\n請只發送純文字推文內容。我會根據文字生成配圖，下一步再讓你確認發布。\n如果此時發圖片或視頻，會被攔截，不會誤發布。`, {
-        reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
-      });
       return;
     }
 
@@ -19753,9 +19924,41 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("schedpost_") || data.startsWith("sch_")) {
+    if (data.startsWith("dopm_")) {
+      const platform = parseShortPostPlatform(data, "dopm_");
+      const action = pendingPostActions.get(chatId);
+      const archiveId = action?.archiveId;
+      const postId = action?.postId;
+      if (!archiveId || !postId || !platform) {
+        await safeEditOrSend(bot, chatId, msgId, "請先从推文列表選擇一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
+      const archive = await loadPersonaForThisBot(archiveId);
+      const post = archive?.posts.find((item) => item.id === postId);
+      if (!archive || !post) {
+        await safeEditOrSend(bot, chatId, msgId, "沒有找到要發佈的推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: `posts_${archiveId}` }]] },
+        });
+        return;
+      }
+      await showPublishPadSelection(chatId, msgId, {
+        mode: "single_post",
+        archiveId,
+        postId,
+        platform,
+        groupContentType: action.groupContentType,
+        selectedPadCodes: [archive.boundPadCode || defaultPadCode],
+      }, `🚀 *多云机发布*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n请选择要同时发布的云机：`, "post_action");
+      return;
+    }
+
+    if (data.startsWith("schedpost_") || data.startsWith("sch_") || data.startsWith("schm_")) {
       deletePendingGeneratePost(chatId);
-      const shortPlatform = parseShortPostPlatform(data, "sch_");
+      const multiPadSchedule = data.startsWith("schm_");
+      const shortPlatform = parseShortPostPlatform(data, multiPadSchedule ? "schm_" : "sch_");
       const action = shortPlatform ? pendingPostActions.get(chatId) : null;
       const parts = data.startsWith("schedpost_") ? data.slice("schedpost_".length).split("_") : [];
       const archiveId = action?.archiveId || parts[0];
@@ -19777,15 +19980,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       pendingPostActions.set(chatId, { archiveId, postId });
-      await showPublishPadSelection(chatId, msgId, {
-        mode: "scheduled_post",
-        archiveId,
-        postId,
-        platform,
-        groupContentType: action?.groupContentType,
-        selectedPadCodes: [archive.boundPadCode || defaultPadCode],
-      }, `⏰ *定時發佈前確認*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action?.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "post_action");
-      return;
+      if (multiPadSchedule) {
+        await showPublishPadSelection(chatId, msgId, {
+          mode: "scheduled_post",
+          archiveId,
+          postId,
+          platform,
+          groupContentType: action?.groupContentType,
+          selectedPadCodes: [archive.boundPadCode || defaultPadCode],
+        }, `⏰ *多云机定时发布*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action?.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "post_action");
+        return;
+      }
       const nextState = {
         stage: "choose_time" as const,
         archiveId,
@@ -19848,6 +20053,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
         reply_markup: {
           inline_keyboard: [
             ...buildAllowedPublishPlatformRows("sched_platform_"),
+            ...allowedPublishPlatforms.map((platform) => ([{
+              text: `📱 多云机定时发 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
+              callback_data: `sched_multi_platform_${platform}`,
+            }])),
             [{ text: "◀️ 返回", callback_data: "schedule_publish" }],
           ],
         },
@@ -19855,8 +20064,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("sched_platform_")) {
-      const platform = data.slice("sched_platform_".length) as TelegramPublishPlatform;
+    if (data.startsWith("sched_platform_") || data.startsWith("sched_multi_platform_")) {
+      const multiPadSchedule = data.startsWith("sched_multi_platform_");
+      const platform = data.slice(multiPadSchedule ? "sched_multi_platform_".length : "sched_platform_".length) as TelegramPublishPlatform;
       if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
       const prev = pendingScheduledPublishes.get(chatId);
       if (!prev?.archiveId || !prev?.postId) {
@@ -19871,14 +20081,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      await showPublishPadSelection(chatId, msgId, {
-        mode: "scheduled_post",
-        archiveId: prev.archiveId,
-        postId: prev.postId,
-        platform,
-        selectedPadCodes: prev.padCodes || [prev.padCode || archive.boundPadCode || defaultPadCode],
-      }, `⏰ *定時發佈前確認*\n\n人設：${archive.name}\n平台：${platform}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "schedule_publish");
-      return;
+      if (multiPadSchedule) {
+        await showPublishPadSelection(chatId, msgId, {
+          mode: "scheduled_post",
+          archiveId: prev.archiveId,
+          postId: prev.postId,
+          platform,
+          selectedPadCodes: prev.padCodes || [prev.padCode || archive.boundPadCode || defaultPadCode],
+        }, `⏰ *多云机定时发布*\n\n人設：${archive.name}\n平台：${platform}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "schedule_publish");
+        return;
+      }
       const nextState = { ...prev, stage: "choose_time" as const, platform };
       pendingScheduledPublishes.set(chatId, nextState);
       void showScheduledTimePicker(chatId, msgId, nextState);
@@ -20030,7 +20242,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               imageUrl: post.imageUrl,
               screenshotUrl: publishScreenshotUrl,
               sourceMeta: post.sourceMeta,
-              ...buildPublishedMetaFromResult(platform, result),
+              ...(await buildPublishedMetaFromResultWithInitialMetrics(platform, result)),
             },
           },
         ).catch(() => null);
@@ -20199,6 +20411,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
   const messageHandler = async (msg: TelegramBot.Message) => {
     const chatId = msg.chat.id;
+    if (!isTelegramChatAllowed(chatId)) {
+      console.warn(`[telegram][chat_allowlist_blocked_update] source=message chat=${chatId}`);
+      return;
+    }
     const text = (msg.text || msg.caption || "").trim();
     const photo = Array.isArray(msg.photo) && msg.photo.length > 0 ? msg.photo[msg.photo.length - 1] : null;
     const video = msg.video || null;

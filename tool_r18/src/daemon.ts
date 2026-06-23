@@ -8,6 +8,7 @@ import { publishPost, type PublishCancellationToken, type PublishProgress } from
 import { startTelegramBot, stopTelegramPolling, type TelegramBotInstanceOptions } from "@/telegram-bot";
 import { markArchiveEpisodesPublished } from "@/lib/persona-archives";
 import { screenshot as captureVmosScreenshot } from "@/lib/vmos-client";
+import { refreshSentimentSourceMetrics } from "@/lib/sentiment-hot-importer";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import fs from "node:fs";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
@@ -167,6 +168,34 @@ const TELEGRAM_BOT_CONFIG_RELOAD_MS = Math.max(Number(process.env.TELEGRAM_BOT_C
 
 function isAllowedScheduledPublishPlatform(platform: unknown): platform is "threads" | "telegram" {
   return platform === "threads" || platform === "telegram";
+}
+
+async function buildInitialPublishedMeta(platform: string, publishedUrl: unknown) {
+  const sourceUrl = String(publishedUrl || "").trim();
+  if (!sourceUrl) return { publishedUrl: undefined, publishedMeta: undefined };
+  const baseMeta = {
+    source: "published_post",
+    platform,
+    sourceUrl,
+    capturedAt: new Date().toISOString(),
+  };
+  if (platform !== "threads") return { publishedUrl: sourceUrl, publishedMeta: baseMeta };
+  const refreshed = await refreshSentimentSourceMetrics({
+    platform,
+    sourceUrl,
+  }).catch(() => null);
+  if (!refreshed?.ok) return { publishedUrl: sourceUrl, publishedMeta: baseMeta };
+  return {
+    publishedUrl: sourceUrl,
+    publishedMeta: {
+      ...baseMeta,
+      hotScore: refreshed.hotScore,
+      metrics: refreshed.metrics || {},
+      engagement: refreshed.engagement || {},
+      mediaItems: refreshed.media || [],
+      capturedAt: new Date().toISOString(),
+    },
+  };
 }
 
 function readDaemonHeartbeat(): { pid?: number; updatedAt?: string } | null {
@@ -407,6 +436,7 @@ async function main() {
         if (result.state === "verified") {
           if (task.archive_id && task.archive_post_id) {
             const screenshotUrl = result.screenshotUrl || await captureVmosScreenshot(credentials, task.pad_code).catch(() => undefined);
+            const initialPublishedMeta = await buildInitialPublishedMeta(task.platform, result.publishedUrl);
             await markArchiveEpisodesPublished(
               task.archive_id,
               [task.archive_post_id],
@@ -417,15 +447,7 @@ async function main() {
                   padCode: task.pad_code,
                   mediaUrl: task.media_url,
                   screenshotUrl,
-                  publishedUrl: result.publishedUrl,
-                  publishedMeta: result.publishedUrl
-                    ? {
-                      source: "published_post",
-                      platform: task.platform,
-                      sourceUrl: result.publishedUrl,
-                      capturedAt: new Date().toISOString(),
-                    }
-                    : undefined,
+                  ...initialPublishedMeta,
                 },
               },
             ).catch(() => null);
@@ -453,28 +475,22 @@ async function main() {
         const screenshotUrl = result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl
           ? result.screenshotUrl
           : await captureVmosScreenshot(credentials, task.pad_code).catch(() => undefined);
+        const resultPublishedUrl = result && typeof result === "object" && "publishedUrl" in result ? result.publishedUrl : undefined;
+        const initialPublishedMeta = await buildInitialPublishedMeta(task.platform, resultPublishedUrl);
         await markArchiveEpisodesPublished(
           task.archive_id,
           [task.archive_post_id],
           { [task.archive_post_id]: task.caption },
           {
             [task.archive_post_id]: {
-              platform: task.platform,
-              padCode: task.pad_code,
-              mediaUrl: task.media_url,
-              screenshotUrl,
-              publishedUrl: result && typeof result === "object" && "publishedUrl" in result ? result.publishedUrl : undefined,
-              publishedMeta: result && typeof result === "object" && "publishedUrl" in result && result.publishedUrl
-                ? {
-                  source: "published_post",
                   platform: task.platform,
-                  sourceUrl: result.publishedUrl,
-                  capturedAt: new Date().toISOString(),
-                }
-                : undefined,
-            },
-          },
-        ).catch(() => null);
+                  padCode: task.pad_code,
+                  mediaUrl: task.media_url,
+                  screenshotUrl,
+                  ...initialPublishedMeta,
+                },
+              },
+            ).catch(() => null);
       }
       return { status: "done" };
     } catch (error: any) {

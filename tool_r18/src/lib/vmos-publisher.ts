@@ -31579,6 +31579,22 @@ export async function warmupThreadsAccount(
       debugReason: `search_visible_action_locate_error:${error instanceof Error ? error.message : String(error)}`,
     } as WarmupFeedActionTargets));
     if (current?.screenshotUrl && await detectThreadsProfilePageLocally(current.screenshotUrl).catch(() => false)) {
+      const stillSearchResults = await detectThreadsSearchResultsPageLocally(current.screenshotUrl).catch(() => false)
+        || await detectThreadsSearchResultContentLoadedLocally(current.screenshotUrl).catch(() => false)
+        || await detectThreadsSearchResultsVisualGateLocally(current.screenshotUrl).catch(() => false);
+      if (stillSearchResults) {
+        if (current.like || current.comment) {
+          report(`搜索结果页被个人页检测误判，但已识别到可见互动栏：${current.debugReason || "visible_action_row"}`);
+          return current;
+        }
+        report("搜索结果页被个人页检测误判，按无稳定互动栏处理并换候选");
+        return {
+          ...current,
+          like: undefined,
+          comment: undefined,
+          debugReason: "acp_search_result_profile_false_positive:no_visible_action_row",
+        };
+      }
       report("搜索结果页当前候选进入个人页，跳过换下一条，避免无关互动");
       return {
         ...current,
@@ -31939,12 +31955,28 @@ export async function warmupThreadsAccount(
       break;
     }
 
-    const relevantSurface = carriedRelevantSurface || await warmupEnsureRelevantSurface(
+    let forceSearchAfterLostSurface = false;
+    let relevantSurface = carriedRelevantSurface;
+    if (relevantSurface && isAcpPad(padCode) && /^search/.test(relevantSurface.reason)) {
+      const keyword = keywordFromRelevantSurface();
+      const currentSearchSurface = await isCurrentAcpSearchResultsSurface(keyword).catch(() => ({
+        ok: false,
+        xml: "",
+        shotUrl: "",
+        searchInputWithKeyword: false,
+      }));
+      if (!currentSearchSurface.ok) {
+        await resetAcpSearchSurface(`搜索结果上下文已离开，禁止继续在推荐流互动，重新随机选择中文关键词：${keyword || relevantSurface.reason}`);
+        relevantSurface = null;
+        forceSearchAfterLostSurface = true;
+      }
+    }
+    relevantSurface ||= await warmupEnsureRelevantSurface(
       config,
       padCode,
       effectiveCfg,
       (step) => report(step),
-      { phase: "browse", allowSearch: true },
+      { phase: "browse", allowSearch: true, forceSearch: forceSearchAfterLostSurface },
     ).catch((error) => ({ ok: false, preview: "", reason: error instanceof Error ? error.message : String(error) }));
     carriedRelevantSurface = /^search/.test(relevantSurface.reason) ? relevantSurface : null;
     if (!relevantSurface.ok) {
@@ -32055,11 +32087,11 @@ export async function warmupThreadsAccount(
         report("搜索结果页优先检查当前可见互动栏，避免反复点进同一媒体...");
         feedActions = await locateAcpSearchResultVisibleActions();
         if (!feedActions?.like && !feedActions?.comment) {
-          report("当前搜索结果页没有稳定可见互动栏，使用原始 ACP 定位再试一次...");
-          feedActions = await locateFeedActionsForWarmup(14_000).catch(() => null);
-        }
-        if (!feedActions?.like && !feedActions?.comment) {
           markBrowsedThisTurn("搜索候选已校验但未找到互动栏");
+          if (/profile_ui|profile_menu/.test(feedActions?.debugReason || "")) {
+            await skipCurrentSearchCandidate(`搜索结果候选进入个人页，跳过当前候选：${feedActions?.debugReason || "profile_ui"}`);
+            continue;
+          }
           report("当前搜索结果页仍未找到稳定互动栏，滑走换下一条，避免点进个人页或媒体层...");
           await warmupScrollDown(config, padCode).catch(() => undefined);
           await delay(warmupRandomInt(900, 1500));
@@ -32443,6 +32475,10 @@ export async function warmupThreadsAccount(
         if (!(await ensureAcpSearchSurfaceForRecovery("补点"))) break;
         actions = await locateAcpSearchResultVisibleActions();
         if (!actions?.like) {
+          if (/profile_ui|profile_menu/.test(actions?.debugReason || "")) {
+            await restoreAcpSearchResultsForNextCandidate(`补点搜索候选进入个人页，换下一条：${actions?.debugReason || "profile_ui"}`);
+            continue;
+          }
           report(`补点搜索结果页未找到稳定可见点赞栏，换下一条：${actions?.debugReason || "missing"}`);
           await warmupScrollDown(config, padCode).catch(() => undefined);
           await delay(warmupRandom(1200, 2400));
@@ -32523,6 +32559,10 @@ export async function warmupThreadsAccount(
           if (!(await ensureAcpSearchSurfaceForRecovery("补留言"))) break;
           actions = await locateAcpSearchResultVisibleActions();
           if (!actions?.comment) {
+            if (/profile_ui|profile_menu/.test(actions?.debugReason || "")) {
+              await restoreAcpSearchResultsForNextCandidate(`补留言搜索候选进入个人页，换下一条：${actions?.debugReason || "profile_ui"}`);
+              continue;
+            }
             report(`补留言搜索结果页未找到稳定可见留言栏，换下一条：${actions?.debugReason || "missing"}`);
             await warmupScrollDown(config, padCode).catch(() => undefined);
             await delay(warmupRandom(1200, 2400));
