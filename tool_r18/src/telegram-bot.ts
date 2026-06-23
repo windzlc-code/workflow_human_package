@@ -17,7 +17,7 @@ import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
 import { buildRegeneratePostInstruction, isRegeneratedPostTooSimilar } from "@/core/persona/regenerate-post-instruction";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
-import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, buildWarmupInterestKeywords, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress } from "@/lib/vmos-publisher";
+import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, buildWarmupInterestKeywords, extractThreadsPublishedPostUrlFromReaderMarkdown, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updateArchivePostMedia, updatePersonaArchivePostDraft, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
@@ -627,6 +627,7 @@ const pendingWarmupConfigs = new Map<number, {
   commentChance?: number;
   maxComments?: number;
   minRequiredComments?: number;
+  minRequiredInteractions?: number;
   commentTemplates?: string[];
   commentPersona?: WarmupCommentPersona;
   keywords?: string[];
@@ -9846,7 +9847,7 @@ export function formatCloudAccountStateNotice(
   const isCaptcha =
     /(驗證你是真人|验证你是真人|真人验证|真人驗證|输入图像上的验证码|输入圖像上的驗證碼|输入图片中的验证码|输入圖片中的驗證碼|captcha|human verification|security check|安全验证|安全驗證|安全查验|安全查驗|風控|风控|challenge)/i.test(normalized);
   const isLoginRequired =
-    /(未登录|未登入|重新登入|重新登录|需要登入|需要登录|login_required|login required|instagram 登入|instagram 登录|登入 instagram|登录 instagram|login chooser)/i.test(normalized);
+    /(未登录|未登入|重新登入|重新登录|需要登入|需要登录|login_required|login required|LOCAL_THREADS_LOGIN_ACTIVITY|LOCAL_THREADS_LOGIN_MODAL_ACTIVITY|LOCAL_THREADS_LOGIN_LANDING|instagram 登入|instagram 登录|登入 instagram|登录 instagram|login chooser)/i.test(normalized);
   const isOnboarding =
     /(完成個人檔案|完成个人档案|新增個人簡介|新增个人简介|建立串文|追蹤個人檔案|追踪个人档案|查看個人檔案|查看个人档案|新號啟動卡片|新号启动卡片|onboarding card|complete profile|profile setup|帳號初始化|账号初始化|個人資料引導|个人资料引导)/i.test(normalized);
   const isBlocked =
@@ -10210,13 +10211,147 @@ function buildPublishedPostInfoHtml(record: NonNullable<PersonaArchive["publishH
     }))}`);
     if (publishedMeta.capturedAt) lines.push(`更新时间: ${escapeHtmlText(String(publishedMeta.capturedAt))}`);
   } else if (platform === "threads") {
-    lines.push("数据: 暂无实际发布帖链接，不能实时刷新该发布帖热度");
+    const hasPad = Boolean(String(record.padCode || "").trim())
+      || (Array.isArray(record.publishedTargets) && record.publishedTargets.some((target) => String(target?.padCode || "").trim()));
+    lines.push(hasPad
+      ? "数据: 暂无实际发布帖链接，可点击刷新热度尝试按云机账号找回发布帖并刷新"
+      : "数据: 暂无实际发布帖链接，且缺少云机信息，不能实时刷新该发布帖热度");
   } else if (platform === "telegram") {
     lines.push("数据: Telegram 发布记录暂未保存消息链接/消息 ID，不能实时刷新群消息数据");
   } else {
     lines.push("数据: 暂无该平台发布帖数据");
   }
   return lines;
+}
+
+type PublishHistoryRecord = NonNullable<PersonaArchive["publishHistory"]>[number];
+
+const THREADS_PROFILE_READER_PREFIX = "https://r.jina.ai/http://r.jina.ai/http://";
+
+function normalizeThreadsUsernameForHistoryLookup(raw: unknown): string {
+  return String(raw || "")
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/^https?:\/\/(?:www\.)?threads\.(?:net|com)\/@?/i, "")
+    .split(/[/?#\s]/)[0]
+    .replace(/^@+/, "")
+    .trim();
+}
+
+function hasPublishHistorySourceUrl(record?: Pick<PublishHistoryRecord, "publishedMeta" | "publishedUrl" | "publishedTargets"> | null) {
+  const publishedMeta = record?.publishedMeta;
+  const publishedUrl = String(record?.publishedUrl || publishedMeta?.sourceUrl || "").trim();
+  const targetUrl = Array.isArray(record?.publishedTargets)
+    ? record.publishedTargets.some((target) => String(target?.publishedUrl || target?.publishedMeta?.sourceUrl || "").trim())
+    : false;
+  return Boolean(publishedUrl || targetUrl);
+}
+
+function hasPublishHistoryPadLookup(record?: Pick<PublishHistoryRecord, "padCode" | "publishedTargets"> | null) {
+  return Boolean(
+    String(record?.padCode || "").trim()
+      || (Array.isArray(record?.publishedTargets) && record.publishedTargets.some((target) => String(target?.padCode || "").trim())),
+  );
+}
+
+async function resolveThreadsPublishedUrlFromProfileReader(args: {
+  username: string;
+  content: string;
+}): Promise<string | undefined> {
+  const normalized = normalizeThreadsUsernameForHistoryLookup(username);
+  const content = String(args.content || "").trim();
+  if (!normalized || !content) return undefined;
+  const profileUrl = `https://www.threads.net/@${normalized}`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeout = controller ? setTimeout(() => controller.abort(), 18_000) : null;
+    try {
+      const readerUrl = `${THREADS_PROFILE_READER_PREFIX}${profileUrl}${attempt ? `?__r=${Date.now().toString(36)}${attempt}` : ""}`;
+      const response = await fetch(readerUrl, {
+        headers: {
+          "user-agent": "Mozilla/5.0",
+          accept: "text/plain, text/markdown, */*",
+          "cache-control": "no-cache",
+          pragma: "no-cache",
+        },
+        signal: controller?.signal,
+      });
+      if (response.ok) {
+        const markdown = await response.text();
+        const matchedUrl = extractThreadsPublishedPostUrlFromReaderMarkdown({
+          markdown,
+          username: normalized,
+          caption: content,
+        });
+        if (matchedUrl) return matchedUrl;
+      }
+    } catch {
+      // Try another uncached reader request before giving up.
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+  }
+  return undefined;
+}
+
+async function resolvePublishHistoryThreadsUrlByPad(args: {
+  padCode?: string;
+  content: string;
+}): Promise<string | undefined> {
+  const padCode = String(args.padCode || "").trim();
+  if (!padCode || !args.content.trim()) return undefined;
+  const credentials = resolveVmosCredentials();
+  const account = await queryThreadsAccount(credentials, padCode).catch(() => null);
+  const username = normalizeThreadsUsernameForHistoryLookup(account?.username || "");
+  if (!username) return undefined;
+  return resolveThreadsPublishedUrlFromProfileReader({
+    username,
+    content: args.content,
+  });
+}
+
+async function attachMissingPublishHistoryThreadsUrls(record: PublishHistoryRecord): Promise<PublishHistoryRecord> {
+  if (String(record.platform || "").toLowerCase() !== "threads") return record;
+  const content = String(record.content || "").trim();
+  if (!content) return record;
+  if (Array.isArray(record.publishedTargets) && record.publishedTargets.length > 0) {
+    let changed = false;
+    const publishedTargets = await Promise.all(record.publishedTargets.map(async (target) => {
+      const existingUrl = String(target.publishedUrl || target.publishedMeta?.sourceUrl || "").trim();
+      if (existingUrl) return target;
+      const resolvedUrl = await resolvePublishHistoryThreadsUrlByPad({ padCode: target.padCode || record.padCode, content });
+      if (!resolvedUrl) return target;
+      changed = true;
+      return {
+        ...target,
+        publishedUrl: resolvedUrl,
+        publishedMeta: {
+          ...(target.publishedMeta || {}),
+          source: "published_post",
+          platform: target.platform || record.platform,
+          sourceUrl: resolvedUrl,
+          capturedAt: new Date().toISOString(),
+        },
+      };
+    }));
+    return changed ? { ...record, publishedTargets } : record;
+  }
+  const existingUrl = String(record.publishedUrl || record.publishedMeta?.sourceUrl || "").trim();
+  if (existingUrl) return record;
+  const resolvedUrl = await resolvePublishHistoryThreadsUrlByPad({ padCode: record.padCode, content });
+  if (!resolvedUrl) return record;
+  return {
+    ...record,
+    publishedUrl: resolvedUrl,
+    publishedMeta: {
+      ...(record.publishedMeta || {}),
+      source: "published_post",
+      platform: record.platform,
+      sourceUrl: resolvedUrl,
+      capturedAt: new Date().toISOString(),
+    },
+  };
 }
 
 function canRefreshSentimentPostMetrics(post?: Pick<PersonaArchive["posts"][number], "sourceMeta"> | null) {
@@ -10260,15 +10395,10 @@ async function refreshStoredPostSentimentMetrics(args: {
   });
 }
 
-function canRefreshPublishHistoryMetrics(record?: Pick<NonNullable<PersonaArchive["publishHistory"]>[number], "publishedMeta" | "publishedUrl" | "publishedTargets" | "platform"> | null) {
-  const publishedMeta = record?.publishedMeta;
-  const publishedUrl = String(record?.publishedUrl || publishedMeta?.sourceUrl || "").trim();
-  const targetUrl = Array.isArray(record?.publishedTargets)
-    ? record.publishedTargets.some((target) => String(target?.publishedUrl || target?.publishedMeta?.sourceUrl || "").trim())
-    : false;
+function canRefreshPublishHistoryMetrics(record?: Pick<PublishHistoryRecord, "publishedMeta" | "publishedUrl" | "publishedTargets" | "platform" | "padCode"> | null) {
   return Boolean(
     String(record?.platform || "").toLowerCase() === "threads"
-      && (publishedUrl || targetUrl),
+      && (hasPublishHistorySourceUrl(record) || hasPublishHistoryPadLookup(record)),
   );
 }
 
@@ -10277,10 +10407,16 @@ async function refreshPublishHistorySentimentMetrics(args: {
   recordId: string;
 }): Promise<NonNullable<PersonaArchive["publishHistory"]>[number] | null> {
   const archive = await loadPersonaForThisBot(args.archiveId);
-  const record = archive?.publishHistory?.find((item) => item.id === args.recordId);
-  const publishedMeta = record?.publishedMeta;
-  const publishedUrl = String(record?.publishedUrl || publishedMeta?.sourceUrl || "").trim();
-  if (!archive || !record || !canRefreshPublishHistoryMetrics(record)) return null;
+  const originalRecord = archive?.publishHistory?.find((item) => item.id === args.recordId);
+  if (!archive || !originalRecord || !canRefreshPublishHistoryMetrics(originalRecord)) return null;
+  const record = hasPublishHistoryPadLookup(originalRecord)
+    ? await attachMissingPublishHistoryThreadsUrls(originalRecord)
+    : originalRecord;
+  if (!hasPublishHistorySourceUrl(record)) {
+    throw new Error("未能从该云机账号主页匹配到这条历史发布帖链接，请确认云机仍登录原 Threads 账号且该帖未删除。");
+  }
+  const publishedMeta = record.publishedMeta;
+  const publishedUrl = String(record.publishedUrl || publishedMeta?.sourceUrl || "").trim();
   if (Array.isArray(record.publishedTargets) && record.publishedTargets.some((target) => String(target?.publishedUrl || target?.publishedMeta?.sourceUrl || "").trim())) {
     const refreshedTargets = await Promise.all(record.publishedTargets.map(async (target) => {
       const targetUrl = String(target.publishedUrl || target.publishedMeta?.sourceUrl || "").trim();
@@ -14198,7 +14334,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("warmup_count_")) {
       const parts = data.slice("warmup_count_".length).split("_");
       const padCode = parts[0];
-      const browseCount = Number(parts[1]) || 10;
+      const browseCount = Math.max(6, Number(parts[1]) || 10);
       const prev = pendingWarmupConfigs.get(chatId) || { platform: "threads" as const, padCode, stage: "choose_count" as const };
       pendingWarmupConfigs.set(chatId, { ...prev, browseCount, stage: "choose_engagement" });
       const warmupStartCallback = prev.startCallback || `warmup_start_${prev.platform || "threads"}_${padCode}`;
@@ -14265,10 +14401,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
           platform,
           likeChance: 100,
           maxLikes: plannedLikes,
-          minRequiredLikes: plannedLikes,
+          minRequiredLikes: 1,
           commentChance: 0,
           maxComments: 0,
           minRequiredComments: 0,
+          minRequiredInteractions: 1,
           commentTemplates: [],
           riskManaged: false,
           stage: "ready",
@@ -14290,7 +14427,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           minRequiredLikes: 0,
           commentChance: 100,
           maxComments: plannedComments,
-          minRequiredComments: plannedComments,
+          minRequiredComments: 1,
+          minRequiredInteractions: 1,
           commentTemplates: [],
           riskManaged: false,
           stage: "ready",
@@ -14310,10 +14448,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
           platform,
           likeChance: 100,
           maxLikes: plannedLikes,
-          minRequiredLikes: plannedLikes,
+          minRequiredLikes: 0,
           commentChance: 100,
           maxComments: plannedComments,
-          minRequiredComments: plannedComments,
+          minRequiredComments: 0,
+          minRequiredInteractions: 1,
           commentTemplates: [],
           riskManaged: false,
           stage: "ready",
@@ -14375,17 +14514,18 @@ function sendMainMenu(chatId: number, msgId?: number) {
             interactionEveryMaxPosts: cfg.interactionEveryMaxPosts,
             likeChance: cfg.likeChance,
             maxLikes: cfg.maxLikes,
-            minRequiredLikes: cfg.minRequiredLikes ?? cfg.maxLikes ?? 0,
+            minRequiredLikes: cfg.minRequiredLikes ?? 0,
             commentChance: cfg.commentChance,
             maxComments: cfg.maxComments,
-            minRequiredComments: cfg.minRequiredComments ?? cfg.maxComments ?? 0,
+            minRequiredComments: cfg.minRequiredComments ?? 0,
+            minRequiredInteractions: cfg.minRequiredInteractions ?? ((cfg.maxLikes || cfg.maxComments) ? 1 : 0),
             commentTemplates: cfg.commentTemplates || [],
             commentPersona,
             keywords,
             searchChance: platform === "threads" ? (cfg.searchChance ?? 16) : 0,
             riskManaged: cfg.riskManaged === true,
             stopOnRiskLimit: cfg.stopOnRiskLimit === true,
-            strictCompletion: true,
+            strictCompletion: false,
             requireReadablePostForComment: platform === "threads",
           },
           (p) => {
@@ -20888,6 +21028,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       : null;
     if (pendingThreadsProfile?.stage === "await_avatar") {
       const profileReturnCallback = pendingThreadsProfile.returnCallback || `pad_detail_${pendingThreadsProfile.padCode}`;
+      console.log(`[telegram][threads_avatar_input] chat=${chatId} pad=${pendingThreadsProfile.padCode} has_media=${Boolean(media?.file_id)} is_video=${Boolean(video)}`);
       if (!media?.file_id || video) {
         await bot.sendMessage(chatId, "❌ 請發送一張圖片作為 Threads 頭像，不要發送影片或純文字。", {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
@@ -20898,7 +21039,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       try {
         const downloaded = await downloadToolR18TelegramMedia(bot, msg, media);
         imageUrl = downloaded.hostPath || "";
+        console.log(`[telegram][threads_avatar_media_ready] chat=${chatId} pad=${pendingThreadsProfile.padCode} url=${imageUrl}`);
       } catch (error) {
+        console.warn(`[telegram][threads_avatar_download_error] chat=${chatId} pad=${pendingThreadsProfile.padCode} error=${rawErrorMessage(error)}`);
         await bot.sendMessage(chatId, `❌ 頭像圖片下載失敗，請重新上傳一次。\n原因：${formatUserFacingError(error, "Telegram 文件下載失敗")}`, {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: profileReturnCallback }]] },
         });
@@ -20924,6 +21067,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       });
       const stopTyping = startTelegramTyping(bot, chatId);
       const progress = (p: PublishProgress) => {
+        console.log(`[telegram][threads_avatar_progress] chat=${chatId} pad=${pendingThreadsProfile.padCode} done=${Boolean(p.done)} step=${p.step}`);
         bot.editMessageText(
           `🖼 正在修改 Threads 頭像\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
           {
@@ -20937,7 +21081,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       try {
         assertPadOperationNotCancelled(opKey);
         const creds = resolveVmosCredentials();
+        console.log(`[telegram][threads_avatar_start] chat=${chatId} pad=${pendingThreadsProfile.padCode}`);
         const result = await updateThreadsProfileAvatar(creds, pendingThreadsProfile.padCode, imageUrl, progress);
+        console.log(`[telegram][threads_avatar_done] chat=${chatId} pad=${pendingThreadsProfile.padCode}`);
         assertPadOperationNotCancelled(opKey);
         stopTyping();
         await bot.sendMessage(chatId, `✅ Threads 頭像已提交\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n${result.detail}`, {
@@ -20949,6 +21095,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } catch (error) {
         stopTyping();
         const errorRaw = rawErrorMessage(error);
+        console.warn(`[telegram][threads_avatar_error] chat=${chatId} pad=${pendingThreadsProfile.padCode} error=${errorRaw}`);
         const notice = formatCloudAccountStateNotice(errorRaw, {
           action: "頭像修改",
           padName: pendingThreadsProfile.padName,
@@ -21185,10 +21332,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
 
+      console.log(`[telegram][threads_profile_input] chat=${chatId} pad=${profileState.padCode} stage=${profileState.stage} has_archive=${Boolean(profileState.archiveId)}`);
       pendingThreadsProfileActions.delete(chatId);
       const opKey = `threads-profile-${profileState.stage}-${chatId}-${Date.now()}`;
       const active = acquirePadOperation(chatId, profileState.padCode, opKey, operation.title);
       if (active) {
+        console.log(`[telegram][threads_profile_busy] chat=${chatId} pad=${profileState.padCode} stage=${profileState.stage}`);
         await sendPadBusyNotice(bot, chatId, profileState.padCode, active);
         return;
       }
@@ -21202,6 +21351,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       );
       const stopTyping = startTelegramTyping(bot, chatId);
       const progress = (p: PublishProgress) => {
+        console.log(`[telegram][threads_profile_progress] chat=${chatId} pad=${profileState.padCode} stage=${profileState.stage} done=${Boolean(p.done)} step=${p.step}`);
         bot.editMessageText(
           `${operation.progressTitle}\n\n雲機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
           {
@@ -21215,7 +21365,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       try {
         assertPadOperationNotCancelled(opKey);
         const creds = resolveVmosCredentials();
+        console.log(`[telegram][threads_profile_start] chat=${chatId} pad=${profileState.padCode} stage=${profileState.stage}`);
         const result = await operation.run(creds, progress);
+        console.log(`[telegram][threads_profile_done] chat=${chatId} pad=${profileState.padCode} stage=${profileState.stage} state=${result.state}`);
         assertPadOperationNotCancelled(opKey);
         stopTyping();
         const title = result.state === "verified" ? operation.successVerified : operation.successSubmitted;
@@ -21227,11 +21379,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
       } catch (error) {
         stopTyping();
-        const notice = formatCloudAccountStateNotice(rawErrorMessage(error), {
+        const errorRaw = rawErrorMessage(error);
+        console.warn(`[telegram][threads_profile_error] chat=${chatId} pad=${profileState.padCode} stage=${profileState.stage} error=${errorRaw}`);
+        const notice = formatCloudAccountStateNotice(errorRaw, {
           action: operation.action,
           padName: profileState.padName,
           padCode: profileState.padCode,
         });
+        console.log(`[telegram][threads_profile_notice] chat=${chatId} pad=${profileState.padCode} stage=${profileState.stage} kind=${notice?.kind || "none"}`);
         if (notice?.kind === "login_required" && profileState.archiveId && profileState.stage !== "await_avatar") {
           pendingThreadsProfileResumeActions.set(chatId, {
             archiveId: profileState.archiveId,

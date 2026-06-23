@@ -481,6 +481,16 @@ describe("formatCloudAccountStateNotice", () => {
     expect(notice?.status).not.toContain("真人验证");
   });
 
+  it("formats local Threads login activity blockers as login required", () => {
+    const notice = formatCloudAccountStateNotice(
+      "__THREADS_BLOCKED__Threads profile update blocked: LOCAL_THREADS_LOGIN_ACTIVITY",
+      { action: "bio update", padName: "OP-TEST2" },
+    );
+
+    expect(notice?.kind).toBe("login_required");
+    expect(notice?.text).toContain("OP-TEST2");
+  });
+
   it("ignores ordinary automation failures", () => {
     expect(formatCloudAccountStateNotice("Threads 發布前未找到新串文輸入控件", { action: "发布" })).toBeNull();
   });
