@@ -10258,7 +10258,7 @@ async function resolveThreadsPublishedUrlFromProfileReader(args: {
   username: string;
   content: string;
 }): Promise<string | undefined> {
-  const normalized = normalizeThreadsUsernameForHistoryLookup(username);
+  const normalized = normalizeThreadsUsernameForHistoryLookup(args.username);
   const content = String(args.content || "").trim();
   if (!normalized || !content) return undefined;
   const profileUrl = `https://www.threads.net/@${normalized}`;
