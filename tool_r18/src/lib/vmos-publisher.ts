@@ -4561,6 +4561,38 @@ async function detectThreadsSearchResultsPageLocally(screenshotUrl: string | und
   return searchPill >= 2400 && resultContent >= 3200 && bottomNav >= 1000;
 }
 
+async function detectThreadsSearchResultContentLoadedLocally(screenshotUrl: string | undefined): Promise<boolean> {
+  if (!screenshotUrl) return false;
+  if (await detectAndroidKeyboardVisibleLocally(screenshotUrl).catch(() => false)) return false;
+  const pixels = await getImagePixelData(screenshotUrl).catch(() => null);
+  if (!pixels) return false;
+  const { data, width, height } = pixels;
+  const countRegion = (
+    leftRatio: number,
+    topRatio: number,
+    rightRatio: number,
+    bottomRatio: number,
+    predicate: (r: number, g: number, b: number, a: number) => boolean,
+  ) => {
+    const left = Math.max(0, Math.floor(width * leftRatio));
+    const right = Math.min(width - 1, Math.ceil(width * rightRatio));
+    const top = Math.max(0, Math.floor(height * topRatio));
+    const bottom = Math.min(height - 1, Math.ceil(height * bottomRatio));
+    let count = 0;
+    for (let y = top; y <= bottom; y += 2) {
+      for (let x = left; x <= right; x += 2) {
+        const index = (y * width + x) * 4;
+        if (predicate(data[index], data[index + 1], data[index + 2], data[index + 3])) count += 1;
+      }
+    }
+    return count;
+  };
+  const isDark = (r: number, g: number, b: number, a: number) => a > 220 && (r + g + b) / 3 < 105;
+  const textDensity = countRegion(0.07, 0.18, 0.94, 0.86, isDark);
+  const lowerTextDensity = countRegion(0.07, 0.42, 0.94, 0.86, isDark);
+  return textDensity >= 2200 || lowerTextDensity >= 1100;
+}
+
 export async function detectThreadsReplyComposerLocally(screenshotUrl: string | undefined): Promise<string | null> {
   if (!screenshotUrl) return null;
   if (await detectThreadsSideDrawerLocally(screenshotUrl).catch(() => false)) return null;
@@ -24258,8 +24290,16 @@ async function warmupSearchInterestSurface(
     if (!isAcpPad(padCode)) return;
     const beforeXml = await dumpUiXml(config, padCode).catch(() => "");
     const beforeCount = estimateVisibleThreadsSearchResultCount(beforeXml);
+    const beforeShot = await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "");
+    const visuallyLoaded = beforeShot
+      ? await detectThreadsSearchResultContentLoadedLocally(beforeShot).catch(() => false)
+      : false;
     if (beforeCount >= 2) {
       report(`搜索结果推文数量正常，继续浏览：${beforeCount} 条`);
+      return;
+    }
+    if (visuallyLoaded) {
+      report(`搜索结果视觉内容已加载，跳过 XML 数量误判：${beforeCount} 条`);
       return;
     }
     report(`搜索结果推文数量偏少，执行一次下拉刷新：${beforeCount} 条`);
@@ -24274,6 +24314,13 @@ async function warmupSearchInterestSurface(
     const afterXml = await dumpUiXml(config, padCode).catch(() => "");
     const afterCount = estimateVisibleThreadsSearchResultCount(afterXml);
     report(`搜索结果刷新后可见推文估算：${afterCount} 条`);
+    await execAdbForText(
+      config,
+      padCode,
+      `input swipe ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.70)} ${Math.round(screen.width * 0.50)} ${Math.round(screen.height * 0.50)} 360`,
+      8_000,
+      500,
+    ).catch(() => "");
   };
 
   report(`按人设关键词搜索相关内容：${keyword}`);
