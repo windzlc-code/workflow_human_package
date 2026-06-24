@@ -266,7 +266,7 @@ describe("Threads publish verification", () => {
 
     expect(buildWarmupInterestKeywords({
       description: "喜歡咖啡館、下午茶和城市生活",
-    })).toEqual(expect.arrayContaining(["咖啡", "甜點", "手搖飲"]));
+    })).toEqual(expect.arrayContaining(["咖啡", "下午茶", "城市生活"]));
   });
 
   it("scores warmup post relevance against persona keywords", () => {
@@ -277,38 +277,37 @@ describe("Threads publish verification", () => {
 
     const financeResult = scoreWarmupPostRelevance("今天台股量能回温，半导体财报和市场行情都值得继续观察", financePersona);
     expect(financeResult.relevant).toBe(true);
-    expect(financeResult.score).toBeGreaterThanOrEqual(5);
+    expect(financeResult.score).toBeGreaterThanOrEqual(3);
 
     const cafeResult = scoreWarmupPostRelevance("周末去巷口咖啡馆喝拿铁，甜点和下午茶都很放松", financePersona);
     expect(cafeResult.relevant).toBe(false);
   });
 
-  it("scores real estate search results as relevant for a property agent persona", () => {
+  it("scores search results by extracted persona keywords instead of fixed domain tables", () => {
     const propertyPersona = {
       description: "房产中介，分享买房、租屋、不动产和工地人生观察",
       personality: "专业但自然",
     };
 
-    const result = scoreWarmupPostRelevance("50歲紐約富豪年賺1億美金，真正的財富是世代持有不動產。你是做什麼才買得起這房子的？", propertyPersona);
+    const result = scoreWarmupPostRelevance("50岁纽约富豪年赚1亿美金，真正的财富是世代持有不动产。你是做什么才买得起这房子的？", propertyPersona);
     expect(result.relevant).toBe(true);
-    expect(result.matched).toEqual(expect.arrayContaining(["real-estate-domain"]));
+    expect(result.matched).toEqual(expect.arrayContaining(["不动产"]));
   });
 
-  it("keeps real estate warmup search keywords domain-specific", () => {
+  it("keeps warmup search keywords persona-derived without hard-coded domain expansion", () => {
     const propertyPersona = {
       description: "房产中介，分享买房、租屋、不动产和工地人生观察，常提到价格左右和客户日常",
       personality: "专业但自然",
     };
 
     const keywords = buildWarmupSearchKeywordCandidates(propertyPersona);
-    expect(keywords).toEqual(expect.arrayContaining(["房产中介", "房仲", "房源", "看房"]));
-    expect(keywords).not.toContain("買房");
-    expect(keywords).not.toContain("买房");
+    expect(keywords).toEqual(expect.arrayContaining(["房产", "买房", "租屋", "不动产"]));
+    expect(keywords).not.toContain("房产中介");
     expect(keywords).not.toContain("左右");
     expect(keywords.some((item) => /是|一位|歲|岁|\d/.test(item))).toBe(false);
     expect(keywords).not.toContain("房产中介是一位");
     expect(keywords).not.toContain("擅长清楚务实地带看房");
-    expect(keywords.every((item) => /房|不動產|不动产|地產|地产|中介|仲介|買房|买房|租屋|租房|工地|看房|看屋/.test(item))).toBe(true);
+    expect(keywords.every((item) => !/自然|专业|口语|人设|人格|中介/.test(item))).toBe(true);
   });
 
   it("builds ACP warmup fallback rows in the fixed 720x1600 coordinate grid", () => {
@@ -1265,13 +1264,13 @@ describe("Threads publish verification", () => {
     expect(preview).not.toContain("赞");
   });
 
-  it("removes punctuation from warmup comments", () => {
+  it("keeps natural punctuation in warmup comments while removing noisy tags", () => {
     expect(sanitizeWarmupComment("華通這波，真的強！想問你怎麼看？🔥 #台股 @bot"))
-      .toBe("華通這波真的強想問你怎麼看");
+      .toBe("華通這波，真的強！想問你怎麼看？");
     expect(sanitizeWarmupComment("Space這段蠻有共鳴"))
       .toBe("這段蠻有共鳴");
     expect(sanitizeWarmupComment("TSMC looks good, right?"))
-      .toBe("TSMC looks good right");
+      .toBe("TSMC looks good, right?");
     expect(sanitizeWarmupComment("這個角度很自然這個角度很自然這個角度很自然"))
       .toBe("這個角度很自然");
     expect(sanitizeWarmupComment("這種小細節才真實這種小細節才真實"))
@@ -1306,7 +1305,25 @@ describe("Threads publish verification", () => {
     expect(finalizeWarmupComment("這個角度很自然這個角度很自然這個角度很自然", "朋友最近股票賺好多"))
       .not.toContain("這個角度很自然這個角度很自然");
     expect(finalizeWarmupComment("這個角度很自然", "朋友最近股票賺好多"))
-      .toMatch(/風險|部位|熱度/);
+      .not.toBe("這個角度很自然");
+  });
+
+  it("does not use domain fallback comments when persona is unrelated", () => {
+    expect(finalizeWarmupComment("今天午餐看起來好吃", "台南AI房仲分享房市服務與客戶信任", [], {
+      description: "旅行生活碎碎念，分享城市散步和日常心情",
+    }))
+      .toBe("");
+    expect(finalizeWarmupComment("這個角度很自然", "台南AI房仲分享房市服務與客戶信任", [], {
+      description: "房產中介，分享房市和客戶服務",
+    }))
+      .toBe("");
+  });
+
+  it("allows real estate financing comments for property personas", () => {
+    expect(finalizeWarmupComment("房貸利率和銀行鑑價真的要先看清楚。", "買房前容易忽略房貸利率、銀行鑑價和聯徵分數", [], {
+      description: "房產中介，分享買房流程、房貸和客戶服務",
+    }))
+      .toBe("房貸利率和銀行鑑價真的要先看清楚。");
   });
 
   it("allows very short natural reactions for very short posts", () => {
@@ -1375,9 +1392,9 @@ describe("Threads publish verification", () => {
       interests: ["不動產", "買房"],
     });
 
-    expect(keywords.slice(0, 5)).toEqual(expect.arrayContaining(["房产中介", "不動產", "房仲"]));
-    expect(keywords).toContain("房产中介");
-    expect(keywords).not.toContain("買房");
+    expect(keywords).toEqual(expect.arrayContaining(["買房", "租房"]));
+    expect(keywords).not.toContain("房产中介");
+    expect(keywords).not.toContain("房仲");
     expect(keywords.some((item) => /^[\x20-\x7E]+$/.test(item))).toBe(false);
     expect(keywords).not.toContain("35岁房产中介");
     expect(keywords).not.toContain("自然口语");
