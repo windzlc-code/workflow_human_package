@@ -9158,6 +9158,16 @@ async function dumpUiXmlQuick(
   padCode: string,
   timeoutMs = 6_000,
 ): Promise<string> {
+  const directOutput = await execAdbForText(
+    config,
+    padCode,
+    "uiautomator dump /proc/self/fd/1 2>&1 | head -c 60000",
+    timeoutMs,
+    500,
+  ).catch(() => "");
+  const directXml = normalizeUiAutomatorXmlDump(directOutput);
+  if (directXml) return directXml;
+
   const targetPath = "/sdcard/vmos_window_quick.xml";
   await execAdbForText(
     config,
@@ -26299,6 +26309,17 @@ function isThreadsAutoReplyIgnoredText(text: string): boolean {
   return false;
 }
 
+function looksLikeThreadsAutoReplyAbnormalPostText(text: string): boolean {
+  const compact = normalizeSingleLine(text);
+  if (!compact) return false;
+  if (/(?:\?|？){4,}/.test(compact)) return true;
+  if (/[\uFFFD�]/.test(compact)) return true;
+  const chars = Array.from(compact.replace(/\s+/g, ""));
+  if (chars.length < 8) return false;
+  const symbolCount = chars.filter((char) => !/[\p{L}\p{N}]/u.test(char)).length;
+  return symbolCount / chars.length >= 0.55;
+}
+
 function rankThreadsAutoReplyVisibleComments(
   comments: ThreadsAutoReplyCandidate[],
   persona?: WarmupCommentPersona,
@@ -28674,6 +28695,24 @@ async function collectThreadsAutoReplyPostContext(
   );
   if (looksLikeThreadsBlankReplyRatingUiXml(initialUiXml)) {
     const postHash = buildThreadsAutoReplyPostHash(padCode, "blank-reply-rating-page", [initialUiText.slice(0, 80)]);
+    return {
+      postPreview: "",
+      postHash,
+      candidates: [],
+      sourceScreenshotUrl: firstShotUrl || undefined,
+    };
+  }
+  if (xmlAvailable && looksLikeThreadsAutoReplyAbnormalPostText(initialUiText)) {
+    const postHash = buildThreadsAutoReplyPostHash(padCode, "abnormal-post-text", [initialUiText.slice(0, 120)]);
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: "collect-skip-abnormal-post-text",
+      screenshotUrl: firstShotUrl || undefined,
+      meta: {
+        reason: "abnormal_post_text",
+        textPreview: initialUiText.slice(0, 180),
+      },
+    });
     return {
       postPreview: "",
       postHash,
