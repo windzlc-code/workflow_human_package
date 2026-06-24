@@ -26790,56 +26790,22 @@ async function openThreadsLatestOwnPostFromProfile(
     }
     const profileShotUrlBeforeTap = shotUrl;
     const profileUiXmlBeforeTap = profileUiXml;
-    await tapScreenshotPointViaAdb(config, padCode, shotUrl, target, 2800).catch(async () => {
-      const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-      const image = await getImageDimensions(shotUrl).catch(() => null);
-      const imageWidth = image?.width || BASE_SCREEN.width;
-      const imageHeight = image?.height || BASE_SCREEN.height;
-      await tapViaAdbAbsolute(
-        config,
-        padCode,
-        Math.round(target.x * (screen.width / imageWidth)),
-        Math.round(target.y * (screen.height / imageHeight)),
-        2800,
-      );
-    });
-    await delay(1400);
-    shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-    saveThreadsAutoReplySampleStep({
+    const recoveredOpen = await openThreadsProfilePostWithTapRecovery(
+      config,
       padCode,
-      step: "profile-comment-badge-after-tap",
-      screenshotUrl: shotUrl,
-      meta: { target, openAttempt },
-    });
-    if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
-      return { ok: true, screenshotUrl: shotUrl };
-    }
+      profileShotUrlBeforeTap,
+      profileUiXmlBeforeTap,
+      target,
+      "profile-comment-badge",
+      { openAttempt },
+    );
+    if (recoveredOpen.ok === true) return recoveredOpen;
+    lastOpenError = recoveredOpen;
+    shotUrl = recoveredOpen.screenshotUrl || shotUrl;
     const stillSuggestionAfterTap = await detectThreadsProfileSuggestionOverlayLocally(shotUrl).catch(() => false);
     if (stillSuggestionAfterTap) {
       shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
       await delay(700);
-      continue;
-    }
-    shotUrl = await openThreadsMediaOverlayCommentsIfVisible(config, padCode, shotUrl).catch(() => shotUrl) || shotUrl;
-    const earlyDetail = await withTimeout(
-      validateThreadsAutoReplyDetailReady(config, padCode, shotUrl),
-      3_500,
-      "threadsAutoReply validate opened post quick timeout",
-    ).catch(() => null);
-    if (earlyDetail?.ok) return { ok: true, screenshotUrl: earlyDetail.screenshotUrl };
-    if (earlyDetail && /回复编辑器|回覆編輯器|reply editor|回复|回覆/.test(earlyDetail.error)) {
-      const fallback = await openThreadsProfilePostByTextFallback(
-        config,
-        padCode,
-        profileShotUrlBeforeTap,
-        profileUiXmlBeforeTap,
-        target,
-        "profile-comment-badge-text-fallback",
-      );
-      if (fallback.ok === true) return fallback;
-      const fallbackError = fallback as { ok: false; error: string; screenshotUrl?: string };
-      lastOpenError = { ok: false, error: fallbackError.error, screenshotUrl: fallbackError.screenshotUrl };
-      shotUrl = fallbackError.screenshotUrl || shotUrl;
       continue;
     }
     const page = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
@@ -26975,51 +26941,21 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   }
   const profileShotUrlBeforeTap = shotUrl;
   const profileUiXmlBeforeTap = profileUiXml;
-  await tapScreenshotPointViaAdb(config, padCode, shotUrl, target, 2600).catch(async () => {
-    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-    const image = await getImageDimensions(shotUrl).catch(() => null);
-    const imageWidth = image?.width || BASE_SCREEN.width;
-    const imageHeight = image?.height || BASE_SCREEN.height;
-    await tapViaAdbAbsolute(
-      config,
-      padCode,
-      Math.round(target.x * (screen.width / imageWidth)),
-      Math.round(target.y * (screen.height / imageHeight)),
-      2600,
-    );
-  });
-  await delay(1200);
-  shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-  saveThreadsAutoReplySampleStep({
+  const recoveredOpen = await openThreadsProfilePostWithTapRecovery(
+    config,
     padCode,
-    step: "profile-next-comment-badge-after-tap",
-    screenshotUrl: shotUrl,
-    meta: { target },
-  });
+    profileShotUrlBeforeTap,
+    profileUiXmlBeforeTap,
+    target,
+    "profile-next-comment-badge",
+  );
+  if (recoveredOpen.ok === true) return recoveredOpen;
+  shotUrl = recoveredOpen.screenshotUrl || shotUrl;
   const stillSuggestionAfterTap = await detectThreadsProfileSuggestionOverlayLocally(shotUrl).catch(() => false);
   if (stillSuggestionAfterTap) {
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
     await delay(700);
     return { ok: false, error: "点击评论角标后仍停留在个人资料提示卡，已返回重扫", screenshotUrl: shotUrl };
-  }
-  shotUrl = await openThreadsMediaOverlayCommentsIfVisible(config, padCode, shotUrl).catch(() => shotUrl) || shotUrl;
-  const earlyDetail = await withTimeout(
-    validateThreadsAutoReplyDetailReady(config, padCode, shotUrl),
-    3_500,
-    "threadsAutoReply validate next opened post quick timeout",
-  ).catch(() => null);
-  if (earlyDetail?.ok) return { ok: true, screenshotUrl: earlyDetail.screenshotUrl };
-  if (earlyDetail && /回复编辑器|回覆編輯器|reply editor|回复|回覆/.test(earlyDetail.error)) {
-    const fallback = await openThreadsProfilePostByTextFallback(
-      config,
-      padCode,
-      profileShotUrlBeforeTap,
-      profileUiXmlBeforeTap,
-      target,
-      "profile-next-comment-badge-text-fallback",
-    );
-    if (fallback.ok === true) return fallback;
-    return fallback as { ok: false; error: string; screenshotUrl?: string };
   }
   const openedPage = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
   if (openedPage && (openedPage.page === "login_required" || openedPage.page === "challenge" || openedPage.page === "system_dialog")) {
@@ -27048,6 +26984,121 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   }
   if (detail.ok !== true) return detail as { ok: false; error: string; screenshotUrl?: string };
   return { ok: true, screenshotUrl: openedPage?.screenshotUrl || shotUrl };
+}
+
+async function openThreadsProfilePostWithTapRecovery(
+  config: VmosConfig,
+  padCode: string,
+  profileShotUrl: string,
+  profileUiXml: string,
+  actionTarget: { x: number; y: number },
+  sampleStepPrefix: string,
+  meta: Record<string, unknown> = {},
+): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  const image = await getImageDimensions(profileShotUrl).catch(() => null);
+  const width = image?.width || BASE_SCREEN.width;
+  const height = image?.height || BASE_SCREEN.height;
+  const clampPoint = (point: { x: number; y: number }) => ({
+    x: Math.max(Math.round(width * 0.04), Math.min(Math.round(width * 0.96), Math.round(point.x))),
+    y: Math.max(Math.round(height * 0.12), Math.min(Math.round(height * 0.92), Math.round(point.y))),
+  });
+  const candidates = [
+    { label: "comment_target", point: actionTarget },
+    { label: "comment_count", point: { x: actionTarget.x + width * 0.055, y: actionTarget.y } },
+    { label: "media_or_text_center", point: { x: width * 0.54, y: actionTarget.y - height * 0.18 } },
+    { label: "post_body_center", point: { x: width * 0.50, y: actionTarget.y - height * 0.28 } },
+    { label: "left_body", point: { x: width * 0.34, y: actionTarget.y - height * 0.22 } },
+  ].map((item) => ({
+    label: item.label,
+    point: clampPoint(item.point),
+  })).filter((item, index, array) => array.findIndex((other) => (
+    Math.abs(other.point.x - item.point.x) < 10 && Math.abs(other.point.y - item.point.y) < 10
+  )) === index);
+  let lastError = "未能进入可靠的 Threads 帖子详情页";
+  let lastShotUrl = profileShotUrl;
+
+  for (let attempt = 0; attempt < candidates.length; attempt += 1) {
+    const candidate = candidates[attempt];
+    const beforeShotUrl = attempt === 0
+      ? profileShotUrl
+      : await restoreThreadsAutoReplyProfileForNextScan(config, padCode)
+        .then((page) => (page.ok ? page.screenshotUrl : profileShotUrl))
+        .catch(() => profileShotUrl);
+    await tapScreenshotPointViaAdb(config, padCode, beforeShotUrl, candidate.point, attempt === 0 ? 2600 : 1800).catch(async () => {
+      const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+      const beforeImage = await getImageDimensions(beforeShotUrl).catch(() => null);
+      const imageWidth = beforeImage?.width || width;
+      const imageHeight = beforeImage?.height || height;
+      await tapViaAdbAbsolute(
+        config,
+        padCode,
+        Math.round(candidate.point.x * (screen.width / imageWidth)),
+        Math.round(candidate.point.y * (screen.height / imageHeight)),
+        attempt === 0 ? 2600 : 1800,
+      );
+    });
+    await delay(attempt === 0 ? 1200 : 800);
+    let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => beforeShotUrl);
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: `${sampleStepPrefix}-after-tap`,
+      screenshotUrl: shotUrl,
+      meta: {
+        ...meta,
+        target: actionTarget,
+        recoveryAttempt: attempt,
+        recoveryPoint: candidate.point,
+        recoveryLabel: candidate.label,
+      },
+    });
+    if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
+      return { ok: true, screenshotUrl: shotUrl };
+    }
+    shotUrl = await openThreadsMediaOverlayCommentsIfVisible(config, padCode, shotUrl).catch(() => shotUrl) || shotUrl;
+    const detail = await withTimeout(
+      validateThreadsAutoReplyDetailReady(config, padCode, shotUrl),
+      attempt === 0 ? 4_000 : 3_500,
+      `threadsAutoReply validate ${sampleStepPrefix} recovery timeout`,
+    ).catch((error) => ({
+      ok: false as const,
+      error: error instanceof Error ? error.message : String(error),
+      screenshotUrl: shotUrl,
+    }));
+    if (detail.ok === true) return { ok: true, screenshotUrl: detail.screenshotUrl };
+    const detailError = detail as { ok: false; error: string; screenshotUrl?: string };
+    lastError = detailError.error;
+    lastShotUrl = detailError.screenshotUrl || shotUrl;
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: `${sampleStepPrefix}-tap-recovery-failed`,
+      screenshotUrl: lastShotUrl,
+      meta: {
+        ...meta,
+        target: actionTarget,
+        recoveryAttempt: attempt,
+        recoveryPoint: candidate.point,
+        recoveryLabel: candidate.label,
+        error: lastError,
+      },
+    });
+    if (
+      /回复编辑器|回覆編輯器|reply editor|回复|回覆/.test(lastError)
+      || await detectThreadsFullscreenMediaViewerLocally(lastShotUrl).catch(() => false)
+      || await detectThreadsWarmupMediaOverlayActions(lastShotUrl).catch(() => null)
+    ) {
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+      await delay(800);
+    }
+    if (attempt < candidates.length - 1) {
+      const profileRestored = await restoreThreadsAutoReplyProfileForNextScan(config, padCode).catch(() => null);
+      if (!profileRestored?.ok && profileUiXml && !looksLikeThreadsProfileUiXml(profileUiXml)) break;
+    }
+  }
+  return {
+    ok: false,
+    error: `多点自纠错后仍未进入可靠的 Threads 帖子详情页：${lastError}`,
+    screenshotUrl: lastShotUrl,
+  };
 }
 
 async function openThreadsProfilePostByTextFallback(
@@ -28721,57 +28772,28 @@ async function collectThreadsAutoReplyPostContext(
     };
   }
   if (!xmlAvailable) {
-    let visualFallbackError = "";
-    const visualCandidates = firstShotUrl
-      ? await extractThreadsAutoReplyVisibleCommentsByVision(firstShotUrl, persona, postOwnIdentifiers).catch((error) => {
-          visualFallbackError = error instanceof Error ? error.message : String(error);
-          return [];
-        })
-      : [];
-    const postHash = buildThreadsAutoReplyPostHash(padCode, "comment-collect-no-ui-xml", [
-      buildThreadsAutoReplyScreenshotSeed(firstShotUrl),
-      ...visualCandidates.slice(0, 4).map((item) => normalizeSingleLine(item.text).slice(0, 80)),
-    ]);
-    const candidates = rankThreadsAutoReplyVisibleComments(visualCandidates, persona)
-      .filter((item) => Boolean(item.replyPoint) && !isThreadsAutoReplyIgnoredText(item.text))
-      .map((item) => ({
-        ...item,
-        key: buildThreadsAutoReplyCommentKey(padCode, postHash, item.text),
-      }))
-      .filter((item) => !item.key || !repliedKeys.has(item.key));
     saveThreadsAutoReplySampleStep({
       padCode,
-      step: "collect-no-ui-fast-return",
+      step: "collect-no-ui-enter-scroll-recovery",
       screenshotUrl: firstShotUrl || undefined,
       meta: {
-        visualCandidateCount: visualCandidates.length,
-        candidateCount: candidates.length,
-        skippedReason: visualCandidates.length ? undefined : "no_ui_xml_no_visual_comment_text",
-        visualFallbackError: visualFallbackError || undefined,
-        candidatePreview: candidates.slice(0, 6).map((item) => ({
-          text: item.text,
-          author: item.author,
-          score: item.score,
-          replyPoint: item.replyPoint,
-          debugReason: item.debugReason,
-        })),
+        reason: "ui_xml_empty_scroll_before_vision_ocr",
       },
     });
-    return {
-      postPreview: "",
-      postHash,
-      candidates,
-      sourceScreenshotUrl: firstShotUrl || undefined,
-    };
   }
   let replyTarget: WarmupFeedActionTargets | null = null;
   let visibleCommentCandidates: ThreadsAutoReplyCandidate[] = [];
   let latestCommentShotUrl = firstShotUrl;
-  const commentCollectScrolls = [
-    "input swipe 360 1250 360 850 450",
-    "input swipe 360 1180 360 650 550",
-    "input swipe 360 1080 360 480 650",
-  ];
+  const commentCollectScrolls = xmlAvailable
+    ? [
+      "input swipe 360 1250 360 850 450",
+      "input swipe 360 1180 360 650 550",
+      "input swipe 360 1080 360 480 650",
+    ]
+    : [
+      "input swipe 360 1260 360 610 620",
+      "input swipe 360 1250 360 520 680",
+    ];
 
   for (let page = 0; page < commentCollectScrolls.length + 1; page += 1) {
     let shotUrl = page === 0 && firstShotUrl
@@ -28805,7 +28827,7 @@ async function collectThreadsAutoReplyPostContext(
     const visibleTexts = extractThreadsAutoReplyVisibleTexts(uiXml);
     let pageTriedVisionFallback = false;
     let pageVisionFallbackError = "";
-    if (!visibleTexts.length && shotUrl) {
+    if (!visibleTexts.length && shotUrl && (xmlAvailable || page > 0)) {
       pageTriedVisionFallback = true;
       const visualCandidates = await extractThreadsAutoReplyVisibleCommentsByVision(
         shotUrl,
@@ -28881,6 +28903,7 @@ async function collectThreadsAutoReplyPostContext(
       shotUrl
       && !pageVisibleComments.length
       && !pageTriedVisionFallback
+      && (xmlAvailable || page > 0)
       && (
         !visibleTexts.length
         || page >= commentCollectScrolls.length
