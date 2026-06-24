@@ -27048,11 +27048,11 @@ async function openThreadsProfilePostWithTapRecovery(
     y: Math.max(Math.round(height * 0.12), Math.min(Math.round(height * 0.92), Math.round(point.y))),
   });
   const candidates = [
-    { label: "comment_target", point: actionTarget },
-    { label: "comment_count", point: { x: actionTarget.x + width * 0.055, y: actionTarget.y } },
     { label: "media_or_text_center", point: { x: width * 0.54, y: actionTarget.y - height * 0.18 } },
     { label: "post_body_center", point: { x: width * 0.50, y: actionTarget.y - height * 0.28 } },
     { label: "left_body", point: { x: width * 0.34, y: actionTarget.y - height * 0.22 } },
+    { label: "comment_target", point: actionTarget },
+    { label: "comment_count", point: { x: actionTarget.x + width * 0.055, y: actionTarget.y } },
   ].map((item) => ({
     label: item.label,
     point: clampPoint(item.point),
