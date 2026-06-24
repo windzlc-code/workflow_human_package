@@ -28131,6 +28131,20 @@ async function validateThreadsAutoReplyDetailReady(
   ) {
     return { ok: true, screenshotUrl: shotUrl };
   }
+  const refreshedShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+  if (refreshedShotUrl && refreshedShotUrl !== shotUrl) {
+    if (
+      await detectThreadsThreadDetailShellLocally(refreshedShotUrl).catch(() => false)
+      || await detectThreadsMediaCommentSheetLocally(refreshedShotUrl).catch(() => false)
+      || (
+        await detectThreadsBottomReplyComposerBarLocally(refreshedShotUrl).catch(() => false)
+        && !await detectAndroidKeyboardVisibleLocally(refreshedShotUrl).catch(() => false)
+      )
+    ) {
+      return { ok: true, screenshotUrl: refreshedShotUrl };
+    }
+    shotUrl = refreshedShotUrl;
+  }
   if (await detectThreadsBlankReplyRatingPageLocally(shotUrl).catch(() => false)) {
     return { ok: true, screenshotUrl: shotUrl };
   }
@@ -28252,22 +28266,25 @@ async function openThreadsMediaOverlayCommentsIfVisible(
       Math.round(point.y * (screen.height / imageHeight)),
       650,
     ).catch(() => undefined);
-    await delay(900);
-    const nextShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-    if (await detectThreadsMediaCommentSheetLocally(nextShotUrl).catch(() => false)) {
-      return nextShotUrl;
+    let nextShotUrl = shotUrl;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await delay(attempt === 0 ? 900 : 550);
+      nextShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => nextShotUrl || shotUrl);
+      if (await detectThreadsMediaCommentSheetLocally(nextShotUrl).catch(() => false)) {
+        return nextShotUrl;
+      }
+      const nextUiText = normalizeSingleLine(decodeXmlAttr(
+        await dumpUiXmlQuick(config, padCode, 2_000).catch(() => ""),
+      ));
+      if (/(熱門|热门|新增到串文|新增至串文|Add to thread)/i.test(nextUiText)) {
+        return nextShotUrl;
+      }
+      const stillMedia = Boolean(
+        await detectThreadsWarmupMediaOverlayActions(nextShotUrl).catch(() => null)
+        || await detectThreadsFullscreenMediaViewerLocally(nextShotUrl).catch(() => false)
+      );
+      if (!stillMedia) return nextShotUrl;
     }
-    const nextUiText = normalizeSingleLine(decodeXmlAttr(
-      await dumpUiXmlQuick(config, padCode, 2_000).catch(() => ""),
-    ));
-    if (/(熱門|热门|新增到串文|新增至串文|Add to thread)/i.test(nextUiText)) {
-      return nextShotUrl;
-    }
-    const stillMedia = Boolean(
-      await detectThreadsWarmupMediaOverlayActions(nextShotUrl).catch(() => null)
-      || await detectThreadsFullscreenMediaViewerLocally(nextShotUrl).catch(() => false)
-    );
-    if (!stillMedia) return nextShotUrl;
   }
   return shotUrl;
 }
