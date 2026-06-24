@@ -26716,8 +26716,16 @@ async function openThreadsLatestOwnPostFromProfile(
       const profileUiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
       const profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
       const hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
-      const hasProfileSetupCardByPixels = await detectThreadsProfileSetupCardLocally(shotUrl).catch(() => false);
-      const setupCardCommentTarget = await locateThreadsProfileTopCountedCommentTargetLocally(shotUrl).catch(() => null);
+      const hasProfileSetupCardByPixels = await withTimeout(
+        detectThreadsProfileSetupCardLocally(shotUrl),
+        2_500,
+        "threadsAutoReply profile setup card pixel detection timeout",
+      ).catch(() => false);
+      const setupCardCommentTarget = await withTimeout(
+        locateThreadsProfileTopCountedCommentTargetLocally(shotUrl),
+        3_000,
+        "threadsAutoReply setup-card comment target detection timeout",
+      ).catch(() => null);
       const setupCardImage = await getImageDimensions(shotUrl).catch(() => null);
       const hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText)
         || Boolean(setupCardCommentTarget && !isThreadsProfileSetupCardBlockingActionTarget(
