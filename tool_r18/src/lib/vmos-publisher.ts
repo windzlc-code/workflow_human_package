@@ -27219,6 +27219,39 @@ async function restoreThreadsAutoReplyProfileForNextScan(
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
       continue;
     }
+    if (
+      await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)
+      || await detectThreadsWarmupMediaOverlayActions(shotUrl).catch(() => null)
+    ) {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-restore-left-media-viewer",
+        screenshotUrl: shotUrl || undefined,
+        meta: { attempt },
+      });
+      const image = await getImageDimensions(shotUrl).catch(() => null);
+      const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+      await tapViaAdbAbsoluteQuick(
+        config,
+        padCode,
+        Math.round(screen.width * 0.095),
+        Math.round(screen.height * 0.045),
+        800,
+      ).catch(async () => {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 5_000, 350).catch(() => "");
+      });
+      await delay(850);
+      shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+      if (
+        image
+        && await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)
+      ) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 5_000, 350).catch(() => "");
+        await delay(650);
+        shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+      }
+      continue;
+    }
     if (shotUrl && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
       const cleanShotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
       saveThreadsAutoReplySampleStep({
@@ -28391,6 +28424,7 @@ async function openThreadsMediaOverlayCommentsIfVisible(
     { x: Math.round(imageWidth * 0.418), y: Math.round(imageHeight * 0.870) },
     { x: Math.round(imageWidth * 0.445), y: Math.round(imageHeight * 0.923) },
     { x: Math.round(imageWidth * 0.417), y: Math.round(imageHeight * 0.933) },
+    { x: Math.round(imageWidth * 0.415), y: Math.round(imageHeight * 0.947) },
   ].filter(Boolean) as Array<{ x: number; y: number }>;
   for (const point of points) {
     await tapViaAdbAbsoluteQuick(
