@@ -26320,6 +26320,43 @@ function looksLikeThreadsAutoReplyAbnormalPostText(text: string): boolean {
   return symbolCount / chars.length >= 0.55;
 }
 
+async function detectThreadsAutoReplyAbnormalPostTextByVision(
+  screenshotUrl: string | undefined,
+): Promise<{ abnormal: boolean; textPreview?: string; error?: string }> {
+  if (!screenshotUrl) return { abnormal: false };
+  const inlineData = await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null);
+  if (!inlineData) return { abnormal: false };
+  const request = createTimeoutSignal(9_000);
+  try {
+    const raw = await callThreadsAutoReplyVisionOcrModel(
+      `請只檢查這張 Threads 串文詳情截圖最上方主帖正文是否是異常亂碼。
+
+異常亂碼定義：
+- 主帖正文主要由連續問號 ????、替換字元 �、或大量無法閱讀符號組成。
+- 正常中文、英文、數字、emoji、少量標點不算異常。
+
+只輸出 JSON：
+{"abnormal":true,"text":"看到的主帖正文前80字"}`,
+      inlineData,
+      request.signal,
+      { maxTokens: 120, perModelTimeoutMs: 4_500 },
+    );
+    const jsonText = extractText(raw).match(/\{[\s\S]*\}/)?.[0] || "";
+    if (!jsonText) return { abnormal: false, error: `vision_json_missing:${normalizeSingleLine(extractText(raw)).slice(0, 80)}` };
+    const parsed = JSON.parse(jsonText);
+    const textPreview = normalizeSingleLine(String(parsed?.text || parsed?.postText || ""));
+    const abnormal = Boolean(parsed?.abnormal) || looksLikeThreadsAutoReplyAbnormalPostText(textPreview);
+    return { abnormal, textPreview };
+  } catch (error) {
+    return {
+      abnormal: false,
+      error: error instanceof Error ? error.message : String(error || "vision_abnormal_check_failed"),
+    };
+  } finally {
+    request.cleanup();
+  }
+}
+
 function rankThreadsAutoReplyVisibleComments(
   comments: ThreadsAutoReplyCandidate[],
   persona?: WarmupCommentPersona,
@@ -28772,12 +28809,34 @@ async function collectThreadsAutoReplyPostContext(
     };
   }
   if (!xmlAvailable) {
+    const abnormalByVision = await detectThreadsAutoReplyAbnormalPostTextByVision(firstShotUrl);
+    if (abnormalByVision.abnormal) {
+      const postHash = buildThreadsAutoReplyPostHash(padCode, "abnormal-post-text-vision", [
+        abnormalByVision.textPreview || buildThreadsAutoReplyScreenshotSeed(firstShotUrl),
+      ]);
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "collect-skip-abnormal-post-text-vision",
+        screenshotUrl: firstShotUrl || undefined,
+        meta: {
+          reason: "abnormal_post_text_vision",
+          textPreview: abnormalByVision.textPreview,
+        },
+      });
+      return {
+        postPreview: "",
+        postHash,
+        candidates: [],
+        sourceScreenshotUrl: firstShotUrl || undefined,
+      };
+    }
     saveThreadsAutoReplySampleStep({
       padCode,
       step: "collect-no-ui-enter-scroll-recovery",
       screenshotUrl: firstShotUrl || undefined,
       meta: {
         reason: "ui_xml_empty_scroll_before_vision_ocr",
+        abnormalCheckError: abnormalByVision.error,
       },
     });
   }
