@@ -3179,6 +3179,7 @@ async function runPadThreadsAutoReplyFromTelegram(
       padCode,
       { maxPosts: 3, maxReplies: 3, maxAgeDays, commentPersona },
       (p) => {
+        console.log(`[telegram][acctautoreply_run] chat=${chatId} pad=${boundPad.padCode} key=${padOperationKey} stage=result replied=${result.replied} scannedPosts=${result.scannedPosts} scannedComments=${result.scannedComments}`);
         assertPadOperationNotCancelled(padOperationKey);
         lastProgress = p;
         const lines = [
@@ -14183,6 +14184,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             void updateTelegramPublishStatus(bot, chatId, msgId, "threads_auto_reply", lines, p.step);
           },
         );
+        console.log(`[telegram][acctautoreply_run] chat=${chatId} pad=${boundPad.padCode} key=${padOperationKey} stage=result replied=${result.replied} scannedPosts=${result.scannedPosts} scannedComments=${result.scannedComments}`);
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
         await bot.sendMessage(chatId, `✅ *Threads自动回复完成*\n\n雲機：${padName}\n已掃描貼文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
@@ -15023,9 +15025,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const daysMatch = runPayload.match(/^d([1-7])_(.+)$/);
       const maxAgeDays = daysMatch ? Number(daysMatch[1]) : 2;
       const id = daysMatch ? daysMatch[2] : runPayload;
+      console.log(`[telegram][acctautoreply_run] chat=${chatId} id=${id} days=${maxAgeDays} stage=load_archive`);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
+      console.log(`[telegram][acctautoreply_run] chat=${chatId} id=${id} pad=${boundPad?.padCode || "none"} stage=resolved_pad`);
       const returnCallback = `acctplatform_threads_${id}`;
       if (!boundPad) {
         await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 自動回覆。`, {
@@ -15034,7 +15038,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const padOperationKey = `threads-auto-reply:${boundPad.padCode}:${chatId}:${Date.now()}`;
+      console.log(`[telegram][acctautoreply_run] chat=${chatId} pad=${boundPad.padCode} key=${padOperationKey} stage=acquire`);
       if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, padOperationKey, "Threads自動回覆"))) return;
+      console.log(`[telegram][acctautoreply_run] chat=${chatId} pad=${boundPad.padCode} key=${padOperationKey} stage=acquired`);
       const stopTyping = startTelegramTyping(bot, chatId);
       try {
         const creds = resolveVmosCredentials();
