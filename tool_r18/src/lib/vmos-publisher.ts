@@ -27061,14 +27061,13 @@ async function openThreadsProfilePostWithTapRecovery(
   )) === index);
   let lastError = "未能进入可靠的 Threads 帖子详情页";
   let lastShotUrl = profileShotUrl;
+  let retryProfileShotUrl = profileShotUrl;
 
   for (let attempt = 0; attempt < candidates.length; attempt += 1) {
     const candidate = candidates[attempt];
     const beforeShotUrl = attempt === 0
       ? profileShotUrl
-      : await restoreThreadsAutoReplyProfileForNextScan(config, padCode)
-        .then((page) => (page.ok ? page.screenshotUrl : profileShotUrl))
-        .catch(() => profileShotUrl);
+      : retryProfileShotUrl;
     await tapScreenshotPointViaAdb(config, padCode, beforeShotUrl, candidate.point, attempt === 0 ? 2600 : 1800).catch(async () => {
       const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
       const beforeImage = await getImageDimensions(beforeShotUrl).catch(() => null);
@@ -27126,6 +27125,10 @@ async function openThreadsProfilePostWithTapRecovery(
         error: lastError,
       },
     });
+    if (await detectThreadsProfilePageLocally(lastShotUrl).catch(() => false)) {
+      retryProfileShotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, lastShotUrl);
+      continue;
+    }
     if (
       /回复编辑器|回覆編輯器|reply editor|回复|回覆/.test(lastError)
       || await detectThreadsFullscreenMediaViewerLocally(lastShotUrl).catch(() => false)
@@ -27137,6 +27140,7 @@ async function openThreadsProfilePostWithTapRecovery(
     if (attempt < candidates.length - 1) {
       const profileRestored = await restoreThreadsAutoReplyProfileForNextScan(config, padCode).catch(() => null);
       if (!profileRestored?.ok && profileUiXml && !looksLikeThreadsProfileUiXml(profileUiXml)) break;
+      if (profileRestored?.ok) retryProfileShotUrl = profileRestored.screenshotUrl;
     }
   }
   return {
