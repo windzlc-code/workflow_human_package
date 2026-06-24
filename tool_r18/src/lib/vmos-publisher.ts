@@ -28728,7 +28728,26 @@ async function collectThreadsAutoReplyPostContext(
   let postPreview = "";
   let firstShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   firstShotUrl = await openThreadsMediaOverlayCommentsIfVisible(config, padCode, firstShotUrl).catch(() => firstShotUrl) || firstShotUrl;
-  if (await detectAndroidKeyboardVisibleLocally(firstShotUrl).catch(() => false)) {
+  const keyboardVisibleAtCollectStart = await detectAndroidKeyboardVisibleLocally(firstShotUrl).catch(() => false);
+  if (
+    keyboardVisibleAtCollectStart
+    && (
+      await detectThreadsReplyComposerLocally(firstShotUrl).catch(() => null)
+      || await detectThreadsCommentReplyEditorLocally(firstShotUrl).catch(() => false)
+      || await detectThreadsBottomReplyComposerBarLocally(firstShotUrl).catch(() => false)
+    )
+  ) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: "collect-reply-editor-entered-by-mistake",
+      screenshotUrl: firstShotUrl || undefined,
+      meta: { reason: "keyboard_visible_reply_editor_at_collect_start" },
+    });
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+    await delay(650);
+    throw new Error("自动回复采集阶段跑偏到回复编辑器，已退回并跳过当前帖");
+  }
+  if (keyboardVisibleAtCollectStart) {
     // Threads 的底部回覆欄容易被誤判成鍵盤；采集階段按 BACK 會退出串文詳情。
     saveThreadsAutoReplySampleStep({
       padCode,
