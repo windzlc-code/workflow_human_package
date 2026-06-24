@@ -26711,7 +26711,7 @@ async function openThreadsLatestOwnPostFromProfile(
 
   let lastOpenError: { ok: false; error: string; screenshotUrl?: string } | null = null;
   for (let openAttempt = 0; openAttempt < 2; openAttempt += 1) {
-    shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+    shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, shotUrl);
     for (let setupScrollAttempt = 0; setupScrollAttempt < 3; setupScrollAttempt += 1) {
       const profileUiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
       const profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
@@ -26735,7 +26735,7 @@ async function openThreadsLatestOwnPostFromProfile(
       if ((!hasProfileSetupCard && !hasProfileSetupCardByPixels) || hasVisiblePostOrActionRow) break;
       await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 520", 1000);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+      shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, shotUrl);
     }
     let profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     let target = await withTimeout(
@@ -26770,7 +26770,7 @@ async function openThreadsLatestOwnPostFromProfile(
       await delay(attempt === 0 ? 1400 : 350);
       await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 380 650", 1100);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+      shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, shotUrl);
       profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
@@ -26800,7 +26800,7 @@ async function openThreadsLatestOwnPostFromProfile(
       await threadsAdbInputNoWait(config, padCode, "input swipe 360 460 360 1220 520", 1000);
       await delay(500);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+      shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, shotUrl);
       profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
@@ -26849,7 +26849,7 @@ async function openThreadsLatestOwnPostFromProfile(
     shotUrl = recoveredOpen.screenshotUrl || shotUrl;
     const stillSuggestionAfterTap = await detectThreadsProfileSuggestionOverlayLocally(shotUrl).catch(() => false);
     if (stillSuggestionAfterTap) {
-      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
+      shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, shotUrl);
       await delay(700);
       continue;
     }
@@ -26871,7 +26871,7 @@ async function openThreadsLatestOwnPostFromProfile(
     const detailError = detail as { ok: false; error: string; screenshotUrl?: string };
     lastOpenError = detailError;
     if (detailError.screenshotUrl && await detectThreadsProfilePageLocally(detailError.screenshotUrl).catch(() => false)) {
-      shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, detailError.screenshotUrl);
+      shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, detailError.screenshotUrl);
       await delay(500);
       continue;
     }
@@ -26893,7 +26893,7 @@ async function openThreadsLatestOwnPostFromProfile(
     if (!/关注建议页|個人主頁|个人主页|個人資料|个人资料/.test(detailError.error)) {
       return detailError;
     }
-    shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, detailError.screenshotUrl || shotUrl);
+    shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, detailError.screenshotUrl || shotUrl);
     await delay(900);
   }
   return lastOpenError || {
@@ -26919,7 +26919,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   if (!page.ok) return page;
   await threadsAdbInputNoWait(config, padCode, "input swipe 360 1180 360 520 460", 1200);
   let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => page.screenshotUrl || "");
-  shotUrl = shotUrl ? await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl) : shotUrl;
+  shotUrl = shotUrl ? await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, shotUrl) : shotUrl;
   if (!shotUrl) return { ok: false, error: "未能取得 Threads 个人主页截图" };
   let profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
   let target = await withTimeout(
@@ -26952,7 +26952,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   for (let attempt = 0; !target && attempt < 3; attempt += 1) {
     await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 380 650", 1100);
     shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-    shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+    shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, shotUrl);
     profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
@@ -26998,7 +26998,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   shotUrl = recoveredOpen.screenshotUrl || shotUrl;
   const stillSuggestionAfterTap = await detectThreadsProfileSuggestionOverlayLocally(shotUrl).catch(() => false);
   if (stillSuggestionAfterTap) {
-    shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
+    shotUrl = await dismissThreadsProfileSuggestionOverlayForAutoReply(config, padCode, shotUrl);
     await delay(700);
     return { ok: false, error: "点击评论角标后仍停留在个人资料提示卡，已返回重扫", screenshotUrl: shotUrl };
   }
@@ -27144,6 +27144,19 @@ async function openThreadsProfilePostWithTapRecovery(
     error: `多点自纠错后仍未进入可靠的 Threads 帖子详情页：${lastError}`,
     screenshotUrl: lastShotUrl,
   };
+}
+
+async function dismissThreadsProfileSuggestionOverlayForAutoReply(
+  config: VmosConfig,
+  padCode: string,
+  shotUrl: string,
+): Promise<string> {
+  if (!shotUrl) return shotUrl;
+  return await withTimeout(
+    dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl),
+    2_500,
+    "threadsAutoReply dismiss profile suggestion timeout",
+  ).catch(() => shotUrl);
 }
 
 async function openThreadsProfilePostByTextFallback(
