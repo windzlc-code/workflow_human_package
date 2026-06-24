@@ -28538,6 +28538,12 @@ async function collectThreadsAutoReplyPostContext(
   replyTarget?: WarmupFeedActionTargets;
   sourceScreenshotUrl?: string;
 }> {
+  const detectAutoReplyFullReplyEditor = async (shotUrl: string | undefined): Promise<string | null> => {
+    const reason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
+    if (!reason || reason === "LOCAL_INLINE_REPLY_BAR") return null;
+    const inlineBar = await detectThreadsBottomReplyComposerBarLocally(shotUrl).catch(() => false);
+    return inlineBar ? null : reason;
+  };
   const collectedTexts: string[] = [];
   const seenTexts = new Set<string>();
   let postPreview = "";
@@ -28587,7 +28593,7 @@ async function collectThreadsAutoReplyPostContext(
   if (
     findThreadsReplyComposerInputTarget(firstUiXml)
     || looksLikeThreadsReplyComposerUiXml(firstUiXml)
-    || await detectThreadsReplyComposerLocally(firstShotUrl).catch(() => null)
+    || await detectAutoReplyFullReplyEditor(firstShotUrl)
   ) {
     saveThreadsAutoReplySampleStep({
       padCode,
@@ -28687,7 +28693,7 @@ async function collectThreadsAutoReplyPostContext(
     let shotUrl = page === 0 && firstShotUrl
       ? firstShotUrl
       : await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-    const replyEditorReason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
+    const replyEditorReason = await detectAutoReplyFullReplyEditor(shotUrl);
     if (replyEditorReason) {
       saveThreadsAutoReplySampleStep({
         padCode,
