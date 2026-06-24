@@ -26211,7 +26211,9 @@ async function extractThreadsAutoReplyVisibleCommentsByVision(
       request.signal,
     );
     const jsonText = extractText(raw).match(/\{[\s\S]*\}/)?.[0] || "";
-    if (!jsonText) return [];
+    if (!jsonText) {
+      throw new Error(`文字視覺 OCR 未返回 JSON：${normalizeSingleLine(extractText(raw)).slice(0, 160)}`);
+    }
     const parsed = JSON.parse(jsonText);
     const comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
     const seen = new Set<string>();
@@ -26246,8 +26248,8 @@ async function extractThreadsAutoReplyVisibleCommentsByVision(
         sourceScreenshotUrl: screenshotUrl,
         debugReason: "thread_detail_vision_ocr:auto_reply_comment_target",
       }));
-  } catch {
-    return [];
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(String(error || "文字視覺 OCR 失敗"));
   } finally {
     request.cleanup();
   }
@@ -26490,16 +26492,10 @@ async function generateThreadsAutoReplyText(
 ): Promise<string> {
   const cleanedComment = normalizeSingleLine(commentText).slice(0, 120);
   const cleanedPost = normalizeSingleLine(postPreview).slice(0, 160);
-  if (!cleanedComment) return fallbackWarmupComment(cleanedPost, [], persona);
+  if (!cleanedComment) throw new Error("threadsAutoReply reply model missing comment text");
   const language = resolveWarmupCommentLanguage(persona);
   if (!getGeminiEndpoint().apiKey) {
-    if (language === "英文") {
-      return finalizeWarmupComment(`I get it, ${cleanedComment.slice(0, 18)}`, cleanedPost || cleanedComment, [], persona);
-    }
-    if (language === "日文") {
-      return finalizeWarmupComment(`ほんとそれ、${cleanedComment.slice(0, 14)}`, cleanedPost || cleanedComment, [], persona);
-    }
-    return finalizeWarmupComment(`真的，${cleanedComment.slice(0, 16)}`, cleanedPost || cleanedComment, [], persona);
+    throw new Error("threadsAutoReply reply model unavailable");
   }
   const request = createTimeoutSignal(8000);
   try {
@@ -26529,8 +26525,8 @@ async function generateThreadsAutoReplyText(
       request.signal,
     );
     return finalizeWarmupComment(extractText(raw), cleanedPost || cleanedComment, [], persona);
-  } catch {
-    return fallbackWarmupComment(cleanedPost || cleanedComment, [], persona);
+  } catch (error) {
+    throw new Error(`threadsAutoReply reply model failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     request.cleanup();
   }
@@ -26542,15 +26538,8 @@ async function decideThreadsAutoReplyByModel(
   persona?: WarmupCommentPersona,
 ): Promise<{ candidate: ThreadsAutoReplyCandidate; reply: string; reason: string } | null> {
   if (!candidates.length) return null;
-  const fallbackCandidate = await chooseThreadsAutoReplyCandidateByModel(postPreview, candidates, persona);
   if (!getGeminiEndpoint().apiKey) {
-    return fallbackCandidate
-      ? {
-          candidate: fallbackCandidate,
-          reply: await generateThreadsAutoReplyText(postPreview, fallbackCandidate.text, persona),
-          reason: "model_unavailable_fallback",
-        }
-      : null;
+    throw new Error("threadsAutoReply decision model unavailable");
   }
 
   const cleanedPost = normalizeSingleLine(postPreview).slice(0, 180);
@@ -26596,34 +26585,24 @@ ${candidates.map((item, index) => `${index + 1}. ${item.author ? `作者 ${item.
     );
     const text = extractText(raw).replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
     const json = text.match(/\{[\s\S]*\}/)?.[0];
-    if (!json) return fallbackCandidate ? {
-      candidate: fallbackCandidate,
-      reply: await generateThreadsAutoReplyText(postPreview, fallbackCandidate.text, persona),
-      reason: "model_json_missing_fallback",
-    } : null;
+    if (!json) {
+      throw new Error(`threadsAutoReply decision model JSON missing: ${normalizeSingleLine(text).slice(0, 160)}`);
+    }
     const parsed = JSON.parse(json);
     const index = Number(parsed?.index);
     if (!Number.isFinite(index) || index <= 0 || index > candidates.length) return null;
     const candidate = candidates[index - 1];
     const reply = finalizeWarmupComment(String(parsed?.reply || ""), cleanedPost || candidate.text, [], persona);
     if (!reply || isGenericWarmupComment(reply)) {
-      return {
-        candidate,
-        reply: await generateThreadsAutoReplyText(postPreview, candidate.text, persona),
-        reason: String(parsed?.reason || "model_reply_weak_fallback"),
-      };
+      throw new Error("threadsAutoReply decision model returned generic reply");
     }
     return {
       candidate,
       reply,
       reason: normalizeSingleLine(String(parsed?.reason || "model_selected")),
     };
-  } catch {
-    return fallbackCandidate ? {
-      candidate: fallbackCandidate,
-      reply: await generateThreadsAutoReplyText(postPreview, fallbackCandidate.text, persona),
-      reason: "model_error_fallback",
-    } : null;
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(String(error || "threadsAutoReply decision model failed"));
   } finally {
     request.cleanup();
   }
@@ -28608,6 +28587,7 @@ async function collectThreadsAutoReplyPostContext(
   if (
     findThreadsReplyComposerInputTarget(firstUiXml)
     || looksLikeThreadsReplyComposerUiXml(firstUiXml)
+    || await detectThreadsReplyComposerLocally(firstShotUrl).catch(() => null)
   ) {
     saveThreadsAutoReplySampleStep({
       padCode,
@@ -28651,8 +28631,12 @@ async function collectThreadsAutoReplyPostContext(
     };
   }
   if (!xmlAvailable) {
+    let visualFallbackError = "";
     const visualCandidates = firstShotUrl
-      ? await extractThreadsAutoReplyVisibleCommentsByVision(firstShotUrl, persona, postOwnIdentifiers).catch(() => [])
+      ? await extractThreadsAutoReplyVisibleCommentsByVision(firstShotUrl, persona, postOwnIdentifiers).catch((error) => {
+          visualFallbackError = error instanceof Error ? error.message : String(error);
+          return [];
+        })
       : [];
     const postHash = buildThreadsAutoReplyPostHash(padCode, "comment-collect-no-ui-xml", [
       buildThreadsAutoReplyScreenshotSeed(firstShotUrl),
@@ -28673,6 +28657,7 @@ async function collectThreadsAutoReplyPostContext(
         visualCandidateCount: visualCandidates.length,
         candidateCount: candidates.length,
         skippedReason: visualCandidates.length ? undefined : "no_ui_xml_no_visual_comment_text",
+        visualFallbackError: visualFallbackError || undefined,
         candidatePreview: candidates.slice(0, 6).map((item) => ({
           text: item.text,
           author: item.author,
@@ -28702,6 +28687,18 @@ async function collectThreadsAutoReplyPostContext(
     let shotUrl = page === 0 && firstShotUrl
       ? firstShotUrl
       : await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+    const replyEditorReason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
+    if (replyEditorReason) {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: `collect-page-${page + 1}-reply-editor-detected`,
+        screenshotUrl: shotUrl || undefined,
+        meta: { reason: replyEditorReason },
+      });
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+      await delay(650);
+      throw new Error(`自动回复采集阶段跑偏到回复编辑器：${replyEditorReason}`);
+    }
     if (await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false)) {
       saveThreadsAutoReplySampleStep({
         padCode,
@@ -28716,12 +28713,18 @@ async function collectThreadsAutoReplyPostContext(
       "threadsAutoReply page ui dump",
     ) : "";
     const visibleTexts = extractThreadsAutoReplyVisibleTexts(uiXml);
+    let pageTriedVisionFallback = false;
+    let pageVisionFallbackError = "";
     if (!visibleTexts.length && shotUrl) {
+      pageTriedVisionFallback = true;
       const visualCandidates = await extractThreadsAutoReplyVisibleCommentsByVision(
         shotUrl,
         persona,
         postOwnIdentifiers,
-      ).catch(() => []);
+      ).catch((error) => {
+        pageVisionFallbackError = error instanceof Error ? error.message : String(error);
+        return [];
+      });
       const postHashForVisual = buildThreadsAutoReplyPostHash(padCode, "comment-collect-visual-fallback", [
         buildThreadsAutoReplyScreenshotSeed(shotUrl),
         ...visualCandidates.slice(0, 4).map((item) => normalizeSingleLine(item.text).slice(0, 80)),
@@ -28740,6 +28743,7 @@ async function collectThreadsAutoReplyPostContext(
         meta: {
           visualCandidateCount: visualCandidates.length,
           candidateCount: rankedVisualCandidates.length,
+          visualFallbackError: pageVisionFallbackError || undefined,
           candidatePreview: rankedVisualCandidates.slice(0, 6).map((item) => ({
             text: item.text,
             author: item.author,
@@ -28786,14 +28790,24 @@ async function collectThreadsAutoReplyPostContext(
     const shouldUseVisionFallback = Boolean(
       shotUrl
       && !pageVisibleComments.length
+      && !pageTriedVisionFallback
       && (
         !visibleTexts.length
         || page >= commentCollectScrolls.length
       )
     );
     if (shouldUseVisionFallback) {
-      const visionComments = await extractThreadsAutoReplyVisibleCommentsByVision(shotUrl, persona, postOwnIdentifiers).catch(() => []);
+      const visionComments = await extractThreadsAutoReplyVisibleCommentsByVision(shotUrl, persona, postOwnIdentifiers).catch((error) => {
+        pageVisionFallbackError = error instanceof Error ? error.message : String(error);
+        return [];
+      });
       if (visionComments.length) pageVisibleComments = visionComments;
+      if (pageVisionFallbackError) {
+        pageVisibleComments = pageVisibleComments.map((item) => ({
+          ...item,
+          debugReason: `${item.debugReason || "thread_detail"};vision_error=${pageVisionFallbackError.slice(0, 80)}`,
+        }));
+      }
     }
     saveThreadsAutoReplySampleStep({
       padCode,
@@ -28811,6 +28825,11 @@ async function collectThreadsAutoReplyPostContext(
         })),
         skippedVisionFallback: !shouldUseVisionFallback && !pageVisibleComments.length,
         usedVisionFallback: pageVisibleComments.some((item) => /vision_ocr/.test(item.debugReason || "")),
+        visionFallbackError: pageVisionFallbackError || (
+          (shouldUseVisionFallback || pageTriedVisionFallback) && !pageVisibleComments.length
+            ? "vision_ocr_returned_no_candidates"
+            : undefined
+        ),
       },
     });
     if (pageVisibleComments.length) {
@@ -28839,8 +28858,12 @@ async function collectThreadsAutoReplyPostContext(
     "threadsAutoReply restored ui dump",
   ) : "";
   let restoredVisibleComments = extractThreadsAutoReplyVisibleComments(restoredUiXml, restoredShotUrl || firstShotUrl, postOwnIdentifiers);
+  let restoredVisionFallbackError = "";
   if (!restoredVisibleComments.length && restoredShotUrl) {
-    const visionComments = await extractThreadsAutoReplyVisibleCommentsByVision(restoredShotUrl, persona, postOwnIdentifiers).catch(() => []);
+    const visionComments = await extractThreadsAutoReplyVisibleCommentsByVision(restoredShotUrl, persona, postOwnIdentifiers).catch((error) => {
+      restoredVisionFallbackError = error instanceof Error ? error.message : String(error);
+      return [];
+    });
     if (visionComments.length) restoredVisibleComments = visionComments;
   }
   saveThreadsAutoReplySampleStep({
@@ -28857,6 +28880,7 @@ async function collectThreadsAutoReplyPostContext(
         debugReason: item.debugReason,
       })),
       usedVisionFallback: restoredVisibleComments.some((item) => /vision_ocr/.test(item.debugReason || "")),
+      visionFallbackError: restoredVisionFallbackError || undefined,
     },
   });
   if (restoredVisibleComments.length) {
@@ -29155,7 +29179,7 @@ export async function autoReplyThreadsAccount(
         "threadsAutoReply decision timeout",
       ).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        errors.push(`第 ${postIndex + 1} 条模型筛选超时：${message}`);
+        errors.push(`第 ${postIndex + 1} 条模型筛选/生成失败：${message}`);
         return null;
       });
     if (!decision) {
