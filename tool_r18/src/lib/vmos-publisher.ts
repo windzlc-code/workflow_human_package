@@ -26790,7 +26790,7 @@ async function openThreadsLatestOwnPostFromProfile(
     }
     const profileShotUrlBeforeTap = shotUrl;
     const profileUiXmlBeforeTap = profileUiXml;
-    await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, target, 2800).catch(async () => {
+    await tapScreenshotPointViaAdb(config, padCode, shotUrl, target, 2800).catch(async () => {
       const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
       const image = await getImageDimensions(shotUrl).catch(() => null);
       const imageWidth = image?.width || BASE_SCREEN.width;
@@ -26975,7 +26975,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   }
   const profileShotUrlBeforeTap = shotUrl;
   const profileUiXmlBeforeTap = profileUiXml;
-  await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, target, 2600).catch(async () => {
+  await tapScreenshotPointViaAdb(config, padCode, shotUrl, target, 2600).catch(async () => {
     const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
     const image = await getImageDimensions(shotUrl).catch(() => null);
     const imageWidth = image?.width || BASE_SCREEN.width;
