@@ -28245,15 +28245,7 @@ async function validateThreadsAutoReplyDetailReady(
   padCode: string,
   shotUrl: string,
 ): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
-  const initialUiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
-  const initialUiText = normalizeSingleLine(decodeXmlAttr(initialUiXml));
   if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
-    return { ok: true, screenshotUrl: shotUrl };
-  }
-  if (
-    /串文/.test(initialUiText)
-    && /(熱門|热门|新增到串文|新增至串文|添加到串文|次瀏覽|次浏览|瀏覽|浏览)/.test(initialUiText)
-  ) {
     return { ok: true, screenshotUrl: shotUrl };
   }
   if (await detectThreadsMediaCommentSheetLocally(shotUrl).catch(() => false)) {
@@ -28262,6 +28254,14 @@ async function validateThreadsAutoReplyDetailReady(
   if (
     await detectThreadsBottomReplyComposerBarLocally(shotUrl).catch(() => false)
     && !await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false)
+  ) {
+    return { ok: true, screenshotUrl: shotUrl };
+  }
+  const initialUiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
+  const initialUiText = normalizeSingleLine(decodeXmlAttr(initialUiXml));
+  if (
+    /串文/.test(initialUiText)
+    && /(熱門|热门|新增到串文|新增至串文|添加到串文|次瀏覽|次浏览|瀏覽|浏览)/.test(initialUiText)
   ) {
     return { ok: true, screenshotUrl: shotUrl };
   }
