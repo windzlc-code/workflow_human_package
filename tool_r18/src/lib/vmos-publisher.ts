@@ -9114,6 +9114,17 @@ async function execAdbForText(
   }
 }
 
+function normalizeUiAutomatorXmlDump(output: string): string {
+  const raw = String(output || "");
+  const starts = [
+    raw.indexOf("<?xml"),
+    raw.indexOf("<hierarchy"),
+  ].filter((index) => index >= 0).sort((a, b) => a - b);
+  if (!starts.length) return "";
+  const xml = raw.slice(starts[0]).trim();
+  return /<hierarchy[\s>]/.test(xml) && /<node\b/.test(xml) ? xml : "";
+}
+
 async function dumpUiXml(
   config: VmosConfig,
   padCode: string,
@@ -9133,8 +9144,7 @@ async function dumpUiXml(
       30000,
       1000,
     ).catch(() => "");
-    const xmlStart = output.indexOf("<?xml");
-    return xmlStart >= 0 ? output.slice(xmlStart) : output;
+    return normalizeUiAutomatorXmlDump(output);
   };
 
   const tmpXml = await readDump("/data/local/tmp/vmos_window.xml");
@@ -9163,8 +9173,7 @@ async function dumpUiXmlQuick(
     timeoutMs,
     500,
   ).catch(() => "");
-  const xmlStart = output.indexOf("<?xml");
-  return xmlStart >= 0 ? output.slice(xmlStart) : output;
+  return normalizeUiAutomatorXmlDump(output);
 }
 
 async function dumpUiXmlStable(
@@ -26268,10 +26277,16 @@ function isThreadsAutoReplyIgnoredText(text: string): boolean {
   if (/^(可見留言|可见留言|可見評論|可见评论|visible comment)$/i.test(compact)) return true;
   if (compact.length < 3 || compact.length > 160) return true;
   const chars = Array.from(compact.replace(/\s+/g, ""));
+  if (/[\uFFFD�]/.test(compact)) return true;
+  if (/(?:\?|？){4,}/.test(compact)) return true;
   if (chars.length >= 4) {
     const uniqueCount = new Set(chars).size;
     const topRepeat = Math.max(...Array.from(new Set(chars)).map((char) => chars.filter((item) => item === char).length));
     if (uniqueCount <= 2 || topRepeat / chars.length >= 0.72) return true;
+  }
+  if (chars.length >= 6) {
+    const symbolCount = chars.filter((char) => !/[\p{L}\p{N}]/u.test(char)).length;
+    if (symbolCount / chars.length >= 0.55) return true;
   }
   if (/^(讚|赞|喜歡|喜欢|回覆|回复|留言|評論|评论|轉發|转发|分享|發佈|发布|Post|Reply|Like|Share|Repost|Threads|Following|For you)$/i.test(compact)) return true;
   if (/^(首頁|主页|搜尋|搜索|探索|通知|個人|个人|新增|取消|完成|更多|返回|查看|複製|复制|編輯|编辑)$/i.test(compact)) return true;
