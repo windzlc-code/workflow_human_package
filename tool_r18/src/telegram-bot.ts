@@ -15046,9 +15046,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const creds = resolveVmosCredentials();
         const commentPersona = buildWarmupCommentPersonaFromArchive(archive);
         let lastProgress: ThreadsAutoReplyProgress | null = null;
-        await safeEditOrSend(bot, chatId, msgId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
+        void withTimeout(safeEditOrSend(bot, chatId, msgId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        }), 3_000, "threads auto-reply start status edit timeout").catch((error) => {
+          console.warn(`[telegram][acctautoreply_run] chat=${chatId} pad=${boundPad.padCode} key=${padOperationKey} stage=start_edit_failed error=${error instanceof Error ? error.message : String(error)}`);
         });
+        console.log(`[telegram][acctautoreply_run] chat=${chatId} pad=${boundPad.padCode} key=${padOperationKey} stage=start_core`);
         const result = await autoReplyThreadsAccount(
           creds,
           boundPad.padCode,
