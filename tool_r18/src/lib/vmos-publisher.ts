@@ -28110,14 +28110,21 @@ async function validateThreadsAutoReplyDetailReady(
   if (await detectThreadsMediaCommentSheetLocally(shotUrl).catch(() => false)) {
     return { ok: true, screenshotUrl: shotUrl };
   }
+  if (
+    await detectThreadsBottomReplyComposerBarLocally(shotUrl).catch(() => false)
+    && !await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false)
+  ) {
+    return { ok: true, screenshotUrl: shotUrl };
+  }
   if (await detectThreadsBlankReplyRatingPageLocally(shotUrl).catch(() => false)) {
     return { ok: true, screenshotUrl: shotUrl };
   }
+  const initialReplyComposerReason = await detectThreadsReplyComposerLocally(shotUrl).catch(() => null);
   if (
     findThreadsReplyComposerInputTarget(initialUiXml)
     || looksLikeThreadsReplyComposerUiXml(initialUiXml)
     || await detectThreadsCommentReplyEditorLocally(shotUrl).catch(() => false)
-    || await detectThreadsReplyComposerLocally(shotUrl).catch(() => null)
+    || (initialReplyComposerReason && initialReplyComposerReason !== "LOCAL_INLINE_REPLY_BAR")
   ) {
     return {
       ok: false,
@@ -28159,6 +28166,12 @@ async function validateThreadsAutoReplyDetailReady(
     };
   }
   if (/串文/.test(uiText) && /新增到串文|新增至串文|Add to thread/i.test(uiText)) {
+    return { ok: true, screenshotUrl: shotUrl };
+  }
+  if (
+    await detectThreadsBottomReplyComposerBarLocally(shotUrl).catch(() => false)
+    && !await detectAndroidKeyboardVisibleLocally(shotUrl).catch(() => false)
+  ) {
     return { ok: true, screenshotUrl: shotUrl };
   }
   if (
@@ -29005,9 +29018,6 @@ export async function autoReplyThreadsAccount(
   ): Promise<string> => {
     const shotUrl = existingScreenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
     if (!shotUrl) return "";
-    if (!replyScreenshots.includes(shotUrl) && replyScreenshots.length < Math.max(1, maxReplies)) {
-      replyScreenshots.push(shotUrl);
-    }
     saveThreadsAutoReplySampleStep({
       padCode,
       step,
