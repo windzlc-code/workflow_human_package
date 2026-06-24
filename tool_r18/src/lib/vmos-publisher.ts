@@ -19534,6 +19534,7 @@ export async function queryThreadsAccountFromAndroidAccountManager(
 async function openThreadsProfileForAccountQuery(
   config: VmosConfig,
   padCode: string,
+  onProgress?: (progress: PublishProgress) => void,
 ): Promise<{ ok: true; profileLikely: boolean; screenshotUrl?: string } | { ok: false; error: string; screenshotUrl?: string }> {
   if (isAcpPad(padCode)) {
     await relaunchThreads(config, padCode, 4500);
@@ -19551,7 +19552,12 @@ async function openThreadsProfileForAccountQuery(
     return { ok: true, profileLikely: true, screenshotUrl: profileShotUrl };
   }
 
-  const currentShotUrl = await screenshot(config, padCode).catch(() => undefined);
+  onProgress?.({ step: "檢查 Threads 當前畫面...", done: false });
+  const currentShotUrl = await withTimeout(
+    screenshot(config, padCode).catch(() => undefined),
+    12_000,
+    "Threads 當前畫面截圖逾時",
+  ).catch(() => undefined);
   if (await detectThreadsProfilePageLocally(currentShotUrl).catch(() => false)) {
     await tapThreadsProfileTab(config, padCode, 1400).catch(() => undefined);
     const refreshedShotUrl = await screenshot(config, padCode).catch(() => currentShotUrl);
@@ -19561,11 +19567,18 @@ async function openThreadsProfileForAccountQuery(
     await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 900).catch(() => "");
     await delay(900);
   }
-  await relaunchThreads(config, padCode, 4500);
-  let initialShotUrl = await screenshot(config, padCode).catch(() => undefined);
+  onProgress?.({ step: "重新啟動 Threads...", done: false });
+  await withTimeout(relaunchThreads(config, padCode, 4500), 18_000, "Threads 重新啟動逾時");
+  onProgress?.({ step: "讀取 Threads 啟動後畫面...", done: false });
+  let initialShotUrl = await withTimeout(
+    screenshot(config, padCode).catch(() => undefined),
+    12_000,
+    "Threads 啟動後截圖逾時",
+  ).catch(() => undefined);
   if (await detectThreadsProfilePageLocally(initialShotUrl).catch(() => false)) {
     return { ok: true, profileLikely: true, screenshotUrl: initialShotUrl };
   }
+  onProgress?.({ step: "讀取 Threads 畫面結構...", done: false });
   let initialUiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
   if (!initialUiXml) {
     const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
@@ -20118,7 +20131,7 @@ async function locateThreadsEditProfileAvatarFromScreenshot(screenshotUrl?: stri
   const { data, info } = await sharp(buffer).resize(720, 1600, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
   const idx = (x: number, y: number) => (Math.max(0, Math.min(info.height - 1, Math.round(y))) * info.width + Math.max(0, Math.min(info.width - 1, Math.round(x)))) * 3;
   let best: { x: number; y: number; score: number } | null = null;
-  for (let cy = 250; cy <= 380; cy += 20) {
+  for (let cy = 190; cy <= 1460; cy += 20) {
     for (let cx = 555; cx <= 635; cx += 20) {
       let total = 0;
       let colorful = 0;
@@ -20267,7 +20280,8 @@ async function openThreadsEditProfilePage(
         await tapCloud720Point(config, padCode, 620, 1510, 1_000).catch(() => undefined);
         await delay(2_000);
         onProgress?.({ step: "点击 Threads 编辑个人档案...", done: false });
-        await tapCloud720Point(config, padCode, 192, 637, 1_200).catch(() => undefined);
+        const editPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
+        await tapCloud720Point(config, padCode, editPoint.x, editPoint.y, 1_200).catch(() => undefined);
         await delay(2_200);
         currentShot = await screenshot(config, padCode).catch(() => currentShot);
         if (await detectThreadsEditProfilePageByScreenshotHeuristic(currentShot).catch(() => false)) {
@@ -20286,7 +20300,7 @@ async function openThreadsEditProfilePage(
     if (fastOpened) return fastOpened;
   }
 
-  const profile = await openThreadsProfileForAccountQuery(config, padCode);
+  const profile = await openThreadsProfileForAccountQuery(config, padCode, onProgress);
   if (!profile.ok) {
     throw new Error(profile.error || "未能打开 Threads 个人主页");
   }
@@ -20314,7 +20328,7 @@ async function openThreadsEditProfilePage(
   let editTargetSource: ThreadsProfileLinkTargetSource | null = editTarget ? "xml" : null;
   const editVisionShotUrl = profileShotUrl || profile.screenshotUrl;
   if (!editTarget && profile.profileLikely && isAcpPad(padCode)) {
-    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 637 };
+    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
     editTarget = await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, FIXED_VMOS_SCREEN);
     editTargetSource = "fallback";
   }
@@ -20322,22 +20336,11 @@ async function openThreadsEditProfilePage(
     editTarget = await locateThreadsButtonByVision(
       editVisionShotUrl,
       "Threads 自己个人主页上的「编辑个人档案 / 编辑个人资料 / 编辑主页 / Edit profile」按钮中心点；不要选分享个人档案、关注、返回键或底部导航",
-    ).catch((error) => {
-      saveThreadsAutoReplySampleStep({
-        padCode,
-        step: "profile-next-comment-badge-scan-retry-error",
-        screenshotUrl: shotUrl,
-        meta: {
-          attempt,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      });
-      return null;
-    });
+    ).catch(() => null);
     if (editTarget) editTargetSource = "vision";
   }
   if (!editTarget && profile.profileLikely) {
-    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 637 };
+    const fallbackPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
     editTarget = await scaleReferencePointToPhysicalTap(config, padCode, fallbackPoint, FIXED_VMOS_SCREEN);
     editTargetSource = "fallback";
   }
@@ -20345,10 +20348,11 @@ async function openThreadsEditProfilePage(
 
   onProgress?.({ step: "进入编辑个人资料页面...", done: false });
   if (isAcpPad(padCode)) {
-    await tapCloud720Point(config, padCode, 192, 637, 2800);
+    const editPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
+    await tapCloud720Point(config, padCode, editPoint.x, editPoint.y, 2800);
   } else {
     const editTapPoint = await resolveThreadsProfileLinkTapPoint(config, padCode, editTarget, editTargetSource || "fallback");
-    await tapViaAdbAbsolute(config, padCode, editTapPoint.x, editTapPoint.y, 2800);
+    await tapViaAdbAbsoluteQuick(config, padCode, editTapPoint.x, editTapPoint.y, 1800);
   }
   await delay(900);
   await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
@@ -20410,8 +20414,8 @@ async function openThreadsEditProfilePage(
       throw new Error(`进入了 Threads 资料子页面，已停止继续盲点，避免跑偏${recovered.screenshotUrl ? `，截图：${recovered.screenshotUrl}` : ""}`);
     }
     const fallbackPoints = [
-      { x: 192, y: 588 },
-      { x: 360, y: 588 },
+      { x: 192, y: 656 },
+      { x: 360, y: 656 },
     ];
     for (const fallbackPoint of fallbackPoints) {
       const point = isAcpPad(padCode)
@@ -20880,7 +20884,7 @@ export async function updateThreadsProfileAvatar(
   }
   if (!avatarTarget) {
     avatarTarget = isAcpPad(padCode)
-      ? { x: 595, y: 340 }
+      ? { x: 595, y: 270 }
       : await scaleReferencePointToPhysicalTap(config, padCode, { x: 360, y: 318 }, FIXED_VMOS_SCREEN);
     avatarTargetSource = "fallback";
   }
@@ -20926,11 +20930,16 @@ export async function updateThreadsProfileAvatar(
     || await detectThreadsEditProfilePageByScreenshotHeuristic(afterAvatarSourceShot).catch(() => false);
   if (isAcpPad(padCode) && stillOnEditProfileAfterSource) {
     onProgress?.({ step: "頭像入口仍停在編輯頁，重新點擊頭像加號...", done: false });
-    await tapCloud720Point(config, padCode, 595, 340, 1800);
-    await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
-    await delay(900);
-    uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    for (const point of [{ x: 595, y: 270 }, { x: 595, y: 340 }]) {
+      await tapCloud720Point(config, padCode, point.x, point.y, 1800);
+      await dismissAndroidPermissionDialog(config, padCode, "allow").catch(() => false);
+      await delay(900);
+      uiXml = await dumpUiXml(config, padCode).catch(() => "");
+      const retryShot = await screenshot(config, padCode).catch(() => undefined);
+      if (!isThreadsEditProfilePageUiXml(uiXml) && !await detectThreadsEditProfilePageByScreenshotHeuristic(retryShot).catch(() => false)) break;
+    }
     const retryShot = await screenshot(config, padCode).catch(() => undefined);
+    uiXml = await dumpUiXml(config, padCode).catch(() => "");
     if (isThreadsEditProfilePageUiXml(uiXml) || await detectThreadsEditProfilePageByScreenshotHeuristic(retryShot).catch(() => false)) {
       const shot = await screenshot(config, padCode).catch(() => undefined);
       throw new Error(`點擊頭像入口後仍停在 Threads 編輯頁，未進入圖庫${shot ? `，截图：${shot}` : ""}`);
@@ -21067,7 +21076,7 @@ export async function updateThreadsProfileLink(
   if (!targetLink) throw new Error("链接不能为空");
 
   onProgress?.({ step: "启动 Threads 并打开个人主页...", done: false });
-  const profile = await openThreadsProfileForAccountQuery(config, padCode);
+  const profile = await openThreadsProfileForAccountQuery(config, padCode, onProgress);
   if (!profile.ok) {
     throw new Error(profile.error || "未能打开 Threads 个人主页");
   }
@@ -21081,7 +21090,7 @@ export async function updateThreadsProfileLink(
 
   let uiXml = isAcpPad(padCode) ? "" : await dumpUiXml(config, padCode).catch(() => "");
   let editTarget = isAcpPad(padCode)
-    ? await scaleReferencePointToPhysicalTap(config, padCode, { x: 192, y: 637 }, FIXED_VMOS_SCREEN)
+    ? await scaleReferencePointToPhysicalTap(config, padCode, { x: 192, y: 656 }, FIXED_VMOS_SCREEN)
     : uiXml
     ? findThreadsTextTargetFromUiXml(
         uiXml,
@@ -21101,7 +21110,7 @@ export async function updateThreadsProfileLink(
   }
   if (!editTarget && profile.profileLikely) {
     editTarget = isAcpPad(padCode)
-      ? await scaleReferencePointToPhysicalTap(config, padCode, { x: 192, y: 637 }, FIXED_VMOS_SCREEN)
+      ? await scaleReferencePointToPhysicalTap(config, padCode, { x: 192, y: 656 }, FIXED_VMOS_SCREEN)
       : await scaleReferencePointToPhysicalTap(config, padCode, { x: 176, y: 596 }, FIXED_VMOS_SCREEN);
     editTargetSource = "fallback";
   }
@@ -21109,10 +21118,11 @@ export async function updateThreadsProfileLink(
 
   onProgress?.({ step: "进入编辑个人资料页面...", done: false });
   if (isAcpPad(padCode)) {
-    await tapCloud720Point(config, padCode, 192, 637, 2800);
+    const editPoint = padCode === ACP_THREADS_FAST_PAD_CODE ? { x: 176, y: 532 } : { x: 192, y: 656 };
+    await tapCloud720Point(config, padCode, editPoint.x, editPoint.y, 2800);
   } else {
     const editTapPoint = await resolveThreadsProfileLinkTapPoint(config, padCode, editTarget, editTargetSource || "fallback");
-    await tapViaAdbAbsolute(config, padCode, editTapPoint.x, editTapPoint.y, 2800);
+    await tapViaAdbAbsoluteQuick(config, padCode, editTapPoint.x, editTapPoint.y, 1800);
   }
   await delay(900);
   await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
@@ -21131,7 +21141,7 @@ export async function updateThreadsProfileLink(
   let preResolvedAddLinkTarget: { x: number; y: number } | null = null;
   let preResolvedAddLinkTargetSource: ThreadsProfileLinkTargetSource | null = null;
   if (isAcpPad(padCode)) {
-    preResolvedAddLinkTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 610, y: 1336 }, FIXED_VMOS_SCREEN);
+    preResolvedAddLinkTarget = await scaleReferencePointToPhysicalTap(config, padCode, { x: 610, y: 867 }, FIXED_VMOS_SCREEN);
     preResolvedAddLinkTargetSource = "fallback";
   } else if (!isThreadsEditProfilePageUiXml(uiXml)) {
     const currentShot = await screenshot(config, padCode).catch(() => undefined);
@@ -21191,7 +21201,12 @@ export async function updateThreadsProfileLink(
   if (!resolvedAddLinkTarget) throw new Error("进入编辑个人资料后未识别到 Links 入口");
   onProgress?.({ step: "打开新增链接输入框...", done: false });
   if (isAcpPad(padCode)) {
-    await tapCloud720Point(config, padCode, 610, 1336, 2400);
+    await tapCloud720Point(config, padCode, 610, 867, 2200);
+    await delay(700);
+    uiXml = await dumpUiXml(config, padCode).catch(() => "");
+    if (!isThreadsProfileLinksPageUiXml(uiXml) && !findThreadsProfileLinkInputTarget(uiXml) && !findThreadsProfileAddLinkRowTarget(uiXml)) {
+      await tapCloud720Point(config, padCode, 610, 1336, 2200);
+    }
   } else {
     const addLinkTapPoint = await resolveThreadsProfileLinkTapPoint(
       config,
@@ -21204,7 +21219,7 @@ export async function updateThreadsProfileLink(
   await dismissThreadsSystemCrashDialogIfPossible(config, padCode).catch(() => false);
   await delay(700);
   if (isAcpPad(padCode)) {
-    await tapCloud720Point(config, padCode, 360, 440, 1800);
+    await tapCloud720Point(config, padCode, 360, 360, 1800);
     await delay(900);
     uiXml = "";
   } else {
@@ -22561,6 +22576,10 @@ function isTrustedWarmupCommentDebugReason(debugReason: string | undefined, padC
   if (!isAcpPad(padCode)) return true;
   const reason = debugReason || "";
   if (/acp_search_comment_safe_geometry_only/.test(reason)) return false;
+  if (/acp_search_comment_safe_geometry_model_confirmed/.test(reason)) return true;
+  if (/acp_implausible_targets_rejected|local_geometry_actions_missing|fallback_comment_missing|primary_comment_shape_rejected/.test(reason)) return false;
+  if (/acp_search_reply_composer_comment_allowed/.test(reason)) return true;
+  if (/acp_safe_geometry_action_row|acp_local_snapshot_action_row/.test(reason)) return true;
   if (/geometry_action_row_detected|acp_common_action_row_fallback/.test(reason)) return false;
   if (/acp_verified_common_action_row_fallback/.test(reason)) return true;
   return /thread_detail_visual|acp_detail_action_row|acp_local_action_row|column_action_row_detected|local_action_row_detected|acp_media_overlay_actions|acp_fast_screenshot_action_row/.test(reason);
@@ -22654,6 +22673,18 @@ function isSafeAcpGeometryCommentCandidate(
   const componentCount = countWarmupGeometryComponents(targets.debugRaw);
   if (componentCount !== null && componentCount < 4) return false;
   return rowY >= height * 0.28 && rowY <= height * 0.90;
+}
+
+function acpWarmupCommentTargetMatchesGeometryRow(
+  targets: Pick<WarmupFeedActionTargets, "comment" | "debugReason" | "debugRaw"> | null | undefined,
+  height = BASE_SCREEN.height,
+): boolean {
+  if (!targets?.comment) return false;
+  const debug = `${targets.debugReason || ""} ${targets.debugRaw || ""}`;
+  if (/acp_implausible_targets_rejected|local_geometry_actions_missing|fallback_comment_missing|primary_comment_shape_rejected/.test(debug)) return false;
+  const rowY = parseWarmupGeometryRowY(debug);
+  if (!rowY) return true;
+  return Math.abs(targets.comment.y - rowY) <= height * 0.045;
 }
 
 export function isPlausibleAcpWarmupActionPoint(
@@ -24744,6 +24775,19 @@ export function scoreWarmupPostRelevance(
   };
 }
 
+export function isUnsafeWarmupEngagementText(text: string): boolean {
+  const normalized = normalizeSingleLine(decodeXmlAttr(text || ""));
+  if (!normalized) return false;
+
+  const modernPoliticalSignal = /共产党|共產黨|中共|民进党|民進黨|习近平|習近平|拜登|川普|郭文贵|郭文貴|政党|政黨|政治/i.test(normalized);
+  const inflammatorySignal = /消灭|消滅|杀害|殺害|害死|屠杀|屠殺|仇恨|煽动|煽動|攻击|攻擊|辱骂|辱罵|骂|罵|人渣|畜生/i.test(normalized);
+  if (modernPoliticalSignal && inflammatorySignal) return true;
+
+  const severeEventSignal = /恐袭|恐襲|枪击|槍擊|杀人|殺人|命案|血腥|死亡|死伤|死傷|屠杀|屠殺|杀害|殺害/i.test(normalized);
+  const politicizedArgumentSignal = /政治|政党|政黨|政府|政權|政权|選舉|选举|立場|立场|對立|对立/i.test(normalized);
+  return severeEventSignal && politicizedArgumentSignal;
+}
+
 async function warmupSearchInterestSurface(
   config: VmosConfig,
   padCode: string,
@@ -25084,7 +25128,7 @@ async function warmupAssessPostRelevanceByModel(
 只根据内容主题是否相关判断；不要因为语言不同就判不相关。
 如果是搜索页，也可以判断可见搜索结果是否整体与人设相关。
 如果主要内容明显不相关，例如体育/娱乐与房产人设无关，应判 false。
-如果主要内容是现实政治争吵、辱骂、煽动对立、攻击国家/政党/公众人物，或容易引战的立场对骂，即使含有人设关键词或历史词，也判 false；这类内容可以跳过，不能用于点赞或留言。
+现代社会、新闻、生活观察、普通历史讨论都可以按主题相关性正常判断；只有主要内容是争议政治对骂、辱骂仇恨、煽动对立、暴力恶性事件或明显引战攻击时，才判 false 并跳过互动。
 返回 JSON：{"relevant":true|false,"reason":"简短原因","preview":"你识别出的主要内容"}
 
 人设：${personaText}
@@ -25593,7 +25637,7 @@ async function warmupGenerateCommentForPost(
 - 不要輸出舊模板句或萬用句，例如「值得參考」「這個角度很自然」「這段分享蠻有共鳴」「這個點我認同」；若人設有專業領域，也不要把留言寫成制式廣告。
 - 語氣要符合留言帳號人設：${personaHint || "未指定，使用台灣 Threads 自然口語"}。
 - 不要寫和人設領域明顯衝突的回覆；只要能自然呼應推文內容和人設口吻，就輸出一句具體留言，不要因為沒有命中固定詞而留空。
-- 如果推文是現實政治爭吵、辱罵、煽動對立、攻擊國家/政黨/公眾人物，或容易引戰的立場對罵，輸出空字串，不要留言。
+- 現代社會、新聞、生活觀察、普通歷史討論都可以正常留言；只有推文主要是在爭議政治對罵、辱罵仇恨、煽動對立、暴力惡性事件或明顯引戰攻擊時，才輸出空字串。
 - 不要使用 hashtag、@、連結或表情符號。
 - 不要提到你是 AI 或自動化。
 ${templateHint}
@@ -25612,7 +25656,7 @@ ${templateHint}
 - 必須自然像真人留言，語氣和用詞要符合目前人設：${personaHint || "未指定，使用台灣 Threads 自然口語"}。
 - 不要硬銷售，不要模板句，不要把留言寫成客服廣告。
 - 需要基於推文全文理解來回覆，可以直接呼應具體事件、問題、情緒、數字、場景或判斷，但不要受固定詞庫限制。
-- 如果推文是現實政治爭吵、辱罵、煽動對立、攻擊國家/政黨/公眾人物，或容易引戰的立場對罵，輸出空字串，不要留言。
+- 現代社會、新聞、生活觀察、普通歷史討論都可以正常留言；只有推文主要是在爭議政治對罵、辱罵仇恨、煽動對立、暴力惡性事件或明顯引戰攻擊時，才輸出空字串。
 - 不要輸出空泛句，例如「值得參考」「這個角度很自然」「這段分享蠻有共鳴」「這個點我認同」。
 
 目標推文：${cleanedPreview}`);
@@ -25742,7 +25786,7 @@ async function warmupGenerateCommentFromScreenshot(
 如果主帖可見文字清楚，必須基於主帖全文理解輸出評論和摘要；只有完全看不清主帖文字時才留空。
 評論必須同時貼合畫面中的帖子內容和留言人設；不能只寫人設口吻，也不能回和人設無關的內容。
 必須提到或呼應帖子中的具體名詞、場景、問題、風險、情緒或判斷；如果畫面看不清楚或無法判斷具體內容，評論留空。
-如果主帖是現實政治爭吵、辱罵、煽動對立、攻擊國家/政黨/公眾人物，或容易引戰的立場對罵，評論留空，只返回空評論和摘要。
+現代社會、新聞、生活觀察、普通歷史討論都可以正常留言；只有主帖主要是在爭議政治對罵、辱罵仇恨、煽動對立、暴力惡性事件或明顯引戰攻擊時，評論才留空。
 如果帖子本身很短或只是情緒句，可以只回 2 到 8 個有效字的自然語氣反應，例如「真的欸」「哈哈真的」「也太懂」，不要硬拉長。
 如果帖子有明確資訊量，評論必須貼合具體內容，10 到 30 個有效字即可，要帶出畫面中的具體名詞、場景、風險、情緒或判斷。
 短反應可以沒有標點；如果評論超過 15 個有效字，必須至少有一個自然停頓標點，例如逗號、句號、問號或驚嘆號，但不要堆疊標點。
@@ -30532,15 +30576,27 @@ async function warmupExecuteCommentAtPoint(
         "warmup comment already-open screenshot timeout",
       ).catch(() => "");
     }
-    const openedReplyComposer = async () => Boolean(
-      findThreadsReplyComposerInputTarget(afterOpenUiXml)
-      || looksLikeThreadsReplyComposerUiXml(afterOpenUiXml)
-      || await detectThreadsReplyComposerLocally(afterOpenShotUrl).catch(() => null)
-      || await detectThreadsCommentReplyEditorLocally(afterOpenShotUrl).catch(() => false)
-      || await detectThreadsInlineReplyBarLocally(afterOpenShotUrl).catch(() => false),
-    );
+    const openedReplyComposer = async () => {
+      if (
+        afterOpenUiXml
+        && (
+          looksLikeThreadsMessagesUiXml(afterOpenUiXml)
+          || looksLikeThreadsStatusMessageUiXml(afterOpenUiXml)
+          || looksLikeThreadsMediaMarkupUiXml(afterOpenUiXml)
+          || looksLikeThreadsProfileUiXml(afterOpenUiXml)
+        )
+      ) {
+        return false;
+      }
+      return Boolean(
+        findThreadsReplyComposerInputTarget(afterOpenUiXml)
+        || looksLikeThreadsReplyComposerUiXml(afterOpenUiXml)
+        || await detectThreadsReplyComposerLocally(afterOpenShotUrl).catch(() => null)
+        || await detectThreadsCommentReplyEditorLocally(afterOpenShotUrl).catch(() => false)
+        || await detectThreadsInlineReplyBarLocally(afterOpenShotUrl).catch(() => false)
+      );
+    };
     const recoverAcpMisopenedCommentSurface = async (stage: string) => {
-      if (await openedReplyComposer()) return;
       if (!afterOpenUiXml) afterOpenUiXml = await dumpReplyUiFast();
       if (!afterOpenShotUrl) {
         afterOpenShotUrl = await captureReplyScreenshotFast(`warmup comment ${stage}`).catch(() => "") || "";
@@ -30566,6 +30622,7 @@ async function warmupExecuteCommentAtPoint(
         label = "侧栏";
         reason = "side_drawer";
       } else {
+        if (await openedReplyComposer()) return;
         const composeReason = afterOpenShotUrl
           ? await detectThreadsComposerLocally(afterOpenShotUrl).catch(() => null)
           : null;
@@ -30781,6 +30838,14 @@ async function warmupExecuteCommentAtPoint(
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
       throw new Error(`ACP 留言落到媒体覆盖层，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
     }
+    let typedUiXml = await dumpReplyUiFast();
+    if (looksLikeThreadsMessagesUiXml(typedUiXml)) {
+      const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-messages-page");
+      await dismissThreadsMessagesPage(config, padCode, 2200).catch(async () => {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+      });
+      throw new Error(`ACP 留言误入消息页，已返回并跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+    }
     if (await withTimeout(
       detectThreadsExternalWebViewLocally(typedShotUrl),
       3_000,
@@ -30790,7 +30855,6 @@ async function warmupExecuteCommentAtPoint(
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
       throw new Error(`ACP 留言落到外链页，已跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
     }
-    let typedUiXml = await dumpReplyUiFast();
     if (looksLikeThreadsRestrictedReplyNoticeUiXml(typedUiXml)) {
       const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-restricted-reply");
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
@@ -30911,6 +30975,13 @@ async function warmupExecuteCommentAtPoint(
         "warmup comment direct unicode typed screenshot timeout",
       ).catch(() => typedShotUrl);
       typedUiXml = await dumpReplyUiFast();
+      if (looksLikeThreadsMessagesUiXml(typedUiXml)) {
+        const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-messages-page");
+        await dismissThreadsMessagesPage(config, padCode, 2200).catch(async () => {
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        });
+        throw new Error(`ACP 留言误入消息页，已返回并跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+      }
       if (looksLikeThreadsRestrictedReplyNoticeUiXml(typedUiXml)) {
         const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-restricted-reply");
         await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
@@ -30974,6 +31045,13 @@ async function warmupExecuteCommentAtPoint(
         "warmup comment visual-bottom retyped screenshot timeout",
       ).catch(() => typedShotUrl);
       typedUiXml = await dumpReplyUiFast();
+      if (looksLikeThreadsMessagesUiXml(typedUiXml)) {
+        const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-messages-page");
+        await dismissThreadsMessagesPage(config, padCode, 2200).catch(async () => {
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        });
+        throw new Error(`ACP 留言误入消息页，已返回并跳过（comment=${comment.slice(0, 24)}${debugPath ? ` debug=${debugPath}` : ""}）`);
+      }
       if (looksLikeThreadsRestrictedReplyNoticeUiXml(typedUiXml)) {
         const debugPath = saveThreadsDebugScreenshot(typedShotUrl, "warmup-acp-comment-restricted-reply");
         await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
@@ -32084,11 +32162,7 @@ export async function warmupThreadsAccount(
     }
   };
   const isUnsafeWarmupEngagementVisibleText = (text: string): boolean => {
-    const normalized = normalizeSingleLine(decodeXmlAttr(text || ""));
-    if (!normalized) return false;
-    const politicalSignal = /共产党|共產黨|中共|国民党|國民黨|民进党|民進黨|粉红|粉紅|习近平|習近平|拜登|川普|郭文贵|郭文貴|日军|日軍|国军|國軍|武汉实验室|武漢實驗室|病毒|政党|政黨|政治|文革|大跃进|大躍進|南京大屠杀|南京大屠殺/i.test(normalized);
-    if (!politicalSignal) return false;
-    return /消灭|消滅|杀害|殺害|害死|屠杀|屠殺|爆料|翻墙|翻牆|查证|查證|仇恨|煽动|煽動|攻击|攻擊|维权|維權|抗议|抗議|不等于|不等於|粉红|粉紅|心血/i.test(normalized);
+    return isUnsafeWarmupEngagementText(text);
   };
   const searchResultPageRelevantBeforeOpen = async (options: { allowKeywordOnlyLike?: boolean; allowKeywordComment?: boolean } = {}) => {
     if (!isAcpPad(padCode) || !/^search/.test(activeRelevantSurfaceReason)) return true;
@@ -32121,14 +32195,6 @@ export async function warmupThreadsAccount(
       acpSearchKeywordFallbackLikeOnly = true;
       acpSearchRejectedCandidates = 0;
       report(`搜索结果可见互动栏按中文关键词「${keyword}」快速校验通过，本轮只允许低频点赞`);
-      return true;
-    }
-    if (
-      options.allowKeywordComment
-      && isWarmupSearchKeywordRelevantToPersona(keyword, effectiveCfg.commentPersona, effectiveCfg.keywords || [])
-    ) {
-      acpSearchRejectedCandidates = 0;
-      report(`搜索结果可见互动栏按中文关键词「${keyword}」快速校验通过，留言内容将在打开回复框后再生成校验`);
       return true;
     }
     const current = await warmupCurrentPostRelevance(config, padCode, effectiveCfg, {
@@ -32303,12 +32369,12 @@ export async function warmupThreadsAccount(
           && current.comment.y >= Math.round(BASE_SCREEN.height * 0.38)
           && current.comment.y <= Math.round(BASE_SCREEN.height * 0.78)
         );
+        const replyComposerVisible = /LOCAL_REPLY_COMPOSER|LOCAL_INLINE_REPLY_BAR/.test(current.debugReason || "");
         if (
           options.allowKeywordComment
           && commentRequiredThisRun
-          && commentPointLooksSafe
-          && /acp_detail_reply_input_fallback/.test(current.debugReason || "")
-          && !/LOCAL_REPLY_COMPOSER/.test(current.debugReason || "")
+          && (commentPointLooksSafe || replyComposerVisible)
+          && /acp_detail_reply_input_fallback|LOCAL_REPLY_COMPOSER|LOCAL_INLINE_REPLY_BAR/.test(current.debugReason || "")
         ) {
           current.debugReason = [
             current.debugReason,
@@ -32317,7 +32383,25 @@ export async function warmupThreadsAccount(
           report(`搜索结果页已在回复框/详情页且留言点安全，沿用当前目标执行留言：${current.debugReason || "reply_composer_comment"}`);
           return current;
         }
-        report(`搜索结果页检测到详情页/回复框 fallback，先强制露出标准互动栏后重试：${current.debugReason || "detail_fallback"}`);
+        report(`搜索结果页检测到详情页/回复框 fallback，先返回搜索结果页再重试：${current.debugReason || "detail_fallback"}`);
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        await delay(850);
+        if (/LOCAL_REPLY_COMPOSER|acp_detail_reply_input_fallback/.test(current.debugReason || "")) {
+          await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+          await delay(1000);
+        }
+        const restored = await withTimeout(
+          warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode, { preferActionRowBeforeProfile: true }),
+          8_000,
+          "warmup ACP search visible action locate after back from detail fallback timeout",
+        ).catch((error) => ({
+          debugReason: `search_visible_action_after_detail_back_error:${error instanceof Error ? error.message : String(error)}`,
+        } as WarmupFeedActionTargets));
+        const restoredUnsafeDetailFallback = /thread_detail_visual|acp_detail_action_row|acp_detail_reply_input_fallback/.test(restored?.debugReason || "");
+        if (!restoredUnsafeDetailFallback && (restored?.like || restored?.comment)) {
+          report(`搜索结果页从详情/回复框恢复后重新定位互动栏：${restored.debugReason || "restored_action_row"}`);
+          return restored;
+        }
         await revealAcpSearchResultActionRow().catch(() => undefined);
         await warmupWaitForScrollSettle(900, 1500);
         const retry = await withTimeout(
@@ -32480,10 +32564,22 @@ export async function warmupThreadsAccount(
         || await detectThreadsSearchResultsVisualGateLocally(shotUrl).catch(() => false)
       : false;
     const searchInputWithKeyword = threadsSearchInputContainsKeyword(xml, keyword);
+    const normalizedKeyword = normalizeSingleLine(keyword).replace(/\s+/g, "");
+    const normalizedXmlText = normalizeSingleLine(decodeXmlAttr(xml)).replace(/\s+/g, "");
+    const keywordPresentOnPage = !normalizedKeyword || searchInputWithKeyword || normalizedXmlText.includes(normalizedKeyword);
+    const hasSearchResultTabs = /(熱門貼文|热门贴文|熱門帖子|热门帖子|最新貼文|最新贴文|最新帖子|Top|Latest)/i.test(normalizedXmlText);
+    const hasPostLikeContent = /(回覆|回复|讚|赞|轉發|转发|小時|小时|分鐘|分钟|\d+\s*(?:天|週|周)|\/\d{1,2}\/\d{2,4})/i.test(normalizedXmlText);
+    const looksLikeSearchSuggestOnly = Boolean(
+      normalizedKeyword
+      && !keywordPresentOnPage
+      && !hasSearchResultTabs
+      && !hasPostLikeContent
+      && /(搜尋|搜索|Search|追蹤建議|追踪建议|為你精選的主題|为你精选的主题|追蹤|追踪|Follow)/i.test(normalizedXmlText)
+    );
     const followButtonCount = (normalizeSingleLine(decodeXmlAttr(xml)).match(/追蹤|追踪|Follow/g) || []).length;
     const accountListInsteadOfPosts = followButtonCount >= 3 && !/熱門貼文|热门帖子|最新貼文|最新帖子/i.test(normalizeSingleLine(decodeXmlAttr(xml)));
     return {
-      ok: !accountListInsteadOfPosts && (searchResultsByXml || searchResultsByVisual),
+      ok: !accountListInsteadOfPosts && !looksLikeSearchSuggestOnly && (searchResultsByXml || searchResultsByVisual),
       xml,
       shotUrl,
       searchInputWithKeyword,
@@ -33002,7 +33098,7 @@ export async function warmupThreadsAccount(
           && feedActions.like.y >= minSafeSearchLikeY
           && feedActions.like.y <= maxSafeSearchLikeY,
         );
-        const searchCommentPointLooksSafe = Boolean(
+        let searchCommentPointLooksSafe = Boolean(
           feedActions?.comment
           && feedActions.comment.x >= Math.round(BASE_SCREEN.width * 0.25)
           && feedActions.comment.x <= Math.round(BASE_SCREEN.width * 0.46)
@@ -33010,6 +33106,21 @@ export async function warmupThreadsAccount(
           && feedActions.comment.y <= Math.round(BASE_SCREEN.height * 0.90)
           && !/primary_comment_shape_rejected|fallback_comment_missing/.test(actionDebug),
         );
+        const searchCommentGeometryConfirmed = Boolean(
+          shouldComment
+          && acpSearchCurrentCandidateModelConfirmed
+          && feedActions?.comment
+          && isSafeAcpGeometryCommentCandidate(feedActions, BASE_SCREEN.height, BASE_SCREEN.width)
+          && /geometry_comment_shape_override/.test(actionDebug)
+        );
+        if (searchCommentGeometryConfirmed) {
+          searchCommentPointLooksSafe = true;
+          feedActions.debugReason = [
+            feedActions.debugReason,
+            "acp_search_comment_safe_geometry_model_confirmed",
+          ].filter(Boolean).join(" | ");
+          actionDebug = `${feedActions.debugReason || ""} ${feedActions.debugRaw || ""}`;
+        }
         const searchLikeHasStableCommonFallback = /acp_verified_common_action_row_fallback/.test(actionDebug)
           && !/fallback_like_missing|fallback_comment_missing|primary_like_shape_rejected|primary_comment_shape_rejected/.test(actionDebug);
         const searchLikeHasStrongRowEvidence = /acp_safe_geometry_action_row|column_action_row_detected|local_action_row_detected|acp_fast_screenshot_action_row/.test(actionDebug)
@@ -33054,6 +33165,7 @@ export async function warmupThreadsAccount(
           shouldComment
           && /acp_verified_common_action_row_fallback/.test(feedActions?.debugReason || "")
           && /fallback_comment_missing|primary_comment_shape_rejected/.test(actionDebug)
+          && !searchCommentPointLooksSafe
         ) {
           report("搜索结果留言栏未完整露出，先显露互动栏并重新截图定位，避免误点正文");
           await revealAcpSearchResultActionRow().catch(() => undefined);
@@ -33178,6 +33290,8 @@ export async function warmupThreadsAccount(
           && /geometry_action_row_detected/.test(actionDebug)
           && commentRequiredThisRun
           && searchCommentPointLooksSafe
+          && !/acp_safe_geometry_action_row|acp_local_snapshot_action_row/.test(actionDebug)
+          && !/acp_search_comment_safe_geometry_model_confirmed/.test(actionDebug)
         ) {
           report(`搜索结果留言点仅通过安全带兜底，跳过避免误入个人页：comment=${Math.round(feedActions.comment.x)},${Math.round(feedActions.comment.y)}`);
           markBrowsedThisTurn("搜索候选留言点不稳定");
@@ -33417,7 +33531,8 @@ export async function warmupThreadsAccount(
         if (
           isAcpPad(padCode)
           && /^search/.test(activeRelevantSurfaceReason)
-          && /LOCAL_REPLY_COMPOSER|acp_detail_reply_input_fallback/.test(commentActions.debugReason || "")
+          && /acp_detail_reply_input_fallback/.test(commentActions.debugReason || "")
+          && !/LOCAL_REPLY_COMPOSER/.test(commentActions.debugReason || "")
         ) {
           report(`搜索结果留言目标来自详情/回复框 fallback，跳过避免误点底部消息页：target=${Math.round(commentActions.comment.x)},${Math.round(commentActions.comment.y)} ${commentActions.debugReason || ""}`);
           commentActions = null;
@@ -33442,24 +33557,14 @@ export async function warmupThreadsAccount(
           throw new Error("留言目标不够可靠，已跳过");
         }
         await warmupWaitForScrollSettle(650, 1100);
-        let currentPreviewBeforeComment = String(await getPostPreview(true).catch(() => "") || "");
-        if (
-          isAcpPad(padCode)
-          && /^search/.test(activeRelevantSurfaceReason)
-          && normalizeSingleLine(currentPreviewBeforeComment).length < 6
-          && acpSearchCurrentCandidateModelConfirmed
-          && normalizeSingleLine(acpSearchLastModelConfirmedPreview).length >= 6
-        ) {
-          currentPreviewBeforeComment = normalizeSingleLine(acpSearchLastModelConfirmedPreview);
+        let currentPreviewBeforeComment = "";
+        if (!(isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason))) {
+          currentPreviewBeforeComment = String(await getPostPreview(true).catch(() => "") || "");
         }
         if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason)) {
           report("留言前重新校准当前可见互动栏，避免模型校验期间页面位移");
           const previousCommentActions = commentActions;
-          const freshCommentActions = await withTimeout(
-            locateAcpSearchResultVisibleActions({ allowKeywordComment: true }),
-            7_000,
-            "warmup fresh comment action relocate timeout",
-          ).catch((error) => ({
+          const freshCommentActions = await locateAcpSearchResultVisibleActions({ allowKeywordComment: true }).catch((error) => ({
             like: undefined,
             comment: undefined,
             screenshotUrl: previousCommentActions?.screenshotUrl,
@@ -33474,6 +33579,7 @@ export async function warmupThreadsAccount(
             && freshCommentActions.comment.y >= Math.round(BASE_SCREEN.height * 0.42)
             && freshCommentActions.comment.y <= Math.round(BASE_SCREEN.height * 0.86)
             && !/primary_comment_shape_rejected|fallback_comment_missing/.test(`${freshCommentActions.debugReason || ""} ${freshCommentActions.debugRaw || ""}`)
+            && acpWarmupCommentTargetMatchesGeometryRow(freshCommentActions)
           );
           const previousCommentLooksSafeForRequiredRun = Boolean(
             previousCommentActions?.comment
@@ -33483,9 +33589,11 @@ export async function warmupThreadsAccount(
             && previousCommentActions.comment.y >= Math.round(BASE_SCREEN.height * 0.22)
             && previousCommentActions.comment.y <= Math.round(BASE_SCREEN.height * 0.90)
             && !/primary_comment_shape_rejected|fallback_comment_missing/.test(`${previousCommentActions.debugReason || ""} ${previousCommentActions.debugRaw || ""}`)
+            && acpWarmupCommentTargetMatchesGeometryRow(previousCommentActions)
           );
           if (
             freshCommentActions?.comment
+            && acpWarmupCommentTargetMatchesGeometryRow(freshCommentActions)
             && (
               isTrustedWarmupCommentDebugReason(freshCommentActions.debugReason, padCode)
               || freshCommentLooksSafeForRequiredRun
@@ -33493,15 +33601,9 @@ export async function warmupThreadsAccount(
           ) {
             commentActions = freshCommentActions;
             report(`留言前重新定位成功：target=${Math.round(commentActions.comment.x)},${Math.round(commentActions.comment.y)} ${commentActions.debugReason || ""}`);
-            if (normalizeSingleLine(currentPreviewBeforeComment).length < 6 && commentActions.screenshotUrl) {
-              currentPreviewBeforeComment = String(await withTimeout(
-                warmupExtractPostPreview(config, padCode, commentActions.screenshotUrl, { allowVisionFallback: true }),
-                10_000,
-                "warmupExtractPostPreview fresh comment target timeout",
-              ).catch(() => "") || "");
-            }
           } else if (
             previousCommentActions?.comment
+            && acpWarmupCommentTargetMatchesGeometryRow(previousCommentActions)
             && (
               isTrustedWarmupCommentDebugReason(previousCommentActions.debugReason, padCode)
               || previousCommentLooksSafeForRequiredRun
@@ -33511,6 +33613,16 @@ export async function warmupThreadsAccount(
             report(`留言前重新定位不可靠，沿用互动前安全坐标：target=${Math.round(commentActions.comment.x)},${Math.round(commentActions.comment.y)} old=${commentActions.debugReason || "unknown"} fresh=${freshCommentActions?.debugReason || "no_comment_target"}`);
           } else {
             throw new Error(`留言前重新定位失败，跳过避免点错：${freshCommentActions?.debugReason || "no_comment_target"}`);
+          }
+          currentPreviewBeforeComment = String(await withTimeout(
+            warmupExtractPostPreview(config, padCode, commentActions.screenshotUrl, { allowVisionFallback: true }),
+            12_000,
+            "warmupExtractPostPreview relocated comment target timeout",
+          ).catch(() => "") || "");
+          if (normalizeSingleLine(currentPreviewBeforeComment).length >= 6) {
+            report(`留言前按重新定位截图读取当前帖摘要：${normalizeSingleLine(currentPreviewBeforeComment).slice(0, 42)}`);
+          } else {
+            report("留言前重新定位截图未读到足够正文，后续只允许回复框/当前截图模型继续读取");
           }
         }
         const currentPostKey = warmupPostPreviewKey(currentPreviewBeforeComment || `${commentActions.debugReason || ""}:${Math.round(commentActions.comment.x)},${Math.round(commentActions.comment.y)}`);
@@ -33538,7 +33650,7 @@ export async function warmupThreadsAccount(
           let preview = normalizeSingleLine(String(currentPreviewBeforeComment || ""));
           if (preferScreenshotComment) {
             const openedPreview = normalizeSingleLine(String(await getPostPreview(true).catch(() => "") || ""));
-            if (warmupCommentContentLength(openedPreview) > warmupCommentContentLength(preview)) {
+            if (warmupCommentContentLength(openedPreview) >= 6) {
               preview = openedPreview;
               report(`回复框打开后重新读取帖子正文：${preview.slice(0, 42)}`);
             }
@@ -33561,7 +33673,7 @@ export async function warmupThreadsAccount(
           const maxCommentGenerationAttempts = isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason) && commentRequiredThisRun ? 3 : 1;
           let finalComment = "";
           let effectivePreview = preview;
-          const confirmedPreview = normalizeSingleLine(acpSearchLastModelConfirmedPreview || "");
+          const confirmedPreview = preferScreenshotComment ? "" : normalizeSingleLine(acpSearchLastModelConfirmedPreview || "");
           const textFirstPreview = warmupCommentContentLength(preview) >= 6
             ? preview
             : (warmupCommentContentLength(confirmedPreview) >= 6 ? confirmedPreview : "");
@@ -33665,9 +33777,9 @@ export async function warmupThreadsAccount(
               sourceScreenshotUrl: commentActions.screenshotUrl,
               debugReason: commentActions.debugReason,
               skipAbsoluteOpenRetry: isAcpPad(padCode)
-                && /acp_fast_screenshot_action_row|acp_verified_common_action_row_fallback|column_action_row_detected|local_action_row_detected/.test(commentActions.debugReason || ""),
+                && /acp_fast_screenshot_action_row|acp_verified_common_action_row_fallback|column_action_row_detected|local_action_row_detected|geometry_action_row_detected|acp_safe_geometry_action_row/.test(commentActions.debugReason || ""),
               openViaCommentFirst: isAcpPad(padCode)
-                && /acp_fast_screenshot_action_row|acp_verified_common_action_row_fallback|column_action_row_detected|local_action_row_detected/.test(commentActions.debugReason || ""),
+                && /acp_fast_screenshot_action_row|acp_verified_common_action_row_fallback|column_action_row_detected|local_action_row_detected|geometry_action_row_detected|acp_safe_geometry_action_row/.test(commentActions.debugReason || ""),
             },
           ),
           isAcpPad(padCode) ? 420_000 : 25_000,

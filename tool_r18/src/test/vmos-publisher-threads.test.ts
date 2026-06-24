@@ -48,6 +48,7 @@ import {
   getThreadsLauncherIconFallbackPoints,
   getThreadsLauncherIconTapCandidates,
   hasRepeatedWarmupCommentText,
+  isUnsafeWarmupEngagementText,
   hasThreadsReplyComposerText,
   hasExplicitSuccessCue,
   isNearDuplicateWarmupComment,
@@ -1398,6 +1399,19 @@ describe("Threads publish verification", () => {
     expect(keywords.some((item) => /^[\x20-\x7E]+$/.test(item))).toBe(false);
     expect(keywords).not.toContain("35岁房产中介");
     expect(keywords).not.toContain("自然口语");
+  });
+
+  it("does not block ordinary ancient history warmup posts as unsafe politics", () => {
+    expect(isUnsafeWarmupEngagementText("羅馬人在公元前31年不懂遠洋航行，這段歷史資料很有討論空間")).toBe(false);
+    expect(isUnsafeWarmupEngagementText("國軍、日軍與南京大屠殺的史料整理，主要是歷史知識分享")).toBe(false);
+    expect(isUnsafeWarmupEngagementText("同一事件的兩個視頻，以此紀念中國警察與人民的魚水情")).toBe(false);
+    expect(isUnsafeWarmupEngagementText("新西蘭溫室因隨地大便事件臨時關閉，提醒大家注意公共環境")).toBe(false);
+    expect(isUnsafeWarmupEngagementText("今天城市更新政策有新變化，租房和通勤都受到影響")).toBe(false);
+    expect(isUnsafeWarmupEngagementText("現代職場新聞整理，討論普通人怎麼做時間管理")).toBe(false);
+    expect(isUnsafeWarmupEngagementText("選舉新聞的資料整理，主要分享制度科普和閱讀筆記")).toBe(false);
+    expect(isUnsafeWarmupEngagementText("今天現實政治立場對立，煽動攻擊政府和政黨")).toBe(true);
+    expect(isUnsafeWarmupEngagementText("中共政治爆料，翻牆查證後一起攻擊對方")).toBe(true);
+    expect(isUnsafeWarmupEngagementText("政治立場對罵引發暴力死傷，留言區都在辱罵煽動")).toBe(true);
   });
 
   it("selects an interaction when timed warmup only requires total interactions", () => {
