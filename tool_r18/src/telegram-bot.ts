@@ -3408,7 +3408,7 @@ async function renderPersonaSettingsPage(
   if (options?.autoRefreshLight && view.mode === "light") {
     nextArchive = await maybeRefreshPersonaLightHotMetrics(archive.id, archive).catch(() => archive);
   }
-  const boundPadName = await resolvePadBindingDisplayName(nextArchive.boundPadCode, nextArchive.boundPadName, defaultPadCode, await listPadsForThisBot());
+  const boundPadName = await resolvePadBindingDisplayName(nextArchive.boundPadCode, nextArchive.boundPadName, defaultPadCode);
   const tgFreeGroupName = normalizeTelegramSingleLine(nextArchive.boundTelegramFreeGroupName || "") || "未綁定";
   const tgPaidGroupName = normalizeTelegramSingleLine(nextArchive.boundTelegramPaidGroupName || "") || "未綁定";
   const isWorkflowPersona = isWorkflowPersonaListItem(nextArchive);
@@ -3538,6 +3538,8 @@ async function runPersonaThreadsAutoReplyFromTelegram(
   bot: TelegramBot,
   chatId: number,
   archiveId: string,
+  listPadsForThisBot: () => Promise<Array<{ padCode: string; padName?: string; padGrade?: string; padType?: string }>>,
+  sendMainMenu: (chatId: number, msgId?: number) => void,
   maxAgeDays = 2,
 ): Promise<void> {
   const archive = await loadPersonaArchive(archiveId).catch(() => null);
@@ -3954,7 +3956,14 @@ function resolvePersonaBoundPadForAccountAction(archive: PersonaArchive, pads: A
   return { padCode, padName: padDisplayName(pad) };
 }
 
-async function beginPersonaThreadsSwitchLoginFromTelegram(bot: TelegramBot, chatId: number, messageId: number | undefined, archiveId: string): Promise<void> {
+async function beginPersonaThreadsSwitchLoginFromTelegram(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number | undefined,
+  archiveId: string,
+  listPadsForThisBot: () => Promise<Array<{ padCode: string; padName?: string; padGrade?: string; padType?: string }>>,
+  sendMainMenu: (chatId: number, msgId?: number) => void,
+): Promise<void> {
   pendingPersonaAccountActions.delete(chatId);
   const archive = await loadPersonaArchive(archiveId).catch(() => null);
   if (!archive) {
@@ -15924,7 +15933,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const id = data.startsWith("acctswitch_threads_")
         ? data.slice("acctswitch_threads_".length)
         : data.slice("acctset_threads_".length);
-      await beginPersonaThreadsSwitchLoginFromTelegram(bot, chatId, msgId, id);
+      await beginPersonaThreadsSwitchLoginFromTelegram(bot, chatId, msgId, id, listPadsForThisBot, sendMainMenu);
       return;
     }
 
@@ -21490,7 +21499,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       if (pendingAutoReplyDays.type === "persona" && pendingAutoReplyDays.archiveId) {
-        await runPersonaThreadsAutoReplyFromTelegram(bot, chatId, pendingAutoReplyDays.archiveId, days);
+        await runPersonaThreadsAutoReplyFromTelegram(bot, chatId, pendingAutoReplyDays.archiveId, listPadsForThisBot, sendMainMenu, days);
         return;
       }
       await bot.sendMessage(chatId, "❌ 自動回覆狀態已失效，請重新進入 Threads 自動回覆。");
