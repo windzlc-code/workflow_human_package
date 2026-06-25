@@ -1941,7 +1941,7 @@ export function looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml: string): boole
 
 export function detectThreadsWarmupCommentPostedCueFromUiXml(uiXml: string): boolean {
   const line = normalizeSingleLine(uiXml);
-  return /已发布|已發佈|已發佈|Posted|Your reply was posted|回覆已送出|回复已发布/i.test(line);
+  return /已发布|已發布|已發佈|Posted|Your reply was posted|回覆已送出|回复已发布/i.test(line);
 }
 
 function hasReadableUiXml(uiXml: string): boolean {
@@ -19618,7 +19618,15 @@ async function openThreadsProfileForAccountQuery(
   onProgress?: (progress: PublishProgress) => void,
 ): Promise<{ ok: true; profileLikely: boolean; screenshotUrl?: string } | { ok: false; error: string; screenshotUrl?: string }> {
   if (isAcpPad(padCode)) {
-    await relaunchThreads(config, padCode, 4500);
+    const currentProfileShotUrl = await withTimeout(
+      screenshot(config, padCode).catch(() => undefined),
+      12_000,
+      "Threads ACP 当前画面截图逾时",
+    ).catch(() => undefined);
+    if (await detectThreadsProfilePageLocally(currentProfileShotUrl).catch(() => false)) {
+      return { ok: true, profileLikely: true, screenshotUrl: currentProfileShotUrl };
+    }
+    await withTimeout(relaunchThreads(config, padCode, 4500), 18_000, "Threads ACP 重新啟動逾時");
     const terminal = await detectThreadsTerminalPageQuick(config, padCode).catch(() => null);
     const launchShotUrl = await screenshot(config, padCode).catch(() => undefined);
     if (terminal && isThreadsTerminalPage(terminal.page)) {
@@ -21969,6 +21977,9 @@ export interface ThreadsAutoReplyProgress {
   scannedComments: number;
   replied: number;
   skipped: number;
+  targetReplies?: number;
+  completionStatus?: "target_reached" | "no_commented_posts" | "no_replyable_comments" | "partial_success" | "failed";
+  completionReason?: string;
   replyScreenshots?: string[];
   done: boolean;
   error?: string;
@@ -25744,6 +25755,26 @@ function finalizeGeneratedWarmupCommentOnly(
   return "";
 }
 
+function finalizeThreadsAutoReplyModelReply(
+  text: string,
+  postPreview: string,
+  commentText: string,
+  persona?: WarmupCommentPersona,
+): string {
+  void postPreview;
+  void commentText;
+  void persona;
+  const reply = sanitizeWarmupComment(text);
+  if (!reply) return "";
+  if (!isUsableWarmupComment(reply)) return "";
+  if (isGenericWarmupComment(reply)) return "";
+  if (isLongUnpunctuatedWarmupComment(reply)) return "";
+  if (/(歡迎|欢迎|私訊|私信|諮詢|咨询|聯繫|联系|為您|为您|房源|看房|預約|预约|http|www\.|加我|私聊)/i.test(reply)) {
+    return "";
+  }
+  return reply;
+}
+
 function hasWarmupCommentNaturalPause(comment: string): boolean {
   return /[，。！？、,.!?]/.test(comment);
 }
@@ -26108,10 +26139,41 @@ function buildThreadsAutoReplyPostHash(padCode: string, postPreview: string, fal
   return hashString(`${padCode}|${seed || "unknown-post"}`, 20);
 }
 
+function normalizeThreadsAutoReplyCommentIdentityText(commentText: string) {
+  const variantMap: Record<string, string> = {
+    "個": "个",
+    "們": "们",
+    "這": "这",
+    "錯": "错",
+    "讚": "赞",
+    "麼": "么",
+    "嗎": "吗",
+    "蘋": "苹",
+    "裡": "里",
+    "裏": "里",
+    "臺": "台",
+    "灣": "湾",
+    "點": "点",
+  };
+  return Array.from(normalizeSingleLine(commentText).toLowerCase())
+    .map((char) => variantMap[char] || char)
+    .join("")
+    .replace(/\s+/g, "")
+    .replace(/[，。！？、,.!?~～"“”'‘’]/g, "");
+}
+
 function buildThreadsAutoReplyCandidateIdentity(author: string | undefined, commentText: string) {
   const normalizedAuthor = normalizeThreadsAutoReplyAuthor(author) || "unknown-author";
-  const normalizedComment = normalizeSingleLine(commentText).toLowerCase();
+  const normalizedComment = normalizeThreadsAutoReplyCommentIdentityText(commentText);
   return `${normalizedAuthor}|${normalizedComment}`;
+}
+
+function buildThreadsAutoReplyRecentCommentIdentityKey(
+  padCode: string,
+  commentAuthor: string | undefined,
+  commentText: string,
+) {
+  return `${padCode}|${buildThreadsAutoReplyCandidateIdentity(commentAuthor, commentText)}`;
 }
 
 function buildThreadsAutoReplyCommentKey(
@@ -26184,12 +26246,23 @@ function rememberThreadsAutoReplyComment(input: {
   writeThreadsAutoReplyHistory(next);
 }
 
+function isThreadsAutoReplyForcedVisibleFallbackCandidate(item: ThreadsAutoReplyCandidate): boolean {
+  if (process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY !== "1") return false;
+  const forcedVisibleFallbackText = normalizeSingleLine(
+    process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY_FALLBACK_TEXT || "",
+  ).toLowerCase();
+  return Boolean(forcedVisibleFallbackText)
+    && normalizeSingleLine(item.text).toLowerCase() === forcedVisibleFallbackText
+    && String(item.debugReason || "").includes("force_visible_reply_fallback");
+}
+
 function finalizeThreadsAutoReplyCandidates(input: {
   padCode: string;
   postHash: string;
   postPreview: string;
   candidates: ThreadsAutoReplyCandidate[];
   repliedKeys: Set<string>;
+  repliedCommentIdentityKeys?: Set<string>;
   ownIdentifiers?: string[];
 }) {
   const normalizedPostPreview = normalizeSingleLine(input.postPreview).replace(/\s+/g, "");
@@ -26220,7 +26293,10 @@ function finalizeThreadsAutoReplyCandidates(input: {
       author: normalizeThreadsAutoReplyAuthor(item.author) || undefined,
       key: buildThreadsAutoReplyCommentKey(input.padCode, input.postHash, item.author, item.text),
     }))
-    .filter((item) => !item.key || !input.repliedKeys.has(item.key));
+    .filter((item) => !item.key || !input.repliedKeys.has(item.key))
+    .filter((item) => !input.repliedCommentIdentityKeys?.has(
+      buildThreadsAutoReplyRecentCommentIdentityKey(input.padCode, item.author, item.text),
+    ));
 }
 
 function extractThreadsAutoReplyVisibleTexts(uiXml: string): string[] {
@@ -26507,6 +26583,54 @@ async function getInlineDataFromUrlOrLocalFile(input: string): Promise<{ mimeTyp
   };
 }
 
+async function detectThreadsProfileUsernameByVision(screenshotUrl: string | undefined): Promise<string | null> {
+  if (!screenshotUrl) return null;
+  const inlineData = await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null);
+  if (!inlineData) return null;
+  const prompt = `Read this Threads profile screenshot and return JSON only: {"username":"profile owner username"}.
+
+Rules:
+- Extract the profile owner username shown near the top of the profile page.
+- Do not return names from posts, replies, comments, suggested cards, buttons, or bottom tabs.
+- If the profile owner username is not visible, return {"username":""}.`;
+  const parseUsername = (raw: string) => {
+    const text = extractText(raw);
+    const jsonText = text.match(/\{[\s\S]*\}/)?.[0] || "";
+    if (jsonText) {
+      try {
+        const parsed = JSON.parse(jsonText);
+        const username = normalizeThreadsProfileUsername(String(parsed?.username || ""));
+        if (username) return username;
+      } catch {
+        // Fall through to loose parsing below.
+      }
+    }
+    return normalizeThreadsProfileUsername(normalizeSingleLine(text));
+  };
+  const request = createTimeoutSignal(9_000);
+  try {
+    const raw = await callThreadsAutoReplyDirectMultimodalModel(
+      prompt,
+      inlineData,
+      request.signal,
+      { maxTokens: 80 },
+    );
+    return parseUsername(raw) || null;
+  } catch {
+    try {
+      const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, request.signal, {
+        maxTokens: 80,
+        perModelTimeoutMs: 4_500,
+      });
+      return parseUsername(raw) || null;
+    } catch {
+      return null;
+    }
+  } finally {
+    request.cleanup();
+  }
+}
+
 async function extractThreadsAutoReplyVisibleCommentsByVision(
   screenshotUrl: string,
   persona?: WarmupCommentPersona,
@@ -26515,35 +26639,66 @@ async function extractThreadsAutoReplyVisibleCommentsByVision(
 ): Promise<ThreadsAutoReplyCandidate[]> {
   if (!screenshotUrl) return [];
   const image = await getImageDimensions(screenshotUrl).catch(() => null);
+  const forceVisibleValidation = process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY === "1";
   const replyPoints = await detectThreadsVisibleCommentReplyPointsLocally(screenshotUrl).catch(() => []);
   const fallbackReplyPoint = replyPoints[0] || {
     x: Math.round((image?.width || BASE_SCREEN.width) * 0.40),
     y: Math.round((image?.height || BASE_SCREEN.height) * 0.75),
   };
-  const commentRegionInlines = image
+  const commentRegionInlines = image && !forceVisibleValidation
     ? (await Promise.all([
       cropImageToInlineData(
         screenshotUrl,
         {
           x: 0,
-          y: Math.max(0, Math.floor((image.height || BASE_SCREEN.height) * 0.60)),
+          y: Math.max(0, Math.floor((image.height || BASE_SCREEN.height) * 0.66)),
           width: image.width || BASE_SCREEN.width,
-          height: Math.max(1, Math.floor((image.height || BASE_SCREEN.height) * 0.28)),
+          height: Math.max(1, Math.floor((image.height || BASE_SCREEN.height) * 0.30)),
+        },
+        1080,
+      ).catch(() => null),
+      cropImageToInlineData(
+        screenshotUrl,
+        {
+          x: 0,
+          y: Math.max(0, Math.floor((image.height || BASE_SCREEN.height) * 0.50)),
+          width: image.width || BASE_SCREEN.width,
+          height: Math.max(1, Math.floor((image.height || BASE_SCREEN.height) * 0.42)),
         },
         1080,
       ).catch(() => null),
     ])).filter((item): item is NonNullable<typeof item> => Boolean(item))
     : [];
+  const fullScreenshotInline = await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null);
   const inlineDataCandidates = [
+    forceVisibleValidation ? fullScreenshotInline : null,
     ...commentRegionInlines,
-    await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null),
+    forceVisibleValidation ? null : fullScreenshotInline,
   ].filter((item): item is NonNullable<typeof item> => Boolean(item));
   if (!inlineDataCandidates.length) return [];
 
   const totalTimeoutMs = Math.max(4_500, Math.min(14_000, Math.round(options.timeoutMs || 11_500)));
   const request = createTimeoutSignal(totalTimeoutMs);
   try {
-    const prompt = `Read this Threads comment screenshot. Return compact JSON only, with no markdown and no explanation.
+    const prompt = forceVisibleValidation
+      ? `Read this Threads comment screenshot. Return compact JSON only, with no markdown and no explanation.
+
+Schema:
+{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
+
+Task:
+- Return up to 3 currently visible external comments that are safe to reply to, ordered from top to bottom.
+- Prefer visible top-level external comments that do NOT already have a visible reply from the main post author nested directly above or below them.
+- Skip the main post author's own comments and replies.
+- If a visible comment row has an 作者/author badge, use that row's author as postAuthor.
+- Skip comments that already have the main post author's reply shown directly above or below them; do not stop there, continue scanning to the next safe external comment.
+- Skip low-information, repetitive, generic, numeric-only, spam, ad, or unrelated comments according to the visible context.
+- Do not rely on fixed phrases; judge whether the comment gives a real reason for this account to reply.
+- Count visible comment rows under Hot/熱門 from top to bottom starting at 1, including the main author's rows, and set row to each returned comment's actual visible row.
+- Copy author and text exactly as shown; do not translate, rewrite, or invent missing text.
+- Ignore post text, Hot/熱門 label, buttons, counts, and the bottom composer.
+- If no safe external comment is visible, return {"comments":[]}.`
+      : `Read this Threads comment screenshot. Return compact JSON only, with no markdown and no explanation.
 
 Schema:
 {"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
@@ -26553,8 +26708,10 @@ Rules:
 - Count visible comment rows from top to bottom starting at 1.
 - Include the main author's own visible comments too when counting rows.
 - Include short visible comments too when counting rows.
+- Include bottom comments just above the composer when they are readable.
+- Do not stop after the first visible comment; list every readable visible comment row in the crop.
 - row must be the row number in the actual screenshot, before any filtering.
-- postAuthor is the main post author if visible; otherwise use an empty string.
+- postAuthor is the main post author if visible; if a visible comment row has an 作者/author badge, use that row's author as postAuthor.
 - Copy author and text exactly as shown; do not translate, rewrite, or invent missing text.
 - Ignore post text, Hot/熱門 label, buttons, reply/like/share UI labels, counts, and the bottom composer.
 - If there are no usable visible comments, return {"comments":[]}.`;
@@ -26565,10 +26722,14 @@ Rules:
       const postAuthor = normalizeThreadsAutoReplyAuthor(normalizeSingleLine(String(
         parsed?.postAuthor || parsed?.post_author || parsed?.threadAuthor || parsed?.thread_author || "",
       )));
-      const ignoredAuthors = mergeThreadsAutoReplyOwnIdentifiers(ownIdentifiers, postAuthor ? [postAuthor] : []);
+      const trustedPostAuthorAsOwn = postAuthor || "";
+      const ignoredAuthors = mergeThreadsAutoReplyOwnIdentifiers(
+        ownIdentifiers,
+        trustedPostAuthorAsOwn ? [trustedPostAuthorAsOwn] : [],
+      );
       const comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
       const seen = new Set<string>();
-      const normalized = comments
+      const normalizedRows = comments
         .map((item, index) => {
           if (item && typeof item === "object") {
             const record = item as Record<string, unknown>;
@@ -26597,8 +26758,19 @@ Rules:
             rowIndex: 0,
           };
         })
-        .filter((item) => !isThreadsAutoReplyIgnoredText(item.text))
-        .filter((item) => !isThreadsAutoReplyOwnAuthor(item.author, ignoredAuthors));
+        .filter((item) => !isThreadsAutoReplyIgnoredText(item.text));
+      const ownRows = new Set(
+        normalizedRows
+          .filter((item) => isThreadsAutoReplyOwnAuthor(item.author, ignoredAuthors))
+          .map((item) => item.rowIndex)
+          .filter((rowIndex) => rowIndex > 0),
+      );
+      const normalized = normalizedRows
+        .filter((item) => !isThreadsAutoReplyOwnAuthor(item.author, ignoredAuthors))
+        .filter((item) => {
+          if (!item.rowIndex) return true;
+          return !ownRows.has(item.rowIndex - 1) && !ownRows.has(item.rowIndex + 1);
+        });
       return normalized
         .filter((item) => {
           const key = buildThreadsAutoReplyCandidateIdentity(item.author, item.text);
@@ -26617,8 +26789,19 @@ Rules:
         }));
     };
     const primaryTimeoutMs = Math.max(5_000, Math.min(10_000, totalTimeoutMs - 1_200));
-    for (const inlineData of inlineDataCandidates) {
+    const mergedCandidates: ThreadsAutoReplyCandidate[] = [];
+    const seenMergedCandidates = new Set<string>();
+    const addParsedCandidates = (items: ThreadsAutoReplyCandidate[]) => {
+      for (const item of items) {
+        const key = buildThreadsAutoReplyCandidateIdentity(item.author, item.text);
+        if (!key || seenMergedCandidates.has(key)) continue;
+        seenMergedCandidates.add(key);
+        mergedCandidates.push(item);
+      }
+    };
+    for (const [inlineIndex, inlineData] of inlineDataCandidates.entries()) {
       const primaryRequest = createTimeoutSignal(primaryTimeoutMs);
+      let parsedByDirect = false;
       try {
         const raw = await callThreadsAutoReplyDirectMultimodalModel(
           prompt,
@@ -26626,30 +26809,197 @@ Rules:
           primaryRequest.signal,
           { maxTokens: 220 },
         );
-        const parsed = parseRawComments(raw, "thread_detail_vision_direct:auto_reply_comment_target");
-        if (parsed.length) return parsed;
+        const parsed = parseRawComments(raw, `thread_detail_vision_direct:auto_reply_comment_target:region_${inlineIndex + 1}`);
+        if (parsed.length) {
+          parsedByDirect = true;
+          addParsedCandidates(parsed);
+        }
       } catch {
         // Fall through to the text-vision fallback below.
       } finally {
         primaryRequest.cleanup();
       }
+      if (parsedByDirect && (forceVisibleValidation || mergedCandidates.length >= 4)) break;
+      if (parsedByDirect) continue;
       try {
         const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, request.signal, {
           maxTokens: 220,
           perModelTimeoutMs: Math.max(3_500, Math.min(6_500, totalTimeoutMs - 1_000)),
         });
-        const parsed = parseRawComments(raw, "thread_detail_vision_ocr:auto_reply_comment_target");
-        if (parsed.length) return parsed;
+        const parsed = parseRawComments(raw, `thread_detail_vision_ocr:auto_reply_comment_target:region_${inlineIndex + 1}`);
+        if (parsed.length) addParsedCandidates(parsed);
+        if (mergedCandidates.length >= 4) break;
       } catch {
         // Try the next crop.
       }
     }
-    return [];
+    if (forceVisibleValidation && !mergedCandidates.length && fullScreenshotInline) {
+      const bottomPrompt = `Read this Threads comment screenshot. Return compact JSON only, with no markdown and no explanation.
+
+Schema:
+{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
+
+Task:
+- Return up to 3 visible safe external comment rows above the bottom composer, ordered from top to bottom.
+- Scan the visible bottom area completely; do not stop after the first safe row.
+- Prefer top-level external comments with concrete content, real questions, or clearly relevant opinions.
+- Skip low-information, repetitive, generic, numeric-only, spam, ad, or unrelated comments according to the visible context.
+- Do not rely on fixed phrases; judge whether the comment gives a real reason for this account to reply.
+- Skip the main post author's own visible comments and replies.
+- Skip comments that already have the main post author's reply shown directly below them.
+- Count visible comment rows under Hot/熱門 from top to bottom starting at 1, including the main author's rows, and set row to each returned comment's actual visible row.
+- Copy author and text exactly as shown; do not translate, rewrite, or invent missing text.
+- Ignore post text, Hot/熱門 label, buttons, counts, "部分其他回覆無法顯示", and the bottom composer.
+- If no external comment is visible, return {"comments":[]}.`;
+      const bottomRequest = createTimeoutSignal(Math.max(4_000, Math.min(8_000, totalTimeoutMs)));
+      try {
+        const raw = await callThreadsAutoReplyDirectMultimodalModel(
+          bottomPrompt,
+          fullScreenshotInline,
+          bottomRequest.signal,
+          { maxTokens: 180 },
+        );
+        addParsedCandidates(parseRawComments(raw, "thread_detail_vision_direct_bottom:auto_reply_comment_target"));
+      } catch {
+        try {
+          const raw = await callThreadsAutoReplyVisionOcrModel(bottomPrompt, fullScreenshotInline, request.signal, {
+            maxTokens: 220,
+            perModelTimeoutMs: Math.max(4_000, Math.min(7_000, totalTimeoutMs - 800)),
+          });
+          addParsedCandidates(parseRawComments(raw, "thread_detail_vision_ocr_bottom:auto_reply_comment_target"));
+        } catch {
+          // Keep the empty candidate result; caller will retry or report diagnostics.
+        }
+      } finally {
+        bottomRequest.cleanup();
+      }
+    }
+    if (forceVisibleValidation && !mergedCandidates.length && fullScreenshotInline) {
+      const allVisiblePrompt = `Read this Threads comment screenshot. Return compact JSON only, with no markdown and no explanation.
+
+Schema:
+{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
+
+Task:
+- List every readable visible comment row under Hot/熱門 from top to bottom.
+- Include readable short comments for extraction, but only treat them as safe reply targets when the visible context gives them concrete meaning.
+- Include comments that are partly low on the screen if the author and text are readable.
+- Copy author and text exactly as shown; do not translate, rewrite, or invent.
+- Skip only the main post text, buttons, counts, composer placeholder, and UI labels.
+- If no readable comment exists, return {"comments":[]}.`;
+      try {
+        const raw = await callThreadsAutoReplyDirectMultimodalModel(
+          allVisiblePrompt,
+          fullScreenshotInline,
+          request.signal,
+          { maxTokens: 300 },
+        );
+        addParsedCandidates(parseRawComments(raw, "thread_detail_vision_direct_all_visible:auto_reply_comment_target"));
+      } catch {
+        try {
+          const raw = await callThreadsAutoReplyVisionOcrModel(allVisiblePrompt, fullScreenshotInline, request.signal, {
+            maxTokens: 300,
+            perModelTimeoutMs: Math.max(4_500, Math.min(7_500, totalTimeoutMs - 800)),
+          });
+          addParsedCandidates(parseRawComments(raw, "thread_detail_vision_ocr_all_visible:auto_reply_comment_target"));
+        } catch {
+          // Caller will record the empty result.
+        }
+      }
+    }
+    return mergedCandidates.slice(0, 5);
   } catch {
     return [];
   } finally {
     request.cleanup();
   }
+}
+
+async function buildThreadsAutoReplyTimeoutFallbackContextFromScreenshot(input: {
+  padCode: string;
+  screenshotUrl: string;
+  persona?: WarmupCommentPersona;
+  ownIdentifiers: string[];
+  repliedKeys: Set<string>;
+  repliedCommentIdentityKeys: Set<string>;
+  postIndex: number;
+}): Promise<{
+  postPreview: string;
+  postHash: string;
+  candidates: ThreadsAutoReplyCandidate[];
+  sourceScreenshotUrl?: string;
+}> {
+  const candidatesByVision = await extractThreadsAutoReplyVisibleCommentsByVision(
+    input.screenshotUrl,
+    input.persona,
+    input.ownIdentifiers,
+    { timeoutMs: 14_000 },
+  ).catch(() => []);
+  if (
+    process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY === "1"
+    && process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY_FALLBACK_TEXT
+  ) {
+    const replyPoints = await detectThreadsVisibleCommentReplyPointsLocally(input.screenshotUrl).catch(() => []);
+    const fallbackText = normalizeSingleLine(process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY_FALLBACK_TEXT || "");
+    const fallbackAuthor = normalizeThreadsAutoReplyAuthor(
+      process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY_FALLBACK_AUTHOR || "visible_external_comment",
+    ) || "visible_external_comment";
+    const fallbackReplyPoint = replyPoints[replyPoints.length - 1] || undefined;
+    if (fallbackText && fallbackReplyPoint) {
+      candidatesByVision.push({
+        text: fallbackText,
+        author: fallbackAuthor,
+        score: 0,
+        replyPoint: fallbackReplyPoint,
+        sourceScreenshotUrl: input.screenshotUrl,
+        debugReason: "force_visible_reply_fallback:auto_reply_comment_target",
+      });
+    }
+  }
+  const postHash = buildThreadsAutoReplyPostHash(input.padCode, "comment-collect-timeout-visible-fallback", [
+    String(input.postIndex + 1),
+    buildThreadsAutoReplyScreenshotSeed(input.screenshotUrl),
+    ...candidatesByVision.slice(0, 6).map((item) => normalizeSingleLine(item.text).slice(0, 80)),
+  ]);
+  const candidates = finalizeThreadsAutoReplyCandidates({
+    padCode: input.padCode,
+    postHash,
+    postPreview: "",
+    candidates: rankThreadsAutoReplyVisibleComments(candidatesByVision, input.persona),
+    repliedKeys: input.repliedKeys,
+    repliedCommentIdentityKeys: input.repliedCommentIdentityKeys,
+    ownIdentifiers: input.ownIdentifiers,
+  });
+  saveThreadsAutoReplySampleStep({
+    padCode: input.padCode,
+    step: "collect-timeout-visible-fallback",
+    screenshotUrl: input.screenshotUrl,
+    meta: {
+      postIndex: input.postIndex + 1,
+      visualCandidateCount: candidatesByVision.length,
+      candidateCount: candidates.length,
+      visualCandidatePreview: candidatesByVision.slice(0, 6).map((item) => ({
+        text: item.text,
+        author: item.author,
+        score: item.score,
+        replyPoint: item.replyPoint,
+        debugReason: item.debugReason,
+      })),
+      candidatePreview: candidates.slice(0, 6).map((item) => ({
+        text: item.text,
+        author: item.author,
+        score: item.score,
+        replyPoint: item.replyPoint,
+        debugReason: item.debugReason,
+      })),
+    },
+  });
+  return {
+    postPreview: "",
+    postHash,
+    candidates,
+    sourceScreenshotUrl: input.screenshotUrl,
+  };
 }
 
 async function extractThreadsAutoReplyPostPreviewByVision(
@@ -26726,6 +27076,80 @@ async function extractThreadsAutoReplyPostPreviewByVision(
   }
 }
 
+async function extractThreadsProfilePostPreviewAboveActionRowByVision(
+  screenshotUrl: string,
+  target: { x: number; y: number },
+  options: { timeoutMs?: number } = {},
+): Promise<{ postPreview: string; postAuthor: string; abnormalPreview?: boolean }> {
+  if (!screenshotUrl) return { postPreview: "", postAuthor: "" };
+  const image = await getImageDimensions(screenshotUrl).catch(() => null);
+  if (!image) return { postPreview: "", postAuthor: "" };
+  const cropTop = Math.max(
+    Math.floor(image.height * 0.16),
+    Math.round(target.y - image.height * 0.32),
+  );
+  const cropBottom = Math.max(cropTop + 80, Math.round(target.y - image.height * 0.045));
+  const inlineData = await cropImageToInlineData(
+    screenshotUrl,
+    {
+      x: 0,
+      y: cropTop,
+      width: image.width,
+      height: Math.min(image.height - cropTop, cropBottom - cropTop),
+    },
+    1080,
+  ).catch(() => null);
+  if (!inlineData) return { postPreview: "", postAuthor: "" };
+  const totalTimeoutMs = Math.max(3_500, Math.min(8_000, Math.round(options.timeoutMs || 5_500)));
+  const request = createTimeoutSignal(totalTimeoutMs);
+  const parsePreview = (raw: string) => {
+    const jsonText = extractText(raw).match(/\{[\s\S]*\}/)?.[0] || "";
+    if (!jsonText) return { postPreview: "", postAuthor: "" };
+    const parsed = JSON.parse(jsonText);
+    return {
+      postAuthor: normalizeThreadsAutoReplyAuthor(normalizeSingleLine(String(
+        parsed?.postAuthor || parsed?.post_author || parsed?.author || "",
+      ))),
+      postPreview: normalizeSingleLine(String(
+        parsed?.postPreview || parsed?.post_preview || parsed?.text || parsed?.caption || "",
+      )),
+      abnormalPreview: Boolean(parsed?.abnormalPreview || parsed?.abnormal_preview || parsed?.abnormal),
+    };
+  };
+  const prompt = `Read this cropped Threads profile post. Return compact JSON only, no markdown.
+
+Schema:
+{"postAuthor":"post author","postPreview":"post body text","abnormalPreview":false}
+
+Rules:
+- Extract only the post body that belongs to the action row immediately below this crop.
+- Ignore author names, timestamps, tabs, buttons, counts, and media mute icons.
+- If the body is only unreadable symbols/question marks, return empty postPreview and abnormalPreview true.
+- If no body is visible because this is an image-only post, return empty postPreview and abnormalPreview false.
+- Do not invent missing text.`;
+  try {
+    const raw = await callThreadsAutoReplyDirectMultimodalModel(
+      prompt,
+      inlineData,
+      request.signal,
+      { maxTokens: 120 },
+    );
+    return parsePreview(raw);
+  } catch {
+    try {
+      const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, request.signal, {
+        maxTokens: 120,
+        perModelTimeoutMs: Math.max(3_200, Math.min(5_200, totalTimeoutMs - 500)),
+      });
+      return parsePreview(raw);
+    } catch {
+      return { postPreview: "", postAuthor: "" };
+    }
+  } finally {
+    request.cleanup();
+  }
+}
+
 function buildThreadsAutoReplyScreenshotSeed(screenshotUrl: string | undefined): string {
   if (!screenshotUrl) return "";
   const normalized = normalizeSingleLine(screenshotUrl);
@@ -26751,7 +27175,6 @@ function isThreadsAutoReplyIgnoredText(text: string): boolean {
   if (/^\d+\s*(秒|分鐘|分钟|小時|小时|天|週|周|月|年|s|m|h|d|w)$/i.test(compact)) return true;
   if (/^@?[a-z0-9_.-]{3,32}$/i.test(compact)) return true;
   if (/https?:\/\/|t\.me\/|line\.me|whatsapp|賺錢|赚钱|兼職|兼职|私訊|私信|加群|導流|引流|博彩|裸聊|約炮|约炮/i.test(compact)) return true;
-  if (/^(急+|啊+|喔+|哦+|嗯+|哈+|呵+|嗨+|hi+|ok+|test+|測試+|测试+)$/i.test(compact)) return true;
   if (!/[\p{L}\p{N}]/u.test(compact)) return true;
   return false;
 }
@@ -26786,7 +27209,14 @@ function rankThreadsAutoReplyVisibleComments(
   const scored = normalized
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.text.length - b.text.length);
-  if (scored.length) return scored;
+  const forcedFallback = normalized.find((item) => isThreadsAutoReplyForcedVisibleFallbackCandidate(item));
+  if (forcedFallback && !scored.some((item) => buildThreadsAutoReplyCandidateIdentity(item.author, item.text) === buildThreadsAutoReplyCandidateIdentity(forcedFallback.author, forcedFallback.text))) {
+    scored.push({
+      ...forcedFallback,
+      score: Math.max(forcedFallback.score || 0, 1),
+    });
+  }
+  if (scored.length) return scored.slice(0, 5);
   if (!rankedEntries.length) {
     return normalized
       .map((item, index) => ({
@@ -26795,10 +27225,17 @@ function rankThreadsAutoReplyVisibleComments(
       }))
       .slice(0, 5);
   }
-  return normalized
+  const ranked = normalized
     .filter((item) => rankedByText.has(normalizeSingleLine(item.text).toLowerCase()))
     .sort((a, b) => (rankedByText.get(normalizeSingleLine(b.text).toLowerCase()) || 0) - (rankedByText.get(normalizeSingleLine(a.text).toLowerCase()) || 0))
     .slice(0, 5);
+  if (forcedFallback && !ranked.some((item) => buildThreadsAutoReplyCandidateIdentity(item.author, item.text) === buildThreadsAutoReplyCandidateIdentity(forcedFallback.author, forcedFallback.text))) {
+    ranked.push({
+      ...forcedFallback,
+      score: Math.max(forcedFallback.score || 0, 1),
+    });
+  }
+  return ranked.slice(0, 5);
 }
 
 async function detectThreadsVisibleCommentReplyPointsLocally(
@@ -26810,7 +27247,7 @@ async function detectThreadsVisibleCommentReplyPointsLocally(
   const visited = new Uint8Array(width * height);
   const startX = Math.max(0, Math.floor(width * 0.12));
   const endX = Math.min(width - 1, Math.floor(width * 0.72));
-  const startY = Math.max(0, Math.floor(height * 0.58));
+  const startY = Math.max(0, Math.floor(height * 0.32));
   const endY = Math.min(height - 1, Math.floor(height * 0.86));
 
   const isDarkPixel = (index: number) => {
@@ -26943,13 +27380,10 @@ function rankThreadsAutoReplyCandidates(
     if (text.length >= 3 && text.length <= 80) score += 3;
     if (text.length >= 6 && text.length <= 60) score += 8;
     if (/[?？]$/.test(text)) score += 8;
-    if (/喜歡|喜欢|想看|期待|好看|可愛|可爱|有趣|真的|真不錯|真不错|不錯|不错|可以|讚|赞|棒|美|愛|爱|哈哈|懂|請問|请问|怎麼|怎么|哪裡|哪里|求|想要|感覺|感觉|漂亮|厲害|厉害/i.test(text)) score += 8;
-    if (/謝謝|谢谢|支持|加油|認同|认同|收藏|學到|学到/i.test(text)) score += 4;
     for (const keyword of keywords) {
       if (keyword.length >= 2 && lower.includes(keyword)) score += 6;
     }
     if (personaText && text.split("").some((char) => personaText.includes(char))) score += 2;
-    if (/罵|骂|噁|恶|垃圾|騙|骗|死|滾|滚|爛|烂|假|黑粉/i.test(text)) score -= 16;
     if (score > 0) candidates.push({ text, score });
   }
   return candidates
@@ -26963,10 +27397,10 @@ async function chooseThreadsAutoReplyCandidateByModel(
   persona?: WarmupCommentPersona,
 ): Promise<ThreadsAutoReplyCandidate | null> {
   if (!candidates.length) return null;
-  if (candidates.length === 1) return candidates[0];
-  if (!getGeminiEndpoint().apiKey) return candidates[0];
+  if (!getGeminiEndpoint().apiKey) return null;
   const request = createTimeoutSignal(7000);
   try {
+    const language = resolveWarmupCommentLanguage(persona);
     const raw = await callGemini(
       PUBLISH_VERIFY_MODEL,
       [{
@@ -26976,17 +27410,22 @@ async function chooseThreadsAutoReplyCandidateByModel(
 
 貼文摘要：${normalizeSingleLine(postPreview).slice(0, 160) || "未取得"}
 帳號人設：${warmupCommentPersonaText(persona) || "未指定，台灣地區自然口語"}
+指定回覆語言：${language}
 
 候選留言：
 ${candidates.map((item, index) => `${index + 1}. ${item.author ? `作者 ${item.author}：` : ""}${item.text}`).join("\n")}
 
-只挑一條最適合回覆的留言。標準：
-- 這些候選已經過系統過濾：不是自己留言、不是主帖作者留言、不是純符號/亂碼/導流，也具備真正的留言級回覆入口。
-- 如果只剩 1 條候選，而且是正常外部留言，只要不明顯違規、辱罵、純表情或廣告導流，就不要輸出 0，直接選它。
-- 優先選和貼文內容或帳號人設相關、有提問、有情緒、有具體反應的留言。
-- 只能挑遊客/其他人的留言；如果看起來是自己帳號或主帖作者自己的留言，輸出 0。
-- 不選廣告、導流、辱罵、無意義、純表情、太泛泛的留言。
-- 如果都不值得回，輸出 0。
+通用判斷規範：
+- 無論候選數量多少，都先判斷留言是否值得由本帳號回覆；不因為只剩一條就硬選。
+- 如果同一篇貼文頁面內有多條候選，必須先橫向比較所有候選，再選最值得回覆的一條；不要因為某條先出現或第一條有效就直接選。
+- 優先選信息量更高、和主帖/圖片更相關、能自然延展對話的具體問題、具體觀察或明確情緒；比較範圍只限目前這篇貼文頁面，不跨貼文保留候選。
+- 只選外部用戶留言；自己帳號、主帖作者、已經看到本帳號回覆過的留言，不選。
+- 這是本帳號自己已發布的貼文；人設用來決定回覆口吻和角色感，不是用來否定貼文主題。
+- 只選能讓真人自然接話的留言：和主帖、圖片、生活場景、具體問題、具體觀察或明確情緒有可接續關係即可，不必硬套人設職業主題。
+- 如果留言只是單純感嘆、笑聲、泛泛稱讚或沒有具體觀察/問題/情緒理由，通常輸出 0；不要為了達到回覆數硬選。
+- 不選低信息量留言、機械重複留言、垃圾導流、辱罵攻擊、純符號/亂碼、抽獎色情賺錢類、和主帖無關的留言。
+- 是否低信息量由你根據上下文判斷，不要靠固定詞表；同一句話在不同上下文可能可回，也可能不可回。
+- 如果沒有合適留言，輸出 0。
 
 只輸出 JSON：{"index":1}`,
         }],
@@ -27000,11 +27439,17 @@ ${candidates.map((item, index) => `${index + 1}. ${item.author ? `作者 ${item.
     if (!Number.isFinite(index) || index <= 0 || index > candidates.length) return null;
     return candidates[index - 1];
   } catch {
-    return candidates[0];
+    return null;
   } finally {
     request.cleanup();
   }
 }
+
+type ThreadsAutoReplyDecision = {
+  candidate: ThreadsAutoReplyCandidate;
+  reply: string;
+  reason: string;
+};
 
 async function generateThreadsAutoReplyText(
   postPreview: string,
@@ -27037,6 +27482,7 @@ async function generateThreadsAutoReplyText(
 - 必須使用「指定回覆語言」，不要因為留言是英文就改用英文；只有指定回覆語言是英文時才用英文。
 - 口語、自然、像真人短回，不要像客服。
 - 必須順著留言內容回，不要答非所問。
+- 必須讓人設落到回覆視角裡；若人設是房產/中介/仲介類，應自然連到生活感、居家氛圍、空間陳列、餐桌場景或住家感受，不要只做普通閒聊。
 - 8 到 36 個中文字左右；留言很短時可以更短。
 - 不要 hashtag、連結、@、廣告語，不要說自己是 AI。
 - 不要過度熱情，不要每句都加標點或表情。`,
@@ -27045,7 +27491,66 @@ async function generateThreadsAutoReplyText(
       { maxOutputTokens: 90, temperature: 0.8 },
       request.signal,
     );
-    return finalizeWarmupComment(extractText(raw), cleanedPost || cleanedComment, [], persona);
+    return finalizeThreadsAutoReplyModelReply(extractText(raw), cleanedPost, cleanedComment, persona);
+  } catch {
+    return "";
+  } finally {
+    request.cleanup();
+  }
+}
+
+async function generateThreadsAutoReplyTextForSelectedComment(
+  postPreview: string,
+  candidate: ThreadsAutoReplyCandidate,
+  persona?: WarmupCommentPersona,
+): Promise<string> {
+  const cleanedComment = normalizeSingleLine(candidate.text).slice(0, 160);
+  const cleanedPost = normalizeSingleLine(postPreview).slice(0, 200);
+  if (!cleanedComment || !getGeminiEndpoint().apiKey) return "";
+  const language = resolveWarmupCommentLanguage(persona);
+  const request = createTimeoutSignal(9_000);
+  try {
+    const raw = await callGemini(
+      PUBLISH_VERIFY_MODEL,
+      [{
+        role: "user",
+        parts: [{
+          text: `你已經選中一條安全的 Threads 外部留言，請替目前帳號產生一條合理回覆。只輸出回覆文字，不要解釋。
+
+帳號人設：
+${warmupCommentPersonaText(persona) || "台灣地區自然口語"}
+
+指定回覆語言：${language}
+自己的貼文摘要：${cleanedPost || "未取得"}
+要回覆的外部留言：${candidate.author ? `作者 ${candidate.author}：` : ""}${cleanedComment}
+
+要求：
+- 必須結合帳號人設、貼文摘要、外部留言內容來回覆，不要只套通用話術。
+- 人設用來控制語氣、視角和措辭，不是要求把所有回覆都轉成職業推銷或專業話題。
+- 若人設是房產/中介/仲介類，即使貼文是日常物品，也要自然從生活感、居家氛圍、空間陳列、餐桌場景或住家感受切入，避免生成和人設無關的普通閒聊。
+- 必須順著這條留言回，不要回到主帖，也不要像客服或廣告。
+- 如果留言只是單純感嘆、笑聲、泛泛稱讚或沒有具體觀察/問題/情緒理由，輸出空字串，不要為了達到回覆數硬回。
+- 6 到 32 個中文字左右；留言太短且沒有實際內容時不要硬回覆。
+- 不要 hashtag、連結、@、導流、看房/諮詢/私訊話術，不要說自己是 AI。
+- 如果留言本身沒有實際內容或像垃圾/敷衍短評，輸出空字串，不要硬回覆。`,
+        }],
+      }],
+      { maxOutputTokens: 100, temperature: 0.65 },
+      request.signal,
+    );
+    const reply = finalizeThreadsAutoReplyModelReply(extractText(raw), cleanedPost, cleanedComment, persona);
+    if (reply) return reply;
+    const sanitizedReply = sanitizeWarmupComment(extractText(raw));
+    if (
+      sanitizedReply
+      && isUsableWarmupComment(sanitizedReply)
+      && !isGenericWarmupComment(sanitizedReply)
+      && !isLongUnpunctuatedWarmupComment(sanitizedReply)
+      && !/(歡迎|欢迎|私訊|私信|諮詢|咨询|聯繫|联系|為您|为您|房源|看房|預約|预约|http|www\.)/i.test(sanitizedReply)
+    ) {
+      return sanitizedReply;
+    }
+    return "";
   } catch {
     return "";
   } finally {
@@ -27058,18 +27563,90 @@ async function decideThreadsAutoReplyByModel(
   candidates: ThreadsAutoReplyCandidate[],
   persona?: WarmupCommentPersona,
   sourceScreenshotUrl?: string,
-): Promise<{ candidate: ThreadsAutoReplyCandidate; reply: string; reason: string } | null> {
+): Promise<ThreadsAutoReplyDecision | null> {
   if (!candidates.length) return null;
-  const fallbackCandidate = candidates.length === 1
-    ? candidates[0]
-    : await chooseThreadsAutoReplyCandidateByModel(postPreview, candidates, persona);
+  let fallbackCandidate: ThreadsAutoReplyCandidate | null | undefined;
+  const getFallbackCandidate = async (): Promise<ThreadsAutoReplyCandidate | null> => {
+    if (fallbackCandidate !== undefined) return fallbackCandidate;
+    fallbackCandidate = await chooseThreadsAutoReplyCandidateByModel(postPreview, candidates, persona);
+    return fallbackCandidate;
+  };
+  const buildModelReplyFromScreenshot = async (candidate: ThreadsAutoReplyCandidate): Promise<string> => {
+    if (!sourceScreenshotUrl) return "";
+    const inlineData = await getInlineDataFromUrlOrLocalFile(sourceScreenshotUrl).catch(() => null);
+    if (!inlineData) return "";
+    const language = resolveWarmupCommentLanguage(persona);
+    const prompt = `請看這張 Threads 貼文與留言截圖，替帳號回覆指定留言。只輸出回覆文字，不要 JSON、不要解釋。
+
+帳號人設：
+${warmupCommentPersonaText(persona) || "台灣地區自然口語"}
+
+指定回覆語言：${language}
+指定要回覆的留言：${candidate.author ? `作者 ${candidate.author}：` : ""}${normalizeSingleLine(candidate.text)}
+
+要求：
+- 你必須根據截圖中的主帖內容、圖片和指定留言生成一條合理回覆。
+- 回覆要符合帳號人設的語氣和角色感，但不要硬把無關主題轉成職業推銷；不要像客服，不要廣告，不要導流，不要說自己是 AI。
+- 若人設是房產/中介/仲介類，回覆要自然帶出生活感、居家氛圍、空間陳列、餐桌場景或住家感受，不能只做普通閒聊。
+- 先用通用規範判斷指定留言是否值得回覆；低信息量、機械重複、垃圾導流、辱罵攻擊、純符號/亂碼、和主帖無關的留言，輸出空字串。
+- 如果指定留言只是單純感嘆、笑聲、泛泛稱讚或沒有具體觀察/問題/情緒理由，輸出空字串，不要為了達到回覆數硬回。
+- 是否低信息量由你根據上下文判斷，不要靠固定詞表；同一句話在不同上下文可能可回，也可能不可回。
+- 6 到 32 個中文字左右。`;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const request = createTimeoutSignal(12_000);
+      try {
+        const raw = attempt < 2
+          ? await callThreadsAutoReplyDirectMultimodalModel(prompt, inlineData, request.signal, {
+            maxTokens: 160,
+            model: "xai/grok-4.3",
+          })
+          : await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, request.signal, {
+            maxTokens: 160,
+            perModelTimeoutMs: 7_000,
+          });
+        const reply = finalizeThreadsAutoReplyModelReply(extractText(raw), postPreview, candidate.text, persona);
+        if (reply) return reply;
+        const sanitizedReply = sanitizeWarmupComment(extractText(raw));
+        if (
+          sanitizedReply
+          && isUsableWarmupComment(sanitizedReply)
+          && !isLongUnpunctuatedWarmupComment(sanitizedReply)
+          && !/(歡迎|欢迎|私訊|私信|諮詢|咨询|聯繫|联系|為您|为您|房源|看房|預約|预约|http|www\.)/i.test(sanitizedReply)
+        ) {
+          return sanitizedReply;
+        }
+      } catch {
+        // Retry with the next model path.
+      } finally {
+        request.cleanup();
+      }
+    }
+    return "";
+  };
   const buildModelGeneratedDecision = async (candidate: ThreadsAutoReplyCandidate | null | undefined, reason: string) => {
     if (!candidate) return null;
-    const reply = await generateThreadsAutoReplyText(postPreview, candidate.text, persona);
-    return reply
-      ? { candidate, reply, reason }
-      : null;
+    const forceFallbackCandidate = isThreadsAutoReplyForcedVisibleFallbackCandidate(candidate);
+    const candidateText = normalizeSingleLine(candidate.text);
+    const preferScreenshotFirst = Boolean(sourceScreenshotUrl) && candidateText.length <= 8;
+    const modelCommentText = forceFallbackCandidate
+      ? `這位留言者留下很短的回應「${candidateText}」，請結合截圖中的貼文內容和帳號人設自然回覆，不要照抄留言。`
+      : candidate.text;
+    const reply = (forceFallbackCandidate || preferScreenshotFirst
+      ? await buildModelReplyFromScreenshot(candidate)
+        || await generateThreadsAutoReplyTextForSelectedComment(postPreview, candidate, persona)
+        || await generateThreadsAutoReplyText(postPreview, modelCommentText, persona)
+      : await generateThreadsAutoReplyText(postPreview, modelCommentText, persona)
+        || await generateThreadsAutoReplyTextForSelectedComment(postPreview, candidate, persona)
+        || await buildModelReplyFromScreenshot(candidate));
+    if (reply) return { candidate, reply, reason };
+    console.warn(`[threads][auto-reply][decision] selected candidate has no model reply reason=${reason} author=${candidate.author || ""} text=${normalizeSingleLine(candidate.text).slice(0, 80)}`);
+    return null;
   };
+  if (candidates.length === 1) {
+    const selected = await getFallbackCandidate();
+    const singleDecision = await buildModelGeneratedDecision(selected, "single_visible_candidate_model_selected");
+    if (singleDecision?.reply) return singleDecision;
+  }
   const cleanedPost = normalizeSingleLine(postPreview).slice(0, 180);
   const personaHint = warmupCommentPersonaText(persona) || "未指定，使用台灣地區自然口語";
   const language = resolveWarmupCommentLanguage(persona);
@@ -27087,12 +27664,15 @@ ${cleanedPost || "未取得，請優先看截圖中的主帖內容"}
 ${candidates.map((item, index) => `${index + 1}. ${item.author ? `作者 ${item.author}：` : ""}${item.text}`).join("\n")}
 
 判斷規則：
-- 這些候選已經過系統過濾：不是自己留言、不是主帖作者留言、不是純符號/亂碼/導流，也具備真正的留言級回覆入口。
-- 如果只剩 1 條候選，而且是正常外部留言，只要不明顯違規、辱罵、純表情或廣告導流，就應該選它，不要輸出 0。
-- 只回覆和帳號人設、貼文主題、圖片/生活場景、情緒互動、提問請求相關的留言。
-- 只回覆遊客/其他人的留言；自己帳號、主帖作者或疑似自己補充的留言一律不要回。
-- 優先選有用信息：提問、具體反應、真實情緒、對圖片/內容的具體觀察、和人設設定相關的留言。
-- 垃圾信息不要回：廣告導流、網址、辱罵、攻擊、無意義敷衍、純表情、抽獎/賺錢/色情導流、和貼文完全無關。
+- 無論候選數量多少，都先判斷留言是否值得由本帳號回覆；不因為只剩一條就硬回。
+- 如果同一篇貼文頁面內有多條候選，必須先橫向比較所有候選，再選最值得回覆的一條；不要因為某條先出現或第一條有效就直接選。
+- 優先選信息量更高、和主帖/圖片更相關、能自然延展對話的具體問題、具體觀察或明確情緒；比較範圍只限目前這篇貼文頁面，不跨貼文保留候選。
+- 只回覆外部用戶留言；自己帳號、主帖作者、已經看到本帳號回覆過的留言，一律不要回。
+- 這是本帳號自己已發布的貼文；人設用來決定回覆口吻和角色感，不是用來否定貼文主題。
+- 只回覆能讓真人自然接話的留言：和主帖、圖片、生活場景、具體問題、具體觀察或明確情緒有可接續關係即可，不必硬套人設職業主題。
+- 如果留言只是單純感嘆、笑聲、泛泛稱讚或沒有具體觀察/問題/情緒理由，通常輸出 index 0；不要為了達到回覆數硬選。
+- 不回低信息量留言、機械重複留言、垃圾導流、辱罵攻擊、純符號/亂碼、抽獎色情賺錢類、和主帖無關的留言。
+- 是否低信息量由你根據上下文判斷，不要靠固定詞表；同一句話在不同上下文可能可回，也可能不可回。
 - 如果候選都不值得回覆，index 必須輸出 0，reply 留空。
 - 回覆要像真人口語短句，順著留言回，不要像客服，不要說「感謝支持」這種套話。
 - 必須使用「指定回覆語言」，不要輸出英文，除非指定回覆語言是英文。
@@ -27104,22 +27684,18 @@ ${candidates.map((item, index) => `${index + 1}. ${item.author ? `作者 ${item.
   const parseDecision = async (raw: string, fallbackReason: string) => {
     const text = extractText(raw).replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
     const json = text.match(/\{[\s\S]*\}/)?.[0];
-    if (!json) return await buildModelGeneratedDecision(fallbackCandidate, fallbackReason);
+    if (!json) return null;
     let parsed: any;
     try {
       parsed = JSON.parse(json);
     } catch {
-      return await buildModelGeneratedDecision(fallbackCandidate, `${fallbackReason}_malformed_json_regenerated`);
+      return await buildModelGeneratedDecision(await getFallbackCandidate(), `${fallbackReason}_malformed_json_regenerated`);
     }
     const index = Number(parsed?.index);
-    if (!Number.isFinite(index) || index <= 0 || index > candidates.length) {
-      return candidates.length === 1
-        ? await buildModelGeneratedDecision(fallbackCandidate, `${fallbackReason}_single_candidate_regenerated`)
-        : null;
-    }
+    if (!Number.isFinite(index) || index <= 0 || index > candidates.length) return null;
     const candidate = candidates[index - 1];
     const rawReply = String(parsed?.reply || "");
-    const reply = finalizeWarmupComment(rawReply, cleanedPost || candidate.text, [], persona)
+    const reply = finalizeThreadsAutoReplyModelReply(rawReply, cleanedPost, candidate.text, persona)
       || (() => {
         if (!sourceScreenshotUrl) return "";
         const visualReply = sanitizeWarmupComment(rawReply);
@@ -27194,10 +27770,44 @@ ${candidates.map((item, index) => `${index + 1}. ${item.author ? `作者 ${item.
     );
     return await parseDecision(extractText(raw), "text_model_decision");
   } catch {
-    return await buildModelGeneratedDecision(fallbackCandidate, "model_error_model_regenerated");
+    return await buildModelGeneratedDecision(await getFallbackCandidate(), "model_error_model_regenerated");
   } finally {
     request.cleanup();
   }
+}
+
+async function decideThreadsAutoRepliesByModel(
+  postPreview: string,
+  candidates: ThreadsAutoReplyCandidate[],
+  persona: WarmupCommentPersona | undefined,
+  sourceScreenshotUrl: string | undefined,
+  limit: number,
+): Promise<ThreadsAutoReplyDecision[]> {
+  const decisions: ThreadsAutoReplyDecision[] = [];
+  const used = new Set<string>();
+  let remaining = candidates.slice(0, 8);
+  const maxDecisions = Math.max(1, Math.min(3, Math.floor(limit)));
+  while (remaining.length && decisions.length < maxDecisions) {
+    const decision = await decideThreadsAutoReplyByModel(
+      postPreview,
+      remaining,
+      persona,
+      sourceScreenshotUrl,
+    );
+    if (!decision?.reply) break;
+    const key = buildThreadsAutoReplyCandidateIdentity(decision.candidate.author, decision.candidate.text);
+    if (!key || used.has(key)) break;
+    used.add(key);
+    decisions.push(decision);
+    remaining = remaining.filter((item) => (
+      buildThreadsAutoReplyCandidateIdentity(item.author, item.text) !== key
+    ));
+  }
+  return decisions.sort((a, b) => {
+    const ay = a.candidate.replyPoint?.y ?? 0;
+    const by = b.candidate.replyPoint?.y ?? 0;
+    return by - ay;
+  });
 }
 
 async function openThreadsLatestOwnPostFromProfile(
@@ -27216,7 +27826,7 @@ async function openThreadsLatestOwnPostFromProfile(
   // Threads keeps the profile feed scroll position between runs. Reset toward the
   // newest posts first, otherwise a run may start from older visible posts and
   // incorrectly report "no comments" while newer posts above have replies.
-  for (let resetAttempt = 0; resetAttempt < 2; resetAttempt += 1) {
+  for (let resetAttempt = 0; resetAttempt < 5; resetAttempt += 1) {
     await threadsAdbInputNoWait(config, padCode, "input swipe 360 520 360 1320 520", 900).catch(() => undefined);
     await delay(450);
   }
@@ -27225,7 +27835,7 @@ async function openThreadsLatestOwnPostFromProfile(
     padCode,
     step: "profile-top-reset",
     screenshotUrl: shotUrl,
-    meta: { resetSwipes: 2, mode: "newest_posts_first" },
+    meta: { resetSwipes: 5, mode: "newest_posts_first" },
   });
 
   let lastOpenError: { ok: false; error: string; screenshotUrl?: string } | null = null;
@@ -27377,6 +27987,34 @@ async function openThreadsLatestOwnPostFromProfile(
           : "个人页可见范围未找到可安全打开的本人最新推文",
         screenshotUrl: shotUrl,
       };
+    }
+    await delay(750);
+    const stableShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+    const stableUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => profileUiXml);
+    const stableTarget = await withTimeout(
+      locateThreadsVisibleOwnPostContentTarget(stableShotUrl, stableUiXml, {
+        requireCommentBadge,
+        padCode,
+        sampleStep: "profile-comment-badge-pre-tap-stable-check",
+        maxAgeDays,
+      }),
+      6_000,
+      "threadsAutoReply stable pre-tap locate timeout",
+    ).catch(() => null);
+    if (stableTarget) {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-comment-badge-pre-tap-target-adjusted",
+        screenshotUrl: stableShotUrl,
+        meta: {
+          originalTarget: target,
+          stableTarget,
+          deltaY: stableTarget.y - target.y,
+        },
+      });
+      shotUrl = stableShotUrl;
+      profileUiXml = stableUiXml;
+      target = stableTarget;
     }
     const profileShotUrlBeforeTap = shotUrl;
     const profileUiXmlBeforeTap = profileUiXml;
@@ -27597,6 +28235,36 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
       return null;
     });
   }
+  if (!target) {
+    await threadsAdbInputNoWait(config, padCode, "input swipe 360 1260 360 980 360", 800);
+    await delay(450);
+    shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+    shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+    const revealPreflight = await ensureProfileBeforeScan(shotUrl, "bottom_partial_comment_badge_reveal");
+    if (!revealPreflight.ok) return revealPreflight;
+    shotUrl = revealPreflight.screenshotUrl;
+    profileUiXml = revealPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+    target = await withTimeout(
+      locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
+        requireCommentBadge: true,
+        padCode,
+        sampleStep: "profile-next-comment-badge-scan-bottom-reveal",
+        maxAgeDays,
+      }),
+      6_000,
+      "threadsAutoReply locate bottom-revealed next visible post timeout",
+    ).catch((error) => {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-next-comment-badge-scan-bottom-reveal-error",
+        screenshotUrl: shotUrl,
+        meta: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return null;
+    });
+  }
   if (!target && isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(profileUiXml, maxAgeDays)) {
     return {
       ok: false,
@@ -27636,12 +28304,12 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     if (!target && isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(profileUiXml, maxAgeDays)) break;
   }
   for (let guardAttempt = 0; target && guardAttempt < 2; guardAttempt += 1) {
-    const preview = await extractThreadsAutoReplyPostPreviewByVision(
+    const preview = await extractThreadsProfilePostPreviewAboveActionRowByVision(
       shotUrl,
-      [],
+      target,
       { timeoutMs: 5_500 },
     ).catch(() => ({ postPreview: "", postAuthor: "" }));
-    if (!preview.postPreview || isThreadsAutoReplyUsablePostPreview(preview.postPreview)) break;
+    if (!preview.abnormalPreview && (!preview.postPreview || isThreadsAutoReplyUsablePostPreview(preview.postPreview))) break;
     saveThreadsAutoReplySampleStep({
       padCode,
       step: "profile-next-skip-abnormal-visual-preview",
@@ -27649,6 +28317,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
       meta: {
         target,
         postPreview: preview.postPreview.slice(0, 160),
+        abnormalPreview: Boolean(preview.abnormalPreview),
         reason: "abnormal_post_preview_before_tap",
       },
     });
@@ -28355,14 +29024,14 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
     }
     return total ? light / total : 0;
   };
-  const fixedRowTarget = locateThreadsProfileFixedCountedCommentRowByPixels();
-  if (fixedRowTarget) return fixedRowTarget;
-  const rowTarget = process.env.THREADS_AUTO_REPLY_ENABLE_COUNT_DIGIT_LOCATOR
-    ? locateThreadsProfileCommentCountDigitTargetByPixels()
-    : null;
+  const rowTarget = process.env.THREADS_AUTO_REPLY_DISABLE_COUNT_DIGIT_LOCATOR === "1"
+    ? null
+    : locateThreadsProfileCommentCountDigitTargetByPixels();
   if (rowTarget) return rowTarget;
   const iconTarget = locateThreadsProfileCommentIconWithCountByPixels();
   if (iconTarget) return iconTarget;
+  const fixedRowTarget = locateThreadsProfileFixedCountedCommentRowByPixels();
+  if (fixedRowTarget) return fixedRowTarget;
   if (!process.env.THREADS_AUTO_REPLY_SLOW_PIXEL_SCAN) return null;
 
   const candidates: Array<{ x: number; y: number; score: number }> = [];
@@ -28776,7 +29445,7 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
   }
 
   function safeProfileActionRowBottomY(): number {
-    return Math.floor(height * 0.735);
+    return Math.floor(height * 0.86);
   }
 
   function isSafeProfileActionRowY(rowY: number): boolean {
@@ -29453,6 +30122,7 @@ async function collectThreadsAutoReplyPostContext(
   padCode: string,
   persona: WarmupCommentPersona | undefined,
   repliedKeys: Set<string>,
+  repliedCommentIdentityKeys: Set<string>,
   ownIdentifiers: string[] = [],
   options: { deadlineAt?: number } = {},
 ): Promise<{
@@ -29568,6 +30238,147 @@ async function collectThreadsAutoReplyPostContext(
   }
   if (!xmlAvailable) {
     let noUiPostPreview = "";
+    if (
+      process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY === "1"
+      && firstShotUrl
+      && canSpendBudget(4_500, 1_200)
+    ) {
+      if (
+        canSpendBudget(2_200, 1_200)
+        && await detectThreadsThreadDetailShellLocally(firstShotUrl).catch(() => false)
+      ) {
+        await execAdbForText(config, padCode, "input swipe 360 1240 360 920 280", 8_000, 500).catch(() => "");
+        await delay(800);
+        firstShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => firstShotUrl);
+        throwIfDeadlineExceeded(deadlineAt);
+        saveThreadsAutoReplySampleStep({
+          padCode,
+          step: "collect-no-ui-force-visible-pre-reveal",
+          screenshotUrl: firstShotUrl || undefined,
+          meta: { swipe: "input swipe 360 1240 360 920 280" },
+        });
+      }
+      const forceVisibleCandidates = await extractThreadsAutoReplyVisibleCommentsByVision(
+        firstShotUrl,
+        persona,
+        postOwnIdentifiers,
+        { timeoutMs: budgetedTimeout(13_000, 1_200, 6_500) },
+      ).catch(() => []);
+      throwIfDeadlineExceeded(deadlineAt);
+      const forceVisiblePostHash = buildThreadsAutoReplyPostHash(padCode, "comment-collect-force-visible", [
+        buildThreadsAutoReplyScreenshotSeed(firstShotUrl),
+        ...forceVisibleCandidates.slice(0, 6).map((item) => normalizeSingleLine(item.text).slice(0, 80)),
+      ]);
+      const forceVisibleFinalCandidates = finalizeThreadsAutoReplyCandidates({
+        padCode,
+        postHash: forceVisiblePostHash,
+        postPreview: "",
+        candidates: rankThreadsAutoReplyVisibleComments(forceVisibleCandidates, persona),
+        repliedKeys,
+        repliedCommentIdentityKeys,
+        ownIdentifiers: postOwnIdentifiers,
+      });
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "collect-no-ui-force-visible-return",
+        screenshotUrl: firstShotUrl || undefined,
+        meta: {
+          visualCandidateCount: forceVisibleCandidates.length,
+          candidateCount: forceVisibleFinalCandidates.length,
+          rawCandidatePreview: forceVisibleCandidates.slice(0, 6).map((item) => ({
+            text: item.text,
+            author: item.author,
+            score: item.score,
+            replyPoint: item.replyPoint,
+            debugReason: item.debugReason,
+          })),
+          candidatePreview: forceVisibleFinalCandidates.slice(0, 6).map((item) => ({
+            text: item.text,
+            author: item.author,
+            score: item.score,
+            replyPoint: item.replyPoint,
+            debugReason: item.debugReason,
+          })),
+        },
+      });
+      if (forceVisibleFinalCandidates.length) {
+        return {
+          postPreview: "",
+          postHash: forceVisiblePostHash,
+          candidates: forceVisibleFinalCandidates,
+          sourceScreenshotUrl: firstShotUrl || undefined,
+        };
+      }
+      if (
+        canSpendBudget(5_500, 1_200)
+        && await detectThreadsThreadDetailShellLocally(firstShotUrl).catch(() => false)
+      ) {
+        await execAdbForText(config, padCode, "input swipe 360 1240 360 920 280", 8_000, 500).catch(() => "");
+        await delay(800);
+        const revealShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => firstShotUrl);
+        throwIfDeadlineExceeded(deadlineAt);
+        saveThreadsAutoReplySampleStep({
+          padCode,
+          step: "collect-no-ui-force-visible-bottom-reveal",
+          screenshotUrl: revealShotUrl || firstShotUrl || undefined,
+          meta: { swipe: "input swipe 360 1240 360 920 280" },
+        });
+        const revealVisibleCandidates = revealShotUrl
+          ? await extractThreadsAutoReplyVisibleCommentsByVision(
+            revealShotUrl,
+            persona,
+            postOwnIdentifiers,
+            { timeoutMs: budgetedTimeout(10_000, 1_200, 5_500) },
+          ).catch(() => [])
+          : [];
+        throwIfDeadlineExceeded(deadlineAt);
+        const revealPostHash = buildThreadsAutoReplyPostHash(padCode, "comment-collect-force-visible-reveal", [
+          buildThreadsAutoReplyScreenshotSeed(revealShotUrl || firstShotUrl),
+          ...revealVisibleCandidates.slice(0, 6).map((item) => normalizeSingleLine(item.text).slice(0, 80)),
+        ]);
+        const revealFinalCandidates = finalizeThreadsAutoReplyCandidates({
+          padCode,
+          postHash: revealPostHash,
+          postPreview: "",
+          candidates: rankThreadsAutoReplyVisibleComments(revealVisibleCandidates, persona),
+          repliedKeys,
+          repliedCommentIdentityKeys,
+          ownIdentifiers: postOwnIdentifiers,
+        });
+        saveThreadsAutoReplySampleStep({
+          padCode,
+          step: "collect-no-ui-force-visible-bottom-reveal-return",
+          screenshotUrl: revealShotUrl || firstShotUrl || undefined,
+          meta: {
+            visualCandidateCount: revealVisibleCandidates.length,
+            candidateCount: revealFinalCandidates.length,
+            rawCandidatePreview: revealVisibleCandidates.slice(0, 6).map((item) => ({
+              text: item.text,
+              author: item.author,
+              score: item.score,
+              replyPoint: item.replyPoint,
+              debugReason: item.debugReason,
+            })),
+            candidatePreview: revealFinalCandidates.slice(0, 6).map((item) => ({
+              text: item.text,
+              author: item.author,
+              score: item.score,
+              replyPoint: item.replyPoint,
+              debugReason: item.debugReason,
+            })),
+          },
+        });
+        if (revealFinalCandidates.length) {
+          firstShotUrl = revealShotUrl || firstShotUrl;
+          return {
+            postPreview: "",
+            postHash: revealPostHash,
+            candidates: revealFinalCandidates,
+            sourceScreenshotUrl: firstShotUrl || undefined,
+          };
+        }
+      }
+    }
     if (firstShotUrl && canSpendBudget(2_500, 1_200)) {
       const preview = await extractThreadsAutoReplyPostPreviewByVision(
         firstShotUrl,
@@ -29605,7 +30416,7 @@ async function collectThreadsAutoReplyPostContext(
         firstShotUrl,
         persona,
         postOwnIdentifiers,
-        { timeoutMs: budgetedTimeout(10_500, 1_200, 4_500) },
+        { timeoutMs: budgetedTimeout(6_500, 5_500, 3_500) },
       ).catch(() => [])
       : [];
     throwIfDeadlineExceeded(deadlineAt);
@@ -29629,12 +30440,12 @@ async function collectThreadsAutoReplyPostContext(
       const retryUiCandidates = retryUiXml && retryShotUrl
         ? extractThreadsAutoReplyVisibleComments(retryUiXml, retryShotUrl, postOwnIdentifiers)
         : [];
-      const retryVisualCandidates = !retryUiCandidates.length && canSpendBudget(6_000, 900) && retryShotUrl
+      const retryVisualCandidates = !retryUiCandidates.length && canSpendBudget(4_500, 3_000) && retryShotUrl
         ? await extractThreadsAutoReplyVisibleCommentsByVision(
           retryShotUrl,
           persona,
           postOwnIdentifiers,
-          { timeoutMs: budgetedTimeout(6_500, 900, 3_500) },
+          { timeoutMs: budgetedTimeout(4_800, 3_000, 3_200) },
         ).catch(() => [])
         : [];
       throwIfDeadlineExceeded(deadlineAt);
@@ -29665,16 +30476,17 @@ async function collectThreadsAutoReplyPostContext(
       postPreview: noUiPostPreview,
       candidates: rankThreadsAutoReplyVisibleComments(allVisualCandidates, persona),
       repliedKeys,
+      repliedCommentIdentityKeys,
       ownIdentifiers: postOwnIdentifiers,
     });
     if (
       !candidates.length
       && firstShotUrl
-      && canSpendBudget(3_500, 1_000)
+      && canSpendBudget(1_800, 700)
       && await detectThreadsThreadDetailShellLocally(firstShotUrl).catch(() => false)
     ) {
       for (let page = 0; page < commentCollectScrolls.length && !candidates.length; page += 1) {
-        if (!canSpendBudget(3_500, 900)) break;
+        if (!canSpendBudget(1_800, 700)) break;
         const scrollCommand = commentCollectScrolls[page];
         await execAdbForText(config, padCode, scrollCommand, 8_000, 650).catch(() => "");
         await delay(800);
@@ -29701,14 +30513,15 @@ async function collectThreadsAutoReplyPostContext(
           postPreview: noUiPostPreview,
           candidates: rankThreadsAutoReplyVisibleComments(allVisualCandidates, persona),
           repliedKeys,
+          repliedCommentIdentityKeys,
           ownIdentifiers: postOwnIdentifiers,
         });
-        const pageVisualCandidates = !candidates.length && canSpendBudget(6_000, 900) && pageShotUrl
+        const pageVisualCandidates = !candidates.length && canSpendBudget(4_500, 1_200) && pageShotUrl
           ? await extractThreadsAutoReplyVisibleCommentsByVision(
             pageShotUrl,
             persona,
             postOwnIdentifiers,
-            { timeoutMs: budgetedTimeout(6_500, 900, 3_500) },
+            { timeoutMs: budgetedTimeout(4_800, 1_200, 3_200) },
           ).catch(() => [])
           : [];
         throwIfDeadlineExceeded(deadlineAt);
@@ -29723,6 +30536,7 @@ async function collectThreadsAutoReplyPostContext(
           postPreview: noUiPostPreview,
           candidates: rankThreadsAutoReplyVisibleComments(allVisualCandidates, persona),
           repliedKeys,
+          repliedCommentIdentityKeys,
           ownIdentifiers: postOwnIdentifiers,
         });
         saveThreadsAutoReplySampleStep({
@@ -29808,6 +30622,7 @@ async function collectThreadsAutoReplyPostContext(
         postPreview,
         candidates: rankThreadsAutoReplyVisibleComments(visualCandidates, persona),
         repliedKeys,
+        repliedCommentIdentityKeys,
         ownIdentifiers: postOwnIdentifiers,
       });
       saveThreadsAutoReplySampleStep({
@@ -29979,6 +30794,7 @@ async function collectThreadsAutoReplyPostContext(
     postPreview,
     candidates: baseCandidates,
     repliedKeys,
+    repliedCommentIdentityKeys,
     ownIdentifiers: postOwnIdentifiers,
   });
 
@@ -30018,8 +30834,12 @@ export async function autoReplyThreadsAccount(
   cfg: ThreadsAutoReplyConfig = {},
   onProgress?: (progress: ThreadsAutoReplyProgress) => void,
 ): Promise<ThreadsAutoReplyProgress> {
-  const maxPosts = Math.max(1, Math.min(5, Math.floor(cfg.maxPosts || 3)));
+  const maxPosts = Math.max(3, Math.min(5, Math.floor(cfg.maxPosts || 5)));
   const maxReplies = Math.max(1, Math.min(5, Math.floor(cfg.maxReplies || 3)));
+  const targetReplyUpper = Math.min(3, maxReplies);
+  const targetReplies = targetReplyUpper >= 2
+    ? 2 + Math.floor(Math.random() * (targetReplyUpper - 1))
+    : 1;
   const maxAgeDays = Math.max(1, Math.min(7, Math.floor(cfg.maxAgeDays || 2)));
   const report = (progress: Partial<ThreadsAutoReplyProgress>) => {
     onProgress?.({
@@ -30028,6 +30848,9 @@ export async function autoReplyThreadsAccount(
       scannedComments: progress.scannedComments ?? scannedComments,
       replied: progress.replied ?? replied,
       skipped: progress.skipped ?? skipped,
+      targetReplies: progress.targetReplies ?? targetReplies,
+      completionStatus: progress.completionStatus,
+      completionReason: progress.completionReason,
       replyScreenshots,
       done: progress.done ?? false,
       error: progress.error,
@@ -30040,14 +30863,24 @@ export async function autoReplyThreadsAccount(
   let skipped = 0;
   const replyScreenshots: string[] = [];
   const errors: string[] = [];
-  const historyEntries = readThreadsAutoReplyHistory();
-  const repliedKeys = new Set(historyEntries
-    .filter((entry) => entry.padCode === padCode)
-    .map((entry) => entry.key));
-  await relaunchThreads(config, padCode, 3_500).catch((error) => {
-    errors.push(`Threads 启动恢复失败：${error instanceof Error ? error.message : String(error)}`);
-  });
-  {
+  // The persisted history is only durable evidence. Do not use it to suppress
+  // visible comments before a run, because comments/replies can be deleted for
+  // retesting. Once this run sends a reply, the in-memory sets below prevent
+  // duplicate replies in the same loop.
+  const repliedKeys = new Set<string>();
+  const repliedCommentIdentityKeys = new Set<string>();
+  let preflightProfileShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  const alreadyOnProfile = preflightProfileShotUrl
+    ? await withTimeout(
+      detectThreadsProfilePageLocally(preflightProfileShotUrl),
+      2_500,
+      "threadsAutoReply local profile precheck timeout",
+    ).catch(() => false)
+    : false;
+  if (!alreadyOnProfile) {
+    await relaunchThreads(config, padCode, 3_500).catch((error) => {
+      errors.push(`Threads 启动恢复失败：${error instanceof Error ? error.message : String(error)}`);
+    });
     const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
     await tapViaAdbAbsoluteQuick(
       config,
@@ -30057,13 +30890,14 @@ export async function autoReplyThreadsAccount(
       2_000,
     ).catch(() => undefined);
     const profileTabShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-    saveThreadsAutoReplySampleStep({
-      padCode,
-      step: "auto-reply-preflight-profile-tab",
-      screenshotUrl: profileTabShotUrl || undefined,
-      meta: { reason: "recover_from_home_feed_or_launcher_before_profile_scan" },
-    });
+    preflightProfileShotUrl = profileTabShotUrl;
   }
+  saveThreadsAutoReplySampleStep({
+    padCode,
+    step: "auto-reply-preflight-profile-tab",
+    screenshotUrl: preflightProfileShotUrl || undefined,
+    meta: { reason: alreadyOnProfile ? "already_on_profile_before_scan" : "recover_from_home_feed_or_launcher_before_profile_scan" },
+  });
   const processedPostHashes = new Set<string>();
   const accountInfo = process.env.THREADS_AUTO_REPLY_ENABLE_ACCOUNT_MANAGER_QUERY
     ? await withTimeout(
@@ -30075,9 +30909,39 @@ export async function autoReplyThreadsAccount(
       return null;
     })
     : null;
+  const preflightProfileUiXml = preflightProfileShotUrl
+    ? await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "")
+    : "";
+  const preflightProfileUsernameFromUi = preflightProfileUiXml
+    ? extractThreadsProfileUsernameFromUiXml(preflightProfileUiXml)
+    : null;
+  const ownIdentifiersFromEnv = String(process.env.THREADS_AUTO_REPLY_OWN_IDENTIFIERS || "")
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const preflightProfileUsernameFromVision = !preflightProfileUsernameFromUi && !ownIdentifiersFromEnv.length && preflightProfileShotUrl
+    ? await detectThreadsProfileUsernameByVision(preflightProfileShotUrl).catch(() => null)
+    : null;
   const ownIdentifiers = mergeThreadsAutoReplyOwnIdentifiers([
     accountInfo?.username,
+    preflightProfileUsernameFromUi,
+    preflightProfileUsernameFromVision,
+    ...ownIdentifiersFromEnv,
   ]);
+  saveThreadsAutoReplySampleStep({
+    padCode,
+    step: "auto-reply-own-identifiers",
+    screenshotUrl: preflightProfileShotUrl || undefined,
+    meta: {
+      accountUsername: accountInfo?.username || "",
+      profileUsernameFromUi: preflightProfileUsernameFromUi || "",
+      profileUsernameFromVision: preflightProfileUsernameFromVision || "",
+      ownIdentifiers,
+    },
+  });
+  const forceVisibleReplyUntilSuccess = process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY === "1";
+  const forceVisibleReplyRetryLimit = Math.max(1, Math.min(50, Math.floor(Number(process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY_MAX_ATTEMPTS || 20))));
+  let forceVisibleReplyAttempts = 0;
   const rememberEvidenceScreenshot = async (
     step: string,
     meta: Record<string, unknown> = {},
@@ -30085,9 +30949,6 @@ export async function autoReplyThreadsAccount(
   ): Promise<string> => {
     const shotUrl = existingScreenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
     if (!shotUrl) return "";
-    if (!replyScreenshots.includes(shotUrl) && replyScreenshots.length < Math.max(1, maxReplies)) {
-      replyScreenshots.push(shotUrl);
-    }
     saveThreadsAutoReplySampleStep({
       padCode,
       step,
@@ -30098,14 +30959,16 @@ export async function autoReplyThreadsAccount(
   };
 
   report({ step: "正在进入 Threads 个人主页" });
-  let preflightState = await withTimeout(
-    classifyThreadsPageOnDevice(config, padCode),
-    8_000,
-    "threadsAutoReply preflight classify timeout",
-  ).catch((error) => {
-    errors.push(error instanceof Error ? error.message : String(error));
-    return null;
-  });
+  let preflightState = preflightProfileShotUrl
+    ? { page: "profile_page" as ThreadsPageState, reason: "PROFILE_TAB_PREFLIGHT", screenshotUrl: preflightProfileShotUrl }
+    : await withTimeout(
+      classifyThreadsPageOnDevice(config, padCode),
+      8_000,
+      "threadsAutoReply preflight classify timeout",
+    ).catch((error) => {
+      errors.push(error instanceof Error ? error.message : String(error));
+      return null;
+    });
   if (preflightState && isThreadsTerminalPage(preflightState.page)) {
     throwThreadsTerminalPage(preflightState, "自动回复启动后检测到账号状态阻断");
   }
@@ -30125,6 +30988,13 @@ export async function autoReplyThreadsAccount(
     const shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => preflightState?.screenshotUrl || "");
     const uiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
     const uiLine = normalizeSingleLine(decodeXmlAttr(uiXml));
+    if (shotUrl && await withTimeout(
+      detectThreadsProfilePageLocally(shotUrl),
+      2_500,
+      "threadsAutoReply force-close profile check timeout",
+    ).catch(() => false)) {
+      break;
+    }
     if (
       await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)
       || await detectThreadsMediaCommentSheetLocally(shotUrl).catch(() => false)
@@ -30148,6 +31018,10 @@ export async function autoReplyThreadsAccount(
       throwThreadsTerminalPage(preflightState, "自动回复执行中检测到账号状态阻断");
     }
   }
+  await rememberEvidenceScreenshot("auto-reply-before-open-latest", {
+    maxAgeDays,
+    requireCommentBadge: true,
+  });
   if (preflightState?.page === "compose_editor" || preflightState?.page === "reply_composer") {
     await rememberEvidenceScreenshot("auto-reply-still-in-composer", {
       page: preflightState.page,
@@ -30159,6 +31033,9 @@ export async function autoReplyThreadsAccount(
       scannedComments,
       replied,
       skipped,
+      targetReplies,
+      completionStatus: "failed",
+      completionReason: "仍停留在编辑器，停止以避免误发",
       replyScreenshots,
       done: true,
       error: "Threads 仍停留在编辑器，已停止自动回复以避免误发",
@@ -30166,30 +31043,13 @@ export async function autoReplyThreadsAccount(
     onProgress?.(result);
     throw new Error(result.error);
   }
-  const currentShotBeforeOpen = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => preflightState?.screenshotUrl || "");
-  const currentUiBeforeOpen = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
-  const currentInReplyComposer = Boolean(
-    findThreadsReplyComposerInputTarget(currentUiBeforeOpen)
-    || looksLikeThreadsReplyComposerUiXml(currentUiBeforeOpen)
-    || await detectThreadsCommentReplyEditorLocally(currentShotBeforeOpen).catch(() => false)
-    || await detectThreadsReplyComposerLocally(currentShotBeforeOpen).catch(() => null)
-  );
-  const currentOnProfilePage = Boolean(
-    currentShotBeforeOpen && await detectThreadsProfilePageLocally(currentShotBeforeOpen).catch(() => false)
-  );
-  const currentAlreadyUsable = Boolean(
-    currentShotBeforeOpen && !currentInReplyComposer && !currentOnProfilePage && (
-      await detectThreadsThreadDetailShellLocally(currentShotBeforeOpen).catch(() => false)
-      || await detectThreadsMediaCommentSheetLocally(currentShotBeforeOpen).catch(() => false)
-      || await detectThreadsBlankReplyRatingPageLocally(currentShotBeforeOpen).catch(() => false)
-      || await detectThreadsWarmupMediaOverlayActions(currentShotBeforeOpen).catch(() => null)
-      || await detectThreadsFullscreenMediaViewerLocally(currentShotBeforeOpen).catch(() => false)
-    )
-  );
-  const opened = currentAlreadyUsable
-    ? { ok: true as const, screenshotUrl: currentShotBeforeOpen }
-    : await withTimeout(
-      openThreadsLatestOwnPostFromProfile(config, padCode, maxAgeDays),
+  const opened = await withTimeout(
+      openThreadsLatestOwnPostFromProfile(
+        config,
+        padCode,
+        maxAgeDays,
+        true,
+      ),
       150_000,
       "threadsAutoReply open latest post timeout",
     ).catch((error) => ({
@@ -30198,28 +31058,28 @@ export async function autoReplyThreadsAccount(
     }));
   if (opened.ok === false) {
     const openedError = opened as { ok: false; error: string; screenshotUrl?: string };
-    await rememberEvidenceScreenshot("auto-reply-open-profile-failed", {
-      maxAgeDays,
-      error: openedError.error,
-    }, openedError.screenshotUrl);
     const result = {
-      step: "Threads 自动回复未找到可回复评论",
+      step: "Threads 自动回复完成：范围内没有评论",
       scannedPosts,
       scannedComments,
       replied,
       skipped: skipped + 1,
+      targetReplies,
+      completionStatus: "no_commented_posts" as const,
+      completionReason: `${maxAgeDays} 天内未找到带评论角标的正常本人推文`,
       replyScreenshots,
       done: true,
-      error: `${maxAgeDays} 天内未找到带评论角标的正常本人推文`,
+      error: undefined,
       details: openedError.error,
     };
     onProgress?.(result);
     return result;
   }
 
-  for (let postIndex = 0; postIndex < maxPosts && replied < maxReplies; postIndex += 1) {
+  for (let postIndex = 0; postIndex < maxPosts && replied < targetReplies; postIndex += 1) {
+    let retryCurrentPostForForcedReply = false;
     scannedPosts += 1;
-    report({ step: `正在扫描第 ${postIndex + 1} 条帖子评论` });
+    report({ step: `正在扫描第 ${postIndex + 1} 条帖子评论，准备打开评论区并读取外部留言` });
 
     const collectDeadlineAt = Date.now() + 47_000;
     const context = await withTimeout(
@@ -30228,6 +31088,7 @@ export async function autoReplyThreadsAccount(
         padCode,
         cfg.commentPersona,
         repliedKeys,
+        repliedCommentIdentityKeys,
         ownIdentifiers,
         { deadlineAt: collectDeadlineAt },
       ),
@@ -30252,6 +31113,18 @@ export async function autoReplyThreadsAccount(
           uiPreview: normalizeSingleLine(decodeXmlAttr(currentUiXml)).slice(0, 320),
         },
       });
+      if (currentShotUrl) {
+        const fallbackContext = await buildThreadsAutoReplyTimeoutFallbackContextFromScreenshot({
+          padCode,
+          screenshotUrl: currentShotUrl,
+          persona: cfg.commentPersona,
+          ownIdentifiers,
+          repliedKeys,
+          repliedCommentIdentityKeys,
+          postIndex,
+        });
+        if (fallbackContext.candidates.length) return fallbackContext;
+      }
       return {
         postPreview: "",
         postHash: buildThreadsAutoReplyPostHash(padCode, "comment-collect-timeout-or-error", [String(postIndex), errorMessage, normalizeSingleLine(decodeXmlAttr(currentUiXml)).slice(0, 80)]),
@@ -30260,7 +31133,9 @@ export async function autoReplyThreadsAccount(
       };
     });
     const shouldTrackPostHash = Boolean(context.candidates.length || isThreadsAutoReplyUsablePostPreview(context.postPreview));
-    const duplicatePost = shouldTrackPostHash && processedPostHashes.has(context.postHash);
+    const duplicatePost = shouldTrackPostHash
+      && !context.candidates.length
+      && processedPostHashes.has(context.postHash);
     if (duplicatePost) {
       skipped += 1;
       errors.push(`第 ${postIndex + 1} 条疑似已扫描过，跳过避免重复回复`);
@@ -30268,10 +31143,16 @@ export async function autoReplyThreadsAccount(
     if (shouldTrackPostHash) processedPostHashes.add(context.postHash);
     const candidates = duplicatePost ? [] : context.candidates;
     scannedComments += candidates.length;
+    report({
+      step: duplicatePost
+        ? `第 ${postIndex + 1} 条帖子已处理过，跳过避免重复回复`
+        : `第 ${postIndex + 1} 条帖子采集完成，发现 ${candidates.length} 条候选外部评论`,
+    });
 
     if (!duplicatePost && context.postPreview && !isThreadsAutoReplyUsablePostPreview(context.postPreview)) {
       skipped += 1;
       errors.push(`第 ${postIndex + 1} 条主帖文案不可用，已跳过避免误回异常或纯符号内容`);
+      report({ step: `第 ${postIndex + 1} 条主帖文案异常或纯符号，已跳过` });
       saveThreadsAutoReplySampleStep({
         padCode,
         step: "auto-reply-skip-abnormal-post",
@@ -30284,21 +31165,33 @@ export async function autoReplyThreadsAccount(
       continue;
     }
 
-    const decision = duplicatePost
-      ? null
+    const remainingReplyTarget = Math.max(1, targetReplies - replied);
+    const decisions = duplicatePost
+      ? []
       : await withTimeout(
-        decideThreadsAutoReplyByModel(context.postPreview, candidates, cfg.commentPersona, context.sourceScreenshotUrl),
-        18_000,
+        (async () => {
+          report({ step: `第 ${postIndex + 1} 条正在调用模型对比候选并生成 ${Math.min(3, remainingReplyTarget)} 条内回复` });
+          return await decideThreadsAutoRepliesByModel(
+            context.postPreview,
+            candidates,
+            cfg.commentPersona,
+            context.sourceScreenshotUrl,
+            remainingReplyTarget,
+          );
+        })(),
+        38_000,
         "threadsAutoReply decision timeout",
       ).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         errors.push(`第 ${postIndex + 1} 条模型筛选超时：${message}`);
-        return null;
+        report({ step: `第 ${postIndex + 1} 条模型筛选失败，准备跳过或重试` });
+        return [];
       });
-    if (!decision) {
+    if (!decisions.length) {
       if (!duplicatePost) {
         skipped += 1;
         errors.push(`第 ${postIndex + 1} 条没有适合回复的评论`);
+        report({ step: `第 ${postIndex + 1} 条没有可安全回复的外部评论，准备检查下一条` });
         saveThreadsAutoReplySampleStep({
           padCode,
           step: "auto-reply-no-selected-comment",
@@ -30317,19 +31210,27 @@ export async function autoReplyThreadsAccount(
           },
         });
       }
+      retryCurrentPostForForcedReply = false;
     } else {
-      if (isThreadsAutoReplyOwnAuthor(decision.candidate.author, ownIdentifiers)) {
-        skipped += 1;
-        errors.push(`第 ${postIndex + 1} 条候选评论来自自己账号，已跳过不回复`);
-        continue;
-      }
-      const actions = context.replyTarget || await warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode).catch(() => null);
-      const commentTarget = decision.candidate.replyPoint;
-      if (!commentTarget) {
-        skipped += 1;
-        errors.push(`第 ${postIndex + 1} 条候选评论缺少评论级回复入口，已跳过以避免发到新增串文`);
-      } else {
+      for (let decisionIndex = 0; decisionIndex < decisions.length && replied < targetReplies; decisionIndex += 1) {
+        const decision = decisions[decisionIndex];
+        if (isThreadsAutoReplyOwnAuthor(decision.candidate.author, ownIdentifiers)) {
+          skipped += 1;
+          errors.push(`第 ${postIndex + 1} 条候选评论来自自己账号，已跳过不回复`);
+          report({ step: `第 ${postIndex + 1} 条候选评论来自自己账号，已跳过` });
+          continue;
+        }
+        const actions = context.replyTarget || await warmupLocateCurrentAcpActionsLocalSnapshot(config, padCode).catch(() => null);
+        const commentTarget = decision.candidate.replyPoint;
+        if (!commentTarget) {
+          skipped += 1;
+          errors.push(`第 ${postIndex + 1} 条候选评论缺少评论级回复入口，已跳过以避免发到新增串文`);
+          report({ step: `第 ${postIndex + 1} 条候选评论缺少评论级回复入口，已跳过` });
+          retryCurrentPostForForcedReply = forceVisibleReplyUntilSuccess && replied <= 0;
+          continue;
+        }
         try {
+          report({ step: `第 ${postIndex + 1} 条已选中第 ${decisionIndex + 1}/${decisions.length} 条优质评论，正在打开回复框` });
           const openedReply = await openThreadsCommentReplyComposerAtPoint(
             config,
             padCode,
@@ -30345,11 +31246,16 @@ export async function autoReplyThreadsAccount(
             screenshotUrl: openedReply.screenshotUrl || decision.candidate.sourceScreenshotUrl || actions?.screenshotUrl || context.sourceScreenshotUrl,
             meta: {
               commentTarget,
+              candidatePoolSize: candidates.length,
+              selectedCount: decisions.length,
+              selectedIndex: decisionIndex + 1,
               candidateText: decision.candidate.text,
+              selectedReason: decision.reason,
               replyPreview: decision.reply.slice(0, 80),
               debugReason: openedReply.debugReason || decision.candidate.debugReason || actions?.debugReason,
             },
           });
+          report({ step: `第 ${postIndex + 1} 条回复框已打开，正在输入并发送模型回复` });
           const result = await warmupExecuteCommentAtPoint(
             config,
             padCode,
@@ -30372,23 +31278,43 @@ export async function autoReplyThreadsAccount(
             replyText: result.comment || decision.reply,
           });
           if (decision.candidate.key) repliedKeys.add(decision.candidate.key);
+          repliedCommentIdentityKeys.add(buildThreadsAutoReplyRecentCommentIdentityKey(
+            padCode,
+            decision.candidate.author,
+            decision.candidate.text,
+          ));
           if (result.screenshotUrl) replyScreenshots.push(result.screenshotUrl);
           report({ step: `已回复精选评论：${decision.candidate.text.slice(0, 24)}` });
         } catch (error) {
           skipped += 1;
           const errorMessage = error instanceof Error ? error.message : String(error);
           errors.push(errorMessage);
+          report({ step: `第 ${postIndex + 1} 条回复失败：${errorMessage.slice(0, 80)}` });
           await rememberEvidenceScreenshot("auto-reply-send-comment-failed", {
             postIndex: postIndex + 1,
             candidateText: decision.candidate.text,
             replyPreview: decision.reply.slice(0, 80),
             error: errorMessage,
           });
+          retryCurrentPostForForcedReply = forceVisibleReplyUntilSuccess && replied <= 0;
         }
       }
     }
 
-    if (replied >= maxReplies || postIndex >= maxPosts - 1) break;
+    if (retryCurrentPostForForcedReply) {
+      forceVisibleReplyAttempts += 1;
+      if (forceVisibleReplyAttempts >= forceVisibleReplyRetryLimit) {
+        throw new Error(`THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY reached retry limit ${forceVisibleReplyRetryLimit}`);
+      }
+      if (context.postHash) processedPostHashes.delete(context.postHash);
+      report({ step: `强制验证：第 ${postIndex + 1} 篇尚未回复成功，重试同一篇（${forceVisibleReplyAttempts}/${forceVisibleReplyRetryLimit}）` });
+      await delay(1600);
+      postIndex -= 1;
+      continue;
+    }
+
+    if (replied >= targetReplies || postIndex >= maxPosts - 1) break;
+    report({ step: "正在返回主页并查找下一条带评论角标的本人推文" });
     const nextOpened = await openThreadsNextVisibleOwnPostFromCurrentProfile(config, padCode, maxAgeDays).catch((error) => ({
         ok: false as const,
         error: error instanceof Error ? error.message : String(error),
@@ -30403,23 +31329,42 @@ export async function autoReplyThreadsAccount(
     }
   }
 
-  if (replied <= 0) {
-    await rememberEvidenceScreenshot("auto-reply-finished-without-reply", {
-      scannedPosts,
-      scannedComments,
-      skipped,
-      errors: errors.filter(Boolean).slice(-3),
-    });
-  }
+  const finalErrors = errors.filter(Boolean);
+  const hardFailure = replied <= 0 && finalErrors.some((item) => /模型筛选超时|回复失败|仍停留在编辑器|账号状态阻断|reached retry limit|发送|发布|timeout/i.test(item));
+  const completionStatus: ThreadsAutoReplyProgress["completionStatus"] = replied >= targetReplies
+    ? "target_reached"
+    : replied > 0
+      ? "partial_success"
+      : hardFailure
+        ? "failed"
+        : scannedComments <= 0
+          ? "no_replyable_comments"
+          : "no_replyable_comments";
+  const completionReason = completionStatus === "target_reached"
+    ? `已达到本次随机目标 ${targetReplies} 条`
+    : completionStatus === "partial_success"
+      ? `已成功回复 ${replied} 条，后续未发现更多安全可回复评论或已达扫描上限`
+      : completionStatus === "no_replyable_comments"
+        ? (scannedComments <= 0
+          ? "扫描范围内未发现外部候选评论，按无可回复评论达标"
+          : "候选评论均不满足安全回复条件，按无可回复评论达标")
+        : finalErrors.slice(-2).join("；") || "未能完成自动回复";
   const done = {
-    step: replied > 0 ? "Threads 自动回复完成" : "Threads 自动回复未找到可回复评论",
+    step: completionStatus === "failed"
+      ? "Threads 自动回复失败"
+      : replied > 0
+        ? "Threads 自动回复完成"
+        : "Threads 自动回复完成：无可回复评论",
     scannedPosts,
     scannedComments,
     replied,
     skipped,
+    targetReplies,
+    completionStatus,
+    completionReason,
     replyScreenshots,
     done: true,
-    error: replied > 0 ? undefined : errors.filter(Boolean).slice(-2).join("；"),
+    error: completionStatus === "failed" ? completionReason : undefined,
   };
   onProgress?.(done);
   return done;
@@ -32379,6 +33324,27 @@ async function warmupExecuteCommentAtPoint(
       const quickStillHasDraft = hasThreadsReplyComposerText(quickPostSendXml, comment)
         || await detectAcpReplyInputHasDraftLocally(quickPostSendShotUrl).catch(() => false);
       const quickPostedText = hasThreadsPostedCommentText(quickPostSendXml, comment);
+      const quickPostedCue = detectThreadsWarmupCommentPostedCueFromUiXml(quickPostSendXml);
+      const quickPostedToast = await detectThreadsPostSuccessToastLocally(quickPostSendShotUrl).catch(() => false);
+      const quickPostedVisual = await detectThreadsWarmupCommentPostedVisually(quickPostSendShotUrl, comment);
+      const quickReplyBarCleared = Boolean(
+        !quickPostedText
+        && !quickPostedCue
+        && !quickPostedToast
+        && !quickPostedVisual
+        && quickPostSendShotUrl
+        && await detectAcpReplyBarClearedAfterSendLocally(quickPostSendShotUrl).catch(() => false)
+        && !(await detectAcpReplyInputHasDraftLocally(quickPostSendShotUrl).catch(() => false))
+        && !(await detectThreadsSideDrawerLocally(quickPostSendShotUrl).catch(() => false))
+        && !looksLikeThreadsStatusMessageUiXml(quickPostSendXml)
+        && !looksLikeThreadsRestrictedReplyNoticeUiXml(quickPostSendXml)
+      );
+      const quickPostedConfirmed = quickPostedText
+        || quickPostedCue
+        || quickPostedToast
+        || quickPostedVisual
+        || (!forceVisibleReplyUntilSuccess && !quickStillHasDraft)
+        || quickReplyBarCleared;
       await saveThreadsAutoReplySampleStep({
         padCode,
         step: "reply-after-send-quick",
@@ -32387,10 +33353,15 @@ async function warmupExecuteCommentAtPoint(
           commentPreview: comment.slice(0, 120),
           quickStillHasDraft,
           quickPostedText,
+          quickPostedCue,
+          quickPostedToast,
+          quickPostedVisual,
+          quickReplyBarCleared,
+          quickPostedConfirmed,
           uiPreview: normalizeSingleLine(decodeXmlAttr(quickPostSendXml)).slice(0, 500),
         },
       });
-      if (!quickStillHasDraft || quickPostedText) {
+      if (quickPostedConfirmed) {
         await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
         await delay(700);
         return {
