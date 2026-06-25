@@ -29340,8 +29340,6 @@ export async function autoReplyThreadsAccount(
       await detectThreadsThreadDetailShellLocally(currentShotBeforeOpen).catch(() => false)
       || await detectThreadsMediaCommentSheetLocally(currentShotBeforeOpen).catch(() => false)
       || await detectThreadsBlankReplyRatingPageLocally(currentShotBeforeOpen).catch(() => false)
-      || await detectThreadsWarmupMediaOverlayActions(currentShotBeforeOpen).catch(() => null)
-      || await detectThreadsFullscreenMediaViewerLocally(currentShotBeforeOpen).catch(() => false)
     )
   );
   const opened = currentAlreadyUsable
