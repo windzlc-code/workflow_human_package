@@ -3393,6 +3393,7 @@ async function renderPersonaSettingsPage(
   chatId: number,
   msgId: number | undefined,
   archive: PersonaArchive,
+  defaultPadCode: string,
   options?: {
     autoRefreshLight?: boolean;
     hotMode?: PersonaSettingsHotMetricsMode;
@@ -3742,6 +3743,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
   msgId: number | undefined,
   archive: PersonaArchive,
   archiveId: string,
+  defaultPadCode: string,
   options?: {
     returnCallback?: string;
     onSuccessRender?: (archive: PersonaArchive) => Promise<void>;
@@ -15567,7 +15569,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         pendingPersonaImageViews.delete(chatId);
         settingsTargetMessageId = undefined;
       }
-      await renderPersonaSettingsPage(bot, chatId, settingsTargetMessageId, archive, {
+      await renderPersonaSettingsPage(bot, chatId, settingsTargetMessageId, archive, defaultPadCode, {
         autoRefreshLight: true,
         hotMode: "light",
         hotFields: [...DEFAULT_PERSONA_DETAIL_HOT_FIELDS],
@@ -15580,7 +15582,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const id = data.slice(prefix.length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      await renderPersonaSettingsPage(bot, chatId, msgId, archive, {
+      await renderPersonaSettingsPage(bot, chatId, msgId, archive, defaultPadCode, {
         autoRefreshLight: prefix === "settingshot_light_",
         hotMode: prefix === "settingshot_light_" ? "light" : "detail",
       });
@@ -15601,7 +15603,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const nextFields = hasField
         ? current.fields.filter((item) => item !== field)
         : [...current.fields, field];
-      await renderPersonaSettingsPage(bot, chatId, msgId, archive, {
+      await renderPersonaSettingsPage(bot, chatId, msgId, archive, defaultPadCode, {
         hotMode: "detail",
         hotFields: normalizePersonaDetailHotFields(nextFields),
       });
@@ -15613,10 +15615,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const current = buildPersonaSettingsHotMetricsView(chatId, id, { mode: "detail" });
-      await refreshPersonaThreadsHotMetricsFromTelegram(bot, chatId, msgId, archive, id, {
+      await refreshPersonaThreadsHotMetricsFromTelegram(bot, chatId, msgId, archive, id, defaultPadCode, {
         returnCallback: `settingshot_detail_${id}`,
         onSuccessRender: async (latestArchive) => {
-          await renderPersonaSettingsPage(bot, chatId, msgId, latestArchive, {
+          await renderPersonaSettingsPage(bot, chatId, msgId, latestArchive, defaultPadCode, {
             hotMode: "detail",
             hotFields: current.fields,
           });
@@ -15632,7 +15634,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         : data.slice("hotrefresh_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      await refreshPersonaThreadsHotMetricsFromTelegram(bot, chatId, msgId, archive, id);
+      await refreshPersonaThreadsHotMetricsFromTelegram(bot, chatId, msgId, archive, id, defaultPadCode);
       return;
     }
 
@@ -22545,7 +22547,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               },
             },
           },
-        }, pendingPersonaAccount.archiveId);
+        }, pendingPersonaAccount.archiveId, defaultPadCode);
         return;
       }
       if (pendingPersonaAccount.stage === "await_threads_handle") {
