@@ -756,6 +756,20 @@ const DEFAULT_PERSONA_DETAIL_HOT_FIELDS: PersonaHotMetricField[] = [
   "shares",
   "views",
 ];
+const PERSONA_HOT_METRIC_FIELD_CODE: Record<PersonaHotMetricField, string> = {
+  followers: "fr",
+  following: "fg",
+  recentViews: "rv",
+  posts: "ps",
+  likes: "lk",
+  comments: "cm",
+  reposts: "rp",
+  shares: "sh",
+  views: "vw",
+};
+const PERSONA_HOT_METRIC_FIELD_BY_CODE = Object.fromEntries(
+  Object.entries(PERSONA_HOT_METRIC_FIELD_CODE).map(([field, code]) => [code, field]),
+) as Record<string, PersonaHotMetricField>;
 
 const pendingPersonaSettingsHotMetricsViews = new Map<number, {
   archiveId: string;
@@ -3178,15 +3192,15 @@ export function buildPersonaSettingsRows(archive: PersonaArchive, options?: {
   ];
   if (hotMode === "detail") {
     rows.push(
-      [{ text: "👈 轻量热点", callback_data: `settingshot_light_${id}` }],
-      [{ text: "🔄 刷新详细数据", callback_data: `settingshot_refresh_${id}` }],
+      [{ text: "👈 轻量热点", callback_data: `shl_${id}` }],
+      [{ text: "🔄 刷新详细数据", callback_data: `shr_${id}` }],
       ...chunk(DEFAULT_PERSONA_DETAIL_HOT_FIELDS.map((field) => ({
         text: `${hotFields.includes(field) ? "✅" : "⬜"} ${hotMetricFieldLabel(field)}`,
-        callback_data: `settingshot_filter_${field}_${id}`,
+        callback_data: `shf_${PERSONA_HOT_METRIC_FIELD_CODE[field]}_${id}`,
       })), 2),
     );
   } else {
-    rows.push([{ text: "📊 详细人设数据", callback_data: `settingshot_detail_${id}` }]);
+    rows.push([{ text: "📊 详细人设数据", callback_data: `shd_${id}` }]);
   }
   rows.push(isWorkflow
     ? [
@@ -15586,25 +15600,42 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("settingshot_light_") || data.startsWith("settingshot_detail_")) {
-      const prefix = data.startsWith("settingshot_light_") ? "settingshot_light_" : "settingshot_detail_";
+    if (data.startsWith("settingshot_light_") || data.startsWith("settingshot_detail_") || data.startsWith("shl_") || data.startsWith("shd_")) {
+      const isLight = data.startsWith("settingshot_light_") || data.startsWith("shl_");
+      const prefix = data.startsWith("settingshot_light_")
+        ? "settingshot_light_"
+        : data.startsWith("settingshot_detail_")
+          ? "settingshot_detail_"
+          : data.startsWith("shl_")
+            ? "shl_"
+            : "shd_";
       const id = data.slice(prefix.length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       await renderPersonaSettingsPage(bot, chatId, msgId, archive, defaultPadCode, {
-        autoRefreshLight: prefix === "settingshot_light_",
-        hotMode: prefix === "settingshot_light_" ? "light" : "detail",
+        autoRefreshLight: isLight,
+        hotMode: isLight ? "light" : "detail",
       });
       return;
     }
 
-    if (data.startsWith("settingshot_filter_")) {
-      const rest = data.slice("settingshot_filter_".length);
-      const splitIndex = rest.indexOf("_");
-      if (splitIndex <= 0) { sendMainMenu(chatId, msgId); return; }
-      const field = rest.slice(0, splitIndex) as PersonaHotMetricField;
-      const id = rest.slice(splitIndex + 1);
-      if (!DEFAULT_PERSONA_DETAIL_HOT_FIELDS.includes(field)) { sendMainMenu(chatId, msgId); return; }
+    if (data.startsWith("settingshot_filter_") || data.startsWith("shf_")) {
+      let field: PersonaHotMetricField | undefined;
+      let id = "";
+      if (data.startsWith("settingshot_filter_")) {
+        const rest = data.slice("settingshot_filter_".length);
+        const splitIndex = rest.indexOf("_");
+        if (splitIndex <= 0) { sendMainMenu(chatId, msgId); return; }
+        field = rest.slice(0, splitIndex) as PersonaHotMetricField;
+        id = rest.slice(splitIndex + 1);
+      } else {
+        const rest = data.slice("shf_".length);
+        const splitIndex = rest.indexOf("_");
+        if (splitIndex <= 0) { sendMainMenu(chatId, msgId); return; }
+        field = PERSONA_HOT_METRIC_FIELD_BY_CODE[rest.slice(0, splitIndex)];
+        id = rest.slice(splitIndex + 1);
+      }
+      if (!field || !DEFAULT_PERSONA_DETAIL_HOT_FIELDS.includes(field)) { sendMainMenu(chatId, msgId); return; }
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const current = buildPersonaSettingsHotMetricsView(chatId, id, { mode: "detail" });
@@ -15619,8 +15650,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("settingshot_refresh_")) {
-      const id = data.slice("settingshot_refresh_".length);
+    if (data.startsWith("settingshot_refresh_") || data.startsWith("shr_")) {
+      const id = data.startsWith("settingshot_refresh_")
+        ? data.slice("settingshot_refresh_".length)
+        : data.slice("shr_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const current = buildPersonaSettingsHotMetricsView(chatId, id, { mode: "detail" });
