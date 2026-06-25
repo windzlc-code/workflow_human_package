@@ -27201,6 +27201,18 @@ async function restoreThreadsAutoReplyProfileForNextScan(
   padCode: string,
 ): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
   let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  const ensurePostsTab = async (currentShotUrl: string): Promise<string> => {
+    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    await tapViaAdbAbsoluteQuick(
+      config,
+      padCode,
+      Math.round(screen.width * 0.12),
+      Math.round(screen.height * 0.145),
+      650,
+    ).catch(() => undefined);
+    await delay(650);
+    return await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => currentShotUrl);
+  };
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const uiXml = await dumpUiXmlQuick(config, padCode, 1_500).catch(() => "");
     if (
@@ -27253,6 +27265,7 @@ async function restoreThreadsAutoReplyProfileForNextScan(
       continue;
     }
     if (shotUrl && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+      shotUrl = await ensurePostsTab(shotUrl);
       const cleanShotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
       saveThreadsAutoReplySampleStep({
         padCode,
@@ -27263,6 +27276,7 @@ async function restoreThreadsAutoReplyProfileForNextScan(
       return { ok: true, screenshotUrl: cleanShotUrl };
     }
     if (looksLikeThreadsProfileUiXml(uiXml)) {
+      shotUrl = await ensurePostsTab(shotUrl);
       saveThreadsAutoReplySampleStep({
         padCode,
         step: "profile-restore-for-next-scan",
@@ -27287,6 +27301,7 @@ async function restoreThreadsAutoReplyProfileForNextScan(
   await delay(1000);
   shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
   if (shotUrl && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+    shotUrl = await ensurePostsTab(shotUrl);
     const cleanShotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
     saveThreadsAutoReplySampleStep({
       padCode,
@@ -27304,13 +27319,14 @@ async function restoreThreadsAutoReplyProfileForNextScan(
   }));
   if (fallback.ok) {
     const finalShotUrl = fallback.screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+    const cleanShotUrl = await ensurePostsTab(finalShotUrl || shotUrl);
     saveThreadsAutoReplySampleStep({
       padCode,
       step: "profile-restore-for-next-scan",
-      screenshotUrl: finalShotUrl || undefined,
+      screenshotUrl: cleanShotUrl || undefined,
       meta: { method: "open_profile_fallback" },
     });
-    return { ok: true, screenshotUrl: finalShotUrl || shotUrl };
+    return { ok: true, screenshotUrl: cleanShotUrl || finalShotUrl || shotUrl };
   }
   const fallbackError = fallback as { ok: false; error: string; screenshotUrl?: string };
   return {
