@@ -55,7 +55,6 @@ export const DEFAULT_GEMINI_BASE_URL = DEFAULT_API_BASE_URL;
 const DEFAULT_REQUEST_TIMEOUT_MS = 90_000;
 export const TEXT_UNDERSTANDING_MODEL_FALLBACKS = [
   "xai/grok-4.3",
-  "grok-4.2",
 ] as const;
 
 function parseTextModelList(value?: string): string[] {
@@ -768,6 +767,9 @@ function stripThinkingBlocks(text: string): string {
 }
 
 export function extractText(data: any): string {
+  if (typeof data === "string") {
+    return stripThinkingBlocks(data.trim());
+  }
   const openAiMessageText = extractOpenAiTextContent(data?.choices?.[0]?.message?.content);
   if (openAiMessageText.trim()) {
     return stripThinkingBlocks(openAiMessageText.trim());
