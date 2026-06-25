@@ -13,9 +13,31 @@ export type ArchiveSetup = Partial<DramaSetup> & {
   tweetStyleLinkUrl?: string;
   tweetStyleLinkText?: string;
   tweetStyleUpdatedAt?: string;
+  hotMetrics?: Record<string, {
+    platform?: string;
+    padCode?: string;
+    username?: string;
+    followers?: number;
+    following?: number;
+    recentViews?: number;
+    likes?: number;
+    comments?: number;
+    reposts?: number;
+    shares?: number;
+    views?: number;
+    posts?: number;
+    scannedPosts?: number;
+    complete?: boolean;
+    scope?: string;
+    lightRefreshedAt?: string;
+    refreshedAt?: string;
+    error?: string;
+  }>;
   accountManagement?: {
     threads?: {
       handle?: string;
+      authProfileKey?: string;
+      authProfileBoundAt?: string;
       password?: string;
       passwordSet?: boolean;
       updatedAt?: string;
@@ -56,6 +78,7 @@ export interface PersonaArchivePost {
     hotScore?: number;
     metrics?: Record<string, unknown>;
     engagement?: Record<string, unknown>;
+    publishedAt?: string;
     capturedAt?: string;
     warnings?: string[];
     originalContent?: string;

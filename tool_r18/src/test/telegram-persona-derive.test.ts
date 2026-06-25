@@ -10,6 +10,8 @@ import {
   buildPostImagePreviewOptions,
   buildPostImageRegenerateCallback,
   buildPersonaSettingsRows,
+  buildPersonaPlatformAccountRows,
+  formatPersonaSettingsHotMetricsLines,
   buildPostDetailActionRows,
   buildStoredPostsListView,
   derivePersonaSpecFromPrompt,
@@ -113,6 +115,25 @@ describe("buildPersonaSettingsRows", () => {
     expect(buttons).toContainEqual({ text: "🧾 人设简介", callback_data: `editcontent_${archive.id}` });
   });
 
+  it("shows the detailed hot-data entry by default", () => {
+    const texts = flattenButtonTexts(buildPersonaSettingsRows(archiveForSettings()));
+
+    expect(texts).toContain("📊 详细人设数据");
+  });
+
+  it("shows detail-mode controls and filters when switched to detail mode", () => {
+    const texts = flattenButtonTexts(buildPersonaSettingsRows(archiveForSettings(), {
+      hotMode: "detail",
+      hotFields: ["followers", "views"],
+    }));
+
+    expect(texts).toContain("👈 轻量热点");
+    expect(texts).toContain("🔄 刷新详细数据");
+    expect(texts).toContain("✅ 粉丝");
+    expect(texts).toContain("✅ 浏览");
+    expect(texts).toContain("⬜ 点赞");
+  });
+
   it("hides persona-image controls for workflow personas", () => {
     const rows = buildPersonaSettingsRows(archiveForSettings({
       setup: {
@@ -145,6 +166,83 @@ describe("buildPersonaSettingsRows", () => {
     expect(texts).not.toContain("🎨 生成人设图");
     expect(texts).toContain("👁 查看人设图");
     expect(texts).toContain("🔄 重新生成人设图");
+  });
+});
+
+describe("buildPersonaPlatformAccountRows", () => {
+  it("replaces Threads hot refresh with the account-binding entry", () => {
+    const texts = flattenButtonTexts(buildPersonaPlatformAccountRows("persona-settings-test", "threads", undefined, archiveForSettings()));
+
+    expect(texts).toContain("🪪 人设账号绑定");
+    expect(texts).not.toContain("🔥 热点刷新");
+    expect(texts).not.toContain("🔥 绑定用户名并刷新热点");
+  });
+});
+
+describe("formatPersonaSettingsHotMetricsLines", () => {
+  it("renders light metrics with recent views", () => {
+    const archive = archiveForSettings({
+      setup: {
+        ...archiveForSettings().setup!,
+        accountManagement: {
+          threads: { handle: "stevie875443" },
+        },
+        hotMetrics: {
+          "threads:stevie875443": {
+            platform: "threads",
+            username: "stevie875443",
+            followers: 4,
+            following: 12,
+            recentViews: 61000,
+            lightRefreshedAt: "2026-06-26T02:51:58.000Z",
+          },
+        },
+      },
+    });
+
+    const lines = formatPersonaSettingsHotMetricsLines(archive, { mode: "light" });
+
+    expect(lines[0]).toContain("轻量热点：Threads：账号 @stevie875443");
+    expect(lines[0]).toContain("粉丝 4");
+    expect(lines[0]).toContain("最近浏览 6.1万");
+  });
+
+  it("renders detail metrics without duplicated summary wording", () => {
+    const archive = archiveForSettings({
+      setup: {
+        ...archiveForSettings().setup!,
+        accountManagement: {
+          threads: { handle: "stevie875443" },
+        },
+        hotMetrics: {
+          "threads:stevie875443": {
+            platform: "threads",
+            username: "stevie875443",
+            followers: 4,
+            following: 12,
+            recentViews: 61000,
+            posts: 20,
+            likes: 1591,
+            comments: 244,
+            reposts: 95,
+            shares: 98,
+            views: 63298,
+            complete: true,
+            refreshedAt: "2026-06-26T02:51:58.000Z",
+          },
+        },
+      },
+    });
+
+    const lines = formatPersonaSettingsHotMetricsLines(archive, {
+      mode: "detail",
+      fields: ["posts", "likes", "views"],
+    });
+
+    expect(lines.join("\n")).toContain("推文 20");
+    expect(lines.join("\n")).toContain("点赞 1.6k");
+    expect(lines.join("\n")).toContain("浏览 6.3万");
+    expect(lines.join("\n")).not.toContain("汇总");
   });
 });
 

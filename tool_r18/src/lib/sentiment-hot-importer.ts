@@ -25,10 +25,31 @@ const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3");
 const MIN_SENTIMENT_HOT_SCORE = 1000;
 
+function resolvePreferredChromeExecutablePath(): string | undefined {
+  const candidates = [
+    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  ].filter(Boolean) as string[];
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+function buildLocalChromiumLaunchOptions() {
+  const executablePath = resolvePreferredChromeExecutablePath();
+  return {
+    headless: true,
+    ...(executablePath ? { executablePath } : {}),
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+  };
+}
+
 export type SentimentCookieHealth = "healthy" | "watch" | "degraded" | "expired" | "missing" | "unknown";
 
 export interface SentimentCookieStatus {
   platform: SentimentHotPlatform;
+  profileKey?: string;
   health: SentimentCookieHealth;
   label: string;
   message: string;
@@ -36,6 +57,7 @@ export interface SentimentCookieStatus {
   expiredCookieCount?: number;
   sessionCookieCount?: number;
   expiringSoonCookieCount?: number;
+  hasRequiredSessionCookie?: boolean;
   authorizationNeedsRefresh?: boolean;
   recommendedAction?: string;
   lastAuthorizedAt?: string | null;
@@ -47,6 +69,36 @@ export interface FetchSentimentHotCandidatesResult {
   cookieStatuses: SentimentCookieStatus[];
   warnings: string[];
 }
+
+export interface ThreadsBrowserProfilePublishedPostSnapshot {
+  sourceUrl: string;
+  hotScore: number;
+  metrics: Record<string, unknown>;
+  engagement: NonNullable<SentimentHotCandidate["engagement"]>;
+  capturedAt: string;
+}
+
+export type ThreadsProfileHotMetrics = {
+  platform: "threads";
+  username: string;
+  followers?: number;
+  following?: number;
+  recentViews?: number;
+  posts?: number;
+  likes?: number;
+  comments?: number;
+  reposts?: number;
+  shares?: number;
+  views?: number;
+  scannedPosts?: number;
+  refreshedAt: string;
+  method: "browser" | "reader" | "failed";
+  complete?: boolean;
+  scope?: "authenticated_full_profile" | "public_partial" | "reader_public_partial" | "profile_visible_light" | "failed";
+  lightRefreshedAt?: string;
+  rawText?: string;
+  error?: string;
+};
 
 function cleanText(value: unknown): string {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -99,6 +151,35 @@ function sentimentProfileMatchesPlatform(profile: any, platform: SentimentHotPla
   return profile?.platform === platform || profile?.sourceKey === platform || profile?.key === platform;
 }
 
+function hasValidCookieNamed(cookies: any[], name: string) {
+  const target = String(name || "").toLowerCase();
+  const nowSeconds = Date.now() / 1000;
+  return (cookies || []).some((cookie: any) => {
+    const expires = Number(cookie?.expires);
+    return String(cookie?.name || "").toLowerCase() === target
+      && String(cookie?.value || "").trim().length > 0
+      && (!Number.isFinite(expires) || expires <= 0 || expires > nowSeconds);
+  });
+}
+
+function cookieDomainMatchesAny(cookie: any, domains: string[]) {
+  const raw = String(cookie?.domain || "").trim().toLowerCase().replace(/^\.+/, "");
+  if (!raw) return false;
+  return domains.some((domain) => raw === domain || raw.endsWith(`.${domain}`));
+}
+
+function hasValidThreadsSessionCookie(cookies: any[]) {
+  const targetDomains = ["threads.net", "threads.com"];
+  const nowSeconds = Date.now() / 1000;
+  return (cookies || []).some((cookie: any) => {
+    const expires = Number(cookie?.expires);
+    return String(cookie?.name || "").toLowerCase() === "sessionid"
+      && String(cookie?.value || "").trim().length > 0
+      && cookieDomainMatchesAny(cookie, targetDomains)
+      && (!Number.isFinite(expires) || expires <= 0 || expires > nowSeconds);
+  });
+}
+
 function buildSentimentCookieStatusFromProfile(platform: SentimentHotPlatform, profile: any): SentimentCookieStatus {
   const cookies = Array.isArray(profile?.cookies) ? profile.cookies.filter((item: any) => item && typeof item === "object") : [];
   const nowSeconds = Date.now() / 1000;
@@ -106,9 +187,11 @@ function buildSentimentCookieStatusFromProfile(platform: SentimentHotPlatform, p
   let expired = 0;
   let session = 0;
   let expiringSoon = 0;
+  let hasLoginSession = false;
   for (const cookie of cookies) {
     if (!cookie?.name || !cookie?.value) continue;
     const expires = Number(cookie.expires);
+    if (String(cookie.name || "").toLowerCase() === "sessionid") hasLoginSession = true;
     if (!Number.isFinite(expires) || expires <= 0) {
       valid += 1;
       session += 1;
@@ -119,11 +202,12 @@ function buildSentimentCookieStatusFromProfile(platform: SentimentHotPlatform, p
       if (expires <= nowSeconds + 7 * 24 * 60 * 60) expiringSoon += 1;
     }
   }
+  const missingThreadsLoginSession = platform === "threads" && valid > 0 && !hasLoginSession;
   const health: SentimentCookieHealth = cookies.length === 0
     ? "missing"
     : valid <= 0
       ? "expired"
-      : expired > 0
+      : missingThreadsLoginSession || expired > 0
         ? "degraded"
         : expiringSoon > 0
           ? "watch"
@@ -139,12 +223,14 @@ function buildSentimentCookieStatusFromProfile(platform: SentimentHotPlatform, p
           : "keep";
   return {
     platform,
+    profileKey: cleanText(profile?.key || profile?.sourceKey || platform) || platform,
     health,
     label: platform === "threads" ? "Threads" : "Instagram",
     validCookieCount: valid,
     expiredCookieCount: expired,
     sessionCookieCount: session,
     expiringSoonCookieCount: expiringSoon,
+    hasRequiredSessionCookie: platform !== "threads" || hasValidThreadsSessionCookie(cookies),
     authorizationNeedsRefresh: recommendedAction !== "keep",
     recommendedAction,
     lastAuthorizedAt: profile?.lastAuthorizedAt || null,
@@ -152,6 +238,11 @@ function buildSentimentCookieStatusFromProfile(platform: SentimentHotPlatform, p
       ? `有效 Cookie ${valid} 個，過期 ${expired} 個。`
       : "缺少授權 Cookie，請到快捷配置頁面刷新。",
   };
+}
+
+export function getSentimentBrowserAuthProfileBinding(platform: SentimentHotPlatform): SentimentCookieStatus {
+  const profile = readSentimentBrowserAuthProfilesConfig().find((item: any) => sentimentProfileMatchesPlatform(item, platform));
+  return buildSentimentCookieStatusFromProfile(platform, profile);
 }
 
 function segmentPersonaWords(value: string): string[] {
@@ -576,6 +667,7 @@ export async function fetchSentimentCookieStatuses(): Promise<SentimentCookieSta
 }
 
 function sentimentCookieStatusHasUsableCookies(status: SentimentCookieStatus): boolean {
+  if (status.platform === "threads" && status.hasRequiredSessionCookie === false) return false;
   if (status.health === "healthy" || status.health === "watch" || status.health === "degraded") return true;
   const match = status.message.match(/有效 Cookie\s*(\d+)/);
   return Boolean(match && Number(match[1]) > 0);
@@ -609,7 +701,7 @@ function normalizeCookieForBrowserAuth(cookie: any, fallbackDomain: string) {
   };
 }
 
-async function refreshSentimentBrowserCookiesForPlatform(platform: SentimentHotPlatform): Promise<{ ok: boolean; message: string }> {
+export async function refreshSentimentBrowserCookiesForPlatform(platform: SentimentHotPlatform): Promise<{ ok: boolean; message: string }> {
   const configPath = path.join(resolveSentimentDataDir(), "sentiment-config.json");
   if (!fs.existsSync(configPath)) return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} Cookie 配置不存在。` };
   const profile = readSentimentBrowserAuthProfilesConfig().find((item: any) => sentimentProfileMatchesPlatform(item, platform));
@@ -646,6 +738,9 @@ async function refreshSentimentBrowserCookiesForPlatform(platform: SentimentHotP
     await context.close().catch(() => undefined);
     if (stillLoggedOut || refreshedCookies.length === 0) {
       return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} 自动刷新未保持登录态，需要人工重新登录授权。` };
+    }
+    if (platform === "threads" && !hasValidThreadsSessionCookie(refreshedCookies)) {
+      return { ok: false, message: "Threads Cookie 已讀取，但缺少 threads.net/threads.com 的有效 sessionid；請在後台瀏覽器打開 Threads 並完成登入後重新同步。" };
     }
     const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/browser-auth/cookies`, {
       method: "POST",
@@ -1237,6 +1332,8 @@ async function fetchThreadsSearchPageCandidates(args: {
         userAgent:
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       });
+      const cookies = readSentimentBrowserAuthCookies("threads");
+      if (cookies.length) await context.addCookies(cookies as any[]).catch(() => undefined);
       const page = await context.newPage();
       for (const query of queries.slice(0, 3)) {
         if (results.length >= args.limit) break;
@@ -1268,7 +1365,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   return sorted.length > 0 ? sorted : readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit, args.refresh === true);
 }
 
-const JINA_READER_PREFIX = "https://r.jina.ai/http://r.jina.ai/http://";
+const JINA_READER_PREFIX = "https://r.jina.ai/http://";
 
 async function fetchThreadsReaderSearchCandidates(args: {
   archiveId: string;
@@ -1453,6 +1550,641 @@ function parseMetricNumberLoose(value: unknown): number | undefined {
   return Math.max(0, Math.round(valueNumber));
 }
 
+function assignThreadsProfileHotMetric(out: Partial<ThreadsProfileHotMetrics>, label: string, value: number | undefined) {
+  if (typeof value !== "number") return;
+  if (/followers?|\u7c89\u7d72|\u7c89\u4e1d/i.test(label)) out.followers = value;
+  else if (/following|\u8ffd\u8e64\u4e2d|\u5173\u6ce8\u4e2d/i.test(label)) out.following = value;
+}
+
+function parseThreadsProfileHotMetricsText(text: string): Partial<ThreadsProfileHotMetrics> {
+  const lines = String(text || "")
+    .split(/\r?\n+/g)
+    .map(cleanText)
+    .filter(Boolean)
+    .slice(0, 250);
+  const out: Partial<ThreadsProfileHotMetrics> = {};
+  const joined = lines.join("\n");
+  const labels = "followers?|following|\\u7c89\\u7d72|\\u7c89\\u4e1d|\\u8ffd\\u8e64\\u4e2d|\\u5173\\u6ce8\\u4e2d";
+  const combined = new RegExp(`(\\d+(?:[.,]\\d+)?\\s*(?:[KkMm\\u842c\\u4e07])?)\\s*(${labels})`, "gi");
+  for (const match of joined.matchAll(combined)) {
+    assignThreadsProfileHotMetric(out, match[2] || "", parseMetricNumberLoose(match[1]));
+  }
+  for (const match of joined.matchAll(new RegExp(`(\\d+(?:[.,]\\d+)?\\s*(?:[KkMm\\u842c\\u4e07])?)\\s*(?:\\u4f4d)?\\s*(\\u7c89\\u7d72|\\u7c89\\u4e1d|followers?)`, "gi"))) {
+    assignThreadsProfileHotMetric(out, match[2] || "", parseMetricNumberLoose(match[1]));
+  }
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = lines[index] || "";
+    const next = lines[index + 1] || "";
+    const prev = lines[index - 1] || "";
+    const currentIsLabel = new RegExp(`^(${labels})$`, "i").test(current) || new RegExp(labels, "i").test(current);
+    const nextIsLabel = new RegExp(`^(${labels})$`, "i").test(next) || new RegExp(labels, "i").test(next);
+    if (currentIsLabel) assignThreadsProfileHotMetric(out, current, parseMetricNumberLoose(current) ?? parseMetricNumberLoose(next) ?? parseMetricNumberLoose(prev));
+    else if (nextIsLabel) assignThreadsProfileHotMetric(out, next, parseMetricNumberLoose(current));
+  }
+  const readMetricRuns = (patterns: RegExp[]) => {
+    const values: number[] = [];
+    for (const pattern of patterns) {
+      for (const match of joined.matchAll(pattern)) {
+        const value = parseMetricNumberLoose(match[1]);
+        if (typeof value === "number") values.push(value);
+      }
+    }
+    return values;
+  };
+  const metricNumber = "(\\d+(?:[.,]\\d+)?\\s*(?:[KkMm\\u842c\\u4e07])?)";
+  const likeValues = readMetricRuns([
+    new RegExp(`(?:讚|赞|likes?)\\s*${metricNumber}`, "gi"),
+  ]);
+  const commentValues = readMetricRuns([
+    new RegExp(`(?:留言|評論|评论|comments?)\\s*${metricNumber}`, "gi"),
+  ]);
+  const shareValues = readMetricRuns([
+    new RegExp(`(?:分享|轉發|转发|shares?|reposts?)\\s*${metricNumber}`, "gi"),
+  ]);
+  const viewValues = readMetricRuns([
+    new RegExp(`(?:瀏覽|浏览|觀看|观看|views?|plays?|impressions?)\\s*${metricNumber}`, "gi"),
+    new RegExp(`${metricNumber}\\s*(?:次)?\\s*(?:最近瀏覽次數|最近浏览次数|瀏覽|浏览|觀看|观看|views?|plays?|impressions?)`, "gi"),
+  ]);
+  const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+  const scannedPosts = Math.max(likeValues.length, commentValues.length, shareValues.length, viewValues.length);
+  if (scannedPosts > 0) out.scannedPosts = scannedPosts;
+  const likes = sum(likeValues);
+  const comments = sum(commentValues);
+  const shares = sum(shareValues);
+  const views = sum(viewValues);
+  if (likes > 0) out.likes = likes;
+  if (comments > 0) out.comments = comments;
+  if (shares > 0) out.shares = shares;
+  if (views > 0) out.views = views;
+  return out;
+}
+
+function threadsProfileHotMetricsHasValue(metrics: Partial<ThreadsProfileHotMetrics>) {
+  return ["followers", "following", "scannedPosts", "likes", "comments", "shares", "views"].some((key) => typeof (metrics as any)[key] === "number");
+}
+
+export function analyzeThreadsProfileVisibleSignals(args: {
+  username: string;
+  bodyText: string;
+  buttonText: string[];
+  links: string[];
+}) {
+  const text = [args.bodyText, ...(args.buttonText || [])]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .join("\n");
+  const parsed = parseThreadsProfileHotMetricsText(text);
+  const postUrls = extractUniqueThreadsPostUrlsFromProfileLinks(args.links || [], args.username);
+  return {
+    text,
+    rawText: text,
+    parsed,
+    postUrls,
+    hasUsableProfileSignals: threadsProfileHotMetricsHasValue(parsed) || postUrls.length > 0,
+  };
+}
+
+export function shouldTreatThreadsProfileAsLoginWall(args: {
+  username: string;
+  bodyText: string;
+  buttonText: string[];
+  links: string[];
+}) {
+  const visible = analyzeThreadsProfileVisibleSignals(args);
+  return detectThreadsProfileLoginWall(visible.text) && !visible.hasUsableProfileSignals;
+}
+
+function hasThreadsProfileLoginSessionCookie(cookies: any[]) {
+  return hasValidThreadsSessionCookie(cookies);
+}
+
+function detectThreadsProfileLoginWall(text: string) {
+  const rawText = String(text || "");
+  if (/(?:編輯個人檔案|编辑个人档案|編輯主頁|编辑主页|洞察報告|成效分析)/i.test(rawText)) return false;
+  return /login|log in|sign in|accounts\/login|登入以查看更多|使用 Instagram 帳號繼續|使用 Instagram 账号继续|登入 Instagram|登录 Instagram/i.test(rawText);
+}
+
+function buildThreadsProfileIncompleteMetrics(username: string, refreshedAt: string, scope: ThreadsProfileHotMetrics["scope"], rawText?: string): ThreadsProfileHotMetrics {
+  return {
+    platform: "threads",
+    username,
+    refreshedAt,
+    method: "failed",
+    complete: false,
+    scope,
+    rawText: rawText ? rawText.slice(0, 4000) : undefined,
+    error: "Threads browser login is not valid for full account aggregation. Refresh Threads sentiment cookies with a logged-in sessionid before retrying.",
+  };
+}
+
+type ThreadsGraphqlProfilePostAggregate = {
+  pk: string;
+  code: string;
+  sourceUrl: string;
+  likeCount: number;
+  commentCount: number;
+  repostCount: number;
+  shareCount: number;
+};
+
+type ThreadsGraphqlProfilePageResult = {
+  posts: ThreadsGraphqlProfilePostAggregate[];
+  endCursor?: string;
+  hasNextPage: boolean;
+};
+
+type ThreadsGraphqlRequestTemplate = {
+  params: Record<string, string>;
+  variables: Record<string, any>;
+};
+
+function buildThreadsGraphqlProfileSourceUrl(username: string, post: any): string {
+  const normalizedUsername = String(username || "").replace(/^@+/, "").trim();
+  const canonicalUrl = cleanText(post?.canonical_url || post?.canonicalUrl);
+  if (/^https?:\/\/(?:www\.)?threads\.(?:net|com)\//i.test(canonicalUrl)) {
+    return canonicalUrl.replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/");
+  }
+  const code = cleanText(post?.code);
+  if (!normalizedUsername || !code) return "";
+  return `https://www.threads.net/@${encodeURIComponent(normalizedUsername)}/post/${encodeURIComponent(code)}`;
+}
+
+export function parseThreadsGraphqlProfilePagePayload(args: {
+  username: string;
+  payload: any;
+}): ThreadsGraphqlProfilePageResult {
+  const mediaData = args.payload?.data?.mediaData;
+  const edges = Array.isArray(mediaData?.edges) ? mediaData.edges : [];
+  const posts: ThreadsGraphqlProfilePostAggregate[] = [];
+  for (const edge of edges) {
+    const post = edge?.node?.thread_items?.[0]?.post;
+    const pk = cleanText(post?.pk);
+    const sourceUrl = buildThreadsGraphqlProfileSourceUrl(args.username, post);
+    if (!pk || !sourceUrl) continue;
+    posts.push({
+      pk,
+      code: cleanText(post?.code),
+      sourceUrl,
+      likeCount: Math.max(0, Number(post?.like_count) || 0),
+      commentCount: Math.max(0, Number(post?.text_post_app_info?.direct_reply_count) || 0),
+      repostCount: Math.max(0, Number(post?.text_post_app_info?.repost_count) || 0),
+      shareCount: Math.max(0, Number(post?.text_post_app_info?.reshare_count) || 0),
+    });
+  }
+  return {
+    posts,
+    endCursor: cleanText(mediaData?.page_info?.end_cursor),
+    hasNextPage: mediaData?.page_info?.has_next_page === true,
+  };
+}
+
+function parseThreadsGraphqlRequestTemplate(postData: string): ThreadsGraphqlRequestTemplate | null {
+  const params = new URLSearchParams(String(postData || ""));
+  const rawVariables = params.get("variables");
+  if (!rawVariables) return null;
+  const variables = safeJson(rawVariables);
+  if (!variables || typeof variables !== "object") return null;
+  const out: Record<string, string> = {};
+  for (const [key, value] of params.entries()) out[key] = value;
+  delete out.variables;
+  return {
+    params: out,
+    variables,
+  };
+}
+
+async function requestThreadsGraphqlProfilePage(args: {
+  page: any;
+  template: ThreadsGraphqlRequestTemplate;
+  after: string;
+}): Promise<any> {
+  const params = new URLSearchParams(args.template.params);
+  params.set("variables", JSON.stringify({
+    ...args.template.variables,
+    after: args.after,
+  }));
+  const text = await args.page.evaluate(async ({ body }) => {
+    const response = await fetch("https://www.threads.com/graphql/query", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+      },
+      body,
+    });
+    return await response.text();
+  }, { body: params.toString() });
+  return safeJson(text);
+}
+
+async function collectThreadsGraphqlProfilePosts(args: {
+  page: any;
+  username: string;
+  initialPayload: any;
+  initialTemplate: ThreadsGraphqlRequestTemplate;
+}): Promise<ThreadsGraphqlProfilePostAggregate[]> {
+  const byPk = new Map<string, ThreadsGraphqlProfilePostAggregate>();
+  let current = parseThreadsGraphqlProfilePagePayload({
+    username: args.username,
+    payload: args.initialPayload,
+  });
+  for (const post of current.posts) byPk.set(post.pk, post);
+  let cursor = current.endCursor || "";
+  let hasNextPage = current.hasNextPage;
+  let pages = 0;
+  while (hasNextPage && cursor && pages < 120) {
+    pages += 1;
+    const payload = await requestThreadsGraphqlProfilePage({
+      page: args.page,
+      template: args.initialTemplate,
+      after: cursor,
+    }).catch(() => null);
+    if (!payload) break;
+    current = parseThreadsGraphqlProfilePagePayload({
+      username: args.username,
+      payload,
+    });
+    const beforeSize = byPk.size;
+    for (const post of current.posts) byPk.set(post.pk, post);
+    if (byPk.size === beforeSize && current.endCursor === cursor) break;
+    cursor = current.endCursor || "";
+    hasNextPage = current.hasNextPage;
+  }
+  return [...byPk.values()];
+}
+
+export function parseThreadsPostViewCountFromText(text: string): number | undefined {
+  return parseMetricNumberLoose(
+    String(text || "").match(/(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*(?:次瀏覽|次浏览|瀏覽|浏览|views?)/i)?.[1]
+      || String(text || "").match(/Thread\s+(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s+views/i)?.[1]
+      || String(text || "").match(/(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*views/i)?.[1],
+  );
+}
+
+async function readThreadsViewCountFromPostPage(args: {
+  page: any;
+  sourceUrl: string;
+}): Promise<number | undefined> {
+  await args.page.goto(args.sourceUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: 25_000,
+  }).catch(() => null);
+  await args.page.waitForFunction(() => {
+    const text = String(document.body?.innerText || "");
+    return /(\d+(?:[.,]\d+)?\s*(?:K|M|萬|万)?)\s*(次瀏覽|次浏览|瀏覽|浏览|views?)/i.test(text)
+      || /回覆|回复|Replies?|尚無回覆|暂无回复/i.test(text);
+  }, undefined, { timeout: 8_000 }).catch(() => null);
+  const text = await args.page.locator("body").innerText({ timeout: 6_000 }).catch(() => "");
+  return parseThreadsPostViewCountFromText(text);
+}
+
+async function collectThreadsViewCountsFromPostPages(args: {
+  context: any;
+  posts: ThreadsGraphqlProfilePostAggregate[];
+}): Promise<{ totalViews: number; resolvedPosts: number }> {
+  if (!args.posts.length) return { totalViews: 0, resolvedPosts: 0 };
+  const page = await args.context.newPage();
+  try {
+    let totalViews = 0;
+    let resolvedPosts = 0;
+    for (const post of args.posts) {
+      const viewCount = await readThreadsViewCountFromPostPage({
+        page,
+        sourceUrl: post.sourceUrl,
+      }).catch(() => undefined);
+      if (typeof viewCount === "number") {
+        totalViews += viewCount;
+        resolvedPosts += 1;
+      }
+    }
+    return { totalViews, resolvedPosts };
+  } finally {
+    await page.close().catch(() => null);
+  }
+}
+
+async function buildThreadsProfileAggregateMetrics(args: {
+  username: string;
+  text: string;
+  links: string[];
+}): Promise<Partial<ThreadsProfileHotMetrics>> {
+  const postUrls = extractUniqueThreadsPostUrlsFromProfileLinks(args.links || [], args.username);
+  const out: Partial<ThreadsProfileHotMetrics> = {};
+  if (postUrls.length > 0) {
+    out.scannedPosts = postUrls.length;
+    out.posts = postUrls.length;
+  }
+  const detailResults = await Promise.all(
+    postUrls.slice(0, 80).map(async (sourceUrl) => ({
+      sourceUrl,
+      detail: await fetchThreadsDetailData(sourceUrl).catch(() => ({ engagement: {}, media: [] })),
+    })),
+  );
+  let views = 0;
+  for (const result of detailResults) {
+    const engagement = result.detail.engagement || {};
+    views += typeof engagement.viewCount === "number" ? engagement.viewCount : 0;
+  }
+  if (views > 0) out.views = views;
+  return out;
+}
+
+async function buildThreadsProfileAggregateMetricsFromBrowserPage(args: {
+  page: any;
+  username: string;
+  links: string[];
+}): Promise<Partial<ThreadsProfileHotMetrics>> {
+  const postUrls = extractUniqueThreadsPostUrlsFromProfileLinks(args.links || [], args.username).slice(0, 120);
+  const out: Partial<ThreadsProfileHotMetrics> = {};
+  if (postUrls.length > 0) {
+    out.scannedPosts = postUrls.length;
+    out.posts = postUrls.length;
+  }
+  let likes = 0;
+  let comments = 0;
+  let reposts = 0;
+  let shares = 0;
+  let views = 0;
+  for (const sourceUrl of postUrls) {
+    await args.page.goto(sourceUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 25_000,
+    }).catch(() => null);
+    await args.page.waitForTimeout(2200);
+    const detailText = await args.page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
+    const actionTexts = await args.page.$$eval("[role=button],button,a", (items: any[]) => items
+      .map((item: any) => (item.textContent || "").trim())
+      .filter(Boolean)
+      .slice(0, 120)).catch(() => []);
+    const detail = parseThreadsBrowserPostDetailMetrics({ text: detailText, actionTexts });
+    const engagement = detail?.engagement || {};
+    const metrics = detail?.metrics || {};
+    likes += typeof engagement.likeCount === "number" ? engagement.likeCount : 0;
+    comments += typeof engagement.commentCount === "number" ? engagement.commentCount : 0;
+    reposts += typeof metrics.repost_count === "number" ? metrics.repost_count : 0;
+    shares += typeof metrics.send_count === "number" ? metrics.send_count : 0;
+    views += typeof engagement.viewCount === "number" ? engagement.viewCount : 0;
+  }
+  if (postUrls.length > 0) {
+    out.likes = likes;
+    out.comments = comments;
+    out.reposts = reposts;
+    out.shares = shares;
+  }
+  if (views > 0) out.views = views;
+  return out;
+}
+
+export async function fetchThreadsProfileLightMetrics(usernameInput: string): Promise<ThreadsProfileHotMetrics> {
+  const username = String(usernameInput || "").replace(/^@+/, "").trim();
+  const refreshedAt = new Date().toISOString();
+  if (!username) {
+    return {
+      platform: "threads",
+      username,
+      refreshedAt,
+      lightRefreshedAt: refreshedAt,
+      method: "failed",
+      error: "Threads 帐号未设定，无法刷新轻量热点数据",
+    };
+  }
+  const profileUrl = `https://www.threads.net/@${encodeURIComponent(username)}`;
+  const cookies = readSentimentBrowserAuthCookies("threads");
+  if (!hasThreadsProfileLoginSessionCookie(cookies)) {
+    return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
+  }
+  if (!process.env.VITEST_WORKER_ID && cookies.length) {
+    let browser: any = null;
+    try {
+      const playwright = await import("playwright");
+      browser = await playwright.chromium.launch(buildLocalChromiumLaunchOptions());
+      const context = await browser.newContext({
+        viewport: { width: 900, height: 1400 },
+        locale: "zh-TW",
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+      });
+      await context.addCookies(cookies as any).catch(() => undefined);
+      const page = await context.newPage();
+      await page.goto(`${profileUrl}?__r=${Date.now().toString(36)}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 25_000,
+      }).catch(() => null);
+      await page.waitForTimeout(2200);
+      const bodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
+      const buttonText = await page.$$eval("[role=button],button,a", (items) => items
+        .map((item) => (item.textContent || "").trim())
+        .filter(Boolean)
+        .slice(0, 120)).catch(() => []);
+      const links = await page.$$eval("a[href]", (items: any[]) => items
+        .map((item: any) => item.href || item.getAttribute?.("href") || "")
+        .filter(Boolean)).catch(() => []);
+      const visible = analyzeThreadsProfileVisibleSignals({ username, bodyText, buttonText, links });
+      if (detectThreadsProfileLoginWall(visible.text) && !visible.hasUsableProfileSignals) {
+        return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed", visible.rawText);
+      }
+      const parsed = visible.parsed || {};
+      if (
+        typeof parsed.followers === "number"
+        || typeof parsed.following === "number"
+        || typeof parsed.views === "number"
+      ) {
+        return {
+          platform: "threads",
+          username,
+          followers: parsed.followers,
+          following: parsed.following,
+          recentViews: parsed.views,
+          refreshedAt,
+          lightRefreshedAt: refreshedAt,
+          method: "browser",
+          complete: true,
+          scope: "profile_visible_light",
+          rawText: visible.rawText.slice(0, 4000),
+        };
+      }
+    } catch {
+      // Fall through to the explicit incomplete result below.
+    } finally {
+      await browser?.close().catch(() => undefined);
+    }
+  }
+  return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
+}
+
+export async function fetchThreadsProfileHotMetrics(usernameInput: string): Promise<ThreadsProfileHotMetrics> {
+  const username = String(usernameInput || "").replace(/^@+/, "").trim();
+  const refreshedAt = new Date().toISOString();
+  if (!username) {
+    return {
+      platform: "threads",
+      username,
+      refreshedAt,
+      method: "failed",
+      error: "Threads 帳號未設定，無法刷新熱點資料",
+    };
+  }
+  const profileUrl = `https://www.threads.net/@${encodeURIComponent(username)}`;
+  const cookies = readSentimentBrowserAuthCookies("threads");
+  if (!hasThreadsProfileLoginSessionCookie(cookies)) {
+    return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
+  }
+  if (!process.env.VITEST_WORKER_ID && cookies.length) {
+    let browser: any = null;
+    try {
+      const playwright = await import("playwright");
+      browser = await playwright.chromium.launch(buildLocalChromiumLaunchOptions());
+      const context = await browser.newContext({
+        viewport: { width: 900, height: 1400 },
+        locale: "zh-TW",
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+      });
+      await context.addCookies(cookies as any).catch(() => undefined);
+      const page = await context.newPage();
+      const capturedGraphqlPages = new Map<string, { payload: any; template: ThreadsGraphqlRequestTemplate }>();
+      let initialGraphqlPayload: any = null;
+      let initialGraphqlTemplate: ThreadsGraphqlRequestTemplate | null = null;
+      page.on("response", async (response: any) => {
+        try {
+          if (!/graphql\/query/i.test(String(response.url?.() || response.url || ""))) return;
+          const request = response.request?.();
+          const postData = request?.postData?.() || "";
+          if (!/BarcelonaProfileThreadsTabRefetchableDirectQuery/.test(postData)) return;
+          const template = parseThreadsGraphqlRequestTemplate(postData);
+          if (!template) return;
+          const payload = safeJson(await response.text().catch(() => ""));
+          if (!payload?.data?.mediaData?.edges) return;
+          const afterKey = cleanText(template.variables?.after) || "__FIRST__";
+          capturedGraphqlPages.set(afterKey, { payload, template });
+          if (template.variables?.after == null || template.variables?.after === "") {
+            initialGraphqlTemplate = template;
+            initialGraphqlPayload = payload;
+            return;
+          }
+          if (!initialGraphqlPayload || !initialGraphqlTemplate) {
+            initialGraphqlTemplate = template;
+            initialGraphqlPayload = payload;
+          }
+        } catch {
+          // Ignore listener failures and fall back to the existing partial path below.
+        }
+      });
+      await page.goto(`${profileUrl}?__r=${Date.now().toString(36)}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 25_000,
+      }).catch(() => null);
+      await page.waitForTimeout(3500);
+      const bodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
+      const buttonText = await page.$$eval("[role=button],button,a", (items) => items
+        .map((item) => (item.textContent || "").trim())
+        .filter(Boolean)
+        .slice(0, 120)).catch(() => []);
+      const links = await page.$$eval("a[href]", (items: any[]) => items
+        .map((item: any) => item.href || item.getAttribute?.("href") || "")
+        .filter(Boolean)).catch(() => []);
+      const visible = analyzeThreadsProfileVisibleSignals({ username, bodyText, buttonText, links });
+      if (detectThreadsProfileLoginWall(visible.text) && !visible.hasUsableProfileSignals) {
+        return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "public_partial", visible.rawText);
+      }
+      let parsed = {
+        ...visible.parsed,
+        ...(await buildThreadsProfileAggregateMetricsFromBrowserPage({ page, username, links })),
+      };
+      if (initialGraphqlPayload && initialGraphqlTemplate) {
+        const posts = await collectThreadsGraphqlProfilePosts({
+          page,
+          username,
+          initialPayload: initialGraphqlPayload,
+          initialTemplate: initialGraphqlTemplate,
+        }).catch(() => []);
+        const seededPosts = new Map<string, ThreadsGraphqlProfilePostAggregate>();
+        for (const { payload } of capturedGraphqlPages.values()) {
+          for (const post of parseThreadsGraphqlProfilePagePayload({ username, payload }).posts) {
+            seededPosts.set(post.pk, post);
+          }
+        }
+        for (const post of posts) seededPosts.set(post.pk, post);
+        const allPosts = [...seededPosts.values()];
+        if (allPosts.length) {
+          const views = await collectThreadsViewCountsFromPostPages({
+            context,
+            posts: allPosts,
+          }).catch(() => ({ totalViews: 0, resolvedPosts: 0 }));
+          parsed = {
+            ...visible.parsed,
+            posts: allPosts.length,
+            scannedPosts: allPosts.length,
+            likes: allPosts.reduce((sum, post) => sum + (post.likeCount || 0), 0),
+            comments: allPosts.reduce((sum, post) => sum + (post.commentCount || 0), 0),
+            reposts: allPosts.reduce((sum, post) => sum + (post.repostCount || 0), 0),
+            shares: allPosts.reduce((sum, post) => sum + (post.shareCount || 0), 0),
+            ...(views.resolvedPosts === allPosts.length ? { views: views.totalViews } : {}),
+          };
+        }
+      }
+      const complete = threadsProfileHotMetricsHasValue(parsed)
+        && typeof parsed.scannedPosts === "number"
+        && parsed.scannedPosts > 0
+        && typeof parsed.views === "number";
+      if (threadsProfileHotMetricsHasValue(parsed)) {
+        return {
+          platform: "threads",
+          username,
+          ...parsed,
+          refreshedAt,
+          method: "browser",
+          complete,
+          scope: complete ? "authenticated_full_profile" : "public_partial",
+          rawText: visible.rawText.slice(0, 4000),
+          error: complete ? undefined : "Threads 已抓到全量帖子互动，但仍有部分帖子浏览量未能完成读取。",
+        };
+      }
+    } catch {
+      // Fall through to the explicit incomplete result below.
+    } finally {
+      await browser?.close?.().catch?.(() => null);
+    }
+  }
+  if (process.env.THREADS_PROFILE_ALLOW_PARTIAL_READER === "1") {
+  try {
+    const readerTargetUrl = `${profileUrl}?__r=${Date.now().toString(36)}`;
+    const response = await fetch(`${JINA_READER_PREFIX}${readerTargetUrl}`, {
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "text/plain, text/markdown, */*",
+        "cache-control": "no-cache",
+        pragma: "no-cache",
+      },
+      signal: buildAbortSignalTimeout(15_000),
+    });
+    const text = response.ok ? await response.text() : "";
+    const links = Array.from(text.matchAll(/https?:\/\/(?:www\.)?threads\.(?:net|com)\/@[^)\]\s]+\/post\/[^)\]\s]+/gi))
+      .map((match) => match[0]);
+    const parsed = {
+      ...parseThreadsProfileHotMetricsText(text),
+      ...(await buildThreadsProfileAggregateMetrics({ username, text, links })),
+    };
+    return {
+      platform: "threads",
+      username,
+      ...parsed,
+      refreshedAt,
+      method: threadsProfileHotMetricsHasValue(parsed) ? "reader" : "failed",
+      rawText: text.slice(0, 4000),
+      error: threadsProfileHotMetricsHasValue(parsed) ? undefined : "未從 Threads Profile 讀取到可用熱點資料",
+    };
+  } catch (error: any) {
+    return {
+      platform: "threads",
+      username,
+      refreshedAt,
+      method: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  }
+  return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
+}
+
 function extractEngagementMetricsFromText(value: string): NonNullable<SentimentHotCandidate["engagement"]> {
   const text = String(value || "");
   const engagement: NonNullable<SentimentHotCandidate["engagement"]> = {};
@@ -1461,10 +2193,11 @@ function extractEngagementMetricsFromText(value: string): NonNullable<SentimentH
     const count = parseMetricNumber(match?.[1] || match?.[0]);
     if (typeof count === "number") (engagement as any)[key] = count;
   };
-  assign("likeCount", /(?:like|likes|liked|讚|赞|喜歡|喜欢|愛心|爱心|點讚|点赞)\D{0,8}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)/i);
-  assign("commentCount", /(?:comment|comments|reply|replies|留言|評論|评论|回覆|回复)\D{0,8}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)/i);
-  assign("viewCount", /(?:view|views|watch|play|plays|瀏覽|浏览|觀看|观看|播放|閱讀|阅读|流量)\D{0,8}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)/i);
-  assign("shareCount", /(?:share|shares|repost|reposts|轉發|转发|分享)\D{0,8}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)/i);
+  const metricSep = String.raw`[\s:：|｜·•,，。()\[\]{}<>]*`;
+  assign("likeCount", new RegExp(String.raw`(?:like|likes|liked|讚|赞|喜歡|喜欢|愛心|爱心|點讚|点赞)${metricSep}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)`, "i"));
+  assign("commentCount", new RegExp(String.raw`(?:comment|comments|reply|replies|留言|評論|评论|回覆|回复)${metricSep}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)`, "i"));
+  assign("viewCount", new RegExp(String.raw`(?:view|views|watch|play|plays|瀏覽|浏览|觀看|观看|播放|閱讀|阅读|流量)${metricSep}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)`, "i"));
+  assign("shareCount", new RegExp(String.raw`(?:share|shares|repost|reposts|轉發|转发|分享)${metricSep}(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)`, "i"));
   const rawSignals = Array.from(text.matchAll(/(?:^|\n)\s*\[?(\d+(?:[.,]\d+)?\s*(?:[Kk萬万])?)\]?\s*(?=\n|$)/g))
     .map((match) => parseMetricNumber(match[1]))
     .filter((item): item is number => typeof item === "number" && item > 0)
@@ -1504,11 +2237,17 @@ function refreshEngagementMetrics(
   base: NonNullable<SentimentHotCandidate["engagement"]>,
   latest: NonNullable<SentimentHotCandidate["engagement"]>,
 ): NonNullable<SentimentHotCandidate["engagement"]> {
-  const refreshed = mergeEngagementMetrics(base, latest);
+  const refreshed: NonNullable<SentimentHotCandidate["engagement"]> = {};
   if (typeof latest.likeCount === "number") refreshed.likeCount = latest.likeCount;
   if (typeof latest.commentCount === "number") refreshed.commentCount = latest.commentCount;
   if (typeof latest.viewCount === "number") refreshed.viewCount = latest.viewCount;
   if (typeof latest.shareCount === "number") refreshed.shareCount = latest.shareCount;
+  const rawSignals = (latest.rawSignals || base.rawSignals || [])
+    .filter((item): item is number => typeof item === "number" && Number.isFinite(item) && item > 0);
+  if (rawSignals.length) refreshed.rawSignals = [...new Set(rawSignals)].slice(0, 8);
+  for (const key of ["likeCount", "commentCount", "viewCount", "shareCount"] as const) {
+    if (typeof refreshed[key] !== "number") (refreshed as any)[key] = undefined;
+  }
   return refreshed;
 }
 
@@ -1546,10 +2285,381 @@ export function parseThreadsDetailEngagementMarkdown(text: string): NonNullable<
   if (rawSignals.length) {
     engagement.rawSignals = [...new Set([...(engagement.rawSignals || []), ...rawSignals])].slice(0, 8);
     if (typeof engagement.likeCount !== "number") engagement.likeCount = rawSignals[0];
-    if (typeof engagement.commentCount !== "number" && rawSignals.length >= 2) engagement.commentCount = rawSignals[1];
-    if (typeof engagement.shareCount !== "number" && rawSignals.length >= 3) engagement.shareCount = rawSignals[2];
   }
   return engagement;
+}
+
+function normalizeThreadsPublishedHistoryText(value: unknown): string {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\s+/g, "")
+    .replace(/[，,。.!！?？:：;；"'“”‘’`·、（）()[\]{}<>《》【】]/g, "")
+    .toLowerCase();
+}
+
+function isThreadsProfilePostTimeLine(value: string): boolean {
+  return /^(?:\d+\s*)?(?:秒|分鐘|分钟|小時|小时|天|週|周|月|年|s|m|h|d|w|mo|y)\b/i.test(value)
+    || /^\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周|月|年|s|m|h|d|w|mo|y)$/i.test(value);
+}
+
+function normalizeThreadsPostUrl(raw: unknown): string {
+  const value = String(raw || "").trim();
+  const match = value.match(/^https?:\/\/(?:www\.)?threads\.(?:net|com)\/@[^/?#\s]+\/post\/[^/?#\s]+/i);
+  if (!match) return "";
+  return match[0].replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/");
+}
+
+function extractUniqueThreadsPostUrlsFromProfileLinks(links: string[], username: string): string[] {
+  const normalizedUsername = String(username || "").replace(/^@+/, "").toLowerCase();
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const link of links || []) {
+    const normalized = normalizeThreadsPostUrl(link);
+    if (!normalized) continue;
+    if (!new RegExp(`/@${normalizedUsername.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/post/`, "i").test(normalized)) continue;
+    const code = normalized.match(/\/post\/([^/?#\s]+)/i)?.[1] || normalized;
+    if (seen.has(code)) continue;
+    seen.add(code);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function parseThreadsProfileMetricLines(lines: string[]): NonNullable<SentimentHotCandidate["engagement"]> {
+  const numbers = lines
+    .flatMap((line) => {
+      const matches = Array.from(String(line || "").matchAll(/\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?/g));
+      if (!matches.length) return [parseMetricNumberLoose(line)];
+      return matches.map((match) => parseMetricNumberLoose(match[0]));
+    })
+    .filter((item): item is number => typeof item === "number" && item > 0)
+    .slice(0, 8);
+  const engagement: NonNullable<SentimentHotCandidate["engagement"]> = {};
+  if (typeof numbers[0] === "number") engagement.likeCount = numbers[0];
+  if (typeof numbers[1] === "number") engagement.commentCount = numbers[1];
+  if (typeof numbers[2] === "number") engagement.shareCount = numbers[2];
+  if (numbers.length) engagement.rawSignals = numbers;
+  return engagement;
+}
+
+function buildThreadsBrowserProfileSnapshot(args: {
+  sourceUrl: string;
+  engagement: NonNullable<SentimentHotCandidate["engagement"]>;
+  metrics?: Record<string, unknown>;
+}): ThreadsBrowserProfilePublishedPostSnapshot {
+  const engagement: NonNullable<SentimentHotCandidate["engagement"]> = { ...(args.engagement || {}) };
+  if (typeof engagement.likeCount !== "number") engagement.likeCount = 0;
+  if (typeof engagement.commentCount !== "number") engagement.commentCount = 0;
+  if (typeof engagement.shareCount !== "number") engagement.shareCount = 0;
+  const rawSignals = engagement.rawSignals || [];
+  const sendCount = rawSignals[3];
+  const hotScore = Math.max(
+    engagement.likeCount || 0,
+    engagement.commentCount || 0,
+    engagement.shareCount || 0,
+    typeof sendCount === "number" ? sendCount : 0,
+  );
+  return {
+    sourceUrl: args.sourceUrl,
+    hotScore,
+    engagement,
+    metrics: {
+      ...compactEngagementMetrics(engagement),
+      ...(args.metrics || {}),
+      repost_count: engagement.shareCount,
+      send_count: sendCount,
+    },
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+export function parseThreadsBrowserProfilePublishedPosts(args: {
+  username: string;
+  text: string;
+  links: string[];
+}): Array<ThreadsBrowserProfilePublishedPostSnapshot & { content: string }> {
+  const username = String(args.username || "").replace(/^@+/, "").trim();
+  if (!username) return [];
+  const postUrls = extractUniqueThreadsPostUrlsFromProfileLinks(args.links || [], username);
+  const lines = String(args.text || "")
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const out: Array<ThreadsBrowserProfilePublishedPostSnapshot & { content: string }> = [];
+  let postIndex = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].replace(/^@+/, "").toLowerCase() !== username.toLowerCase()) continue;
+    const timeLine = lines[index + 1] || "";
+    if (!isThreadsProfilePostTimeLine(timeLine)) continue;
+    const contentLines: string[] = [];
+    const metricLines: string[] = [];
+    let cursor = index + 2;
+    for (; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor];
+      const next = lines[cursor + 1] || "";
+      if (line.replace(/^@+/, "").toLowerCase() === username.toLowerCase() && isThreadsProfilePostTimeLine(next)) break;
+      if (/^(翻譯|翻译|translate|translation)$/i.test(line)) continue;
+      const metric = parseMetricNumberLoose(line);
+      if (typeof metric === "number" && metric > 0 && contentLines.length > 0) {
+        metricLines.push(line);
+        continue;
+      }
+      if (!metricLines.length) contentLines.push(line);
+    }
+    const content = contentLines.join("\n").trim();
+    const sourceUrl = postUrls[postIndex++] || "";
+    if (content && sourceUrl) {
+      out.push({
+        content,
+        ...buildThreadsBrowserProfileSnapshot({
+          sourceUrl,
+          engagement: parseThreadsProfileMetricLines(metricLines),
+        }),
+      });
+    }
+    index = Math.max(index, cursor - 1);
+  }
+  return out;
+}
+
+export function matchThreadsBrowserProfilePublishedPost(args: {
+  username: string;
+  text: string;
+  links: string[];
+  content: string;
+}): ThreadsBrowserProfilePublishedPostSnapshot | null {
+  const target = normalizeThreadsPublishedHistoryText(args.content);
+  if (!target) return null;
+  const targetHead = target.slice(0, Math.min(24, target.length));
+  const posts = parseThreadsBrowserProfilePublishedPosts({
+    username: args.username,
+    text: args.text,
+    links: args.links,
+  });
+  let best: (ThreadsBrowserProfilePublishedPostSnapshot & { content: string }) | null = null;
+  let bestScore = 0;
+  for (const post of posts) {
+    const current = normalizeThreadsPublishedHistoryText(post.content);
+    if (!current) continue;
+    let score = 0;
+    if (targetHead && current.includes(targetHead)) score += 100;
+    if (current && target.includes(current.slice(0, Math.min(18, current.length)))) score += 60;
+    for (let len = Math.min(30, target.length, current.length); len >= 8; len -= 2) {
+      if (current.includes(target.slice(0, len)) || target.includes(current.slice(0, len))) {
+        score += len;
+        break;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = post;
+    }
+  }
+  if (!best || bestScore < 18) return null;
+  const { content: _content, ...snapshot } = best;
+  return snapshot;
+}
+
+async function readThreadsBrowserProfileMatchFromPage(args: {
+  page: any;
+  username: string;
+  content: string;
+}): Promise<ThreadsBrowserProfilePublishedPostSnapshot | null> {
+  const profileText = await args.page.locator("body").innerText({ timeout: 10_000 }).catch(() => "");
+  const links = await args.page.$$eval("a[href]", (items: any[]) => items
+    .map((item: any) => item.href || item.getAttribute?.("href") || "")
+    .filter(Boolean)).catch(() => []);
+  return matchThreadsBrowserProfilePublishedPost({
+    username: args.username,
+    content: args.content,
+    text: profileText,
+    links,
+  });
+}
+
+async function lookupThreadsPublishedPostFromBrowserSearchPage(args: {
+  page: any;
+  username: string;
+  content: string;
+}): Promise<ThreadsBrowserProfilePublishedPostSnapshot | null> {
+  const username = String(args.username || "").replace(/^@+/, "").trim();
+  const content = String(args.content || "").trim();
+  if (!username || !content) return null;
+  const queries = Array.from(new Set([
+    content.replace(/\s+/g, " ").slice(0, 72),
+    content.replace(/\s+/g, "").slice(0, 48),
+    `${username} ${content.replace(/\s+/g, " ").slice(0, 48)}`,
+  ].map((item) => item.trim()).filter((item) => item.length >= 6)));
+  for (const query of queries.slice(0, 4)) {
+    await args.page.goto(`https://www.threads.net/search?q=${encodeURIComponent(query)}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 35_000,
+    }).catch(() => null);
+    await args.page.waitForTimeout(4500);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const matched = await readThreadsBrowserProfileMatchFromPage({
+        page: args.page,
+        username,
+        content,
+      });
+      if (matched) return matched;
+      await args.page.mouse.wheel(0, 1800).catch(() => null);
+      await args.page.waitForTimeout(1200);
+    }
+  }
+  return null;
+}
+
+function parseThreadsActionMetricText(value: unknown, labelPattern: RegExp): number | undefined {
+  const text = String(value || "").replace(/\s+/g, "").trim();
+  if (!labelPattern.test(text)) return undefined;
+  const withoutLabel = text.replace(labelPattern, "");
+  const count = parseMetricNumberLoose(withoutLabel);
+  return typeof count === "number" ? count : 0;
+}
+
+function findThreadsActionMetricSequence(actionTexts: string[]) {
+  const normalized = (actionTexts || []).map((item) => String(item || "").replace(/\s+/g, "").trim()).filter(Boolean);
+  for (let index = 0; index <= normalized.length - 4; index += 1) {
+    const like = parseThreadsActionMetricText(normalized[index], /^(?:Like|Likes|讚|赞|喜歡|喜欢)/i);
+    const comment = parseThreadsActionMetricText(normalized[index + 1], /^(?:Comment|Comments|Reply|Replies|留言|回覆|回复|評論|评论)/i);
+    const repost = parseThreadsActionMetricText(normalized[index + 2], /^(?:Repost|Reposts|轉發|转发)/i);
+    const send = parseThreadsActionMetricText(normalized[index + 3], /^(?:Share|Shares|分享|傳送|发送|傳送給|发送给)/i);
+    if ([like, comment, repost, send].every((item) => typeof item === "number")) {
+      return { likeCount: like, commentCount: comment, repostCount: repost, sendCount: send };
+    }
+  }
+  return null;
+}
+
+export function parseThreadsBrowserPostDetailMetrics(args: {
+  text: string;
+  actionTexts: string[];
+}): Pick<ThreadsBrowserProfilePublishedPostSnapshot, "hotScore" | "engagement" | "metrics"> | null {
+  const sequence = findThreadsActionMetricSequence(args.actionTexts || []);
+  if (!sequence) return null;
+  const text = String(args.text || "");
+  const viewCount = parseMetricNumberLoose(
+    text.match(/Thread\s+(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s+views/i)?.[1]
+    || text.match(/串文\s*(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*次瀏覽/i)?.[1]
+    || text.match(/(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*次瀏覽/i)?.[1],
+  );
+  const rawSignals = [sequence.likeCount, sequence.commentCount, sequence.repostCount, sequence.sendCount]
+    .filter((item): item is number => typeof item === "number" && Number.isFinite(item) && item > 0);
+  const engagement: NonNullable<SentimentHotCandidate["engagement"]> = {
+    likeCount: sequence.likeCount,
+    commentCount: sequence.commentCount,
+    shareCount: sequence.repostCount,
+  };
+  if (typeof viewCount === "number") engagement.viewCount = viewCount;
+  if (rawSignals.length) engagement.rawSignals = rawSignals;
+  const interactionHotScore = Math.max(sequence.likeCount, sequence.commentCount, sequence.repostCount, sequence.sendCount);
+  const hotScore = typeof viewCount === "number" ? viewCount : interactionHotScore;
+  return {
+    hotScore,
+    engagement,
+    metrics: {
+      ...compactEngagementMetrics(engagement),
+      repost_count: sequence.repostCount,
+      send_count: sequence.sendCount,
+      ...(typeof viewCount === "number" ? { view_count: viewCount } : {}),
+    },
+  };
+}
+
+async function fetchThreadsBrowserDetailMetrics(sourceUrl: string): Promise<Pick<ThreadsBrowserProfilePublishedPostSnapshot, "hotScore" | "engagement" | "metrics"> | null> {
+  if (process.env.VITEST_WORKER_ID) return null;
+  const normalizedSourceUrl = String(sourceUrl || "").replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/");
+  if (!/^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(normalizedSourceUrl)) return null;
+  const cookies = readSentimentBrowserAuthCookies("threads");
+  if (!cookies.length) return null;
+  let browser: any = null;
+  try {
+    const playwright = await import("playwright");
+    browser = await playwright.chromium.launch(buildLocalChromiumLaunchOptions());
+    const context = await browser.newContext({
+      viewport: { width: 900, height: 1400 },
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    });
+    await context.addCookies(cookies as any);
+    const page = await context.newPage();
+    await page.goto(normalizedSourceUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 35_000,
+    }).catch(() => null);
+    await page.waitForTimeout(6500);
+    const detailText = await page.locator("body").innerText({ timeout: 10_000 }).catch(() => "");
+    const actionTexts = await page.$$eval("[role=button],button", (items) => items
+      .map((item) => (item.textContent || "").trim())
+      .filter(Boolean)).catch(() => []);
+    return parseThreadsBrowserPostDetailMetrics({ text: detailText, actionTexts });
+  } catch {
+    return null;
+  } finally {
+    await browser?.close?.().catch?.(() => null);
+  }
+}
+
+export async function lookupThreadsPublishedPostFromBrowserProfile(args: {
+  username: string;
+  content: string;
+}): Promise<ThreadsBrowserProfilePublishedPostSnapshot | null> {
+  const username = String(args.username || "").replace(/^@+/, "").trim();
+  const content = String(args.content || "").trim();
+  if (!username || !content) return null;
+  const cookies = readSentimentBrowserAuthCookies("threads");
+  if (!cookies.length) return null;
+  let browser: any = null;
+  try {
+    const playwright = await import("playwright");
+    browser = await playwright.chromium.launch(buildLocalChromiumLaunchOptions());
+    const context = await browser.newContext({
+      viewport: { width: 900, height: 1400 },
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    });
+    await context.addCookies(cookies as any);
+    const page = await context.newPage();
+    await page.goto(`https://www.threads.net/@${encodeURIComponent(username)}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 35_000,
+    }).catch(() => null);
+    await page.waitForTimeout(4500);
+    let matched = await readThreadsBrowserProfileMatchFromPage({ page, username, content });
+    for (let attempt = 0; !matched && attempt < 8; attempt += 1) {
+      await page.mouse.wheel(0, 2200).catch(() => null);
+      await page.waitForTimeout(1400);
+      matched = await readThreadsBrowserProfileMatchFromPage({ page, username, content });
+    }
+    if (!matched) {
+      matched = await lookupThreadsPublishedPostFromBrowserSearchPage({ page, username, content });
+    }
+    if (!matched) return null;
+    await page.goto(matched.sourceUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 35_000,
+    }).catch(() => null);
+    await page.waitForTimeout(6500);
+    const detailText = await page.locator("body").innerText({ timeout: 10_000 }).catch(() => "");
+    const actionTexts = await page.$$eval("[role=button],button", (items) => items
+      .map((item) => (item.textContent || "").trim())
+      .filter(Boolean)).catch(() => []);
+    const detailMetrics = parseThreadsBrowserPostDetailMetrics({ text: detailText, actionTexts });
+    if (!detailMetrics) return matched;
+    return {
+      ...matched,
+      hotScore: detailMetrics.hotScore,
+      engagement: detailMetrics.engagement,
+      metrics: {
+        ...(matched.metrics || {}),
+        ...(detailMetrics.metrics || {}),
+      },
+      capturedAt: new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  } finally {
+    await browser?.close?.().catch?.(() => null);
+  }
 }
 
 function extractThreadsMediaFromMarkdown(text: string, limit = 12): SentimentHotMedia[] {
@@ -1588,7 +2698,9 @@ async function fetchThreadsDetailData(sourceUrl: string): Promise<{
   const normalizedSourceUrl = String(sourceUrl || "").replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/");
   if (!/^https:\/\/www\.threads\.net\/@[^/]+\/post\//i.test(normalizedSourceUrl)) return { engagement: {}, media: [] };
   try {
-    const response = await fetch(`${JINA_READER_PREFIX}${normalizedSourceUrl}`, {
+    const cacheBuster = `__r=${Date.now().toString(36)}`;
+    const readerTargetUrl = `${normalizedSourceUrl}${normalizedSourceUrl.includes("?") ? "&" : "?"}${cacheBuster}`;
+    const response = await fetch(`${JINA_READER_PREFIX}${readerTargetUrl}`, {
       headers: {
         "user-agent": "Mozilla/5.0",
         accept: "text/plain, text/markdown, */*",
@@ -1629,19 +2741,25 @@ export async function refreshSentimentSourceMetrics(args: {
     return { ok: false, message: "目前仅支持 Threads 原帖实时刷新热度。" };
   }
   const detail = await fetchThreadsDetailData(sourceUrl);
-  const hasMetrics = hasNamedEngagementMetrics(detail.engagement) || Boolean(detail.engagement.rawSignals?.length);
+  const browserDetail = await fetchThreadsBrowserDetailMetrics(sourceUrl);
+  const latestEngagement = browserDetail?.engagement || detail.engagement;
+  const hasMetrics = hasNamedEngagementMetrics(latestEngagement);
   if (!hasMetrics && !detail.media.length) {
     return { ok: false, message: "暂时没有从原帖读取到新的热度数据，请稍后重试。" };
   }
-  const engagement = refreshEngagementMetrics(args.existingEngagement || {}, detail.engagement);
+  const engagement = refreshEngagementMetrics(args.existingEngagement || {}, latestEngagement);
   const media = mergeCandidateMedia(args.existingMedia || [], detail.media);
-  const hotScore = Math.max(
-    Number(args.existingHotScore || 0),
+  const refreshedHotScore = Math.max(
     engagement.viewCount || 0,
     engagement.likeCount || 0,
     engagement.commentCount || 0,
     engagement.shareCount || 0,
   );
+  const hotScore = typeof browserDetail?.hotScore === "number"
+    ? browserDetail.hotScore
+    : refreshedHotScore > 0
+      ? refreshedHotScore
+      : Number(args.existingHotScore || 0);
   return {
     ok: true,
     message: "已刷新原帖热度。",
@@ -1650,6 +2768,12 @@ export async function refreshSentimentSourceMetrics(args: {
     media,
     metrics: {
       mediaCount: media.length,
+      like_count: engagement.likeCount || 0,
+      comment_count: engagement.commentCount || 0,
+      share_count: engagement.shareCount || 0,
+      repost_count: engagement.shareCount || 0,
+      send_count: Number((browserDetail?.metrics as any)?.send_count || 0),
+      ...(browserDetail?.metrics || {}),
       ...compactEngagementMetrics(engagement),
     },
   };
@@ -1664,7 +2788,7 @@ async function enrichThreadsCandidateDetails(candidates: SentimentHotCandidate[]
   const enriched = [...candidates];
   await Promise.all(targets.map(async ({ candidate, index }) => {
     const detail = await fetchThreadsDetailData(candidate.sourceUrl);
-    if (!hasNamedEngagementMetrics(detail.engagement) && !detail.engagement.rawSignals?.length && !detail.media.length) return;
+    if (!hasNamedEngagementMetrics(detail.engagement) && !detail.media.length) return;
     const engagement = mergeEngagementMetrics(candidate.engagement || {}, detail.engagement);
     const media = mergeCandidateMedia(candidate.media || [], detail.media);
     enriched[index] = {
@@ -1692,6 +2816,24 @@ function compactEngagementMetrics(engagement: NonNullable<SentimentHotCandidate[
   return out;
 }
 
+function normalizeSentimentPublishedAt(value: unknown): string | undefined {
+  const text = cleanText(value);
+  if (!text) return undefined;
+  const parsed = Date.parse(text);
+  if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (slash) {
+    const month = Number(slash[1]);
+    const day = Number(slash[2]);
+    const yearRaw = Number(slash[3]);
+    const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return new Date(Date.UTC(year, month - 1, day)).toISOString();
+    }
+  }
+  return undefined;
+}
+
 export function parseThreadsReaderSearchMarkdownCandidates(args: {
   text: string;
   query: string;
@@ -1711,6 +2853,7 @@ export function parseThreadsReaderSearchMarkdownCandidates(args: {
     const authorMatches = [...before.matchAll(/\[([^\]\n]{2,80})]\((https:\/\/www\.threads\.net\/@[^)\s]+)\)/g)];
     const author = cleanText(authorMatches.at(-1)?.[1] || "Threads");
     const sourceUrl = match[2];
+    const publishedAt = normalizeSentimentPublishedAt(match[1]);
     const block = match[3] || "";
     const content = cleanThreadsReaderContent(block);
     if (isLowQualitySentimentContent(content)) continue;
@@ -1738,6 +2881,7 @@ export function parseThreadsReaderSearchMarkdownCandidates(args: {
         ...compactEngagementMetrics(engagement),
       },
       engagement,
+      publishedAt,
       capturedAt: new Date().toISOString(),
       warnings: [],
     });
@@ -1920,8 +3064,11 @@ function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
         };
       });
     if (platform !== "threads") return cookies;
-    const mirrored = cookies.map((cookie: any) => ({ ...cookie, domain: ".threads.com" }));
-    return [...cookies, ...mirrored];
+    const mirrored = cookies.flatMap((cookie: any) => [
+      { ...cookie, domain: ".threads.net" },
+      { ...cookie, domain: ".threads.com" },
+    ]);
+    return activeUniqueCookies([...cookies, ...mirrored]);
   } catch {
     return [];
   }
@@ -2194,6 +3341,7 @@ async function readCandidatesFromDatabase(args: { archiveId: string; keywords: s
           ...compactEngagementMetrics(engagement),
         },
         engagement,
+        publishedAt: normalizeSentimentPublishedAt(row.published_at),
         capturedAt: cleanText(row.last_seen_at || row.found_at || row.first_seen_at) || new Date().toISOString(),
         warnings: media.filter((item) => item.warning).map((item) => item.warning as string),
       });
