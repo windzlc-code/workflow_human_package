@@ -21766,6 +21766,7 @@ export interface ThreadsAutoReplyConfig {
   maxReplies?: number;
   maxAgeDays?: number;
   commentPersona?: WarmupCommentPersona;
+  cancellationToken?: PublishCancellationToken;
 }
 
 export interface ThreadsAutoReplyProgress {
@@ -28460,6 +28461,17 @@ async function openThreadsMediaOverlayCommentsIfVisible(
       const nextUiText = normalizeSingleLine(decodeXmlAttr(
         await dumpUiXmlQuick(config, padCode, 2_000).catch(() => ""),
       ));
+      if (looksLikeThreadsRepostOptionsUiXml(nextUiText)) {
+        saveThreadsAutoReplySampleStep({
+          padCode,
+          step: "media-overlay-comment-tap-opened-repost-options",
+          screenshotUrl: nextShotUrl || undefined,
+          meta: { point, uiPreview: nextUiText.slice(0, 220) },
+        });
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+        await delay(650);
+        break;
+      }
       if (/(熱門|热门|新增到串文|新增至串文|Add to thread)/i.test(nextUiText)) {
         return nextShotUrl;
       }
@@ -28754,6 +28766,59 @@ async function openThreadsCommentReplyComposerAtPoint(
   };
 }
 
+function looksLikeThreadsRepostOptionsUiXml(uiXml: string): boolean {
+  const line = normalizeSingleLine(decodeXmlAttr(uiXml));
+  if (!line) return false;
+  return /轉發選項|转发选项|Repost options/i.test(line)
+    && /(引用|Quote|標記|标记|Mark|僅限轉發|仅限转发|Repost only|僅限|仅限)/i.test(line);
+}
+
+async function recoverThreadsAutoReplyCollectSurfaceIfBlocked(
+  config: VmosConfig,
+  padCode: string,
+  step: string,
+  shotUrl: string | undefined,
+  uiXml: string,
+): Promise<void> {
+  const uiPreview = normalizeSingleLine(decodeXmlAttr(uiXml));
+  if (looksLikeThreadsRepostOptionsUiXml(uiXml)) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: `${step}-repost-options-detected`,
+      screenshotUrl: shotUrl || undefined,
+      meta: { reason: "repost_options_bottom_sheet", uiPreview: uiPreview.slice(0, 220) },
+    });
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+    await delay(650);
+    throw new Error("自动回复采集阶段跑偏到转发选项弹层，已关闭并跳过当前帖");
+  }
+  if (await detectThreadsSideDrawerLocally(shotUrl).catch(() => false)) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: `${step}-side-drawer-detected`,
+      screenshotUrl: shotUrl || undefined,
+      meta: { reason: "side_drawer" },
+    });
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+    await delay(650);
+    throw new Error("自动回复采集阶段跑偏到侧边栏，已关闭并跳过当前帖");
+  }
+  if (
+    await detectThreadsPostActionSheetLocally(shotUrl).catch(() => false)
+    && /引用|Quote|標記|标记|轉發|转发|Repost/i.test(uiPreview)
+  ) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: `${step}-action-sheet-detected`,
+      screenshotUrl: shotUrl || undefined,
+      meta: { reason: "unexpected_action_sheet", uiPreview: uiPreview.slice(0, 220) },
+    });
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+    await delay(650);
+    throw new Error("自动回复采集阶段跑偏到操作弹层，已关闭并跳过当前帖");
+  }
+}
+
 async function collectThreadsAutoReplyPostContext(
   config: VmosConfig,
   padCode: string,
@@ -28819,6 +28884,7 @@ async function collectThreadsAutoReplyPostContext(
       "threadsAutoReply first ui dump after rating dismiss",
     );
   }
+  await recoverThreadsAutoReplyCollectSurfaceIfBlocked(config, padCode, "collect-start", firstShotUrl || undefined, firstUiXml);
   saveThreadsAutoReplySampleStep({
     padCode,
     step: "collect-start",
@@ -28936,6 +29002,19 @@ async function collectThreadsAutoReplyPostContext(
   }
   let replyTarget: WarmupFeedActionTargets | null = null;
   let visibleCommentCandidates: ThreadsAutoReplyCandidate[] = [];
+  const visibleCommentCandidateKeys = new Set<string>();
+  const appendVisibleCommentCandidates = (items: ThreadsAutoReplyCandidate[]) => {
+    for (const item of items) {
+      const key = [
+        normalizeSingleLine(item.author || "").toLowerCase(),
+        normalizeSingleLine(item.text || "").toLowerCase(),
+        item.replyPoint ? `${Math.round(item.replyPoint.x)}:${Math.round(item.replyPoint.y)}` : "",
+      ].join("|");
+      if (!key || visibleCommentCandidateKeys.has(key)) continue;
+      visibleCommentCandidateKeys.add(key);
+      visibleCommentCandidates.push(item);
+    }
+  };
   let latestCommentShotUrl = firstShotUrl;
   const commentCollectScrolls = xmlAvailable
     ? [
@@ -28977,6 +29056,7 @@ async function collectThreadsAutoReplyPostContext(
       padCode,
       "threadsAutoReply page ui dump",
     ) : "";
+    await recoverThreadsAutoReplyCollectSurfaceIfBlocked(config, padCode, `collect-page-${page + 1}`, shotUrl || undefined, uiXml);
     const visibleTexts = extractThreadsAutoReplyVisibleTexts(uiXml);
     let pageTriedVisionFallback = false;
     let pageVisionFallbackError = "";
@@ -29099,7 +29179,7 @@ async function collectThreadsAutoReplyPostContext(
       },
     });
     if (pageVisibleComments.length) {
-      visibleCommentCandidates = pageVisibleComments;
+      appendVisibleCommentCandidates(pageVisibleComments);
       latestCommentShotUrl = shotUrl || latestCommentShotUrl;
     }
     const scrollCommand = commentCollectScrolls[page];
@@ -29123,6 +29203,7 @@ async function collectThreadsAutoReplyPostContext(
     padCode,
     "threadsAutoReply restored ui dump",
   ) : "";
+  await recoverThreadsAutoReplyCollectSurfaceIfBlocked(config, padCode, "collect-restored", restoredShotUrl || undefined, restoredUiXml);
   let restoredVisibleComments = extractThreadsAutoReplyVisibleComments(restoredUiXml, restoredShotUrl || firstShotUrl, postOwnIdentifiers);
   let restoredVisionFallbackError = "";
   if (!restoredVisibleComments.length && restoredShotUrl) {
@@ -29150,7 +29231,7 @@ async function collectThreadsAutoReplyPostContext(
     },
   });
   if (restoredVisibleComments.length) {
-    visibleCommentCandidates = restoredVisibleComments;
+    appendVisibleCommentCandidates(restoredVisibleComments);
     latestCommentShotUrl = restoredShotUrl || latestCommentShotUrl;
   }
   const restoredTarget = visibleCommentCandidates.length
@@ -29230,7 +29311,9 @@ export async function autoReplyThreadsAccount(
   const maxPosts = Math.max(1, Math.min(5, Math.floor(cfg.maxPosts || 3)));
   const maxReplies = Math.max(1, Math.min(5, Math.floor(cfg.maxReplies || 3)));
   const maxAgeDays = Math.max(1, Math.min(7, Math.floor(cfg.maxAgeDays || 2)));
+  const throwIfCancelled = () => cfg.cancellationToken?.throwIfCancelled?.();
   const report = (progress: Partial<ThreadsAutoReplyProgress>) => {
+    throwIfCancelled();
     onProgress?.({
       step: progress.step || "Threads 自动回复进行中",
       scannedPosts: progress.scannedPosts ?? scannedPosts,
@@ -29249,12 +29332,25 @@ export async function autoReplyThreadsAccount(
   let skipped = 0;
   const replyScreenshots: string[] = [];
   const errors: string[] = [];
+  console.log(`[threads-auto-reply][core] pad=${padCode} stage=init maxPosts=${maxPosts} maxReplies=${maxReplies} maxAgeDays=${maxAgeDays}`);
   const historyEntries = readThreadsAutoReplyHistory();
+  console.log(`[threads-auto-reply][core] pad=${padCode} stage=history_loaded entries=${historyEntries.length}`);
   const repliedKeys = new Set(historyEntries
     .filter((entry) => entry.padCode === padCode)
     .map((entry) => entry.key));
   const processedPostHashes = new Set<string>();
-  const accountInfo = await queryThreadsAccountFromAndroidAccountManager(config, padCode, 7_000).catch(() => null);
+  console.log(`[threads-auto-reply][core] pad=${padCode} stage=account_query_start`);
+  const accountInfo = await withTimeout(
+    queryThreadsAccountFromAndroidAccountManager(config, padCode, 7_000),
+    8_000,
+    "threadsAutoReply account query timeout",
+  ).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    errors.push(message);
+    console.warn(`[threads-auto-reply][core] pad=${padCode} stage=account_query_failed error=${message}`);
+    return null;
+  });
+  console.log(`[threads-auto-reply][core] pad=${padCode} stage=account_query_done username=${accountInfo?.username || ""}`);
   const ownIdentifiers = mergeThreadsAutoReplyOwnIdentifiers([
     accountInfo?.username,
   ]);
@@ -29275,6 +29371,8 @@ export async function autoReplyThreadsAccount(
   };
 
   report({ step: "正在进入 Threads 个人主页" });
+  console.log(`[threads-auto-reply][core] pad=${padCode} stage=preflight_start`);
+  throwIfCancelled();
   let preflightState = await withTimeout(
     classifyThreadsPageOnDevice(config, padCode),
     8_000,
@@ -29283,6 +29381,8 @@ export async function autoReplyThreadsAccount(
     errors.push(error instanceof Error ? error.message : String(error));
     return null;
   });
+  console.log(`[threads-auto-reply][core] pad=${padCode} stage=preflight_done page=${preflightState?.page || ""}`);
+  throwIfCancelled();
   if (preflightState && isThreadsTerminalPage(preflightState.page)) {
     throwThreadsTerminalPage(preflightState, "自动回复启动后检测到账号状态阻断");
   }
@@ -29344,6 +29444,7 @@ export async function autoReplyThreadsAccount(
     throw new Error(result.error);
   }
   const currentShotBeforeOpen = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => preflightState?.screenshotUrl || "");
+  throwIfCancelled();
   const currentUiBeforeOpen = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
   const currentInReplyComposer = Boolean(
     findThreadsReplyComposerInputTarget(currentUiBeforeOpen)
@@ -29361,13 +29462,17 @@ export async function autoReplyThreadsAccount(
   const opened = currentAlreadyUsable
     ? { ok: true as const, screenshotUrl: currentShotBeforeOpen }
     : await withTimeout(
-      openThreadsLatestOwnPostFromProfile(config, padCode, maxAgeDays),
+      (async () => {
+        console.log(`[threads-auto-reply][core] pad=${padCode} stage=open_profile_start maxAgeDays=${maxAgeDays}`);
+        return await openThreadsLatestOwnPostFromProfile(config, padCode, maxAgeDays);
+      })(),
       150_000,
       "threadsAutoReply open latest post timeout",
     ).catch((error) => ({
       ok: false as const,
       error: error instanceof Error ? error.message : String(error),
     }));
+  throwIfCancelled();
   if (opened.ok === false) {
     const openedError = opened as { ok: false; error: string; screenshotUrl?: string };
     await rememberEvidenceScreenshot("auto-reply-open-profile-failed", {
@@ -29390,6 +29495,7 @@ export async function autoReplyThreadsAccount(
   }
 
   for (let postIndex = 0; postIndex < maxPosts && replied < maxReplies; postIndex += 1) {
+    throwIfCancelled();
     scannedPosts += 1;
     report({ step: `正在扫描第 ${postIndex + 1} 条帖子评论` });
 
@@ -29423,6 +29529,7 @@ export async function autoReplyThreadsAccount(
         sourceScreenshotUrl: currentShotUrl || undefined,
       };
     });
+    throwIfCancelled();
     const duplicatePost = processedPostHashes.has(context.postHash);
     if (duplicatePost) {
       skipped += 1;
@@ -29443,6 +29550,7 @@ export async function autoReplyThreadsAccount(
         errors.push(`第 ${postIndex + 1} 条模型筛选/生成失败：${message}`);
         return null;
       });
+    throwIfCancelled();
     if (!decision) {
       if (!duplicatePost) {
         skipped += 1;
@@ -29479,6 +29587,7 @@ export async function autoReplyThreadsAccount(
       } else {
         try {
           const openedReply = await openThreadsCommentReplyComposerAtPoint(config, padCode, commentTarget);
+          throwIfCancelled();
           if (!openedReply.ok) {
             throw new Error(openedReply.error);
           }
@@ -29510,6 +29619,7 @@ export async function autoReplyThreadsAccount(
             45_000,
             "threadsAutoReply send reply timeout",
           );
+          throwIfCancelled();
           replied += 1;
           rememberThreadsAutoReplyComment({
             padCode,
@@ -29535,10 +29645,12 @@ export async function autoReplyThreadsAccount(
     }
 
     if (replied >= maxReplies || postIndex >= maxPosts - 1) break;
+    throwIfCancelled();
     const nextOpened = await openThreadsNextVisibleOwnPostFromCurrentProfile(config, padCode, maxAgeDays).catch((error) => ({
         ok: false as const,
         error: error instanceof Error ? error.message : String(error),
       }));
+    throwIfCancelled();
     if (!nextOpened.ok) {
       errors.push(nextOpened.error);
       await rememberEvidenceScreenshot("auto-reply-open-next-post-failed", {

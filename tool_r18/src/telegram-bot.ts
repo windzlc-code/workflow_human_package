@@ -3177,9 +3177,14 @@ async function runPadThreadsAutoReplyFromTelegram(
     const result = await autoReplyThreadsAccount(
       creds,
       padCode,
-      { maxPosts: 3, maxReplies: 3, maxAgeDays, commentPersona },
+      {
+        maxPosts: 3,
+        maxReplies: 3,
+        maxAgeDays,
+        commentPersona,
+        cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) },
+      },
       (p) => {
-        console.log(`[telegram][acctautoreply_run] chat=${chatId} pad=${boundPad.padCode} key=${padOperationKey} stage=result replied=${result.replied} scannedPosts=${result.scannedPosts} scannedComments=${result.scannedComments}`);
         assertPadOperationNotCancelled(padOperationKey);
         lastProgress = p;
         const lines = [
@@ -3265,7 +3270,13 @@ async function runPersonaThreadsAutoReplyFromTelegram(
     const result = await autoReplyThreadsAccount(
       creds,
       boundPad.padCode,
-      { maxPosts: 3, maxReplies: 3, maxAgeDays, commentPersona },
+      {
+        maxPosts: 3,
+        maxReplies: 3,
+        maxAgeDays,
+        commentPersona,
+        cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) },
+      },
       (p) => {
         assertPadOperationNotCancelled(padOperationKey);
         lastProgress = p;
@@ -14170,7 +14181,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const result = await autoReplyThreadsAccount(
           creds,
           padCode,
-          { maxPosts: 3, maxReplies: 3, maxAgeDays, commentPersona },
+          {
+            maxPosts: 3,
+            maxReplies: 3,
+            maxAgeDays,
+            commentPersona,
+            cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) },
+          },
           (p) => {
             assertPadOperationNotCancelled(padOperationKey);
             lastProgress = p;
@@ -14184,7 +14201,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             void updateTelegramPublishStatus(bot, chatId, msgId, "threads_auto_reply", lines, p.step);
           },
         );
-        console.log(`[telegram][acctautoreply_run] chat=${chatId} pad=${boundPad.padCode} key=${padOperationKey} stage=result replied=${result.replied} scannedPosts=${result.scannedPosts} scannedComments=${result.scannedComments}`);
+        console.log(`[telegram][acctautoreply_run] chat=${chatId} pad=${padCode} key=${padOperationKey} stage=result replied=${result.replied} scannedPosts=${result.scannedPosts} scannedComments=${result.scannedComments}`);
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
         await bot.sendMessage(chatId, `✅ *Threads自动回复完成*\n\n雲機：${padName}\n已掃描貼文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
@@ -15055,7 +15072,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const result = await autoReplyThreadsAccount(
           creds,
           boundPad.padCode,
-          { maxPosts: 3, maxReplies: 3, maxAgeDays, commentPersona },
+          {
+            maxPosts: 3,
+            maxReplies: 3,
+            maxAgeDays,
+            commentPersona,
+            cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) },
+          },
           (p) => {
             assertPadOperationNotCancelled(padOperationKey);
             lastProgress = p;
