@@ -19202,7 +19202,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (paidR18VideoPostAction.action === "custom") {
         pendingPaidR18VideoCustomInputs.set(chatId, { actionKey: paidR18VideoPostAction.key, createdAt: Date.now() });
         await safeEditOrSend(bot, chatId, msgId, [
-          "✍️ 請輸入這支付費視頻要保存的推文文案。",
+          "✍️ 請輸入這個付費視頻要保存的推文文案。",
           "",
           "下一條文字會和視頻一起寫入付費推文庫。",
         ].join(String.fromCharCode(10)), {
@@ -22768,7 +22768,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const finalContent = String(text || "").trim();
       if (!finalContent) {
-        await bot.sendMessage(chatId, "請輸入要和這支付費視頻一起保存的文字文案。", {
+        await bot.sendMessage(chatId, "請輸入要和這個付費視頻一起保存的文字文案。", {
           reply_markup: {
             inline_keyboard: [
               [{ text: "📝 改用 Grok 生成", callback_data: buildPaidR18VideoPostCallback("ai", paidR18VideoCustomInput.actionKey) }],
