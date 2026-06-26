@@ -1937,15 +1937,9 @@ function buildMatrixSourceRows(): Array<Array<{ text: string; callback_data: str
 }
 
 function buildMatrixCountRowsForLimit(commonLimit: number): Array<Array<{ text: string; callback_data: string }>> {
-  const candidates = [...new Set([1, 2, 3, 5, 10, commonLimit])]
-    .filter((count) => count > 0 && count <= commonLimit)
-    .sort((a, b) => a - b);
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (let index = 0; index < candidates.length; index += 2) {
-    rows.push(candidates.slice(index, index + 2).map((count) => ({
-      text: `每人 ${count} 篇`,
-      callback_data: `mxc_${count}`,
-    })));
+  if (commonLimit > 0) {
+    rows.push([{ text: `每人 ${commonLimit} 篇`, callback_data: `mxc_${commonLimit}` }]);
   }
   rows.push([{ text: "每人全部", callback_data: "mxc_all" }]);
   rows.push([{ text: "◀️ 返回平台", callback_data: "mxback_platform" }]);
