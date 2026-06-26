@@ -26536,10 +26536,17 @@ async function callThreadsAutoReplyDirectMultimodalModel(
   const apiKey = normalizeSingleLine(config.gptKey || config.geminiTextKey || "");
   const baseUrl = normalizeSingleLine(config.gptEndpoint || config.geminiTextEndpoint || "");
   if (!apiKey || !baseUrl) throw new Error("OpenAI 兼容多模態端點未設定");
-  const modelCandidates = String(options.model || config.llmModelPriorityOrder || config.llm_model_priority_order || resolvePublishVerifyModel() || "xai/grok-4.3")
+  const modelCandidates = [
+    ...String(options.model || config.llmModelPriorityOrder || config.llm_model_priority_order || resolvePublishVerifyModel() || "")
     .split(/[,\n]/)
     .map((item) => normalizeSingleLine(item))
-    .filter(Boolean);
+      .filter(Boolean),
+    "google/gemini-3.5-flash",
+    "google/gemini-3-flash-preview",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "xai/grok-4.3",
+  ];
   const modelScore = (candidate: string) => {
     const lower = candidate.toLowerCase();
     if (/gemini-3\.5-flash/.test(lower)) return 0;
@@ -26548,7 +26555,15 @@ async function callThreadsAutoReplyDirectMultimodalModel(
     if (/grok|xai/.test(lower)) return 4;
     return 3;
   };
-  const model = [...modelCandidates].sort((a, b) => modelScore(a) - modelScore(b))[0] || "xai/grok-4.3";
+  const seenModels = new Set<string>();
+  const model = [...modelCandidates]
+    .filter((candidate) => {
+      const key = candidate.toLowerCase();
+      if (!candidate || seenModels.has(key)) return false;
+      seenModels.add(key);
+      return true;
+    })
+    .sort((a, b) => modelScore(a) - modelScore(b))[0] || "xai/grok-4.3";
   const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
     headers: {
