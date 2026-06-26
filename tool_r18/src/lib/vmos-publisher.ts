@@ -28498,7 +28498,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   if (openedPage && (openedPage.page === "login_required" || openedPage.page === "challenge" || openedPage.page === "system_dialog")) {
     return { ok: false, error: `Threads 当前不可自动回复：${openedPage.reason}`, screenshotUrl: openedPage.screenshotUrl || shotUrl };
   }
-  const detail = await withTimeout(
+  let detail = await withTimeout(
     validateThreadsAutoReplyDetailReady(config, padCode, openedPage?.screenshotUrl || shotUrl),
     5_000,
     "threadsAutoReply validate next opened post timeout",
@@ -28507,6 +28507,65 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     error: error instanceof Error ? error.message : String(error),
     screenshotUrl: openedPage?.screenshotUrl || shotUrl,
   }));
+  if (
+    detail.ok !== true
+    && await detectThreadsProfilePageLocally(detail.screenshotUrl || openedPage?.screenshotUrl || shotUrl).catch(() => false)
+  ) {
+    const image = await getImageDimensions(profileShotUrlBeforeTap).catch(() => null);
+    const imageWidth = image?.width || BASE_SCREEN.width;
+    const imageHeight = image?.height || BASE_SCREEN.height;
+    const retryPoints = [
+      {
+        x: Math.round(imageWidth * 0.48),
+        y: Math.round(Math.max(imageHeight * 0.34, Math.min(imageHeight * 0.78, target.y - imageHeight * 0.18))),
+        debugReason: "profile_next_retry_post_body_near_action_row",
+      },
+      {
+        x: Math.round(imageWidth * 0.34),
+        y: Math.round(Math.max(imageHeight * 0.34, Math.min(imageHeight * 0.78, target.y - imageHeight * 0.30))),
+        debugReason: "profile_next_retry_post_text_area",
+      },
+    ];
+    for (const [retryIndex, retryPoint] of retryPoints.entries()) {
+      await tapScreenshotPointViaAdbNoWait(config, padCode, profileShotUrlBeforeTap, retryPoint, 2200).catch(async () => {
+        const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+        await tapViaAdbAbsolute(
+          config,
+          padCode,
+          Math.round(retryPoint.x * (screen.width / imageWidth)),
+          Math.round(retryPoint.y * (screen.height / imageHeight)),
+          2200,
+        );
+      });
+      await delay(1100);
+      const retryShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => detail.screenshotUrl || shotUrl);
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-next-open-self-correct-retry",
+        screenshotUrl: retryShotUrl || undefined,
+        meta: {
+          retryIndex: retryIndex + 1,
+          originalTarget: target,
+          retryPoint,
+        },
+      });
+      const retryOverlayShotUrl = retryShotUrl
+        ? await openThreadsMediaOverlayCommentsIfVisible(config, padCode, retryShotUrl).catch(() => retryShotUrl)
+        : retryShotUrl;
+      const retryDetail = await withTimeout(
+        validateThreadsAutoReplyDetailReady(config, padCode, retryOverlayShotUrl || retryShotUrl || shotUrl),
+        5_000,
+        "threadsAutoReply validate next opened post self-correct timeout",
+      ).catch((error) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+        screenshotUrl: retryOverlayShotUrl || retryShotUrl || shotUrl,
+      }));
+      if (retryDetail.ok === true) return { ok: true, screenshotUrl: retryDetail.screenshotUrl };
+      detail = retryDetail;
+      if (!await detectThreadsProfilePageLocally(retryDetail.screenshotUrl || "").catch(() => false)) break;
+    }
+  }
   if (detail.ok !== true && /回复编辑器|回覆編輯器|reply editor|回复|回覆/.test((detail as { ok: false; error: string; screenshotUrl?: string }).error)) {
     const fallback = await openThreadsProfilePostByTextFallback(
       config,
