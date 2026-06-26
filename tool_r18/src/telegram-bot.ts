@@ -791,6 +791,7 @@ const pendingPostSelections = new Map<number, {
 const pendingPostActions = new Map<number, {
   archiveId: string;
   postId: string;
+  source?: "posts" | "favorites";
   groupContentType?: TelegramGroupContentType;
 }>();
 
@@ -809,6 +810,7 @@ type PendingPublishPadSelection = {
   startIndex?: number;
   count?: number;
   page?: number;
+  source?: "posts" | "favorites";
   groupContentType?: TelegramGroupContentType;
   retryPostIdsByPad?: Record<string, string[]>;
   completedPadCodesByPost?: Record<string, string[]>;
@@ -5108,7 +5110,7 @@ async function saveStoredPostCustomEdit(args: {
   const archive = await loadPersonaArchive(args.archiveId);
   const post = archive ? findArchivePostBySource(archive, args.postId, args.source) : null;
   if (!archive || !post) {
-    await args.bot.sendMessage(args.chatId, "?????????????????????");
+    await args.bot.sendMessage(args.chatId, "沒有找到這篇推文，請返回列表重新打開。");
     return;
   }
   let mediaItems = post.mediaItems;
@@ -5138,7 +5140,7 @@ async function saveStoredPostCustomEdit(args: {
       mediaItems: mediaItems || post.sourceMeta?.mediaItems,
       warnings: [
         ...(post.sourceMeta?.warnings || []),
-        "???????????",
+        "已手動編輯推文內容",
       ],
     } as any,
     updatedAt: new Date().toISOString(),
@@ -5158,11 +5160,11 @@ async function saveStoredPostCustomEdit(args: {
         },
       });
   if (!updated) {
-    await args.bot.sendMessage(args.chatId, "???????????");
+    await args.bot.sendMessage(args.chatId, "保存推文修改失敗，請稍後重試。");
     return;
   }
   await addSummariesToMemoryAsync(args.archiveId, [
-    `???${args.source === "favorites" ? "??" : "???"}?? | ??:${updated.content.slice(0, 160)}`,
+    `已更新${args.source === "favorites" ? "收藏" : "待發布"}推文 | 內容:${updated.content.slice(0, 160)}`,
   ]).catch(() => undefined);
   pendingPostActions.set(args.chatId, { archiveId: args.archiveId, postId: args.postId, source: args.source, groupContentType: args.groupContentType });
   const sourcePosts = resolveArchivePostCollection(archive, args.source);
@@ -5170,7 +5172,7 @@ async function saveStoredPostCustomEdit(args: {
   const displayIndex = args.displayIndex || (updated.orderIndex ?? sourceIndex) + 1;
   const mediaList = getStoredPostMediaItems(updated);
   const imageUrl = String(mediaList[0]?.url || updated.imageUrl || "").trim();
-  await args.bot.sendMessage(args.chatId, `?????
+  await args.bot.sendMessage(args.chatId, `✅ 推文已保存
 
 ${buildPostDetailTextWithArchive(displayIndex, updated.content, imageUrl, archive, updated.sourceMeta)}`, {
     parse_mode: "HTML",
@@ -5187,7 +5189,7 @@ ${buildPostDetailTextWithArchive(displayIndex, updated.content, imageUrl, archiv
         allowSentimentEditControls: args.source === "favorites" || isSentimentHotImportedPost(updated),
         favoriteCallback: args.source === "favorites" ? undefined : "post_favorite_action",
         backCallback: buildPostSourcePageCallback(args.archiveId, args.source, 0, args.groupContentType),
-        backText: args.source === "favorites" ? "?? ??????" : "?? ??????",
+        backText: args.source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
       }),
     },
   });
@@ -10067,11 +10069,13 @@ async function attachGeneratedImageToArchivePost(args: {
 async function regenerateArchivePostContent(args: {
   archiveId: string;
   postId: string;
+  source?: "posts" | "favorites";
 }) {
   const archive = await loadPersonaArchive(args.archiveId);
   if (!archive) throw new Error("人设不存在");
-  const originalIndex = archive.posts.findIndex((post) => post.id === args.postId);
-  const original = archive.posts[originalIndex];
+  const sourcePosts = resolveArchivePostCollection(archive, args.source);
+  const originalIndex = sourcePosts.findIndex((post) => post.id === args.postId);
+  const original = sourcePosts[originalIndex];
   if (!original) throw new Error("推文不存在");
 
   let generated: any = null;
@@ -10099,9 +10103,7 @@ async function regenerateArchivePostContent(args: {
   const latestArchive = await loadPersonaArchive(args.archiveId);
   if (!latestArchive) throw new Error("人设不存在");
   const now = new Date().toISOString();
-  const nextPosts = latestArchive.posts
-    .filter((post) => !generatedPostIds.has(post.id))
-    .map((post) => post.id === args.postId
+  const patchPost = (post: PersonaArchive["posts"][number]) => post.id === args.postId
       ? {
           ...post,
           content: generatedContent,
@@ -10118,10 +10120,16 @@ async function regenerateArchivePostContent(args: {
             },
           ],
         }
-      : post);
-  const saved = await savePersonaArchive({ ...latestArchive, posts: nextPosts });
+      : post;
+  const nextPosts = latestArchive.posts
+    .filter((post) => !generatedPostIds.has(post.id))
+    .map((post) => args.source === "favorites" ? post : patchPost(post));
+  const nextFavorites = (latestArchive.favoritePosts || [])
+    .filter((post) => !generatedPostIds.has(post.id))
+    .map((post) => args.source === "favorites" ? patchPost(post) : post);
+  const saved = await savePersonaArchive({ ...latestArchive, posts: nextPosts, favoritePosts: nextFavorites });
   invalidatePersonaListCache();
-  const updated = saved.posts.find((post) => post.id === args.postId);
+  const updated = resolveArchivePostCollection(saved, args.source).find((post) => post.id === args.postId);
   if (!updated) throw new Error("保存重新生成结果失败");
   return updated;
 }
@@ -11900,7 +11908,7 @@ async function updateStoredPostMediaItems(args: {
   successText: string;
 }) {
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
-  const post = archive?.posts.find((item) => item.id === args.postId);
+  const post = archive ? findArchivePostBySource(archive, args.postId, args.source) : null;
   if (!archive || !post) {
     await args.bot.sendMessage(args.chatId, "没有找到这篇推文，请返回推文列表重新打开。");
     return;
@@ -19122,8 +19130,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const post = archive ? findArchivePostBySource(archive, postId, source) : null;
       if (!post) {
         await deleteTemporaryMessage(bot, chatId, loadingMessage);
-        await safeEditOrSend(bot, chatId, msgId, "?????????", {
-          reply_markup: { inline_keyboard: [[{ text: "?? ??????", callback_data: buildPostSourcePageCallback(archiveId, source, 0, selected?.groupContentType) }]] },
+        await safeEditOrSend(bot, chatId, msgId, "沒有找到這篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(archiveId, source, 0, selected?.groupContentType) }]] },
         });
         return;
       }
@@ -19151,7 +19159,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         allowSentimentEditControls: isFavoriteSource || isSentimentImportedPost,
         favoriteCallback: isFavoriteSource ? undefined : "post_favorite_action",
         backCallback: buildPostSourcePageCallback(archiveId, source, listPage, selected?.groupContentType),
-        backText: isFavoriteSource ? "?? ??????" : "?? ??????",
+        backText: isFavoriteSource ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
       });
       if ((isSentimentImportedPost || isFavoriteSource ? mediaItems.length > 0 : mediaItems.length > 1)) {
         if (await sendStoredPostMediaGridDetail({
@@ -19725,15 +19733,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const archive = await loadPersonaForThisBot(action.archiveId);
-      const post = explicitPostIndex !== null ? archive?.posts[explicitPostIndex] : archive?.posts.find((item) => item.id === action.postId);
+      const post = explicitPostIndex !== null ? archive?.posts[explicitPostIndex] : archive ? findArchivePostBySource(archive, action.postId, action.source) : null;
       if (!archive || !post) {
         await safeEditOrSend(bot, chatId, msgId, "\u6c92\u6709\u627e\u5230\u9019\u7bc7\u63a8\u6587\u3002", {
-          reply_markup: { inline_keyboard: [[{ text: "\u25c0\ufe0f \u8fd4\u56de\u63a8\u6587\u5217\u8868", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+          reply_markup: { inline_keyboard: [[{ text: "\u25c0\ufe0f \u8fd4\u56de\u63a8\u6587\u5217\u8868", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] },
         });
         return;
       }
       if (!action.postId) action.postId = post.id;
       const isImageOnly = data === "post_img_regen" || data.startsWith("post_img_regen_");
+      if (isImageOnly && action.source === "favorites") {
+        await safeEditOrSend(bot, chatId, msgId, "收藏推文請先進入「媒體管理」上傳或替換媒體。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+        });
+        return;
+      }
       if (isImageOnly && !isWorkflowPersonaListItem(archive) && !getExplicitPersonaReferenceImageUrl(archive)) {
         await safeEditOrSend(bot, chatId, msgId, [
           "⚠️ 此人設尚未生成人設圖。",
@@ -19760,21 +19774,27 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const sourcePosts = resolveArchivePostCollection(archive, action.source);
+      const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
+      const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
       await safeEditOrSend(
         bot,
         chatId,
         msgId,
         isImageOnly
-          ? `🖼 正在为第 ${(post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1} 篇单独生成图片...`
-          : `🔄 正在重新生成第 ${(post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1} 篇推文...`,
-        { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: `posts_${action.archiveId}` }]] } },
+          ? `🖼 正在为第 ${displayIndex} 篇单独生成图片...`
+          : `🔄 正在重新生成第 ${displayIndex} 篇推文...`,
+        { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] } },
       );
       const stopTyping = startTelegramTyping(bot, chatId);
       try {
           const updated = await regenerateArchivePostContent(action);
           stopTyping();
-          const displayIndex = (updated.orderIndex ?? archive.posts.findIndex((item) => item.id === updated.id)) + 1;
-          await bot.sendMessage(chatId, `✅ 推文已重新生成\n\n${buildPostDetailTextWithArchive(displayIndex, updated.content, String(updated.imageUrl || ""), archive, updated.sourceMeta)}`, {
+          const updatedSourcePosts = resolveArchivePostCollection(archive, action.source);
+          const updatedSourceIndex = updatedSourcePosts.findIndex((item) => item.id === updated.id);
+          const updatedDisplayIndex = (updated.orderIndex ?? updatedSourceIndex) + 1;
+          pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: updated.id, source: action.source, groupContentType: action.groupContentType });
+          await bot.sendMessage(chatId, `✅ 推文已重新生成\n\n${buildPostDetailTextWithArchive(updatedDisplayIndex, updated.content, String(updated.imageUrl || ""), archive, updated.sourceMeta)}`, {
             parse_mode: "HTML",
             ...buildPostImagePreviewOptions(String(updated.imageUrl || "")),
             reply_markup: {
@@ -19783,17 +19803,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 publishCallback: "post_action",
                 deleteCallback: "post_delete_action",
                 archiveId: action.archiveId,
-                postIndex: archive.posts.findIndex((item) => item.id === updated.id),
+                postIndex: action.source === "favorites" ? undefined : archive.posts.findIndex((item) => item.id === updated.id),
                 groupContentType: action.groupContentType,
-                canRefreshMetrics: canRefreshSentimentPostMetrics(updated),
-                allowSentimentEditControls: isSentimentHotImportedPost(updated),
+                canRefreshMetrics: action.source === "favorites" ? false : canRefreshSentimentPostMetrics(updated),
+                allowSentimentEditControls: action.source === "favorites" || isSentimentHotImportedPost(updated),
+                favoriteCallback: action.source === "favorites" ? undefined : "post_favorite_action",
+                backCallback: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType),
+                backText: action.source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
               }),
             },
           });
       } catch (error) {
         stopTyping();
         await bot.sendMessage(chatId, `❌ ${isImageOnly ? "图片生成失败" : "重新生成推文失败"}：${formatUserFacingError(error, isImageOnly ? "图片生成失败，请稍后重试。" : "推文生成失敗，請稍後重試。")}`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(action.archiveId, 0, action.groupContentType) }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] },
         });
       }
       return;
@@ -20034,43 +20057,43 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const source = selected?.source || action?.source || "posts";
       const groupContentType = selected?.groupContentType || action?.groupContentType;
       if (!archiveId || !postId) {
-        await safeEditOrSend(bot, chatId, msgId, "??????????????", {
-          reply_markup: { inline_keyboard: [[{ text: "?? ??????", callback_data: "list_personas" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "請先從推文列表選擇一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
         });
         return;
       }
       const archive = await loadPersonaForThisBot(archiveId);
       const post = archive ? findArchivePostBySource(archive, postId, source) : null;
       if (!post) {
-        await safeEditOrSend(bot, chatId, msgId, "?????????", {
-          reply_markup: { inline_keyboard: [[{ text: "?? ??????", callback_data: buildPostSourcePageCallback(archiveId, source, 0, groupContentType) }]] },
+        await safeEditOrSend(bot, chatId, msgId, "沒有找到這篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(archiveId, source, 0, groupContentType) }]] },
         });
         return;
       }
       pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType });
-      await safeEditOrSend(bot, chatId, msgId, `?? *????????*
+      await safeEditOrSend(bot, chatId, msgId, `🚀 *確認發布推文*
 
 "${post.content.slice(0, 80)}..."`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             ...allowedPublishPlatforms.map((platform) => ([{
-              text: `??? ${platformButtons[platform].text}`,
+              text: `發布 ${platformButtons[platform].text}`,
               callback_data: `dop_${platform}`,
             }])),
             ...allowedPublishPlatforms.map((platform) => ([{
-              text: `?? ???? ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
+              text: `多雲機發布 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
               callback_data: `dopm_${platform}`,
             }])),
             ...(source === "favorites" ? [] : allowedPublishPlatforms.map((platform) => ([{
-              text: `? ??? ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
+              text: `定時發布 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
               callback_data: `sch_${platform}`,
             }]))),
             ...(source === "favorites" ? [] : allowedPublishPlatforms.map((platform) => ([{
-              text: `?? ?????? ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
+              text: `多雲機定時 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
               callback_data: `schm_${platform}`,
             }]))),
-            [{ text: source === "favorites" ? "?? ??????" : "?? ??????", callback_data: buildPostSourcePageCallback(archiveId, source, 0, groupContentType) }],
+            [{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(archiveId, source, 0, groupContentType) }],
           ],
         },
       });
@@ -20087,14 +20110,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const source = selected?.source || action?.source || "posts";
       const groupContentType = selected?.groupContentType || action?.groupContentType;
       if (!archiveId || !postId) {
-        await safeEditOrSend(bot, chatId, msgId, "??????????????", {
-          reply_markup: { inline_keyboard: [[{ text: "?? ??????", callback_data: "list_personas" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "請先從推文列表選擇一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
         });
         return;
       }
       const backCallback = buildPostSourcePageCallback(archiveId, source, 0, groupContentType);
-      await safeEditOrSend(bot, chatId, msgId, source === "favorites" ? "?? ??????????..." : "?? ????????...", {
-        reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "?? ??????" : "?? ??????", callback_data: backCallback }]] },
+      await safeEditOrSend(bot, chatId, msgId, source === "favorites" ? "🗑 正在刪除收藏推文..." : "🗑 正在刪除推文...", {
+        reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: backCallback }]] },
       });
       void (async () => {
         const startedAt = Date.now();
@@ -20104,8 +20127,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
             : await deleteArchiveEpisode(archiveId, postId).then(() => loadPersonaForThisBot(archiveId));
           invalidatePersonaListCache();
           const remaining = source === "favorites" ? archive?.favoritePosts?.length || 0 : archive?.posts.length || 0;
-          await bot.sendMessage(chatId, source === "favorites" ? `?? ???????????????? ${remaining} ??` : `?? ???????????? ${remaining} ??`, {
-            reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "?? ??????" : "?? ??????", callback_data: backCallback }]] },
+          await bot.sendMessage(chatId, source === "favorites" ? `✅ 收藏推文已刪除，剩餘 ${remaining} 篇` : `✅ 推文已刪除，剩餘 ${remaining} 篇`, {
+            reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: backCallback }]] },
           });
           const elapsed = Date.now() - startedAt;
           if (elapsed >= 1000) {
@@ -20113,15 +20136,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
           }
         } catch (error: any) {
           console.error("[telegram][delete_post_error]", error?.message || error);
-          await bot.sendMessage(chatId, `? ?????${formatUserFacingError(error, "???????????")}`, {
-            reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "?? ??????" : "?? ??????", callback_data: backCallback }]] },
+          await bot.sendMessage(chatId, `❌ 刪除失敗：${formatUserFacingError(error, "請稍後重試。")}`, {
+            reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: backCallback }]] },
           }).catch(() => undefined);
         }
       })();
       return;
     }
 
-    // ?? ??? ??
+    // 查看旧版配图
     if (data.startsWith("viewimg_")) {
       const archiveId = data.slice("viewimg_".length);
       const archive = await loadPersonaArchive(archiveId).catch(() => null);
@@ -22292,6 +22315,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           chatId,
           archiveId: storedPostEdit.archiveId,
           postId: storedPostEdit.postId,
+          source: storedPostEdit.source,
           groupContentType: storedPostEdit.groupContentType,
           displayIndex: storedPostEdit.displayIndex,
           content: editedText || storedPostEdit.currentContent,
