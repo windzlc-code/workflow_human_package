@@ -26586,7 +26586,6 @@ async function callThreadsAutoReplyDirectMultimodalModel(
       }],
       temperature: 0,
       max_tokens: Math.max(80, Math.min(600, Math.round(options.maxTokens || 220))),
-      max_completion_tokens: Math.max(80, Math.min(600, Math.round(options.maxTokens || 220))),
     }),
     signal,
   });
