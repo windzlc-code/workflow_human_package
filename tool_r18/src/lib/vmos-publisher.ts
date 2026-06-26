@@ -26726,7 +26726,7 @@ Task:
 - Copy author and text exactly as shown; do not translate, rewrite, or invent missing text.
 - Ignore post text, Hot/熱門 label, buttons, counts, and the bottom composer.
 - If no safe external comment is visible, return {"comments":[]}.`
-      : `Read this Threads comment screenshot. Return compact JSON only, with no markdown and no explanation.
+      : `Read this Threads comment screenshot. Extract visible comments first; do not decide reply quality in this step. Return compact JSON only, with no markdown and no explanation.
 
 Schema:
 {"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
@@ -26734,15 +26734,16 @@ Schema:
 Rules:
 - Only read currently visible comment rows under the Hot/熱門 header and above the bottom composer.
 - Count visible comment rows from top to bottom starting at 1.
-- Include the main author's own visible comments too when counting rows.
-- Include short visible comments too when counting rows.
-- Include bottom comments just above the composer when they are readable.
+- Include the main author's own visible comments too when counting rows and in comments; filtering happens later.
+- Include every readable external comment even if it is short, generic, repetitive, numeric-only, or low quality; filtering happens later.
+- Include bottom comments just above the composer when their author and text are readable.
+- A Threads comment row usually has an author line such as "windzlc123 7天" followed by the comment text on the next line; pair that author with the next readable text line.
 - Do not stop after the first visible comment; list every readable visible comment row in the crop.
 - row must be the row number in the actual screenshot, before any filtering.
 - postAuthor is the main post author if visible; if a visible comment row has an 作者/author badge, use that row's author as postAuthor.
 - Copy author and text exactly as shown; do not translate, rewrite, or invent missing text.
 - Ignore post text, Hot/熱門 label, buttons, reply/like/share UI labels, counts, and the bottom composer.
-- If there are no usable visible comments, return {"comments":[]}.`;
+- If there are no readable visible comments, return {"comments":[]}.`;
     const parseRawComments = (raw: string, debugReason: string): ThreadsAutoReplyCandidate[] => {
       const jsonText = extractText(raw).match(/\{[\s\S]*\}/)?.[0] || "";
       if (!jsonText) return [];
@@ -26903,15 +26904,16 @@ Task:
       }
     }
     if (forceVisibleValidation && !mergedCandidates.length && fullScreenshotInline) {
-      const allVisiblePrompt = `Read this Threads comment screenshot. Return compact JSON only, with no markdown and no explanation.
+      const allVisiblePrompt = `Read this Threads comment screenshot. Extract visible comments first; do not decide reply quality in this step. Return compact JSON only, with no markdown and no explanation.
 
 Schema:
 {"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
 
 Task:
 - List every readable visible comment row under Hot/熱門 from top to bottom.
-- Include readable short comments for extraction, but only treat them as safe reply targets when the visible context gives them concrete meaning.
+- Include readable short, generic, repetitive, numeric-only, or low-quality comments for extraction; filtering happens later.
 - Include comments that are partly low on the screen if the author and text are readable.
+- A Threads comment row usually has an author line such as "windzlc123 7天" followed by the comment text on the next line; pair that author with the next readable text line.
 - Copy author and text exactly as shown; do not translate, rewrite, or invent.
 - Skip only the main post text, buttons, counts, composer placeholder, and UI labels.
 - If no readable comment exists, return {"comments":[]}.`;
