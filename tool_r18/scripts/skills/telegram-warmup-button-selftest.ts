@@ -26,15 +26,33 @@ function argValue(name: string): string | undefined {
   return process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
 }
 
+function hasArg(name: string) {
+  return process.argv.includes(`--${name}`);
+}
+
+function printHelp() {
+  console.log([
+    "Usage:",
+    "  node --import tsx scripts/skills/telegram-warmup-button-selftest.ts --chatId=<telegram_chat_id> --pad=<pad_code> --mode=<browse|like|comment|both> --count=<n>",
+    "",
+    "Required:",
+    "  --chatId or TELEGRAM_SELFTEST_CHAT_ID",
+    "",
+    "Example:",
+    "  node --import tsx scripts/skills/telegram-warmup-button-selftest.ts --chatId=8100401093 --pad=ACP250322677KIRJ --mode=comment --count=6",
+  ].join("\n"));
+}
+
 const WEBHOOK_URL = process.env.TELEGRAM_SELFTEST_WEBHOOK_URL
   || "http://127.0.0.1:8788/telegram/webhook/auto-script-webhook-secret";
-const CHAT_ID = Number(process.env.TELEGRAM_SELFTEST_CHAT_ID || "6470391105");
-const FROM_ID = Number(process.env.TELEGRAM_SELFTEST_FROM_ID || CHAT_ID);
+const CHAT_ID_RAW = process.env.TELEGRAM_SELFTEST_CHAT_ID || argValue("chatId") || argValue("chat");
+const CHAT_ID = Number(CHAT_ID_RAW || "NaN");
+const FROM_ID = Number(process.env.TELEGRAM_SELFTEST_FROM_ID || argValue("fromId") || CHAT_ID);
 const PAD_CODE = process.env.TELEGRAM_WARMUP_SELFTEST_PAD_CODE || argValue("pad") || argValue("padCode") || "ACP250430WZA6JZL";
 const PAD_NAME = process.env.TELEGRAM_WARMUP_SELFTEST_PAD_NAME || argValue("padName") || "OP-TEST2";
 const REQUEST_TIMEOUT_MS = Number(process.env.TELEGRAM_SELFTEST_REQUEST_TIMEOUT_MS || 30_000);
 const STEP_DELAY_MS = Number(process.env.TELEGRAM_SELFTEST_STEP_DELAY_MS || 900);
-const WARMUP_TIMEOUT_MS = Number(process.env.TELEGRAM_WARMUP_SELFTEST_TIMEOUT_MS || 8 * 60_000);
+const WARMUP_TIMEOUT_MS = Number(process.env.TELEGRAM_WARMUP_SELFTEST_TIMEOUT_MS || 15 * 60_000);
 const POLL_INTERVAL_MS = Number(process.env.TELEGRAM_WARMUP_SELFTEST_POLL_INTERVAL_MS || 3_000);
 const STALE_PROGRESS_TIMEOUT_MS = Number(process.env.TELEGRAM_WARMUP_SELFTEST_STALE_MS || 90_000);
 const FAST_COUNT_MODE = process.env.TELEGRAM_WARMUP_SELFTEST_FAST_COUNT !== "0";
@@ -214,7 +232,7 @@ async function waitForWarmupResult(
         || (mode === "like" ? parsed.liked > 0
           : mode === "comment" ? parsed.commented > 0
             : parsed.liked + parsed.commented > 0);
-      const browseOk = mode === "browse" ? parsed.browsed >= browseCount : parsed.browsed > 0;
+      const browseOk = parsed.browsed >= browseCount;
       const ok = browseOk && interactionsOk;
       return {
         ok,
@@ -255,8 +273,12 @@ async function waitForWarmupResult(
 }
 
 async function main() {
+  if (hasArg("help") || hasArg("h")) {
+    printHelp();
+    return;
+  }
   if (!Number.isFinite(CHAT_ID) || CHAT_ID <= 0) {
-    throw new Error("TELEGRAM_SELFTEST_CHAT_ID is required");
+    throw new Error("TELEGRAM_SELFTEST_CHAT_ID or --chatId is required");
   }
   const { platform, mode, browseCount } = parseArgs();
   const logOffset = currentLogOffset();

@@ -397,18 +397,33 @@ Demo post body
     expect(refreshed.hotScore).toBe(250);
   });
 
-  it("keeps all media files from Threads detail markdown", () => {
+  it("keeps only top-level media files from Threads detail markdown", () => {
     const media = parseThreadsDetailMediaMarkdown(`
 ![Image 1: demo profile picture](https://cdn.example.com/profile_pic.jpg)
 ![Image 2](https://cdn.example.com/a.jpg)
 ![Image 3](https://cdn.example.com/b.webp)
 ![Image 4](https://cdn.example.com/c.jpg)
+[![Image 5: reply_user's profile picture](https://cdn.example.com/reply-s150x150.jpg)](https://www.threads.net/@reply)
+![Image 6](https://cdn.example.com/reply-body.jpg)
+Log in to see more replies.
 `);
 
     expect(media.map((item) => item.url)).toEqual([
       "https://cdn.example.com/a.jpg",
       "https://cdn.example.com/b.webp",
       "https://cdn.example.com/c.jpg",
+    ]);
+  });
+
+  it("drops Threads link preview media from detail markdown", () => {
+    const media = parseThreadsDetailMediaMarkdown(`
+![Image 1](https://scontent-sea5-1.cdninstagram.com/v/t51.82787-15/post.jpg)
+![Image 2](https://external-sea5-1.xx.fbcdn.net/emg1/v/t13/preview?url=https%3A%2F%2Fexample.com%2Fcover.jpg)
+![Image 3](https://www.youtube.com/s/desktop/favicon_144x144.png)
+`);
+
+    expect(media.map((item) => item.url)).toEqual([
+      "https://scontent-sea5-1.cdninstagram.com/v/t51.82787-15/post.jpg",
     ]);
   });
 
@@ -558,7 +573,7 @@ Instagram
     expect(parsed.posts).toEqual([{
       pk: "3925594288747063183",
       code: "DZ1ABCxyz",
-      sourceUrl: "https://www.threads.net/@stevie875443/post/DZ1ABCxyz",
+      sourceUrl: "https://www.threads.com/@stevie875443/post/DZ1ABCxyz",
       likeCount: 954,
       commentCount: 68,
       repostCount: 92,

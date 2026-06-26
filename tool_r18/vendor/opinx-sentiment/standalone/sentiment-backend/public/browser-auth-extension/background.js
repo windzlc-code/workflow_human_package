@@ -22,11 +22,11 @@ const PROFILES = [
   {
     key: "threads",
     sourceKey: "threads",
-    domain: "threads.net",
-    cookieDomains: ["threads.net", "instagram.com", "facebook.com"],
-    matchDomains: ["threads.net", "instagram.com", "facebook.com"],
-    authUrl: "https://www.threads.net/",
-    authUrls: ["https://www.threads.net/", "https://www.instagram.com/accounts/login/"],
+    domain: "threads.com",
+    cookieDomains: ["threads.com", "threads.net", "instagram.com", "facebook.com"],
+    matchDomains: ["threads.com", "threads.net", "instagram.com", "facebook.com"],
+    authUrl: "https://www.threads.com/",
+    authUrls: ["https://www.threads.com/", "https://www.instagram.com/accounts/login/"],
   },
   {
     key: "xSearch",
@@ -194,6 +194,10 @@ async function apiBase() {
 }
 
 function profileForUrl(url = "") {
+  return profilesForUrl(url)[0] || null;
+}
+
+function profilesForUrl(url = "") {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "");
     const normalizeDomain = (domain = "") => String(domain || "").replace(/^\.+/, "").replace(/^www\./, "");
@@ -201,16 +205,14 @@ function profileForUrl(url = "") {
       const normalized = normalizeDomain(domain);
       return normalized && (host === normalized || host.endsWith(`.${normalized}`));
     };
-    const exactProfile = PROFILES.find(profile => matchesDomain(profile.domain));
-    if (exactProfile) return exactProfile;
-    return PROFILES.find(profile => {
+    return PROFILES.filter(profile => {
       const domains = [profile.domain, ...(profile.matchDomains || []), ...(profile.cookieDomains || [])]
         .map(normalizeDomain)
         .filter(Boolean);
       return [...new Set(domains)].some(domain => host === domain || host.endsWith(`.${domain}`));
     });
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -313,10 +315,16 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete" || !tab?.url) return;
-  const profile = profileForUrl(tab.url);
-  if (!profile) return;
-  syncProfileCookies(profile).catch(async (error) => {
-    await storageSet({ lastStatus: `${profile.key}: ${error.message}` });
+  const profiles = profilesForUrl(tab.url);
+  if (!profiles.length) return;
+  Promise.allSettled(profiles.map(profile => syncProfileCookies(profile))).then(async results => {
+    const statusText = results.map((result, index) => {
+      const profile = profiles[index];
+      return result.status === "fulfilled"
+        ? `${profile.key}: OK`
+        : `${profile.key}: ${result.reason?.message || result.reason}`;
+    }).join("；");
+    await storageSet({ lastStatus: statusText });
   });
 });
 
@@ -329,13 +337,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     if (message?.type === "sync-current-tab") {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      const profile = profileForUrl(tab?.url || "");
-      if (!profile) {
+      const profiles = profilesForUrl(tab?.url || "");
+      if (!profiles.length) {
         sendResponse({ ok: false, error: "当前标签页不是受支持的授权站点" });
         return;
       }
-      const result = await syncProfileCookies(profile);
-      sendResponse({ ok: true, result });
+      const results = await Promise.allSettled(profiles.map(profile => syncProfileCookies(profile)));
+      const failures = results
+        .map((result, index) => ({ result, profile: profiles[index] }))
+        .filter(item => item.result.status === "rejected");
+      if (failures.length === results.length) {
+        sendResponse({ ok: false, error: failures.map(item => `${item.profile.key}: ${item.result.reason?.message || item.result.reason}`).join("；") });
+        return;
+      }
+      sendResponse({
+        ok: true,
+        result: results.map((result, index) => ({
+          profileKey: profiles[index].key,
+          ok: result.status === "fulfilled",
+          error: result.status === "rejected" ? String(result.reason?.message || result.reason) : undefined,
+          value: result.status === "fulfilled" ? result.value : undefined,
+        })),
+      });
       return;
     }
     if (message?.type === "set-api-base") {

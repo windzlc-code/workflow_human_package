@@ -29,6 +29,7 @@ export interface SentimentHotCandidate {
     shareCount?: number;
     rawSignals?: number[];
   };
+  publishedAt?: string;
   capturedAt: string;
   warnings?: string[];
 }

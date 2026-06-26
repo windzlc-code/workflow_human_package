@@ -2345,12 +2345,55 @@ function sentimentCookieHealthLabel(health) {
   const map = {
     healthy: "正常",
     watch: "需关注",
-    degraded: "部分过期",
+    degraded: "需处理",
     expired: "已过期",
     missing: "未授权",
     unknown: "未知",
   };
   return map[health] || health || "-";
+}
+
+function sentimentCookieActionLabel(action) {
+  const map = {
+    keep: "已就绪",
+    "authorize-profile": "请先登录并授权",
+    "reauthorize-profile": "请重新登录并同步",
+    "refresh-profile-cookies": "请刷新当前授权 Cookie",
+    "refresh-before-expiry": "Cookie 即将过期，建议重新同步",
+  };
+  return map[action] || action || "";
+}
+
+function sentimentCookieStatusDetails(profile) {
+  const validCookieCount = Number(profile?.validCookieCount || 0);
+  const key = String(profile?.key || profile?.platform || "").trim().toLowerCase();
+  const requiresSessionid = key === "threads";
+  const ordinaryCookieReady = validCookieCount > 0;
+  const ordinaryCookieText = ordinaryCookieReady
+    ? `普通 Cookie：已授权（${validCookieCount}）`
+    : "普通 Cookie：未授权";
+  const sessionidReady = profile?.hasRequiredSessionCookie !== false && ordinaryCookieReady;
+  const sessionidText = sessionidReady
+    ? "sessionid：已授权（需确认账号可正常访问 Threads）"
+    : ordinaryCookieReady
+      ? "sessionid：未授权，当前只有普通 Cookie"
+      : "sessionid：未授权";
+  if (!requiresSessionid) {
+    return [
+      { text: ordinaryCookieText, state: ordinaryCookieReady ? "ready" : "missing" },
+      { text: "sessionid：未授权（当前平台不要求）", state: "unknown" },
+    ];
+  }
+  return [
+    { text: ordinaryCookieText, state: ordinaryCookieReady ? "ready" : "missing" },
+    { text: sessionidText, state: sessionidReady ? "ready" : "missing" },
+    {
+      text: sessionidReady
+        ? "提示：如果授权账号被封、受限、需验证，或打开 Threads 自动跳首页，请退出旧账号后用可用账号重新同步。"
+        : "提示：Threads 全量搜索需要可用账号的 sessionid，请登录可用账号并用授权助手同步当前站点。",
+      state: sessionidReady ? "unknown" : "missing",
+    },
+  ];
 }
 
 function formatAdminDate(value) {
@@ -2407,10 +2450,16 @@ function renderSentimentCookieProfiles(payload) {
       const key = String(profile.key || profile.platform || "");
       const cookieNames = (Array.isArray(profile.cookieNames) ? profile.cookieNames : []).slice(0, 12);
       const nameText = cookieNames.length ? cookieNames.join(", ") : "-";
+      const statusDetails = sentimentCookieStatusDetails(profile);
+      const actionLabel = sentimentCookieActionLabel(profile.recommendedAction);
       return `
         <tr>
           <td><strong>${escapeHtml(profile.label || key)}</strong><div class="small">${escapeHtml(profile.domain || profile.platform || "")}</div></td>
-          <td><span class="badge ${escapeHtml(profile.authHealth || "unknown")}">${escapeHtml(sentimentCookieHealthLabel(profile.authHealth))}</span><div class="small">${escapeHtml(profile.recommendedAction || "")}</div></td>
+          <td>
+            <span class="badge ${escapeHtml(profile.authHealth || "unknown")}">${escapeHtml(sentimentCookieHealthLabel(profile.authHealth))}</span>
+            ${actionLabel ? `<div class="small">${escapeHtml(actionLabel)}</div>` : ""}
+            ${statusDetails.map((line) => `<div class="small sentiment-cookie-detail ${escapeHtml(line.state || "unknown")}">${escapeHtml(line.text || "")}</div>`).join("")}
+          </td>
           <td>${Number(profile.validCookieCount || 0)} / ${Number(profile.expiredCookieCount || 0)}</td>
           <td>${Number(profile.expiringSoonCookieCount || 0)}<div class="small">${escapeHtml(profile.nearestExpiresAt || "")}</div></td>
           <td>${escapeHtml(formatAdminDate(profile.lastAuthorizedAt))}</td>

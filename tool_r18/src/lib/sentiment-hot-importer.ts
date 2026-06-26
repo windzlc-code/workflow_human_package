@@ -1808,6 +1808,10 @@ function hasThreadsProfileLoginSessionCookie(cookies: any[]) {
   return hasValidThreadsSessionCookie(cookies);
 }
 
+function buildThreadsProfileUrl(username: string) {
+  return `https://www.threads.com/@${encodeURIComponent(username)}`;
+}
+
 function detectThreadsProfileLoginWall(text: string) {
   const rawText = String(text || "");
   if (/(?:編輯個人檔案|编辑个人档案|編輯主頁|编辑主页|洞察報告|成效分析)/i.test(rawText)) return false;
@@ -1853,11 +1857,11 @@ function buildThreadsGraphqlProfileSourceUrl(username: string, post: any): strin
   const normalizedUsername = String(username || "").replace(/^@+/, "").trim();
   const canonicalUrl = cleanText(post?.canonical_url || post?.canonicalUrl);
   if (/^https?:\/\/(?:www\.)?threads\.(?:net|com)\//i.test(canonicalUrl)) {
-    return canonicalUrl.replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/");
+    return canonicalUrl.replace(/^https:\/\/www\.threads\.net\//i, "https://www.threads.com/");
   }
   const code = cleanText(post?.code);
   if (!normalizedUsername || !code) return "";
-  return `https://www.threads.net/@${encodeURIComponent(normalizedUsername)}/post/${encodeURIComponent(code)}`;
+  return `https://www.threads.com/@${encodeURIComponent(normalizedUsername)}/post/${encodeURIComponent(code)}`;
 }
 
 export function parseThreadsGraphqlProfilePagePayload(args: {
@@ -2002,24 +2006,29 @@ async function collectThreadsViewCountsFromPostPages(args: {
   posts: ThreadsGraphqlProfilePostAggregate[];
 }): Promise<{ totalViews: number; resolvedPosts: number }> {
   if (!args.posts.length) return { totalViews: 0, resolvedPosts: 0 };
-  const page = await args.context.newPage();
-  try {
-    let totalViews = 0;
-    let resolvedPosts = 0;
-    for (const post of args.posts) {
-      const viewCount = await readThreadsViewCountFromPostPage({
-        page,
-        sourceUrl: post.sourceUrl,
-      }).catch(() => undefined);
-      if (typeof viewCount === "number") {
-        totalViews += viewCount;
-        resolvedPosts += 1;
+  const workers = Math.min(4, args.posts.length);
+  let cursor = 0;
+  let totalViews = 0;
+  let resolvedPosts = 0;
+  await Promise.all(Array.from({ length: workers }, async () => {
+    const page = await args.context.newPage();
+    try {
+      while (cursor < args.posts.length) {
+        const post = args.posts[cursor++];
+        const viewCount = await readThreadsViewCountFromPostPage({
+          page,
+          sourceUrl: post.sourceUrl,
+        }).catch(() => undefined);
+        if (typeof viewCount === "number") {
+          totalViews += viewCount;
+          resolvedPosts += 1;
+        }
       }
+    } finally {
+      await page.close().catch(() => null);
     }
-    return { totalViews, resolvedPosts };
-  } finally {
-    await page.close().catch(() => null);
-  }
+  }));
+  return { totalViews, resolvedPosts };
 }
 
 async function buildThreadsProfileAggregateMetrics(args: {
@@ -2107,7 +2116,7 @@ export async function fetchThreadsProfileLightMetrics(usernameInput: string): Pr
       error: "Threads 帐号未设定，无法刷新轻量热点数据",
     };
   }
-  const profileUrl = `https://www.threads.net/@${encodeURIComponent(username)}`;
+  const profileUrl = buildThreadsProfileUrl(username);
   const cookies = readSentimentBrowserAuthCookies("threads");
   if (!hasThreadsProfileLoginSessionCookie(cookies)) {
     return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
@@ -2124,7 +2133,7 @@ export async function fetchThreadsProfileLightMetrics(usernameInput: string): Pr
       });
       await context.addCookies(cookies as any).catch(() => undefined);
       const page = await context.newPage();
-      await page.goto(`${profileUrl}?__r=${Date.now().toString(36)}`, {
+      await page.goto(profileUrl, {
         waitUntil: "domcontentloaded",
         timeout: 25_000,
       }).catch(() => null);
@@ -2183,7 +2192,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
       error: "Threads 帳號未設定，無法刷新熱點資料",
     };
   }
-  const profileUrl = `https://www.threads.net/@${encodeURIComponent(username)}`;
+  const profileUrl = buildThreadsProfileUrl(username);
   const cookies = readSentimentBrowserAuthCookies("threads");
   if (!hasThreadsProfileLoginSessionCookie(cookies)) {
     return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
@@ -2228,7 +2237,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
           // Ignore listener failures and fall back to the existing partial path below.
         }
       });
-      await page.goto(`${profileUrl}?__r=${Date.now().toString(36)}`, {
+      await page.goto(profileUrl, {
         waitUntil: "domcontentloaded",
         timeout: 25_000,
       }).catch(() => null);
@@ -2245,10 +2254,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
       if (detectThreadsProfileLoginWall(visible.text) && !visible.hasUsableProfileSignals) {
         return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "public_partial", visible.rawText);
       }
-      let parsed = {
-        ...visible.parsed,
-        ...(await buildThreadsProfileAggregateMetricsFromBrowserPage({ page, username, links })),
-      };
+      let parsed = { ...visible.parsed };
       if (initialGraphqlPayload && initialGraphqlTemplate) {
         const collection = await collectThreadsGraphqlProfilePosts({
           page,
@@ -2287,6 +2293,11 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             || collection.reachedEnd
             || (capturedPageCount >= 2 && allPosts.length >= 20);
         }
+      } else {
+        parsed = {
+          ...parsed,
+          ...(await buildThreadsProfileAggregateMetricsFromBrowserPage({ page, username, links })),
+        };
       }
       const complete = threadsProfileHotMetricsHasValue(parsed)
         && typeof parsed.scannedPosts === "number"
@@ -2788,7 +2799,7 @@ export async function lookupThreadsPublishedPostFromBrowserProfile(args: {
     });
     await context.addCookies(cookies as any);
     const page = await context.newPage();
-    await page.goto(`https://www.threads.net/@${encodeURIComponent(username)}`, {
+    await page.goto(buildThreadsProfileUrl(username), {
       waitUntil: "domcontentloaded",
       timeout: 35_000,
     }).catch(() => null);
@@ -2831,11 +2842,25 @@ export async function lookupThreadsPublishedPostFromBrowserProfile(args: {
   }
 }
 
+function isNonPostThreadsMediaUrl(url: string): boolean {
+  if (/profile_pic|profile|s150x150/i.test(url)) return true;
+  if (/\/favicon(?:[-_.]|\d|$)|favicon[_-]?\d*/i.test(url)) return true;
+  if (/external-[^/]+\.xx\.fbcdn\.net\/emg1\/v\/t13\//i.test(url)) return true;
+  return false;
+}
+
 function extractThreadsMediaFromMarkdown(text: string, limit = 12): SentimentHotMedia[] {
+  const source = String(text || "");
   const media: SentimentHotMedia[] = [];
-  for (const imageMatch of String(text || "").matchAll(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/g)) {
-    const url = imageMatch[1];
-    if (/profile_pic|profile|s150x150/i.test(url)) continue;
+  let lastIndex = 0;
+  for (const imageMatch of source.matchAll(/!\[([^\]]*)]\((https?:\/\/[^)\s]+)\)/g)) {
+    const between = source.slice(lastIndex, imageMatch.index || 0);
+    if (media.length > 0 && /Log in to see more replies|see more replies|more replies|回覆|回复|評論|评论/i.test(between)) break;
+    lastIndex = (imageMatch.index || 0) + imageMatch[0].length;
+    const alt = imageMatch[1] || "";
+    const url = imageMatch[2];
+    if (media.length > 0 && /profile picture/i.test(alt)) break;
+    if (isNonPostThreadsMediaUrl(url)) continue;
     if (media.some((item) => item.url === url)) continue;
     const type = /\.(mp4|mov|webm)(?:$|[?#])/i.test(url) || /video/i.test(url) ? "video" : "image";
     media.push({ type, url });
@@ -3233,10 +3258,12 @@ function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
         };
       });
     if (platform !== "threads") return cookies;
-    const mirrored = cookies.flatMap((cookie: any) => [
-      { ...cookie, domain: ".threads.net" },
-      { ...cookie, domain: ".threads.com" },
-    ]);
+    const mirrored = cookies
+      .filter((cookie: any) => cookieDomainMatchesAny(cookie, ["threads.net", "threads.com"]))
+      .flatMap((cookie: any) => [
+        { ...cookie, domain: ".threads.net" },
+        { ...cookie, domain: ".threads.com" },
+      ]);
     return activeUniqueCookies([...cookies, ...mirrored]);
   } catch {
     return [];

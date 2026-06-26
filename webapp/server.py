@@ -57,12 +57,18 @@ TOOL_R18_UPLOAD_ROOT = Path(os.getenv("TOOL_R18_UPLOAD_HOST_DIR", str(DATA_DIR /
 RUNTIME_CONFIG_PATH = Path(os.getenv("APP_RUNTIME_CONFIG_PATH", str(DATA_DIR / "runtime_config.json"))).resolve()
 TG_WORKBENCH_DB_PATH = Path(os.getenv("TG_WORKBENCH_DB_PATH", str(DATA_DIR / "workbench.db"))).resolve()
 TOOL_R18_RUNTIME_DIR = Path(os.getenv("TOOL_R18_RUNTIME_DIR", str(ROOT_DIR / "tool_r18" / ".runtime"))).resolve()
-SENTIMENT_CONFIG_PATH = Path(
-    os.getenv(
-        "TOOL_R18_SENTIMENT_CONFIG_PATH",
-        str(TOOL_R18_RUNTIME_DIR / "sentiment-opinx" / "sentiment-config.json"),
-    )
-).resolve()
+
+
+def _resolve_sentiment_config_path() -> Path:
+    explicit = str(os.getenv("TOOL_R18_SENTIMENT_CONFIG_PATH") or "").strip()
+    if explicit:
+        return Path(explicit).resolve()
+    primary = (TOOL_R18_RUNTIME_DIR / "sentiment-opinx" / "sentiment-config.json").resolve()
+    fallback = (TOOL_R18_RUNTIME_DIR / "automatic-script" / "sentiment-opinx" / "sentiment-config.json").resolve()
+    return fallback if not primary.exists() and fallback.exists() else primary
+
+
+SENTIMENT_CONFIG_PATH = _resolve_sentiment_config_path()
 CLOSED_IMAGE_WORKFLOW_STAGE_PREFIX = "closed_image_model:"
 CLOSED_LLM_WORKFLOW_STAGE_PREFIX = "closed_llm_model:"
 _TG_PROMPT_VARIANT_HISTORY_LOCK = threading.Lock()
@@ -681,7 +687,7 @@ def _sentiment_now_seconds() -> float:
     return time.time()
 
 
-def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str | None = None) -> dict[str, Any]:
+def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str | None = None, platform: str | None = None) -> dict[str, Any]:
     now = _sentiment_now_seconds()
     valid = 0
     expired = 0
@@ -691,6 +697,7 @@ def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str
     nearest_expires: float | None = None
     expired_names: list[str] = []
     expiring_soon_names: list[str] = []
+    valid_cookies: list[dict[str, Any]] = []
     for cookie in cookies:
         expires_raw = cookie.get("expires")
         try:
@@ -701,6 +708,7 @@ def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str
         if expires <= 0:
             session += 1
             valid += 1
+            valid_cookies.append(cookie)
         elif expires <= now:
             expired += 1
             if name and name not in expired_names:
@@ -708,11 +716,14 @@ def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str
         else:
             persistent += 1
             valid += 1
+            valid_cookies.append(cookie)
             nearest_expires = expires if nearest_expires is None else min(nearest_expires, expires)
             if expires <= now + (7 * 24 * 60 * 60):
                 expiring_soon += 1
                 if name and name not in expiring_soon_names:
                     expiring_soon_names.append(name)
+    platform_key = str(platform or "").strip().lower()
+    missing_required_session = platform_key == "threads" and valid > 0 and not _sentiment_cookies_have_threads_sessionid(valid_cookies)
     if not cookies:
         health = "missing"
         action = "authorize-profile"
@@ -721,6 +732,10 @@ def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str
         health = "expired"
         action = "reauthorize-profile"
         reasons = ["all-cookies-expired"]
+    elif missing_required_session:
+        health = "degraded"
+        action = "reauthorize-profile"
+        reasons = ["missing-required-sessionid"]
     elif expired > 0:
         health = "degraded"
         action = "refresh-profile-cookies"
@@ -746,8 +761,9 @@ def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str
         "persistentCookieCount": persistent,
         "expiringSoonCookieCount": expiring_soon,
         "nearestExpiresAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(nearest_expires)) if nearest_expires else None,
-        "authStatus": "authorized" if valid > 0 else ("expired" if cookies else "missing"),
+        "authStatus": "incomplete" if missing_required_session else ("authorized" if valid > 0 else ("expired" if cookies else "missing")),
         "authHealth": health,
+        "hasRequiredSessionCookie": not missing_required_session,
         "authorizationNeedsRefresh": action != "keep",
         "recommendedAction": action,
         "statusReasons": reasons,
@@ -755,6 +771,55 @@ def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str
         "expiringSoonCookieNames": expiring_soon_names[:20],
         "lastAuthorizedAgeDays": last_authorized_age_days,
     }
+
+
+def _sentiment_profile_requires_sessionid(profile: dict[str, Any], profile_key: str = "") -> bool:
+    platform_key = str(profile.get("platform") or profile.get("key") or profile.get("sourceKey") or profile_key or "").strip().lower()
+    return platform_key == "threads"
+
+
+def _sentiment_cookies_have_valid_name(cookies: list[dict[str, Any]], name: str) -> bool:
+    target = str(name or "").strip().lower()
+    if not target:
+        return False
+    now = _sentiment_now_seconds()
+    for cookie in cookies:
+        cookie_name = str(cookie.get("name") or "").strip().lower()
+        cookie_value = str(cookie.get("value") or "").strip()
+        if cookie_name != target or not cookie_value:
+            continue
+        try:
+            expires = float(cookie.get("expires"))
+        except Exception:
+            expires = -1
+        if expires <= 0 or expires > now:
+            return True
+    return False
+
+
+def _sentiment_cookie_domain_matches(cookie: dict[str, Any], domains: list[str]) -> bool:
+    domain = str(cookie.get("domain") or "").strip().lower().lstrip(".")
+    if not domain:
+        return False
+    return any(domain == item or domain.endswith(f".{item}") for item in domains)
+
+
+def _sentiment_cookies_have_threads_sessionid(cookies: list[dict[str, Any]]) -> bool:
+    now = _sentiment_now_seconds()
+    for cookie in cookies:
+        if str(cookie.get("name") or "").strip().lower() != "sessionid":
+            continue
+        if not str(cookie.get("value") or "").strip():
+            continue
+        if not _sentiment_cookie_domain_matches(cookie, ["threads.net", "threads.com"]):
+            continue
+        try:
+            expires = float(cookie.get("expires"))
+        except Exception:
+            expires = -1
+        if expires <= 0 or expires > now:
+            return True
+    return False
 
 
 def _read_sentiment_config_file() -> dict[str, Any]:
@@ -1051,7 +1116,11 @@ def _sentiment_profile_for_client(profile: dict[str, Any]) -> dict[str, Any]:
         "cookieNames": [str(cookie.get("name") or "") for cookie in cookies if isinstance(cookie, dict) and cookie.get("name")][:80],
         "lastAuthorizedAt": last_authorized_at,
     }
-    safe.update(_sentiment_auth_state([cookie for cookie in cookies if isinstance(cookie, dict)], last_authorized_at))
+    safe.update(_sentiment_auth_state(
+        [cookie for cookie in cookies if isinstance(cookie, dict)],
+        last_authorized_at,
+        str(profile.get("platform") or profile.get("key") or ""),
+    ))
     return safe
 
 
@@ -18007,6 +18076,16 @@ def create_app() -> FastAPI:
                 break
         if not cookies:
             return JSONResponse({"ok": False, "error": "no valid cookies"}, status_code=400, headers=cors_headers)
+        if _sentiment_profile_requires_sessionid(profile, profile_key) and not _sentiment_cookies_have_threads_sessionid(cookies):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Threads Cookie 已讀取，但缺少 threads.net/threads.com 的有效 sessionid；請先在後台瀏覽器打開 Threads 並完成登入，再重新同步授權。",
+                    "requiresCookie": "sessionid",
+                },
+                status_code=400,
+                headers=cors_headers,
+            )
         profile["cookies"] = cookies
         profile["lastAuthorizedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         profile["lastAuthorizedBy"] = "browser-auth-helper"
@@ -18033,7 +18112,7 @@ def create_app() -> FastAPI:
             "profiles": rows,
             "summary": {
                 "profileCount": len(rows),
-                "authorizedProfileCount": sum(1 for row in rows if int(row.get("validCookieCount") or 0) > 0),
+                "authorizedProfileCount": sum(1 for row in rows if row.get("authHealth") in ("healthy", "watch")),
                 "healthyProfileCount": sum(1 for row in rows if row.get("authHealth") == "healthy"),
                 "needsRefreshProfileCount": len(action_profiles),
                 "missingProfileCount": sum(1 for row in rows if row.get("authHealth") == "missing"),
@@ -18062,6 +18141,8 @@ def create_app() -> FastAPI:
         cookies = _parse_manual_cookie_payload(payload.cookies_text, fallback_domain)
         if not cookies:
             raise HTTPException(status_code=400, detail="没有解析到有效 Cookie。请粘贴 JSON Cookie 数组，或 name=value; name2=value2 格式。")
+        if _sentiment_profile_requires_sessionid(profile, profile_key) and not _sentiment_cookies_have_threads_sessionid(cookies):
+            raise HTTPException(status_code=400, detail="Threads Cookie 已讀取，但缺少 threads.net/threads.com 的有效 sessionid；請先在後台瀏覽器打開 Threads 並完成登入，再重新同步授權。")
         profile["cookies"] = cookies
         profile["lastAuthorizedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         note = str(payload.note or "").strip()

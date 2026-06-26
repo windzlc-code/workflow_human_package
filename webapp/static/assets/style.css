@@ -265,6 +265,18 @@ a {
   word-break: break-word;
 }
 
+.sentiment-cookie-detail.ready {
+  color: #166534;
+}
+
+.sentiment-cookie-detail.missing {
+  color: #b91c1c;
+}
+
+.sentiment-cookie-detail.unknown {
+  color: #475569;
+}
+
 .sentiment-cookie-table .badge.healthy,
 .sentiment-cookie-table .badge.ok {
   background: rgba(22, 163, 74, 0.12);

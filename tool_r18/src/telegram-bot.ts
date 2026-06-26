@@ -3255,15 +3255,49 @@ function normalizePersonaDetailHotFields(fields?: PersonaHotMetricField[]): Pers
   return next.length ? next : [...DEFAULT_PERSONA_DETAIL_HOT_FIELDS];
 }
 
+function getPersonaHotMetricsViewPreference(archive: PersonaArchive): {
+  mode: PersonaSettingsHotMetricsMode;
+  fields: PersonaHotMetricField[];
+} {
+  const raw = (archive.setup as any)?.hotMetricsView || {};
+  return {
+    mode: raw.mode === "detail" ? "detail" : "light",
+    fields: normalizePersonaDetailHotFields(Array.isArray(raw.fields) ? raw.fields : undefined),
+  };
+}
+
+async function persistPersonaHotMetricsViewPreference(
+  archive: PersonaArchive,
+  mode: PersonaSettingsHotMetricsMode,
+  fields?: PersonaHotMetricField[],
+) {
+  const current = getPersonaHotMetricsViewPreference(archive);
+  await updatePersonaArchiveProfile(archive.id, {
+    setup: {
+      ...(archive.setup || {}),
+      hotMetricsView: {
+        mode,
+        fields: normalizePersonaDetailHotFields(fields || current.fields),
+        updatedAt: new Date().toISOString(),
+      },
+    },
+  }).catch(() => null);
+}
+
 function buildPersonaSettingsHotMetricsView(chatId: number, archiveId: string, overrides?: Partial<{
   mode: PersonaSettingsHotMetricsMode;
   fields: PersonaHotMetricField[];
+  defaults: {
+    mode: PersonaSettingsHotMetricsMode;
+    fields: PersonaHotMetricField[];
+  };
 }>) {
   const current = pendingPersonaSettingsHotMetricsViews.get(chatId);
+  const defaults = overrides?.defaults;
   const next = {
     archiveId,
-    mode: overrides?.mode || (current?.archiveId === archiveId ? current.mode : "light"),
-    fields: normalizePersonaDetailHotFields(overrides?.fields || (current?.archiveId === archiveId ? current.fields : undefined)),
+    mode: overrides?.mode || (current?.archiveId === archiveId ? current.mode : defaults?.mode || "light"),
+    fields: normalizePersonaDetailHotFields(overrides?.fields || (current?.archiveId === archiveId ? current.fields : defaults?.fields)),
   };
   pendingPersonaSettingsHotMetricsViews.set(chatId, next);
   return next;
@@ -3281,6 +3315,21 @@ function hotMetricFieldLabel(field: PersonaHotMetricField) {
     case "shares": return "分享";
     case "views": return "瀏覽";
     default: return field;
+  }
+}
+
+function hotMetricFieldIcon(field: PersonaHotMetricField) {
+  switch (field) {
+    case "followers": return "👥";
+    case "following": return "➕";
+    case "recentViews": return "👁";
+    case "posts": return "🧾";
+    case "likes": return "❤️";
+    case "comments": return "💬";
+    case "reposts": return "🔁";
+    case "shares": return "📤";
+    case "views": return "📊";
+    default: return "📌";
   }
 }
 
@@ -3369,14 +3418,14 @@ export function buildPersonaHotMetricsPanelRows(archiveId: string, view: {
 }): Array<Array<{ text: string; callback_data: string }>> {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
     [
-      { text: `${view.mode === "light" ? "✅ " : ""}輕量版`, callback_data: `shl_${archiveId}` },
-      { text: `${view.mode === "detail" ? "✅ " : ""}詳細版`, callback_data: `shd_${archiveId}` },
+      { text: `${view.mode === "light" ? "✅ " : ""}⚡ 輕量版`, callback_data: `shl_${archiveId}` },
+      { text: `${view.mode === "detail" ? "✅ " : ""}📊 詳細版`, callback_data: `shd_${archiveId}` },
     ],
-    [{ text: "🔄 刷新數據", callback_data: `shr_${archiveId}` }],
+    [{ text: `🔄 刷新${view.mode === "detail" ? "詳細" : "輕量"}數據`, callback_data: `shr_${archiveId}` }],
   ];
   if (view.mode === "detail") {
     rows.push(...chunk(DEFAULT_PERSONA_DETAIL_HOT_FIELDS.map((field) => ({
-      text: `${view.fields.includes(field) ? "✅" : "⬜"} ${hotMetricFieldLabel(field)}`,
+      text: `${view.fields.includes(field) ? "✅" : "⬜"} ${hotMetricFieldIcon(field)} ${hotMetricFieldLabel(field)}`,
       callback_data: `shf_${PERSONA_HOT_METRIC_FIELD_CODE[field]}_${archiveId}`,
     })), 2));
   }
@@ -3394,9 +3443,11 @@ async function renderPersonaHotMetricsPanel(
     hotFields?: PersonaHotMetricField[];
   },
 ) {
+  const defaults = getPersonaHotMetricsViewPreference(archive);
   const view = buildPersonaSettingsHotMetricsView(chatId, archive.id, {
-    mode: options?.hotMode,
-    fields: options?.hotFields,
+    mode: options?.hotMode || defaults.mode,
+    fields: options?.hotFields || defaults.fields,
+    defaults,
   });
   const lines = [
     "🔥 *人設熱點數據*",
@@ -3647,9 +3698,11 @@ async function renderPersonaSettingsPage(
     hotFields?: PersonaHotMetricField[];
   },
 ) {
+  const defaults = getPersonaHotMetricsViewPreference(archive);
   const view = buildPersonaSettingsHotMetricsView(chatId, archive.id, {
-    mode: options?.hotMode,
-    fields: options?.hotFields,
+    mode: options?.hotMode || defaults.mode,
+    fields: options?.hotFields || defaults.fields,
+    defaults,
   });
   let nextArchive = archive;
   if (options?.autoRefreshLight && view.mode === "light" && !hasPersonaHotMetricsData(archive)) {
@@ -16595,8 +16648,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       await renderPersonaSettingsPage(bot, chatId, settingsTargetMessageId, archive, defaultPadCode, {
         autoRefreshLight: true,
-        hotMode: "light",
-        hotFields: [...DEFAULT_PERSONA_DETAIL_HOT_FIELDS],
       });
       return;
     }
@@ -16613,8 +16664,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const id = data.slice(prefix.length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const nextMode: PersonaSettingsHotMetricsMode = isLight ? "light" : "detail";
+      await persistPersonaHotMetricsViewPreference(archive, nextMode);
       await renderPersonaHotMetricsPanel(bot, chatId, msgId, archive, {
-        hotMode: isLight ? "light" : "detail",
+        hotMode: nextMode,
       });
       return;
     }
@@ -16643,9 +16696,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const nextFields = hasField
         ? current.fields.filter((item) => item !== field)
         : [...current.fields, field];
+      const normalizedNextFields = normalizePersonaDetailHotFields(nextFields);
+      await persistPersonaHotMetricsViewPreference(archive, "detail", normalizedNextFields);
       await renderPersonaHotMetricsPanel(bot, chatId, msgId, archive, {
         hotMode: "detail",
-        hotFields: normalizePersonaDetailHotFields(nextFields),
+        hotFields: normalizedNextFields,
       });
       return;
     }
@@ -16656,7 +16711,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         : data.slice("shr_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      const current = buildPersonaSettingsHotMetricsView(chatId, id);
+      const current = buildPersonaSettingsHotMetricsView(chatId, id, {
+        defaults: getPersonaHotMetricsViewPreference(archive),
+      });
       if (current.mode === "light") {
         await safeEditOrSend(bot, chatId, msgId, [
           "🔄 正在刷新輕量版熱點資料...",

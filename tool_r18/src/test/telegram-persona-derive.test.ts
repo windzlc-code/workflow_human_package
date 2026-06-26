@@ -148,12 +148,12 @@ describe("buildPersonaSettingsRows", () => {
       fields: ["followers", "views"],
     }));
 
-    expect(texts).toContain("輕量版");
-    expect(texts).toContain("✅ 詳細版");
-    expect(texts).toContain("🔄 刷新數據");
-    expect(texts).toContain("✅ 粉絲");
-    expect(texts).toContain("✅ 瀏覽");
-    expect(texts).toContain("⬜ 點讚");
+    expect(texts).toContain("⚡ 輕量版");
+    expect(texts).toContain("✅ 📊 詳細版");
+    expect(texts).toContain("🔄 刷新詳細數據");
+    expect(texts).toContain("✅ 👥 粉絲");
+    expect(texts).toContain("✅ 📊 瀏覽");
+    expect(texts).toContain("⬜ ❤️ 點讚");
   });
 
   it("hides persona-image controls for workflow personas", () => {
