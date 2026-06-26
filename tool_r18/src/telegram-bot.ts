@@ -785,6 +785,7 @@ const pendingSentimentHotMediaPanels = new Map<number, {
 const pendingPostSelections = new Map<number, {
   archiveId: string;
   postIds: string[];
+  source?: "posts" | "favorites";
   groupContentType?: TelegramGroupContentType;
 }>();
 
@@ -866,6 +867,18 @@ type PendingBulkPostAction = {
 };
 
 const pendingBulkPostActions = new Map<number, PendingBulkPostAction>();
+
+type PendingMatrixPublish = {
+  archiveIds: string[];
+  page: number;
+  source?: "posts" | "favorites";
+  count?: number | "all";
+  platform?: TelegramPublishPlatform;
+  stage: "choose_personas" | "choose_source" | "choose_platform" | "choose_count" | "confirm" | "running";
+  createdAt: number;
+};
+
+const pendingMatrixPublishes = new Map<number, PendingMatrixPublish>();
 
 type PendingPostImageRegenerationAction = {
   archiveId: string;
@@ -1423,6 +1436,7 @@ function clearTelegramNavigationTransientState(chatId: number) {
   deletePendingGeneratePost(chatId);
   pendingGeneratedPostImageGroupFlows.delete(chatId);
   pendingThreadsAutoReplyDaysInputs.delete(chatId);
+  pendingMatrixPublishes.delete(chatId);
   clearToolR18TransientState(chatId);
 }
 
@@ -1704,7 +1718,7 @@ function resolvePendingPostSelection(chatId: number, data: string, prefix: strin
   if (!selection || !Number.isFinite(index) || index < 0) return null;
   const postId = selection.postIds[index];
   if (!postId) return null;
-  return { archiveId: selection.archiveId, postId, index, displayIndex: index + 1, groupContentType: selection.groupContentType };
+  return { archiveId: selection.archiveId, postId, index, displayIndex: index + 1, source: selection.source, groupContentType: selection.groupContentType };
 }
 
 const STORED_POSTS_PAGE_SIZE = 5;
@@ -1875,6 +1889,73 @@ function buildPagedPersonaSelectorPayload(args: {
       reply_markup: { inline_keyboard: keyboard },
     },
   };
+}
+
+function buildMatrixPersonaSelectionPayload(list: PersonaListSummary[], state: PendingMatrixPublish): TelegramMenuPayload {
+  const pageInfo = paginateListItems(list, state.page || 0, PERSONA_LIST_PAGE_SIZE);
+  const selected = new Set(state.archiveIds);
+  const lines = [
+    "🚀 *矩陣發布*",
+    "",
+    `已選人設：${selected.size} 個`,
+    "請選擇要一起發布的人設。",
+  ];
+  if (pageInfo.totalPages > 1) lines.splice(2, 0, `第 ${pageInfo.page + 1}/${pageInfo.totalPages} 頁`);
+  const start = pageInfo.page * PERSONA_LIST_PAGE_SIZE;
+  const keyboard = [
+    ...pageInfo.items.map((persona, index) => ([{
+      text: `${selected.has(persona.id) ? "✅" : "⬜"} ${formatPersonaButtonText(persona)}`,
+      callback_data: `mxpt_${persona.id}`,
+    }])),
+    ...buildListPaginationRows({
+      page: pageInfo.page,
+      totalPages: pageInfo.totalPages,
+      callbackForPage: (page) => `mxpg_${page}`,
+    }),
+    [
+      { text: "✅ 選本頁", callback_data: "mxpsel" },
+      { text: "🧹 清本頁", callback_data: "mxpclr" },
+    ],
+    [{ text: `下一步：選擇來源（${selected.size}）`, callback_data: "mxpc" }],
+    [{ text: "◀️ 返回人設列表", callback_data: "list_personas" }],
+  ];
+  return {
+    text: lines.join("\n"),
+    options: {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: keyboard },
+    },
+  };
+}
+
+function buildMatrixSourceRows(): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{ text: "📝 待發布推文", callback_data: "mxsrc_posts" }],
+    [{ text: "⭐ 收藏推文", callback_data: "mxsrc_favorites" }],
+    [{ text: "◀️ 返回選人設", callback_data: "matrix_start" }],
+  ];
+}
+
+function buildMatrixCountRows(): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [
+      { text: "每人 1 篇", callback_data: "mxc_1" },
+      { text: "每人 3 篇", callback_data: "mxc_3" },
+    ],
+    [
+      { text: "每人 5 篇", callback_data: "mxc_5" },
+      { text: "每人全部", callback_data: "mxc_all" },
+    ],
+    [{ text: "◀️ 返回平台", callback_data: "mxback_platform" }],
+  ];
+}
+
+function formatMatrixSourceLabel(source?: "posts" | "favorites") {
+  return source === "favorites" ? "收藏推文" : "待發布推文";
+}
+
+function formatMatrixCountLabel(count?: number | "all") {
+  return count === "all" ? "全部" : `每人 ${count || 1} 篇`;
 }
 
 function buildPersonaHistoryCallback(archiveId: string, groupContentType?: TelegramGroupContentType, page = 0) {
@@ -13966,6 +14047,138 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     return results;
   };
 
+  const executeMatrixPublish = async (
+    chatId: number,
+    msgId: number | undefined,
+    state: PendingMatrixPublish,
+  ) => {
+    const platform = state.platform || "threads";
+    const source = state.source || "posts";
+    const count = state.count || 1;
+    if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
+    if (!credentials.ak || !credentials.sk) {
+      await safeEditOrSend(bot, chatId, msgId, "❌ VMOS 憑據未配置。", {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回矩陣確認", callback_data: "mxb_confirm" }]] },
+      });
+      return;
+    }
+
+    pendingMatrixPublishes.set(chatId, { ...state, stage: "running" });
+    const pads = await listPadsForThisBot().catch(() => [] as PadListItem[]);
+    const totalPersonas = state.archiveIds.length;
+    let totalPlanned = 0;
+    let successPosts = 0;
+    let failedJobs = 0;
+    const failedLines: string[] = [];
+    const completedLines: string[] = [];
+    const stopTyping = startTelegramTyping(bot, chatId);
+    try {
+      for (let archiveIndex = 0; archiveIndex < state.archiveIds.length; archiveIndex += 1) {
+        const archiveId = state.archiveIds[archiveIndex];
+        try {
+          const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
+          if (!archive) {
+            failedJobs += 1;
+            failedLines.push(`${archiveId}：找不到人設`);
+            continue;
+          }
+          const sourcePosts = resolveArchivePostCollection(archive, source);
+          const selectedPosts = (count === "all" ? sourcePosts : sourcePosts.slice(0, Math.max(1, count))).filter(Boolean);
+          if (!selectedPosts.length) {
+            failedJobs += 1;
+            failedLines.push(`${archive.name}：沒有可發布的${formatMatrixSourceLabel(source)}`);
+            continue;
+          }
+          totalPlanned += selectedPosts.length;
+          let padBinding: { padCode: string; padName?: string };
+          try {
+            padBinding = await resolvePublishPadBinding(archive, undefined, defaultPadCode, pads);
+          } catch (error: any) {
+            failedJobs += selectedPosts.length;
+            failedLines.push(`${archive.name}：${formatUserFacingError(error, "雲機不可用")}`);
+            continue;
+          }
+          await safeEditOrSend(bot, chatId, msgId, [
+            "🚀 矩陣發布中",
+            "",
+            `人設進度：${archiveIndex + 1}/${totalPersonas}`,
+            `目前人設：${archive.name}`,
+            `平台：${platform}`,
+            `雲機：${padBinding.padName || padBinding.padCode}`,
+            `推文：${selectedPosts.length} 篇`,
+          ].join("\n"), {
+            reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "fresh_main_menu" }]] },
+          });
+
+          const results = await publishPostsAcrossPads({
+            chatId,
+            archive,
+            posts: selectedPosts,
+            platform,
+            padCodes: [padBinding.padCode],
+            label: "矩陣發布",
+          });
+          const result = results[0];
+          const publishedIds = result?.publishedPostIds || [];
+          successPosts += publishedIds.length;
+          const publishedPosts = selectedPosts.filter((post) => publishedIds.includes(post.id));
+          if (publishedPosts.length) {
+            const meta = Object.fromEntries(publishedPosts.map((post) => [post.id, {
+              platform,
+              padCode: padBinding.padCode,
+              imageUrl: getStoredPostPrimaryMediaUrl(post),
+              screenshotUrl: result?.screenshots?.[0],
+              sourceMeta: post.sourceMeta,
+              publishedTargets: [result?.publishTargetByPost?.[post.id]].filter(Boolean),
+              ...(result?.publishMetaByPost?.[post.id] || {}),
+            }]));
+            await (source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
+              archive.id,
+              publishedPosts.map((post) => post.id),
+              Object.fromEntries(publishedPosts.map((post) => [post.id, post.content])),
+              meta,
+            ).catch(() => null);
+          }
+          if (!result?.ok || publishedIds.length < selectedPosts.length) {
+            const missing = selectedPosts.length - publishedIds.length;
+            failedJobs += Math.max(1, missing);
+            failedLines.push(`${archive.name}：${result?.error || `未完成 ${missing} 篇`}`);
+          } else {
+            completedLines.push(`${archive.name}：${publishedIds.length} 篇`);
+          }
+        } catch (error: any) {
+          failedJobs += 1;
+          failedLines.push(`${archiveId}：${formatUserFacingError(error, "發布失敗，請稍後重試")}`);
+        }
+      }
+    } finally {
+      stopTyping();
+      pendingMatrixPublishes.delete(chatId);
+      invalidatePersonaListCache();
+    }
+
+    const summary = [
+      failedJobs ? "⚠️ 矩陣發布完成，部分失敗" : "✅ 矩陣發布完成",
+      "",
+      `平台：${platform}`,
+      `來源：${formatMatrixSourceLabel(source)}`,
+      `人設：${totalPersonas} 個`,
+      `計劃推文：${totalPlanned} 篇`,
+      `成功：${successPosts} 篇`,
+      `失敗：${failedJobs}`,
+    ];
+    if (completedLines.length) summary.push("", "已完成：", ...completedLines.slice(-8));
+    if (failedLines.length) summary.push("", "失敗：", ...failedLines.slice(-8));
+    await bot.sendMessage(chatId, summary.join("\n"), {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🚀 重新矩陣發布", callback_data: "matrix_start" }],
+          [{ text: "👤 返回人設列表", callback_data: "list_personas" }],
+        ],
+      },
+    });
+  };
+
   const customPublishBackToMethodButton = (state: PendingCustomPublish) => ({
     text: "◀️ 返回发布方式",
     callback_data: state.archiveId ? `custom_publish_platform_${state.platform || effectiveDefaultPublishPlatform}` : "custom_publish",
@@ -14982,7 +15195,10 @@ async function getPersonaListMenuPayload(options: { force?: boolean; page?: numb
     page,
     itemCallback: (persona) => `pd_${persona.id}`,
     pageCallbackRoot: "list_personas",
-    topRows: [[{ text: "➕ 新建人設", callback_data: "create_persona_entry" }]],
+    topRows: [
+      [{ text: "🚀 矩陣發布", callback_data: "matrix_start" }],
+      [{ text: "➕ 新建人設", callback_data: "create_persona_entry" }],
+    ],
     emptyText: "暫無人設。",
     parseMode: "Markdown",
   });
@@ -15925,6 +16141,178 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const payload = await getPersonaListMenuPayload({ page: personaListPage });
       await renderControlPanel(chatId, payload.text, payload.options, msgId);
       return;
+    }
+
+    if (
+      data === "matrix_start"
+      || data.startsWith("mxpg_")
+      || data.startsWith("mxpt_")
+      || data === "mxpsel"
+      || data === "mxpclr"
+      || data === "mxpc"
+      || data.startsWith("mxsrc_")
+      || data.startsWith("mxplat_")
+      || data.startsWith("mxc_")
+      || data === "mxb_source"
+      || data === "mxback_platform"
+      || data === "mxb_confirm"
+      || data === "mxrun"
+    ) {
+      const allPersonas = filterPersonaMenuList(await listPersonasCached());
+      let state = pendingMatrixPublishes.get(chatId) || {
+        archiveIds: [],
+        page: 0,
+        stage: "choose_personas" as const,
+        createdAt: Date.now(),
+      };
+      const renderPersonaSelection = async () => {
+        pendingMatrixPublishes.set(chatId, state);
+        const payload = buildMatrixPersonaSelectionPayload(allPersonas, state);
+        await safeEditOrSend(bot, chatId, msgId, payload.text, payload.options);
+      };
+      if (data === "matrix_start") {
+        state = { ...state, stage: "choose_personas", page: state.page || 0, createdAt: Date.now() };
+        await renderPersonaSelection();
+        return;
+      }
+      if (data.startsWith("mxpg_")) {
+        state = { ...state, page: Math.max(0, Number(data.slice("mxpg_".length) || 0)), stage: "choose_personas" };
+        await renderPersonaSelection();
+        return;
+      }
+      if (data.startsWith("mxpt_")) {
+        const personaId = data.slice("mxpt_".length);
+        const selected = new Set(state.archiveIds);
+        if (personaId && allPersonas.some((persona) => persona.id === personaId)) {
+          if (selected.has(personaId)) selected.delete(personaId);
+          else selected.add(personaId);
+        }
+        state = { ...state, archiveIds: [...selected], stage: "choose_personas" };
+        await renderPersonaSelection();
+        return;
+      }
+      if (data === "mxpsel" || data === "mxpclr") {
+        const pageInfo = paginateListItems(allPersonas, state.page || 0, PERSONA_LIST_PAGE_SIZE);
+        const selected = new Set(state.archiveIds);
+        for (const persona of pageInfo.items) {
+          if (data === "mxpsel") selected.add(persona.id);
+          else selected.delete(persona.id);
+        }
+        state = { ...state, archiveIds: [...selected], stage: "choose_personas" };
+        await renderPersonaSelection();
+        return;
+      }
+      if (data === "mxpc" || data === "mxb_source") {
+        if (!state.archiveIds.length) {
+          await renderPersonaSelection();
+          return;
+        }
+        state = { ...state, stage: "choose_source" };
+        pendingMatrixPublishes.set(chatId, state);
+        await safeEditOrSend(bot, chatId, msgId, `🚀 *矩陣發布*\n\n已選人設：${state.archiveIds.length} 個\n\n請選擇推文來源：`, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: buildMatrixSourceRows() },
+        });
+        return;
+      }
+      if (data.startsWith("mxsrc_") || data === "mxback_platform") {
+        const source = data.startsWith("mxsrc_")
+          ? data.slice("mxsrc_".length) as "posts" | "favorites"
+          : state.source;
+        if (source !== "posts" && source !== "favorites") {
+          await safeEditOrSend(bot, chatId, msgId, "矩陣發布狀態已過期，請重新開始。", {
+            reply_markup: { inline_keyboard: [[{ text: "🚀 重新開始", callback_data: "matrix_start" }]] },
+          });
+          return;
+        }
+        state = { ...state, source, stage: "choose_platform" };
+        pendingMatrixPublishes.set(chatId, state);
+        await safeEditOrSend(bot, chatId, msgId, `🚀 *矩陣發布*\n\n人設：${state.archiveIds.length} 個\n來源：${formatMatrixSourceLabel(source)}\n\n請選擇發布平台：`, {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              ...allowedPublishPlatforms.map((platform) => ([{
+                text: platformButtons[platform].text,
+                callback_data: `mxplat_${platform}`,
+              }])),
+              [{ text: "◀️ 返回來源", callback_data: "mxb_source" }],
+            ],
+          },
+        });
+        return;
+      }
+      if (data.startsWith("mxplat_")) {
+        const platform = data.slice("mxplat_".length) as TelegramPublishPlatform;
+        if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
+        state = { ...state, platform, stage: "choose_count" };
+        pendingMatrixPublishes.set(chatId, state);
+        await safeEditOrSend(bot, chatId, msgId, `🚀 *矩陣發布*\n\n人設：${state.archiveIds.length} 個\n來源：${formatMatrixSourceLabel(state.source)}\n平台：${platform}\n\n請選擇每個人設發布幾篇：`, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: buildMatrixCountRows() },
+        });
+        return;
+      }
+      if (data.startsWith("mxc_") || data === "mxb_confirm") {
+        const countToken = data.startsWith("mxc_") ? data.slice("mxc_".length) : String(state.count || 1);
+        const count = countToken === "all" ? "all" : Math.max(1, Number(countToken || 1));
+        state = { ...state, count, stage: "confirm" };
+        pendingMatrixPublishes.set(chatId, state);
+        const source = state.source || "posts";
+        const detailLines: string[] = [];
+        let plannedPosts = 0;
+        for (const archiveId of state.archiveIds) {
+          const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
+          if (!archive) {
+            detailLines.push(`${archiveId}：找不到人設`);
+            continue;
+          }
+          const sourcePosts = resolveArchivePostCollection(archive, source);
+          const selectedCount = count === "all" ? sourcePosts.length : Math.min(sourcePosts.length, count);
+          plannedPosts += selectedCount;
+          detailLines.push(`${archive.name}：${selectedCount} 篇，雲機 ${archive.boundPadCode || defaultPadCode}`);
+        }
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🚀 *矩陣發布確認*",
+          "",
+          `人設：${state.archiveIds.length} 個`,
+          `來源：${formatMatrixSourceLabel(source)}`,
+          `平台：${state.platform || "threads"}`,
+          `數量：${formatMatrixCountLabel(count)}`,
+          `計劃推文：${plannedPosts} 篇`,
+          "",
+          ...detailLines.slice(0, 12),
+          detailLines.length > 12 ? `...還有 ${detailLines.length - 12} 個人設` : "",
+          "",
+          "系統會使用各人設綁定雲機，按順序發布。",
+        ].filter(Boolean).join("\n"), {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "✅ 開始矩陣發布", callback_data: "mxrun" }],
+              [{ text: "◀️ 返回數量", callback_data: `mxplat_${state.platform || "threads"}` }],
+              [{ text: "👤 重新選人設", callback_data: "matrix_start" }],
+            ],
+          },
+        });
+        return;
+      }
+      if (data === "mxrun") {
+        if (state.stage === "running") {
+          await safeEditOrSend(bot, chatId, msgId, "矩陣發布正在執行中，請等待目前任務完成。", {
+            reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "fresh_main_menu" }]] },
+          });
+          return;
+        }
+        if (!state.archiveIds.length || !state.source || !state.platform || !state.count) {
+          await safeEditOrSend(bot, chatId, msgId, "矩陣發布狀態不完整，請重新開始。", {
+            reply_markup: { inline_keyboard: [[{ text: "🚀 重新開始", callback_data: "matrix_start" }]] },
+          });
+          return;
+        }
+        pendingMatrixPublishes.set(chatId, { ...state, stage: "running" });
+        await executeMatrixPublish(chatId, msgId, state);
+        return;
+      }
     }
 
     // ── 人设详情 ──
