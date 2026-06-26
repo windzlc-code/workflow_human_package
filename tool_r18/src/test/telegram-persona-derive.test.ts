@@ -58,6 +58,13 @@ function flattenButtonCallbacks(rows: Array<Array<{ callback_data: string }>>) {
 }
 
 describe("derivePersonaSpecFromPrompt", () => {
+  it("generates persisted interest tags for new personas", () => {
+    const spec = derivePersonaSpecFromPrompt("basketball creator");
+
+    expect(spec.setup.interests?.length).toBeGreaterThan(0);
+    expect(spec.setup.interests?.every((item) => item.length <= 12)).toBe(true);
+  });
+
   it("uses a short custom prompt as the persona name and keeps basketball content aligned", () => {
     const spec = derivePersonaSpecFromPrompt("篮球大佬");
 

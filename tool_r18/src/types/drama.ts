@@ -242,6 +242,7 @@ export interface DramaSetup {
   personalityTags?: string;
   postFormat?: string;
   contentTheme?: string;
+  interests?: string[];
   trendTopics?: string[];
   tweetStyleProfile?: string;
   tweetStyleSample?: string;

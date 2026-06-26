@@ -670,7 +670,7 @@ async function resolveWarmupCommentPersonaForPad(padCode: string): Promise<Warmu
   };
   return {
     ...persona,
-    interests: buildWarmupInterestKeywords(persona),
+    interests: normalizePersonaInterestTags(archive.setup?.interests, buildWarmupInterestKeywords(persona)),
   };
 }
 
@@ -7856,6 +7856,16 @@ export function derivePersonaSpecFromPrompt(text: string) {
       personaPersonality: personality,
       personaGender: female,
       personaStyle: style,
+      interests: derivePersonaInterestTags({
+        genres: [genre],
+        personaPersonality: personality,
+        personaGender: female,
+        personaStyle: style,
+        personaName: name,
+        personaDescription: content,
+        contentTheme: genre,
+        customTopic: rawText,
+      }, content),
       targetMarket: "cn",
       chineseScript: "traditional",
       totalEpisodes: 50,
@@ -7907,6 +7917,41 @@ function pickStringArray(value: unknown, fallback: string[]) {
     .filter(Boolean)
     .slice(0, 3);
   return items.length ? items : fallback;
+}
+
+function normalizePersonaInterestTags(value: unknown, fallback: string[] = []): string[] {
+  const source = Array.isArray(value) ? value : [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of [...source, ...fallback]) {
+    const tag = normalizeTelegramSingleLine(String(item || ""))
+      .replace(/^#/, "")
+      .replace(/[，,。；;、\s]+$/g, "")
+      .slice(0, 12);
+    if (tag.length < 2) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(tag);
+    if (result.length >= 8) break;
+  }
+  return result;
+}
+
+function derivePersonaInterestTags(setup: Partial<DramaSetup> | undefined, content = ""): string[] {
+  const persona = {
+    name: setup?.personaName,
+    description: [setup?.personaDescription, setup?.contentTheme, setup?.customTopic, content].filter(Boolean).join(" "),
+    style: setup?.personaStyle,
+    personality: setup?.personaPersonality,
+    interests: normalizePersonaInterestTags(setup?.interests),
+  };
+  const candidates = [
+    ...(setup?.genres || []),
+    ...normalizePersonaInterestTags(setup?.interests),
+    ...buildWarmupInterestKeywords(persona),
+  ];
+  return normalizePersonaInterestTags(candidates).slice(0, 8);
 }
 
 function pickBoolean(value: unknown): boolean | undefined {
@@ -7973,6 +8018,10 @@ function normalizeCodexPersonaSpec(raw: any, originalText: string): { name: stri
     contentTheme: pickString(setupRaw.contentTheme, genres.join("、")),
     customTopic: pickString(setupRaw.customTopic, originalText),
   };
+  setup.interests = derivePersonaInterestTags({
+    ...setup,
+    interests: normalizePersonaInterestTags(setupRaw.interests),
+  }, content);
   const isGirlPersona = pickBoolean(setupRaw.isGirlPersona);
   const isMemePersona = pickBoolean(setupRaw.isMemePersona);
   if (isGirlPersona !== undefined) setup.isGirlPersona = isGirlPersona;
@@ -8013,6 +8062,7 @@ async function derivePersonaSpecWithCodex(text: string): Promise<{ name: string;
         personaName: "人设名称",
         personaDescription: "同 content 或更短描述",
         contentTheme: "内容主题和图片视觉倾向",
+        interests: ["Threads 可填写的兴趣标签"],
         customTopic: "用户原始输入",
         isGirlPersona: false,
         isMemePersona: false,
@@ -8264,6 +8314,10 @@ async function createPersonaFromPromptSelection(args: {
       selectedKeywords.length ? `核心走向：${selectedKeywords.join("、")}` : "",
     ].filter(Boolean).join("\n"),
   } as DramaSetup;
+  spec.setup.interests = derivePersonaInterestTags({
+    ...spec.setup,
+    interests: [...normalizePersonaInterestTags(spec.setup.interests), ...selectedKeywords],
+  }, spec.content);
   const created = await createPersonaBySpec({
     name: spec.name,
     content: spec.content,
@@ -16419,6 +16473,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const workflowPersona = isWorkflowPersonaListItem(archive);
+      const interestTags = normalizePersonaInterestTags(archive.setup?.interests);
+      const interestLine = interestTags.length ? `興趣標籤: ${interestTags.join("、")}\n` : "";
       await safeEditOrSend(
         bot,
         chatId,
@@ -16429,7 +16485,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         `待发布推文: ${archive.posts.length} 篇\n` +
         `已发布: ${archive.publishHistory?.length || 0} 篇\n` +
         `绑定云机: ${archive.boundPadCode || defaultPadCode}${archive.boundPadName ? ` (${archive.boundPadName})` : ""}\n\n` +
-        `${archive.content.slice(0, 200)}`,
+        `${interestLine}${archive.content.slice(0, 200)}`,
         {
           parse_mode: "Markdown",
           reply_markup: {
