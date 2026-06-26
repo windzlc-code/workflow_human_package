@@ -26746,18 +26746,42 @@ Rules:
 - Ignore post text, Hot/熱門 label, buttons, reply/like/share UI labels, counts, and the bottom composer.
 - If there are no readable visible comments, return {"comments":[]}.`;
     const parseRawComments = (raw: string, debugReason: string): ThreadsAutoReplyCandidate[] => {
-      const jsonText = extractText(raw).match(/\{[\s\S]*\}/)?.[0] || "";
+      const extractedText = extractText(raw);
+      const jsonText = extractedText.match(/\{[\s\S]*\}/)?.[0]
+        || extractedText.match(/\[[\s\S]*\]/)?.[0]
+        || "";
       if (!jsonText) return [];
       const parsed = JSON.parse(jsonText);
       const postAuthor = normalizeThreadsAutoReplyAuthor(normalizeSingleLine(String(
-        parsed?.postAuthor || parsed?.post_author || parsed?.threadAuthor || parsed?.thread_author || "",
+        parsed?.postAuthor
+        || parsed?.post_author
+        || parsed?.threadAuthor
+        || parsed?.thread_author
+        || parsed?.作者
+        || parsed?.主作者
+        || parsed?.串文作者
+        || "",
       )));
       const trustedPostAuthorAsOwn = postAuthor || "";
       const ignoredAuthors = mergeThreadsAutoReplyOwnIdentifiers(
         ownIdentifiers,
         trustedPostAuthorAsOwn ? [trustedPostAuthorAsOwn] : [],
       );
-      const comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
+      const comments = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.comments)
+          ? parsed.comments
+          : Array.isArray(parsed?.visibleComments)
+            ? parsed.visibleComments
+            : Array.isArray(parsed?.visible_comments)
+              ? parsed.visible_comments
+              : Array.isArray(parsed?.留言)
+                ? parsed.留言
+                : Array.isArray(parsed?.評論)
+                  ? parsed.評論
+                  : Array.isArray(parsed?.评论)
+                    ? parsed.评论
+                    : [];
       const seen = new Set<string>();
       const normalizedRows = comments
         .map((item, index) => {
@@ -26769,14 +26793,41 @@ Rules:
               || record.replyRow
               || record.replyRowIndex
               || record.visibleRow
+              || record["行"]
+              || record["行號"]
+              || record["行号"]
+              || record["序號"]
+              || record["序号"]
               || 0,
             )));
             const replyPoint = rowIndex > 0
               ? replyPoints[rowIndex - 1]
               : (replyPoints[index] || fallbackReplyPoint);
             return {
-              author: normalizeSingleLine(String(record.author || record.username || record.user || "")),
-              text: normalizeSingleLine(String(record.text || record.comment || record.content || record.message || "")),
+              author: normalizeSingleLine(String(
+                record.author
+                || record.username
+                || record.user
+                || record.account
+                || record["作者"]
+                || record["用戶"]
+                || record["用户"]
+                || record["帳號"]
+                || record["账号"]
+                || "",
+              )),
+              text: normalizeSingleLine(String(
+                record.text
+                || record.comment
+                || record.content
+                || record.message
+                || record["留言"]
+                || record["評論"]
+                || record["评论"]
+                || record["內容"]
+                || record["内容"]
+                || "",
+              )),
               replyPoint,
               rowIndex,
             };
