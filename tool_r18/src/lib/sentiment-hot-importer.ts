@@ -596,7 +596,7 @@ async function buildSentimentHotKeywordsWithModel(args: {
     archive.content ? `人設簡介：${archive.content}` : "",
     Array.isArray((setup as any).interests) && (setup as any).interests.length ? `興趣標籤參考（只能作為參考，不能直接照抄）：${(setup as any).interests.join("、")}` : "",
     Array.isArray((setup as any).genres) && (setup as any).genres.length ? `類型：${(setup as any).genres.join("、")}` : "",
-    (setup as any).personality ? `性格：${(setup as any).personality}` : "",
+    (setup as any).personality ? `性格邊界（只用於理解語氣與排除衝突，絕不可直接輸出為關鍵詞）：${(setup as any).personality}` : "",
     (setup as any).personaType ? `身份：${(setup as any).personaType}` : "",
     setup.tweetStyleProfile ? `推文風格：${setup.tweetStyleProfile}` : "",
     setup.tweetStyleSample ? `推文樣例：${setup.tweetStyleSample}` : "",
@@ -616,13 +616,15 @@ async function buildSentimentHotKeywordsWithModel(args: {
             "你是社群热点搜索关键词规划器。请根据人设核心内容生成 Threads / Instagram 中文热点搜索关键词。",
             "要求：",
             "1. 只输出 JSON 数组，数组内是字符串，例如：[\"海外金融\",\"工薪信贷\",\"信用卡\"]。",
-            "2. 必须综合判断：人设名称、人设简介、身份/类型、性格边界、推文风格、近期记忆、兴趣标签参考。兴趣标签不能直接照抄，必须和人设核心设定互相印证后才可保留。",
-            "3. 输出的是搜索用关键词，不是人设标签。优先选择能在 Threads / Instagram 搜到真实热点的领域词、场景词、受众痛点词。",
-            "4. 每个关键词都必须同时满足：贴合人设核心领域；能支撑该人设持续创作；不偏离人设身份和受众。",
-            "5. 不要输出字段说明、视觉描述、语气词、泛词或平台词，例如：内容主题、视觉倾向、生活、日常、热门、分享、科技。",
-            "6. 如果某个词出现在否定、排除、边界描述里，例如“不做美食”，不要把它当关键词。",
-            "7. 不要为了凑数扩展到无关领域；宁可少于 10 个，也不要宽泛。",
-            "8. 单个关键词 2-12 个中文字，最多 10 个，按优先级排序。",
+            "2. 生成前先做判断：人设名称、人设简介、身份/类型、推文风格、近期记忆、兴趣标签参考用于确定领域；性格只用于判断语气边界和排除冲突，绝不能作为关键词输出。",
+            "3. 关键词必须是用户会真实输入搜索框的简单名词短语，只允许从以下通用模板中生成：领域词、行业词、职业/身份受众词、具体场景词、具体痛点词、具体产品/制度/事件词。",
+            "4. 输出的是搜索用关键词，不是人设标签、不是人物介绍、不是文案片段。优先选择能在 Threads / Instagram 搜到真实热点的领域词、场景词、受众痛点词。",
+            "5. 严禁输出抽象人格词、性格词、语气词、风格词、自我描述、履历碎片、半截句子、代词句或泛词，例如：说话直白、犀利、不绕弯子、他自认为、年轻的前、内容主题、视觉倾向、生活、日常、热门、分享、科技。",
+            "6. 每个关键词都必须同时满足：贴合人设核心领域；能支撑该人设持续创作；不偏离人设身份和受众；单独拿出来也能直接搜索。",
+            "7. 如果某个词出现在否定、排除、边界描述里，例如“不做美食”，不要把它当关键词。",
+            "8. 不要为了凑数扩展到无关领域；宁可少于 10 个，也不要宽泛。",
+            "9. 输出前自检并删除不合格项：不是名词短语的删除；带“的/了/他/她/我/你/自认/说话/风格/性格”的删除；无法单独搜索的删除。",
+            "10. 单个关键词 2-12 个中文字，最多 10 个，按优先级排序。",
             "",
             "人设资料：",
             personaText,
@@ -884,7 +886,7 @@ export async function fetchSentimentHotCandidates(args: {
   const archiveId = cleanText(archive?.id) || "default";
   const keywords = await buildSentimentHotKeywordsWithModel({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries, warnings });
   const limit = args.limit || 10;
-  const poolLimit = Math.max(limit * 6, 60);
+  const poolLimit = Math.max(limit * 10, 100);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
 
   let candidates = hasSearchKeywords
@@ -1103,7 +1105,7 @@ async function filterSentimentCandidatesWithModel(args: {
   limit: number;
   warnings: string[];
 }): Promise<SentimentHotCandidate[]> {
-  const candidates = sortRelevantHotCandidates(args.candidates, args.keywords, Math.max(args.limit * 6, 60));
+  const candidates = sortRelevantHotCandidates(args.candidates, args.keywords, Math.max(args.limit * 10, 100));
   if (candidates.length <= args.limit) return candidates;
   const personaText = [
     args.archive?.name ? `Name: ${args.archive.name}` : "",
@@ -1111,7 +1113,7 @@ async function filterSentimentCandidatesWithModel(args: {
     args.archive?.setup ? `Setup: ${JSON.stringify(args.archive.setup)}` : "",
     `Keywords: ${args.keywords.join(" / ")}`,
   ].filter(Boolean).join("\n");
-  const candidateText = candidates.slice(0, 40).map((candidate, index) => {
+  const candidateText = candidates.slice(0, 100).map((candidate, index) => {
     const media = candidate.media?.length ? ` media=${candidate.media.length}` : "";
     return `${index + 1}. score=${candidate.hotScore}${media}
 ${cleanText(candidate.content).slice(0, 280)}`;
