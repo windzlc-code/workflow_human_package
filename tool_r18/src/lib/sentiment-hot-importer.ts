@@ -386,8 +386,6 @@ const PRIORITY_DOMAIN_KEYWORDS = new Set([
   "职场",
 ]);
 
-const BROAD_THREADS_SEARCH_QUERIES = ["生活", "日常", "熱門", "分享", "台灣", "心情", "今天", "最近", "穿搭", "美食", "遊戲", "戀愛"];
-
 function isGenericSentimentKeyword(value: string): boolean {
   const key = cleanText(value).toLowerCase();
   return GENERIC_SENTIMENT_KEYWORDS.has(key) && !DOMAIN_RELEVANCE_KEYWORDS.has(key);
@@ -408,8 +406,14 @@ const DYNAMIC_KEYWORD_STOPWORDS = new Set([
   "人设",
   "內容",
   "内容",
+  "內容主題",
+  "内容主题",
   "風格",
   "风格",
+  "視覺傾向",
+  "视觉倾向",
+  "圖片視覺傾向",
+  "图片视觉倾向",
   "推文",
   "文案",
   "生成",
@@ -423,7 +427,13 @@ const DYNAMIC_KEYWORD_STOPWORDS = new Set([
   "设定",
   "目前風格",
   "目前风格",
+  "理性務實",
+  "理性务实",
+  "務實",
+  "务实",
 ]);
+
+const SENTIMENT_KEYWORD_NEGATION_RE = /(?:不做|不要|不是|不碰|避免|排除|禁止|拒絕|拒绝|非|無關|无关).{0,8}$/u;
 
 function meaningfulNeedles(keywords: string[]): string[] {
   return keywords
@@ -432,73 +442,50 @@ function meaningfulNeedles(keywords: string[]): string[] {
     .slice(0, 12);
 }
 
-function addMedicalTopicKeywords(out: string[], text: string) {
-  if (!/[医醫]|医生|醫生|医院|醫院|医疗|醫療|手术|手術|诊所|診所|医美|醫美/.test(text)) return;
-  out.push(
-    "醫療",
-    "医疗",
-    "醫生",
-    "医生",
-    "醫院",
-    "医院",
-    "醫療糾紛",
-    "医疗纠纷",
-    "醫療事故",
-    "医疗事故",
-    "黑心診所",
-    "黑心诊所",
-    "醫美",
-    "医美",
-    "手術",
-    "手术",
-  );
-  if (/黑暗|邪恶|邪惡|反派|阴谋|陰謀|恐怖|壓迫|压迫/.test(text)) {
-    out.push("黑心醫生", "黑心医生", "醫院爆料", "医院爆料", "醫療爭議", "医疗争议");
-  }
-}
-
-function addGeneralTopicKeywords(out: string[], text: string) {
-  const groups: Array<[RegExp, string[]]> = [
-    [/(教师|老師|老师|校園|校园|學生|学生|课堂|課堂)/, ["老師", "教師", "學生", "校園", "課堂"]],
-    [/(恋爱|戀愛|情感|感情|暧昧|曖昧|分手|关系|關係)/, ["戀愛", "感情", "曖昧", "分手", "關係"]],
-    [/(穿搭|美妆|美妝|护肤|護膚|拍照|女生|日系)/, ["穿搭", "美妝", "護膚", "女生", "拍照"]],
-    [/(AI|人工智能|人工智慧|自动化|自動化|科技|互联网|互聯網|职场|職場)/i, ["AI", "人工智慧", "自動化", "科技", "職場"]],
-    [/(動漫|动漫|二次元|遊戲|游戏|漫展|手辦|手办|cos|cosplay)/i, ["動漫", "二次元", "遊戲", "漫展", "cosplay"]],
-    [/(美食|吃貨|吃货|餐廳|餐厅|咖啡|甜點|甜点|料理|宵夜)/, ["美食", "餐廳", "咖啡", "甜點", "宵夜"]],
-    [/(旅行|旅遊|旅游|露營|露营|景點|景点|出遊|出游|城市|拍照)/, ["旅行", "旅遊", "景點", "露營", "城市"]],
-    [/(寵物|宠物|貓|猫|狗|小動物|小动物|毛孩)/, ["寵物", "貓", "狗", "毛孩", "小動物"]],
-    [/(家庭|媽媽|妈妈|太太|人妻|婚姻|育兒|育儿|家務|家务|親子|亲子)/, ["家庭", "媽媽", "婚姻", "育兒", "親子"]],
-    [/(上班|職場|职场|同事|主管|公司|加班|辦公室|办公室|工作)/, ["職場", "上班", "同事", "加班", "辦公室"]],
-    [/(健身|運動|运动|跑步|瑜伽|球類|球类|排球|籃球|篮球|足球)/, ["健身", "運動", "跑步", "排球", "籃球"]],
-    [/(娛樂|娱乐|明星|偶像|八卦|追星|影劇|影剧|電影|电影|綜藝|综艺)/, ["娛樂", "明星", "八卦", "影劇", "電影"]],
-    [/(理財|理财|投資|投资|股票|基金|幣圈|币圈|副業|副业|賺錢|赚钱)/, ["理財", "投資", "股票", "副業", "賺錢"]],
-    [/(法律|律師|律师|法院|案件|糾紛|纠纷|警察|社會|社会|新聞|新闻)/, ["法律", "社會", "新聞", "案件", "糾紛"]],
-  ];
-  for (const [pattern, values] of groups) {
-    if (pattern.test(text)) out.push(...values);
-  }
-}
-
 function normalizeDynamicKeyword(value: string, archiveName: string): string {
   return cleanText(value)
     .replace(/^[-_*#\d.、\s]+/g, "")
-    .replace(/^(人設|人设|類型|类型|性格|內容|内容|風格|风格|主題|主题|模式|記憶|记忆)[:：]/, "")
-    .replace(/^(改成|改為|改为|換成|换成|修改成|修改為|修改为|內容以|内容以|以)/, "")
+    .replace(/^(人設|人设|類型|类型|性格|內容|内容|內容領域|内容领域|風格|风格|主題|主题|模式|記憶|记忆)[:：]?/, "")
+    .replace(/^(改成|改為|改为|換成|换成|修改成|修改為|修改为|內容以|内容以|以|面向|面對|是一位|是一个|是一個|聚焦|專注|专注|圍繞|围绕)/, "")
     .replace(archiveName ? new RegExp(archiveName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g") : /$^/, "")
-    .replace(/(人設|人设|設定|设定|風格|风格|推文|文案|為主|为主)$/g, "")
+    .replace(/(人設|人设|設定|设定|風格|风格|推文|文案|傾向|倾向|為主|为主)$/g, "")
     .trim();
+}
+
+function hasNegatedKeywordContext(source: string, keyword: string): boolean {
+  const key = cleanText(keyword);
+  if (!key) return false;
+  let index = cleanText(source).indexOf(key);
+  while (index >= 0) {
+    const prefix = source.slice(Math.max(0, index - 16), index);
+    if (SENTIMENT_KEYWORD_NEGATION_RE.test(prefix)) return true;
+    index = source.indexOf(key, index + key.length);
+  }
+  return false;
+}
+
+function normalizeSentimentSearchKeyword(value: unknown, options?: { archiveName?: string; sourceText?: string }): string {
+  const text = normalizeDynamicKeyword(String(value || ""), options?.archiveName || "")
+    .replace(/^[@#]+/g, "")
+    .trim();
+  const key = text.toLowerCase();
+  if (!text) return "";
+  if (!hasHan(text) && !/^AI$/i.test(text)) return "";
+  if (text.length < 2 || text.length > 12) return "";
+  if (DYNAMIC_KEYWORD_STOPWORDS.has(text) || DYNAMIC_KEYWORD_STOPWORDS.has(key)) return "";
+  if (WEAK_RELEVANCE_STOPWORDS.has(text) || WEAK_RELEVANCE_STOPWORDS.has(key)) return "";
+  if (isGenericSentimentKeyword(text)) return "";
+  if (options?.archiveName && text.includes(options.archiveName)) return "";
+  if (options?.sourceText && hasNegatedKeywordContext(options.sourceText, text)) return "";
+  return text;
 }
 
 function extractDynamicPersonaKeywords(args: { archiveName: string; pieces: string[] }): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const add = (value: string) => {
-    const text = normalizeDynamicKeyword(value, args.archiveName);
+    const text = normalizeSentimentSearchKeyword(value, { archiveName: args.archiveName, sourceText: args.pieces.join(" ") });
     const key = text.toLowerCase();
-    if (!hasHan(text)) return;
-    if (text.length < 2 || text.length > 14) return;
-    if (DYNAMIC_KEYWORD_STOPWORDS.has(text) || DYNAMIC_KEYWORD_STOPWORDS.has(key)) return;
-    if (args.archiveName && text.includes(args.archiveName)) return;
     if (seen.has(key)) return;
     seen.add(key);
     out.push(text);
@@ -511,8 +498,8 @@ function extractDynamicPersonaKeywords(args: { archiveName: string; pieces: stri
     for (const segment of cleaned.split(/[,，、。.!！?？；;：:\n\r]+/g)) {
       const text = normalizeDynamicKeyword(segment, args.archiveName);
       if (!text) continue;
-      add(text);
       for (const token of text.split(/\s+|和|與|与|及|以及|跟/g)) add(token);
+      if (!/\s/.test(text) && text.length <= 8) add(text);
     }
   }
   return out.slice(0, 8);
@@ -525,12 +512,9 @@ function buildSearchKeywordCandidates(args: {
   const joined = args.pieces.join(" ");
   const out: string[] = [];
   out.push(...extractDynamicPersonaKeywords(args));
-  addMedicalTopicKeywords(out, joined);
-  addGeneralTopicKeywords(out, joined);
   for (const item of splitKeywords(joined)) {
-    if (!hasHan(item)) continue;
-    if (args.archiveName && item.includes(args.archiveName)) continue;
-    out.push(item);
+    const keyword = normalizeSentimentSearchKeyword(item, { archiveName: args.archiveName, sourceText: joined });
+    if (keyword) out.push(keyword);
   }
   return rankSearchKeywords([...new Set(out)]
     .filter((item) => item.length >= 2 && item.length <= 12 && !isGenericSentimentKeyword(item))
@@ -554,32 +538,10 @@ function rankSearchKeywords(keywords: string[]): string[] {
 function extractDirectHanKeywords(args: { archiveName: string; text: string }): string[] {
   const out: string[] = [];
   const add = (value: string) => {
-    const text = cleanText(value);
-    if (!text || text.length < 2 || text.length > 12) return;
-    if (args.archiveName && text.includes(args.archiveName)) return;
-    if (isGenericSentimentKeyword(text)) return;
+    const text = normalizeSentimentSearchKeyword(value, { archiveName: args.archiveName, sourceText: args.text });
+    if (!text) return;
     out.push(text);
   };
-  if (/[醫医]|醫生|医生|醫院|医院|醫療|医疗|護理|护理|護士|护士|急診|急诊|診所|诊所/.test(args.text)) {
-    [
-      "醫療",
-      "医疗",
-      "醫生",
-      "医生",
-      "醫院",
-      "医院",
-      "醫療事故",
-      "医疗事故",
-      "醫療糾紛",
-      "医疗纠纷",
-      "護理",
-      "护理",
-      "護士",
-      "护士",
-      "急診",
-      "急诊",
-    ].forEach(add);
-  }
   for (const match of args.text.matchAll(/[\u3400-\u9fff]{2,12}/gu)) add(match[0]);
   return [...new Set(out)].slice(0, 10);
 }
@@ -594,11 +556,7 @@ export function buildSentimentHotKeywords(args: {
   const pieces = [
     archive.name,
     Array.isArray((setup as any).genres) ? (setup as any).genres.join(" ") : "",
-    (setup as any).contentTheme,
-    (setup as any).personality,
     (setup as any).personaType,
-    setup.tweetStyleProfile,
-    setup.tweetStyleSample,
     archive.content,
     ...(args.memorySummaries || []),
     args.prompt,
@@ -610,6 +568,86 @@ export function buildSentimentHotKeywords(args: {
     ...extractDirectHanKeywords({ archiveName: personaName, text: joined }),
   ];
   return rankSearchKeywords([...new Set(extracted.filter(Boolean))]).slice(0, 10);
+}
+
+function parseModelKeywordList(text: string): string[] {
+  const raw = cleanText(text).replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map(String);
+    if (Array.isArray(parsed?.keywords)) return parsed.keywords.map(String);
+  } catch {
+    // Fall back to splitting free-form model text below.
+  }
+  return raw.split(/[,，、\n\r/／|]+/g).map((item) => item.trim());
+}
+
+async function buildSentimentHotKeywordsWithModel(args: {
+  archive?: Partial<Pick<PersonaArchive, "name" | "content" | "setup">>;
+  prompt?: string;
+  memorySummaries?: string[];
+  warnings: string[];
+}): Promise<string[]> {
+  const fallbackKeywords = buildSentimentHotKeywords(args);
+  const archive = args.archive || {};
+  const setup = archive.setup || {};
+  const personaText = [
+    archive.name ? `人設名稱：${archive.name}` : "",
+    archive.content ? `人設簡介：${archive.content}` : "",
+    Array.isArray((setup as any).interests) && (setup as any).interests.length ? `興趣標籤參考（只能作為參考，不能直接照抄）：${(setup as any).interests.join("、")}` : "",
+    Array.isArray((setup as any).genres) && (setup as any).genres.length ? `類型：${(setup as any).genres.join("、")}` : "",
+    (setup as any).personality ? `性格：${(setup as any).personality}` : "",
+    (setup as any).personaType ? `身份：${(setup as any).personaType}` : "",
+    setup.tweetStyleProfile ? `推文風格：${setup.tweetStyleProfile}` : "",
+    setup.tweetStyleSample ? `推文樣例：${setup.tweetStyleSample}` : "",
+    args.memorySummaries?.length ? `近期記憶：${args.memorySummaries.join("；")}` : "",
+    args.prompt ? `本次補充要求：${args.prompt}` : "",
+    fallbackKeywords.length ? `規則候選：${fallbackKeywords.join("、")}` : "",
+  ].filter(Boolean).join("\n");
+  if (!personaText.trim()) return fallbackKeywords;
+
+  try {
+    const result = await callTextUnderstandingModelWithFallback(
+      "xai/grok-4.3",
+      [{
+        role: "user",
+        parts: [{
+          text: [
+            "你是社群热点搜索关键词规划器。请根据人设核心内容生成 Threads / Instagram 中文热点搜索关键词。",
+            "要求：",
+            "1. 只输出 JSON 数组，数组内是字符串，例如：[\"海外金融\",\"工薪信贷\",\"信用卡\"]。",
+            "2. 必须综合判断：人设名称、人设简介、身份/类型、性格边界、推文风格、近期记忆、兴趣标签参考。兴趣标签不能直接照抄，必须和人设核心设定互相印证后才可保留。",
+            "3. 输出的是搜索用关键词，不是人设标签。优先选择能在 Threads / Instagram 搜到真实热点的领域词、场景词、受众痛点词。",
+            "4. 每个关键词都必须同时满足：贴合人设核心领域；能支撑该人设持续创作；不偏离人设身份和受众。",
+            "5. 不要输出字段说明、视觉描述、语气词、泛词或平台词，例如：内容主题、视觉倾向、生活、日常、热门、分享、科技。",
+            "6. 如果某个词出现在否定、排除、边界描述里，例如“不做美食”，不要把它当关键词。",
+            "7. 不要为了凑数扩展到无关领域；宁可少于 10 个，也不要宽泛。",
+            "8. 单个关键词 2-12 个中文字，最多 10 个，按优先级排序。",
+            "",
+            "人设资料：",
+            personaText,
+          ].join("\n"),
+        }],
+      }],
+      { temperature: 0.1, maxOutputTokens: 256 },
+      AbortSignal.timeout(8_000),
+      {
+        isUsableResponse: (data) => Boolean(extractText(data).trim()),
+        isRetryableError: () => false,
+      },
+    );
+    const archiveName = cleanText(archive.name);
+    const sourceText = personaText;
+    const keywords = parseModelKeywordList(extractText(result.data))
+      .map((item) => normalizeSentimentSearchKeyword(item, { archiveName, sourceText }))
+      .filter(Boolean);
+    const unique = rankSearchKeywords([...new Set(keywords)]).slice(0, 10);
+    if (unique.length > 0) return unique;
+    args.warnings.push("模型未返回可用热点搜索关键词，已使用人设字段清洗后的规则关键词。");
+  } catch (error) {
+    args.warnings.push("模型生成热点搜索关键词失败，已使用人设字段清洗后的规则关键词：" + (error instanceof Error ? error.message : String(error)));
+  }
+  return fallbackKeywords;
 }
 
 export function cleanSentimentCandidateContent(value: unknown): string {
@@ -633,6 +671,27 @@ export function cleanSentimentCandidateContent(value: unknown): string {
     .replace(/\s+/g, " ")
     .trim();
   return text;
+}
+
+function normalizeSentimentCandidateSourceUrl(value: unknown): string {
+  return cleanText(value)
+    .replace(/[)\].,，。]+$/g, "")
+    .replace(/#.*$/g, "")
+    .replace(/[?&]__r=[^&]+/g, "")
+    .replace(/[?&]utm_[^=&]+=[^&]+/g, "")
+    .replace(/[?&]$/, "")
+    .toLowerCase();
+}
+
+function sentimentCandidateDedupeKey(candidate: SentimentHotCandidate, contentOverride?: string): string {
+  const rawSourceUrl = cleanText(candidate.sourceUrl);
+  const sourceUrl = normalizeSentimentCandidateSourceUrl(rawSourceUrl);
+  if (sourceUrl && !/#candidate-\d+$/i.test(rawSourceUrl)) return `${candidate.platform}:url:${sourceUrl}`;
+  const content = cleanSentimentCandidateContent(contentOverride ?? candidate.content)
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "")
+    .toLowerCase()
+    .slice(0, 120);
+  return `${candidate.platform}:content:${content || candidate.id}`;
 }
 
 function isLowQualitySentimentContent(value: string): boolean {
@@ -823,7 +882,7 @@ export async function fetchSentimentHotCandidates(args: {
   const warnings: string[] = [];
   const archive = args.archive;
   const archiveId = cleanText(archive?.id) || "default";
-  const keywords = buildSentimentHotKeywords({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries });
+  const keywords = await buildSentimentHotKeywordsWithModel({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries, warnings });
   const limit = args.limit || 10;
   const poolLimit = Math.max(limit * 6, 60);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
@@ -856,8 +915,13 @@ export async function fetchSentimentHotCandidates(args: {
     });
     if (instagramCandidates.length > 0) {
       const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+      const byKey = new Set(candidates.map((candidate) => sentimentCandidateDedupeKey(candidate)));
       for (const candidate of instagramCandidates) {
-        if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+        const dedupeKey = sentimentCandidateDedupeKey(candidate);
+        if (!byId.has(candidate.id) && !byKey.has(dedupeKey)) {
+          byId.set(candidate.id, candidate);
+          byKey.add(dedupeKey);
+        }
         if (byId.size >= poolLimit) break;
       }
       candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
@@ -890,8 +954,13 @@ export async function fetchSentimentHotCandidates(args: {
     const databaseCandidates = await readCandidatesFromDatabase({ archiveId, keywords, limit: poolLimit, excludeShown: args.refresh === true });
     if (databaseCandidates.length > 0) {
       const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+      const byKey = new Set(candidates.map((candidate) => sentimentCandidateDedupeKey(candidate)));
       for (const candidate of databaseCandidates) {
-        if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+        const dedupeKey = sentimentCandidateDedupeKey(candidate);
+        if (!byId.has(candidate.id) && !byKey.has(dedupeKey)) {
+          byId.set(candidate.id, candidate);
+          byKey.add(dedupeKey);
+        }
         if (byId.size >= poolLimit) break;
       }
       candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
@@ -905,6 +974,7 @@ export async function fetchSentimentHotCandidates(args: {
       keywords,
       candidates,
       limit,
+      refresh: args.refresh === true,
       warnings,
     });
     candidates = await filterSentimentCandidatesWithModel({ archive, keywords, candidates, limit, warnings });
@@ -937,18 +1007,23 @@ async function fillSentimentHotCandidatesToLimit(args: {
   keywords: string[];
   candidates: SentimentHotCandidate[];
   limit: number;
+  refresh?: boolean;
   warnings: string[];
 }): Promise<SentimentHotCandidate[]> {
   const out: SentimentHotCandidate[] = [];
   const seen = new Set<string>();
+  const seenDedupeKeys = new Set<string>();
   const add = (candidate: SentimentHotCandidate) => {
     const content = cleanSentimentCandidateContent(candidate.content || "");
     if (!candidate?.id || seen.has(candidate.id)) return;
+    const dedupeKey = sentimentCandidateDedupeKey(candidate, content);
+    if (seenDedupeKeys.has(dedupeKey)) return;
     if (!content || isLowQualitySentimentContent(content) || !isChineseSentimentCandidate(content)) return;
     const normalized = { ...candidate, content };
     if (!isUsefulHotCandidate(normalized)) return;
     if (!candidateMatchesCurrentKeywords(normalized, args.keywords)) return;
     seen.add(candidate.id);
+    seenDedupeKeys.add(dedupeKey);
     out.push(normalized);
   };
 
@@ -956,12 +1031,12 @@ async function fillSentimentHotCandidatesToLimit(args: {
   if (out.length >= args.limit) return out.slice(0, args.limit);
 
   const fallbackCandidates = [
-    ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit * 4, false),
+    ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit * 4, args.refresh === true),
     ...(await readCandidatesFromDatabase({
       archiveId: args.archiveId,
       keywords: args.keywords,
       limit: args.limit * 4,
-      excludeShown: false,
+      excludeShown: args.refresh === true,
     }).catch(() => [])),
   ];
   for (const candidate of fallbackCandidates) {
@@ -970,7 +1045,11 @@ async function fillSentimentHotCandidatesToLimit(args: {
   }
 
   if (out.length >= args.limit) {
-    args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u7528\u540c\u4eba\u8a2d\u95dc\u9375\u8a5e\u7684\u9ad8\u71b1\u5ea6\u6b77\u53f2\u5019\u9078\u88dc\u9f4a\u3002");
+    if (args.refresh === true) {
+      args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u50c5\u4f7f\u7528\u672a\u5c55\u793a\u904e\u7684\u9ad8\u71b1\u5ea6\u5019\u9078\u88dc\u8db3\uff1b\u4e0d\u6703\u7528\u91cd\u8907\u820a\u63a8\u6587\u786c\u5145\u6578\u3002");
+    } else {
+      args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u7528\u540c\u4eba\u8a2d\u95dc\u9375\u8a5e\u7684\u9ad8\u71b1\u5ea6\u6b77\u53f2\u5019\u9078\u88dc\u9f4a\u3002");
+    }
     return out.slice(0, args.limit);
   }
 
@@ -1169,12 +1248,6 @@ function buildDynamicSearchQueryVariants(baseQueries: string[]): string[] {
     add(query);
     addSplitParts(query);
   }
-
-  const suffixes = ["分享", "心得", "討論", "推薦", "故事", "經驗", "日常", "台灣", "熱門", "吐槽"];
-  const cores = out.filter((item) => item.length >= 2 && item.length <= 8).slice(0, 12);
-  for (const core of cores) {
-    for (const suffix of suffixes) add(`${core} ${suffix}`);
-  }
   return out.slice(0, 80);
 }
 
@@ -1271,7 +1344,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   const baseQueries = buildThreadsSearchQueries(args.keywords);
   const shownIds = getSentimentHotShownIds(args.archiveId);
   const selectedOrImportedIds = getSentimentHotExcludedIds(args.archiveId);
-  const primaryExcluded = selectedOrImportedIds;
+  const primaryExcluded = args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : selectedOrImportedIds;
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
@@ -1287,6 +1360,7 @@ async function fetchThreadsSearchPageCandidates(args: {
 
   if (readerResults.length < args.limit) {
     const existing = new Map(readerResults.map((candidate) => [candidate.id, candidate]));
+    const existingKeys = new Set(readerResults.map((candidate) => sentimentCandidateDedupeKey(candidate)));
     const remainingQueries = queries.slice(20);
     for (let offset = 0; offset < remainingQueries.length && existing.size < args.limit; offset += 20) {
       const extraResults = await fetchThreadsReaderSearchCandidates({
@@ -1298,7 +1372,11 @@ async function fetchThreadsSearchPageCandidates(args: {
         excludeIds: primaryExcluded,
       }).catch(() => []);
       for (const candidate of extraResults) {
-        if (!existing.has(candidate.id)) existing.set(candidate.id, candidate);
+        const dedupeKey = sentimentCandidateDedupeKey(candidate);
+        if (!existing.has(candidate.id) && !existingKeys.has(dedupeKey)) {
+          existing.set(candidate.id, candidate);
+          existingKeys.add(dedupeKey);
+        }
         if (existing.size >= args.limit) break;
       }
     }
@@ -1308,8 +1386,13 @@ async function fetchThreadsSearchPageCandidates(args: {
   if (readerResults.length < args.limit) {
     const cachedResults = readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit, args.refresh === true);
     const byId = new Map(readerResults.map((candidate) => [candidate.id, candidate]));
+    const byKey = new Set(readerResults.map((candidate) => sentimentCandidateDedupeKey(candidate)));
     for (const candidate of cachedResults) {
-      if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+      const dedupeKey = sentimentCandidateDedupeKey(candidate);
+      if (!byId.has(candidate.id) && !byKey.has(dedupeKey)) {
+        byId.set(candidate.id, candidate);
+        byKey.add(dedupeKey);
+      }
       if (byId.size >= args.limit) break;
     }
     readerResults = [...byId.values()];
@@ -1348,7 +1431,7 @@ async function fetchThreadsSearchPageCandidates(args: {
         for (const candidate of parsed) {
           if (primaryExcluded.has(candidate.id)) continue;
           if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) continue;
-          if (results.some((item) => item.id === candidate.id || item.content === candidate.content)) continue;
+          if (results.some((item) => item.id === candidate.id || sentimentCandidateDedupeKey(item) === sentimentCandidateDedupeKey(candidate))) continue;
           results.push(candidate);
           if (results.length >= args.limit) break;
         }
@@ -1377,6 +1460,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
 }): Promise<SentimentHotCandidate[]> {
   const excluded = args.excludeIds || (args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : getSentimentHotExcludedIds(args.archiveId));
   const all: SentimentHotCandidate[] = [];
+  const allKeys = new Set<string>();
   const searches = await Promise.all(
     args.queries.map(async (query, index) => {
       const targetUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
@@ -1409,7 +1493,9 @@ async function fetchThreadsReaderSearchCandidates(args: {
     for (const candidate of parsed) {
       if (excluded.has(candidate.id)) continue;
       if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) continue;
-      if (all.some((item) => item.id === candidate.id || item.sourceUrl === candidate.sourceUrl || item.content === candidate.content)) continue;
+      const dedupeKey = sentimentCandidateDedupeKey(candidate);
+      if (all.some((item) => item.id === candidate.id) || allKeys.has(dedupeKey)) continue;
+      allKeys.add(dedupeKey);
       all.push(candidate);
       if (all.length >= args.limit) break;
     }
@@ -1428,6 +1514,7 @@ async function fetchInstagramReaderSearchCandidates(args: {
 }): Promise<SentimentHotCandidate[]> {
   const excluded = args.excludeIds || (args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : getSentimentHotExcludedIds(args.archiveId));
   const all: SentimentHotCandidate[] = [];
+  const allKeys = new Set<string>();
   const searches = await Promise.all(
     args.queries.map(async (query, index) => {
       const normalizedQuery = cleanText(query).replace(/^#/, "");
@@ -1467,7 +1554,9 @@ async function fetchInstagramReaderSearchCandidates(args: {
     for (const candidate of parsed) {
       if (excluded.has(candidate.id)) continue;
       if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) continue;
-      if (all.some((item) => item.id === candidate.id || item.sourceUrl === candidate.sourceUrl || item.content === candidate.content)) continue;
+      const dedupeKey = sentimentCandidateDedupeKey(candidate);
+      if (all.some((item) => item.id === candidate.id) || allKeys.has(dedupeKey)) continue;
+      allKeys.add(dedupeKey);
       all.push(candidate);
       if (all.length >= args.limit) break;
     }
@@ -1581,16 +1670,18 @@ function parseThreadsProfileHotMetricsText(text: string): Partial<ThreadsProfile
     if (currentIsLabel) assignThreadsProfileHotMetric(out, current, parseMetricNumberLoose(current) ?? parseMetricNumberLoose(next) ?? parseMetricNumberLoose(prev));
     else if (nextIsLabel) assignThreadsProfileHotMetric(out, next, parseMetricNumberLoose(current));
   }
-  const readMetricRuns = (patterns: RegExp[]) => {
+  const readMetricRuns = (patterns: RegExp[], options?: { skip?: (matchText: string) => boolean }) => {
     const values: number[] = [];
     for (const pattern of patterns) {
       for (const match of joined.matchAll(pattern)) {
+        if (options?.skip?.(match[0] || "")) continue;
         const value = parseMetricNumberLoose(match[1]);
         if (typeof value === "number") values.push(value);
       }
     }
     return values;
   };
+  const uniqueMetricValues = (values: number[]) => [...new Set(values)];
   const metricNumber = "(\\d+(?:[.,]\\d+)?\\s*(?:[KkMm\\u842c\\u4e07])?)";
   const likeValues = readMetricRuns([
     new RegExp(`(?:讚|赞|likes?)\\s*${metricNumber}`, "gi"),
@@ -1601,10 +1692,13 @@ function parseThreadsProfileHotMetricsText(text: string): Partial<ThreadsProfile
   const shareValues = readMetricRuns([
     new RegExp(`(?:分享|轉發|转发|shares?|reposts?)\\s*${metricNumber}`, "gi"),
   ]);
+  const recentViewValues = uniqueMetricValues(readMetricRuns([
+    new RegExp(`${metricNumber}\\s*(?:次)?\\s*(?:最近瀏覽次數|最近浏览次数)`, "gi"),
+  ]));
   const viewValues = readMetricRuns([
     new RegExp(`(?:瀏覽|浏览|觀看|观看|views?|plays?|impressions?)\\s*${metricNumber}`, "gi"),
     new RegExp(`${metricNumber}\\s*(?:次)?\\s*(?:最近瀏覽次數|最近浏览次数|瀏覽|浏览|觀看|观看|views?|plays?|impressions?)`, "gi"),
-  ]);
+  ], { skip: (matchText) => /最近瀏覽次數|最近浏览次数/i.test(matchText) });
   const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
   const scannedPosts = Math.max(likeValues.length, commentValues.length, shareValues.length, viewValues.length);
   if (scannedPosts > 0) out.scannedPosts = scannedPosts;
@@ -1612,6 +1706,7 @@ function parseThreadsProfileHotMetricsText(text: string): Partial<ThreadsProfile
   const comments = sum(commentValues);
   const shares = sum(shareValues);
   const views = sum(viewValues);
+  if (recentViewValues.length) out.recentViews = Math.max(...recentViewValues);
   if (likes > 0) out.likes = likes;
   if (comments > 0) out.comments = comments;
   if (shares > 0) out.shares = shares;
@@ -1620,7 +1715,7 @@ function parseThreadsProfileHotMetricsText(text: string): Partial<ThreadsProfile
 }
 
 function threadsProfileHotMetricsHasValue(metrics: Partial<ThreadsProfileHotMetrics>) {
-  return ["followers", "following", "scannedPosts", "likes", "comments", "shares", "views"].some((key) => typeof (metrics as any)[key] === "number");
+  return ["followers", "following", "recentViews", "scannedPosts", "likes", "comments", "shares", "views"].some((key) => typeof (metrics as any)[key] === "number");
 }
 
 export function analyzeThreadsProfileVisibleSignals(args: {
@@ -1691,6 +1786,7 @@ type ThreadsGraphqlProfilePageResult = {
   posts: ThreadsGraphqlProfilePostAggregate[];
   endCursor?: string;
   hasNextPage: boolean;
+  pageInfoResolved: boolean;
 };
 
 type ThreadsGraphqlRequestTemplate = {
@@ -1735,6 +1831,7 @@ export function parseThreadsGraphqlProfilePagePayload(args: {
     posts,
     endCursor: cleanText(mediaData?.page_info?.end_cursor),
     hasNextPage: mediaData?.page_info?.has_next_page === true,
+    pageInfoResolved: typeof mediaData?.page_info?.has_next_page === "boolean",
   };
 }
 
@@ -1782,7 +1879,7 @@ async function collectThreadsGraphqlProfilePosts(args: {
   username: string;
   initialPayload: any;
   initialTemplate: ThreadsGraphqlRequestTemplate;
-}): Promise<ThreadsGraphqlProfilePostAggregate[]> {
+}): Promise<{ posts: ThreadsGraphqlProfilePostAggregate[]; reachedEnd: boolean }> {
   const byPk = new Map<string, ThreadsGraphqlProfilePostAggregate>();
   let current = parseThreadsGraphqlProfilePagePayload({
     username: args.username,
@@ -1791,6 +1888,7 @@ async function collectThreadsGraphqlProfilePosts(args: {
   for (const post of current.posts) byPk.set(post.pk, post);
   let cursor = current.endCursor || "";
   let hasNextPage = current.hasNextPage;
+  let pageInfoResolved = current.pageInfoResolved;
   let pages = 0;
   while (hasNextPage && cursor && pages < 120) {
     pages += 1;
@@ -1799,18 +1897,24 @@ async function collectThreadsGraphqlProfilePosts(args: {
       template: args.initialTemplate,
       after: cursor,
     }).catch(() => null);
-    if (!payload) break;
+    if (!payload) return { posts: [...byPk.values()], reachedEnd: false };
     current = parseThreadsGraphqlProfilePagePayload({
       username: args.username,
       payload,
     });
+    if (current.posts.length === 0 && !current.endCursor) {
+      return { posts: [...byPk.values()], reachedEnd: pages >= 2 || byPk.size >= 20 };
+    }
     const beforeSize = byPk.size;
     for (const post of current.posts) byPk.set(post.pk, post);
-    if (byPk.size === beforeSize && current.endCursor === cursor) break;
+    if (byPk.size === beforeSize && current.endCursor === cursor) {
+      return { posts: [...byPk.values()], reachedEnd: current.pageInfoResolved && current.hasNextPage !== true };
+    }
     cursor = current.endCursor || "";
     hasNextPage = current.hasNextPage;
+    pageInfoResolved = current.pageInfoResolved;
   }
-  return [...byPk.values()];
+  return { posts: [...byPk.values()], reachedEnd: pageInfoResolved && hasNextPage !== true };
 }
 
 export function parseThreadsPostViewCountFromText(text: string): number | undefined {
@@ -1986,6 +2090,7 @@ export async function fetchThreadsProfileLightMetrics(usernameInput: string): Pr
       if (
         typeof parsed.followers === "number"
         || typeof parsed.following === "number"
+        || typeof parsed.recentViews === "number"
         || typeof parsed.views === "number"
       ) {
         return {
@@ -1993,7 +2098,7 @@ export async function fetchThreadsProfileLightMetrics(usernameInput: string): Pr
           username,
           followers: parsed.followers,
           following: parsed.following,
-          recentViews: parsed.views,
+          recentViews: parsed.recentViews ?? parsed.views,
           refreshedAt,
           lightRefreshedAt: refreshedAt,
           method: "browser",
@@ -2090,19 +2195,23 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
         ...(await buildThreadsProfileAggregateMetricsFromBrowserPage({ page, username, links })),
       };
       if (initialGraphqlPayload && initialGraphqlTemplate) {
-        const posts = await collectThreadsGraphqlProfilePosts({
+        const collection = await collectThreadsGraphqlProfilePosts({
           page,
           username,
           initialPayload: initialGraphqlPayload,
           initialTemplate: initialGraphqlTemplate,
-        }).catch(() => []);
+        }).catch(() => ({ posts: [], reachedEnd: false }));
         const seededPosts = new Map<string, ThreadsGraphqlProfilePostAggregate>();
+        const capturedPageCount = capturedGraphqlPages.size;
+        let capturedReachedEnd = false;
         for (const { payload } of capturedGraphqlPages.values()) {
-          for (const post of parseThreadsGraphqlProfilePagePayload({ username, payload }).posts) {
+          const pageResult = parseThreadsGraphqlProfilePagePayload({ username, payload });
+          if (pageResult.pageInfoResolved && pageResult.hasNextPage !== true) capturedReachedEnd = true;
+          for (const post of pageResult.posts) {
             seededPosts.set(post.pk, post);
           }
         }
-        for (const post of posts) seededPosts.set(post.pk, post);
+        for (const post of collection.posts) seededPosts.set(post.pk, post);
         const allPosts = [...seededPosts.values()];
         if (allPosts.length) {
           const views = await collectThreadsViewCountsFromPostPages({
@@ -2119,17 +2228,22 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             shares: allPosts.reduce((sum, post) => sum + (post.shareCount || 0), 0),
             ...(views.resolvedPosts === allPosts.length ? { views: views.totalViews } : {}),
           };
+          (parsed as any).profileReachedEnd = capturedReachedEnd
+            || collection.reachedEnd
+            || (capturedPageCount >= 2 && allPosts.length >= 20);
         }
       }
       const complete = threadsProfileHotMetricsHasValue(parsed)
         && typeof parsed.scannedPosts === "number"
         && parsed.scannedPosts > 0
-        && typeof parsed.views === "number";
+        && typeof parsed.views === "number"
+        && (parsed as any).profileReachedEnd === true;
       if (threadsProfileHotMetricsHasValue(parsed)) {
+        const { profileReachedEnd: _profileReachedEnd, ...publicParsed } = parsed as any;
         return {
           platform: "threads",
           username,
-          ...parsed,
+          ...publicParsed,
           refreshedAt,
           method: "browser",
           complete,
@@ -3075,7 +3189,6 @@ function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
 }
 
 function buildThreadsSearchQueries(keywords: string[]): string[] {
-  const joined = keywords.join(" ");
   const out: string[] = [];
   const add = (value: string) => {
     const text = cleanText(value);
@@ -3084,44 +3197,6 @@ function buildThreadsSearchQueries(keywords: string[]): string[] {
     if (text.length > 14) return;
     out.push(text);
   };
-  const synonymGroups: Array<[RegExp, string[]]> = [
-    [/(教师|老師|老师|校園|校园|學生|学生|课堂|課堂)/, ["老師", "教師", "學生", "校園", "課堂"]],
-    [/(恋爱|戀愛|情感|感情|暧昧|曖昧|分手|关系|關係)/, ["戀愛", "感情", "曖昧", "分手", "關係"]],
-    [/(穿搭|美妆|美妝|护肤|護膚|拍照|女生|日系)/, ["穿搭", "美妝", "護膚", "女生", "拍照"]],
-    [/(医疗|醫療|医生|醫生|医院|醫院|手术|手術|医美|醫美)/, ["醫療", "醫生", "醫院", "醫療事故", "醫美"]],
-    [/(AI|人工智能|人工智慧|自动化|自動化|科技|互联网|互聯網|职场|職場)/i, ["AI", "人工智慧", "自動化", "科技", "職場"]],
-    [/(動漫|动漫|二次元|遊戲|游戏|電玩|电玩|手遊|手游|實況|实况|漫展|同人|手辦|手办|cos|cosplay|宅宅|宅男|宅女|VTuber|Vtuber|vtuber)/i, ["動漫", "二次元", "遊戲", "電玩", "手遊", "遊戲實況", "漫展", "同人", "cosplay", "VTuber"]],
-  ];
-  for (const [pattern, values] of synonymGroups) {
-    if (pattern.test(joined)) values.forEach(add);
-  }
-  if (/[\u52d5\u52a8]\u6f2b|\u4e8c\u6b21\u5143|[\u904a\u6e38]\u6232|[\u96fb\u7535]\u73a9|[\u624b]\u904a|[\u624b]\u6e38|[\u5be6\u5b9e]\u6cc1|\u6f2b\u5c55|\u540c\u4eba|cos|cosplay|ACG|VTuber|Vtuber|vtuber/i.test(joined)) {
-    [
-      "\u52d5\u6f2b",
-      "\u52a8\u6f2b",
-      "\u4e8c\u6b21\u5143",
-      "\u904a\u6232",
-      "\u6e38\u620f",
-      "\u96fb\u73a9",
-      "\u7535\u73a9",
-      "\u624b\u904a",
-      "\u624b\u6e38",
-      "\u904a\u6232\u5be6\u6cc1",
-      "\u6e38\u620f\u5b9e\u51b5",
-      "\u5be6\u6cc1\u4e3b",
-      "\u5b9e\u51b5\u4e3b",
-      "\u6f2b\u5c55",
-      "\u52d5\u6f2b\u5c55",
-      "\u52a8\u6f2b\u5c55",
-      "\u540c\u4eba\u5c55",
-      "\u540c\u4eba",
-      "cosplay",
-      "coser",
-      "ACG",
-      "VTuber",
-      "\u5b85\u5b85",
-    ].forEach(add);
-  }
   for (const keyword of meaningfulNeedles(keywords)) {
     add(keyword);
     for (const part of splitKeywords(keyword)) add(part);

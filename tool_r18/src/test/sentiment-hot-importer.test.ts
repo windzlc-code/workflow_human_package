@@ -1,16 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildSentimentCandidateId } from "@/lib/sentiment-candidate-store";
 import {
+  analyzeThreadsProfileVisibleSignals,
   buildSentimentHotKeywords,
   candidateMatchesCurrentKeywords,
   cleanSentimentCandidateContent,
   isChineseSentimentCandidate,
   parseInstagramReaderSearchMarkdownCandidates,
+  matchThreadsBrowserProfilePublishedPost,
+  parseThreadsBrowserPostDetailMetrics,
+  parseThreadsBrowserProfilePublishedPosts,
+  parseThreadsGraphqlProfilePagePayload,
+  parseThreadsPostViewCountFromText,
   parseThreadsReaderSearchMarkdownCandidates,
   parseThreadsDetailEngagementMarkdown,
   parseThreadsDetailMediaMarkdown,
   parseThreadsSearchTextCandidates,
   refreshSentimentSourceMetrics,
+  shouldTreatThreadsProfileAsLoginWall,
 } from "@/lib/sentiment-hot-importer";
 
 afterEach(() => {
@@ -55,7 +62,52 @@ describe("sentiment hot importer", () => {
     });
 
     expect(keywords).not.toContain("李无");
-    expect(keywords).toEqual(expect.arrayContaining(["醫療", "医疗", "醫生", "医生"]));
+    expect(keywords).toEqual(expect.arrayContaining(["医疗黑暗", "邪恶医生故事", "邪恶实验"]));
+    expect(keywords).not.toContain("醫療");
+    expect(keywords).not.toContain("医生");
+  });
+
+  it("does not promote visual field labels or negated topics into hot search keywords", () => {
+    const keywords = buildSentimentHotKeywords({
+      archive: {
+        id: "ken",
+        name: "Ken 海外工薪金融干货",
+        content: "面向海外工薪族，分享海外金融、工薪信貸、理財規劃、信用卡和贷款。不做美食娛樂。",
+        setup: {
+          genres: ["AI", "人工智慧", "自動化", "職場", "海外金融", "工薪信貸", "理財規劃"],
+          contentTheme: "內容主題和圖片視覺傾向",
+          personality: "理性務實",
+        },
+        posts: [],
+      } as any,
+    });
+
+    expect(keywords).toEqual(expect.arrayContaining(["海外金融", "工薪信貸", "理財規劃"]));
+    expect(keywords).not.toContain("內容主題");
+    expect(keywords).not.toContain("圖片視覺傾向");
+    expect(keywords).not.toContain("視覺傾向");
+    expect(keywords).not.toContain("理性務實");
+    expect(keywords).not.toContain("美食");
+  });
+
+  it("does not directly use interest tags as fallback hot search keywords", () => {
+    const keywords = buildSentimentHotKeywords({
+      archive: {
+        id: "interest-drift",
+        name: "海外工薪理財號",
+        content: "面向海外工薪族，專注工薪信貸、信用卡、貸款和理財規劃。",
+        setup: {
+          interests: ["美食", "旅行"],
+          genres: ["海外金融"],
+          personaType: "海外工薪金融干貨",
+        },
+        posts: [],
+      } as any,
+    });
+
+    expect(keywords).toEqual(expect.arrayContaining(["工薪信貸", "信用卡", "貸款", "理財規劃"]));
+    expect(keywords).not.toContain("美食");
+    expect(keywords).not.toContain("旅行");
   });
 
   it("rejects hot candidates that conflict with the persona topic", () => {
@@ -183,9 +235,115 @@ Demo post body
 
     expect(engagement.viewCount).toBe(978000);
     expect(engagement.likeCount).toBe(31900);
-    expect(engagement.commentCount).toBe(355);
-    expect(engagement.shareCount).toBe(713);
+    expect(engagement.commentCount).toBeUndefined();
+    expect(engagement.shareCount).toBeUndefined();
     expect(engagement.rawSignals).toEqual([31900, 355, 713, 5600]);
+  });
+
+  it("does not treat unlabeled Threads detail numbers as comments or reposts", () => {
+    const engagement = parseThreadsDetailEngagementMarkdown(`
+Title: Demo on Threads
+
+# [Thread 269 views](https://www.threads.net/@demo/post/abc)
+
+Demo post body
+
+2
+
+291
+
+88
+
+6
+`);
+
+    expect(engagement.viewCount).toBe(269);
+    expect(engagement.likeCount).toBe(2);
+    expect(engagement.commentCount).toBeUndefined();
+    expect(engagement.shareCount).toBeUndefined();
+    expect(engagement.rawSignals).toEqual([2, 291, 88, 6]);
+  });
+
+  it("matches old published Threads posts from the logged-in profile page", () => {
+    const text = `
+stevie875443
+1天
+2 足球運動與金融投資理財
+翻譯
+291
+54
+88
+13
+stevie875443
+1天
+你心目中一生必看的 動漫 神作？
+翻譯
+209
+56
+1
+13
+`;
+    const links = [
+      "https://www.threads.com/@stevie875443/post/DZ6zcSaErFb",
+      "https://www.threads.com/@stevie875443/post/DZ6gGNAEqjT",
+    ];
+
+    const posts = parseThreadsBrowserProfilePublishedPosts({ username: "stevie875443", text, links });
+    expect(posts.map((post) => post.sourceUrl)).toEqual([
+      "https://www.threads.net/@stevie875443/post/DZ6zcSaErFb",
+      "https://www.threads.net/@stevie875443/post/DZ6gGNAEqjT",
+    ]);
+
+    const matched = matchThreadsBrowserProfilePublishedPost({
+      username: "stevie875443",
+      text,
+      links,
+      content: "你心目中一生必看的 動漫 神作？",
+    });
+    expect(matched?.sourceUrl).toBe("https://www.threads.net/@stevie875443/post/DZ6gGNAEqjT");
+    expect(matched?.engagement).toMatchObject({
+      likeCount: 209,
+      commentCount: 56,
+      shareCount: 1,
+      rawSignals: [209, 56, 1, 13],
+    });
+    expect(matched?.metrics).toMatchObject({
+      like_count: 209,
+      comment_count: 56,
+      share_count: 1,
+      send_count: 13,
+    });
+  });
+
+  it("uses labeled Threads post detail buttons instead of guessing unlabeled numbers", () => {
+    const detail = parseThreadsBrowserPostDetailMetrics({
+      text: `
+Log in
+Thread
+274 views
+stevie875443
+1d
+2 足球運動與金融投資理財
+Translate
+2
+`,
+      actionTexts: ["Like", "Comment2", "Repost", "Share"],
+    });
+
+    expect(detail?.engagement).toMatchObject({
+      likeCount: 0,
+      commentCount: 2,
+      shareCount: 0,
+    });
+    expect(detail?.metrics).toMatchObject({
+      like_count: 0,
+      comment_count: 2,
+      share_count: 0,
+      repost_count: 0,
+      send_count: 0,
+      view_count: 274,
+    });
+    expect(detail?.hotScore).toBe(274);
   });
 
   it("overwrites existing named metrics when refreshing a stored Threads source", async () => {
@@ -226,13 +384,15 @@ Demo post body
     expect(refreshed.ok, JSON.stringify(refreshed)).toBe(true);
     expect(refreshed.engagement?.viewCount).toBe(250);
     expect(refreshed.engagement?.likeCount).toBe(20);
-    expect(refreshed.engagement?.commentCount).toBe(5);
-    expect(refreshed.engagement?.shareCount).toBe(3);
+    expect(refreshed.engagement?.commentCount).toBeUndefined();
+    expect(refreshed.engagement?.shareCount).toBeUndefined();
     expect(refreshed.metrics).toMatchObject({
       view_count: 250,
       like_count: 20,
-      comment_count: 5,
-      share_count: 3,
+      comment_count: 0,
+      share_count: 0,
+      repost_count: 0,
+      send_count: 0,
     });
     expect(refreshed.hotScore).toBe(250);
   });
@@ -321,5 +481,134 @@ bunundoc
     expect(candidates[0].content).toContain("醫療");
     expect(candidates[0].content).not.toContain("翻譯");
     expect(candidates[0].sourceUrl).toContain("threads.com/search");
+  });
+
+  it("keeps visible Threads profile metrics from the page body", () => {
+    const visible = analyzeThreadsProfileVisibleSignals({
+      username: "stevie875443",
+      bodyText: `
+阿牛投資理財|挑戰10年財務自由
+4 位粉絲
+12 追蹤中
+6.1 萬次最近瀏覽次數
+      `,
+      buttonText: ["追蹤", "分享"],
+      links: [],
+    });
+
+    expect(visible.parsed.followers).toBe(4);
+    expect(visible.parsed.following).toBe(12);
+    expect(visible.parsed.recentViews).toBe(61000);
+    expect(visible.hasUsableProfileSignals).toBe(true);
+  });
+
+  it("does not double-count duplicated Threads profile recent views", () => {
+    const visible = analyzeThreadsProfileVisibleSignals({
+      username: "stevie875443",
+      bodyText: `
+阿牛投資理財|挑戰10年財務自由
+4 位粉絲
+6.1 萬次最近瀏覽次數
+Instagram
+4位粉絲
+6.1 萬次最近瀏覽次數
+      `,
+      buttonText: [],
+      links: [],
+    });
+
+    expect(visible.parsed.recentViews).toBe(61000);
+    expect(visible.parsed.views).toBeUndefined();
+  });
+
+  it("parses paginated Threads profile GraphQL payload into real post metrics", () => {
+    const parsed = parseThreadsGraphqlProfilePagePayload({
+      username: "stevie875443",
+      payload: {
+        data: {
+          mediaData: {
+            edges: [
+              {
+                node: {
+                  thread_items: [{
+                    post: {
+                      pk: "3925594288747063183",
+                      code: "DZ1ABCxyz",
+                      canonical_url: "https://www.threads.com/@stevie875443/post/DZ1ABCxyz",
+                      like_count: 954,
+                      text_post_app_info: {
+                        direct_reply_count: 68,
+                        repost_count: 92,
+                        reshare_count: 58,
+                      },
+                    },
+                  }],
+                },
+              },
+            ],
+            page_info: {
+              end_cursor: "cursor-1",
+              has_next_page: true,
+            },
+          },
+        },
+      },
+    });
+
+    expect(parsed.posts).toEqual([{
+      pk: "3925594288747063183",
+      code: "DZ1ABCxyz",
+      sourceUrl: "https://www.threads.net/@stevie875443/post/DZ1ABCxyz",
+      likeCount: 954,
+      commentCount: 68,
+      repostCount: 92,
+      shareCount: 58,
+    }]);
+    expect(parsed.endCursor).toBe("cursor-1");
+    expect(parsed.hasNextPage).toBe(true);
+  });
+
+  it("parses Threads post view counts directly from the detail page text", () => {
+    expect(parseThreadsPostViewCountFromText(`
+串文
+84次瀏覽
+stevie875443
+2天
+超好笑到底誰寫的www
+    `)).toBe(84);
+
+    expect(parseThreadsPostViewCountFromText(`
+Thread
+6.1萬 views
+    `)).toBe(61000);
+  });
+
+  it("does not treat a visible Threads profile as a login wall just because login CTA text is present", () => {
+    const links = [
+      "https://www.threads.com/@stevie875443/post/DZ6zcSaErFb",
+      "https://www.threads.com/@stevie875443/post/DZ6gGNAEqjT",
+    ];
+
+    expect(shouldTreatThreadsProfileAsLoginWall({
+      username: "stevie875443",
+      bodyText: `
+阿牛投資理財|挑戰10年財務自由
+4 位粉絲
+12 追蹤中
+6.1 萬次最近瀏覽次數
+登入以查看更多
+      `,
+      buttonText: ["Sign in", "追蹤"],
+      links,
+    })).toBe(false);
+  });
+
+  it("still treats a Threads login prompt without profile signals as a login wall", () => {
+    expect(shouldTreatThreadsProfileAsLoginWall({
+      username: "stevie875443",
+      bodyText: "登入以查看更多",
+      buttonText: ["Sign in", "使用 Instagram 帳號繼續"],
+      links: [],
+    })).toBe(true);
   });
 });
