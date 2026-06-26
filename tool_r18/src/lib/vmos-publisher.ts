@@ -26855,18 +26855,8 @@ Rules:
           };
         })
         .filter((item) => !isThreadsAutoReplyIgnoredText(item.text));
-      const ownRows = new Set(
-        normalizedRows
-          .filter((item) => isThreadsAutoReplyOwnAuthor(item.author, ignoredAuthors))
-          .map((item) => item.rowIndex)
-          .filter((rowIndex) => rowIndex > 0),
-      );
       const normalized = normalizedRows
-        .filter((item) => !isThreadsAutoReplyOwnAuthor(item.author, ignoredAuthors))
-        .filter((item) => {
-          if (!item.rowIndex) return true;
-          return !ownRows.has(item.rowIndex - 1) && !ownRows.has(item.rowIndex + 1);
-        });
+        .filter((item) => !isThreadsAutoReplyOwnAuthor(item.author, ignoredAuthors));
       return normalized
         .filter((item) => {
           const key = buildThreadsAutoReplyCandidateIdentity(item.author, item.text);
