@@ -582,6 +582,50 @@ function parseModelKeywordList(text: string): string[] {
   return raw.split(/[,，、\n\r/／|]+/g).map((item) => item.trim());
 }
 
+async function reviewSentimentHotKeywordsWithModel(args: {
+  personaText: string;
+  rawKeywords: string[];
+  fallbackKeywords: string[];
+}): Promise<string[]> {
+  const rawKeywords = args.rawKeywords.map(cleanText).filter(Boolean).slice(0, 16);
+  const fallbackKeywords = args.fallbackKeywords.map(cleanText).filter(Boolean).slice(0, 10);
+  if (rawKeywords.length === 0) return [];
+  const result = await callTextUnderstandingModelWithFallback(
+    "xai/grok-4.3",
+    [{
+      role: "user",
+      parts: [{
+        text: [
+          "你是热点搜索关键词审查器。你的任务是清理候选关键词污染，只保留能直接用于 Threads / Instagram 搜索框的中文名词短语。",
+          "只输出 JSON 数组，数组内是最终保留的关键词字符串，不要解释。",
+          "",
+          "合格关键词只能是：领域词、行业词、职业/身份受众词、具体场景词、具体痛点词、具体产品/制度/事件词。",
+          "必须删除：抽象人格词、性格词、语气词、风格词、自我描述、履历包装、身份包装、半截句子、代词句、泛词。",
+          "典型必须删除的形式：幽默、接地气、带点宅气、说话直白、发文语气随性、热爱某某文化、某某达人、专家、他自认为、年轻的前、内容主题、日常、热门、分享。",
+          "如果候选词是包装句，要改成其中可搜索的领域名词；例如“热爱二次元文化”应变成“二次元文化”，“二次元理财达人”应拆成“二次元文化”和“投资理财”，不要保留“达人”。",
+          "如果无法改成具体可搜索名词短语，就删除。宁可少于 10 个，不要凑数。",
+          "输出前自检：每个词单独放进搜索框时，是否能搜索到真实话题；如果答案不确定或只是形容人设，就删除。",
+          "",
+          "人设资料：",
+          args.personaText,
+          "",
+          "候选关键词：",
+          JSON.stringify(rawKeywords, null, 2),
+          "",
+          fallbackKeywords.length ? `可参考但不可直接照抄的规则候选：${fallbackKeywords.join("、")}` : "",
+        ].filter(Boolean).join("\n"),
+      }],
+    }],
+    { temperature: 0, maxOutputTokens: 256 },
+    AbortSignal.timeout(8_000),
+    {
+      isUsableResponse: (data) => Boolean(extractText(data).trim()),
+      isRetryableError: () => false,
+    },
+  );
+  return parseModelKeywordList(extractText(result.data));
+}
+
 async function buildSentimentHotKeywordsWithModel(args: {
   archive?: Partial<Pick<PersonaArchive, "name" | "content" | "setup">>;
   prompt?: string;
@@ -619,7 +663,7 @@ async function buildSentimentHotKeywordsWithModel(args: {
             "2. 生成前先做判断：人设名称、人设简介、身份/类型、推文风格、近期记忆、兴趣标签参考用于确定领域；性格只用于判断语气边界和排除冲突，绝不能作为关键词输出。",
             "3. 关键词必须是用户会真实输入搜索框的简单名词短语，只允许从以下通用模板中生成：领域词、行业词、职业/身份受众词、具体场景词、具体痛点词、具体产品/制度/事件词。",
             "4. 输出的是搜索用关键词，不是人设标签、不是人物介绍、不是文案片段。优先选择能在 Threads / Instagram 搜到真实热点的领域词、场景词、受众痛点词。",
-            "5. 严禁输出抽象人格词、性格词、语气词、风格词、自我描述、履历碎片、半截句子、代词句或泛词，例如：说话直白、犀利、不绕弯子、他自认为、年轻的前、内容主题、视觉倾向、生活、日常、热门、分享、科技。",
+            "5. 严禁输出抽象人格词、性格词、语气词、风格词、自我描述、履历碎片、身份包装、半截句子、代词句或泛词，例如：幽默、接地气、带点宅气、说话直白、发文语气随性、热爱某某文化、某某达人、专家、他自认为、年轻的前、内容主题、视觉倾向、生活、日常、热门、分享、科技。",
             "6. 每个关键词都必须同时满足：贴合人设核心领域；能支撑该人设持续创作；不偏离人设身份和受众；单独拿出来也能直接搜索。",
             "7. 如果某个词出现在否定、排除、边界描述里，例如“不做美食”，不要把它当关键词。",
             "8. 不要为了凑数扩展到无关领域；宁可少于 10 个，也不要宽泛。",
@@ -640,7 +684,16 @@ async function buildSentimentHotKeywordsWithModel(args: {
     );
     const archiveName = cleanText(archive.name);
     const sourceText = personaText;
-    const keywords = parseModelKeywordList(extractText(result.data))
+    const rawKeywords = parseModelKeywordList(extractText(result.data));
+    const reviewedKeywords = await reviewSentimentHotKeywordsWithModel({
+      personaText,
+      rawKeywords,
+      fallbackKeywords,
+    }).catch((error) => {
+      args.warnings.push("模型审查热点关键词失败，已使用第一轮模型关键词：" + (error instanceof Error ? error.message : String(error)));
+      return rawKeywords;
+    });
+    const keywords = reviewedKeywords
       .map((item) => normalizeSentimentSearchKeyword(item, { archiveName, sourceText }))
       .filter(Boolean);
     const unique = rankSearchKeywords([...new Set(keywords)]).slice(0, 10);
