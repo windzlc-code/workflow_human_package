@@ -1936,18 +1936,20 @@ function buildMatrixSourceRows(): Array<Array<{ text: string; callback_data: str
   ];
 }
 
-function buildMatrixCountRows(): Array<Array<{ text: string; callback_data: string }>> {
-  return [
-    [
-      { text: "每人 1 篇", callback_data: "mxc_1" },
-      { text: "每人 3 篇", callback_data: "mxc_3" },
-    ],
-    [
-      { text: "每人 5 篇", callback_data: "mxc_5" },
-      { text: "每人全部", callback_data: "mxc_all" },
-    ],
-    [{ text: "◀️ 返回平台", callback_data: "mxback_platform" }],
-  ];
+function buildMatrixCountRowsForLimit(commonLimit: number): Array<Array<{ text: string; callback_data: string }>> {
+  const candidates = [...new Set([1, 2, 3, 5, 10, commonLimit])]
+    .filter((count) => count > 0 && count <= commonLimit)
+    .sort((a, b) => a - b);
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let index = 0; index < candidates.length; index += 2) {
+    rows.push(candidates.slice(index, index + 2).map((count) => ({
+      text: `每人 ${count} 篇`,
+      callback_data: `mxc_${count}`,
+    })));
+  }
+  rows.push([{ text: "每人全部", callback_data: "mxc_all" }]);
+  rows.push([{ text: "◀️ 返回平台", callback_data: "mxback_platform" }]);
+  return rows;
 }
 
 function formatMatrixSourceLabel(source?: "posts" | "favorites") {
@@ -14047,6 +14049,95 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     return results;
   };
 
+  const buildMatrixCountSelectionPayload = async (state: PendingMatrixPublish) => {
+    const source = state.source || "posts";
+    const detailLines: string[] = [];
+    const counts: number[] = [];
+    let totalAvailable = 0;
+    for (const archiveId of state.archiveIds) {
+      const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
+      if (!archive) {
+        detailLines.push(`${archiveId}：找不到人設`);
+        counts.push(0);
+        continue;
+      }
+      const count = resolveArchivePostCollection(archive, source).length;
+      counts.push(count);
+      totalAvailable += count;
+      detailLines.push(`${archive.name}：可發 ${count} 篇`);
+    }
+    const commonLimit = counts.length ? Math.min(...counts) : 0;
+    const readyPersonaCount = counts.filter((count) => count > 0).length;
+    const text = [
+      "🚀 *矩陣發布*",
+      "",
+      `人設：${state.archiveIds.length} 個`,
+      `來源：${formatMatrixSourceLabel(source)}`,
+      `平台：${state.platform || "threads"}`,
+      "",
+      `共同可發下限：每人 ${commonLimit} 篇`,
+      `可發人設：${readyPersonaCount}/${state.archiveIds.length} 個`,
+      `全部可發總量：${totalAvailable} 篇`,
+      "",
+      "你可以直接在輸入框輸入每人要發布的篇數。",
+      "下方只顯示所有已選人設都能共同發布的通用篇數。",
+      "",
+      ...detailLines.slice(0, 12),
+      detailLines.length > 12 ? `...還有 ${detailLines.length - 12} 個人設` : "",
+    ].filter(Boolean).join("\n");
+    return {
+      commonLimit,
+      totalAvailable,
+      text,
+      rows: buildMatrixCountRowsForLimit(commonLimit),
+    };
+  };
+
+  const renderMatrixPublishConfirm = async (
+    chatId: number,
+    msgId: number | undefined,
+    state: PendingMatrixPublish,
+    count: number | "all",
+  ) => {
+    const source = state.source || "posts";
+    const detailLines: string[] = [];
+    let plannedPosts = 0;
+    for (const archiveId of state.archiveIds) {
+      const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
+      if (!archive) {
+        detailLines.push(`${archiveId}：找不到人設`);
+        continue;
+      }
+      const sourcePosts = resolveArchivePostCollection(archive, source);
+      const selectedCount = count === "all" ? sourcePosts.length : Math.min(sourcePosts.length, count);
+      plannedPosts += selectedCount;
+      detailLines.push(`${archive.name}：${selectedCount} 篇，雲機 ${archive.boundPadCode || defaultPadCode}`);
+    }
+    await safeEditOrSend(bot, chatId, msgId, [
+      "🚀 *矩陣發布確認*",
+      "",
+      `人設：${state.archiveIds.length} 個`,
+      `來源：${formatMatrixSourceLabel(source)}`,
+      `平台：${state.platform || "threads"}`,
+      `數量：${formatMatrixCountLabel(count)}`,
+      `計劃推文：${plannedPosts} 篇`,
+      "",
+      ...detailLines.slice(0, 12),
+      detailLines.length > 12 ? `...還有 ${detailLines.length - 12} 個人設` : "",
+      "",
+      "系統會使用各人設綁定雲機，按順序發布。",
+    ].filter(Boolean).join("\n"), {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "✅ 開始矩陣發布", callback_data: "mxrun" }],
+          [{ text: "◀️ 返回數量", callback_data: `mxplat_${state.platform || "threads"}` }],
+          [{ text: "👤 重新選人設", callback_data: "matrix_start" }],
+        ],
+      },
+    });
+  };
+
   const executeMatrixPublish = async (
     chatId: number,
     msgId: number | undefined,
@@ -16246,54 +16337,33 @@ function sendMainMenu(chatId: number, msgId?: number) {
         if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
         state = { ...state, platform, stage: "choose_count" };
         pendingMatrixPublishes.set(chatId, state);
-        await safeEditOrSend(bot, chatId, msgId, `🚀 *矩陣發布*\n\n人設：${state.archiveIds.length} 個\n來源：${formatMatrixSourceLabel(state.source)}\n平台：${platform}\n\n請選擇每個人設發布幾篇：`, {
+        const countPayload = await buildMatrixCountSelectionPayload(state);
+        await safeEditOrSend(bot, chatId, msgId, countPayload.text, {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: buildMatrixCountRows() },
+          reply_markup: { inline_keyboard: countPayload.rows },
         });
         return;
       }
       if (data.startsWith("mxc_") || data === "mxb_confirm") {
         const countToken = data.startsWith("mxc_") ? data.slice("mxc_".length) : String(state.count || 1);
         const count = countToken === "all" ? "all" : Math.max(1, Number(countToken || 1));
+        if (count !== "all") {
+          const countPayload = await buildMatrixCountSelectionPayload(state);
+          if (countPayload.commonLimit <= 0 || count > countPayload.commonLimit) {
+            await safeEditOrSend(bot, chatId, msgId, [
+              "❌ 篇數超出共同可發下限",
+              "",
+              `目前共同可發下限：每人 ${countPayload.commonLimit} 篇`,
+              "請重新輸入不超過下限的數字，或點擊「每人全部」。",
+            ].join("\n"), {
+              reply_markup: { inline_keyboard: countPayload.rows },
+            });
+            return;
+          }
+        }
         state = { ...state, count, stage: "confirm" };
         pendingMatrixPublishes.set(chatId, state);
-        const source = state.source || "posts";
-        const detailLines: string[] = [];
-        let plannedPosts = 0;
-        for (const archiveId of state.archiveIds) {
-          const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
-          if (!archive) {
-            detailLines.push(`${archiveId}：找不到人設`);
-            continue;
-          }
-          const sourcePosts = resolveArchivePostCollection(archive, source);
-          const selectedCount = count === "all" ? sourcePosts.length : Math.min(sourcePosts.length, count);
-          plannedPosts += selectedCount;
-          detailLines.push(`${archive.name}：${selectedCount} 篇，雲機 ${archive.boundPadCode || defaultPadCode}`);
-        }
-        await safeEditOrSend(bot, chatId, msgId, [
-          "🚀 *矩陣發布確認*",
-          "",
-          `人設：${state.archiveIds.length} 個`,
-          `來源：${formatMatrixSourceLabel(source)}`,
-          `平台：${state.platform || "threads"}`,
-          `數量：${formatMatrixCountLabel(count)}`,
-          `計劃推文：${plannedPosts} 篇`,
-          "",
-          ...detailLines.slice(0, 12),
-          detailLines.length > 12 ? `...還有 ${detailLines.length - 12} 個人設` : "",
-          "",
-          "系統會使用各人設綁定雲機，按順序發布。",
-        ].filter(Boolean).join("\n"), {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "✅ 開始矩陣發布", callback_data: "mxrun" }],
-              [{ text: "◀️ 返回數量", callback_data: `mxplat_${state.platform || "threads"}` }],
-              [{ text: "👤 重新選人設", callback_data: "matrix_start" }],
-            ],
-          },
-        });
+        await renderMatrixPublishConfirm(chatId, msgId, state, count);
         return;
       }
       if (data === "mxrun") {
@@ -23844,6 +23914,44 @@ function sendMainMenu(chatId: number, msgId?: number) {
         invalidatePersonaListCache();
         await bot.sendMessage(chatId, `✅ Telegram 登入資料已保存\n手機：${maskAccountSecret(pendingPersonaAccount.phone)}\n登入 Email：${pendingPersonaAccount.email ? maskAccountSecret(pendingPersonaAccount.email) : "未設定/已跳過"}\n二級密碼：已設定`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${pendingPersonaAccount.archiveId}` }]] },
+        });
+        return;
+      }
+    }
+
+    const pendingMatrix = pendingMatrixPublishes.get(chatId);
+    if (pendingMatrix?.stage === "choose_count") {
+      const value = normalizeTelegramSingleLine(text || "");
+      if (/^\d+$/.test(value)) {
+        const count = Math.max(1, Number(value));
+        const countPayload = await buildMatrixCountSelectionPayload(pendingMatrix);
+        if (countPayload.commonLimit <= 0 || count > countPayload.commonLimit) {
+          await bot.sendMessage(chatId, [
+            "❌ 篇數超出共同可發下限",
+            "",
+            `目前共同可發下限：每人 ${countPayload.commonLimit} 篇`,
+            `你輸入的是：每人 ${count} 篇`,
+            "",
+            "請重新輸入不超過下限的數字，或點擊「每人全部」。",
+          ].join("\n"), {
+            reply_markup: { inline_keyboard: countPayload.rows },
+          });
+          return;
+        }
+        const nextState: PendingMatrixPublish = { ...pendingMatrix, count, stage: "confirm" };
+        pendingMatrixPublishes.set(chatId, nextState);
+        await renderMatrixPublishConfirm(chatId, undefined, nextState, count);
+        return;
+      }
+      if (value) {
+        const countPayload = await buildMatrixCountSelectionPayload(pendingMatrix);
+        await bot.sendMessage(chatId, [
+          "❌ 篇數格式不正確",
+          "",
+          "請直接輸入數字，例如：2。",
+          `目前共同可發下限：每人 ${countPayload.commonLimit} 篇`,
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: countPayload.rows },
         });
         return;
       }
