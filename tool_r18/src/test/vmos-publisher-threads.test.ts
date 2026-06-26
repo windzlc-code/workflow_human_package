@@ -40,8 +40,11 @@ import {
   findThreadsTopSearchButtonTarget,
   findAcpReplySendButtonPointFromScreenshot,
   findThreadsProfileVideoTabTarget,
+  finalizeThreadsAutoReplyCandidates,
   finalizeWarmupComment,
   locateThreadsVisibleOwnPostContentTarget,
+  loadThreadsAutoReplyRepliedSets,
+  rememberThreadsAutoReplyComment,
   chooseThreadsGalleryMarkerToKeep,
   getLocalVisualVerificationSupport,
   getThreadsProfileReferenceImageBestMatchForTest,
@@ -1617,5 +1620,93 @@ describe("Threads publish verification", () => {
       }
       expect(shouldUseThreadsShareIntentPath(padCode)).toBe(true);
     }
+  });
+
+  it("suppresses visible comments that were already replied in persisted Threads auto-reply history", () => {
+    const originalHistoryFile = process.env.THREADS_AUTO_REPLY_HISTORY_FILE;
+    const file = path.join(
+      process.cwd(),
+      ".runtime",
+      "automatic-script-test",
+      `threads-auto-reply-history-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+    );
+    const padCode = "TEST_REPLY_HISTORY_PAD";
+    const postHash = "post-hash-1";
+    try {
+      process.env.THREADS_AUTO_REPLY_HISTORY_FILE = file;
+      rememberThreadsAutoReplyComment({
+        padCode,
+        postHash,
+        commentAuthor: "outside_user",
+        commentText: "苹果怎么吃最美味",
+        replyText: "切片配酸奶和坚果，口感会更有层次。",
+      });
+
+      const { repliedKeys, repliedCommentIdentityKeys } = loadThreadsAutoReplyRepliedSets(padCode);
+      const candidates = finalizeThreadsAutoReplyCandidates({
+        padCode,
+        postHash,
+        postPreview: "今天聊聊水果和餐桌氛围",
+        repliedKeys,
+        repliedCommentIdentityKeys,
+        ownIdentifiers: ["owner"],
+        candidates: [
+          {
+            author: "outside_user",
+            text: "苹果怎么吃最美味",
+            score: 10,
+            replyPoint: { x: 300, y: 900 },
+          },
+          {
+            author: "fresh_user",
+            text: "餐桌摆盘怎么做更自然",
+            score: 9,
+            replyPoint: { x: 300, y: 1040 },
+          },
+        ],
+      });
+
+      expect(candidates.map((item) => item.text)).toEqual(["餐桌摆盘怎么做更自然"]);
+    } finally {
+      if (originalHistoryFile === undefined) {
+        delete process.env.THREADS_AUTO_REPLY_HISTORY_FILE;
+      } else {
+        process.env.THREADS_AUTO_REPLY_HISTORY_FILE = originalHistoryFile;
+      }
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  it("filters low-information auto-reply comments before ranking", () => {
+    const candidates = finalizeThreadsAutoReplyCandidates({
+      padCode: "TEST_REPLY_QUALITY_PAD",
+      postHash: "post-hash-quality",
+      postPreview: "苹果动画发布测试，厨房木桌上的红苹果短片",
+      repliedKeys: new Set(),
+      repliedCommentIdentityKeys: new Set(),
+      ownIdentifiers: ["rick_y54088"],
+      candidates: [
+        {
+          author: "windzlc123",
+          text: "哈哈哈",
+          score: 9,
+          replyPoint: { x: 232, y: 1032 },
+        },
+        {
+          author: "windzlc123",
+          text: "123",
+          score: 8,
+          replyPoint: { x: 232, y: 1208 },
+        },
+        {
+          author: "windzlc123",
+          text: "这个真不错",
+          score: 7,
+          replyPoint: { x: 232, y: 780 },
+        },
+      ],
+    });
+
+    expect(candidates.map((item) => item.text)).toEqual(["这个真不错"]);
   });
 });

@@ -26108,6 +26108,7 @@ type ThreadsAutoReplyHistoryEntry = {
   key: string;
   padCode: string;
   postHash: string;
+  commentIdentityKey?: string;
   commentAuthor?: string;
   commentPreview: string;
   replyPreview: string;
@@ -26132,6 +26133,19 @@ function writeThreadsAutoReplyHistory(entries: ThreadsAutoReplyHistoryEntry[]) {
   const file = getThreadsAutoReplyHistoryFile();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify({ entries: entries.slice(-800) }, null, 2), "utf8");
+}
+
+export function loadThreadsAutoReplyRepliedSets(padCode: string) {
+  const repliedKeys = new Set<string>();
+  const repliedCommentIdentityKeys = new Set<string>();
+  for (const entry of readThreadsAutoReplyHistory()) {
+    if (entry.padCode !== padCode) continue;
+    if (entry.key) repliedKeys.add(entry.key);
+    const commentIdentityKey = entry.commentIdentityKey
+      || buildThreadsAutoReplyRecentCommentIdentityKey(entry.padCode, entry.commentAuthor, entry.commentPreview);
+    if (commentIdentityKey) repliedCommentIdentityKeys.add(commentIdentityKey);
+  }
+  return { repliedKeys, repliedCommentIdentityKeys };
 }
 
 function buildThreadsAutoReplyPostHash(padCode: string, postPreview: string, fallbackTexts: string[] = []) {
@@ -26224,7 +26238,7 @@ function extractThreadsAutoReplyLikelyOwnAuthorsFromUiXml(uiXml: string): string
   return username ? mergeThreadsAutoReplyOwnIdentifiers([username]) : [];
 }
 
-function rememberThreadsAutoReplyComment(input: {
+export function rememberThreadsAutoReplyComment(input: {
   padCode: string;
   postHash: string;
   commentAuthor?: string;
@@ -26233,11 +26247,13 @@ function rememberThreadsAutoReplyComment(input: {
 }) {
   const entries = readThreadsAutoReplyHistory();
   const key = buildThreadsAutoReplyCommentKey(input.padCode, input.postHash, input.commentAuthor, input.commentText);
+  const commentIdentityKey = buildThreadsAutoReplyRecentCommentIdentityKey(input.padCode, input.commentAuthor, input.commentText);
   const next = entries.filter((entry) => entry.key !== key);
   next.push({
     key,
     padCode: input.padCode,
     postHash: input.postHash,
+    commentIdentityKey,
     commentAuthor: normalizeThreadsAutoReplyAuthor(input.commentAuthor) || undefined,
     commentPreview: normalizeSingleLine(input.commentText).slice(0, 80),
     replyPreview: normalizeSingleLine(input.replyText).slice(0, 80),
@@ -26256,7 +26272,7 @@ function isThreadsAutoReplyForcedVisibleFallbackCandidate(item: ThreadsAutoReply
     && String(item.debugReason || "").includes("force_visible_reply_fallback");
 }
 
-function finalizeThreadsAutoReplyCandidates(input: {
+export function finalizeThreadsAutoReplyCandidates(input: {
   padCode: string;
   postHash: string;
   postPreview: string;
@@ -26520,7 +26536,19 @@ async function callThreadsAutoReplyDirectMultimodalModel(
   const apiKey = normalizeSingleLine(config.gptKey || config.geminiTextKey || "");
   const baseUrl = normalizeSingleLine(config.gptEndpoint || config.geminiTextEndpoint || "");
   if (!apiKey || !baseUrl) throw new Error("OpenAI 兼容多模態端點未設定");
-  const model = normalizeSingleLine(options.model || resolvePublishVerifyModel() || "xai/grok-4.3");
+  const modelCandidates = String(options.model || config.llmModelPriorityOrder || config.llm_model_priority_order || resolvePublishVerifyModel() || "xai/grok-4.3")
+    .split(/[,\n]/)
+    .map((item) => normalizeSingleLine(item))
+    .filter(Boolean);
+  const modelScore = (candidate: string) => {
+    const lower = candidate.toLowerCase();
+    if (/gemini-3\.1-pro/.test(lower)) return 0;
+    if (/gemini-3\.5-flash/.test(lower)) return 1;
+    if (/gemini.*flash/.test(lower)) return 2;
+    if (/grok|xai/.test(lower)) return 4;
+    return 3;
+  };
+  const model = [...modelCandidates].sort((a, b) => modelScore(a) - modelScore(b))[0] || "xai/grok-4.3";
   const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
     headers: {
@@ -27134,7 +27162,9 @@ Rules:
       request.signal,
       { maxTokens: 120 },
     );
-    return parsePreview(raw);
+    const parsed = parsePreview(raw);
+    if (parsed.abnormalPreview || parsed.postPreview) return parsed;
+    throw new Error("direct profile preview empty; retry with OCR vision");
   } catch {
     try {
       const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, request.signal, {
@@ -27171,6 +27201,7 @@ function isThreadsAutoReplyIgnoredText(text: string): boolean {
   }
   if (/^(讚|赞|喜歡|喜欢|回覆|回复|留言|評論|评论|轉發|转发|分享|發佈|发布|Post|Reply|Like|Share|Repost|Threads|Following|For you)$/i.test(compact)) return true;
   if (/^(首頁|主页|搜尋|搜索|探索|通知|個人|个人|新增|取消|完成|更多|返回|查看|複製|复制|編輯|编辑)$/i.test(compact)) return true;
+  if (/^(哈|哈哈|哈哈哈|哈哈哈哈|呵呵|嘿嘿|嘻嘻|笑死|lol|lmao|haha|hahaha|ok|嗯|啊|哦|喔)+$/i.test(compact)) return true;
   if (/^\d+(\.\d+)?[萬万千kKmM]?$/.test(compact)) return true;
   if (/^\d+\s*(秒|分鐘|分钟|小時|小时|天|週|周|月|年|s|m|h|d|w)$/i.test(compact)) return true;
   if (/^@?[a-z0-9_.-]{3,32}$/i.test(compact)) return true;
@@ -29177,7 +29208,7 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
       const rowScore = likeNear * 1.1 + commentNear * 1.4 + countNear * 1.8 + repostNear + shareNear;
       if (
         isSafeProfileActionRowY(y)
-        && looksLikeProfileActionRowBand(y)
+        && (looksLikeProfileActionRowBand(y) || (rowScore >= 0.45 && rowUiBackground >= 0.88))
         && likeNear >= 0.010
         && commentNear >= 0.012
         && countNear >= 0.012
@@ -30863,12 +30894,7 @@ export async function autoReplyThreadsAccount(
   let skipped = 0;
   const replyScreenshots: string[] = [];
   const errors: string[] = [];
-  // The persisted history is only durable evidence. Do not use it to suppress
-  // visible comments before a run, because comments/replies can be deleted for
-  // retesting. Once this run sends a reply, the in-memory sets below prevent
-  // duplicate replies in the same loop.
-  const repliedKeys = new Set<string>();
-  const repliedCommentIdentityKeys = new Set<string>();
+  const { repliedKeys, repliedCommentIdentityKeys } = loadThreadsAutoReplyRepliedSets(padCode);
   let preflightProfileShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   const alreadyOnProfile = preflightProfileShotUrl
     ? await withTimeout(
