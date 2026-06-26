@@ -22973,6 +22973,44 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    const pendingMatrixLate = pendingMatrixPublishes.get(chatId);
+    if (pendingMatrixLate?.stage === "choose_count") {
+      const value = normalizeTelegramSingleLine(text || "");
+      if (/^\d+$/.test(value)) {
+        const count = Math.max(1, Number(value));
+        const countPayload = await buildMatrixCountSelectionPayload(pendingMatrixLate);
+        if (countPayload.commonLimit <= 0 || count > countPayload.commonLimit) {
+          await bot.sendMessage(chatId, [
+            "❌ 篇數超出共同可發下限",
+            "",
+            `目前共同可發下限：每人 ${countPayload.commonLimit} 篇`,
+            `你輸入的是：每人 ${count} 篇`,
+            "",
+            "請重新輸入不超過下限的數字，或點擊「每人全部」。",
+          ].join("\n"), {
+            reply_markup: { inline_keyboard: countPayload.rows },
+          });
+          return;
+        }
+        const nextState: PendingMatrixPublish = { ...pendingMatrixLate, count, stage: "confirm" };
+        pendingMatrixPublishes.set(chatId, nextState);
+        await renderMatrixPublishConfirm(chatId, undefined, nextState, count);
+        return;
+      }
+      if (value) {
+        const countPayload = await buildMatrixCountSelectionPayload(pendingMatrixLate);
+        await bot.sendMessage(chatId, [
+          "❌ 篇數格式不正確",
+          "",
+          "請直接輸入數字，例如：2。",
+          `目前共同可發下限：每人 ${countPayload.commonLimit} 篇`,
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: countPayload.rows },
+        });
+        return;
+      }
+    }
+
     if (/^\d+$/.test(text)) {
       await bot.sendMessage(chatId, "目前沒有等待輸入數字的生成任務。請重新進入「人設詳情 → 新建推文」，再輸入數量或字數。", {
         reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }], [{ text: "🏠 主選單", callback_data: "fresh_main_menu" }]] },
