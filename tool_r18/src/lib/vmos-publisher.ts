@@ -26663,11 +26663,12 @@ async function extractThreadsAutoReplyVisibleCommentsByVision(
   screenshotUrl: string,
   persona?: WarmupCommentPersona,
   ownIdentifiers: string[] = [],
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; forceVisibleValidation?: boolean } = {},
 ): Promise<ThreadsAutoReplyCandidate[]> {
   if (!screenshotUrl) return [];
   const image = await getImageDimensions(screenshotUrl).catch(() => null);
-  const forceVisibleValidation = process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY === "1";
+  const forceVisibleValidation = options.forceVisibleValidation === true
+    || process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY === "1";
   const replyPoints = await detectThreadsVisibleCommentReplyPointsLocally(screenshotUrl).catch(() => []);
   const fallbackReplyPoint = replyPoints[0] || {
     x: Math.round((image?.width || BASE_SCREEN.width) * 0.40),
@@ -30549,7 +30550,7 @@ async function collectThreadsAutoReplyPostContext(
           repliedCommentIdentityKeys,
           ownIdentifiers: postOwnIdentifiers,
         });
-        const pageVisualCandidates = !candidates.length && canSpendBudget(4_500, 1_200) && pageShotUrl
+        let pageVisualCandidates = !candidates.length && canSpendBudget(4_500, 1_200) && pageShotUrl
           ? await extractThreadsAutoReplyVisibleCommentsByVision(
             pageShotUrl,
             persona,
@@ -30557,6 +30558,14 @@ async function collectThreadsAutoReplyPostContext(
             { timeoutMs: budgetedTimeout(4_800, 1_200, 3_200) },
           ).catch(() => [])
           : [];
+        if (!pageVisualCandidates.length && !candidates.length && canSpendBudget(8_500, 1_200) && pageShotUrl) {
+          pageVisualCandidates = await extractThreadsAutoReplyVisibleCommentsByVision(
+            pageShotUrl,
+            persona,
+            postOwnIdentifiers,
+            { timeoutMs: budgetedTimeout(9_500, 1_200, 6_500), forceVisibleValidation: true },
+          ).catch(() => []);
+        }
         throwIfDeadlineExceeded(deadlineAt);
         addVisualCandidates(pageVisualCandidates);
         postHash = buildThreadsAutoReplyPostHash(padCode, "comment-collect-no-ui-xml", [
