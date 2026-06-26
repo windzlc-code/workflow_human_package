@@ -1936,12 +1936,14 @@ function buildMatrixSourceRows(): Array<Array<{ text: string; callback_data: str
   ];
 }
 
-function buildMatrixCountRowsForLimit(commonLimit: number): Array<Array<{ text: string; callback_data: string }>> {
+function buildMatrixCountRowsForLimit(commonLimit: number, totalAvailable = 0): Array<Array<{ text: string; callback_data: string }>> {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   if (commonLimit > 0) {
     rows.push([{ text: `每人 ${commonLimit} 篇`, callback_data: `mxc_${commonLimit}` }]);
   }
-  rows.push([{ text: "每人全部", callback_data: "mxc_all" }]);
+  if (totalAvailable > 0) {
+    rows.push([{ text: "每人全部", callback_data: "mxc_all" }]);
+  }
   rows.push([{ text: "◀️ 返回平台", callback_data: "mxback_platform" }]);
   return rows;
 }
@@ -14075,6 +14077,9 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       "",
       "你可以直接在輸入框輸入每人要發布的篇數。",
       "下方只顯示所有已選人設都能共同發布的通用篇數。",
+      commonLimit <= 0
+        ? "目前共同可發篇數為 0，代表至少 1 個已選人設沒有可發內容；請返回調整人設，或使用「每人全部」按各自庫存發布。"
+        : "",
       "",
       ...detailLines.slice(0, 12),
       detailLines.length > 12 ? `...還有 ${detailLines.length - 12} 個人設` : "",
@@ -14083,7 +14088,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       commonLimit,
       totalAvailable,
       text,
-      rows: buildMatrixCountRowsForLimit(commonLimit),
+      rows: buildMatrixCountRowsForLimit(commonLimit, totalAvailable),
     };
   };
 
@@ -16340,9 +16345,30 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (data.startsWith("mxc_") || data === "mxb_confirm") {
         const countToken = data.startsWith("mxc_") ? data.slice("mxc_".length) : String(state.count || 1);
-        const count = countToken === "all" ? "all" : Math.max(1, Number(countToken || 1));
+        const count = countToken === "all" ? "all" : Number(countToken || 0);
+        const countPayload = await buildMatrixCountSelectionPayload(state);
+        if (count === "all" && countPayload.totalAvailable <= 0) {
+          await safeEditOrSend(bot, chatId, msgId, [
+            "❌ 目前沒有可發布的推文",
+            "",
+            "已選人設都沒有可發內容，請返回重新選擇人設或先新增推文。",
+          ].join("\n"), {
+            reply_markup: { inline_keyboard: countPayload.rows },
+          });
+          return;
+        }
         if (count !== "all") {
-          const countPayload = await buildMatrixCountSelectionPayload(state);
+          if (!Number.isInteger(count) || count < 1) {
+            await safeEditOrSend(bot, chatId, msgId, [
+              "❌ 篇數必須大於 0",
+              "",
+              `目前共同可發下限：每人 ${countPayload.commonLimit} 篇`,
+              "請重新輸入 1 以上的數字，或點擊「每人全部」。",
+            ].join("\n"), {
+              reply_markup: { inline_keyboard: countPayload.rows },
+            });
+            return;
+          }
           if (countPayload.commonLimit <= 0 || count > countPayload.commonLimit) {
             await safeEditOrSend(bot, chatId, msgId, [
               "❌ 篇數超出共同可發下限",
@@ -22977,8 +23003,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (pendingMatrixLate?.stage === "choose_count") {
       const value = normalizeTelegramSingleLine(text || "");
       if (/^\d+$/.test(value)) {
-        const count = Math.max(1, Number(value));
+        const count = Number(value);
         const countPayload = await buildMatrixCountSelectionPayload(pendingMatrixLate);
+        if (!Number.isInteger(count) || count < 1) {
+          await bot.sendMessage(chatId, [
+            "❌ 篇數必須大於 0",
+            "",
+            `目前共同可發下限：每人 ${countPayload.commonLimit} 篇`,
+            `你輸入的是：每人 ${count} 篇`,
+            "",
+            "請重新輸入 1 以上的數字，或點擊「每人全部」。",
+          ].join("\n"), {
+            reply_markup: { inline_keyboard: countPayload.rows },
+          });
+          return;
+        }
         if (countPayload.commonLimit <= 0 || count > countPayload.commonLimit) {
           await bot.sendMessage(chatId, [
             "❌ 篇數超出共同可發下限",
@@ -23955,8 +23994,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (pendingMatrix?.stage === "choose_count") {
       const value = normalizeTelegramSingleLine(text || "");
       if (/^\d+$/.test(value)) {
-        const count = Math.max(1, Number(value));
+        const count = Number(value);
         const countPayload = await buildMatrixCountSelectionPayload(pendingMatrix);
+        if (!Number.isInteger(count) || count < 1) {
+          await bot.sendMessage(chatId, [
+            "❌ 篇數必須大於 0",
+            "",
+            `目前共同可發下限：每人 ${countPayload.commonLimit} 篇`,
+            `你輸入的是：每人 ${count} 篇`,
+            "",
+            "請重新輸入 1 以上的數字，或點擊「每人全部」。",
+          ].join("\n"), {
+            reply_markup: { inline_keyboard: countPayload.rows },
+          });
+          return;
+        }
         if (countPayload.commonLimit <= 0 || count > countPayload.commonLimit) {
           await bot.sendMessage(chatId, [
             "❌ 篇數超出共同可發下限",
