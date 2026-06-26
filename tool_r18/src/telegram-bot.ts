@@ -15920,7 +15920,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
         );
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
-        await bot.sendMessage(chatId, `✅ *Threads 自動回覆完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
+        const completionMessage = result.replied > 0
+          ? `✅ *Threads 自動回覆完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`
+          : `✅ Threads 自動回覆完成\n\n本次沒有可發送的回覆截圖。\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`;
+        await bot.sendMessage(chatId, completionMessage, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
         });
