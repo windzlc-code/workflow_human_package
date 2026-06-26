@@ -9,8 +9,6 @@ import {
   buildArchivePostFromEpisode,
   reorderArchivePostsByIds,
   replaceArchivePostsFromEpisodes,
-  sortArchivePosts,
-  sortPublishHistory,
   type ArchiveSetup,
   type PersonaArchive,
   type PersonaArchivePost,
@@ -276,6 +274,12 @@ function normalizePublishRecord(raw: any, fallbackIndex: number): PersonaPublish
   const now = new Date().toISOString();
   const publishedAt = toIso(raw?.publishedAt, raw?.createdAt || now);
   const content = typeof raw?.content === "string" ? raw.content : "";
+  const rawPublishedMeta = raw?.publishedMeta && typeof raw.publishedMeta === "object"
+    ? raw.publishedMeta
+    : undefined;
+  const legacySourceHotspotMeta = rawPublishedMeta?.source === "published_source_hotspot"
+    ? rawPublishedMeta
+    : undefined;
   const title = typeof raw?.title === "string" && raw.title.trim()
     ? raw.title
     : `發布紀錄 #${fallbackIndex + 1}`;
@@ -298,10 +302,10 @@ function normalizePublishRecord(raw: any, fallbackIndex: number): PersonaPublish
     telegramGroupContentType: raw?.telegramGroupContentType === "paid" ? "paid" : raw?.telegramGroupContentType === "free" ? "free" : undefined,
     sourceMeta: raw?.sourceMeta && typeof raw.sourceMeta === "object"
       ? raw.sourceMeta
-      : undefined,
+      : legacySourceHotspotMeta,
     publishedUrl: typeof raw?.publishedUrl === "string" ? raw.publishedUrl : undefined,
-    publishedMeta: raw?.publishedMeta && typeof raw.publishedMeta === "object"
-      ? raw.publishedMeta
+    publishedMeta: rawPublishedMeta && rawPublishedMeta.source !== "published_source_hotspot"
+      ? rawPublishedMeta
       : undefined,
     publishedTargets: Array.isArray(raw?.publishedTargets)
       ? raw.publishedTargets
@@ -397,6 +401,9 @@ function normalizeArchive(raw: any): PersonaArchive {
   const posts = Array.isArray(raw?.posts)
     ? raw.posts.map((post: any, index: number) => normalizePost(post, index))
     : [];
+  const favoritePosts = Array.isArray(raw?.favoritePosts)
+    ? raw.favoritePosts.map((post: any, index: number) => normalizePost(post, index))
+    : [];
   const platformPosts = normalizePlatformPosts(raw?.platformPosts, posts);
   const publishHistory = Array.isArray(raw?.publishHistory)
     ? raw.publishHistory.map((record: any, index: number) => normalizePublishRecord(record, index))
@@ -440,6 +447,7 @@ function normalizeArchive(raw: any): PersonaArchive {
       ? raw.ownerBotName.trim()
       : undefined,
     posts: sortArchivePosts(platformPosts.threads || posts),
+    favoritePosts: sortArchivePosts(favoritePosts),
     platformPosts,
     publishHistory: sortPublishHistory(publishHistory),
     personaImageLibrary,
@@ -774,6 +782,7 @@ export async function savePersonaArchive(archive: PersonaArchive): Promise<Perso
     ...archive,
     updatedAt: new Date().toISOString(),
     posts: sortArchivePosts(archive.posts || []),
+    favoritePosts: sortArchivePosts(archive.favoritePosts || []),
     publishHistory: archive.publishHistory,
   });
 }
@@ -1203,6 +1212,7 @@ export async function appendCustomPersonaArchivePost(args: {
     hotScore?: number;
     metrics?: Record<string, unknown>;
     engagement?: Record<string, unknown>;
+    publishedAt?: string;
     capturedAt?: string;
     warnings?: string[];
     originalContent?: string;
@@ -1345,6 +1355,86 @@ export async function markArchiveEpisodesPublished(
 
   if (hasElectronMemoryAPI() && publishedMemories.length > 0) {
     void writeMemories().catch(() => undefined);
+  }
+
+  return savedArchive;
+}
+
+export async function markFavoritePostsPublished(
+  archiveId: string,
+  favoritePostIds: string[],
+  publishedContentById: Record<string, string> = {},
+  publishedMetaById: Record<string, PersonaPublishMeta> = {},
+): Promise<PersonaArchive | null> {
+  if (favoritePostIds.length === 0) return null;
+  const archive = await loadPersonaArchive(archiveId);
+  if (!archive) return null;
+  const idSet = new Set(favoritePostIds);
+  const publishedAt = new Date().toISOString();
+  const publishedPosts = (archive.favoritePosts || []).filter((post) => idSet.has(post.id));
+
+  const getSentContent = (post: PersonaArchivePost) => {
+    const sentContent = typeof publishedContentById[post.id] === "string"
+      ? publishedContentById[post.id].trim()
+      : "";
+    return sentContent || post.content;
+  };
+
+  const publishedMemories = publishedPosts
+    .map((post) => {
+      const content = getSentContent(post);
+      if (!content.trim()) return null;
+      const summary = content === post.content && post.memorySummary
+        ? buildArchiveMemoryOutline(post.memorySummary)
+        : undefined;
+      return { content, summary };
+    })
+    .filter(Boolean) as Array<{ content: string; summary?: string }>;
+
+  const publishHistory = publishedPosts
+    .map((post, index) => {
+      const meta = publishedMetaById[post.id] || {};
+      const content = getSentContent(post);
+      return normalizePublishRecord({
+        id: crypto.randomUUID(),
+        archivePostId: post.id,
+        title: post.title,
+        content,
+        wordCount: content.length,
+        publishedAt,
+        platform: meta.platform,
+        padCode: meta.padCode,
+        padName: meta.padName,
+        imageUrl: meta.mediaUrl || meta.imageUrl || post.imageUrl,
+        screenshotUrl: meta.screenshotUrl,
+        telegramGroupContentType: post.telegramGroupContentType,
+        sourceMeta: meta.sourceMeta || post.sourceMeta,
+        publishedUrl: meta.publishedUrl,
+        publishedMeta: meta.publishedMeta,
+        publishedTargets: meta.publishedTargets,
+      }, (archive.publishHistory?.length || 0) + index);
+    })
+    .filter((record) => record.content.trim());
+
+  const writeMemories = async () => {
+    for (const { content, summary } of publishedMemories) {
+      await addPostToMemory(archive.id, content, archive.name, summary, archive.content);
+    }
+  };
+
+  const savedArchive = await savePersonaArchive({
+    ...archive,
+    updatedAt: publishedAt,
+    favoritePosts: sortArchivePosts(archive.favoritePosts || []),
+    publishHistory: sortPublishHistory([
+      ...(archive.publishHistory || []),
+      ...publishHistory,
+    ]),
+  });
+
+  if (publishedMemories.length > 0) {
+    if (hasElectronMemoryAPI()) void writeMemories().catch(() => undefined);
+    else await writeMemories();
   }
 
   return savedArchive;

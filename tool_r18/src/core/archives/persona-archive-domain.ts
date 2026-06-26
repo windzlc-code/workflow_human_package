@@ -164,6 +164,7 @@ export interface PersonaArchive {
   boundTelegramPaidGroupName?: string;
   ownerBotName?: string;
   posts: PersonaArchivePost[];
+  favoritePosts?: PersonaArchivePost[];
   platformPosts?: Record<string, PersonaArchivePost[]>;
   publishHistory?: PersonaPublishRecord[];
   personaImageLibrary?: PersonaImageLibraryItem[];

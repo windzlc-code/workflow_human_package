@@ -9,10 +9,12 @@ import {
   buildPostDetailText,
   buildPostImagePreviewOptions,
   buildPostImageRegenerateCallback,
+  buildPersonaHotMetricsPanelRows,
   buildPersonaSettingsRows,
   buildPersonaPlatformAccountRows,
   formatPersonaSettingsHotMetricsLines,
   buildPostDetailActionRows,
+  buildStoredPostMediaManageKeyboard,
   buildStoredPostsListView,
   derivePersonaSpecFromPrompt,
   filterPersonaMenuList,
@@ -112,26 +114,39 @@ describe("buildPersonaSettingsRows", () => {
     const rows = buildPersonaSettingsRows(archive);
     const buttons = rows.flat();
 
-    expect(buttons).toContainEqual({ text: "🧾 人设简介", callback_data: `editcontent_${archive.id}` });
+    expect(buttons).toContainEqual({ text: "🧾 人設簡介", callback_data: `editcontent_${archive.id}` });
   });
 
-  it("shows the detailed hot-data entry by default", () => {
+  it("shows the persona hot-data panel entry by default", () => {
     const texts = flattenButtonTexts(buildPersonaSettingsRows(archiveForSettings()));
 
-    expect(texts).toContain("📊 详细人设数据");
+    expect(texts).toContain("🔥 人設熱點數據");
+    expect(texts).not.toContain("📊 详细人设数据");
   });
 
-  it("shows detail-mode controls and filters when switched to detail mode", () => {
+  it("keeps hot-data mode controls inside the independent panel", () => {
     const texts = flattenButtonTexts(buildPersonaSettingsRows(archiveForSettings(), {
       hotMode: "detail",
       hotFields: ["followers", "views"],
     }));
 
-    expect(texts).toContain("👈 轻量热点");
-    expect(texts).toContain("🔄 刷新详细数据");
-    expect(texts).toContain("✅ 粉丝");
-    expect(texts).toContain("✅ 浏览");
-    expect(texts).toContain("⬜ 点赞");
+    expect(texts).toContain("🔥 人設熱點數據");
+    expect(texts).not.toContain("🔄 刷新數據");
+    expect(texts).not.toContain("✅ 粉絲");
+  });
+
+  it("builds light/detail controls and filters for the independent hot-data panel", () => {
+    const texts = flattenButtonTexts(buildPersonaHotMetricsPanelRows("persona-settings-test", {
+      mode: "detail",
+      fields: ["followers", "views"],
+    }));
+
+    expect(texts).toContain("輕量版");
+    expect(texts).toContain("✅ 詳細版");
+    expect(texts).toContain("🔄 刷新數據");
+    expect(texts).toContain("✅ 粉絲");
+    expect(texts).toContain("✅ 瀏覽");
+    expect(texts).toContain("⬜ 點讚");
   });
 
   it("hides persona-image controls for workflow personas", () => {
@@ -202,9 +217,9 @@ describe("formatPersonaSettingsHotMetricsLines", () => {
 
     const lines = formatPersonaSettingsHotMetricsLines(archive, { mode: "light" });
 
-    expect(lines[0]).toContain("轻量热点：Threads：账号 @stevie875443");
-    expect(lines[0]).toContain("粉丝 4");
-    expect(lines[0]).toContain("最近浏览 6.1万");
+    expect(lines[0]).toContain("輕量版：Threads：帳號 @stevie875443");
+    expect(lines[0]).toContain("粉絲 4");
+    expect(lines[0]).toContain("最近瀏覽 6.1萬");
   });
 
   it("renders detail metrics without duplicated summary wording", () => {
@@ -240,8 +255,8 @@ describe("formatPersonaSettingsHotMetricsLines", () => {
     });
 
     expect(lines.join("\n")).toContain("推文 20");
-    expect(lines.join("\n")).toContain("点赞 1.6k");
-    expect(lines.join("\n")).toContain("浏览 6.3万");
+    expect(lines.join("\n")).toContain("點讚 1.6k");
+    expect(lines.join("\n")).toContain("瀏覽 6.3萬");
     expect(lines.join("\n")).not.toContain("汇总");
   });
 });
@@ -357,6 +372,37 @@ describe("stored posts pagination", () => {
     expect(buttons.find((button) => button.text === "🗑 删除第8篇")).toBeUndefined();
     expect(buttons.find((button) => button.text === "🚀 發布推文")?.callback_data).toBe("bulkpub_archive-1_p1");
     expect(buttons.find((button) => button.text === "🗑 刪除推文")?.callback_data).toBe("bulkdel_archive-1_p1");
+  });
+
+  it("labels mixed image and video posts in the list", () => {
+    const view = buildStoredPostsListView("archive-1", [{
+      id: "post-mixed",
+      content: "混合媒體推文",
+      mediaItems: [
+        { url: "https://example.com/one.jpg", type: "image" },
+        { url: "https://example.com/two.mp4", type: "video" },
+      ],
+    }]);
+
+    expect(view.text).toContain("<b>【1】</b> <b>类型: 圖片+視頻</b>");
+    expect(view.keyboard.flat().map((button) => button.text)).toContain("👁 查看第1篇（圖片+視頻）");
+  });
+
+  it("adds visual media type icons to media management buttons", () => {
+    const rows = buildStoredPostMediaManageKeyboard({
+      mediaItems: [
+        { url: "https://example.com/one.jpg", type: "image" },
+        { url: "https://example.com/two.mp4", type: "video" },
+      ],
+      selectedIndexes: [1],
+    });
+    const texts = rows.flat().map((button) => button.text);
+
+    expect(texts).toContain("⬜️ 🖼 1.圖片");
+    expect(texts).toContain("☑️ 🎬 2.視頻");
+    expect(texts).toContain("🎬 播放視頻 2");
+    expect(texts).toContain("✅ 全選");
+    expect(texts).toContain("🧹 清空");
   });
 
   it("keeps stored post actions inside the selected Telegram content branch", () => {
@@ -502,10 +548,33 @@ describe("buildPostDetailActionRows", () => {
       archiveId: "archive-1",
       allowSentimentEditControls: true,
     });
+    const texts = flattenButtonTexts(rows);
     const callbacks = flattenButtonCallbacks(rows);
 
+    expect(texts).toContain("🧩 媒體管理");
+    expect(texts).toContain("✏️ 文案管理");
+    expect(texts).not.toContain("编辑文案/媒体");
     expect(callbacks).toContain("post_media_manage");
     expect(callbacks).toContain("post_edit_custom");
+    expect(callbacks).not.toContain("post_media_preview");
+    expect(callbacks).not.toContain("post_img_regen");
+    expect(callbacks).not.toContain("post_regen");
+  });
+
+  it("adds favorite and custom back callbacks when requested", () => {
+    const rows = buildPostDetailActionRows({
+      hasImage: true,
+      publishCallback: "post_action",
+      deleteCallback: "post_delete_action",
+      archiveId: "archive-1",
+      favoriteCallback: "post_favorite_action",
+      backCallback: "favs_archive-1_p0",
+      backText: "back to favorites",
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
+    expect(callbacks).toContain("post_favorite_action");
+    expect(callbacks).toContain("favs_archive-1_p0");
   });
 });
 describe("buildPublishPadSelectionRows", () => {
