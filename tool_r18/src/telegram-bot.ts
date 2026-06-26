@@ -10199,6 +10199,57 @@ async function attachGeneratedImageToArchivePost(args: {
   return true;
 }
 
+async function rewriteSentimentHotImportedPostContent(args: {
+  archive: PersonaArchive;
+  post: PersonaArchive["posts"][number];
+  attempt: number;
+}) {
+  const sourceMeta = args.post.sourceMeta || {};
+  const sourceLines = [
+    sourceMeta.platform ? `平台：${sourceMeta.platform}` : "",
+    sourceMeta.sourceUrl ? `原帖連結：${sourceMeta.sourceUrl}` : "",
+    sourceMeta.metrics ? `原帖數據：${JSON.stringify(sourceMeta.metrics).slice(0, 500)}` : "",
+    sourceMeta.originalContent ? `原始抓取文案：${String(sourceMeta.originalContent).trim()}` : "",
+  ].filter(Boolean).join("\n");
+  const prompt = [
+    "你是 Threads 熱點推文文案重寫器。請把已抓取的熱點推文改寫成當前人設可以直接發布的新文案。",
+    "只輸出重寫後的推文正文，不要解釋，不要加標題，不要輸出編號。",
+    "",
+    "硬性要求：",
+    "1. 必須明顯不同於原文，不能只是同義替換、調整標點、增減 emoji 或保留原句式。",
+    "2. 保留原熱點的核心信息、情緒方向和可討論點，但用當前人設的角度重新組織。",
+    "3. 開頭、段落順序、句式節奏和結尾互動都要重寫。",
+    "4. 不要複製原文中的整句、連續短語或口頭禪。",
+    "5. 不要改變媒體，也不要描述自己看不到的畫面細節。",
+    "6. 字數保持接近原文；如果原文很短，就生成自然短推文。",
+    args.attempt > 1 ? "7. 上一次重寫仍然太像原文；這次必須換角度、換開頭、換句式。" : "",
+    "",
+    `人設名稱：${args.archive.name}`,
+    args.archive.content ? `人設簡介：${args.archive.content}` : "",
+    args.archive.setup ? `人設設定：${JSON.stringify(args.archive.setup).slice(0, 1200)}` : "",
+    sourceLines ? `熱點來源資料：\n${sourceLines}` : "",
+    "",
+    `目前待改寫文案：\n${args.post.content}`,
+  ].filter(Boolean).join("\n");
+  const { data } = await callTextUnderstandingModelWithFallback(
+    resolveTelegramTextModelPreference(args.post.telegramGroupContentType === "paid" ? "paid" : "free"),
+    [{ role: "user", parts: [{ text: prompt }] }],
+    { temperature: args.attempt > 1 ? 0.75 : 0.55, maxOutputTokens: 700 },
+    AbortSignal.timeout(20_000),
+    {
+      isUsableResponse: (data) => Boolean(extractText(data).trim()),
+      isRetryableError: isTextModelFallbackError,
+      onFallback: (event) => {
+        console.warn("[telegram][sentiment_hot_rewrite_fallback]", `${event.from}->${event.to}: ${event.error}`);
+      },
+    },
+  );
+  return extractText(data)
+    .replace(/^```(?:text|markdown)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+
 async function regenerateArchivePostContent(args: {
   archiveId: string;
   postId: string;
@@ -10215,17 +10266,22 @@ async function regenerateArchivePostContent(args: {
   let generatedContent = "";
   const generatedPostIds = new Set<string>();
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const result = await runPersonaWorkflow({
-      action: "generate-posts",
-      archiveId: args.archiveId,
-      count: 1,
-      textModelBranch: original.telegramGroupContentType === "paid" ? "paid" : "free",
-      customInstruction: buildRegeneratePostInstruction(original.content, attempt),
-    } as any);
-    generated = ((result as any)?.posts || [])[0];
-    const generatedPostId = String(generated?.id || generated?.archivePostId || "");
-    if (generatedPostId) generatedPostIds.add(generatedPostId);
-    generatedContent = String(generated?.content || "").trim();
+    if (isSentimentHotImportedPost(original)) {
+      generated = {};
+      generatedContent = await rewriteSentimentHotImportedPostContent({ archive, post: original, attempt });
+    } else {
+      const result = await runPersonaWorkflow({
+        action: "generate-posts",
+        archiveId: args.archiveId,
+        count: 1,
+        textModelBranch: original.telegramGroupContentType === "paid" ? "paid" : "free",
+        customInstruction: buildRegeneratePostInstruction(original.content, attempt),
+      } as any);
+      generated = ((result as any)?.posts || [])[0];
+      const generatedPostId = String(generated?.id || generated?.archivePostId || "");
+      if (generatedPostId) generatedPostIds.add(generatedPostId);
+      generatedContent = String(generated?.content || "").trim();
+    }
     if (!generatedContent) throw new Error("AI 未返回新推文內容");
     if (!isRegeneratedPostTooSimilar(original.content, generatedContent)) break;
     if (attempt === 3) {
@@ -10252,6 +10308,16 @@ async function regenerateArchivePostContent(args: {
               source: "regenerate-post" as any,
             },
           ],
+          sourceMeta: isSentimentHotImportedPost(post)
+            ? {
+                ...(post.sourceMeta || {}),
+                edited: true,
+                warnings: [
+                  ...(post.sourceMeta?.warnings || []),
+                  "已使用 AI 重寫熱點推文文案",
+                ],
+              }
+            : post.sourceMeta,
         }
       : post;
   const nextPosts = latestArchive.posts
