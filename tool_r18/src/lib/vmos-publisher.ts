@@ -26542,9 +26542,9 @@ async function callThreadsAutoReplyDirectMultimodalModel(
     .filter(Boolean);
   const modelScore = (candidate: string) => {
     const lower = candidate.toLowerCase();
-    if (/gemini-3\.1-pro/.test(lower)) return 0;
-    if (/gemini-3\.5-flash/.test(lower)) return 1;
-    if (/gemini.*flash/.test(lower)) return 2;
+    if (/gemini-3\.5-flash/.test(lower)) return 0;
+    if (/gemini.*flash/.test(lower)) return 1;
+    if (/gemini-3\.1-pro/.test(lower)) return 4;
     if (/grok|xai/.test(lower)) return 4;
     return 3;
   };
