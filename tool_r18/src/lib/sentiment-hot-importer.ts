@@ -33,6 +33,7 @@ const THREADS_READER_TOTAL_QUERY_LIMIT = 36;
 const THREADS_READER_QUERY_BATCH_SIZE = 6;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 22_000;
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "經驗",
@@ -1112,10 +1113,14 @@ export async function fetchSentimentHotCandidates(args: {
   const warnings: string[] = [];
   const archive = args.archive;
   const archiveId = cleanText(archive?.id) || "default";
-  const keywordResult = await withSentimentTimeout(
-    buildSentimentHotKeywordsWithModel({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries, warnings }),
-    30_000,
-    undefined,
+  const keywordResult = await measureSentimentStage(
+    warnings,
+    "keywords",
+    () => withSentimentTimeout(
+      buildSentimentHotKeywordsWithModel({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries, warnings }),
+      30_000,
+      undefined,
+    ),
   );
   const keywords = keywordResult || [];
   if (!keywordResult) {
@@ -1128,6 +1133,8 @@ export async function fetchSentimentHotCandidates(args: {
   let candidates = hasSearchKeywords
     ? readThreadsSearchCandidateCache(archiveId, keywords, poolLimit, args.refresh === true)
     : [];
+  const initialCacheCount = candidates.length;
+  const channelStats: string[] = [];
   const cachedQaCount = hasSearchKeywords
     ? selectSentimentHotCandidatesForModelQa(sortRelevantHotCandidates(candidates, keywords, poolLimit), keywords, limit).length
     : 0;
@@ -1144,15 +1151,20 @@ export async function fetchSentimentHotCandidates(args: {
     warnings.push(`當前候選池原始候選 ${candidates.length} 篇，但高品質預篩候選只有 ${cachedQaCount}/${limit} 篇，已繼續刷新真實來源補充候選。`);
   }
   if (shouldFetchLiveCandidates) {
-    const threadsCandidates = await withSentimentTimeout(
-      fetchThreadsSearchPageCandidates({
-        archiveId,
-        keywords,
-        limit: poolLimit,
-        refresh: args.refresh === true,
-      }),
-      25_000,
-      [],
+    const beforeThreadsCount = candidates.length;
+    const threadsCandidates = await measureSentimentStage(
+      warnings,
+      "threads-search",
+      () => withSentimentTimeout(
+        fetchThreadsSearchPageCandidates({
+          archiveId,
+          keywords,
+          limit: poolLimit,
+          refresh: args.refresh === true,
+        }),
+        25_000,
+        [],
+      ),
     ).catch((error) => {
       warnings.push("\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u6293\u53d6\u5931\u6557\uff1a" + (error instanceof Error ? error.message : String(error)));
       return [];
@@ -1167,6 +1179,7 @@ export async function fetchSentimentHotCandidates(args: {
       }
     }
     candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
+    channelStats.push(`Threads 原始 ${threadsCandidates.length}，新增 ${Math.max(0, candidates.length - beforeThreadsCount)}`);
     rememberSentimentHotSourceRefresh(archiveId);
   }
   if (candidates.length > 0) {
@@ -1175,21 +1188,30 @@ export async function fetchSentimentHotCandidates(args: {
       : "已從當前人設候選池刷新熱點。");
   }
 
-  if (shouldFetchLiveCandidates && candidates.length < poolLimit) {
-    const instagramCandidates = await withSentimentTimeout(
-      fetchInstagramReaderSearchCandidates({
-      archiveId,
-      keywords,
-      queries: buildOrderedSentimentQueries(buildThreadsSearchQueries(keywords), args.refresh ? Date.now() + candidates.length : candidates.length, args.refresh === true).slice(0, INSTAGRAM_READER_QUERY_LIMIT),
-      limit: poolLimit,
-      refresh: args.refresh === true,
-      }),
-      20_000,
-      [],
+  const preInstagramQaCount = hasSearchKeywords
+    ? selectSentimentHotCandidatesForModelQa(sortRelevantHotCandidates(candidates, keywords, poolLimit), keywords, limit).length
+    : 0;
+  if (shouldFetchLiveCandidates && preInstagramQaCount < limit) {
+    const beforeInstagramCount = candidates.length;
+    const instagramCandidates = await measureSentimentStage(
+      warnings,
+      "instagram-reader",
+      () => withSentimentTimeout(
+        fetchInstagramReaderSearchCandidates({
+          archiveId,
+          keywords,
+          queries: buildOrderedSentimentQueries(buildThreadsSearchQueries(keywords), args.refresh ? Date.now() + candidates.length : candidates.length, args.refresh === true).slice(0, INSTAGRAM_READER_QUERY_LIMIT),
+          limit: poolLimit,
+          refresh: args.refresh === true,
+        }),
+        20_000,
+        [],
+      ),
     ).catch((error) => {
       warnings.push("Instagram reader 抓取失敗：" + (error instanceof Error ? error.message : String(error)));
       return [];
     });
+    let instagramAddedCount = 0;
     if (instagramCandidates.length > 0) {
       const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
       const byKey = new Set(candidates.map((candidate) => sentimentCandidateDedupeKey(candidate)));
@@ -1198,37 +1220,43 @@ export async function fetchSentimentHotCandidates(args: {
         if (!byId.has(candidate.id) && !byKey.has(dedupeKey)) {
           byId.set(candidate.id, candidate);
           byKey.add(dedupeKey);
+          instagramAddedCount += 1;
         }
         if (byId.size >= poolLimit) break;
       }
       candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
       warnings.push(args.refresh ? `已即時刷新 Instagram reader 候選 ${instagramCandidates.length} 篇。` : `已加入 Instagram reader 候選 ${instagramCandidates.length} 篇。`);
     }
+    channelStats.push(`Instagram 原始 ${instagramCandidates.length}，新增 ${instagramAddedCount}，補充前 ${beforeInstagramCount}`);
+  } else if (shouldFetchLiveCandidates) {
+    channelStats.push(`Instagram 已跳過，預篩 ${preInstagramQaCount}/${limit}`);
   }
 
-  const runtime = await withSentimentTimeout(ensureSentimentRuntime(), 6_000, {
+  const runtime = await measureSentimentStage(warnings, "runtime", () => withSentimentTimeout(ensureSentimentRuntime(), 6_000, {
     ok: false,
     url: resolveSentimentBackendUrl(),
     warning: "\u8206\u60c5\u5f8c\u53f0\u555f\u52d5\u8f03\u6162\uff0c\u5df2\u512a\u5148\u4f7f\u7528\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u5019\u9078\u3002",
-  });
+  }));
   if (!runtime.ok && runtime.warning) warnings.push(runtime.warning);
 
-  let cookieStatuses = await withSentimentTimeout(fetchSentimentCookieStatuses(), 6_000, [
+  let cookieStatuses = await measureSentimentStage(warnings, "cookie-status", () => withSentimentTimeout(fetchSentimentCookieStatuses(), 6_000, [
     { platform: "threads" as const, health: "unknown" as const, label: "Threads", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
     { platform: "instagram" as const, health: "unknown" as const, label: "Instagram", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
-  ]);
+  ]));
   if (shouldFetchLiveCandidates && runtime.ok) {
-    cookieStatuses = await withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), 35_000, cookieStatuses);
+    cookieStatuses = await measureSentimentStage(warnings, "cookie-refresh", () => withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), 35_000, cookieStatuses));
   }
   const usableSources = cookieStatuses
     .filter(sentimentCookieStatusHasUsableCookies)
     .map((status) => status.platform);
   if (shouldFetchLiveCandidates && runtime.ok && usableSources.length > 0) {
-    await withSentimentTimeout(triggerRealtimeSentimentScan(usableSources, warnings), 6_000, undefined);
+    await measureSentimentStage(warnings, "realtime-scan", () => withSentimentTimeout(triggerRealtimeSentimentScan(usableSources, warnings), 6_000, undefined));
   }
 
   if (hasSearchKeywords && candidates.length < limit) {
+    const beforeDatabaseCount = candidates.length;
     const databaseCandidates = await readCandidatesFromDatabase({ archiveId, keywords, limit: poolLimit, excludeShown: args.refresh === true });
+    let databaseAddedCount = 0;
     if (databaseCandidates.length > 0) {
       const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
       const byKey = new Set(candidates.map((candidate) => sentimentCandidateDedupeKey(candidate)));
@@ -1237,11 +1265,13 @@ export async function fetchSentimentHotCandidates(args: {
         if (!byId.has(candidate.id) && !byKey.has(dedupeKey)) {
           byId.set(candidate.id, candidate);
           byKey.add(dedupeKey);
+          databaseAddedCount += 1;
         }
         if (byId.size >= poolLimit) break;
       }
       candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
     }
+    channelStats.push(`資料庫原始 ${databaseCandidates.length}，新增 ${databaseAddedCount}，補充前 ${beforeDatabaseCount}`);
   }
   if (shouldFetchLiveCandidates && runtime.ok && usableSources.length > 0 && hasSearchKeywords && candidates.length < limit) {
     const beforeWaitCount = candidates.length;
@@ -1253,6 +1283,7 @@ export async function fetchSentimentHotCandidates(args: {
       excludeShown: true,
     });
     if (candidates.length > beforeWaitCount) {
+      channelStats.push(`即時掃描新增 ${candidates.length - beforeWaitCount}`);
       warnings.push(`\u5df2\u7b49\u5f85\u5f8c\u53f0\u5be6\u6642\u6383\u63cf\u56de\u586b\uff0c\u540c\u4eba\u8a2d\u95dc\u9375\u8a5e\u5019\u9078\u589e\u52a0\u5230 ${Math.min(candidates.length, limit)}/${limit} \u7bc7\u3002`);
     }
   }
@@ -1275,10 +1306,14 @@ export async function fetchSentimentHotCandidates(args: {
       refresh: args.refresh === true,
       warnings,
     });
-    const filteredCandidates = await withSentimentTimeout(
-      filterSentimentCandidatesWithModel({ archive, keywords, candidates, limit, warnings }),
-      25_000,
-      undefined,
+    const filteredCandidates = await measureSentimentStage(
+      warnings,
+      "model-qa",
+      () => withSentimentTimeout(
+        filterSentimentCandidatesWithModel({ archive, keywords, candidates, limit, warnings }),
+        25_000,
+        undefined,
+      ),
     );
     if (filteredCandidates) {
       candidates = filteredCandidates;
@@ -1300,6 +1335,15 @@ export async function fetchSentimentHotCandidates(args: {
   }
 
   candidates = finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords });
+  const finalQaCount = candidates.filter((candidate) => candidate.qaPassed).length;
+  const channelSummary = [
+    `快取初始 ${initialCacheCount}`,
+    ...channelStats,
+    `最終 ${candidates.length}/${limit}`,
+    `QA 通過 ${finalQaCount}/${candidates.length}`,
+  ].join("；");
+  console.info(`[sentiment_hot_channels] archiveId=${archiveId} ${channelSummary}`);
+  warnings.push(`渠道統計：${channelSummary}`);
 
   if (candidates.length === 0) {
     warnings.push("\u672a\u627e\u5230\u7b26\u5408\u689d\u4ef6\u7684\u9ad8\u71b1\u5ea6\u4e2d\u6587\u71b1\u9ede\uff1b\u8acb\u5237\u65b0\u6216\u63db\u66f4\u4eba\u8a2d\u95dc\u9375\u8a5e\u3002");
@@ -1724,6 +1768,21 @@ async function withSentimentTimeout<T>(promise: Promise<T>, timeoutMs: number, f
   }
 }
 
+async function measureSentimentStage<T>(warnings: string[], label: string, run: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await run();
+  } finally {
+    const elapsedMs = Date.now() - startedAt;
+    console.info(`[sentiment_hot_stage] label=${label} durationMs=${elapsedMs}`);
+  }
+}
+
+function remainingSentimentDeadlineMs(deadlineAt?: number, fallbackMs = 1_000): number {
+  if (!deadlineAt) return fallbackMs;
+  return Math.max(1, deadlineAt - Date.now());
+}
+
 async function syncSentimentKeywords(keywords: string[]) {
   const usableKeywords = meaningfulNeedles(keywords).slice(0, 6);
   for (const keyword of usableKeywords) {
@@ -1961,6 +2020,7 @@ async function fetchThreadsSearchPageCandidates(args: {
     queries: queries.slice(0, THREADS_BROWSER_QUERY_LIMIT),
     limit: args.limit,
     excludeIds: primaryExcluded,
+    deadlineAt: Date.now() + SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS,
   }).catch(() => []);
 
   if (browserResults.length > 0) {
@@ -2049,6 +2109,7 @@ async function fetchThreadsBrowserSearchCandidates(args: {
   queries: string[];
   limit: number;
   excludeIds?: Set<string>;
+  deadlineAt?: number;
 }): Promise<SentimentHotCandidate[]> {
   const cookies = readSentimentBrowserAuthCookies("threads");
   if (!hasValidThreadsSessionCookie(cookies)) return [];
@@ -2071,7 +2132,8 @@ async function fetchThreadsBrowserSearchCandidates(args: {
       const page = await context.newPage();
       for (const query of args.queries) {
         if (results.length >= args.limit) break;
-        const search = await readThreadsSearchPageText(page, query);
+        if (args.deadlineAt && Date.now() >= args.deadlineAt) break;
+        const search = await readThreadsSearchPageText(page, query, args.deadlineAt);
         if (detectThreadsProfileLoginWall(search.text)) break;
         const parsed = parseThreadsSearchTextCandidates({
           text: search.text,
@@ -3748,11 +3810,13 @@ function isLikelyInstagramAuthor(value: string) {
   return Boolean(text && /^[A-Za-z0-9._]{2,30}$/.test(text) && !/^(?:p|reel|tv|explore|accounts|direct|stories|about|developer|legal|privacy)$/i.test(text));
 }
 
-async function readThreadsSearchPageText(page: any, query: string): Promise<{ text: string; url: string }> {
+async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: number): Promise<{ text: string; url: string }> {
   const searchUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
-  await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
-  await page.waitForTimeout(2_500);
-  const text = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+  await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(20_000, remainingSentimentDeadlineMs(deadlineAt, 20_000)) });
+  if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
+  await page.waitForTimeout(Math.min(2_500, remainingSentimentDeadlineMs(deadlineAt, 2_500)));
+  if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
+  const text = await page.locator("body").innerText({ timeout: Math.min(5_000, remainingSentimentDeadlineMs(deadlineAt, 5_000)) }).catch(() => "");
   return { text, url: page.url() || searchUrl };
 }
 

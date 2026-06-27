@@ -27,7 +27,48 @@ function bigramSet(value: string): Set<string> {
   return set;
 }
 
-export function isRegeneratedPostTooSimilar(originalContent: string, generatedContent: string): boolean {
+function hasLongSharedFragment(original: string, generated: string, minLength = 24): boolean {
+  const shorter = original.length <= generated.length ? original : generated;
+  const longer = original.length <= generated.length ? generated : original;
+  if (shorter.length < minLength) return false;
+  for (let index = 0; index <= shorter.length - minLength; index += 1) {
+    if (longer.includes(shorter.slice(index, index + minLength))) return true;
+  }
+  return false;
+}
+
+function countListStructureMarkers(value: string): number {
+  const text = String(value || "");
+  const matches = text.match(/(?:^|[\n\s。！？；;，,])(?:\d{1,2}[.、)]|[一二三四五六七八九十]+[.、)]|[-•*])\s*/g);
+  return matches?.length || 0;
+}
+
+function hasCopiedListStructure(originalContent: string, generatedContent: string): boolean {
+  const originalMarkers = countListStructureMarkers(originalContent);
+  const generatedMarkers = countListStructureMarkers(generatedContent);
+  return originalMarkers >= 2 && generatedMarkers >= 2;
+}
+
+export function calculateRegeneratedPostSimilarity(originalContent: string, generatedContent: string): number {
+  const original = normalizeSimilarityText(originalContent);
+  const generated = normalizeSimilarityText(generatedContent);
+  if (!original || !generated) return 0;
+  if (original === generated) return 1;
+  const originalSet = bigramSet(original);
+  const generatedSet = bigramSet(generated);
+  if (!originalSet.size || !generatedSet.size) return 0;
+  let overlap = 0;
+  for (const item of generatedSet) {
+    if (originalSet.has(item)) overlap += 1;
+  }
+  return overlap / Math.min(originalSet.size, generatedSet.size);
+}
+
+export function isRegeneratedPostTooSimilar(
+  originalContent: string,
+  generatedContent: string,
+  options: { allowSameListStructure?: boolean; similarityThreshold?: number } = {},
+): boolean {
   const original = normalizeSimilarityText(originalContent);
   const generated = normalizeSimilarityText(generatedContent);
   if (!original || !generated) return false;
@@ -35,12 +76,7 @@ export function isRegeneratedPostTooSimilar(originalContent: string, generatedCo
   const shortOriginal = original.slice(0, Math.min(original.length, 80));
   const shortGenerated = generated.slice(0, Math.min(generated.length, 80));
   if (shortOriginal.length >= 20 && (generated.includes(shortOriginal) || original.includes(shortGenerated))) return true;
-  const originalSet = bigramSet(original);
-  const generatedSet = bigramSet(generated);
-  if (!originalSet.size || !generatedSet.size) return false;
-  let overlap = 0;
-  for (const item of generatedSet) {
-    if (originalSet.has(item)) overlap += 1;
-  }
-  return overlap / Math.min(originalSet.size, generatedSet.size) >= 0.78;
+  if (hasLongSharedFragment(original, generated)) return true;
+  if (!options.allowSameListStructure && hasCopiedListStructure(originalContent, generatedContent)) return true;
+  return calculateRegeneratedPostSimilarity(originalContent, generatedContent) >= (options.similarityThreshold ?? 0.72);
 }

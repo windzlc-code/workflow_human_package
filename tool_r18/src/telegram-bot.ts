@@ -15,7 +15,7 @@ import { resolveVmosCredentials, readRuntimeApiConfig } from "@/runtime/node/con
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
-import { buildRegeneratePostInstruction, isRegeneratedPostTooSimilar } from "@/core/persona/regenerate-post-instruction";
+import { buildRegeneratePostInstruction, calculateRegeneratedPostSimilarity, isRegeneratedPostTooSimilar } from "@/core/persona/regenerate-post-instruction";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, buildWarmupInterestKeywords, extractThreadsPublishedPostUrlFromReaderMarkdown, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
@@ -799,6 +799,8 @@ const pendingPostActions = new Map<number, {
   source?: "posts" | "favorites";
   groupContentType?: TelegramGroupContentType;
 }>();
+
+type SentimentHotRewriteMode = "source_structure" | "persona_style";
 
 const pendingStoredPostMediaMessages = new Map<number, {
   messageIds: number[];
@@ -2108,11 +2110,20 @@ function clonePostForFavorites(post: PersonaArchive["posts"][number], favoriteCo
   };
 }
 
+function isArchivePostFavorited(archive: PersonaArchive, post: PersonaArchive["posts"][number] | null | undefined): boolean {
+  if (!post) return false;
+  return (archive.favoritePosts || []).some((favorite) => {
+    const sourcePostId = String((favorite.sourceMeta as any)?.favoriteSourcePostId || "").trim();
+    return favorite.id === post.id || sourcePostId === post.id;
+  });
+}
+
 async function addFavoritePostClone(archiveId: string, postId: string, source?: "posts" | "favorites") {
   const archive = await loadPersonaArchive(archiveId).catch(() => null);
   const post = archive ? findArchivePostBySource(archive, postId, source) : null;
   if (!archive || !post) return null;
   const favoritePosts = archive.favoritePosts || [];
+  if (source !== "favorites" && isArchivePostFavorited(archive, post)) return archive;
   return savePersonaArchive({
     ...archive,
     favoritePosts: [...favoritePosts, clonePostForFavorites(post, favoritePosts.length)],
@@ -5291,15 +5302,7 @@ async function saveStoredPostCustomEdit(args: {
   let mediaItems = post.mediaItems;
   if (args.mediaUrl) {
     const replacement = { url: args.mediaUrl, type: args.mediaType || "unknown", localPath: args.mediaUrl };
-    const replaceIndexes = new Set((args.replaceMediaIndexes || []).filter((index) => Number.isInteger(index) && index >= 0));
-    if (replaceIndexes.size > 0) {
-      const currentItems = getStoredPostMediaItems(post);
-      const insertAt = Math.min(...replaceIndexes);
-      mediaItems = currentItems.filter((_, index) => !replaceIndexes.has(index));
-      mediaItems.splice(Math.min(insertAt, mediaItems.length), 0, replacement);
-    } else {
-      mediaItems = [replacement];
-    }
+    mediaItems = replaceStoredPostMediaSelection(getStoredPostMediaItems(post), args.replaceMediaIndexes || [], replacement);
   }
   const primaryMedia = mediaItems?.[0];
   const primaryMediaUrl = primaryMedia?.url || primaryMedia?.localPath || "";
@@ -5363,6 +5366,7 @@ ${buildPostDetailTextWithArchive(displayIndex, updated.content, imageUrl, archiv
         canRefreshMetrics: args.source === "favorites" ? false : canRefreshSentimentPostMetrics(updated),
         allowSentimentEditControls: args.source === "favorites" || isSentimentHotImportedPost(updated),
         favoriteCallback: args.source === "favorites" ? undefined : "post_favorite_action",
+        favoriteAdded: args.source !== "favorites" && isArchivePostFavorited(archive, updated),
         backCallback: buildPostSourcePageCallback(args.archiveId, args.source, 0, args.groupContentType),
         backText: args.source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
       }),
@@ -10299,39 +10303,76 @@ async function rewriteSentimentHotImportedPostContent(args: {
   archive: PersonaArchive;
   post: PersonaArchive["posts"][number];
   attempt: number;
+  mode: SentimentHotRewriteMode;
 }) {
+  const timeoutMs = 75_000;
+  const startedAt = Date.now();
   const sourceMeta = args.post.sourceMeta || {};
+  const setup: any = args.archive.setup || {};
+  const personaCoreLines = [
+    `人設名稱：${args.archive.name}`,
+    args.archive.content ? `人設完整簡介：${args.archive.content}` : "",
+    setup.personaDescription ? `人設身份/本質：${setup.personaDescription}` : "",
+    setup.contentTheme ? `內容核心領域：${setup.contentTheme}` : "",
+    setup.customTopic ? `長期內容方向：${setup.customTopic}` : "",
+    setup.personaPersonality ? `性格基調：${setup.personaPersonality}` : "",
+    setup.personaStyle ? `說話方式：${setup.personaStyle}` : "",
+    Array.isArray(setup.genres) && setup.genres.length ? `類型標籤：${setup.genres.join("、")}` : "",
+    Array.isArray(setup.interests) && setup.interests.length ? `常聊興趣：${setup.interests.join("、")}` : "",
+    setup.tweetStyleLinkText ? `推文風格參考：${String(setup.tweetStyleLinkText).slice(0, 500)}` : "",
+  ].filter(Boolean).join("\n");
   const sourceLines = [
     sourceMeta.platform ? `平台：${sourceMeta.platform}` : "",
     sourceMeta.sourceUrl ? `原帖連結：${sourceMeta.sourceUrl}` : "",
     sourceMeta.metrics ? `原帖數據：${JSON.stringify(sourceMeta.metrics).slice(0, 500)}` : "",
     sourceMeta.originalContent ? `原始抓取文案：${String(sourceMeta.originalContent).trim()}` : "",
   ].filter(Boolean).join("\n");
+  const modeLines = args.mode === "source_structure"
+    ? [
+      "本次模式：按原帖結構樣式生成。",
+      "要求：可以借鑑原帖的內容組織方式、段落數、清單/步驟形式、節奏長短和互動位置。",
+      "但必須換成全新文字，不能複製原句、連續短語、段落片段或口頭禪。",
+      "仍要自然帶入當前人設的身份和語氣；不要變成無人設的摘要。",
+    ]
+    : [
+      "本次模式：按當前人設結構風格生成。",
+      "要求：原帖只作為信息素材，不得沿用原帖的段落順序、清單/步驟結構、問句位置或情緒節奏。",
+      "必須改成這個人設平常會用的結構，例如個人觀察、反問、吐槽、提醒、經驗分享、觀點短評或生活場景切入。",
+      "人設身份、核心本質、性格、口吻和價值觀的優先級高於原帖結構。",
+    ];
   const prompt = [
-    "你是 Threads 熱點推文文案重寫器。請把已抓取的熱點推文改寫成當前人設可以直接發布的新文案。",
-    "只輸出重寫後的推文正文，不要解釋，不要加標題，不要輸出編號。",
+    "你是 Threads 熱點推文二創文案器。請把抓取到的熱點當成素材，生成一篇可直接發布的新推文。",
+    "只輸出最終推文正文，不要解釋，不要加標題，不要輸出編號。",
     "",
-    "硬性要求：",
-    "1. 必須明顯不同於原文，不能只是同義替換、調整標點、增減 emoji 或保留原句式。",
-    "2. 保留原熱點的核心信息、情緒方向和可討論點，但用當前人設的角度重新組織。",
-    "3. 開頭、段落順序、句式節奏和結尾互動都要重寫。",
-    "4. 不要複製原文中的整句、連續短語或口頭禪。",
+    ...modeLines,
+    "",
+    "處理方式（內部完成，不要輸出分析）：",
+    "1. 先提取原帖真正有價值的事實、情緒、爭議點或生活洞察。",
+    "2. 再判斷這個人設會怎麼看這件事：他的身份、核心本質、性格、口吻、價值觀、日常場景是什麼。",
+    "3. 最後用人設自己的說話方式重新寫一篇原創推文。",
+    "",
+    "人設優先級要求：",
+    "1. 必須像這個人設本人發文，不像新聞摘要或原帖搬運。",
+    "2. 如果人設是投資、醫療、動漫、生活、店主、職場、運動等方向，必須自然帶入該領域的觀察方式。",
+    "3. 可以保留熱點的核心信息，但必須換成新角度、新開頭和新表述。",
+    "4. 不要複製原文中的整句、連續短語、段落片段或口頭禪。",
     "5. 不要改變媒體，也不要描述自己看不到的畫面細節。",
-    "6. 字數保持接近原文；如果原文很短，就生成自然短推文。",
-    args.attempt > 1 ? "7. 上一次重寫仍然太像原文；這次必須換角度、換開頭、換句式。" : "",
+    "6. 必須使用繁體中文和自然台灣社群語氣。",
+    args.mode === "persona_style" ? "7. 字數可以接近原文，但結構必須不同；寧可重組成更像人設的短推文，也不要為了貼近原文而照著原文展開。" : "7. 可以保留原帖結構樣式，但語句必須重寫，且要比原文更像當前人設。",
+    args.attempt > 1 ? "8. 上一次重寫仍然太像原文；這次必須明顯提高原創度，不得保留任何連續原文片段。" : "",
     "",
-    `人設名稱：${args.archive.name}`,
-    args.archive.content ? `人設簡介：${args.archive.content}` : "",
-    args.archive.setup ? `人設設定：${JSON.stringify(args.archive.setup).slice(0, 1200)}` : "",
-    sourceLines ? `熱點來源資料：\n${sourceLines}` : "",
+    `【當前人設核心】\n${personaCoreLines || "未提供明確人設，請根據人設名稱和待改寫文案推斷自然口吻。"}`,
+    sourceLines ? `【熱點素材，只能作為信息來源，不得模仿文風】\n${sourceLines}` : "",
     "",
-    `目前待改寫文案：\n${args.post.content}`,
+    args.mode === "source_structure"
+      ? `【原帖文案，可借鑑結構但不得複製文字】\n${args.post.content}`
+      : `【原帖文案，只提取素材，不要沿用結構】\n${args.post.content}`,
   ].filter(Boolean).join("\n");
-  const { data } = await callTextUnderstandingModelWithFallback(
+  const { data, model } = await callTextUnderstandingModelWithFallback(
     resolveTelegramTextModelPreference(args.post.telegramGroupContentType === "paid" ? "paid" : "free"),
     [{ role: "user", parts: [{ text: prompt }] }],
-    { temperature: args.attempt > 1 ? 0.75 : 0.55, maxOutputTokens: 700 },
-    AbortSignal.timeout(20_000),
+    { temperature: args.attempt > 1 ? 0.85 : 0.7, maxOutputTokens: 900 },
+    AbortSignal.timeout(timeoutMs),
     {
       isUsableResponse: (data) => Boolean(extractText(data).trim()),
       isRetryableError: isTextModelFallbackError,
@@ -10340,16 +10381,21 @@ async function rewriteSentimentHotImportedPostContent(args: {
       },
     },
   );
-  return extractText(data)
+  const rewritten = extractText(data)
     .replace(/^```(?:text|markdown)?/i, "")
     .replace(/```$/i, "")
     .trim();
+  console.info(
+    `[telegram][sentiment_hot_rewrite_success] mode=${args.mode} model=${model} attempt=${args.attempt} durationMs=${Date.now() - startedAt} inputChars=${args.post.content.length} outputChars=${rewritten.length} similarity=${calculateRegeneratedPostSimilarity(args.post.content, rewritten).toFixed(3)}`,
+  );
+  return rewritten;
 }
 
 async function regenerateArchivePostContent(args: {
   archiveId: string;
   postId: string;
   source?: "posts" | "favorites";
+  rewriteMode?: SentimentHotRewriteMode;
 }) {
   const archive = await loadPersonaArchive(args.archiveId);
   if (!archive) throw new Error("人设不存在");
@@ -10364,7 +10410,12 @@ async function regenerateArchivePostContent(args: {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     if (isSentimentHotImportedPost(original)) {
       generated = {};
-      generatedContent = await rewriteSentimentHotImportedPostContent({ archive, post: original, attempt });
+      generatedContent = await rewriteSentimentHotImportedPostContent({
+        archive,
+        post: original,
+        attempt,
+        mode: args.rewriteMode || "persona_style",
+      });
     } else {
       const result = await runPersonaWorkflow({
         action: "generate-posts",
@@ -10379,7 +10430,9 @@ async function regenerateArchivePostContent(args: {
       generatedContent = String(generated?.content || "").trim();
     }
     if (!generatedContent) throw new Error("AI 未返回新推文內容");
-    if (!isRegeneratedPostTooSimilar(original.content, generatedContent)) break;
+    if (!isRegeneratedPostTooSimilar(original.content, generatedContent, {
+      allowSameListStructure: isSentimentHotImportedPost(original) && (args.rewriteMode || "persona_style") === "source_structure",
+    })) break;
     if (attempt === 3) {
       throw new Error("AI 連續返回與原推文過於相似的內容，請稍後再試或換一個生成方向。");
     }
@@ -10474,6 +10527,59 @@ async function regenerateArchivePostImage(args: {
   });
   if (!persisted) throw new Error("图片已生成，但写入推文失败");
   return { imageUrl: image.imageUrl };
+}
+
+async function generateStoredPostReplacementImage(args: {
+  archive: PersonaArchive;
+  archiveId: string;
+  post: PersonaArchive["posts"][number];
+  chatId: number;
+}) {
+  const hasExplicitPersonaReference = Boolean(getExplicitPersonaReferenceImageUrl(args.archive));
+  const personaVisualIdentity = buildArchivePersonaVisualIdentityCue(args.archive, args.archive.name, args.post.content);
+  const sourceMeta: any = args.post.sourceMeta || {};
+  const prompt = [
+    `Generate one public-safe image for this Threads post.`,
+    `Persona/archive name: ${args.archive.name}`,
+    personaVisualIdentity ? `Persona visual identity and content style to express: ${personaVisualIdentity}` : "",
+    "The image must directly match the current edited tweet content, not the old imported media.",
+    "Extract concrete visual requirements from the tweet: subject, scene, props, outfit, action, mood, lighting, and camera distance.",
+    "If the tweet mentions finance, medical, anime, work, sports, travel, food, or lifestyle, make that domain visually obvious without adding text, logos, UI screenshots, or watermarks.",
+    hasExplicitPersonaReference
+      ? "A persona reference image exists; keep the same recognizable person when the backend can use the reference."
+      : "No persona reference image is available; do not invent a fixed face, but keep the written persona's field, age vibe, style, and scene consistent.",
+    sourceMeta?.source === "sentiment_hot_import" ? "This post was imported from a hot topic; create a fresh image for the current repost, not a copy of the original media." : "",
+    `Current tweet content:\n${args.post.content}`,
+  ].filter(Boolean).join("\n");
+  const image = !isWorkflowPersonaListItem(args.archive) && hasExplicitPersonaReference
+    ? await generateClosedPersonaPostImage({
+        archiveId: args.archiveId,
+        archiveName: args.archive.name,
+        post: args.post,
+        prompt,
+      }).then((result) => ({ ok: result.ok, imageUrl: result.imageUrl, error: result.error }))
+    : args.chatId
+      ? await submitGeneratedPostImageCandidateTask({
+          chatId: args.chatId,
+          archiveId: args.archiveId,
+          archiveName: args.archive.name,
+          post: args.post,
+          prompt,
+          hasPersonaReferenceImage: hasExplicitPersonaReference,
+        }).then((result) => ({ ok: result.ok, imageUrl: result.imageUrl, error: result.error }))
+      : await generatePersonaImageForArchive(args.archiveId, prompt, {
+          customVisualInstruction: prompt,
+        }).catch((error) => ({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+  if (!image?.ok || !image.imageUrl) {
+    throw new Error(image?.error || "AI 图片生成失败");
+  }
+  return {
+    imageUrl: image.imageUrl,
+    prompt,
+  };
 }
 
 async function generateArchivePostImageCandidates(args: {
@@ -10732,7 +10838,7 @@ async function extractVideoThumbnailBuffer(mediaUrl: string, size: number): Prom
       }
     }
     const outputPath = path.join(tempDir, "thumb.jpg");
-    const vf = `scale=${size}:${size}:force_original_aspect_ratio=increase,crop=${size}:${size}`;
+    const vf = `scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=0x111827`;
     let lastError: unknown = null;
     for (const seek of ["00:00:01", "00:00:00"]) {
       try {
@@ -10951,7 +11057,7 @@ async function buildSentimentCandidateMediaGridPreview(
         input = thumbnail
           ? await sharp(thumbnail)
             .rotate()
-            .resize(tileSize, tileSize, { fit: "cover" })
+            .resize(tileSize, tileSize, { fit: "contain", background: "#111827" })
             .composite([{ input: sentimentCandidateVideoPlayOverlaySvg(tileSize, tileSize), left: 0, top: 0 }])
             .jpeg({ quality: 86 })
             .toBuffer()
@@ -10961,7 +11067,7 @@ async function buildSentimentCandidateMediaGridPreview(
       } else {
         input = await sharp(await loadTelegramMediaBuffer(source))
           .rotate()
-          .resize(tileSize, tileSize, { fit: "cover" })
+          .resize(tileSize, tileSize, { fit: "contain", background: "#eef7ea" })
           .jpeg({ quality: 86 })
           .toBuffer();
       }
@@ -11302,6 +11408,20 @@ function getStoredPostMediaItems(post: Pick<PersonaArchive["posts"][number], "im
   const history = Array.isArray(post.imageHistory) ? post.imageHistory : [];
   add(history.length ? history[history.length - 1]?.imageUrl : "");
   return out;
+}
+
+function replaceStoredPostMediaSelection(
+  mediaItems: StoredPostMediaItem[],
+  replaceIndexes: number[],
+  replacement: StoredPostMediaItem,
+): StoredPostMediaItem[] {
+  const selected = replaceIndexes.filter((index) => Number.isInteger(index) && index >= 0 && index < mediaItems.length);
+  if (!selected.length) return [replacement];
+  const selectedSet = new Set(selected);
+  const insertAt = Math.min(...selected);
+  const nextItems = mediaItems.filter((_, index) => !selectedSet.has(index));
+  nextItems.splice(Math.min(insertAt, nextItems.length), 0, replacement);
+  return nextItems;
 }
 
 function getStoredPostInlinePreviewUrl(
@@ -12081,6 +12201,7 @@ export function buildStoredPostMediaManageKeyboard(args: {
   mediaItems: StoredPostMediaItem[];
   selectedIndexes: number[];
   imageRegenerateCallback?: string;
+  allowAiReplace?: boolean;
 }) {
   const selected = new Set(args.selectedIndexes);
   const mediaRows: Array<Array<{ text: string; callback_data: string }>> = [];
@@ -12115,6 +12236,7 @@ export function buildStoredPostMediaManageKeyboard(args: {
       { text: `🗑 刪除選中 ${selected.size}`, callback_data: "post_media_delete_selected" },
       { text: `🔁 替換選中 ${selected.size}`, callback_data: "post_media_replace_selected" },
     ],
+    ...(args.allowAiReplace ? [[{ text: `🤖 AI 生成圖片替換選中 ${selected.size}`, callback_data: "post_media_replace_ai" }]] : []),
     [{ text: "◀️ 返回查看推文", callback_data: "post_action_view" }],
   ];
 }
@@ -12167,7 +12289,12 @@ async function renderStoredPostMediaManager(
     "圖片已按媒體編號排版；點擊下方編號可單選/多選，紅色標記表示保存時會刪除。",
     "可刪除選中媒體，或上傳一張圖片/視頻替換選中媒體。",
   ].join("\n");
-  const mediaManagerKeyboard = buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback });
+  const mediaManagerKeyboard = buildStoredPostMediaManageKeyboard({
+    mediaItems,
+    selectedIndexes,
+    imageRegenerateCallback,
+    allowAiReplace: true,
+  });
   if (await sendStoredPostMediaGridDetail({
     bot,
     chatId,
@@ -12188,7 +12315,7 @@ async function renderStoredPostMediaManager(
     "",
     "点击编号可单选/多选；可删除选中媒体，或上传一张图片/视频替换选中媒体。",
   ].join("\n"), {
-    reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback }) },
+    reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
   });
 }
 
@@ -12261,12 +12388,16 @@ export function buildPostDetailActionRows(args: {
   canRefreshMetrics?: boolean;
   allowSentimentEditControls?: boolean;
   favoriteCallback?: string;
+  favoriteAdded?: boolean;
   backCallback?: string;
   backText?: string;
 }) {
   const imageRegenCallback = typeof args.postIndex === "number"
     ? `post_img_regen_${args.archiveId}_${args.postIndex}`
     : "post_img_regen";
+  const favoriteButton = args.favoriteCallback
+    ? [{ text: args.favoriteAdded ? "⭐ 已收藏" : "⭐ 收藏這篇", callback_data: args.favoriteAdded ? "post_action_view" : args.favoriteCallback }]
+    : null;
   if (args.allowSentimentEditControls) {
     return [
       [{ text: "🚀 發布這篇", callback_data: args.publishCallback }],
@@ -12275,7 +12406,7 @@ export function buildPostDetailActionRows(args: {
         ? [[{ text: "🧩 媒體管理", callback_data: "post_media_manage" }]]
         : [[{ text: "🖼 單獨生成配圖", callback_data: imageRegenCallback }]]),
       [{ text: "✏️ 文案管理", callback_data: "post_edit_custom" }],
-      ...(args.favoriteCallback ? [[{ text: "⭐ 收藏這篇", callback_data: args.favoriteCallback }]] : []),
+      ...(favoriteButton ? [favoriteButton] : []),
       [{ text: "🗑 刪除這篇", callback_data: args.deleteCallback }],
       [{ text: args.backText || "◀️ 返回推文列表", callback_data: args.backCallback || buildStoredPostsPageCallback(args.archiveId, 0, args.groupContentType) }],
     ];
@@ -12286,7 +12417,7 @@ export function buildPostDetailActionRows(args: {
     ...(args.hasImage ? [[{ text: "🖼 查看配圖/視頻", callback_data: "post_media_preview" }]] : []),
     [{ text: "🔄 重新生成推文", callback_data: "post_regen" }],
     [{ text: args.hasImage ? "🖼 重新生成图片" : "🖼 单独生成图片", callback_data: imageRegenCallback }],
-    ...(args.favoriteCallback ? [[{ text: "⭐ 收藏這篇", callback_data: args.favoriteCallback }]] : []),
+    ...(favoriteButton ? [favoriteButton] : []),
     [{ text: "🗑 删除这篇", callback_data: args.deleteCallback }],
     [{ text: args.backText || "◀️ 返回推文列表", callback_data: args.backCallback || buildStoredPostsPageCallback(args.archiveId, 0, args.groupContentType) }],
   ];
@@ -19858,6 +19989,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         canRefreshMetrics: !isFavoriteSource && canRefreshSentimentPostMetrics(post),
         allowSentimentEditControls: isFavoriteSource || isSentimentImportedPost,
         favoriteCallback: isFavoriteSource ? undefined : "post_favorite_action",
+        favoriteAdded: !isFavoriteSource && isArchivePostFavorited(archive, post),
         backCallback: buildPostSourcePageCallback(archiveId, source, listPage, selected?.groupContentType),
         backText: isFavoriteSource ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
       });
@@ -20134,7 +20266,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_media_manage" || data.startsWith("post_media_toggle_") || data === "post_media_select_all" || data === "post_media_clear" || data === "post_media_delete_selected" || data === "post_media_replace_selected") {
+    if (data === "post_media_manage" || data.startsWith("post_media_toggle_") || data === "post_media_select_all" || data === "post_media_clear" || data === "post_media_delete_selected" || data === "post_media_replace_selected" || data === "post_media_replace_upload" || data === "post_media_replace_ai") {
       await deletePendingStoredPostMediaMessages(bot, chatId);
       const action = pendingPostActions.get(chatId);
       if (!action?.archiveId || !action.postId) {
@@ -20181,7 +20313,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } else if (data === "post_media_delete_selected") {
         if (!selectedIndexes.length) {
           await safeEditOrSend(bot, chatId, msgId, "请先选择要删除的媒体。", {
-            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback }) },
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
           });
           return;
         }
@@ -20201,7 +20333,32 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } else if (data === "post_media_replace_selected") {
         if (!selectedIndexes.length) {
           await safeEditOrSend(bot, chatId, msgId, "请先选择要替换的媒体。", {
-            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback }) },
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
+          });
+          return;
+        }
+        await safeEditOrSend(bot, chatId, msgId, [
+          "替换选中媒体",
+          "",
+          `已选择: ${selectedIndexes.map((index) => index + 1).join(", ")}`,
+          "",
+          "请选择替换方式：",
+          "1. 手动上传：你发送一张图片或一个视频替换选中媒体。",
+          "2. AI 生成图片：根据当前推文内容生成合理配图并替换选中媒体。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "📤 手动上传替换", callback_data: "post_media_replace_upload" }],
+              [{ text: "🤖 AI 生成图片替换", callback_data: "post_media_replace_ai" }],
+              [{ text: "返回媒体管理", callback_data: "post_media_manage" }],
+            ],
+          },
+        });
+        return;
+      } else if (data === "post_media_replace_upload") {
+        if (!selectedIndexes.length) {
+          await safeEditOrSend(bot, chatId, msgId, "请先选择要替换的媒体。", {
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
           });
           return;
         }
@@ -20215,13 +20372,62 @@ function sendMainMenu(chatId: number, msgId?: number) {
           replaceMediaIndexes: selectedIndexes,
         });
         await safeEditOrSend(bot, chatId, msgId, [
-          "替换选中媒体",
+          "手动上传替换媒体",
           "",
           `已选择: ${selectedIndexes.map((index) => index + 1).join(", ")}`,
           "请发送一张图片或一个视频。新媒体会替换当前选中的媒体；caption 可同时作为新文案。",
         ].join("\n"), {
           reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: "post_media_manage" }]] },
         });
+        return;
+      } else if (data === "post_media_replace_ai") {
+        if (!selectedIndexes.length) {
+          await safeEditOrSend(bot, chatId, msgId, "请先选择要替换的媒体。", {
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
+          });
+          return;
+        }
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🤖 正在生成替换图片...",
+          "",
+          `推文: 第 ${displayIndex} 篇`,
+          `替换媒体: ${selectedIndexes.map((index) => index + 1).join(", ")}`,
+          "",
+          "系统会根据当前推文内容和人设生成一张新图，并替换选中的媒体。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: "post_media_manage" }]] },
+        });
+        const stopTyping = startTelegramTyping(bot, chatId);
+        try {
+          const generated = await generateStoredPostReplacementImage({
+            archive,
+            archiveId: action.archiveId,
+            post,
+            chatId,
+          });
+          const nextMediaItems = replaceStoredPostMediaSelection(mediaItems, selectedIndexes, {
+            url: generated.imageUrl,
+            type: "image",
+            localPath: generated.imageUrl,
+            warning: "AI 根据当前推文内容生成替换图",
+          });
+          await updateStoredPostMediaItems({
+            bot,
+            chatId,
+            archiveId: action.archiveId,
+            postId: action.postId,
+            source: action.source,
+            groupContentType: action.groupContentType,
+            mediaItems: nextMediaItems,
+            successText: `AI 已生成图片并替换 ${selectedIndexes.length} 个选中媒体`,
+          });
+        } catch (error) {
+          await bot.sendMessage(chatId, `❌ AI 生成替换图片失败：${formatUserFacingError(error, "图片生成失败，请稍后重试。")}`, {
+            reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: "post_media_manage" }]] },
+          });
+        } finally {
+          stopTyping();
+        }
         return;
       }
       pendingPostMediaSelections.set(chatId, {
@@ -20268,7 +20474,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         `推文: 第 ${displayIndex} 篇`,
         "",
         "請選擇文案處理方式。",
-        "AI 重寫會保留現有媒體，只重寫文案。",
+        "AI 重寫會保留現有媒體，只重寫文案；抓取热点可选择按原帖结构或按当前人设风格生成。",
         "自訂文案只修改文字，圖片/視頻請到「媒體管理」處理。",
       ].join("\n");
       const keyboard = [
@@ -20413,7 +20619,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_regen_ai" || data === "post_img_regen" || data.startsWith("post_img_regen_")) {
+    if (data === "post_regen_ai" || data === "post_regen_ai_source" || data === "post_regen_ai_persona" || data === "post_img_regen" || data.startsWith("post_img_regen_")) {
       let action = pendingPostActions.get(chatId);
       let explicitPostIndex: number | null = null;
       if (data.startsWith("post_img_regen_")) {
@@ -20442,6 +20648,36 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (!action.postId) action.postId = post.id;
       const isImageOnly = data === "post_img_regen" || data.startsWith("post_img_regen_");
+      const rewriteMode: SentimentHotRewriteMode | undefined = data === "post_regen_ai_source"
+        ? "source_structure"
+        : data === "post_regen_ai_persona"
+          ? "persona_style"
+          : undefined;
+      const isSentimentImported = isSentimentHotImportedPost(post);
+      if (data === "post_regen_ai" && isSentimentImported) {
+        const sourcePosts = resolveArchivePostCollection(archive, action.source);
+        const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
+        const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🤖 AI 重寫推文",
+          "",
+          `人設: ${archive.name}`,
+          `推文: 第 ${displayIndex} 篇`,
+          "",
+          "请选择重写模式：",
+          "1. 按抓取推文结构样式：保留原帖的组织方式，但换成新文字和当前人设语气。",
+          "2. 按当前人设结构风格：只把原帖当素材，用人设自己的结构、口吻和核心本质重新生成。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🧬 按原帖结构样式生成", callback_data: "post_regen_ai_source" }],
+              [{ text: "👤 按当前人设风格生成", callback_data: "post_regen_ai_persona" }],
+              [{ text: "返回文案管理", callback_data: "post_edit_custom" }],
+            ],
+          },
+        });
+        return;
+      }
       if (isImageOnly && action.source === "favorites") {
         await safeEditOrSend(bot, chatId, msgId, "收藏推文請先進入「媒體管理」上傳或替換媒體。", {
           reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
@@ -20477,24 +20713,29 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const sourcePosts = resolveArchivePostCollection(archive, action.source);
       const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
       const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
+      const rewriteModeLabel = rewriteMode === "source_structure"
+        ? "（按原帖结构样式）"
+        : rewriteMode === "persona_style"
+          ? "（按当前人设风格）"
+          : "";
       await safeEditOrSend(
         bot,
         chatId,
         msgId,
         isImageOnly
           ? `🖼 正在为第 ${displayIndex} 篇单独生成图片...`
-          : `🔄 正在重新生成第 ${displayIndex} 篇推文...`,
+          : `🔄 正在重新生成第 ${displayIndex} 篇推文${rewriteModeLabel}...`,
         { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] } },
       );
       const stopTyping = startTelegramTyping(bot, chatId);
       try {
-          const updated = await regenerateArchivePostContent(action);
+          const updated = await regenerateArchivePostContent({ ...action, rewriteMode });
           stopTyping();
           const updatedSourcePosts = resolveArchivePostCollection(archive, action.source);
           const updatedSourceIndex = updatedSourcePosts.findIndex((item) => item.id === updated.id);
           const updatedDisplayIndex = (updated.orderIndex ?? updatedSourceIndex) + 1;
           pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: updated.id, source: action.source, groupContentType: action.groupContentType });
-          await bot.sendMessage(chatId, `✅ 推文已重新生成\n\n${buildPostDetailTextWithArchive(updatedDisplayIndex, updated.content, String(updated.imageUrl || ""), archive, updated.sourceMeta)}`, {
+          await bot.sendMessage(chatId, `✅ 推文已重新生成${rewriteModeLabel}\n\n${buildPostDetailTextWithArchive(updatedDisplayIndex, updated.content, String(updated.imageUrl || ""), archive, updated.sourceMeta)}`, {
             parse_mode: "HTML",
             ...buildPostImagePreviewOptions(String(updated.imageUrl || "")),
             reply_markup: {
@@ -20508,6 +20749,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 canRefreshMetrics: action.source === "favorites" ? false : canRefreshSentimentPostMetrics(updated),
                 allowSentimentEditControls: action.source === "favorites" || isSentimentHotImportedPost(updated),
                 favoriteCallback: action.source === "favorites" ? undefined : "post_favorite_action",
+                favoriteAdded: action.source !== "favorites" && isArchivePostFavorited(archive, updated),
                 backCallback: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType),
                 backText: action.source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
               }),
@@ -20555,6 +20797,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           groupContentType: action.groupContentType,
           canRefreshMetrics: canRefreshSentimentPostMetrics(post),
           allowSentimentEditControls: isSentimentImportedPost,
+          favoriteCallback: "post_favorite_action",
+          favoriteAdded: isArchivePostFavorited(archive, post),
         });
         if (isSentimentImportedPost && mediaItems.length === 1 && (mediaItems[0].type === "video" || inferStoredPostMediaKind(mediaItems[0].url) === "video")) {
           if (await sendPostPhotoDetail(bot, chatId, msgId, {
@@ -20643,6 +20887,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           groupContentType: action.groupContentType,
           canRefreshMetrics: action.source === "favorites" ? false : canRefreshSentimentPostMetrics(post),
           allowSentimentEditControls: isSentimentImportedPost,
+          favoriteCallback: action.source === "favorites" ? undefined : "post_favorite_action",
+          favoriteAdded: action.source !== "favorites" && isArchivePostFavorited(archive, post),
         });
         if ((isSentimentImportedPost || previewItems.length > 1) && await sendStoredPostMediaGridDetail({
           bot,
@@ -20681,6 +20927,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         groupContentType: action.groupContentType,
         canRefreshMetrics: action.source === "favorites" ? false : canRefreshSentimentPostMetrics(post),
         allowSentimentEditControls: isSentimentImportedPost,
+        favoriteCallback: action.source === "favorites" ? undefined : "post_favorite_action",
+        favoriteAdded: action.source !== "favorites" && isArchivePostFavorited(archive, post),
       });
       if (isSentimentImportedPost && mediaItems.length === 1 && (mediaItems[0].type === "video" || inferStoredPostMediaKind(mediaItems[0].url) === "video")) {
         if (await sendPostPhotoDetail(bot, chatId, msgId, {
@@ -20736,11 +20984,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, `⭐ 已加入收藏推文\n\n当前收藏：${updated.favoritePosts?.length || 0} 篇`, {
+      await safeEditOrSend(bot, chatId, msgId, `⭐ 已收藏\n\n当前收藏：${updated.favoritePosts?.length || 0} 篇`, {
         reply_markup: {
           inline_keyboard: [
             [{ text: "⭐ 查看收藏推文", callback_data: buildFavoritePostsPageCallback(action.archiveId, 0) }],
-            [{ text: "返回查看推文", callback_data: "post_action_view" }],
+            [{ text: "⭐ 已收藏，返回查看推文", callback_data: "post_action_view" }],
           ],
         },
       });
