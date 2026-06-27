@@ -12529,18 +12529,6 @@ async function loadSelectablePersonaMemories(archiveId: string): Promise<Persona
     });
     if (entries.length >= MAX_SELECTABLE_PERSONA_MEMORIES) break;
   }
-  if (entries.length < MAX_SELECTABLE_PERSONA_MEMORIES) {
-    for (const post of (archive.posts || []).slice(-MAX_SELECTABLE_PERSONA_MEMORIES).reverse()) {
-      pushEntry({
-        id: post.id,
-        date: post.updatedAt || post.createdAt,
-        content: post.content,
-        summary: post.memorySummary,
-        kind: "post",
-      });
-      if (entries.length >= MAX_SELECTABLE_PERSONA_MEMORIES) break;
-    }
-  }
   if (entries.length) {
     console.log(`[telegram][memory_fallback] archive=${archiveId} count=${entries.length}`);
   }

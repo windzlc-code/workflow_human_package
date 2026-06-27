@@ -169,6 +169,24 @@ function makeEntry(summary: string, index: number, content?: string): PersonaMem
   };
 }
 
+function memoryDedupeKey(summary: string): string {
+  return normalizeMemorySummaryForStorage(String(summary || ""))
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+function appendUniqueMemoryEntries(existing: PersonaMemoryEntry[], items: Array<{ summary: string; content?: string }>): PersonaMemoryEntry[] {
+  const seen = new Set(existing.map((entry) => memoryDedupeKey(entry.summary)).filter(Boolean));
+  const additions: PersonaMemoryEntry[] = [];
+  for (const item of items) {
+    const key = memoryDedupeKey(item.summary);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    additions.push(makeEntry(item.summary, additions.length, item.content));
+  }
+  return additions.length ? [...existing, ...additions] : existing;
+}
+
 export function getPersonaMemory(personaId: string): PersonaMemory {
   return {
     personaId,
@@ -186,10 +204,7 @@ export function addSummariesToMemory(personaId: string, summaries: string[]) {
     .filter(Boolean) as Array<{ summary: string; content?: string }>;
   if (cleaned.length === 0) return;
   const existing = readEntries(personaId);
-  writeEntries(personaId, [
-    ...existing,
-    ...cleaned.map((item, index) => makeEntry(item.summary, index, item.content)),
-  ]);
+  writeEntries(personaId, appendUniqueMemoryEntries(existing, cleaned));
 }
 
 export async function addSummariesToMemoryAsync(
@@ -206,16 +221,22 @@ export async function addSummariesToMemoryAsync(
     .filter(Boolean) as Array<{ summary: string; content?: string }>;
   if (cleaned.length === 0) return;
   const existing = await readEntriesAsync(personaId);
-  await writeEntriesAsync(personaId, [
-    ...existing,
-    ...cleaned.map((item, index) => ({
-      ...makeEntry(item.summary, index, item.content),
+  const seen = new Set(existing.map((entry) => memoryDedupeKey(entry.summary)).filter(Boolean));
+  const additions: PersonaMemoryEntry[] = [];
+  for (const item of cleaned) {
+    const key = memoryDedupeKey(item.summary);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    additions.push({
+      ...makeEntry(item.summary, additions.length, item.content),
       kind: entryOptions.kind || "post",
       sourceCount: entryOptions.sourceCount,
       rangeStart: entryOptions.rangeStart,
       rangeEnd: entryOptions.rangeEnd,
-    })),
-  ]);
+    });
+  }
+  if (additions.length === 0) return;
+  await writeEntriesAsync(personaId, [...existing, ...additions]);
 }
 
 export async function replacePersonaMemoryEntries(

@@ -3,10 +3,7 @@
  * Fetches trending topics via Electron's hidden BrowserWindow.
  * - Multi-source search per market
  * - Daily cache per persona+genre (localStorage)
- * - Saves fetched topics to persona memory
  */
-
-import { addPostToMemory } from "@/lib/persona-memory-v2";
 
 const newsAPI = () => (window as any).electronAPI?.news;
 
@@ -241,11 +238,6 @@ export async function fetchTrendingTopics(
 
     if (text) {
       if (personaId) setCache(personaId, label, text);
-
-      if (personaId) {
-        const memoryEntry = `[熱門話題·${new Date().toLocaleDateString("zh-TW")}·${label}]\n${text.slice(0, 500)}`;
-        addPostToMemory(personaId, memoryEntry, personaName).catch(() => {});
-      }
 
       results.push(`=== ${label} ===\n${text}`);
     }
