@@ -1334,7 +1334,7 @@ export async function fetchSentimentHotCandidates(args: {
     warnings.push("\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u002f\u0020\u0049\u006e\u0073\u0074\u0061\u0067\u0072\u0061\u006d\u0020\u7f3a\u5c11\u6709\u6548\u0020\u0043\u006f\u006f\u006b\u0069\u0065\uff0c\u5df2\u8df3\u904e\u771f\u5be6\u6383\u63cf\uff1b\u8acb\u5148\u5728\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u914d\u7f6e\u4e2d\u6388\u6b0a\u5f8c\u518d\u5237\u65b0\u6293\u53d6\u3002");
   }
 
-  candidates = finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords });
+  candidates = finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: args.refresh === true });
   const finalQaCount = candidates.filter((candidate) => candidate.qaPassed).length;
   const channelSummary = [
     `快取初始 ${initialCacheCount}`,
@@ -1397,29 +1397,9 @@ async function fillSentimentHotCandidatesToLimit(args: {
     if (out.length >= args.limit) break;
   }
 
-  if (args.refresh === true && out.length < args.limit) {
-    const beforeSoftBackfillCount = out.length;
-    const softBackfillCandidates = [
-      ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit * 12, false),
-      ...(await readCandidatesFromDatabase({
-        archiveId: args.archiveId,
-        keywords: args.keywords,
-        limit: args.limit * 12,
-        excludeShown: false,
-      }).catch(() => [])),
-    ];
-    for (const candidate of softBackfillCandidates) {
-      add(candidate);
-      if (out.length >= args.limit) break;
-    }
-    if (out.length > beforeSoftBackfillCount) {
-      args.warnings.push(`未展示候選不足 ${args.limit} 篇，已用近期展示過但未發布/未導入的候選低優先級回補 ${out.length - beforeSoftBackfillCount} 篇。`);
-    }
-  }
-
   if (out.length >= args.limit) {
     if (args.refresh === true) {
-      args.warnings.push("即時新結果不足 " + args.limit + " 篇，已按未展示優先、近期展示低優先級的策略補足候選。");
+      args.warnings.push("即時新結果不足 " + args.limit + " 篇，已按未展示優先的策略補足候選。");
     } else {
       args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u7528\u540c\u4eba\u8a2d\u95dc\u9375\u8a5e\u7684\u9ad8\u71b1\u5ea6\u6b77\u53f2\u5019\u9078\u88dc\u9f4a\u3002");
     }
@@ -1936,13 +1916,14 @@ function sortSentimentHotCandidatePool(candidates: SentimentHotCandidate[], keyw
     .slice(0, limit);
 }
 
-export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHotCandidate[], limit: number, options?: { archiveId?: string; keywords?: string[] }): SentimentHotCandidate[] {
+export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHotCandidate[], limit: number, options?: { archiveId?: string; keywords?: string[]; excludeShown?: boolean }): SentimentHotCandidate[] {
   const out: SentimentHotCandidate[] = [];
   const seenKeys = new Set<string>();
   const shownIds = options?.archiveId ? getSentimentHotShownIds(options.archiveId) : new Set<string>();
   const keywords = options?.keywords || [];
   const sorted = candidates
     .filter((candidate) => isUsefulHotCandidate(candidate) && hasMinimumSentimentHotContentLength(candidate))
+    .filter((candidate) => !(options?.excludeShown && shownIds.has(candidate.id)))
     .sort((a, b) => {
       const aShown = shownIds.has(a.id) ? 1 : 0;
       const bShown = shownIds.has(b.id) ? 1 : 0;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildSentimentCandidateId } from "@/lib/sentiment-candidate-store";
+import { buildSentimentCandidateId, rememberSentimentHotShown } from "@/lib/sentiment-candidate-store";
 import {
   analyzeThreadsProfileVisibleSignals,
   buildSentimentHotKeywords,
@@ -308,6 +308,40 @@ describe("sentiment hot importer", () => {
 
     expect(candidates.map((candidate) => candidate.id)).toEqual(["top", "duplicate-b", "low"]);
     expect(candidates.map((candidate) => candidate.hotScore)).toEqual([30000, 18000, 5000]);
+  });
+
+  it("excludes already shown hot candidates during refresh display", () => {
+    const archiveId = `test-refresh-exclude-shown-${Date.now()}`;
+    const base = {
+      platform: "threads",
+      author: "demo",
+      capturedAt: new Date().toISOString(),
+      media: [],
+      metrics: {},
+    } as const;
+    const shown = {
+      ...base,
+      id: "shown-hot",
+      sourceUrl: "https://www.threads.net/@demo/post/shown-hot",
+      content: "海外信貸市場最近很多人討論信用卡周轉和銀行貸款審核，這篇雖然熱度最高，但已經在上一輪展示過。刷新抓取時不應再拿它回補，避免使用者一直看到同一篇內容，應該依靠新的搜尋候選補足剩餘數量。",
+      hotScore: 90000,
+    };
+    const fresh = {
+      ...base,
+      id: "fresh-hot",
+      sourceUrl: "https://www.threads.net/@demo/post/fresh-hot",
+      content: "海外信貸族群最近開始整理收入證明、負債比例和固定支出，再比較信用卡分期、銀行貸款與貸款利率。這種內容和人設關鍵詞高度相關，而且沒有被展示過，刷新時應該優先出現在候選列表。",
+      hotScore: 30000,
+    };
+
+    rememberSentimentHotShown(archiveId, [shown] as any);
+    const candidates = finalizeSentimentHotCandidatesForDisplay([shown, fresh] as any, 10, {
+      archiveId,
+      keywords: ["海外信貸", "銀行貸款", "信用卡"],
+      excludeShown: true,
+    });
+
+    expect(candidates.map((candidate) => candidate.id)).toEqual(["fresh-hot"]);
   });
 
   it("does not display hot candidates shorter than 60 Chinese characters", () => {
