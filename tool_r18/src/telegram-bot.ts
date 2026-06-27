@@ -4797,6 +4797,10 @@ function sentimentHotCandidatePostLink(candidate: SentimentHotCandidate): string
   return "";
 }
 
+function sentimentHotCandidateTextLength(candidate: Pick<SentimentHotCandidate, "content">): number {
+  return Array.from(cleanSentimentCandidateContent(candidate.content).replace(/\s+/g, "")).length;
+}
+
 function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index: number) {
   const platform = candidate.platform === "threads" ? "Threads" : "Instagram";
   const content = cleanSentimentCandidateContent(candidate.content);
@@ -4807,7 +4811,7 @@ function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index
   const backfillMark = candidate.warnings?.some((item) => item.includes("回补") || item.includes("回補")) ? " *回補*" : "";
   return [
     "────────────",
-    `${index + 1}. [${platform}/${media}]${qaMark}${backfillMark} ${formatSentimentMetricLine(candidate)}`,
+    `${index + 1}. [${platform}/${media}]${qaMark}${backfillMark} ${formatSentimentMetricLine(candidate)}；字數 ${sentimentHotCandidateTextLength(candidate)}`,
     `${text}${content.length > 72 ? "..." : ""}`,
     ...(postLink ? [`链接: ${postLink}`] : []),
   ].join("\n");
@@ -4819,6 +4823,7 @@ function formatSentimentCookieLine(status: SentimentCookieStatus) {
 }
 
 const SENTIMENT_HOT_NO_LINK_PREVIEW = { disable_web_page_preview: true };
+const SENTIMENT_HOT_PICKER_TIMEOUT_MS = 90_000;
 
 async function sendSentimentHotCandidatePicker(args: {
   bot: TelegramBot;
@@ -4848,12 +4853,16 @@ async function sendSentimentHotCandidatePicker(args: {
       .map((entry) => String(entry.summary || "").trim())
       .filter(Boolean)
       .slice(0, 8);
-    const result = await fetchSentimentHotCandidates({
-      archive,
-      memorySummaries,
-      limit: 10,
-      refresh: args.refresh === true,
-    });
+    const result = await withTimeout(
+      fetchSentimentHotCandidates({
+        archive,
+        memorySummaries,
+        limit: 10,
+        refresh: args.refresh === true,
+      }),
+      SENTIMENT_HOT_PICKER_TIMEOUT_MS,
+      "热点抓取超时，请稍后刷新重试；系统已停止等待本次抓取结果。",
+    );
     pendingSentimentHotImports.set(args.chatId, {
       archiveId: archive.id,
       archiveName: archive.name,
@@ -4951,6 +4960,7 @@ function buildSentimentHotCandidateDetailText(args: {
     `作者: ${args.candidate.author || "-"}`,
     `媒体: ${mediaLabel}`,
     `数据: ${formatSentimentMetricLine(args.candidate)}`,
+    `字數: ${sentimentHotCandidateTextLength(args.candidate)}`,
     `QA: ${args.candidate.qaPassed ? "*已通过*" : "-"}`,
     `原帖: ${args.candidate.sourceUrl || "-"}`,
     "",

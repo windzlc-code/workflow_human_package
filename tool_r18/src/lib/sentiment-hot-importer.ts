@@ -24,7 +24,7 @@ import {
 const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3");
 const MIN_SENTIMENT_HOT_SCORE = 1000;
-const MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT = 80;
+const MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT = 60;
 const SENTIMENT_HOT_CANDIDATE_POOL_TARGET = 400;
 const THREADS_SEARCH_CACHE_CANDIDATE_LIMIT = 2000;
 const THREADS_BROWSER_QUERY_LIMIT = 16;
@@ -884,6 +884,7 @@ function sentimentCandidateFinalDedupeKeys(candidate: SentimentHotCandidate, con
   if (mediaKey) keys.add(`${candidate.platform}:media:${mediaKey}`);
   const textKey = normalizeSentimentCandidateFingerprint(content);
   if (textKey.length >= 24) keys.add(`${candidate.platform}:text:${textKey}`);
+  if (textKey.length >= 40) keys.add(`${candidate.platform}:text-prefix:${textKey.slice(0, 80)}`);
   return [...keys];
 }
 

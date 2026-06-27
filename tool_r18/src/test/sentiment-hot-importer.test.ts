@@ -310,7 +310,7 @@ describe("sentiment hot importer", () => {
     expect(candidates.map((candidate) => candidate.hotScore)).toEqual([30000, 18000, 5000]);
   });
 
-  it("does not display hot candidates shorter than 80 Chinese characters", () => {
+  it("does not display hot candidates shorter than 60 Chinese characters", () => {
     const candidates = finalizeSentimentHotCandidatesForDisplay([
       {
         id: "short-hot",
