@@ -4913,7 +4913,8 @@ function buildSentimentHotCandidateDetailText(args: {
     : args.candidate.media.length
       ? `图片 ${args.candidate.media.length}`
       : "纯文字";
-  const warnings = args.candidate.warnings?.length ? ["", "提示:", ...args.candidate.warnings.map((item) => `- ${item}`)] : [];
+  const uniqueWarnings = [...new Set((args.candidate.warnings || []).map(normalizeTelegramSingleLine).filter(Boolean))];
+  const warnings = uniqueWarnings.length ? ["", "提示:", ...uniqueWarnings.map((item) => `- ${item}`)] : [];
   return [
     `🔥 热点详情 #${args.index + 1}`,
     "",

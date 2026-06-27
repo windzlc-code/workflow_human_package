@@ -238,7 +238,7 @@ describe("sentiment hot importer", () => {
     } as any, keywords)).toBe(true);
     expect(isObviouslyLowQualitySentimentHotCandidate({
       ...base,
-      content: "海外金融信用卡限時優惠整理，這次比較不同銀行的回饋比例、年費門檻、海外刷卡手續費、分期利率和還款規則，也提醒工薪族不要只看折扣，還要評估現金流和信用評分影響。",
+      content: "海外金融信用卡限時優惠整理，這次比較不同銀行的回饋比例、年費門檻、海外刷卡手續費、分期利率和還款規則，也提醒工薪族不要只看折扣，還要評估現金流和信用評分影響，避免為了短期回饋拉高長期負債。",
     } as any, keywords)).toBe(false);
     expect(isObviouslyLowQualitySentimentHotCandidate({
       ...base,
@@ -250,7 +250,7 @@ describe("sentiment hot importer", () => {
     } as any, ["海外信貸", "工薪信貸", "貸款利率"])).toBe(true);
     expect(isObviouslyLowQualitySentimentHotCandidate({
       ...base,
-      content: "看新聞最近銀行都快沒錢了，信貸專員說這陣子太多人申請，所以利率很高，有人整理銀行審核和貸款利率的真實經驗，也補充收入證明、負債比和還款規劃會影響最後核准條件。",
+      content: "看新聞最近銀行都快沒錢了，信貸專員說這陣子太多人申請，所以利率很高，有人整理銀行審核和貸款利率的真實經驗，也補充收入證明、負債比和還款規劃會影響最後核准條件，提醒工薪族先算清楚每月現金流。",
     } as any, ["海外信貸", "銀行風控", "貸款利率"])).toBe(false);
     expect(isObviouslyLowQualitySentimentHotCandidate({
       ...base,
@@ -280,7 +280,7 @@ describe("sentiment hot importer", () => {
         ...base,
         id: "low",
         sourceUrl: "https://www.threads.net/@demo/post/low",
-        content: "海外金融信用卡和貸款利率最近討論不少，很多工薪族會先比較銀行審核和現金流，再決定是否申請信貸。這類內容雖然熱度較低，但資訊量足夠，仍可作為排序測試裡的有效候選。",
+        content: "海外金融信用卡和貸款利率最近討論不少，很多工薪族會先比較銀行審核和現金流，再決定是否申請信貸。這類內容雖然熱度較低，但資訊量足夠，仍可作為排序測試裡的有效候選，也能提醒不要盲目追額度。",
         hotScore: 5000,
       },
       {
@@ -301,7 +301,7 @@ describe("sentiment hot importer", () => {
         ...base,
         id: "top",
         sourceUrl: "https://www.threads.net/@demo/post/top",
-        content: "海外信貸市場最近熱度很高，信用卡週轉、銀行貸款和利率審核都被反覆討論。有人把申請資料、負債比和收入證明整理成清單，提醒工薪族不要只看額度，也要看還款節奏和風險。",
+        content: "海外信貸市場最近熱度很高，信用卡週轉、銀行貸款和利率審核都被反覆討論。有人把申請資料、負債比和收入證明整理成清單，提醒工薪族不要只看額度，也要看還款節奏和風險，尤其要先確認穩定薪資流水。",
         hotScore: 30000,
       },
     ] as any, 10);
@@ -310,7 +310,7 @@ describe("sentiment hot importer", () => {
     expect(candidates.map((candidate) => candidate.hotScore)).toEqual([30000, 18000, 5000]);
   });
 
-  it("does not display hot candidates shorter than 45 Chinese characters", () => {
+  it("does not display hot candidates shorter than 80 Chinese characters", () => {
     const candidates = finalizeSentimentHotCandidatesForDisplay([
       {
         id: "short-hot",
@@ -324,22 +324,11 @@ describe("sentiment hot importer", () => {
         capturedAt: new Date().toISOString(),
       },
       {
-        id: "mid-hot",
-        platform: "threads",
-        sourceUrl: "https://www.threads.net/@demo/post/mid",
-        author: "demo",
-        content: "海外信貸最近討論很多，信用卡和銀行貸款都很熱門。有人整理收入證明與利率審核，提醒工薪族不要只看額度，也要看還款節奏。",
-        media: [],
-        hotScore: 85000,
-        metrics: {},
-        capturedAt: new Date().toISOString(),
-      },
-      {
         id: "long-hot",
         platform: "threads",
         sourceUrl: "https://www.threads.net/@demo/post/long",
         author: "demo",
-        content: "海外信貸最近討論很多，信用卡和銀行貸款都很熱門。有人整理收入證明、負債比、利率審核、還款節奏和現金流安排，提醒工薪族不要只看額度，也要確認長期風險。",
+        content: "海外信貸最近討論很多，信用卡和銀行貸款都很熱門。有人整理收入證明、負債比、利率審核、還款節奏和現金流安排，提醒工薪族不要只看額度，也要確認長期風險。這種長文更適合改寫成人設乾貨。",
         media: [],
         hotScore: 80000,
         metrics: {},
@@ -347,7 +336,7 @@ describe("sentiment hot importer", () => {
       },
     ] as any, 10);
 
-    expect(candidates.map((candidate) => candidate.id)).toEqual(["mid-hot", "long-hot"]);
+    expect(candidates.map((candidate) => candidate.id)).toEqual(["long-hot"]);
   });
 
   it("keeps heat ordering ahead of QA markers in final candidates", () => {
@@ -363,14 +352,14 @@ describe("sentiment hot importer", () => {
         ...base,
         id: "hot-without-qa",
         sourceUrl: "https://www.threads.net/@demo/post/hot-without-qa",
-        content: "海外信貸市場最近很多人在討論信用卡週轉和銀行貸款審核，這篇熱度很高，但還沒有模型 QA 標記。內容同時提到收入證明、負債比和還款壓力，足以作為長文候選排序測試。",
+        content: "海外信貸市場最近很多人在討論信用卡週轉和銀行貸款審核，這篇熱度很高，但還沒有模型 QA 標記。內容同時提到收入證明、負債比和還款壓力，足以作為長文候選排序測試，也能檢查熱度排序是否優先。",
         hotScore: 50000,
       },
       {
         ...base,
         id: "qa-lower-heat",
         sourceUrl: "https://www.threads.net/@demo/post/qa-lower-heat",
-        content: "海外工薪族最近討論貸款利率和信用卡債務整合，有人整理收入證明、負債比、還款節奏和銀行審核條件，適合改寫成務實提醒。這條候選已通過 QA，但熱度低於另一條。",
+        content: "海外工薪族最近討論貸款利率和信用卡債務整合，有人整理收入證明、負債比、還款節奏和銀行審核條件，適合改寫成務實提醒。這條候選已通過 QA，但熱度低於另一條，用來確認 QA 標記不會壓過高熱度。",
         hotScore: 9000,
         qaPassed: true,
       },
@@ -391,7 +380,7 @@ describe("sentiment hot importer", () => {
         ...base,
         id: "same-post-low",
         sourceUrl: "https://www.threads.net/@demo/post/POST123?utm_source=a",
-        content: "海外金融信貸案例最近很多人討論，有人整理信用卡額度、貸款利率、銀行審核和現金流安排，提醒工薪族不要只看能不能借到錢，也要看還款風險。",
+        content: "海外金融信貸案例最近很多人討論，有人整理信用卡額度、貸款利率、銀行審核和現金流安排，提醒工薪族不要只看能不能借到錢，也要看還款風險。這條用來測試相同原帖低熱度版本會被合併。",
         media: [],
         hotScore: 9000,
       },
@@ -399,7 +388,7 @@ describe("sentiment hot importer", () => {
         ...base,
         id: "same-post-high",
         sourceUrl: "https://www.threads.net/@demo/post/POST123?x=1",
-        content: "同一篇原帖被不同查詢通道抓到，內容描述稍微不同，但 post id 一樣，應該只保留熱度更高的版本。這裡補充信用卡額度、銀行審核、信貸利率和還款規劃，確保候選長度符合硬門檻。",
+        content: "同一篇原帖被不同查詢通道抓到，內容描述稍微不同，但 post id 一樣，應該只保留熱度更高的版本。這裡補充信用卡額度、銀行審核、信貸利率和還款規劃，確保候選長度符合硬門檻，也確認去重不受文字差異干擾。",
         media: [],
         hotScore: 20000,
       },
@@ -415,7 +404,7 @@ describe("sentiment hot importer", () => {
         ...base,
         id: "same-media-high",
         sourceUrl: "https://www.threads.net/@demo/post/media-high",
-        content: "同一個媒體文件被另一個入口抓到，文字不完全相同，但媒體 URL 一樣，保留高熱度版本。這條也提到海外信貸、信用卡週轉、銀行貸款審核和現金流安排，避免被短文規則排除。",
+        content: "同一個媒體文件被另一個入口抓到，文字不完全相同，但媒體 URL 一樣，保留高熱度版本。這條也提到海外信貸、信用卡週轉、銀行貸款審核和現金流安排，避免被短文規則排除，同時驗證媒體 URL 去重是否穩定。",
         media: [{ type: "image", url: "https://cdn.example.com/a.jpg?utm_source=high" }],
         hotScore: 18000,
       },
@@ -423,7 +412,7 @@ describe("sentiment hot importer", () => {
         ...base,
         id: "unique",
         sourceUrl: "https://www.threads.net/@demo/post/unique",
-        content: "海外工薪族最近也在討論銀行貸款審核，這是一條不同原帖不同媒體的有效候選，應該正常保留。內容補充信用卡、利率、收入證明和負債比，滿足長文候選要求。",
+        content: "海外工薪族最近也在討論銀行貸款審核，這是一條不同原帖不同媒體的有效候選，應該正常保留。內容補充信用卡、利率、收入證明和負債比，滿足長文候選要求，也確認唯一候選不被錯誤合併或短文規則誤刪。",
         media: [{ type: "image", url: "https://cdn.example.com/unique.jpg" }],
         hotScore: 7000,
       },

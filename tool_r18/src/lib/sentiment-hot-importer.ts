@@ -24,11 +24,12 @@ import {
 const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3");
 const MIN_SENTIMENT_HOT_SCORE = 1000;
-const MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT = 45;
+const MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT = 80;
 const SENTIMENT_HOT_CANDIDATE_POOL_TARGET = 200;
 const THREADS_SEARCH_CACHE_CANDIDATE_LIMIT = 1000;
 const INSTAGRAM_READER_QUERY_LIMIT = 24;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 10 * 60 * 1000;
+const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "經驗",
   "心得",
@@ -1125,8 +1126,12 @@ export async function fetchSentimentHotCandidates(args: {
   const cachedQaCount = hasSearchKeywords
     ? selectSentimentHotCandidatesForModelQa(sortRelevantHotCandidates(candidates, keywords, poolLimit), keywords, limit).length
     : 0;
+  const canUseCandidatePoolForRefresh = args.refresh === true
+    && candidates.length >= limit
+    && cachedQaCount >= limit
+    && !shouldRefreshSentimentHotSource(archiveId);
   const shouldFetchLiveCandidates = hasSearchKeywords
-    && (candidates.length < limit || cachedQaCount < limit || args.refresh === true);
+    && (candidates.length < limit || cachedQaCount < limit || (args.refresh === true && !canUseCandidatePoolForRefresh));
   if (hasSearchKeywords && args.refresh === true && candidates.length >= limit && !shouldFetchLiveCandidates) {
     warnings.push("已使用當前人設候選池刷新；高品質候選仍足夠，已跳過短時間內重複抓取以降低平台風控。");
   }
@@ -1815,6 +1820,10 @@ function sentimentHotHanCount(value: unknown): number {
 
 function hasMinimumSentimentHotContentLength(candidate: SentimentHotCandidate): boolean {
   return sentimentHotHanCount(candidate.content) >= MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT;
+}
+
+function uniqueSentimentWarnings(warnings: unknown[]): string[] {
+  return [...new Set(warnings.map(cleanText).filter(Boolean))];
 }
 
 function sortUsefulHotCandidates(candidates: SentimentHotCandidate[], limit: number): SentimentHotCandidate[] {
@@ -3801,7 +3810,8 @@ function writeThreadsSearchCandidateCache(archiveId: string, keywords: string[],
     state[key] = {
       at: now,
       version: THREADS_SEARCH_CACHE_VERSION,
-      candidates: sortSentimentHotCandidatePool([...byId.values()], keywords, THREADS_SEARCH_CACHE_CANDIDATE_LIMIT),
+      candidates: sortSentimentHotCandidatePool([...byId.values()], keywords, THREADS_SEARCH_CACHE_CANDIDATE_LIMIT)
+        .map((candidate) => ({ ...candidate, warnings: uniqueSentimentWarnings(candidate.warnings || []) })),
     };
   }
   fs.mkdirSync(path.dirname(THREADS_SEARCH_CACHE_FILE), { recursive: true });
@@ -3831,7 +3841,7 @@ function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], 
       const normalized = {
         ...candidate,
         content,
-        warnings: [...(candidate.warnings || []), "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。"],
+        warnings: uniqueSentimentWarnings([...(candidate.warnings || []), THREADS_SEARCH_CACHE_WARNING]),
       };
       byId.set(candidate.id, normalized);
     }
