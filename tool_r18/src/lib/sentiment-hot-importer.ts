@@ -1130,7 +1130,7 @@ export async function fetchSentimentHotCandidates(args: {
   const poolLimit = Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
 
-  let candidates = hasSearchKeywords
+  let candidates = hasSearchKeywords && args.refresh !== true
     ? readThreadsSearchCandidateCache(archiveId, keywords, poolLimit, args.refresh === true)
     : [];
   const initialCacheCount = candidates.length;
