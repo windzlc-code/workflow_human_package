@@ -33,7 +33,7 @@ const THREADS_READER_TOTAL_QUERY_LIMIT = 36;
 const THREADS_READER_QUERY_BATCH_SIZE = 6;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
-const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 8_000;
+const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 6_000;
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "經驗",
@@ -1162,7 +1162,7 @@ export async function fetchSentimentHotCandidates(args: {
           limit: poolLimit,
           refresh: args.refresh === true,
         }),
-        25_000,
+        32_000,
         [],
       ),
     ).catch((error) => {
@@ -2168,7 +2168,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
             "cache-control": args.refresh ? "no-cache" : "max-age=300",
             pragma: args.refresh ? "no-cache" : "",
           },
-          signal: AbortSignal.timeout(18_000),
+          signal: AbortSignal.timeout(8_000),
         });
         if (!response.ok) return { query, targetUrl, text: "" };
         return { query, targetUrl, text: await response.text() };
@@ -2228,7 +2228,7 @@ async function fetchInstagramReaderSearchCandidates(args: {
               "cache-control": args.refresh ? "no-cache" : "max-age=300",
               pragma: args.refresh ? "no-cache" : "",
             },
-            signal: AbortSignal.timeout(18_000),
+            signal: AbortSignal.timeout(8_000),
           });
           if (response.ok) texts.push({ query, targetUrl, text: await response.text() });
         } catch {
