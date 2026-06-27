@@ -25,10 +25,14 @@ const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3");
 const MIN_SENTIMENT_HOT_SCORE = 1000;
 const MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT = 80;
-const SENTIMENT_HOT_CANDIDATE_POOL_TARGET = 200;
-const THREADS_SEARCH_CACHE_CANDIDATE_LIMIT = 1000;
-const INSTAGRAM_READER_QUERY_LIMIT = 24;
-const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 10 * 60 * 1000;
+const SENTIMENT_HOT_CANDIDATE_POOL_TARGET = 400;
+const THREADS_SEARCH_CACHE_CANDIDATE_LIMIT = 2000;
+const THREADS_BROWSER_QUERY_LIMIT = 16;
+const THREADS_READER_INITIAL_QUERY_LIMIT = 6;
+const THREADS_READER_TOTAL_QUERY_LIMIT = 36;
+const THREADS_READER_QUERY_BATCH_SIZE = 6;
+const INSTAGRAM_READER_QUERY_LIMIT = 48;
+const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "經驗",
@@ -1078,7 +1082,7 @@ async function waitForMoreSentimentHotCandidates(args: {
     const databaseCandidates = await readCandidatesFromDatabase({
       archiveId: args.archiveId,
       keywords: args.keywords,
-      limit: Math.max(args.limit * 10, 100),
+      limit: Math.max(args.limit * 20, 200),
       excludeShown: args.excludeShown,
     }).catch(() => []);
     if (!databaseCandidates.length) continue;
@@ -1117,7 +1121,7 @@ export async function fetchSentimentHotCandidates(args: {
     warnings.push("模型生成热点关键词超时，已停止本次抓取；不会使用规则关键词兜底。");
   }
   const limit = args.limit || 10;
-  const poolLimit = Math.max(limit * 20, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
+  const poolLimit = Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
 
   let candidates = hasSearchKeywords
@@ -1335,11 +1339,11 @@ async function fillSentimentHotCandidatesToLimit(args: {
   if (out.length >= args.limit) return out.slice(0, args.limit);
 
   const fallbackCandidates = [
-    ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit * 4, args.refresh === true),
+    ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit * 8, args.refresh === true),
     ...(await readCandidatesFromDatabase({
       archiveId: args.archiveId,
       keywords: args.keywords,
-      limit: args.limit * 4,
+      limit: args.limit * 8,
       excludeShown: args.refresh === true,
     }).catch(() => [])),
   ];
@@ -1368,7 +1372,7 @@ async function ensureSentimentHotQaCandidatePool(args: {
   refresh?: boolean;
   warnings: string[];
 }): Promise<SentimentHotCandidate[]> {
-  const target = Math.max(args.limit * 20, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
+  const target = Math.max(args.limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
   const sorted = sortRelevantHotCandidates(args.candidates, args.keywords, target);
   const currentQaCount = selectSentimentHotCandidatesForModelQa(sorted, args.keywords, args.limit).length;
   if (currentQaCount >= args.limit) return sorted;
@@ -1551,7 +1555,7 @@ function candidateLooksOffTopicForKeywords(content: string, keywords: string[]):
 }
 
 function selectSentimentHotCandidatesForModelQa(candidates: SentimentHotCandidate[], keywords: string[], limit: number): SentimentHotCandidate[] {
-  const target = Math.min(Math.max(limit * 10, 60), 100);
+  const target = Math.min(Math.max(limit * 20, 120), 200);
   return candidates
     .filter((candidate) => !isObviouslyLowQualitySentimentHotCandidate(candidate, keywords))
     .slice(0, target);
@@ -1591,7 +1595,7 @@ async function filterSentimentCandidatesWithModel(args: {
   limit: number;
   warnings: string[];
 }): Promise<SentimentHotCandidate[]> {
-  const candidates = sortRelevantHotCandidates(args.candidates, args.keywords, Math.max(args.limit * 10, 100));
+  const candidates = sortRelevantHotCandidates(args.candidates, args.keywords, Math.max(args.limit * 20, 200));
   if (candidates.length === 0) return [];
   const modelCandidates = selectSentimentHotCandidatesForModelQa(candidates, args.keywords, args.limit);
   if (modelCandidates.length === 0) {
@@ -1933,7 +1937,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   let browserResults = await fetchThreadsBrowserSearchCandidates({
     archiveId: args.archiveId,
     keywords: args.keywords,
-    queries: queries.slice(0, 8),
+    queries: queries.slice(0, THREADS_BROWSER_QUERY_LIMIT),
     limit: args.limit,
     excludeIds: primaryExcluded,
   }).catch(() => []);
@@ -1962,7 +1966,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   let readerResults = await fetchThreadsReaderSearchCandidates({
     archiveId: args.archiveId,
     keywords: args.keywords,
-    queries: queries.slice(0, 6),
+    queries: queries.slice(0, THREADS_READER_INITIAL_QUERY_LIMIT),
     limit: args.limit,
     refresh: args.refresh,
     excludeIds: primaryExcluded,
@@ -1971,12 +1975,12 @@ async function fetchThreadsSearchPageCandidates(args: {
   if (readerResults.length < args.limit) {
     const existing = new Map(readerResults.map((candidate) => [candidate.id, candidate]));
     const existingKeys = new Set(readerResults.map((candidate) => sentimentCandidateDedupeKey(candidate)));
-    const remainingQueries = queries.slice(6, 18);
-    for (let offset = 0; offset < remainingQueries.length && existing.size < args.limit; offset += 6) {
+    const remainingQueries = queries.slice(THREADS_READER_INITIAL_QUERY_LIMIT, THREADS_READER_TOTAL_QUERY_LIMIT);
+    for (let offset = 0; offset < remainingQueries.length && existing.size < args.limit; offset += THREADS_READER_QUERY_BATCH_SIZE) {
       const extraResults = await fetchThreadsReaderSearchCandidates({
         archiveId: args.archiveId,
         keywords: args.keywords,
-        queries: remainingQueries.slice(offset, offset + 6),
+        queries: remainingQueries.slice(offset, offset + THREADS_READER_QUERY_BATCH_SIZE),
         limit: args.limit,
         refresh: args.refresh,
         excludeIds: primaryExcluded,
