@@ -782,6 +782,10 @@ const pendingSentimentHotMediaPanels = new Map<number, {
   messageId: number;
 }>();
 
+const pendingSentimentHotLoadingMessages = new Map<number, {
+  messageId: number;
+}>();
+
 const pendingPostSelections = new Map<number, {
   archiveId: string;
   postIds: string[];
@@ -4825,6 +4829,7 @@ async function sendSentimentHotCandidatePicker(args: {
   refresh?: boolean;
 }) {
   await deletePendingSentimentHotMediaPanel(args.bot, args.chatId);
+  await deletePendingSentimentHotLoadingMessage(args.bot, args.chatId, args.messageId);
   const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   if (!archive) {
     await safeEditOrSend(args.bot, args.chatId, args.messageId, "人设不存在或已被删除，请重新选择。", {
@@ -4833,61 +4838,76 @@ async function sendSentimentHotCandidatePicker(args: {
     return;
   }
 
-  await safeEditOrSend(args.bot, args.chatId, args.messageId, "正在抓取 Threads / Instagram 热点，请稍候...");
-  const memorySummaries = (await loadSelectablePersonaMemories(archive.id).catch(() => []))
-    .map((entry) => String(entry.summary || "").trim())
-    .filter(Boolean)
-    .slice(0, 8);
-  const result = await fetchSentimentHotCandidates({
-    archive,
-    memorySummaries,
-    limit: 10,
-    refresh: args.refresh === true,
-  });
-  pendingSentimentHotImports.set(args.chatId, {
-    archiveId: archive.id,
-    archiveName: archive.name,
-    contentBranch: args.contentBranch,
-    candidates: result.candidates,
-    keywords: result.keywords,
-    cookieStatuses: result.cookieStatuses,
-    warnings: result.warnings,
-  });
-  const actionKey = rememberSentimentHotAction(args.chatId, archive.id);
-  const candidateRows = result.candidates.map((candidate, index) => ([
-    {
-      text: `查看第 ${index + 1} 篇`,
-      callback_data: `shdet_${actionKey}_${index}`,
-    },
-    {
-      text: `使用第 ${index + 1} 篇`,
-      callback_data: `shuse_${actionKey}_${index}`,
-    },
-  ]));
-  const text = [
-    "🔥 热点抓取",
-    "",
-    `人设: ${archive.name}`,
-    `来源: Threads + Instagram`,
-    `关键词: ${result.keywords.join(" / ") || "自动分析"}`,
-    "",
-    "Cookie 状态:",
-    ...result.cookieStatuses.map(formatSentimentCookieLine),
-    ...(result.warnings.length ? ["", "提示:", ...result.warnings.map((item) => `- ${item}`)] : []),
-    "",
-    result.candidates.length ? "候选热点:" : "暂时没有抓到可用热点，请刷新或检查 Cookie。",
-    ...result.candidates.map(formatSentimentHotCandidateLine),
-  ].join("\n");
-  await safeEditOrSend(args.bot, args.chatId, args.messageId, text, {
-    ...SENTIMENT_HOT_NO_LINK_PREVIEW,
-    reply_markup: {
-      inline_keyboard: [
-        ...candidateRows,
-        [{ text: "刷新抓取", callback_data: `shrf_${actionKey}` }],
-        [{ text: "返回新建推文", callback_data: `genpost_branch_${archive.id}` }],
-      ],
-    },
-  });
+  const loadingMessage = await safeEditOrSend(args.bot, args.chatId, args.messageId, "正在抓取 Threads / Instagram 热点，请稍候...");
+  const resultMessageId = args.messageId || loadingMessage?.message_id;
+  if (!args.messageId && loadingMessage?.message_id) {
+    pendingSentimentHotLoadingMessages.set(args.chatId, { messageId: loadingMessage.message_id });
+  }
+  try {
+    const memorySummaries = (await loadSelectablePersonaMemories(archive.id).catch(() => []))
+      .map((entry) => String(entry.summary || "").trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    const result = await fetchSentimentHotCandidates({
+      archive,
+      memorySummaries,
+      limit: 10,
+      refresh: args.refresh === true,
+    });
+    pendingSentimentHotImports.set(args.chatId, {
+      archiveId: archive.id,
+      archiveName: archive.name,
+      contentBranch: args.contentBranch,
+      candidates: result.candidates,
+      keywords: result.keywords,
+      cookieStatuses: result.cookieStatuses,
+      warnings: result.warnings,
+    });
+    const actionKey = rememberSentimentHotAction(args.chatId, archive.id);
+    const candidateRows = result.candidates.map((candidate, index) => ([
+      {
+        text: `查看第 ${index + 1} 篇`,
+        callback_data: `shdet_${actionKey}_${index}`,
+      },
+      {
+        text: `使用第 ${index + 1} 篇`,
+        callback_data: `shuse_${actionKey}_${index}`,
+      },
+    ]));
+    const text = [
+      "🔥 热点抓取",
+      "",
+      `人设: ${archive.name}`,
+      `来源: Threads + Instagram`,
+      `关键词: ${result.keywords.join(" / ") || "自动分析"}`,
+      "",
+      "Cookie 状态:",
+      ...result.cookieStatuses.map(formatSentimentCookieLine),
+      ...(result.warnings.length ? ["", "提示:", ...result.warnings.map((item) => `- ${item}`)] : []),
+      "",
+      result.candidates.length ? "候选热点:" : "暂时没有抓到可用热点，请刷新或检查 Cookie。",
+      ...result.candidates.map(formatSentimentHotCandidateLine),
+    ].join("\n");
+    const resultMessage = await safeEditOrSend(args.bot, args.chatId, resultMessageId, text, {
+      ...SENTIMENT_HOT_NO_LINK_PREVIEW,
+      reply_markup: {
+        inline_keyboard: [
+          ...candidateRows,
+          [{ text: "刷新抓取", callback_data: `shrf_${actionKey}` }],
+          [{ text: "返回新建推文", callback_data: `genpost_branch_${archive.id}` }],
+        ],
+      },
+    });
+    if (loadingMessage?.message_id && resultMessage?.message_id && resultMessage.message_id !== loadingMessage.message_id) {
+      await args.bot.deleteMessage(args.chatId, loadingMessage.message_id).catch(() => undefined);
+    }
+  } catch (error: any) {
+    await safeEditOrSend(args.bot, args.chatId, resultMessageId, `热点抓取失败：${formatUserFacingError(error, "请稍后重试。")}`, {
+      reply_markup: { inline_keyboard: [[{ text: "返回新建推文", callback_data: `genpost_branch_${archive.id}` }]] },
+    });
+  } finally {
+    if (loadingMessage?.message_id) pendingSentimentHotLoadingMessages.delete(args.chatId);
+  }
 }
 
 function truncateTelegramPhotoCaption(text: string) {
@@ -4900,6 +4920,14 @@ async function deletePendingSentimentHotMediaPanel(bot: TelegramBot, chatId: num
   pendingSentimentHotMediaPanels.delete(chatId);
   if (panel.messageId === exceptMessageId) return;
   await bot.deleteMessage(chatId, panel.messageId).catch(() => undefined);
+}
+
+async function deletePendingSentimentHotLoadingMessage(bot: TelegramBot, chatId: number, exceptMessageId?: number) {
+  const loading = pendingSentimentHotLoadingMessages.get(chatId);
+  if (!loading) return;
+  pendingSentimentHotLoadingMessages.delete(chatId);
+  if (loading.messageId === exceptMessageId) return;
+  await bot.deleteMessage(chatId, loading.messageId).catch(() => undefined);
 }
 
 function buildSentimentHotCandidateDetailText(args: {
