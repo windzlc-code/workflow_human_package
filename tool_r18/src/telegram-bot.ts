@@ -21292,7 +21292,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         msgId,
         isReplace
           ? "⭐ 请输入重新生成简介的方向 ⭐\n　　我会重新生成完整人设简介。"
-          : "⭐ 请输入要编辑的内容 ⭐\n　　我会在原简介基础上修改。",
+          : "⭐ 请输入新的人设简介 ⭐\n　　你发送什么文字，我就直接覆盖保存，不会在原简介基础上改写。",
         {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `settings_${id}` }]] },
         },
@@ -21307,7 +21307,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "✏️ 编辑简介", callback_data: `editcontent_patch_${id}` }],
+            [{ text: "✏️ 直接替换简介", callback_data: `editcontent_patch_${id}` }],
             [{ text: "🔄 重新生成", callback_data: `editcontent_regen_${id}` }],
             [{ text: "❌ 取消", callback_data: `settings_${id}` }],
           ],
@@ -24764,6 +24764,28 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const mode = pending.mode === "replace" ? "replace" : "patch";
+      if (mode === "patch") {
+        const nextContent = String(text || "").trim();
+        if (!nextContent) {
+          await bot.sendMessage(chatId, "❌ 人设简介不能为空，请重新进入编辑后发送完整简介。", {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${pending.archiveId}` }]] },
+          });
+          return;
+        }
+        const updated = await updatePersonaArchiveProfile(pending.archiveId, {
+          content: nextContent,
+          setup: {
+            personaDescription: nextContent,
+            contentTheme: nextContent,
+            customTopic: nextContent,
+          } as Partial<DramaSetup>,
+        }).catch(() => null);
+        invalidatePersonaListCache();
+        await bot.sendMessage(chatId, `✅ 人设简介已替换\n\n${(updated?.content || nextContent).slice(0, 500)}`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${pending.archiveId}` }]] },
+        });
+        return;
+      }
       const thinking = await bot.sendMessage(chatId, `🧠 ${mode === "replace" ? "正在重新生成人设简介..." : "正在编辑人设简介..."}`);
       let rewriteError = "";
       const rewritten = await rewritePersonaIntroWithCodex(archive, text, mode).catch((error: any) => {
