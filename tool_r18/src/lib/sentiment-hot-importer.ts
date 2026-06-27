@@ -1352,9 +1352,29 @@ async function fillSentimentHotCandidatesToLimit(args: {
     if (out.length >= args.limit) break;
   }
 
+  if (args.refresh === true && out.length < args.limit) {
+    const beforeSoftBackfillCount = out.length;
+    const softBackfillCandidates = [
+      ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit * 12, false),
+      ...(await readCandidatesFromDatabase({
+        archiveId: args.archiveId,
+        keywords: args.keywords,
+        limit: args.limit * 12,
+        excludeShown: false,
+      }).catch(() => [])),
+    ];
+    for (const candidate of softBackfillCandidates) {
+      add(candidate);
+      if (out.length >= args.limit) break;
+    }
+    if (out.length > beforeSoftBackfillCount) {
+      args.warnings.push(`未展示候選不足 ${args.limit} 篇，已用近期展示過但未發布/未導入的候選低優先級回補 ${out.length - beforeSoftBackfillCount} 篇。`);
+    }
+  }
+
   if (out.length >= args.limit) {
     if (args.refresh === true) {
-      args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u50c5\u4f7f\u7528\u672a\u5c55\u793a\u904e\u7684\u9ad8\u71b1\u5ea6\u5019\u9078\u88dc\u8db3\uff1b\u4e0d\u6703\u7528\u91cd\u8907\u820a\u63a8\u6587\u786c\u5145\u6578\u3002");
+      args.warnings.push("即時新結果不足 " + args.limit + " 篇，已按未展示優先、近期展示低優先級的策略補足候選。");
     } else {
       args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u7528\u540c\u4eba\u8a2d\u95dc\u9375\u8a5e\u7684\u9ad8\u71b1\u5ea6\u6b77\u53f2\u5019\u9078\u88dc\u9f4a\u3002");
     }
