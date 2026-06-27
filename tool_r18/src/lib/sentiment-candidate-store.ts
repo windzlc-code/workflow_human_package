@@ -32,10 +32,11 @@ export interface SentimentHotCandidate {
   publishedAt?: string;
   capturedAt: string;
   warnings?: string[];
+  qaPassed?: boolean;
 }
 
 type StoreState = {
-  shown: Record<string, string[]>;
+  shown: Record<string, Array<string | { id: string; at?: string }>>;
   selected: Record<string, string[]>;
   imported: Record<string, string[]>;
 };
@@ -78,10 +79,14 @@ export function getSentimentHotExcludedIds(archiveId: string): Set<string> {
   ]);
 }
 
+function shownEntryId(entry: string | { id: string; at?: string }): string {
+  return typeof entry === "string" ? entry : String(entry?.id || "");
+}
+
 export function getSentimentHotRefreshExcludedIds(archiveId: string): Set<string> {
   const state = readState();
   return new Set([
-    ...(state.shown[archiveId] || []),
+    ...(state.shown[archiveId] || []).map(shownEntryId).filter(Boolean),
     ...(state.selected[archiveId] || []),
     ...(state.imported[archiveId] || []),
   ]);
@@ -89,14 +94,21 @@ export function getSentimentHotRefreshExcludedIds(archiveId: string): Set<string
 
 export function getSentimentHotShownIds(archiveId: string): Set<string> {
   const state = readState();
-  return new Set(state.shown[archiveId] || []);
+  return new Set((state.shown[archiveId] || []).map(shownEntryId).filter(Boolean));
 }
 
 export function rememberSentimentHotShown(archiveId: string, candidates: SentimentHotCandidate[]) {
   const state = readState();
-  const current = new Set(state.shown[archiveId] || []);
-  for (const candidate of candidates) current.add(candidate.id);
-  state.shown[archiveId] = [...current].slice(-500);
+  const now = new Date().toISOString();
+  const current = new Map<string, { id: string; at: string }>();
+  for (const entry of state.shown[archiveId] || []) {
+    const id = shownEntryId(entry);
+    if (!id) continue;
+    const at = typeof entry === "string" ? "" : String(entry.at || "");
+    current.set(id, { id, at });
+  }
+  for (const candidate of candidates) current.set(candidate.id, { id: candidate.id, at: now });
+  state.shown[archiveId] = [...current.values()].slice(-500);
   writeState(state);
 }
 
