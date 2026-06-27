@@ -33,8 +33,7 @@ const THREADS_READER_TOTAL_QUERY_LIMIT = 36;
 const THREADS_READER_QUERY_BATCH_SIZE = 6;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
-const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 12_000;
-const SENTIMENT_HOT_STAGE_THREADS_SEARCH_TIMEOUT_MS = 28_000;
+const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 22_000;
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "經驗",
@@ -1988,7 +1987,6 @@ async function fetchThreadsSearchPageCandidates(args: {
   limit: number;
   refresh?: boolean;
 }): Promise<SentimentHotCandidate[]> {
-  const stageDeadlineAt = Date.now() + SENTIMENT_HOT_STAGE_THREADS_SEARCH_TIMEOUT_MS;
   const baseQueries = buildThreadsSearchQueries(args.keywords);
   const shownIds = getSentimentHotShownIds(args.archiveId);
   const selectedOrImportedIds = getSentimentHotExcludedIds(args.archiveId);
@@ -2003,7 +2001,7 @@ async function fetchThreadsSearchPageCandidates(args: {
     queries: queries.slice(0, THREADS_BROWSER_QUERY_LIMIT),
     limit: args.limit,
     excludeIds: primaryExcluded,
-    deadlineAt: Math.min(stageDeadlineAt, Date.now() + SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS),
+    deadlineAt: Date.now() + SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS,
   }).catch(() => []);
 
   if (browserResults.length > 0) {
@@ -2034,7 +2032,6 @@ async function fetchThreadsSearchPageCandidates(args: {
     limit: args.limit,
     refresh: args.refresh,
     excludeIds: primaryExcluded,
-    deadlineAt: stageDeadlineAt,
   }).catch(() => []);
 
   if (readerResults.length < args.limit) {
@@ -2042,7 +2039,6 @@ async function fetchThreadsSearchPageCandidates(args: {
     const existingKeys = new Set(readerResults.map((candidate) => sentimentCandidateDedupeKey(candidate)));
     const remainingQueries = queries.slice(THREADS_READER_INITIAL_QUERY_LIMIT, THREADS_READER_TOTAL_QUERY_LIMIT);
     for (let offset = 0; offset < remainingQueries.length && existing.size < args.limit; offset += THREADS_READER_QUERY_BATCH_SIZE) {
-      if (Date.now() >= stageDeadlineAt) break;
       const extraResults = await fetchThreadsReaderSearchCandidates({
         archiveId: args.archiveId,
         keywords: args.keywords,
@@ -2050,7 +2046,6 @@ async function fetchThreadsSearchPageCandidates(args: {
         limit: args.limit,
         refresh: args.refresh,
         excludeIds: primaryExcluded,
-        deadlineAt: stageDeadlineAt,
       }).catch(() => []);
       for (const candidate of extraResults) {
         const dedupeKey = sentimentCandidateDedupeKey(candidate);
@@ -2157,16 +2152,12 @@ async function fetchThreadsReaderSearchCandidates(args: {
   limit: number;
   refresh?: boolean;
   excludeIds?: Set<string>;
-  deadlineAt?: number;
 }): Promise<SentimentHotCandidate[]> {
   const excluded = args.excludeIds || (args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : getSentimentHotExcludedIds(args.archiveId));
   const all: SentimentHotCandidate[] = [];
   const allKeys = new Set<string>();
-  if (args.deadlineAt && Date.now() >= args.deadlineAt) return [];
   const searches = await Promise.all(
     args.queries.map(async (query, index) => {
-      const timeoutMs = Math.min(18_000, remainingSentimentDeadlineMs(args.deadlineAt, 18_000));
-      if (timeoutMs <= 250) return { query, targetUrl: "", text: "" };
       const targetUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
       const readerTargetUrl = args.refresh ? `${targetUrl}&__r=${Date.now().toString(36)}${index}` : targetUrl;
       try {
@@ -2177,7 +2168,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
             "cache-control": args.refresh ? "no-cache" : "max-age=300",
             pragma: args.refresh ? "no-cache" : "",
           },
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(18_000),
         });
         if (!response.ok) return { query, targetUrl, text: "" };
         return { query, targetUrl, text: await response.text() };
