@@ -2107,7 +2107,6 @@ async function fetchThreadsBrowserSearchCandidates(args: {
     const browser = await chromium.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-dev-shm-usage"],
-      timeout: 10_000,
     });
     try {
       const context = await browser.newContext({
@@ -2139,9 +2138,9 @@ async function fetchThreadsBrowserSearchCandidates(args: {
           if (results.length >= args.limit) break;
         }
       }
-      await Promise.race([context.close(), waitSentiment(1000)]).catch(() => undefined);
+      await context.close();
     } finally {
-      await closeSentimentBrowser(browser).catch(() => undefined);
+      await browser.close().catch(() => undefined);
     }
   } catch {
     // Playwright is optional; reader/cache/database paths still keep the Telegram flow alive.
@@ -2150,16 +2149,6 @@ async function fetchThreadsBrowserSearchCandidates(args: {
 }
 
 const JINA_READER_PREFIX = "https://r.jina.ai/http://";
-
-async function closeSentimentBrowser(browser: any): Promise<void> {
-  if (!browser) return;
-  const close = Promise.resolve(browser.close()).catch(() => undefined);
-  await Promise.race([close, waitSentiment(1500)]);
-  const process = typeof browser.process === "function" ? browser.process() : null;
-  if (process && typeof process.kill === "function" && !process.killed) {
-    process.kill("SIGKILL");
-  }
-}
 
 async function fetchThreadsReaderSearchCandidates(args: {
   archiveId: string;
