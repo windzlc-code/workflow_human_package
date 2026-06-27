@@ -12492,6 +12492,7 @@ async function loadSelectablePersonaMemories(archiveId: string): Promise<Persona
       summary: normalizeMemorySummaryForStorage(String(entry?.summary || "")),
     }))
     .filter((entry) => String(entry?.summary || "").trim())
+    .filter((entry) => !isAutoImportedHotMemorySummary(entry.summary))
     .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())
     .slice(0, MAX_SELECTABLE_PERSONA_MEMORIES);
   const entries: PersonaMemoryEntry[] = [...persisted];
@@ -12533,6 +12534,13 @@ async function loadSelectablePersonaMemories(archiveId: string): Promise<Persona
     console.log(`[telegram][memory_fallback] archive=${archiveId} count=${entries.length}`);
   }
   return entries;
+}
+
+function isAutoImportedHotMemorySummary(summary: string): boolean {
+  const text = normalizeTelegramSingleLine(summary).toLowerCase();
+  return /(?:舆情热点素材|輿情熱點素材|热点素材|熱點素材)\s*\|\s*平台[:：]?\s*(?:threads|instagram)/i.test(text)
+    || /平台[:：]?\s*(?:threads|instagram)\s*\|\s*数据[:：]?/i.test(text)
+    || /平台[:：]?\s*(?:threads|instagram)\s*\|\s*數據[:：]?/i.test(text);
 }
 
 const GENERATE_MEMORY_PAGE_SIZE = 10;
