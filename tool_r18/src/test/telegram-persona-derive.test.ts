@@ -12,6 +12,7 @@ import {
   buildPostImageRegenerateCallback,
   buildPersonaSettingsRows,
   buildPersonaPlatformAccountRows,
+  buildLinkEndingSettingsRows,
   calculateSentimentHotRewriteMinLength,
   formatPersonaSettingsHotMetricsLines,
   buildPostDetailActionRows,
@@ -218,6 +219,36 @@ describe("buildPadDetailActionRows", () => {
 });
 
 describe("link ending presets", () => {
+  it("renders editable preset rows with an empty checkbox for inactive presets", () => {
+    const rows = buildLinkEndingSettingsRows("archive-1", {
+      activeLinkEndingPresetId: "preset-b",
+      linkEndingPresets: [
+        {
+          id: "preset-a",
+          name: "模板A",
+          endingText: "结尾A",
+          linkUrl: "https://example.com/a",
+          enabled: false,
+        },
+        {
+          id: "preset-b",
+          name: "模板B",
+          endingText: "结尾B",
+          linkUrl: "https://example.com/b",
+          enabled: true,
+        },
+      ],
+    });
+    const texts = rows.flat().map((button) => button.text);
+    const callbacks = rows.flat().map((button) => button.callback_data);
+
+    expect(texts).toContain("☐ 模板A");
+    expect(texts).toContain("✅ 模板B");
+    expect(texts).not.toContain("⭕ 模板A");
+    expect(callbacks).toContain("lpe_archive-1_0");
+    expect(callbacks).toContain("lpd_archive-1_0");
+  });
+
   it("parses ending text and URL even when the user sends them on one line", () => {
     const preset = parseLinkEndingPresetFromText("你好啊https://example.com/more");
 
