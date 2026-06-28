@@ -63,28 +63,6 @@ const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "清单",
 ];
 
-const SIMPLIFIED_TO_TRADITIONAL_SEARCH_CHARS: Record<string, string> = {
-  债: "債",
-  务: "務",
-  贷: "貸",
-  财: "財",
-  资: "資",
-  划: "劃",
-  规: "規",
-  经: "經",
-  验: "驗",
-  识: "識",
-  银: "銀",
-  审: "審",
-  学: "學",
-  习: "習",
-  课: "課",
-  动: "動",
-  导: "導",
-  计: "計",
-  广: "廣",
-};
-
 function resolvePreferredChromeExecutablePath(): string | undefined {
   const candidates = [
     process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -742,6 +720,7 @@ async function reviewSentimentHotKeywordsWithModel(args: {
           "输出前自检：每个词单独放进搜索框时，是否能搜索到真实话题；如果答案不确定或只是形容人设，就删除。",
           "",
           "人设资料：",
+          "\u5982\u679c\u5019\u9078\u8a5e\u662f\u7c21\u9ad4\u6982\u5ff5\uff0c\u8acb\u5728\u5be9\u67e5\u8f38\u51fa\u4e2d\u76f4\u63a5\u6539\u6210 Threads / Instagram \u4e0a\u66f4\u5bb9\u6613\u641c\u5230\u7684\u7e41\u9ad4\u4e2d\u6587\u540d\u8a5e\u77ed\u8a9e\uff1b\u4f8b\u5982\u8f38\u51fa\u201c\u8cb8\u6b3e\u201d\u3001\u201c\u7406\u8ca1\u898f\u5283\u201d\u3001\u201c\u50b5\u52d9\u6574\u5408\u201d\uff0c\u4e0d\u8981\u4fdd\u7559\u201c\u8d37\u6b3e\u201d\u3001\u201c\u7406\u8d22\u89c4\u5212\u201d\u3001\u201c\u503a\u52a1\u6574\u5408\u201d\u9019\u985e\u5f62\u5f0f\u3002",
           args.personaText,
           "",
           "候选关键词：",
@@ -801,6 +780,7 @@ async function buildSentimentHotKeywordsWithModel(args: {
             "8. 不要为了凑数扩展到无关领域；宁可少于 10 个，也不要宽泛。",
             "9. 输出前自检并删除不合格项：不是名词短语的删除；带“的/了/他/她/我/你/自认/说话/风格/性格”的删除；无法单独搜索的删除。",
             "10. 单个关键词 2-12 个中文字，最多 10 个，按优先级排序。",
+            "\u0031\u0031\u002e \u5982\u679c\u4eba\u8a2d\u8cc7\u6599\u662f\u7c21\u9ad4\u4e2d\u6587\uff0c\u4f60\u5fc5\u9808\u81ea\u884c\u7522\u751f Threads / Instagram \u4e0a\u66f4\u5bb9\u6613\u641c\u5230\u7684\u7e41\u9ad4\u4e2d\u6587\u95dc\u9375\u8a5e\uff1b\u4f8b\u5982\u628a\u201c\u8d37\u6b3e\u201d\u6982\u5ff5\u8f38\u51fa\u70ba\u201c\u8cb8\u6b3e\u201d\uff0c\u628a\u201c\u7406\u8d22\u89c4\u5212\u201d\u6982\u5ff5\u8f38\u51fa\u70ba\u201c\u7406\u8ca1\u898f\u5283\u201d\u3002\u9019\u662f\u6a21\u578b\u8f38\u51fa\u898f\u7bc4\uff0c\u4e0d\u8981\u7b49\u7a0b\u5f0f\u515c\u5e95\u8f49\u63db\u3002",
             "",
             "人设资料：",
             personaText,
@@ -1817,12 +1797,6 @@ function buildOrderedSentimentQueries(baseQueries: string[], seed: number, refre
   return [...baseQueries, ...rotateSentimentQueries(supplemental, seed)];
 }
 
-function buildTraditionalSearchQueryVariant(value: string): string {
-  const text = cleanText(value);
-  if (!text) return "";
-  return [...text].map((char) => SIMPLIFIED_TO_TRADITIONAL_SEARCH_CHARS[char] || char).join("");
-}
-
 function buildDynamicSearchQueryVariants(baseQueries: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -1858,15 +1832,10 @@ function buildDynamicSearchQueryVariants(baseQueries: string[]): string[] {
 
   for (const query of baseQueries) {
     add(query);
-    add(buildTraditionalSearchQueryVariant(query));
     for (const variant of expandSentimentSearchKeywordVariants(query)) add(variant);
-    for (const variant of expandSentimentSearchKeywordVariants(query)) add(buildTraditionalSearchQueryVariant(variant));
     addQualityIntentQueries(query);
-    addQualityIntentQueries(buildTraditionalSearchQueryVariant(query));
     for (const variant of expandSentimentSearchKeywordVariants(query)) addQualityIntentQueries(variant);
-    for (const variant of expandSentimentSearchKeywordVariants(query)) addQualityIntentQueries(buildTraditionalSearchQueryVariant(variant));
     addSplitParts(query);
-    addSplitParts(buildTraditionalSearchQueryVariant(query));
   }
   return out.slice(0, 120);
 }
