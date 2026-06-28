@@ -24,9 +24,11 @@ import {
   inferStoredPostMediaKind,
   isSentimentHotRewriteTooShort,
   normalizeThreadsProfileLinkInput,
+  parseLinkEndingPresetFromText,
   parseSimplePagedCallback,
   parsePersonaContentTypeCallback,
   parseStoredPostsCallback,
+  applyLinkEndingPresetToText,
 } from "@/telegram-bot";
 import type { PersonaArchive } from "@/core/archives/persona-archive-domain";
 
@@ -212,6 +214,31 @@ describe("buildPadDetailActionRows", () => {
     expect(callbacks.some((callback) => callback.startsWith("pad_threads_profile_"))).toBe(false);
     expect(callbacks.some((callback) => callback.startsWith("pad_threads_auto_reply_"))).toBe(false);
     expect(callbacks.some((callback) => callback.startsWith("warmup_start_"))).toBe(false);
+  });
+});
+
+describe("link ending presets", () => {
+  it("parses ending text and URL even when the user sends them on one line", () => {
+    const preset = parseLinkEndingPresetFromText("你好啊https://example.com/more");
+
+    expect(preset).toEqual({
+      name: "你好啊",
+      linkUrl: "https://example.com/more",
+      endingText: "你好啊",
+    });
+  });
+
+  it("appends the active ending and link without duplicating old copies", () => {
+    const content = "今天整理了一些重點。\n你好啊\nhttps://example.com/more";
+    const next = applyLinkEndingPresetToText(content, {
+      endingText: "你好啊",
+      linkUrl: "https://example.com/more",
+    });
+
+    expect(next).toContain("今天整理了一些重點。");
+    expect(next.endsWith("你好啊\nhttps://example.com/more")).toBe(true);
+    expect(next.match(/你好啊/g)).toHaveLength(1);
+    expect(next.match(/https:\/\/example\.com\/more/g)).toHaveLength(1);
   });
 });
 

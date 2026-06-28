@@ -4494,7 +4494,7 @@ function buildLinkEndingSettingsRows(archiveId: string, setup: any): Array<Array
   return rows;
 }
 
-function parseLinkEndingPresetFromText(input: string, msg?: TelegramBot.Message): Omit<LinkEndingPreset, "id" | "createdAt" | "updatedAt" | "enabled"> | null {
+export function parseLinkEndingPresetFromText(input: string, msg?: TelegramBot.Message): Omit<LinkEndingPreset, "id" | "createdAt" | "updatedAt" | "enabled"> | null {
   const raw = String(input || "").trim();
   const linkUrl = extractTweetStyleLinkUrl(raw) || (msg ? extractTweetStyleLinkUrlFromTelegramMessage(msg) : undefined) || "";
   const endingText = raw
@@ -4520,7 +4520,7 @@ function buildPersonaPublishCaption(content: string, setup: any): string {
   return applyLinkEndingPresetToText(content, active);
 }
 
-function applyLinkEndingPresetToText(content: string, active: { linkUrl?: string; endingText?: string }): string {
+export function applyLinkEndingPresetToText(content: string, active: { linkUrl?: string; endingText?: string }): string {
   let next = String(content || "").trim();
   const endingText = String(active.endingText || "").trim();
   const linkUrl = String(active.linkUrl || "").trim();
@@ -4540,6 +4540,59 @@ function applyLinkEndingPresetToText(content: string, active: { linkUrl?: string
     next = `${next}\n${linkUrl}`.trim();
   }
   return next.trim();
+}
+
+async function handlePendingLinkEndingPresetInput(args: {
+  bot: TelegramBot;
+  chatId: number;
+  archiveId: string;
+  text: string;
+  msg: TelegramBot.Message;
+}) {
+  const archive = await loadPersonaForThisBot(args.archiveId).catch(() => null);
+  if (!archive) {
+    await args.bot.sendMessage(args.chatId, "❌ 當前 Bot 不能讀取這個人設。", {
+      reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+    });
+    return;
+  }
+  const presetInput = parseLinkEndingPresetFromText(args.text || "", args.msg);
+  if (!presetInput) {
+    await args.bot.sendMessage(args.chatId, "❌ 沒有讀取到結尾語句或鏈接。請重新進入「鏈接設置」後再新增。", {
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回鏈接設置", callback_data: `linksettings_${args.archiveId}` }]] },
+    });
+    return;
+  }
+  const now = new Date().toISOString();
+  const preset: LinkEndingPreset = {
+    id: `lp-${Date.now().toString(36)}`,
+    ...presetInput,
+    enabled: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const existingPresets = getLinkEndingPresets(archive.setup as any).map((item) => ({ ...item, enabled: false }));
+  const updated = await updatePersonaArchiveProfile(args.archiveId, {
+    setup: {
+      ...(archive.setup || {}),
+      linkEndingPresets: [...existingPresets, preset],
+      activeLinkEndingPresetId: preset.id,
+    } as any,
+  }).catch((error: any) => {
+    console.error("[telegram][save_link_ending_preset_error]", error?.message || error);
+    return null;
+  });
+  if (!updated) {
+    await args.bot.sendMessage(args.chatId, "❌ 鏈接設置模板保存失敗，請稍後重試。", {
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回鏈接設置", callback_data: `linksettings_${args.archiveId}` }]] },
+    });
+    return;
+  }
+  invalidatePersonaListCache();
+  await args.bot.sendMessage(args.chatId, "✅ 鏈接設置模板已保存並啟用。", {
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[{ text: "🔗 查看鏈接設置", callback_data: `linksettings_${args.archiveId}` }]] },
+  });
 }
 
 function isJinjunyaLinkPersona(setup: any): boolean {
@@ -23365,6 +23418,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
     if (msg.text?.startsWith("/")) return;
+
+    const priorityPendingAction = pendingActions.get(chatId);
+    if (priorityPendingAction?.type === "set-persona-link-ending-preset") {
+      pendingActions.delete(chatId);
+      await handlePendingLinkEndingPresetInput({
+        bot,
+        chatId,
+        archiveId: priorityPendingAction.archiveId,
+        text,
+        msg,
+      });
+      return;
+    }
 
     const pendingAutoReplyDays = pendingThreadsAutoReplyDaysInputs.get(chatId);
     if (pendingAutoReplyDays) {
