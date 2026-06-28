@@ -553,7 +553,7 @@ interface PersonaLocal {
 }
 
 const pendingActions = new Map<number, {
-  type: "bind-pad" | "edit-persona-name" | "edit-persona-content" | "create-persona" | "set-persona-tweet-style" | "set-persona-link-ending-preset" | "edit-link-ending-preset-name" | "set-telegram-group-binding";
+  type: "bind-pad" | "edit-persona-name" | "edit-persona-content" | "create-persona" | "set-persona-tweet-style" | "set-persona-link-ending-preset" | "edit-link-ending-preset-name" | "edit-link-ending-preset-content" | "set-telegram-group-binding";
   archiveId: string;
   stage?: "await_name" | "await_prompt" | "await_keywords";
   personaName?: string;
@@ -4496,6 +4496,14 @@ export function buildLinkEndingSettingsRows(archiveId: string, setup: any): Arra
   return rows;
 }
 
+export function buildLinkEndingPresetEditRows(archiveId: string, presetIndex: number): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{ text: "✏️ 修改模板名称", callback_data: `lpn_${archiveId}_${presetIndex}` }],
+    [{ text: "🔗 修改模板内容", callback_data: `lpc_${archiveId}_${presetIndex}` }],
+    [{ text: "◀️ 返回链接设置", callback_data: `linksettings_${archiveId}` }],
+  ];
+}
+
 export function parseLinkEndingPresetFromText(input: string, msg?: TelegramBot.Message): Omit<LinkEndingPreset, "id" | "createdAt" | "updatedAt" | "enabled"> | null {
   const raw = String(input || "").trim();
   const linkUrl = extractTweetStyleLinkUrl(raw) || (msg ? extractTweetStyleLinkUrlFromTelegramMessage(msg) : undefined) || "";
@@ -4637,6 +4645,59 @@ async function handleEditLinkEndingPresetNameInput(args: {
   }
   invalidatePersonaListCache();
   await args.bot.sendMessage(args.chatId, `✅ 模板名称已更新：${name}`, {
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[{ text: "🔗 查看链接设置", callback_data: `linksettings_${args.archiveId}` }]] },
+  });
+}
+
+async function handleEditLinkEndingPresetContentInput(args: {
+  bot: TelegramBot;
+  chatId: number;
+  archiveId: string;
+  presetIndex: number;
+  text: string;
+  msg: TelegramBot.Message;
+}) {
+  const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
+  if (!archive) {
+    await args.bot.sendMessage(args.chatId, "❌ 当前 Bot 不能读取这个人设。", {
+      reply_markup: { inline_keyboard: [[{ text: "🏠 主选单", callback_data: "back_main" }]] },
+    });
+    return;
+  }
+  const presets = getLinkEndingPresets(archive.setup as any);
+  const target = Number.isInteger(args.presetIndex) ? presets[args.presetIndex] : undefined;
+  const presetInput = parseLinkEndingPresetFromText(args.text || "", args.msg);
+  if (!target || !presetInput) {
+    await args.bot.sendMessage(args.chatId, "❌ 没有读取到结尾语句或链接，或模板不存在，请重新进入链接设置。", {
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回链接设置", callback_data: `linksettings_${args.archiveId}` }]] },
+    });
+    return;
+  }
+  const nextPresets = presets.map((preset, index) => (
+    index === args.presetIndex
+      ? {
+        ...preset,
+        endingText: presetInput.endingText,
+        linkUrl: presetInput.linkUrl,
+        updatedAt: new Date().toISOString(),
+      }
+      : preset
+  ));
+  const updated = await updatePersonaArchiveProfile(args.archiveId, {
+    setup: { ...(archive.setup || {}), linkEndingPresets: nextPresets } as any,
+  }).catch((error: any) => {
+    console.error("[telegram][edit_link_ending_preset_content_error]", error?.message || error);
+    return null;
+  });
+  if (!updated) {
+    await args.bot.sendMessage(args.chatId, "❌ 模板内容保存失败，请稍后重试。", {
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回链接设置", callback_data: `linksettings_${args.archiveId}` }]] },
+    });
+    return;
+  }
+  invalidatePersonaListCache();
+  await args.bot.sendMessage(args.chatId, "✅ 模板内容已更新。", {
     disable_web_page_preview: true,
     reply_markup: { inline_keyboard: [[{ text: "🔗 查看链接设置", callback_data: `linksettings_${args.archiveId}` }]] },
   });
@@ -21602,17 +21663,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
       ].join("\n"), {
         disable_web_page_preview: true,
         reply_markup: {
-          inline_keyboard: [
-            [{ text: "✏️ 修改模板名称", callback_data: `lpn_${id}_${presetIndex}` }],
-            [{ text: "◀️ 返回链接设置", callback_data: `linksettings_${id}` }],
-          ],
+          inline_keyboard: buildLinkEndingPresetEditRows(id, presetIndex),
         },
       });
       return;
     }
 
-    if (data.startsWith("lpn_")) {
-      const rest = data.slice("lpn_".length);
+    if (data.startsWith("lpn_") || data.startsWith("lpc_")) {
+      const isNameEdit = data.startsWith("lpn_");
+      const rest = data.slice((isNameEdit ? "lpn_" : "lpc_").length);
       const splitIndex = rest.lastIndexOf("_");
       if (splitIndex <= 0) { sendMainMenu(chatId, msgId); return; }
       const id = rest.slice(0, splitIndex);
@@ -21623,11 +21682,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const targetPreset = Number.isInteger(presetIndex) ? presets[presetIndex] : undefined;
       if (!targetPreset) { sendMainMenu(chatId, msgId); return; }
       pendingActions.set(chatId, {
-        type: "edit-link-ending-preset-name",
+        type: isNameEdit ? "edit-link-ending-preset-name" : "edit-link-ending-preset-content",
         archiveId: id,
         linkPresetIndex: presetIndex,
       });
-      await safeEditOrSend(bot, chatId, msgId, "请发送新的模板名称。", {
+      await safeEditOrSend(bot, chatId, msgId, isNameEdit
+        ? "请发送新的模板名称。"
+        : [
+          "请发送新的结尾语句和链接。",
+          "",
+          "格式示例：",
+          "想看更多整理，我放这里",
+          "https://example.com/more",
+        ].join("\n"), {
         disable_web_page_preview: true,
         reply_markup: { inline_keyboard: [[{ text: "取消", callback_data: `lpe_${id}_${presetIndex}` }]] },
       });
@@ -23542,6 +23609,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId: priorityPendingAction.archiveId,
         presetIndex: Number(priorityPendingAction.linkPresetIndex),
         text,
+      });
+      return;
+    }
+
+    if (priorityPendingAction?.type === "edit-link-ending-preset-content") {
+      pendingActions.delete(chatId);
+      await handleEditLinkEndingPresetContentInput({
+        bot,
+        chatId,
+        archiveId: priorityPendingAction.archiveId,
+        presetIndex: Number(priorityPendingAction.linkPresetIndex),
+        text,
+        msg,
       });
       return;
     }

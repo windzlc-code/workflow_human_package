@@ -13,6 +13,7 @@ import {
   buildPersonaSettingsRows,
   buildPersonaPlatformAccountRows,
   buildLinkEndingSettingsRows,
+  buildLinkEndingPresetEditRows,
   calculateSentimentHotRewriteMinLength,
   formatPersonaSettingsHotMetricsLines,
   buildPostDetailActionRows,
@@ -247,6 +248,15 @@ describe("link ending presets", () => {
     expect(texts).not.toContain("⭕ 模板A");
     expect(callbacks).toContain("lpe_archive-1_0");
     expect(callbacks).toContain("lpd_archive-1_0");
+  });
+
+  it("renders content editing only inside a preset edit panel", () => {
+    const rows = buildLinkEndingPresetEditRows("archive-1", 2);
+    const callbacks = rows.flat().map((button) => button.callback_data);
+
+    expect(callbacks).toContain("lpn_archive-1_2");
+    expect(callbacks).toContain("lpc_archive-1_2");
+    expect(callbacks).toContain("linksettings_archive-1");
   });
 
   it("parses ending text and URL even when the user sends them on one line", () => {
