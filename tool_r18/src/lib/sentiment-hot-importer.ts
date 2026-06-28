@@ -1448,9 +1448,29 @@ async function fillSentimentHotCandidatesToLimit(args: {
     if (out.length >= args.limit) break;
   }
 
+  if (args.refresh === true && out.length < args.limit) {
+    const beforeSoftBackfillCount = out.length;
+    const softBackfillCandidates = [
+      ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, Math.max(args.limit * 30, SENTIMENT_HOT_CANDIDATE_POOL_TARGET), false),
+      ...(await readCandidatesFromDatabase({
+        archiveId: args.archiveId,
+        keywords: args.keywords,
+        limit: Math.max(args.limit * 30, SENTIMENT_HOT_CANDIDATE_POOL_TARGET),
+        excludeShown: false,
+      }).catch(() => [])),
+    ];
+    for (const candidate of softBackfillCandidates) {
+      add(candidate);
+      if (out.length >= args.limit) break;
+    }
+    if (out.length > beforeSoftBackfillCount) {
+      args.warnings.push("\u672a\u5c55\u793a\u5019\u9078\u4e0d\u8db3\uff0c\u5df2\u4f7f\u7528\u8fd1\u671f\u5c55\u793a\u904e\u4f46\u672a\u767c\u4f48/\u672a\u5c0e\u5165\u7684\u5019\u9078\u4f4e\u512a\u5148\u7d1a\u56de\u88dc\u3002");
+    }
+  }
+
   if (out.length >= args.limit) {
     if (args.refresh === true) {
-      args.warnings.push("即時新結果不足 " + args.limit + " 篇，已按未展示優先的策略補足候選。");
+      args.warnings.push("即時新結果不足 " + args.limit + " 篇，已按未展示優先、近期展示低優先級的策略補足候選。");
     } else {
       args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u7528\u540c\u4eba\u8a2d\u95dc\u9375\u8a5e\u7684\u9ad8\u71b1\u5ea6\u6b77\u53f2\u5019\u9078\u88dc\u9f4a\u3002");
     }
@@ -1694,7 +1714,6 @@ export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHo
   const sorted = candidates
     .filter((candidate) => isUsefulHotCandidate(candidate) && hasMinimumSentimentHotContentLength(candidate))
     .filter((candidate) => keywords.length === 0 || candidateMatchesCurrentKeywords(candidate, keywords))
-    .filter((candidate) => !(options?.excludeShown && shownIds.has(candidate.id)))
     .sort((a, b) => {
       const aShown = shownIds.has(a.id) ? 1 : 0;
       const bShown = shownIds.has(b.id) ? 1 : 0;
@@ -3889,12 +3908,21 @@ function isLikelyInstagramAuthor(value: string) {
 }
 
 async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: number): Promise<{ text: string; url: string }> {
+  const encodedQuery = encodeURIComponent(query);
+  const primarySearchUrl = `https://www.threads.net/search?q=${encodedQuery}`;
   const searchUrl = "https://www.threads.com/search";
-  const directSearchUrl = `https://www.threads.com/search?q=${encodeURIComponent(query)}&serp_type=default`;
+  const directSearchUrl = `https://www.threads.com/search?q=${encodedQuery}&serp_type=default`;
+  await page.goto(primarySearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(8_000, remainingSentimentDeadlineMs(deadlineAt, 8_000)) }).catch(() => undefined);
+  await page.waitForTimeout(Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)));
+  if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || primarySearchUrl };
+  const primaryText = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
+  if (primaryText && primaryText.trim().length > 120) {
+    return { text: primaryText, url: page.url() || primarySearchUrl };
+  }
   await page.goto(directSearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(6_000, remainingSentimentDeadlineMs(deadlineAt, 6_000)) }).catch(async () => {
     await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(4_000, remainingSentimentDeadlineMs(deadlineAt, 4_000)) }).catch(() => undefined);
   });
-  if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
+  if (deadlineAt && Date.now() >= deadlineAt) return { text: primaryText || "", url: page.url() || searchUrl };
   const searchInput = page.locator('input[type="search"], input[placeholder*="搜尋"], input[placeholder*="Search"], textarea, [contenteditable="true"]').first();
   await searchInput.click({ timeout: Math.min(1_000, remainingSentimentDeadlineMs(deadlineAt, 1_000)) }).catch(() => undefined);
   await searchInput.fill(query, { timeout: Math.min(1_000, remainingSentimentDeadlineMs(deadlineAt, 1_000)) }).catch(async () => {
@@ -3902,8 +3930,9 @@ async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: 
   });
   await page.keyboard.press("Enter").catch(() => undefined);
   await page.waitForTimeout(Math.min(1_200, remainingSentimentDeadlineMs(deadlineAt, 1_200)));
-  if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
-  const text = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
+  if (deadlineAt && Date.now() >= deadlineAt) return { text: primaryText || "", url: page.url() || searchUrl };
+  const fallbackText = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
+  const text = fallbackText && fallbackText.trim().length > primaryText.trim().length ? fallbackText : primaryText;
   return { text, url: page.url() || directSearchUrl };
 }
 
