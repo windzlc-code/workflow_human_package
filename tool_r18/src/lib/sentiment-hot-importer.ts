@@ -63,6 +63,28 @@ const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "清单",
 ];
 
+const SIMPLIFIED_TO_TRADITIONAL_SEARCH_CHARS: Record<string, string> = {
+  债: "債",
+  务: "務",
+  贷: "貸",
+  财: "財",
+  资: "資",
+  划: "劃",
+  规: "規",
+  经: "經",
+  验: "驗",
+  识: "識",
+  银: "銀",
+  审: "審",
+  学: "學",
+  习: "習",
+  课: "課",
+  动: "動",
+  导: "導",
+  计: "計",
+  广: "廣",
+};
+
 function resolvePreferredChromeExecutablePath(): string | undefined {
   const candidates = [
     process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
@@ -1795,6 +1817,12 @@ function buildOrderedSentimentQueries(baseQueries: string[], seed: number, refre
   return [...baseQueries, ...rotateSentimentQueries(supplemental, seed)];
 }
 
+function buildTraditionalSearchQueryVariant(value: string): string {
+  const text = cleanText(value);
+  if (!text) return "";
+  return [...text].map((char) => SIMPLIFIED_TO_TRADITIONAL_SEARCH_CHARS[char] || char).join("");
+}
+
 function buildDynamicSearchQueryVariants(baseQueries: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -1830,10 +1858,15 @@ function buildDynamicSearchQueryVariants(baseQueries: string[]): string[] {
 
   for (const query of baseQueries) {
     add(query);
+    add(buildTraditionalSearchQueryVariant(query));
     for (const variant of expandSentimentSearchKeywordVariants(query)) add(variant);
+    for (const variant of expandSentimentSearchKeywordVariants(query)) add(buildTraditionalSearchQueryVariant(variant));
     addQualityIntentQueries(query);
+    addQualityIntentQueries(buildTraditionalSearchQueryVariant(query));
     for (const variant of expandSentimentSearchKeywordVariants(query)) addQualityIntentQueries(variant);
+    for (const variant of expandSentimentSearchKeywordVariants(query)) addQualityIntentQueries(buildTraditionalSearchQueryVariant(variant));
     addSplitParts(query);
+    addSplitParts(buildTraditionalSearchQueryVariant(query));
   }
   return out.slice(0, 120);
 }
