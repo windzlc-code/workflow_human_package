@@ -33,7 +33,7 @@ const THREADS_READER_TOTAL_QUERY_LIMIT = 36;
 const THREADS_READER_QUERY_BATCH_SIZE = 6;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
-const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 6_000;
+const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 14_000;
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "經驗",
@@ -3792,13 +3792,22 @@ function isLikelyInstagramAuthor(value: string) {
 }
 
 async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: number): Promise<{ text: string; url: string }> {
-  const searchUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
-  await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(20_000, remainingSentimentDeadlineMs(deadlineAt, 20_000)) });
+  const searchUrl = "https://www.threads.com/search";
+  const directSearchUrl = `https://www.threads.com/search?q=${encodeURIComponent(query)}&serp_type=default`;
+  await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(20_000, remainingSentimentDeadlineMs(deadlineAt, 20_000)) }).catch(async () => {
+    await page.goto(directSearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(10_000, remainingSentimentDeadlineMs(deadlineAt, 10_000)) });
+  });
   if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
-  await page.waitForTimeout(Math.min(2_500, remainingSentimentDeadlineMs(deadlineAt, 2_500)));
+  const searchInput = page.locator('input[type="search"], input[placeholder*="搜尋"], input[placeholder*="Search"], textarea, [contenteditable="true"]').first();
+  await searchInput.click({ timeout: Math.min(3_000, remainingSentimentDeadlineMs(deadlineAt, 3_000)) }).catch(() => undefined);
+  await searchInput.fill(query, { timeout: Math.min(3_000, remainingSentimentDeadlineMs(deadlineAt, 3_000)) }).catch(async () => {
+    await page.keyboard.type(query).catch(() => undefined);
+  });
+  await page.keyboard.press("Enter").catch(() => undefined);
+  await page.waitForTimeout(Math.min(4_000, remainingSentimentDeadlineMs(deadlineAt, 4_000)));
   if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
   const text = await page.locator("body").innerText({ timeout: Math.min(5_000, remainingSentimentDeadlineMs(deadlineAt, 5_000)) }).catch(() => "");
-  return { text, url: page.url() || searchUrl };
+  return { text, url: page.url() || directSearchUrl };
 }
 
 const THREADS_SEARCH_CACHE_FILE = resolveRuntimeFile("sentiment_threads_search_cache.json");
