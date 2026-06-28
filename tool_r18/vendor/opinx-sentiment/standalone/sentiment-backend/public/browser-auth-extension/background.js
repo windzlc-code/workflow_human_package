@@ -1,4 +1,4 @@
-const DEFAULT_API_BASE = "http://47.250.188.76";
+const DEFAULT_API_BASE = "http://43.167.237.120";
 
 const PROFILES = [
   {

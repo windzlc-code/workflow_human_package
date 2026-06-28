@@ -869,6 +869,7 @@ Instagram
                       pk: "3925594288747063183",
                       code: "DZ1ABCxyz",
                       canonical_url: "https://www.threads.com/@stevie875443/post/DZ1ABCxyz",
+                      taken_at: 1782075045,
                       like_count: 954,
                       text_post_app_info: {
                         direct_reply_count: 68,
@@ -893,6 +894,7 @@ Instagram
       pk: "3925594288747063183",
       code: "DZ1ABCxyz",
       sourceUrl: "https://www.threads.com/@stevie875443/post/DZ1ABCxyz",
+      publishedAt: "2026-06-21T20:50:45.000Z",
       likeCount: 954,
       commentCount: 68,
       repostCount: 92,

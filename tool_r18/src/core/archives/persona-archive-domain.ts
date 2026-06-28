@@ -30,6 +30,19 @@ export type ArchiveSetup = Partial<DramaSetup> & {
     complete?: boolean;
     scope?: string;
     lightRefreshedAt?: string;
+    postMetrics?: Array<{
+      pk?: string;
+      code?: string;
+      sourceUrl: string;
+      content?: string;
+      publishedAt?: string;
+      likeCount?: number;
+      commentCount?: number;
+      repostCount?: number;
+      shareCount?: number;
+      viewCount?: number;
+      capturedAt?: string;
+    }>;
     refreshedAt?: string;
     error?: string;
   }>;

@@ -85,6 +85,16 @@ function buildLocalChromiumLaunchOptions() {
   };
 }
 
+async function addCookiesBestEffort(context: any, cookies: any[]) {
+  const usable = (cookies || []).filter((cookie) => cookie?.name && cookie?.value && cookie?.domain);
+  if (!usable.length) return;
+  const ok = await context.addCookies(usable as any).then(() => true).catch(() => false);
+  if (ok) return;
+  for (const cookie of usable) {
+    await context.addCookies([cookie] as any).catch(() => undefined);
+  }
+}
+
 export type SentimentCookieHealth = "healthy" | "watch" | "degraded" | "expired" | "missing" | "unknown";
 
 export interface SentimentCookieStatus {
@@ -118,6 +128,20 @@ export interface ThreadsBrowserProfilePublishedPostSnapshot {
   capturedAt: string;
 }
 
+export type ThreadsProfilePostHotMetrics = {
+  pk?: string;
+  code?: string;
+  sourceUrl: string;
+  content?: string;
+  publishedAt?: string;
+  likeCount?: number;
+  commentCount?: number;
+  repostCount?: number;
+  shareCount?: number;
+  viewCount?: number;
+  capturedAt?: string;
+};
+
 export type ThreadsProfileHotMetrics = {
   platform: "threads";
   username: string;
@@ -136,12 +160,26 @@ export type ThreadsProfileHotMetrics = {
   complete?: boolean;
   scope?: "authenticated_full_profile" | "public_partial" | "reader_public_partial" | "profile_visible_light" | "failed";
   lightRefreshedAt?: string;
+  postMetrics?: ThreadsProfilePostHotMetrics[];
   rawText?: string;
   error?: string;
 };
 
 function cleanText(value: unknown): string {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeThreadsTimestamp(value: unknown): string | undefined {
+  if (value == null || value === "") return undefined;
+  if (typeof value === "string" && /\d{4}-\d{2}-\d{2}T/.test(value)) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
+  const millis = numeric > 100000000000 ? numeric : numeric * 1000;
+  const date = new Date(millis);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
 function safeJson(value: unknown): any {
@@ -2526,10 +2564,13 @@ type ThreadsGraphqlProfilePostAggregate = {
   pk: string;
   code: string;
   sourceUrl: string;
+  content?: string;
+  publishedAt?: string;
   likeCount: number;
   commentCount: number;
   repostCount: number;
   shareCount: number;
+  viewCount?: number;
 };
 
 type ThreadsGraphqlProfilePageResult = {
@@ -2555,6 +2596,19 @@ function buildThreadsGraphqlProfileSourceUrl(username: string, post: any): strin
   return `https://www.threads.com/@${encodeURIComponent(normalizedUsername)}/post/${encodeURIComponent(code)}`;
 }
 
+function normalizeThreadsPostUrlKey(value: unknown): string {
+  return String(value || "")
+    .replace(/^https:\/\/www\.threads\.net\//i, "https://www.threads.com/")
+    .replace(/[?#].*$/, "")
+    .replace(/\/+$/, "");
+}
+
+function resolveThreadsProfilePostMergeKey(post: Partial<ThreadsGraphqlProfilePostAggregate>) {
+  return cleanText(post.code)
+    || normalizeThreadsPostUrlKey(post.sourceUrl)
+    || cleanText(post.pk);
+}
+
 export function parseThreadsGraphqlProfilePagePayload(args: {
   username: string;
   payload: any;
@@ -2566,11 +2620,20 @@ export function parseThreadsGraphqlProfilePagePayload(args: {
     const post = edge?.node?.thread_items?.[0]?.post;
     const pk = cleanText(post?.pk);
     const sourceUrl = buildThreadsGraphqlProfileSourceUrl(args.username, post);
+    const content = cleanText(post?.caption?.text || post?.text_post_app_info?.share_text || post?.text_post_app_info?.text || "");
+    const publishedAt = normalizeThreadsTimestamp(
+      post?.taken_at
+        ?? post?.taken_at_timestamp
+        ?? post?.created_at
+        ?? post?.caption?.created_at,
+    );
     if (!pk || !sourceUrl) continue;
     posts.push({
       pk,
       code: cleanText(post?.code),
       sourceUrl,
+      ...(content ? { content } : {}),
+      ...(publishedAt ? { publishedAt } : {}),
       likeCount: Math.max(0, Number(post?.like_count) || 0),
       commentCount: Math.max(0, Number(post?.text_post_app_info?.direct_reply_count) || 0),
       repostCount: Math.max(0, Number(post?.text_post_app_info?.repost_count) || 0),
@@ -2667,6 +2730,150 @@ async function collectThreadsGraphqlProfilePosts(args: {
   return { posts: [...byPk.values()], reachedEnd: pageInfoResolved && hasNextPage !== true };
 }
 
+async function scrollThreadsProfileUntilGraphqlEnd(args: {
+  page: any;
+  capturedGraphqlPages: Map<string, { payload: any; template: ThreadsGraphqlRequestTemplate }>;
+  username: string;
+  maxScrolls?: number;
+}) {
+  let stagnantRounds = 0;
+  let lastCount = args.capturedGraphqlPages.size;
+  for (let scroll = 0; scroll < (args.maxScrolls || 80); scroll += 1) {
+    const reachedEnd = [...args.capturedGraphqlPages.values()].some(({ payload }) => {
+      const pageResult = parseThreadsGraphqlProfilePagePayload({ username: args.username, payload });
+      return pageResult.pageInfoResolved && pageResult.hasNextPage !== true;
+    });
+    if (reachedEnd) return;
+    await args.page.mouse.wheel(0, 1800).catch(() => undefined);
+    await args.page.waitForTimeout(900);
+    const nextCount = args.capturedGraphqlPages.size;
+    if (nextCount === lastCount) {
+      stagnantRounds += 1;
+      if (stagnantRounds >= 5) return;
+    } else {
+      stagnantRounds = 0;
+      lastCount = nextCount;
+    }
+  }
+}
+
+function normalizeThreadsVisibleDate(value: unknown): string | undefined {
+  const match = String(value || "").match(/(20\d{2})[\/-](\d{1,2})[\/-](\d{1,2})/);
+  if (!match) return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!year || !month || !day) return undefined;
+  const date = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function parseThreadsVisibleMetric(actionTexts: string[], labelPattern: RegExp): number | undefined {
+  for (const actionText of actionTexts || []) {
+    const compact = String(actionText || "").replace(/\s+/g, "").trim();
+    if (!labelPattern.test(compact)) continue;
+    const count = parseMetricNumberLoose(compact.replace(labelPattern, ""));
+    return typeof count === "number" ? count : 0;
+  }
+  return undefined;
+}
+
+async function extractThreadsVisibleProfilePosts(args: {
+  page: any;
+  username: string;
+}): Promise<ThreadsGraphqlProfilePostAggregate[]> {
+  const username = String(args.username || "").replace(/^@+/, "").trim();
+  if (!username) return [];
+  const debugVisible = process.env.THREADS_PROFILE_DEBUG_VISIBLE === "1";
+  let visibleExtractor: Function;
+  try {
+    visibleExtractor = new Function("payload", String.raw`
+    const targetUsername = payload.targetUsername;
+    const debug = payload.debug;
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const anchors = Array.from(document.querySelectorAll("a[href*='/post/']"));
+    const out = [];
+    const debugRows = [];
+    const seen = new Set();
+    for (const anchor of anchors) {
+      const href = String(anchor.href || anchor.getAttribute("href") || "");
+      const matchesProfile = href.toLowerCase().includes("/@" + String(targetUsername || "").toLowerCase() + "/post/");
+      const dateText = normalize(anchor.textContent || "");
+      const matchesDate = /20\d{2}[\/-]\d{1,2}[\/-]\d{1,2}/.test(dateText);
+      if (debug && debugRows.length < 8) debugRows.push({ href, dateText, matchesProfile, matchesDate });
+      if (!matchesProfile) continue;
+      if (!matchesDate) continue;
+      let node = anchor;
+      let best = null;
+      for (let depth = 0; node && depth < 8; depth += 1) {
+        const text = normalize(node.innerText || node.textContent || "");
+        if (text.includes(targetUsername) && text.includes(dateText) && text.length > dateText.length + 8) best = node;
+        node = node.parentElement;
+      }
+      const container = best || anchor.parentElement;
+      const fullText = String(container?.innerText || container?.textContent || "").trim();
+      const actionTexts = Array.from(container?.querySelectorAll("[role=button],button") || [])
+        .map((item) => normalize(item.textContent || ""))
+        .filter(Boolean);
+      if (!fullText) continue;
+      const key = href.replace(/[?#].*$/, "").replace(/\/+$/, "");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ sourceUrl: key, dateText, text: fullText, actionTexts });
+    }
+    return { out, debugRows, anchorCount: anchors.length };
+  `);
+  } catch (error: any) {
+    if (debugVisible) {
+      console.log("[threads-profile-visible-anchors]", JSON.stringify({ username, anchorCount: -1, samples: [], error: `construct:${String(error?.message || error)}` }));
+    }
+    return [];
+  }
+  let rows: any;
+  try {
+    rows = await args.page.evaluate(visibleExtractor as any, {
+      targetUsername: username,
+      debug: debugVisible,
+    });
+  } catch (error: any) {
+    rows = { out: [], debugRows: [], anchorCount: -1, error: String(error?.message || error) };
+  }
+  if (debugVisible) {
+    console.log("[threads-profile-visible-anchors]", JSON.stringify({ username, anchorCount: rows.anchorCount, samples: rows.debugRows, error: (rows as any).error }));
+  }
+  const posts: ThreadsGraphqlProfilePostAggregate[] = [];
+  for (const row of rows.out || []) {
+    const sourceUrl = normalizeThreadsPostUrlKey(row.sourceUrl);
+    const code = cleanText(sourceUrl.match(/\/post\/([^/?#]+)/i)?.[1]);
+    if (!sourceUrl || !code) continue;
+    const lines = String(row.text || "")
+      .split(/\n+/)
+      .map((line) => cleanText(line))
+      .filter(Boolean);
+    const contentLines = lines.filter((line) => {
+      if (line === username || line === row.dateText) return false;
+      if (/^(串文|回覆|影音內容|轉發|追蹤|發送訊息|更多|翻譯|Instagram)$/i.test(line)) return false;
+      if (/^(讚|回覆|回复|留言|轉發|分享)\s*\d*$/i.test(line.replace(/\s+/g, ""))) return false;
+      if (/^\d+(?:[,.]\d+)?\s*(?:K|M|萬|万)?$/.test(line)) return false;
+      if (/^20\d{2}[\/-]\d{1,2}[\/-]\d{1,2}$/.test(line)) return false;
+      return true;
+    });
+    const content = cleanText(contentLines.join(" "));
+    posts.push({
+      pk: `visible:${code}`,
+      code,
+      sourceUrl,
+      ...(content ? { content } : {}),
+      ...(normalizeThreadsVisibleDate(row.dateText) ? { publishedAt: normalizeThreadsVisibleDate(row.dateText) } : {}),
+      likeCount: parseThreadsVisibleMetric(row.actionTexts, /^(?:Like|Likes|讚|赞|喜歡|喜欢)/i) || 0,
+      commentCount: parseThreadsVisibleMetric(row.actionTexts, /^(?:Comment|Comments|Reply|Replies|留言|回覆|回复|評論|评论)/i) || 0,
+      repostCount: parseThreadsVisibleMetric(row.actionTexts, /^(?:Repost|Reposts|轉發|转发)/i) || 0,
+      shareCount: parseThreadsVisibleMetric(row.actionTexts, /^(?:Share|Shares|分享|傳送|发送|傳送給|发送给)/i) || 0,
+    });
+  }
+  return posts;
+}
+
 export function parseThreadsPostViewCountFromText(text: string): number | undefined {
   return parseMetricNumberLoose(
     String(text || "").match(/(\d+(?:[.,]\d+)?\s*(?:[KkMm\u842c\u4e07])?)\s*(?:次瀏覽|次浏览|瀏覽|浏览|views?)/i)?.[1]
@@ -2695,12 +2902,13 @@ async function readThreadsViewCountFromPostPage(args: {
 async function collectThreadsViewCountsFromPostPages(args: {
   context: any;
   posts: ThreadsGraphqlProfilePostAggregate[];
-}): Promise<{ totalViews: number; resolvedPosts: number }> {
-  if (!args.posts.length) return { totalViews: 0, resolvedPosts: 0 };
+}): Promise<{ totalViews: number; resolvedPosts: number; viewsByUrl: Record<string, number> }> {
+  if (!args.posts.length) return { totalViews: 0, resolvedPosts: 0, viewsByUrl: {} };
   const workers = Math.min(4, args.posts.length);
   let cursor = 0;
   let totalViews = 0;
   let resolvedPosts = 0;
+  const viewsByUrl: Record<string, number> = {};
   await Promise.all(Array.from({ length: workers }, async () => {
     const page = await args.context.newPage();
     try {
@@ -2711,6 +2919,7 @@ async function collectThreadsViewCountsFromPostPages(args: {
           sourceUrl: post.sourceUrl,
         }).catch(() => undefined);
         if (typeof viewCount === "number") {
+          viewsByUrl[post.sourceUrl] = viewCount;
           totalViews += viewCount;
           resolvedPosts += 1;
         }
@@ -2719,7 +2928,7 @@ async function collectThreadsViewCountsFromPostPages(args: {
       await page.close().catch(() => null);
     }
   }));
-  return { totalViews, resolvedPosts };
+  return { totalViews, resolvedPosts, viewsByUrl };
 }
 
 async function buildThreadsProfileAggregateMetrics(args: {
@@ -2740,11 +2949,20 @@ async function buildThreadsProfileAggregateMetrics(args: {
     })),
   );
   let views = 0;
+  const postMetrics: ThreadsProfilePostHotMetrics[] = [];
   for (const result of detailResults) {
     const engagement = result.detail.engagement || {};
-    views += typeof engagement.viewCount === "number" ? engagement.viewCount : 0;
+    const viewCount = typeof engagement.viewCount === "number" ? engagement.viewCount : undefined;
+    if (typeof viewCount === "number") views += viewCount;
+    postMetrics.push({
+      sourceUrl: result.sourceUrl,
+      likeCount: typeof engagement.likeCount === "number" ? engagement.likeCount : undefined,
+      commentCount: typeof engagement.commentCount === "number" ? engagement.commentCount : undefined,
+      viewCount,
+    });
   }
   if (views > 0) out.views = views;
+  if (postMetrics.length > 0) out.postMetrics = postMetrics;
   return out;
 }
 
@@ -2764,6 +2982,7 @@ async function buildThreadsProfileAggregateMetricsFromBrowserPage(args: {
   let reposts = 0;
   let shares = 0;
   let views = 0;
+  const postMetrics: ThreadsProfilePostHotMetrics[] = [];
   for (const sourceUrl of postUrls) {
     await args.page.goto(sourceUrl, {
       waitUntil: "domcontentloaded",
@@ -2783,6 +3002,14 @@ async function buildThreadsProfileAggregateMetricsFromBrowserPage(args: {
     reposts += typeof metrics.repost_count === "number" ? metrics.repost_count : 0;
     shares += typeof metrics.send_count === "number" ? metrics.send_count : 0;
     views += typeof engagement.viewCount === "number" ? engagement.viewCount : 0;
+    postMetrics.push({
+      sourceUrl,
+      likeCount: typeof engagement.likeCount === "number" ? engagement.likeCount : undefined,
+      commentCount: typeof engagement.commentCount === "number" ? engagement.commentCount : undefined,
+      repostCount: typeof metrics.repost_count === "number" ? metrics.repost_count : undefined,
+      shareCount: typeof metrics.send_count === "number" ? metrics.send_count : undefined,
+      viewCount: typeof engagement.viewCount === "number" ? engagement.viewCount : undefined,
+    });
   }
   if (postUrls.length > 0) {
     out.likes = likes;
@@ -2791,6 +3018,7 @@ async function buildThreadsProfileAggregateMetricsFromBrowserPage(args: {
     out.shares = shares;
   }
   if (views > 0) out.views = views;
+  if (postMetrics.length > 0) out.postMetrics = postMetrics;
   return out;
 }
 
@@ -2809,12 +3037,14 @@ export async function fetchThreadsProfileLightMetrics(usernameInput: string): Pr
   }
   const profileUrl = buildThreadsProfileUrl(username);
   const cookies = readSentimentBrowserAuthCookies("threads");
-  if (!hasThreadsProfileLoginSessionCookie(cookies)) {
-    return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
-  }
-  if (!process.env.VITEST_WORKER_ID && cookies.length) {
-    let browser: any = null;
-    try {
+  if (!process.env.VITEST_WORKER_ID) {
+    const cookieAttempts = [
+      [],
+      ...(hasThreadsProfileLoginSessionCookie(cookies) ? [cookies] : []),
+    ];
+    for (const attemptCookies of cookieAttempts) {
+      let browser: any = null;
+      try {
       const playwright = await import("playwright");
       browser = await playwright.chromium.launch(buildLocalChromiumLaunchOptions());
       const context = await browser.newContext({
@@ -2822,7 +3052,7 @@ export async function fetchThreadsProfileLightMetrics(usernameInput: string): Pr
         locale: "zh-TW",
         userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
       });
-      await context.addCookies(cookies as any).catch(() => undefined);
+      if (attemptCookies.length) await addCookiesBestEffort(context, attemptCookies);
       const page = await context.newPage();
       await page.goto(profileUrl, {
         waitUntil: "domcontentloaded",
@@ -2867,6 +3097,7 @@ export async function fetchThreadsProfileLightMetrics(usernameInput: string): Pr
     } finally {
       await browser?.close().catch(() => undefined);
     }
+    }
   }
   return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
 }
@@ -2885,12 +3116,15 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
   }
   const profileUrl = buildThreadsProfileUrl(username);
   const cookies = readSentimentBrowserAuthCookies("threads");
-  if (!hasThreadsProfileLoginSessionCookie(cookies)) {
-    return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "failed");
-  }
-  if (!process.env.VITEST_WORKER_ID && cookies.length) {
-    let browser: any = null;
-    try {
+  if (!process.env.VITEST_WORKER_ID) {
+    const cookieAttempts = [
+      [],
+      ...(hasThreadsProfileLoginSessionCookie(cookies) ? [cookies] : []),
+    ];
+    let bestBrowserMetrics: ThreadsProfileHotMetrics | null = null;
+    for (const attemptCookies of cookieAttempts) {
+      let browser: any = null;
+      try {
       const playwright = await import("playwright");
       browser = await playwright.chromium.launch(buildLocalChromiumLaunchOptions());
       const context = await browser.newContext({
@@ -2898,7 +3132,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
         locale: "zh-TW",
         userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
       });
-      await context.addCookies(cookies as any).catch(() => undefined);
+      if (attemptCookies.length) await addCookiesBestEffort(context, attemptCookies);
       const page = await context.newPage();
       const capturedGraphqlPages = new Map<string, { payload: any; template: ThreadsGraphqlRequestTemplate }>();
       let initialGraphqlPayload: any = null;
@@ -2933,6 +3167,39 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
         timeout: 25_000,
       }).catch(() => null);
       await page.waitForTimeout(3500);
+      await page.waitForFunction((targetUsername: string) => {
+        const text = String(document.body?.innerText || "");
+        return text.includes(targetUsername)
+          && /(串文|Threads)/i.test(text)
+          && /(回覆|回复|Replies?)/i.test(text);
+      }, username, { timeout: 12_000 }).catch(() => undefined);
+      const visibleProfilePosts = new Map<string, ThreadsGraphqlProfilePostAggregate>();
+      const seedVisiblePosts = async () => {
+        const posts = await extractThreadsVisibleProfilePosts({ page, username }).catch(() => []);
+        if (process.env.THREADS_PROFILE_DEBUG_VISIBLE === "1") {
+          console.log("[threads-profile-visible]", JSON.stringify({ username, count: posts.length, codes: posts.slice(0, 12).map((post) => post.code) }));
+        }
+        for (const post of posts) {
+          const key = resolveThreadsProfilePostMergeKey(post);
+          if (key) visibleProfilePosts.set(key, post);
+        }
+      };
+      await seedVisiblePosts();
+      const initialBodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
+      const initialButtonText = await page.$$eval("[role=button],button,a", (items) => items
+        .map((item) => (item.textContent || "").trim())
+        .filter(Boolean)
+        .slice(0, 160)).catch(() => []);
+      const initialLinks = await page.$$eval("a[href]", (items: any[]) => items
+        .map((item: any) => item.href || item.getAttribute?.("href") || "")
+        .filter(Boolean)).catch(() => []);
+      await seedVisiblePosts();
+      await scrollThreadsProfileUntilGraphqlEnd({
+        page,
+        capturedGraphqlPages,
+        username,
+      });
+      await seedVisiblePosts();
       const bodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
       const buttonText = await page.$$eval("[role=button],button,a", (items) => items
         .map((item) => (item.textContent || "").trim())
@@ -2941,35 +3208,71 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
       const links = await page.$$eval("a[href]", (items: any[]) => items
         .map((item: any) => item.href || item.getAttribute?.("href") || "")
         .filter(Boolean)).catch(() => []);
-      const visible = analyzeThreadsProfileVisibleSignals({ username, bodyText, buttonText, links });
+      const visible = analyzeThreadsProfileVisibleSignals({
+        username,
+        bodyText: [initialBodyText, bodyText].filter(Boolean).join("\n"),
+        buttonText: [...initialButtonText, ...buttonText],
+        links: [...initialLinks, ...links],
+      });
       if (detectThreadsProfileLoginWall(visible.text) && !visible.hasUsableProfileSignals) {
-        return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "public_partial", visible.rawText);
+        if (attemptCookies.length && bestBrowserMetrics) return bestBrowserMetrics;
+        if (attemptCookies.length) return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "public_partial", visible.rawText);
+        continue;
       }
       let parsed = { ...visible.parsed };
-      if (initialGraphqlPayload && initialGraphqlTemplate) {
-        const collection = await collectThreadsGraphqlProfilePosts({
-          page,
-          username,
-          initialPayload: initialGraphqlPayload,
-          initialTemplate: initialGraphqlTemplate,
-        }).catch(() => ({ posts: [], reachedEnd: false }));
+      if ((initialGraphqlPayload && initialGraphqlTemplate) || visibleProfilePosts.size > 0) {
+        const collection = initialGraphqlPayload && initialGraphqlTemplate
+          ? await collectThreadsGraphqlProfilePosts({
+            page,
+            username,
+            initialPayload: initialGraphqlPayload,
+            initialTemplate: initialGraphqlTemplate,
+          }).catch(() => ({ posts: [], reachedEnd: false }))
+          : { posts: [], reachedEnd: false };
         const seededPosts = new Map<string, ThreadsGraphqlProfilePostAggregate>();
         const capturedPageCount = capturedGraphqlPages.size;
         let capturedReachedEnd = false;
+        for (const post of visibleProfilePosts.values()) {
+          const key = resolveThreadsProfilePostMergeKey(post);
+          if (key) seededPosts.set(key, post);
+        }
         for (const { payload } of capturedGraphqlPages.values()) {
           const pageResult = parseThreadsGraphqlProfilePagePayload({ username, payload });
           if (pageResult.pageInfoResolved && pageResult.hasNextPage !== true) capturedReachedEnd = true;
           for (const post of pageResult.posts) {
-            seededPosts.set(post.pk, post);
+            const key = resolveThreadsProfilePostMergeKey(post);
+            if (key) seededPosts.set(key, { ...(seededPosts.get(key) || {}), ...post });
           }
         }
-        for (const post of collection.posts) seededPosts.set(post.pk, post);
-        const allPosts = [...seededPosts.values()];
+        for (const post of collection.posts) {
+          const key = resolveThreadsProfilePostMergeKey(post);
+          if (key) seededPosts.set(key, { ...(seededPosts.get(key) || {}), ...post });
+        }
+        const allPosts = [...seededPosts.values()].sort((a, b) => {
+          const bTime = b.publishedAt ? Date.parse(b.publishedAt) : 0;
+          const aTime = a.publishedAt ? Date.parse(a.publishedAt) : 0;
+          if (bTime !== aTime) return bTime - aTime;
+          return String(b.pk || "").localeCompare(String(a.pk || ""));
+        });
         if (allPosts.length) {
           const views = await collectThreadsViewCountsFromPostPages({
             context,
             posts: allPosts,
           }).catch(() => ({ totalViews: 0, resolvedPosts: 0 }));
+          const viewsByUrl = (views as any).viewsByUrl || {};
+          const postMetrics = allPosts.map((post) => ({
+            pk: post.pk,
+            code: post.code,
+            sourceUrl: post.sourceUrl,
+            ...(post.content ? { content: post.content } : {}),
+            ...(post.publishedAt ? { publishedAt: post.publishedAt } : {}),
+            likeCount: post.likeCount,
+            commentCount: post.commentCount,
+            repostCount: post.repostCount,
+            shareCount: post.shareCount,
+            viewCount: typeof viewsByUrl[post.sourceUrl] === "number" ? viewsByUrl[post.sourceUrl] : post.viewCount,
+            capturedAt: refreshedAt,
+          }));
           parsed = {
             ...visible.parsed,
             posts: allPosts.length,
@@ -2979,10 +3282,10 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             reposts: allPosts.reduce((sum, post) => sum + (post.repostCount || 0), 0),
             shares: allPosts.reduce((sum, post) => sum + (post.shareCount || 0), 0),
             ...(views.resolvedPosts === allPosts.length ? { views: views.totalViews } : {}),
+            postMetrics,
           };
           (parsed as any).profileReachedEnd = capturedReachedEnd
-            || collection.reachedEnd
-            || (capturedPageCount >= 2 && allPosts.length >= 20);
+            || collection.reachedEnd;
         }
       } else {
         parsed = {
@@ -2997,23 +3300,27 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
         && (parsed as any).profileReachedEnd === true;
       if (threadsProfileHotMetricsHasValue(parsed)) {
         const { profileReachedEnd: _profileReachedEnd, ...publicParsed } = parsed as any;
-        return {
+        const browserMetrics: ThreadsProfileHotMetrics = {
           platform: "threads",
           username,
           ...publicParsed,
           refreshedAt,
           method: "browser",
           complete,
-          scope: complete ? "authenticated_full_profile" : "public_partial",
+          scope: complete && attemptCookies.length ? "authenticated_full_profile" : complete ? "profile_visible_light" : "public_partial",
           rawText: visible.rawText.slice(0, 4000),
           error: complete ? undefined : "Threads 已抓到全量帖子互动，但仍有部分帖子浏览量未能完成读取。",
         };
+        if (complete || attemptCookies.length || !hasThreadsProfileLoginSessionCookie(cookies)) return browserMetrics;
+        bestBrowserMetrics = browserMetrics;
       }
     } catch {
       // Fall through to the explicit incomplete result below.
     } finally {
       await browser?.close?.().catch?.(() => null);
     }
+    }
+    if (bestBrowserMetrics) return bestBrowserMetrics;
   }
   if (process.env.THREADS_PROFILE_ALLOW_PARTIAL_READER === "1") {
   try {
@@ -4008,7 +4315,7 @@ function readSentimentBrowserAuthCookies(platform: SentimentHotPlatform) {
         { ...cookie, domain: ".threads.net" },
         { ...cookie, domain: ".threads.com" },
       ]);
-    return activeUniqueCookies([...cookies, ...mirrored]);
+    return [...cookies, ...mirrored].slice(0, 120);
   } catch {
     return [];
   }

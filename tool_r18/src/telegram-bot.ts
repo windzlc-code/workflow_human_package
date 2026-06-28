@@ -26,7 +26,7 @@ import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinju
 import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
-import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, fetchThreadsProfileHotMetrics, fetchThreadsProfileLightMetrics, getSentimentBrowserAuthProfileBinding, refreshSentimentBrowserCookiesForPlatform, refreshSentimentSourceMetrics, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
+import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, fetchThreadsProfileHotMetrics, getSentimentBrowserAuthProfileBinding, refreshSentimentBrowserCookiesForPlatform, refreshSentimentSourceMetrics, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
 import { rememberSentimentHotImported, rememberSentimentHotSelected, type SentimentHotCandidate } from "@/lib/sentiment-candidate-store";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import { buildPersonaVisualIdentityCue } from "@/lib/persona-image-search";
@@ -743,7 +743,6 @@ const pendingPersonaImageViews = new Map<number, {
   photoMessageId?: number;
 }>();
 
-type PersonaSettingsHotMetricsMode = "light" | "detail";
 type PersonaHotMetricField = "followers" | "following" | "recentViews" | "posts" | "likes" | "comments" | "reposts" | "shares" | "views";
 
 const DEFAULT_PERSONA_DETAIL_HOT_FIELDS: PersonaHotMetricField[] = [
@@ -757,27 +756,7 @@ const DEFAULT_PERSONA_DETAIL_HOT_FIELDS: PersonaHotMetricField[] = [
   "shares",
   "views",
 ];
-const PERSONA_HOT_METRIC_FIELD_CODE: Record<PersonaHotMetricField, string> = {
-  followers: "fr",
-  following: "fg",
-  recentViews: "rv",
-  posts: "ps",
-  likes: "lk",
-  comments: "cm",
-  reposts: "rp",
-  shares: "sh",
-  views: "vw",
-};
-const PERSONA_HOT_METRIC_FIELD_BY_CODE = Object.fromEntries(
-  Object.entries(PERSONA_HOT_METRIC_FIELD_CODE).map(([field, code]) => [code, field]),
-) as Record<string, PersonaHotMetricField>;
-
-const pendingPersonaSettingsHotMetricsViews = new Map<number, {
-  archiveId: string;
-  mode: PersonaSettingsHotMetricsMode;
-  fields: PersonaHotMetricField[];
-}>();
-
+const PERSONA_HOT_POSTS_PAGE_SIZE = 10;
 const pendingSentimentHotMediaPanels = new Map<number, {
   messageId: number;
 }>();
@@ -3270,54 +3249,6 @@ function normalizePersonaDetailHotFields(fields?: PersonaHotMetricField[]): Pers
   return next.length ? next : [...DEFAULT_PERSONA_DETAIL_HOT_FIELDS];
 }
 
-function getPersonaHotMetricsViewPreference(archive: PersonaArchive): {
-  mode: PersonaSettingsHotMetricsMode;
-  fields: PersonaHotMetricField[];
-} {
-  const raw = (archive.setup as any)?.hotMetricsView || {};
-  return {
-    mode: raw.mode === "detail" ? "detail" : "light",
-    fields: normalizePersonaDetailHotFields(Array.isArray(raw.fields) ? raw.fields : undefined),
-  };
-}
-
-async function persistPersonaHotMetricsViewPreference(
-  archive: PersonaArchive,
-  mode: PersonaSettingsHotMetricsMode,
-  fields?: PersonaHotMetricField[],
-) {
-  const current = getPersonaHotMetricsViewPreference(archive);
-  await updatePersonaArchiveProfile(archive.id, {
-    setup: {
-      ...(archive.setup || {}),
-      hotMetricsView: {
-        mode,
-        fields: normalizePersonaDetailHotFields(fields || current.fields),
-        updatedAt: new Date().toISOString(),
-      },
-    },
-  }).catch(() => null);
-}
-
-function buildPersonaSettingsHotMetricsView(chatId: number, archiveId: string, overrides?: Partial<{
-  mode: PersonaSettingsHotMetricsMode;
-  fields: PersonaHotMetricField[];
-  defaults: {
-    mode: PersonaSettingsHotMetricsMode;
-    fields: PersonaHotMetricField[];
-  };
-}>) {
-  const current = pendingPersonaSettingsHotMetricsViews.get(chatId);
-  const defaults = overrides?.defaults;
-  const next = {
-    archiveId,
-    mode: overrides?.mode || (current?.archiveId === archiveId ? current.mode : defaults?.mode || "light"),
-    fields: normalizePersonaDetailHotFields(overrides?.fields || (current?.archiveId === archiveId ? current.fields : defaults?.fields)),
-  };
-  pendingPersonaSettingsHotMetricsViews.set(chatId, next);
-  return next;
-}
-
 function hotMetricFieldLabel(field: PersonaHotMetricField) {
   switch (field) {
     case "followers": return "粉絲";
@@ -3330,21 +3261,6 @@ function hotMetricFieldLabel(field: PersonaHotMetricField) {
     case "shares": return "分享";
     case "views": return "瀏覽";
     default: return field;
-  }
-}
-
-function hotMetricFieldIcon(field: PersonaHotMetricField) {
-  switch (field) {
-    case "followers": return "👥";
-    case "following": return "➕";
-    case "recentViews": return "👁";
-    case "posts": return "🧾";
-    case "likes": return "❤️";
-    case "comments": return "💬";
-    case "reposts": return "🔁";
-    case "shares": return "📤";
-    case "views": return "📊";
-    default: return "📌";
   }
 }
 
@@ -3381,42 +3297,24 @@ function formatPersonaHotMetricsTimestamp(value?: string) {
 }
 
 export function formatPersonaSettingsHotMetricsLines(archive: PersonaArchive, options?: {
-  mode?: PersonaSettingsHotMetricsMode;
   fields?: PersonaHotMetricField[];
 }) {
   const metrics: any = resolvePersonaThreadsHotMetrics(archive);
-  const mode = options?.mode || "light";
   if (!metrics) {
-    return [mode === "detail" ? "詳細版：Threads：尚未手動刷新" : "輕量版：Threads：未刷新"];
+    return ["Threads：尚未刷新"];
   }
   const usernamePart = metrics.username ? `帳號 @${metrics.username}` : "";
-  if (mode === "light") {
-    const parts = [
-      usernamePart,
-      ...buildPersonaHotMetricParts(metrics, ["followers", "following", "recentViews"]),
-    ].filter(Boolean);
-    const timestamp = formatPersonaHotMetricsTimestamp(metrics.lightRefreshedAt || metrics.refreshedAt);
-    const suffix = timestamp ? `（${timestamp}）` : "";
-    if (parts.length) return [`輕量版：Threads：${parts.join("；")}${suffix}`];
-    return [`輕量版：Threads：${metrics.error || "未刷新"}`];
-  }
   const selectedFields = normalizePersonaDetailHotFields(options?.fields);
-  if (metrics.complete !== true) {
-    const lightParts = [
-      usernamePart,
-      ...buildPersonaHotMetricParts(metrics, ["followers", "following", "recentViews"]),
-    ].filter(Boolean);
-    const lightTimestamp = formatPersonaHotMetricsTimestamp(metrics.lightRefreshedAt || metrics.refreshedAt);
+  const detailParts = buildPersonaHotMetricParts(metrics, selectedFields);
+  if (metrics.complete !== true && detailParts.length === 0) {
     return [
-      "詳細版：Threads：尚未手動刷新",
-      ...(lightParts.length ? [`目前輕量資料：${lightParts.join("；")}${lightTimestamp ? `（${lightTimestamp}）` : ""}`] : []),
+      `Threads：${metrics.error || "尚未刷新"}`,
     ];
   }
-  const detailParts = buildPersonaHotMetricParts(metrics, selectedFields);
   const detailTimestamp = formatPersonaHotMetricsTimestamp(metrics.refreshedAt);
   return [
-    `詳細版：Threads：${usernamePart || "已刷新"}`,
-    detailParts.length ? detailParts.join("；") : "目前篩選器沒有選中可展示的資料項",
+    `Threads：${usernamePart || "已刷新"}`,
+    detailParts.length ? detailParts.join("；") : "目前沒有可展示的資料項",
     ...(detailTimestamp ? [`更新時間：${detailTimestamp}`] : []),
   ];
 }
@@ -3427,67 +3325,89 @@ function hasPersonaHotMetricsData(archive: PersonaArchive) {
   return DEFAULT_PERSONA_DETAIL_HOT_FIELDS.some((field) => typeof resolvePersonaHotMetricFieldValue(metrics, field) === "number");
 }
 
-export function buildPersonaHotMetricsPanelRows(archiveId: string, view: {
-  mode: PersonaSettingsHotMetricsMode;
-  fields: PersonaHotMetricField[];
-}): Array<Array<{ text: string; callback_data: string }>> {
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [
-    [
-      { text: `${view.mode === "light" ? "✅ " : ""}⚡ 輕量版`, callback_data: `shl_${archiveId}` },
-      { text: `${view.mode === "detail" ? "✅ " : ""}📊 詳細版`, callback_data: `shd_${archiveId}` },
-    ],
-    [{ text: `🔄 刷新${view.mode === "detail" ? "詳細" : "輕量"}數據`, callback_data: `shr_${archiveId}` }],
+function getPersonaHotMetricPosts(metrics: any): any[] {
+  return Array.isArray(metrics?.postMetrics)
+    ? metrics.postMetrics
+      .filter((post: any) => post && typeof post === "object")
+      .sort((a: any, b: any) => {
+        const bTime = b?.publishedAt ? Date.parse(String(b.publishedAt)) : 0;
+        const aTime = a?.publishedAt ? Date.parse(String(a.publishedAt)) : 0;
+        if (bTime !== aTime) return bTime - aTime;
+        return String(b?.sourceUrl || "").localeCompare(String(a?.sourceUrl || ""));
+      })
+    : [];
+}
+
+function formatPersonaHotPostMetricsLine(post: any, displayIndex: number) {
+  const parts = [
+    typeof post.likeCount === "number" ? `讚 ${formatPersonaHotMetricCount(post.likeCount)}` : "",
+    typeof post.commentCount === "number" ? `評 ${formatPersonaHotMetricCount(post.commentCount)}` : "",
+    typeof post.repostCount === "number" ? `轉發 ${formatPersonaHotMetricCount(post.repostCount)}` : "",
+    typeof post.shareCount === "number" ? `分享 ${formatPersonaHotMetricCount(post.shareCount)}` : "",
+    typeof post.viewCount === "number" ? `瀏覽 ${formatPersonaHotMetricCount(post.viewCount)}` : "",
+  ].filter(Boolean);
+  const content = String(post.content || "").replace(/\s+/g, " ").trim();
+  const label = content
+    ? `${content.slice(0, 46)}${content.length > 46 ? "..." : ""}`
+    : (post.code ? `post/${post.code}` : "未讀取到文案");
+  return [
+    `${displayIndex}. ${label}`,
+    ...(post.publishedAt ? [`發布時間：${formatPersonaHotMetricsTimestamp(post.publishedAt)}`] : []),
+    `數據：${parts.length ? parts.join(" · ") : "暫無可展示數據"}`,
+    ...(post.sourceUrl ? [`原帖：${post.sourceUrl}`] : []),
   ];
-  if (view.mode === "detail") {
-    rows.push(...chunk(DEFAULT_PERSONA_DETAIL_HOT_FIELDS.map((field) => ({
-      text: `${view.fields.includes(field) ? "✅" : "⬜"} ${hotMetricFieldIcon(field)} ${hotMetricFieldLabel(field)}`,
-      callback_data: `shf_${PERSONA_HOT_METRIC_FIELD_CODE[field]}_${archiveId}`,
-    })), 2));
+}
+
+function buildPersonaHotMetricsPostsPanelRows(archiveId: string, page: number, totalPosts: number): Array<Array<{ text: string; callback_data: string }>> {
+  const totalPages = Math.max(1, Math.ceil(totalPosts / PERSONA_HOT_POSTS_PAGE_SIZE));
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [
+    [{ text: "🔄 刷新數據", callback_data: `shr_${archiveId}` }],
+  ];
+  if (totalPages > 1) {
+    rows.push([
+      { text: "◀️ 上一頁", callback_data: `shp_${Math.max(0, page - 1)}_${archiveId}` },
+      { text: `${Math.min(page + 1, totalPages)}/${totalPages}`, callback_data: `shp_${page}_${archiveId}` },
+      { text: "下一頁 ▶️", callback_data: `shp_${Math.min(totalPages - 1, page + 1)}_${archiveId}` },
+    ]);
   }
   rows.push([{ text: "◀️ 返回人設設定", callback_data: `settings_${archiveId}` }]);
   return rows;
 }
 
-async function renderPersonaHotMetricsPanel(
+async function renderPersonaHotMetricsPostsPanel(
   bot: TelegramBot,
   chatId: number,
   msgId: number | undefined,
   archive: PersonaArchive,
-  options?: {
-    hotMode?: PersonaSettingsHotMetricsMode;
-    hotFields?: PersonaHotMetricField[];
-  },
+  page = 0,
 ) {
-  const defaults = getPersonaHotMetricsViewPreference(archive);
-  const view = buildPersonaSettingsHotMetricsView(chatId, archive.id, {
-    mode: options?.hotMode || defaults.mode,
-    fields: options?.hotFields || defaults.fields,
-    defaults,
-  });
+  const metrics: any = resolvePersonaThreadsHotMetrics(archive);
+  const postMetrics = getPersonaHotMetricPosts(metrics);
+  const totalPages = Math.max(1, Math.ceil(postMetrics.length / PERSONA_HOT_POSTS_PAGE_SIZE));
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const start = safePage * PERSONA_HOT_POSTS_PAGE_SIZE;
+  const pagePosts = postMetrics.slice(start, start + PERSONA_HOT_POSTS_PAGE_SIZE);
   const lines = [
-    "🔥 *人設熱點數據*",
+    "🔥 人設熱點數據",
     "",
     `人設：${archive.name}`,
     "平台：Threads",
-    `模式：${view.mode === "detail" ? "詳細版" : "輕量版"}`,
     "",
-    ...formatPersonaSettingsHotMetricsLines(archive, {
-      mode: view.mode,
-      fields: view.fields,
-    }),
+    ...formatPersonaSettingsHotMetricsLines(archive),
+    "",
+    `單帖數據：${postMetrics.length ? `第 ${start + 1}-${start + pagePosts.length} / ${postMetrics.length} 篇` : "尚未讀取到單帖資料"}`,
+    ...(pagePosts.length
+      ? pagePosts.flatMap((post, index) => ["", ...formatPersonaHotPostMetricsLine(post, start + index + 1)])
+      : ["請點擊下方「刷新數據」讀取綁定帳號下每篇推文的發布數據。"]),
   ];
   await safeEditOrSend(bot, chatId, msgId, lines.join("\n"), {
-    parse_mode: "Markdown",
     reply_markup: {
-      inline_keyboard: buildPersonaHotMetricsPanelRows(archive.id, view),
+      inline_keyboard: buildPersonaHotMetricsPostsPanelRows(archive.id, safePage, postMetrics.length),
     },
   });
 }
 
-export function buildPersonaSettingsRows(archive: PersonaArchive, options?: {
-  hotMode?: PersonaSettingsHotMetricsMode;
-  hotFields?: PersonaHotMetricField[];
-}): Array<Array<{ text: string; callback_data: string }>> {
+export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{ text: string; callback_data: string }>> {
   const id = archive.id;
   const isWorkflow = isWorkflowPersonaListItem(archive);
   const referenceImageUrl = getExplicitPersonaReferenceImageUrl(archive);
@@ -3500,7 +3420,7 @@ export function buildPersonaSettingsRows(archive: PersonaArchive, options?: {
     [{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }],
     [{ text: "🔐 帳號管理", callback_data: `acctmgmt_${id}` }],
   ];
-  rows.push([{ text: "🔥 人設熱點數據", callback_data: `shd_${id}` }]);
+  rows.push([{ text: "🔥 人設熱點數據", callback_data: `shp_0_${id}` }]);
   rows.push(isWorkflow
     ? [
         { text: "TG免費群", callback_data: `bindtg_free_${id}` },
@@ -3655,85 +3575,22 @@ function buildPersonaAccountManagementRows(archiveId: string): Array<Array<{ tex
   ];
 }
 
-async function maybeRefreshPersonaLightHotMetrics(archiveId: string, archive: PersonaArchive): Promise<PersonaArchive> {
-  const threadsHandle = normalizePersonaHotMetricsUsername((archive.setup as any)?.accountManagement?.threads?.handle);
-  if (!threadsHandle) return archive;
-  const authBinding = resolveThreadsHotAuthBinding();
-  if (!authBinding.ok) return archive;
-  const metrics = await fetchThreadsProfileLightMetrics(threadsHandle).catch(() => null);
-  if (!metrics) return archive;
-  const hasLightValue = typeof metrics.followers === "number"
-    || typeof metrics.following === "number"
-    || typeof metrics.recentViews === "number";
-  if (!hasLightValue) return archive;
-  const hotMetricsKey = buildPersonaHotMetricsKey("threads", threadsHandle);
-  const existingHotMetrics = (archive.setup as any)?.hotMetrics || {};
-  const previous = existingHotMetrics[hotMetricsKey] || {};
-  const merged = {
-    ...previous,
-    platform: "threads",
-    username: metrics.username || threadsHandle,
-    ...(typeof metrics.followers === "number" ? { followers: metrics.followers } : {}),
-    ...(typeof metrics.following === "number" ? { following: metrics.following } : {}),
-    ...(typeof metrics.recentViews === "number" ? { recentViews: metrics.recentViews } : {}),
-    lightRefreshedAt: metrics.lightRefreshedAt || metrics.refreshedAt,
-  };
-  const updated = await updatePersonaArchiveProfile(archiveId, {
-    setup: {
-      ...(archive.setup || {}),
-      hotMetrics: {
-        ...existingHotMetrics,
-        [hotMetricsKey]: merged,
-      },
-    },
-  }).catch(() => null);
-  invalidatePersonaListCache();
-  if (updated) return updated;
-  return {
-    ...archive,
-    setup: {
-      ...(archive.setup || {}),
-      hotMetrics: {
-        ...existingHotMetrics,
-        [hotMetricsKey]: merged,
-      },
-    },
-  };
-}
-
 async function renderPersonaSettingsPage(
   bot: TelegramBot,
   chatId: number,
   msgId: number | undefined,
   archive: PersonaArchive,
   defaultPadCode: string,
-  options?: {
-    autoRefreshLight?: boolean;
-    hotMode?: PersonaSettingsHotMetricsMode;
-    hotFields?: PersonaHotMetricField[];
-  },
 ) {
-  const defaults = getPersonaHotMetricsViewPreference(archive);
-  const view = buildPersonaSettingsHotMetricsView(chatId, archive.id, {
-    mode: options?.hotMode || defaults.mode,
-    fields: options?.hotFields || defaults.fields,
-    defaults,
-  });
   let nextArchive = archive;
-  if (options?.autoRefreshLight && view.mode === "light" && !hasPersonaHotMetricsData(archive)) {
-    nextArchive = await maybeRefreshPersonaLightHotMetrics(archive.id, archive).catch(() => archive);
-  }
   const boundPadName = await resolvePadBindingDisplayName(nextArchive.boundPadCode, nextArchive.boundPadName, defaultPadCode);
   const tgFreeGroupName = normalizeTelegramSingleLine(nextArchive.boundTelegramFreeGroupName || "") || "未綁定";
   const tgPaidGroupName = normalizeTelegramSingleLine(nextArchive.boundTelegramPaidGroupName || "") || "未綁定";
   const isWorkflowPersona = isWorkflowPersonaListItem(nextArchive);
-  const settingsRows = buildPersonaSettingsRows(nextArchive, {
-    hotMode: view.mode,
-    hotFields: view.fields,
-  });
+  const settingsRows = buildPersonaSettingsRows(nextArchive);
   console.log(`[telegram][settings_group_binding] archive=${archive.id} free="${tgFreeGroupName}" paid="${tgPaidGroupName}"`);
   const settingsLines = [
-    "⚙️ *人設設定*",
+    "⚙️ 人設設定",
     "",
     `人設：${nextArchive.name}`,
     `綁定雲機：${boundPadName}`,
@@ -3745,12 +3602,8 @@ async function renderPersonaSettingsPage(
     `待發布推文：${nextArchive.posts.length} 篇`,
     `已發布：${nextArchive.publishHistory?.length || 0} 篇`,
   ];
-  settingsLines.splice(Math.max(0, settingsLines.length - 2), 0, ...formatPersonaSettingsHotMetricsLines(nextArchive, {
-    mode: view.mode,
-    fields: view.fields,
-  }));
+  settingsLines.splice(Math.max(0, settingsLines.length - 2), 0, ...formatPersonaSettingsHotMetricsLines(nextArchive));
   await safeEditOrSend(bot, chatId, msgId, settingsLines.join("\n"), {
-    parse_mode: "Markdown",
     reply_markup: {
       inline_keyboard: settingsRows,
     },
@@ -3974,7 +3827,7 @@ function buildPersonaPlatformAccountText(archive: PersonaArchive, platform: Pers
       `人設：${archive.name}`,
       padLine,
       `目前帳號：${current?.handle ? maskAccountSecret(current.handle) : "未設定"}`,
-      formatPersonaSettingsHotMetricsLines(archive, { mode: "light" })[0],
+      formatPersonaSettingsHotMetricsLines(archive)[0],
       `密碼：${current?.passwordSet ? "已設定" : "未設定"}`,
       formatPersonaAccountRuntimeStatus(status),
       "",
@@ -4149,12 +4002,17 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
     const existingHotMetrics = (archive.setup as any)?.hotMetrics || {};
     const previousMetrics: any = existingHotMetrics[hotMetricsKey] || {};
     const scannedPosts = typeof metrics.scannedPosts === "number" ? metrics.scannedPosts : 0;
-    const previousScannedPosts = typeof previousMetrics.scannedPosts === "number" ? previousMetrics.scannedPosts : 0;
-    const hasAggregateValues = ["likes", "comments", "reposts", "shares", "views"]
-      .every((field) => typeof (metrics as any)[field] === "number");
-    const highConfidenceAggregate = metrics.complete === true
-      || (scannedPosts >= 20 && scannedPosts >= previousScannedPosts && hasAggregateValues);
-    if (!highConfidenceAggregate) {
+    const hasUsableAccountMetrics = scannedPosts > 0
+      || ["followers", "following", "posts", "likes", "comments", "reposts", "shares", "views"]
+        .some((field) => typeof (metrics as any)[field] === "number");
+    const hasCompleteAccountMetrics = metrics.complete === true
+      && scannedPosts > 0
+      && Array.isArray((metrics as any).postMetrics)
+      && (metrics as any).postMetrics.length >= scannedPosts;
+    const hasRefreshablePostMetrics = scannedPosts > 0
+      && Array.isArray((metrics as any).postMetrics)
+      && (metrics as any).postMetrics.length > 0;
+    if (!hasUsableAccountMetrics || (!hasCompleteAccountMetrics && !hasRefreshablePostMetrics)) {
       stopTyping();
       if (existingHotMetrics[hotMetricsKey]?.complete !== true) {
         await updatePersonaArchiveProfile(archiveId, {
@@ -4168,7 +4026,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
                 complete: false,
                 scope: metrics.scope,
                 refreshedAt: metrics.refreshedAt,
-                error: metrics.error,
+                error: metrics.error || (hasUsableAccountMetrics ? `Threads profile refresh returned partial data only (${scannedPosts} posts). Full account metrics were not saved.` : undefined),
               },
             },
           },
@@ -4185,8 +4043,8 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
         `後台自動刷新：${autoRefreshResult.ok ? "已完成" : "未恢復登入態"}`,
         autoRefreshResult.ok ? "" : `原因：${autoRefreshResult.message || metrics.error || "Threads Cookie 無效"}`,
         "",
-        "目前 Threads 舆情登入態不足，無法真實取得此帳號旗下所有推文的全量匯總。",
-        "系統已停止寫入本次局部數據，避免把公開頁資料誤當成總瀏覽、總點讚、總留言、總轉發、總分享。",
+        "目前 Threads 舆情登入態不足，無法取得此帳號旗下推文資料。",
+        "系統已停止寫入本次空資料，避免把失敗結果覆蓋到人設熱點面板。",
         "",
         "請先在後台完成 Threads 真實登入授權；完成後重新點擊熱點刷新即可。",
       ].join("\n"), {
@@ -4213,8 +4071,9 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
         shares: metrics.shares,
         views: metrics.views,
         scannedPosts: metrics.scannedPosts,
-        complete: highConfidenceAggregate,
-        scope: highConfidenceAggregate ? "authenticated_full_profile" : metrics.scope,
+        postMetrics: Array.isArray((metrics as any).postMetrics) ? (metrics as any).postMetrics : previousMetrics.postMetrics,
+        complete: metrics.complete === true,
+        scope: metrics.complete === true ? "authenticated_full_profile" : metrics.scope,
         refreshedAt: metrics.refreshedAt,
         error: metrics.error,
       },
@@ -5251,14 +5110,6 @@ async function importSentimentHotCandidate(args: {
       ],
     },
   });
-  await addSummariesToMemoryAsync(pending.archiveId, [
-    [
-      "热点素材",
-      `平台:${candidate.platform}`,
-      `数据:${formatSentimentMetricLine(candidate)}`,
-      `内容:${finalContent.slice(0, 160)}`,
-    ].join(" | "),
-  ]).catch(() => undefined);
   rememberSentimentHotImported(pending.archiveId, candidate.id);
   pending.candidates.splice(args.index, 1);
   pendingSentimentHotImports.set(args.chatId, pending);
@@ -5268,7 +5119,7 @@ async function importSentimentHotCandidate(args: {
     `来源: ${candidate.platform}`,
     `数据: ${formatSentimentMetricLine(candidate)}`,
     mediaUrl ? `媒体: ${mediaType || "unknown"}` : "媒体: 无",
-    "已写入人设记忆。",
+    "已加入待发布推文，发布成功后才会写入人设记忆。",
   ].join("\n"), {
     reply_markup: {
       inline_keyboard: [
@@ -5341,9 +5192,6 @@ async function saveStoredPostCustomEdit(args: {
     await args.bot.sendMessage(args.chatId, "保存推文修改失敗，請稍後重試。");
     return;
   }
-  await addSummariesToMemoryAsync(args.archiveId, [
-    `已更新${args.source === "favorites" ? "收藏" : "待發布"}推文 | 內容:${updated.content.slice(0, 160)}`,
-  ]).catch(() => undefined);
   pendingPostActions.set(args.chatId, { archiveId: args.archiveId, postId: args.postId, source: args.source, groupContentType: args.groupContentType });
   const sourcePosts = resolveArchivePostCollection(archive, args.source);
   const sourceIndex = sourcePosts.findIndex((item) => item.id === updated.id);
@@ -16816,14 +16664,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         pendingPersonaImageViews.delete(chatId);
         settingsTargetMessageId = undefined;
       }
-      await renderPersonaSettingsPage(bot, chatId, settingsTargetMessageId, archive, defaultPadCode, {
-        autoRefreshLight: true,
-      });
+      await renderPersonaSettingsPage(bot, chatId, settingsTargetMessageId, archive, defaultPadCode);
       return;
     }
 
     if (data.startsWith("settingshot_light_") || data.startsWith("settingshot_detail_") || data.startsWith("shl_") || data.startsWith("shd_")) {
-      const isLight = data.startsWith("settingshot_light_") || data.startsWith("shl_");
       const prefix = data.startsWith("settingshot_light_")
         ? "settingshot_light_"
         : data.startsWith("settingshot_detail_")
@@ -16834,44 +16679,38 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const id = data.slice(prefix.length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      const nextMode: PersonaSettingsHotMetricsMode = isLight ? "light" : "detail";
-      await persistPersonaHotMetricsViewPreference(archive, nextMode);
-      await renderPersonaHotMetricsPanel(bot, chatId, msgId, archive, {
-        hotMode: nextMode,
-      });
+      await renderPersonaHotMetricsPostsPanel(bot, chatId, msgId, archive, 0);
       return;
     }
 
     if (data.startsWith("settingshot_filter_") || data.startsWith("shf_")) {
-      let field: PersonaHotMetricField | undefined;
       let id = "";
       if (data.startsWith("settingshot_filter_")) {
         const rest = data.slice("settingshot_filter_".length);
         const splitIndex = rest.indexOf("_");
         if (splitIndex <= 0) { sendMainMenu(chatId, msgId); return; }
-        field = rest.slice(0, splitIndex) as PersonaHotMetricField;
         id = rest.slice(splitIndex + 1);
       } else {
         const rest = data.slice("shf_".length);
         const splitIndex = rest.indexOf("_");
         if (splitIndex <= 0) { sendMainMenu(chatId, msgId); return; }
-        field = PERSONA_HOT_METRIC_FIELD_BY_CODE[rest.slice(0, splitIndex)];
         id = rest.slice(splitIndex + 1);
       }
-      if (!field || !DEFAULT_PERSONA_DETAIL_HOT_FIELDS.includes(field)) { sendMainMenu(chatId, msgId); return; }
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      const current = buildPersonaSettingsHotMetricsView(chatId, id, { mode: "detail" });
-      const hasField = current.fields.includes(field);
-      const nextFields = hasField
-        ? current.fields.filter((item) => item !== field)
-        : [...current.fields, field];
-      const normalizedNextFields = normalizePersonaDetailHotFields(nextFields);
-      await persistPersonaHotMetricsViewPreference(archive, "detail", normalizedNextFields);
-      await renderPersonaHotMetricsPanel(bot, chatId, msgId, archive, {
-        hotMode: "detail",
-        hotFields: normalizedNextFields,
-      });
+      await renderPersonaHotMetricsPostsPanel(bot, chatId, msgId, archive, 0);
+      return;
+    }
+
+    if (data.startsWith("shp_")) {
+      const rest = data.slice("shp_".length);
+      const splitIndex = rest.indexOf("_");
+      if (splitIndex <= 0) { sendMainMenu(chatId, msgId); return; }
+      const page = Math.max(0, Number(rest.slice(0, splitIndex) || 0));
+      const id = rest.slice(splitIndex + 1);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      await renderPersonaHotMetricsPostsPanel(bot, chatId, msgId, archive, page);
       return;
     }
 
@@ -16881,39 +16720,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         : data.slice("shr_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      const current = buildPersonaSettingsHotMetricsView(chatId, id, {
-        defaults: getPersonaHotMetricsViewPreference(archive),
+      await refreshPersonaThreadsHotMetricsFromTelegram(bot, chatId, msgId, archive, id, defaultPadCode, {
+        returnCallback: `shp_0_${id}`,
+        onSuccessRender: async (latestArchive) => {
+          await renderPersonaHotMetricsPostsPanel(bot, chatId, msgId, latestArchive, 0);
+        },
       });
-      if (current.mode === "light") {
-        await safeEditOrSend(bot, chatId, msgId, [
-          "🔄 正在刷新輕量版熱點資料...",
-          "",
-          `人設：${archive.name}`,
-          "平台：Threads",
-          "",
-          "正在透過代碼讀取 Threads 主頁輕量資料，不會打開雲機。",
-        ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設熱點數據", callback_data: `shl_${id}` }]] },
-        });
-        const latestArchive = await maybeRefreshPersonaLightHotMetrics(id, archive).catch(() => archive);
-        await renderPersonaHotMetricsPanel(bot, chatId, msgId, latestArchive, {
-          hotMode: "light",
-          hotFields: current.fields,
-        });
-      } else {
-        await refreshPersonaThreadsHotMetricsFromTelegram(bot, chatId, msgId, archive, id, defaultPadCode, {
-          returnCallback: `settingshot_detail_${id}`,
-          onSuccessRender: async (latestArchive) => {
-            await renderPersonaHotMetricsPanel(bot, chatId, msgId, latestArchive, {
-              hotMode: "detail",
-              hotFields: current.fields,
-            });
-          },
-        });
-      }
       return;
     }
-
     if (data.startsWith("accthotrefresh_threads_") || data.startsWith("hotrefresh_")) {
       pendingPersonaAccountActions.delete(chatId);
       const id = data.startsWith("accthotrefresh_threads_")
@@ -16931,7 +16745,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       await safeEditOrSend(bot, chatId, msgId, buildPersonaAccountManagementText(archive), {
-        parse_mode: "Markdown",
         reply_markup: { inline_keyboard: buildPersonaAccountManagementRows(id) },
       });
       return;

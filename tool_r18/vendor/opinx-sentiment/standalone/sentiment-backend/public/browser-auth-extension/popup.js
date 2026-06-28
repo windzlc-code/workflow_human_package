@@ -10,7 +10,7 @@ function send(message) {
 
 async function loadState() {
   const values = await chrome.storage.local.get(["apiBase", "lastStatus"]);
-  $("apiBase").value = values.apiBase || "http://47.250.188.76";
+  $("apiBase").value = values.apiBase || "http://43.167.237.120";
   setStatus(values.lastStatus || "等待授权");
 }
 
