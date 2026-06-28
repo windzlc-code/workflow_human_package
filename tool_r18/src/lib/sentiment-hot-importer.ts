@@ -34,6 +34,8 @@ const THREADS_READER_QUERY_BATCH_SIZE = 6;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 14_000;
+const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 58_000;
+const SENTIMENT_HOT_TIMEOUT_WARNING = "\u71b1\u9ede\u6293\u53d6\u5df2\u8d85\u6642\uff0c\u5df2\u505c\u6b62\u5f8c\u7e8c\u8017\u6642\u6b65\u9a5f\uff1b\u8acb\u7a0d\u5f8c\u5237\u65b0\u6216\u6aa2\u67e5 Cookie / sessionid\u3002";
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "經驗",
@@ -788,7 +790,7 @@ async function buildSentimentHotKeywordsWithModel(args: {
         }],
       }],
       { temperature: 0.1, maxOutputTokens: 256 },
-      AbortSignal.timeout(15_000),
+      AbortSignal.timeout(22_000),
       {
         isUsableResponse: (data) => Boolean(extractText(data).trim()),
         isRetryableError: () => false,
@@ -1112,6 +1114,7 @@ export async function fetchSentimentHotCandidates(args: {
   limit?: number;
   refresh?: boolean;
 }): Promise<FetchSentimentHotCandidatesResult> {
+  const startedAt = Date.now();
   const warnings: string[] = [];
   const archive = args.archive;
   const archiveId = cleanText(archive?.id) || "default";
@@ -1120,7 +1123,7 @@ export async function fetchSentimentHotCandidates(args: {
     "keywords",
     () => withSentimentTimeout(
       buildSentimentHotKeywordsWithModel({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries, warnings }),
-      30_000,
+      Math.min(30_000, remainingSentimentHotTotalBudgetMs(startedAt, 28_000)),
       undefined,
     ),
   );
@@ -1164,7 +1167,7 @@ export async function fetchSentimentHotCandidates(args: {
           limit: poolLimit,
           refresh: args.refresh === true,
         }),
-        32_000,
+        Math.min(32_000, remainingSentimentHotTotalBudgetMs(startedAt, 18_000)),
         [],
       ),
     ).catch((error) => {
@@ -1193,7 +1196,7 @@ export async function fetchSentimentHotCandidates(args: {
   const preInstagramQaCount = hasSearchKeywords
     ? selectSentimentHotCandidatesForModelQa(sortRelevantHotCandidates(candidates, keywords, poolLimit), keywords, limit).length
     : 0;
-  if (shouldFetchLiveCandidates && preInstagramQaCount < limit) {
+  if (shouldFetchLiveCandidates && preInstagramQaCount < limit && hasSentimentHotTotalBudget(startedAt, 9_000)) {
     const beforeInstagramCount = candidates.length;
     const instagramCandidates = await measureSentimentStage(
       warnings,
@@ -1206,7 +1209,7 @@ export async function fetchSentimentHotCandidates(args: {
           limit: poolLimit,
           refresh: args.refresh === true,
         }),
-        20_000,
+        Math.min(20_000, remainingSentimentHotTotalBudgetMs(startedAt, 8_000)),
         [],
       ),
     ).catch((error) => {
@@ -1230,29 +1233,34 @@ export async function fetchSentimentHotCandidates(args: {
       warnings.push(args.refresh ? `已即時刷新 Instagram reader 候選 ${instagramCandidates.length} 篇。` : `已加入 Instagram reader 候選 ${instagramCandidates.length} 篇。`);
     }
     channelStats.push(`Instagram 原始 ${instagramCandidates.length}，新增 ${instagramAddedCount}，補充前 ${beforeInstagramCount}`);
+  } else if (shouldFetchLiveCandidates && preInstagramQaCount < limit) {
+    pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
+    channelStats.push("Instagram 已跳過，剩餘時間不足");
   } else if (shouldFetchLiveCandidates) {
     channelStats.push(`Instagram 已跳過，預篩 ${preInstagramQaCount}/${limit}`);
   }
 
-  const runtime = await measureSentimentStage(warnings, "runtime", () => withSentimentTimeout(ensureSentimentRuntime(), 6_000, {
+  const runtime = await measureSentimentStage(warnings, "runtime", () => withSentimentTimeout(ensureSentimentRuntime(), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 7_000)), {
     ok: false,
     url: resolveSentimentBackendUrl(),
     warning: "\u8206\u60c5\u5f8c\u53f0\u555f\u52d5\u8f03\u6162\uff0c\u5df2\u512a\u5148\u4f7f\u7528\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u5019\u9078\u3002",
   }));
   if (!runtime.ok && runtime.warning) warnings.push(runtime.warning);
 
-  let cookieStatuses = await measureSentimentStage(warnings, "cookie-status", () => withSentimentTimeout(fetchSentimentCookieStatuses(), 6_000, [
+  let cookieStatuses = await measureSentimentStage(warnings, "cookie-status", () => withSentimentTimeout(fetchSentimentCookieStatuses(), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 6_000)), [
     { platform: "threads" as const, health: "unknown" as const, label: "Threads", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
     { platform: "instagram" as const, health: "unknown" as const, label: "Instagram", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
   ]));
-  if (shouldFetchLiveCandidates && runtime.ok) {
-    cookieStatuses = await measureSentimentStage(warnings, "cookie-refresh", () => withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), 35_000, cookieStatuses));
+  if (shouldFetchLiveCandidates && runtime.ok && hasSentimentHotTotalBudget(startedAt, 7_000)) {
+    cookieStatuses = await measureSentimentStage(warnings, "cookie-refresh", () => withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), Math.min(35_000, remainingSentimentHotTotalBudgetMs(startedAt, 5_000)), cookieStatuses));
+  } else if (shouldFetchLiveCandidates && runtime.ok) {
+    pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
   }
   const usableSources = cookieStatuses
     .filter(sentimentCookieStatusHasUsableCookies)
     .map((status) => status.platform);
-  if (shouldFetchLiveCandidates && runtime.ok && usableSources.length > 0) {
-    await measureSentimentStage(warnings, "realtime-scan", () => withSentimentTimeout(triggerRealtimeSentimentScan(usableSources, warnings), 6_000, undefined));
+  if (shouldFetchLiveCandidates && runtime.ok && usableSources.length > 0 && hasSentimentHotTotalBudget(startedAt, 4_000)) {
+    await measureSentimentStage(warnings, "realtime-scan", () => withSentimentTimeout(triggerRealtimeSentimentScan(usableSources, warnings), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 3_000)), undefined));
   }
 
   if (hasSearchKeywords && candidates.length < limit) {
@@ -1275,7 +1283,7 @@ export async function fetchSentimentHotCandidates(args: {
     }
     channelStats.push(`資料庫原始 ${databaseCandidates.length}，新增 ${databaseAddedCount}，補充前 ${beforeDatabaseCount}`);
   }
-  if (shouldFetchLiveCandidates && runtime.ok && usableSources.length > 0 && hasSearchKeywords && candidates.length < limit) {
+  if (shouldFetchLiveCandidates && runtime.ok && usableSources.length > 0 && hasSearchKeywords && candidates.length < limit && hasSentimentHotTotalBudget(startedAt, 5_000)) {
     const beforeWaitCount = candidates.length;
     candidates = await waitForMoreSentimentHotCandidates({
       archiveId,
@@ -1313,7 +1321,7 @@ export async function fetchSentimentHotCandidates(args: {
       "model-qa",
       () => withSentimentTimeout(
         filterSentimentCandidatesWithModel({ archive, keywords, candidates, limit, warnings }),
-        25_000,
+        Math.min(25_000, remainingSentimentHotTotalBudgetMs(startedAt, 2_000)),
         undefined,
       ),
     );
@@ -1334,6 +1342,9 @@ export async function fetchSentimentHotCandidates(args: {
     }
   } else if (runtime.ok) {
     warnings.push("\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u002f\u0020\u0049\u006e\u0073\u0074\u0061\u0067\u0072\u0061\u006d\u0020\u7f3a\u5c11\u6709\u6548\u0020\u0043\u006f\u006f\u006b\u0069\u0065\uff0c\u5df2\u8df3\u904e\u771f\u5be6\u6383\u63cf\uff1b\u8acb\u5148\u5728\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u914d\u7f6e\u4e2d\u6388\u6b0a\u5f8c\u518d\u5237\u65b0\u6293\u53d6\u3002");
+  }
+  if (!hasSentimentHotTotalBudget(startedAt, 1_000)) {
+    pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
   }
 
   candidates = finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: args.refresh === true });
@@ -1386,11 +1397,11 @@ async function fillSentimentHotCandidatesToLimit(args: {
   if (out.length >= args.limit) return out.slice(0, args.limit);
 
   const fallbackCandidates = [
-    ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit * 8, args.refresh === true),
+    ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, Math.max(args.limit * 20, SENTIMENT_HOT_CANDIDATE_POOL_TARGET), args.refresh === true),
     ...(await readCandidatesFromDatabase({
       archiveId: args.archiveId,
       keywords: args.keywords,
-      limit: args.limit * 8,
+      limit: Math.max(args.limit * 20, SENTIMENT_HOT_CANDIDATE_POOL_TARGET),
       excludeShown: args.refresh === true,
     }).catch(() => [])),
   ];
@@ -1750,6 +1761,18 @@ async function withSentimentTimeout<T>(promise: Promise<T>, timeoutMs: number, f
   }
 }
 
+function remainingSentimentHotTotalBudgetMs(startedAt: number, reserveMs = 0): number {
+  return Math.max(1_000, SENTIMENT_HOT_TOTAL_TIMEOUT_MS - (Date.now() - startedAt) - reserveMs);
+}
+
+function hasSentimentHotTotalBudget(startedAt: number, minRemainingMs = 1_000): boolean {
+  return SENTIMENT_HOT_TOTAL_TIMEOUT_MS - (Date.now() - startedAt) >= minRemainingMs;
+}
+
+function pushSentimentHotWarning(warnings: string[], warning: string) {
+  if (!warnings.includes(warning)) warnings.push(warning);
+}
+
 async function measureSentimentStage<T>(warnings: string[], label: string, run: () => Promise<T>): Promise<T> {
   const startedAt = Date.now();
   try {
@@ -1791,7 +1814,6 @@ function rotateSentimentQueries(queries: string[], seed: number): string[] {
 
 function buildOrderedSentimentQueries(baseQueries: string[], seed: number, refresh = false): string[] {
   const pool = buildSentimentRefreshQueryPool(baseQueries);
-  if (refresh) return rotateSentimentQueries(pool, seed);
   const baseSet = new Set(baseQueries);
   const supplemental = pool.filter((query) => !baseSet.has(query));
   return [...baseQueries, ...rotateSentimentQueries(supplemental, seed)];
@@ -2095,7 +2117,12 @@ async function fetchThreadsBrowserSearchCandidates(args: {
   deadlineAt?: number;
 }): Promise<SentimentHotCandidate[]> {
   const cookies = readSentimentBrowserAuthCookies("threads");
-  if (!hasValidThreadsSessionCookie(cookies)) return [];
+  const sessionCookieCount = cookies.filter((cookie: any) => String(cookie?.name || "").toLowerCase() === "sessionid" && String(cookie?.value || "").trim()).length;
+  if (!hasValidThreadsSessionCookie(cookies)) {
+    console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} sessionid=0 cookies=${cookies.length} status=skip_no_session`);
+    return [];
+  }
+  console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} sessionid=${sessionCookieCount} cookies=${cookies.length} queries=${args.queries.length} status=start`);
   const excluded = args.excludeIds || getSentimentHotRefreshExcludedIds(args.archiveId);
   const results: SentimentHotCandidate[] = [];
   const resultKeys = new Set<string>();
@@ -2125,23 +2152,45 @@ async function fetchThreadsBrowserSearchCandidates(args: {
           limit: args.limit - results.length,
           sourceUrl: search.url,
         });
+        let acceptedCount = 0;
+        let excludedCount = 0;
+        let keywordMissCount = 0;
+        let shortCount = 0;
+        let duplicateCount = 0;
         for (const candidate of parsed) {
-          if (excluded.has(candidate.id)) continue;
-          if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) continue;
+          if (excluded.has(candidate.id)) {
+            excludedCount += 1;
+            continue;
+          }
+          if (!hasMinimumSentimentHotContentLength(candidate)) {
+            shortCount += 1;
+            continue;
+          }
+          if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) {
+            keywordMissCount += 1;
+            continue;
+          }
           const dedupeKey = sentimentCandidateDedupeKey(candidate);
-          if (results.some((item) => item.id === candidate.id) || resultKeys.has(dedupeKey)) continue;
+          if (results.some((item) => item.id === candidate.id) || resultKeys.has(dedupeKey)) {
+            duplicateCount += 1;
+            continue;
+          }
           results.push(candidate);
           resultKeys.add(dedupeKey);
+          acceptedCount += 1;
           if (results.length >= args.limit) break;
         }
+        console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} query=${JSON.stringify(query)} textLen=${search.text.length} parsed=${parsed.length} accepted=${acceptedCount} total=${results.length} excluded=${excludedCount} short=${shortCount} keywordMiss=${keywordMissCount} duplicate=${duplicateCount} url=${search.url}`);
       }
       await context.close();
     } finally {
       await browser.close().catch(() => undefined);
     }
-  } catch {
+  } catch (error) {
+    console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} status=error message=${JSON.stringify(error instanceof Error ? error.message : String(error))}`);
     // Playwright is optional; reader/cache/database paths still keep the Telegram flow alive.
   }
+  console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} status=done total=${results.length}`);
   return sortRelevantHotCandidates(results, args.keywords, args.limit);
 }
 
@@ -3977,6 +4026,8 @@ function buildThreadsSearchQueries(keywords: string[]): string[] {
   for (const keyword of meaningfulNeedles(keywords)) {
     add(keyword);
     for (const part of splitKeywords(keyword)) add(part);
+  }
+  for (const keyword of meaningfulNeedles(keywords)) {
     for (const variant of buildDynamicSearchQueryVariants([keyword])) add(variant);
   }
   return [...new Set(out)].slice(0, 48);
