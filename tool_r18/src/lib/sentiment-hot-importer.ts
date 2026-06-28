@@ -1140,7 +1140,7 @@ async function waitForMoreSentimentHotCandidates(args: {
       }
       if (byId.size >= args.limit) break;
     }
-    candidates = sortRelevantHotCandidates([...byId.values()], args.keywords, args.limit);
+    candidates = sortSentimentHotCandidatePool([...byId.values()], args.keywords, args.limit);
   }
   return candidates;
 }
@@ -1173,7 +1173,7 @@ export async function fetchSentimentHotCandidates(args: {
   const poolLimit = Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
 
-  let candidates = hasSearchKeywords && args.refresh !== true
+  let candidates = hasSearchKeywords
     ? readThreadsSearchCandidateCache(archiveId, keywords, poolLimit, args.refresh === true)
     : [];
   const initialCacheCount = candidates.length;
@@ -1221,7 +1221,7 @@ export async function fetchSentimentHotCandidates(args: {
         byKey.add(dedupeKey);
       }
     }
-    candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
+    candidates = sortSentimentHotCandidatePool([...byId.values()], keywords, poolLimit);
     channelStats.push(`Threads 原始 ${threadsCandidates.length}，新增 ${Math.max(0, candidates.length - beforeThreadsCount)}`);
     rememberSentimentHotSourceRefresh(archiveId);
   }
@@ -1267,7 +1267,7 @@ export async function fetchSentimentHotCandidates(args: {
         }
         if (byId.size >= poolLimit) break;
       }
-      candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
+      candidates = sortSentimentHotCandidatePool([...byId.values()], keywords, poolLimit);
       warnings.push(args.refresh ? `已即時刷新 Instagram reader 候選 ${instagramCandidates.length} 篇。` : `已加入 Instagram reader 候選 ${instagramCandidates.length} 篇。`);
     }
     channelStats.push(`Instagram 原始 ${instagramCandidates.length}，新增 ${instagramAddedCount}，補充前 ${beforeInstagramCount}`);
@@ -1317,7 +1317,7 @@ export async function fetchSentimentHotCandidates(args: {
         }
         if (byId.size >= poolLimit) break;
       }
-      candidates = sortRelevantHotCandidates([...byId.values()], keywords, poolLimit);
+      candidates = sortSentimentHotCandidatePool([...byId.values()], keywords, poolLimit);
     }
     channelStats.push(`資料庫原始 ${databaseCandidates.length}，新增 ${databaseAddedCount}，補充前 ${beforeDatabaseCount}`);
   }
@@ -1425,7 +1425,7 @@ async function fillSentimentHotCandidatesToLimit(args: {
     if (!content || isLowQualitySentimentContent(content) || !isChineseSentimentCandidate(content)) return;
     const normalized = { ...candidate, content };
     if (!isUsefulHotCandidate(normalized)) return;
-    if (!candidateMatchesCurrentKeywords(normalized, args.keywords)) return;
+    if (!candidateTouchesCurrentKeywords(normalized, args.keywords)) return;
     seen.add(candidate.id);
     seenDedupeKeys.add(dedupeKey);
     out.push(normalized);
@@ -1469,7 +1469,7 @@ async function ensureSentimentHotQaCandidatePool(args: {
   warnings: string[];
 }): Promise<SentimentHotCandidate[]> {
   const target = Math.max(args.limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
-  const sorted = sortRelevantHotCandidates(args.candidates, args.keywords, target);
+  const sorted = sortSentimentHotCandidatePool(args.candidates, args.keywords, target);
   const currentQaCount = selectSentimentHotCandidatesForModelQa(sorted, args.keywords, args.limit).length;
   if (currentQaCount >= args.limit) return sorted;
 
@@ -1498,7 +1498,7 @@ async function ensureSentimentHotQaCandidatePool(args: {
 
   for (const candidate of sorted) add(candidate);
   for (const candidate of fallbackCandidates) add(candidate);
-  const merged = sortRelevantHotCandidates([...byId.values()], args.keywords, target);
+  const merged = sortSentimentHotCandidatePool([...byId.values()], args.keywords, target);
   const nextQaCount = selectSentimentHotCandidatesForModelQa(merged, args.keywords, args.limit).length;
   if (nextQaCount > currentQaCount) {
     args.warnings.push(`即時抓取通過高品質預篩的候選不足，已從同人設候選庫回填 QA 候選 ${nextQaCount}/${args.limit} 篇。`);
@@ -2031,6 +2031,12 @@ function countMatchedNeedles(candidate: SentimentHotCandidate, needles: string[]
   return needles.filter((needle) => haystack.includes(needle.toLowerCase())).length;
 }
 
+function candidateTouchesCurrentKeywords(candidate: SentimentHotCandidate, keywords: string[]): boolean {
+  const needles = buildRelevanceNeedles(keywords);
+  if (needles.length === 0) return false;
+  return countMatchedNeedles(candidate, needles) > 0;
+}
+
 export function candidateMatchesCurrentKeywords(candidate: SentimentHotCandidate, keywords: string[]): boolean {
   const needles = buildRelevanceNeedles(keywords);
   if (needles.length === 0) return false;
@@ -2069,7 +2075,7 @@ async function fetchThreadsSearchPageCandidates(args: {
 
   if (browserResults.length > 0) {
     writeThreadsSearchCandidateCache(args.archiveId, args.keywords, browserResults);
-    if (browserResults.length >= args.limit) return sortRelevantHotCandidates(browserResults, args.keywords, args.limit);
+    if (browserResults.length >= args.limit) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
   }
 
   if (browserResults.length < args.limit) {
@@ -2085,7 +2091,7 @@ async function fetchThreadsSearchPageCandidates(args: {
       if (byId.size >= args.limit) break;
     }
     browserResults = [...byId.values()];
-    if (browserResults.length >= args.limit) return sortRelevantHotCandidates(browserResults, args.keywords, args.limit);
+    if (browserResults.length >= args.limit) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
   }
 
   let readerResults = await fetchThreadsReaderSearchCandidates({
@@ -2138,11 +2144,11 @@ async function fetchThreadsSearchPageCandidates(args: {
   }
 
   if (readerResults.length > 0) {
-    const merged = sortRelevantHotCandidates([...new Map([...browserResults, ...readerResults].map((candidate) => [candidate.id, candidate])).values()], args.keywords, args.limit);
+    const merged = sortSentimentHotCandidatePool([...new Map([...browserResults, ...readerResults].map((candidate) => [candidate.id, candidate])).values()], args.keywords, args.limit);
     writeThreadsSearchCandidateCache(args.archiveId, args.keywords, merged);
     return merged;
   }
-  const sorted = sortRelevantHotCandidates(results, args.keywords, args.limit);
+  const sorted = sortSentimentHotCandidatePool(results, args.keywords, args.limit);
   if (sorted.length > 0) writeThreadsSearchCandidateCache(args.archiveId, args.keywords, sorted);
   return sorted.length > 0 ? sorted : readThreadsSearchCandidateCache(args.archiveId, args.keywords, args.limit, args.refresh === true);
 }
@@ -2205,7 +2211,7 @@ async function fetchThreadsBrowserSearchCandidates(args: {
             shortCount += 1;
             continue;
           }
-          if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) {
+          if (!candidateTouchesCurrentKeywords(candidate, args.keywords)) {
             keywordMissCount += 1;
             continue;
           }
@@ -2230,7 +2236,7 @@ async function fetchThreadsBrowserSearchCandidates(args: {
     // Playwright is optional; reader/cache/database paths still keep the Telegram flow alive.
   }
   console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} status=done total=${results.length}`);
-  return sortRelevantHotCandidates(results, args.keywords, args.limit);
+  return sortSentimentHotCandidatePool(results, args.keywords, args.limit);
 }
 
 const JINA_READER_PREFIX = "https://r.jina.ai/http://";
@@ -2277,7 +2283,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
     });
     for (const candidate of parsed) {
       if (excluded.has(candidate.id)) continue;
-      if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) continue;
+      if (!candidateTouchesCurrentKeywords(candidate, args.keywords)) continue;
       const dedupeKey = sentimentCandidateDedupeKey(candidate);
       if (all.some((item) => item.id === candidate.id) || allKeys.has(dedupeKey)) continue;
       allKeys.add(dedupeKey);
@@ -2338,7 +2344,7 @@ async function fetchInstagramReaderSearchCandidates(args: {
     });
     for (const candidate of parsed) {
       if (excluded.has(candidate.id)) continue;
-      if (!candidateMatchesCurrentKeywords(candidate, args.keywords)) continue;
+      if (!candidateTouchesCurrentKeywords(candidate, args.keywords)) continue;
       const dedupeKey = sentimentCandidateDedupeKey(candidate);
       if (all.some((item) => item.id === candidate.id) || allKeys.has(dedupeKey)) continue;
       allKeys.add(dedupeKey);
@@ -4275,7 +4281,7 @@ function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], 
       const content = cleanThreadsReaderContent(candidate.content || "");
       if (!content || isLowQualitySentimentContent(content) || !isChineseSentimentCandidate(content)) continue;
       if (!isUsefulHotCandidate(candidate)) continue;
-      if (!candidateMatchesCurrentKeywords({ ...candidate, content }, keywords)) continue;
+      if (!candidateTouchesCurrentKeywords({ ...candidate, content }, keywords)) continue;
       const normalized = {
         ...candidate,
         content,
