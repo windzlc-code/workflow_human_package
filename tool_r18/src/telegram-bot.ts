@@ -15012,13 +15012,14 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
 
   const buildCustomPublishLinkTemplateText = (state: PendingCustomPublish, archive: PersonaArchive) => {
     const presets = getSelectableLinkEndingPresets(archive.setup as any);
+    const currentText = state.text?.trim();
     const lines = [
       "🔗 发布前选择链接模板",
       "",
       `人设：${archive.name}`,
       "",
-      state.text?.trim()
-        ? `当前文案：${state.text.trim().slice(0, 180)}${state.text.trim().length > 180 ? "..." : ""}`
+      currentText
+        ? `当前文案：\n${currentText}`
         : "当前文案：未收到文字，选择模板后会把模板作为文案结尾。",
       "",
       "请选择要添加到本次发布文案里的模板：",
@@ -15041,13 +15042,14 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
 
   const buildStoredPostLinkTemplateText = (archive: PersonaArchive, post: PersonaArchive["posts"][number]) => {
     const presets = getSelectableLinkEndingPresets(archive.setup as any);
+    const currentText = post.content?.trim();
     return [
       "🔗 发布前选择链接模板",
       "",
       `人设：${archive.name}`,
       "",
-      post.content?.trim()
-        ? `当前文案：${post.content.trim().slice(0, 180)}${post.content.trim().length > 180 ? "..." : ""}`
+      currentText
+        ? `当前文案：\n${currentText}`
         : "当前文案：-",
       "",
       "请选择要添加到本次发布文案里的模板：",
@@ -15055,6 +15057,24 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
         ? presets.slice(0, 10).map((preset, index) => `${index + 1}. ${preset.name || "模板"}${preset.endingText ? ` / ${preset.endingText.slice(0, 40)}` : ""}${preset.linkUrl ? ` / ${preset.linkUrl}` : ""}`)
         : ["当前人设还没有链接模板。"]),
     ].join("\n");
+  };
+
+  const sendCustomPublishMediaPreview = async (targetChatId: number, state: PendingCustomPublish) => {
+    if (!state.fileId) {
+      await deletePendingStoredPostMediaMessages(bot, targetChatId);
+      return;
+    }
+    await deletePendingStoredPostMediaMessages(bot, targetChatId);
+    const caption = state.fileKind === "video" ? "🎬 当前发布视频预览" : state.fileKind === "document" ? "📎 当前发布媒体预览" : "🖼 当前发布图片预览";
+    let sent: TelegramBot.Message | undefined;
+    if (state.fileKind === "video") {
+      sent = await bot.sendVideo(targetChatId, state.fileId, { caption }).catch(() => undefined);
+    } else if (state.fileKind === "document") {
+      sent = await (bot as any).sendDocument(targetChatId, state.fileId, { caption }).catch(() => undefined);
+    } else {
+      sent = await bot.sendPhoto(targetChatId, state.fileId, { caption }).catch(() => undefined);
+    }
+    rememberStoredPostMediaMessages(targetChatId, sent);
   };
 
   const customPublishContentSummary = (state: PendingCustomPublish) => {
@@ -21587,6 +21607,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const mediaItems = getStoredPostMediaItems(post);
+      if (mediaItems.length) {
+        const collection = resolveArchivePostCollection(archive, action.source);
+        const displayIndex = Math.max(1, collection.findIndex((item) => item.id === post.id) + 1);
+        await sendStoredPostMediaPreviews(bot, chatId, mediaItems, displayIndex);
+      } else {
+        await deletePendingStoredPostMediaMessages(bot, chatId);
+      }
       await safeEditOrSend(bot, chatId, msgId, buildStoredPostLinkTemplateText(archive, post), {
         disable_web_page_preview: true,
         reply_markup: { inline_keyboard: buildStoredPostLinkTemplateRows(archive) },
@@ -21616,7 +21644,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const nextContent = applyLinkEndingPresetToText(post.content || "", preset);
       const previewPost = buildPostWithPublishContentOverride(post, nextContent);
       pendingPostActions.set(chatId, { ...action, linkEndingPresetApplied: true, contentOverride: nextContent });
-      await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板（仅本次发布预览）\n\n${String(previewPost.content || "").slice(0, 220)}${String(previewPost.content || "").length > 220 ? "..." : ""}\n\n可以直接发布，也可以撤回模板。`, {
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板（仅本次发布预览）\n\n${String(previewPost.content || "").trim()}\n\n可以直接发布，也可以撤回模板。`, {
         disable_web_page_preview: true,
         reply_markup: {
           inline_keyboard: [
@@ -23335,6 +23363,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      await sendCustomPublishMediaPreview(chatId, prev);
       await safeEditOrSend(bot, chatId, msgId, buildCustomPublishLinkTemplateText(prev, archive), {
         disable_web_page_preview: true,
         reply_markup: { inline_keyboard: buildCustomPublishLinkTemplateRows(archive) },
@@ -23362,7 +23391,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const nextText = applyLinkEndingPresetToText(baseText, preset);
       const nextState = { ...prev, text: nextText, archiveName: prev.archiveName || archive.name, linkEndingPresetApplied: true, linkEndingPresetBaseText: baseText };
       pendingCustomPublishes.set(chatId, nextState);
-      await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板\n\n${customPublishContentSummary(nextState)}\n\n可以直接发布，或继续返回修改内容。`, {
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板\n\n${customPublishContentSummary(nextState)}\n\n完整文案：\n${String(nextState.text || "").trim() || "-"}\n\n可以直接发布，或继续返回修改内容。`, {
         disable_web_page_preview: true,
         reply_markup: { inline_keyboard: customPublishFinalPublishRows(nextState) },
       });
