@@ -4917,11 +4917,10 @@ function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index
   const text = content.slice(0, 72);
   const media = candidate.media.some((item) => item.type === "video") ? "視頻" : candidate.media.length ? "圖片" : "純文字";
   const postLink = sentimentHotCandidatePostLink(candidate);
-  const qaMark = candidate.qaPassed ? " *QA*" : "";
   const backfillMark = candidate.warnings?.some((item) => item.includes("回补") || item.includes("回補")) ? " *回補*" : "";
   return [
     "────────────",
-    `${index + 1}. [${platform}/${media}]${qaMark}${backfillMark} ${formatSentimentMetricLine(candidate)}；字數 ${sentimentHotCandidateTextLength(candidate)}`,
+    `${index + 1}. [${platform}/${media}]${backfillMark} ${formatSentimentMetricLine(candidate)}；字數 ${sentimentHotCandidateTextLength(candidate)}`,
     `${text}${content.length > 72 ? "..." : ""}`,
     ...(postLink ? [`链接: ${postLink}`] : []),
   ].join("\n");
@@ -5071,7 +5070,6 @@ function buildSentimentHotCandidateDetailText(args: {
     `媒体: ${mediaLabel}`,
     `数据: ${formatSentimentMetricLine(args.candidate)}`,
     `字數: ${sentimentHotCandidateTextLength(args.candidate)}`,
-    `QA: ${args.candidate.qaPassed ? "*已通过*" : "-"}`,
     `原帖: ${args.candidate.sourceUrl || "-"}`,
     "",
     "正文:",
@@ -5338,7 +5336,6 @@ async function importSentimentHotCandidate(args: {
       metrics: candidate.metrics,
       engagement: candidate.engagement,
       capturedAt: candidate.capturedAt,
-      qaPassed: candidate.qaPassed === true,
       originalContent: cleanSentimentCandidateContent(candidate.content),
       originalMediaUrl: candidate.media[0]?.localPath || candidate.media[0]?.url,
       originalMediaUrls: candidate.media.map((item) => item.localPath || item.url).filter(Boolean),

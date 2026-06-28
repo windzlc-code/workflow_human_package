@@ -33,8 +33,8 @@ const THREADS_READER_TOTAL_QUERY_LIMIT = 36;
 const THREADS_READER_QUERY_BATCH_SIZE = 6;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
-const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 14_000;
-const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 58_000;
+const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 45_000;
+const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 95_000;
 const SENTIMENT_HOT_TIMEOUT_WARNING = "\u71b1\u9ede\u6293\u53d6\u5df2\u8d85\u6642\uff0c\u5df2\u505c\u6b62\u5f8c\u7e8c\u8017\u6642\u6b65\u9a5f\uff1b\u8acb\u7a0d\u5f8c\u5237\u65b0\u6216\u6aa2\u67e5 Cookie / sessionid\u3002";
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
@@ -1178,20 +1178,20 @@ export async function fetchSentimentHotCandidates(args: {
     : [];
   const initialCacheCount = candidates.length;
   const channelStats: string[] = [];
-  const cachedQaCount = hasSearchKeywords
-    ? selectSentimentHotCandidatesForModelQa(sortRelevantHotCandidates(candidates, keywords, poolLimit), keywords, limit).length
+  const cachedReadyCount = hasSearchKeywords
+    ? sortRelevantHotCandidates(candidates, keywords, poolLimit).length
     : 0;
   const canUseCandidatePoolForRefresh = args.refresh === true
     && candidates.length >= limit
-    && cachedQaCount >= limit
+    && cachedReadyCount >= limit
     && !shouldRefreshSentimentHotSource(archiveId);
   const shouldFetchLiveCandidates = hasSearchKeywords
-    && (candidates.length < limit || cachedQaCount < limit || (args.refresh === true && !canUseCandidatePoolForRefresh));
+    && (candidates.length < limit || cachedReadyCount < limit || (args.refresh === true && !canUseCandidatePoolForRefresh));
   if (hasSearchKeywords && args.refresh === true && candidates.length >= limit && !shouldFetchLiveCandidates) {
     warnings.push("已使用當前人設候選池刷新；高品質候選仍足夠，已跳過短時間內重複抓取以降低平台風控。");
   }
-  if (hasSearchKeywords && args.refresh === true && candidates.length >= limit && cachedQaCount < limit) {
-    warnings.push(`當前候選池原始候選 ${candidates.length} 篇，但高品質預篩候選只有 ${cachedQaCount}/${limit} 篇，已繼續刷新真實來源補充候選。`);
+  if (hasSearchKeywords && args.refresh === true && candidates.length >= limit && cachedReadyCount < limit) {
+    warnings.push(`當前候選池原始候選 ${candidates.length} 篇，但高品質預篩候選只有 ${cachedReadyCount}/${limit} 篇，已繼續刷新真實來源補充候選。`);
   }
   if (shouldFetchLiveCandidates) {
     const beforeThreadsCount = candidates.length;
@@ -1205,7 +1205,7 @@ export async function fetchSentimentHotCandidates(args: {
           limit: poolLimit,
           refresh: args.refresh === true,
         }),
-        Math.min(32_000, remainingSentimentHotTotalBudgetMs(startedAt, 18_000)),
+        Math.min(58_000, remainingSentimentHotTotalBudgetMs(startedAt, 24_000)),
         [],
       ),
     ).catch((error) => {
@@ -1231,10 +1231,10 @@ export async function fetchSentimentHotCandidates(args: {
       : "已從當前人設候選池刷新熱點。");
   }
 
-  const preInstagramQaCount = hasSearchKeywords
-    ? selectSentimentHotCandidatesForModelQa(sortRelevantHotCandidates(candidates, keywords, poolLimit), keywords, limit).length
+  const preInstagramReadyCount = hasSearchKeywords
+    ? sortRelevantHotCandidates(candidates, keywords, poolLimit).length
     : 0;
-  if (shouldFetchLiveCandidates && preInstagramQaCount < limit && hasSentimentHotTotalBudget(startedAt, 9_000)) {
+  if (shouldFetchLiveCandidates && preInstagramReadyCount < limit && hasSentimentHotTotalBudget(startedAt, 9_000)) {
     const beforeInstagramCount = candidates.length;
     const instagramCandidates = await measureSentimentStage(
       warnings,
@@ -1271,11 +1271,11 @@ export async function fetchSentimentHotCandidates(args: {
       warnings.push(args.refresh ? `已即時刷新 Instagram reader 候選 ${instagramCandidates.length} 篇。` : `已加入 Instagram reader 候選 ${instagramCandidates.length} 篇。`);
     }
     channelStats.push(`Instagram 原始 ${instagramCandidates.length}，新增 ${instagramAddedCount}，補充前 ${beforeInstagramCount}`);
-  } else if (shouldFetchLiveCandidates && preInstagramQaCount < limit) {
+  } else if (shouldFetchLiveCandidates && preInstagramReadyCount < limit) {
     pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
     channelStats.push("Instagram 已跳過，剩餘時間不足");
   } else if (shouldFetchLiveCandidates) {
-    channelStats.push(`Instagram 已跳過，預篩 ${preInstagramQaCount}/${limit}`);
+    channelStats.push(`Instagram 已跳過，預篩 ${preInstagramReadyCount}/${limit}`);
   }
 
   const runtime = await measureSentimentStage(warnings, "runtime", () => withSentimentTimeout(ensureSentimentRuntime(), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 7_000)), {
@@ -1346,29 +1346,7 @@ export async function fetchSentimentHotCandidates(args: {
       refresh: args.refresh === true,
       warnings,
     });
-    candidates = await ensureSentimentHotQaCandidatePool({
-      archiveId,
-      keywords,
-      candidates,
-      limit,
-      refresh: args.refresh === true,
-      warnings,
-    });
-    const filteredCandidates = await measureSentimentStage(
-      warnings,
-      "model-qa",
-      () => withSentimentTimeout(
-        filterSentimentCandidatesWithModel({ archive, keywords, candidates, limit, warnings }),
-        Math.min(25_000, remainingSentimentHotTotalBudgetMs(startedAt, 2_000)),
-        undefined,
-      ),
-    );
-    if (filteredCandidates) {
-      candidates = filteredCandidates;
-    } else {
-      candidates = strictSentimentHotCandidateQaFallback(candidates, keywords, limit);
-      warnings.push(`模型 QA 超時，已改用嚴格高品質候選 ${candidates.length}/${limit} 篇。`);
-    }
+    candidates = sortRelevantHotCandidates(candidates, keywords, Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET));
   }
   if (runtime.ok && usableSources.length > 0) {
     void syncSentimentKeywords(keywords).catch(() => undefined);
@@ -1386,12 +1364,10 @@ export async function fetchSentimentHotCandidates(args: {
   }
 
   candidates = finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: args.refresh === true });
-  const finalQaCount = candidates.filter((candidate) => candidate.qaPassed).length;
   const channelSummary = [
     `快取初始 ${initialCacheCount}`,
     ...channelStats,
     `最終 ${candidates.length}/${limit}`,
-    `QA 通過 ${finalQaCount}/${candidates.length}`,
   ].join("；");
   console.info(`[sentiment_hot_channels] archiveId=${archiveId} ${channelSummary}`);
   warnings.push(`渠道統計：${channelSummary}`);
@@ -1460,163 +1436,6 @@ async function fillSentimentHotCandidatesToLimit(args: {
   return out;
 }
 
-async function ensureSentimentHotQaCandidatePool(args: {
-  archiveId: string;
-  keywords: string[];
-  candidates: SentimentHotCandidate[];
-  limit: number;
-  refresh?: boolean;
-  warnings: string[];
-}): Promise<SentimentHotCandidate[]> {
-  const target = Math.max(args.limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
-  const sorted = sortSentimentHotCandidatePool(args.candidates, args.keywords, target);
-  const currentQaCount = selectSentimentHotCandidatesForModelQa(sorted, args.keywords, args.limit).length;
-  if (currentQaCount >= args.limit) return sorted;
-
-  const fallbackCandidates = [
-    ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, target, args.refresh === true),
-    ...(await readCandidatesFromDatabase({
-      archiveId: args.archiveId,
-      keywords: args.keywords,
-      limit: target,
-      excludeShown: args.refresh === true,
-    }).catch(() => [])),
-  ];
-  if (fallbackCandidates.length === 0) return sorted;
-
-  const byId = new Map<string, SentimentHotCandidate>();
-  const byKey = new Set<string>();
-  const add = (candidate: SentimentHotCandidate | undefined) => {
-    if (!candidate?.id || byId.has(candidate.id)) return;
-    const content = cleanSentimentCandidateContent(candidate.content || "");
-    if (!content) return;
-    const dedupeKey = sentimentCandidateDedupeKey(candidate, content);
-    if (byKey.has(dedupeKey)) return;
-    byId.set(candidate.id, { ...candidate, content });
-    byKey.add(dedupeKey);
-  };
-
-  for (const candidate of sorted) add(candidate);
-  for (const candidate of fallbackCandidates) add(candidate);
-  const merged = sortSentimentHotCandidatePool([...byId.values()], args.keywords, target);
-  const nextQaCount = selectSentimentHotCandidatesForModelQa(merged, args.keywords, args.limit).length;
-  if (nextQaCount > currentQaCount) {
-    args.warnings.push(`即時抓取通過高品質預篩的候選不足，已從同人設候選庫回填 QA 候選 ${nextQaCount}/${args.limit} 篇。`);
-  }
-  return merged;
-}
-
-function parseModelIndexList(text: string, max: number): number[] {
-  const raw = cleanText(text).replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-  const fromJson = (() => {
-    try {
-      const parsed = JSON.parse(raw);
-      const values = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.indexes) ? parsed.indexes : Array.isArray(parsed?.indices) ? parsed.indices : [];
-      return values.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value));
-    } catch {
-      return [];
-    }
-  })();
-  const values = fromJson.length > 0 ? fromJson : [...raw.matchAll(/\d+/g)].map((match) => Number(match[0]));
-  return [...new Set(values)]
-    .filter((value) => value >= 1 && value <= max)
-    .map((value) => value - 1);
-}
-
-export interface SentimentHotCandidateQaDecision {
-  index: number;
-  pass: boolean;
-  relevance: number;
-  quality: number;
-  rewriteValue: number;
-  audienceFit: number;
-  risk: number;
-  reason?: string;
-}
-
-function stripJsonFence(value: string): string {
-  return cleanText(value).replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-}
-
-function clampQaScore(value: unknown, fallback = 0): number {
-  const score = Number(value);
-  if (!Number.isFinite(score)) return fallback;
-  return Math.max(0, Math.min(100, Math.round(score)));
-}
-
-export function parseSentimentHotCandidateQaDecisions(text: string, max: number): SentimentHotCandidateQaDecision[] {
-  const raw = stripJsonFence(text);
-  let rows: unknown[] = [];
-  try {
-    const parsed = JSON.parse(raw);
-    rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.decisions) ? parsed.decisions : [];
-  } catch {
-    rows = [];
-  }
-
-  const out: SentimentHotCandidateQaDecision[] = [];
-  const seen = new Set<number>();
-  for (const row of rows) {
-    if (typeof row !== "object" || row === null) continue;
-    const record = typeof row === "object" && row !== null ? row as Record<string, unknown> : {};
-    const rawIndex = Number(record.index ?? record.id ?? record.no);
-    if (!Number.isInteger(rawIndex)) continue;
-    const index = rawIndex >= 1 ? rawIndex - 1 : rawIndex;
-    if (index < 0 || index >= max || seen.has(index)) continue;
-    seen.add(index);
-
-    out.push({
-      index,
-      pass: record.pass === true,
-      relevance: clampQaScore(record.relevance),
-      quality: clampQaScore(record.quality),
-      rewriteValue: clampQaScore(record.rewriteValue ?? record.rewrite_value),
-      audienceFit: clampQaScore(record.audienceFit ?? record.audience_fit),
-      risk: clampQaScore(record.risk, 100),
-      reason: typeof record.reason === "string" ? cleanText(record.reason).slice(0, 80) : undefined,
-    });
-  }
-  return out;
-}
-
-export function sentimentHotCandidateQaPasses(decision: SentimentHotCandidateQaDecision): boolean {
-  if (decision.pass !== true) return false;
-  if (decision.relevance < 35) return false;
-  if (decision.quality < 35) return false;
-  if (decision.rewriteValue < 30) return false;
-  if (decision.audienceFit < 30) return false;
-  if (decision.risk > 80) return false;
-  return decision.relevance + decision.quality + decision.rewriteValue + decision.audienceFit - decision.risk * 0.25 >= 120;
-}
-
-function rankSentimentHotCandidateQaDecision(decision: SentimentHotCandidateQaDecision): number {
-  return decision.relevance * 0.35
-    + decision.quality * 0.25
-    + decision.rewriteValue * 0.2
-    + decision.audienceFit * 0.2
-    - decision.risk * 0.35;
-}
-
-function strictSentimentHotCandidateQaFallback(candidates: SentimentHotCandidate[], keywords: string[], limit: number): SentimentHotCandidate[] {
-  const needles = buildRelevanceNeedles(keywords);
-  const strongNeedles = buildStrongRelevanceNeedles(keywords);
-  return candidates
-    .filter((candidate) => {
-      const content = cleanSentimentCandidateContent(candidate.content);
-      const normalized = { ...candidate, content };
-      if (candidateLooksOffTopicForKeywords(content, keywords)) return false;
-      if (isLowQualitySentimentContent(content)) return false;
-      if (!isChineseSentimentCandidate(content)) return false;
-      if (!isUsefulHotCandidate(normalized)) return false;
-      const matchedCount = countMatchedNeedles(normalized, needles);
-      const matchedStrongCount = countMatchedNeedles(normalized, strongNeedles);
-      if (candidateLooksOffTopic(normalized) && matchedStrongCount < 1 && matchedCount < 2) return false;
-      if (strongNeedles.length > 0 && matchedStrongCount < 1) return false;
-      return matchedStrongCount >= 1 || matchedCount >= 2;
-    })
-    .slice(0, limit);
-}
-
 export function isObviouslyLowQualitySentimentHotCandidate(candidate: SentimentHotCandidate, keywords: string[] = []): boolean {
   const content = cleanSentimentCandidateContent(candidate.content);
   if (!content || isLowQualitySentimentContent(content)) return true;
@@ -1648,141 +1467,6 @@ function isFinanceSentimentKeywordSet(keywords: string[]): boolean {
 function candidateLooksOffTopicForKeywords(content: string, keywords: string[]): boolean {
   if (!isFinanceSentimentKeywordSet(keywords)) return false;
   return /(?:星座|運勢|运势|牡羊|白羊|塔羅|塔罗|同居|帶套|带套|恐怖情人|女仔望過嚟|過來人警世|纯点|純點|點位|点位|座標|坐标|地圖|地图|髮圈|发圈|藥師夢|药师梦)/u.test(content);
-}
-
-function selectSentimentHotCandidatesForModelQa(candidates: SentimentHotCandidate[], keywords: string[], limit: number): SentimentHotCandidate[] {
-  const target = Math.min(Math.max(limit * 20, 120), 200);
-  return candidates
-    .filter((candidate) => !isObviouslyLowQualitySentimentHotCandidate(candidate, keywords))
-    .slice(0, target);
-}
-
-function backfillSentimentModelSelection(args: {
-  selected: SentimentHotCandidate[];
-  candidates: SentimentHotCandidate[];
-  limit: number;
-  warnings: string[];
-  reason: string;
-}): SentimentHotCandidate[] {
-  const out: SentimentHotCandidate[] = [];
-  const seen = new Set<string>();
-  const add = (candidate: SentimentHotCandidate | undefined) => {
-    if (!candidate?.id || seen.has(candidate.id)) return;
-    seen.add(candidate.id);
-    out.push(candidate);
-  };
-  for (const candidate of args.selected) {
-    add(candidate);
-    if (out.length >= args.limit) return out.slice(0, args.limit);
-  }
-  if (args.selected.length > 0 && out.length < args.limit) {
-    for (const candidate of args.candidates) {
-      add(candidate);
-      if (out.length >= args.limit) return out.slice(0, args.limit);
-    }
-    args.warnings.push(`模型篩選保留 ${out.length}/${args.limit} 篇；已用嚴格高品質候選補足。`);
-  }
-  return out.slice(0, args.limit);
-}
-async function filterSentimentCandidatesWithModel(args: {
-  archive?: PersonaArchive;
-  keywords: string[];
-  candidates: SentimentHotCandidate[];
-  limit: number;
-  warnings: string[];
-}): Promise<SentimentHotCandidate[]> {
-  const candidates = sortRelevantHotCandidates(args.candidates, args.keywords, Math.max(args.limit * 20, 200));
-  if (candidates.length === 0) return [];
-  const modelCandidates = selectSentimentHotCandidatesForModelQa(candidates, args.keywords, args.limit);
-  if (modelCandidates.length === 0) {
-    args.warnings.push("明顯低質候選已被代碼預篩排除；已使用相關性與熱度排序候選。");
-    return candidates.slice(0, args.limit);
-  }
-  const personaText = [
-    args.archive?.name ? `Name: ${args.archive.name}` : "",
-    args.archive?.content ? `Profile: ${args.archive.content}` : "",
-    args.archive?.setup ? `Setup: ${JSON.stringify(args.archive.setup)}` : "",
-    `Keywords: ${args.keywords.join(" / ")}`,
-  ].filter(Boolean).join("\n");
-  const candidateText = modelCandidates.map((candidate, index) => {
-    const media = candidate.media?.length ? ` media=${candidate.media.length}` : "";
-    return `${index + 1}. score=${candidate.hotScore}${media}
-${cleanText(candidate.content).slice(0, 280)}`;
-  }).join("\n\n");
-  try {
-    const result = await callTextUnderstandingModelWithFallback(
-      "xai/grok-4.3",
-      [{
-        role: "user",
-        parts: [{
-          text: [
-            "\u4f60\u662f\u4eba\u8bbe\u8206\u60c5\u7d20\u6750\u5ba1\u6838\u5668\u3002\u4f60\u9700\u8981\u5148\u7406\u89e3\u4eba\u8bbe\uff0c\u518d\u7b5b\u9009\u70ed\u70b9\uff0c\u800c\u4e0d\u662f\u673a\u68b0\u5339\u914d\u5173\u952e\u8bcd\u3002",
-            "\u4efb\u52a1\uff1a\u4ece\u5019\u9009 Threads/Instagram \u70ed\u70b9\u4e2d\uff0c\u9009\u51fa\u4e0e\u5f53\u524d\u4eba\u8bbe\u771f\u6b63\u76f8\u5173\u3001\u4e0d\u51b2\u7a81\u3001\u53ef\u4ee5\u76f4\u63a5\u4f5c\u4e3a\u8be5\u4eba\u8bbe\u521b\u4f5c\u7d20\u6750\u7684\u5185\u5bb9\u3002",
-            "\u5ba1\u6838\u6b65\u9aa4\uff08\u4e0d\u8981\u8f93\u51fa\u8fc7\u7a0b\uff09\uff1a",
-            "1. \u4ece\u4eba\u8bbe\u4e2d\u63a8\u65ad\uff1a\u6838\u5fc3\u9886\u57df\u3001\u804c\u4e1a/\u8eab\u4efd\u3001\u5174\u8da3\u3001\u8bed\u6c14\u3001\u4e0d\u5e94\u8be5\u78b0\u7684\u51b2\u7a81\u4e3b\u9898\u3002",
-            "2. \u9010\u6761\u5224\u65ad\u5019\u9009\u662f\u5426\u548c\u4eba\u8bbe\u7684\u6838\u5fc3\u8bbe\u5b9a\u4e00\u81f4\uff1b\u53ea\u6709\u5f31\u5173\u952e\u8bcd\uff08\u5982\u5206\u4eab\u3001\u65e5\u5e38\u3001\u751f\u6d3b\u3001\u5973\u751f\u3001\u70ed\u95e8\uff09\u4e0d\u80fd\u901a\u8fc7\u3002",
-            "3. \u6392\u9664\u4e0e\u4eba\u8bbe\u8eab\u4efd\u3001\u4e16\u754c\u89c2\u3001\u5185\u5bb9\u65b9\u5411\u51b2\u7a81\u7684\u5019\u9009\uff1b\u5373\u4f7f\u70ed\u5ea6\u5f88\u9ad8\u4e5f\u4e0d\u8981\u9009\u3002",
-            "4. \u4f18\u5148\u4fdd\u7559\u70ed\u5ea6\u9ad8\u3001\u4e2d\u6587\u5185\u5bb9\u3001\u4e3b\u9898\u660e\u786e\u3001\u80fd\u88ab\u8be5\u4eba\u8bbe\u81ea\u7136\u53d1\u5e03\u6216\u6539\u5199\u7684\u5019\u9009\u3002",
-            "5. \u5982\u679c\u5f3a\u76f8\u5173\u5019\u9009\u4e0d\u8db3\uff0c\u53ef\u4ee5\u88dc\u5145\u300c\u4e0d\u51b2\u7a81\u3001\u53ef\u88ab\u8a72\u4eba\u8a2d\u6539\u5beb\u3001\u540c\u9818\u57df\u6216\u540c\u53d7\u773e\u6703\u611f\u8208\u8da3\u300d\u7684\u5019\u9078\uff1b\u4f46\u4ecd\u7136\u5fc5\u9808\u6392\u9664\u7121\u95dc\u6216\u885d\u7a81\u5167\u5bb9\u3002",
-            "6. \u8acb\u5c0d\u6bcf\u689d\u5019\u9078\u505a QA \u8a55\u5206\uff1arelevance \u4eba\u8a2d\u76f8\u95dc\u6027\uff0cquality \u5167\u5bb9\u8cea\u91cf\uff0crewriteValue \u6539\u5beb\u6210\u8a72\u4eba\u8a2d\u63a8\u6587\u7684\u50f9\u503c\uff0caudienceFit \u53d7\u773e\u5951\u5408\uff0crisk \u8dd1\u984c/\u5ee3\u544a/\u4f4e\u8cea/\u885d\u7a81\u98a8\u96aa\u3002",
-            "7. pass 的標準要嚴格：必須有足夠資訊量、主題明確、可以凸顯人設特點並值得改寫成推文；短句感嘆、單一問題、純段子、空泛日常、低資訊量、登入頁、廣告導購、純連結、非中文、完全跑題或違反人設邊界都設為 false。",
-            `8. \u6700\u591a\u53ef\u901a\u904e ${args.limit} \u7bc7\uff1b\u6c92\u6709\u901a\u904e QA \u7684\u5019\u9078\u6642\u8fd4\u56de []\u3002`,
-            "\u53ea\u8f93\u51fa JSON \u6570\u7ec4\uff0c\u4f8b\u5982\uff1a[{\"index\":1,\"pass\":true,\"relevance\":86,\"quality\":78,\"rewriteValue\":82,\"audienceFit\":75,\"risk\":12,\"reason\":\"主題明確且適合改寫\"}]\u6216[]\u3002\u4e0d\u8981\u89e3\u91cb\u3002",
-            "",
-            "\u4eba\u8bbe\uff1a",
-            personaText,
-            "",
-            "\u5019\u9009\uff1a",
-            candidateText,
-          ].join("\n"),
-        }],
-      }],
-      { temperature: 0.1, maxOutputTokens: 1600 },
-      AbortSignal.timeout(20_000),
-      {
-        isUsableResponse: (data) => Boolean(extractText(data).trim()),
-        isRetryableError: () => false,
-      },
-    );
-    const modelText = extractText(result.data);
-    const qaDecisions = parseSentimentHotCandidateQaDecisions(modelText, modelCandidates.length);
-    if (qaDecisions.length > 0) {
-      const qaSelected = qaDecisions
-        .filter(sentimentHotCandidateQaPasses)
-        .sort((a, b) => rankSentimentHotCandidateQaDecision(b) - rankSentimentHotCandidateQaDecision(a))
-        .map((decision) => {
-          const candidate = modelCandidates[decision.index];
-          return candidate ? { ...candidate, qaPassed: true } : null;
-        })
-        .filter(Boolean)
-        .slice(0, args.limit);
-      if (qaSelected.length === 0) {
-        args.warnings.push("QA 評分未通過任何候選；已保留相關性與熱度排序候選，不再清空結果。");
-        return candidates.slice(0, args.limit);
-      }
-      args.warnings.push(`QA 評分通過 ${qaSelected.length}/${qaDecisions.length} 篇；不足數量時使用相關性與熱度候選補足。`);
-      return backfillSentimentModelSelection({
-        selected: qaSelected,
-        candidates,
-        limit: args.limit,
-        warnings: args.warnings,
-        reason: "QA 評分通過候選",
-      });
-    }
-    if (/^\s*```(?:json)?\s*\[\s*]\s*```?\s*$/i.test(modelText) || /^\s*\[\s*]\s*$/.test(modelText)) {
-      args.warnings.push("模型返回空筛选结果；已保留相關性與熱度排序候選。");
-    }
-    const indexes = parseModelIndexList(modelText, modelCandidates.length);
-    if (indexes.length > 0) {
-      const selected = indexes.map((index) => modelCandidates[index]).filter(Boolean);
-      args.warnings.push(`\u6a21\u578b\u8fd4\u56de\u820a\u7248\u5e8f\u865f ${selected.length}/${args.limit} \u7bc7\uff1b\u5df2\u6309\u5bec\u9b06\u4f4e\u8cea\u904e\u6ffe\u5f8c\u653e\u51fa\u3002`);
-      return selected.slice(0, args.limit);
-    }
-    args.warnings.push("\u6a21\u578b QA \u672a\u8fd4\u56de\u53ef\u7528\u8a55\u5206\uff0c\u5df2\u4fdd\u7559\u76f8\u95dc\u6027\u8207\u71b1\u5ea6\u6392\u5e8f\u5019\u9078\u3002");
-  } catch (error) {
-    args.warnings.push("\u6a21\u578b QA \u5931\u8d25\uff0c\u5df2\u4fdd\u7559\u76f8\u95dc\u6027\u8207\u71b1\u5ea6\u6392\u5e8f\u5019\u9078\uff1a" + (error instanceof Error ? error.message : String(error)));
-  }
-  return candidates.slice(0, args.limit);
 }
 
 async function withSentimentTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
@@ -1998,9 +1682,6 @@ export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHo
       }
       const heatDelta = Number(b.hotScore || 0) - Number(a.hotScore || 0);
       if (heatDelta !== 0) return heatDelta;
-      const aQa = a.qaPassed ? 0 : 1;
-      const bQa = b.qaPassed ? 0 : 1;
-      if (aQa !== bQa) return aQa - bQa;
       return sentimentHotHanCount(b.content) - sentimentHotHanCount(a.content);
     });
   for (const candidate of sorted) {

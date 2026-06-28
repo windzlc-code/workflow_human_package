@@ -8,7 +8,6 @@ import {
   finalizeSentimentHotCandidatesForDisplay,
   isObviouslyLowQualitySentimentHotCandidate,
   isChineseSentimentCandidate,
-  parseSentimentHotCandidateQaDecisions,
   parseInstagramReaderSearchMarkdownCandidates,
   matchThreadsBrowserProfilePublishedPost,
   parseThreadsBrowserPostDetailMetrics,
@@ -20,7 +19,6 @@ import {
   parseThreadsDetailMediaMarkdown,
   parseThreadsSearchTextCandidates,
   refreshSentimentSourceMetrics,
-  sentimentHotCandidateQaPasses,
   shouldTreatThreadsProfileAsLoginWall,
 } from "@/lib/sentiment-hot-importer";
 
@@ -225,23 +223,7 @@ describe("sentiment hot importer", () => {
       .toEqual([personaDaily]);
   });
 
-  it("parses hot candidate QA decisions and rejects low-quality scores", () => {
-    const decisions = parseSentimentHotCandidateQaDecisions(JSON.stringify([
-      { index: 1, pass: true, relevance: 86, quality: 78, rewriteValue: 82, audienceFit: 75, risk: 12 },
-      { index: 2, pass: true, relevance: 90, quality: 40, rewriteValue: 88, audienceFit: 80, risk: 10 },
-      { index: 3, pass: true, relevance: 91, quality: 88, rewriteValue: 82, audienceFit: 80, risk: 60 },
-      { index: 4, pass: true, relevance: 20, quality: 20, rewriteValue: 20, audienceFit: 20, risk: 90 },
-      { index: 99, pass: true, relevance: 100, quality: 100, rewriteValue: 100, audienceFit: 100, risk: 0 },
-    ]), 4);
-
-    expect(decisions.map((decision) => decision.index)).toEqual([0, 1, 2, 3]);
-    expect(sentimentHotCandidateQaPasses(decisions[0])).toBe(true);
-    expect(sentimentHotCandidateQaPasses(decisions[1])).toBe(true);
-    expect(sentimentHotCandidateQaPasses(decisions[2])).toBe(true);
-    expect(sentimentHotCandidateQaPasses(decisions[3])).toBe(false);
-  });
-
-  it("filters obvious low-quality hot candidates before model QA", () => {
+  it("filters obvious low-quality hot candidates before display", () => {
     const base = {
       id: "candidate",
       platform: "threads",
@@ -403,7 +385,7 @@ describe("sentiment hot importer", () => {
     expect(candidates.map((candidate) => candidate.id)).toEqual(["long-hot"]);
   });
 
-  it("keeps heat ordering ahead of QA markers in final candidates", () => {
+  it("keeps heat ordering in final candidates", () => {
     const base = {
       platform: "threads",
       author: "demo",
@@ -416,16 +398,15 @@ describe("sentiment hot importer", () => {
         ...base,
         id: "hot-without-qa",
         sourceUrl: "https://www.threads.net/@demo/post/hot-without-qa",
-        content: "海外信貸市場最近很多人在討論信用卡週轉和銀行貸款審核，這篇熱度很高，但還沒有模型 QA 標記。內容同時提到收入證明、負債比和還款壓力，足以作為長文候選排序測試，也能檢查熱度排序是否優先。",
+        content: "海外信貸市場最近很多人在討論信用卡週轉和銀行貸款審核，這篇熱度很高，但還沒有模型 old-marker 標記。內容同時提到收入證明、負債比和還款壓力，足以作為長文候選排序測試，也能檢查熱度排序是否優先。",
         hotScore: 50000,
       },
       {
         ...base,
         id: "qa-lower-heat",
         sourceUrl: "https://www.threads.net/@demo/post/qa-lower-heat",
-        content: "海外工薪族最近討論貸款利率和信用卡債務整合，有人整理收入證明、負債比、還款節奏和銀行審核條件，適合改寫成務實提醒。這條候選已通過 QA，但熱度低於另一條，用來確認 QA 標記不會壓過高熱度。",
+        content: "海外工薪族最近討論貸款利率和信用卡債務整合，有人整理收入證明、負債比、還款節奏和銀行審核條件，適合改寫成務實提醒。這條候選已通過 old-marker，但熱度低於另一條，用來確認 old-marker 標記不會壓過高熱度。",
         hotScore: 9000,
-        qaPassed: true,
       },
     ] as any, 10);
 
