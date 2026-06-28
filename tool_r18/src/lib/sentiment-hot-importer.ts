@@ -33,11 +33,11 @@ const THREADS_READER_TOTAL_QUERY_LIMIT = 36;
 const THREADS_READER_QUERY_BATCH_SIZE = 6;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
-const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 45_000;
-const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 95_000;
+const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 12_000;
+const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 75_000;
 const SENTIMENT_HOT_FAST_RETURN_COUNT = 5;
 const SENTIMENT_HOT_SUPPLEMENT_MIN_REMAINING_MS = 15_000;
-const THREADS_BROWSER_EMPTY_SHELL_LIMIT = 3;
+const THREADS_BROWSER_EMPTY_SHELL_LIMIT = 1;
 const SENTIMENT_HOT_TIMEOUT_WARNING = "\u71b1\u9ede\u6293\u53d6\u5df2\u8d85\u6642\uff0c\u5df2\u505c\u6b62\u5f8c\u7e8c\u8017\u6642\u6b65\u9a5f\uff1b\u8acb\u7a0d\u5f8c\u5237\u65b0\u6216\u6aa2\u67e5 Cookie / sessionid\u3002";
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
@@ -1188,7 +1188,11 @@ export async function fetchSentimentHotCandidates(args: {
     && candidates.length >= limit
     && cachedReadyCount >= limit
     && !shouldRefreshSentimentHotSource(archiveId);
+  const canReturnCachedWhileRefreshing = args.refresh === true
+    && candidates.length >= limit
+    && cachedReadyCount >= limit;
   const shouldFetchLiveCandidates = hasSearchKeywords
+    && !canReturnCachedWhileRefreshing
     && (candidates.length < limit || cachedReadyCount < limit || (args.refresh === true && !canUseCandidatePoolForRefresh));
   if (hasSearchKeywords && args.refresh === true && candidates.length >= limit && !shouldFetchLiveCandidates) {
     warnings.push("已使用當前人設候選池刷新；高品質候選仍足夠，已跳過短時間內重複抓取以降低平台風控。");
@@ -1208,7 +1212,7 @@ export async function fetchSentimentHotCandidates(args: {
           limit: poolLimit,
           refresh: args.refresh === true,
         }),
-        Math.min(58_000, remainingSentimentHotTotalBudgetMs(startedAt, 24_000)),
+        Math.min(16_000, remainingSentimentHotTotalBudgetMs(startedAt, 24_000)),
         [],
       ),
     ).catch((error) => {
@@ -1227,6 +1231,19 @@ export async function fetchSentimentHotCandidates(args: {
     candidates = sortSentimentHotCandidatePool([...byId.values()], keywords, poolLimit);
     channelStats.push(`Threads 原始 ${threadsCandidates.length}，新增 ${Math.max(0, candidates.length - beforeThreadsCount)}`);
     rememberSentimentHotSourceRefresh(archiveId);
+  } else if (hasSearchKeywords && canReturnCachedWhileRefreshing) {
+    channelStats.push(`Threads cache ${cachedReadyCount}/${limit}; returned first, background refresh scheduled`);
+    if (shouldRefreshSentimentHotSource(archiveId)) {
+      rememberSentimentHotSourceRefresh(archiveId);
+      void fetchThreadsSearchPageCandidates({
+        archiveId,
+        keywords,
+        limit: poolLimit,
+        refresh: true,
+      }).catch((error) => {
+        console.warn("[sentiment_hot_background_refresh_failed]", error instanceof Error ? error.message : String(error));
+      });
+    }
   }
   if (candidates.length > 0) {
     warnings.push(shouldFetchLiveCandidates
@@ -1297,7 +1314,7 @@ export async function fetchSentimentHotCandidates(args: {
     { platform: "instagram" as const, health: "unknown" as const, label: "Instagram", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
   ]));
   if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok && hasSentimentHotTotalBudget(startedAt, 7_000)) {
-    cookieStatuses = await measureSentimentStage(warnings, "cookie-refresh", () => withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), Math.min(35_000, remainingSentimentHotTotalBudgetMs(startedAt, 5_000)), cookieStatuses));
+    cookieStatuses = await measureSentimentStage(warnings, "cookie-refresh", () => withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 5_000)), cookieStatuses));
   } else if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok) {
     pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
   }
@@ -1749,7 +1766,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   const selectedOrImportedIds = getSentimentHotExcludedIds(args.archiveId);
   const primaryExcluded = args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : selectedOrImportedIds;
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
-  const fastReturnTarget = Math.min(args.limit, SENTIMENT_HOT_FAST_RETURN_COUNT);
+  const fastReturnTarget = Math.min(args.limit, 2);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
 
@@ -3874,19 +3891,19 @@ function isLikelyInstagramAuthor(value: string) {
 async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: number): Promise<{ text: string; url: string }> {
   const searchUrl = "https://www.threads.com/search";
   const directSearchUrl = `https://www.threads.com/search?q=${encodeURIComponent(query)}&serp_type=default`;
-  await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(20_000, remainingSentimentDeadlineMs(deadlineAt, 20_000)) }).catch(async () => {
-    await page.goto(directSearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(10_000, remainingSentimentDeadlineMs(deadlineAt, 10_000)) });
+  await page.goto(directSearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(6_000, remainingSentimentDeadlineMs(deadlineAt, 6_000)) }).catch(async () => {
+    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(4_000, remainingSentimentDeadlineMs(deadlineAt, 4_000)) }).catch(() => undefined);
   });
   if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
   const searchInput = page.locator('input[type="search"], input[placeholder*="搜尋"], input[placeholder*="Search"], textarea, [contenteditable="true"]').first();
-  await searchInput.click({ timeout: Math.min(3_000, remainingSentimentDeadlineMs(deadlineAt, 3_000)) }).catch(() => undefined);
-  await searchInput.fill(query, { timeout: Math.min(3_000, remainingSentimentDeadlineMs(deadlineAt, 3_000)) }).catch(async () => {
+  await searchInput.click({ timeout: Math.min(1_000, remainingSentimentDeadlineMs(deadlineAt, 1_000)) }).catch(() => undefined);
+  await searchInput.fill(query, { timeout: Math.min(1_000, remainingSentimentDeadlineMs(deadlineAt, 1_000)) }).catch(async () => {
     await page.keyboard.type(query).catch(() => undefined);
   });
   await page.keyboard.press("Enter").catch(() => undefined);
-  await page.waitForTimeout(Math.min(2_500, remainingSentimentDeadlineMs(deadlineAt, 2_500)));
+  await page.waitForTimeout(Math.min(1_200, remainingSentimentDeadlineMs(deadlineAt, 1_200)));
   if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
-  const text = await page.locator("body").innerText({ timeout: Math.min(5_000, remainingSentimentDeadlineMs(deadlineAt, 5_000)) }).catch(() => "");
+  const text = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
   return { text, url: page.url() || directSearchUrl };
 }
 
