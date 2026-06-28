@@ -5,12 +5,14 @@ import {
   buildSimplePagedCallback,
   buildPersonaContentTypeCallback,
   buildPersonaContentTypePickerRows,
+  buildPadDetailActionRows,
   buildPublishPadSelectionRows,
   buildPostDetailText,
   buildPostImagePreviewOptions,
   buildPostImageRegenerateCallback,
   buildPersonaSettingsRows,
   buildPersonaPlatformAccountRows,
+  calculateSentimentHotRewriteMinLength,
   formatPersonaSettingsHotMetricsLines,
   buildPostDetailActionRows,
   buildStoredPostMediaManageKeyboard,
@@ -20,6 +22,7 @@ import {
   formatCloudAccountStateNotice,
   formatUserFacingError,
   inferStoredPostMediaKind,
+  isSentimentHotRewriteTooShort,
   normalizeThreadsProfileLinkInput,
   parseSimplePagedCallback,
   parsePersonaContentTypeCallback,
@@ -199,6 +202,19 @@ describe("buildPersonaPlatformAccountRows", () => {
   });
 });
 
+describe("buildPadDetailActionRows", () => {
+  it("keeps duplicated Threads account actions out of cloud machine details", () => {
+    const callbacks = buildPadDetailActionRows().flat().map((button) => button.callback_data);
+
+    expect(callbacks).toEqual(["pad_mgmt"]);
+    expect(callbacks.some((callback) => callback.startsWith("pad_query_account_"))).toBe(false);
+    expect(callbacks.some((callback) => callback.startsWith("pad_switch_account_"))).toBe(false);
+    expect(callbacks.some((callback) => callback.startsWith("pad_threads_profile_"))).toBe(false);
+    expect(callbacks.some((callback) => callback.startsWith("pad_threads_auto_reply_"))).toBe(false);
+    expect(callbacks.some((callback) => callback.startsWith("warmup_start_"))).toBe(false);
+  });
+});
+
 describe("formatPersonaSettingsHotMetricsLines", () => {
   it("renders account metrics with recent views", () => {
     const archive = archiveForSettings({
@@ -264,6 +280,29 @@ describe("formatPersonaSettingsHotMetricsLines", () => {
     expect(lines.join("\n")).toContain("點讚 1.6k");
     expect(lines.join("\n")).toContain("瀏覽 6.3萬");
     expect(lines.join("\n")).not.toContain("汇总");
+  });
+});
+
+describe("sentiment hot rewrite quality gate", () => {
+  it("rejects very short persona-style rewrites for long imported hot posts", () => {
+    const original = [
+      "分享用海外收入申請台灣的信貸心得，由於是第一次申請信貸，事前做了不少功課。",
+      "後來選擇一家銀行，期間需要準備薪轉、公司收入證明、扣繳憑單和財力資料。",
+      "審核時銀行會電話確認細節，也會看負債比、收入穩定性和用途。",
+      "整體流程大約一週，利率比想像中低，但每個人條件不同，不能直接照抄。",
+      "如果是海外薪資，最好先準備好完整文件，並且找願意承作的銀行窗口。",
+    ].join("");
+
+    expect(calculateSentimentHotRewriteMinLength(original, "persona_style")).toBeGreaterThanOrEqual(90);
+    expect(isSentimentHotRewriteTooShort(original, "午後的陽光剛好灑進教研室，看著桌上剛整理好的財務教案，老師想和大家分享一個很實用的觀念", "persona_style")).toBe(true);
+    expect(isSentimentHotRewriteTooShort(original, `${original} 這段如果換成現在的人設角度，還需要補上自己的判斷和提醒。`, "persona_style")).toBe(false);
+  });
+
+  it("does not require more characters than a short source post contains", () => {
+    const original = "今天下雨，出門記得帶傘。";
+
+    expect(calculateSentimentHotRewriteMinLength(original, "persona_style")).toBe(Array.from(original.replace(/\s+/g, "")).length);
+    expect(isSentimentHotRewriteTooShort(original, original, "persona_style")).toBe(false);
   });
 });
 

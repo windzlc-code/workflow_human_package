@@ -782,6 +782,24 @@ const pendingPostActions = new Map<number, {
 
 type SentimentHotRewriteMode = "source_structure" | "persona_style";
 
+function countRewriteContentChars(value: string): number {
+  return Array.from(String(value || "").replace(/\s+/g, "")).length;
+}
+
+export function calculateSentimentHotRewriteMinLength(originalContent: string, mode: SentimentHotRewriteMode): number {
+  const originalLength = countRewriteContentChars(originalContent);
+  if (originalLength <= 0) return 0;
+  const ratioFloor = mode === "persona_style" ? 0.35 : 0.45;
+  const absoluteFloor = mode === "persona_style" ? 90 : 110;
+  return Math.min(originalLength, Math.max(absoluteFloor, Math.ceil(originalLength * ratioFloor)));
+}
+
+export function isSentimentHotRewriteTooShort(originalContent: string, rewrittenContent: string, mode: SentimentHotRewriteMode): boolean {
+  const minimum = calculateSentimentHotRewriteMinLength(originalContent, mode);
+  if (minimum <= 0) return false;
+  return countRewriteContentChars(rewrittenContent) < minimum;
+}
+
 const pendingStoredPostMediaMessages = new Map<number, {
   messageIds: number[];
 }>();
@@ -3485,6 +3503,10 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
     rows.push(buttons.slice(index, index + 2));
   }
   return rows;
+}
+
+export function buildPadDetailActionRows(): Array<Array<{ text: string; callback_data: string }>> {
+  return [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]];
 }
 
 function normalizePersonaHotMetricsUsername(value?: string | null) {
@@ -10428,8 +10450,9 @@ async function rewriteSentimentHotImportedPostContent(args: {
     "4. 不要複製原文中的整句、連續短語、段落片段或口頭禪。",
     "5. 不要改變媒體，也不要描述自己看不到的畫面細節。",
     "6. 必須使用繁體中文和自然台灣社群語氣。",
-    args.mode === "persona_style" ? "7. 字數可以接近原文，但結構必須不同；寧可重組成更像人設的短推文，也不要為了貼近原文而照著原文展開。" : "7. 可以保留原帖結構樣式，但語句必須重寫，且要比原文更像當前人設。",
-    args.attempt > 1 ? "8. 上一次重寫仍然太像原文；這次必須明顯提高原創度，不得保留任何連續原文片段。" : "",
+    args.mode === "persona_style" ? "7. 結構必須不同，但內容不能縮成一句摘要；要完整保留熱點素材的核心信息、觀點和可讀性。" : "7. 可以保留原帖結構樣式，但語句必須重寫，且要比原文更像當前人設。",
+    args.attempt > 1 ? "8. 上一次重寫太短或仍然太像原文；這次必須完整展開，明顯提高原創度，不得保留任何連續原文片段。" : "",
+    `9. 本次至少輸出 ${calculateSentimentHotRewriteMinLength(args.post.content, args.mode)} 個有效中文字/字符左右；不得只輸出一句短句、標語或摘要。`,
     "",
     `【當前人設核心】\n${personaCoreLines || "未提供明確人設，請根據人設名稱和待改寫文案推斷自然口吻。"}`,
     sourceLines ? `【熱點素材，只能作為信息來源，不得模仿文風】\n${sourceLines}` : "",
@@ -10500,6 +10523,17 @@ async function regenerateArchivePostContent(args: {
       generatedContent = String(generated?.content || "").trim();
     }
     if (!generatedContent) throw new Error("AI 未返回新推文內容");
+    const sentimentRewriteMode = args.rewriteMode || "persona_style";
+    const tooShort = isSentimentHotImportedPost(original) && isSentimentHotRewriteTooShort(original.content, generatedContent, sentimentRewriteMode);
+    if (tooShort) {
+      console.warn(
+        `[telegram][sentiment_hot_rewrite_too_short] mode=${sentimentRewriteMode} attempt=${attempt} inputChars=${countRewriteContentChars(original.content)} outputChars=${countRewriteContentChars(generatedContent)} minChars=${calculateSentimentHotRewriteMinLength(original.content, sentimentRewriteMode)}`,
+      );
+      if (attempt === 3) {
+        throw new Error("AI 連續返回過短文案，請稍後再試或換一個生成方向。");
+      }
+      continue;
+    }
     if (!isRegeneratedPostTooSimilar(original.content, generatedContent, {
       allowSameListStructure: isSentimentHotImportedPost(original) && (args.rewriteMode || "persona_style") === "source_structure",
     })) break;
@@ -15946,17 +15980,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       await safeEditOrSend(bot, chatId, msgId, `📱 *雲機詳情*\n\n編號：${pad.padCode}\n名稱：${padDisplayName(pad)}\n狀態：${statusLabel}`, {
         parse_mode: "Markdown",
         reply_markup: {
-          inline_keyboard: [
-            [{ text: "🔍 查询 Threads 帳號", callback_data: `pad_query_account_${padCode}` }],
-            [{ text: "🔄 切换登录帳號", callback_data: `pad_switch_account_${padCode}` }],
-            [{ text: "🔗 Threads 简介新增链接", callback_data: `pad_threads_profile_link_${padCode}` }],
-            [{ text: "📝 修改 Threads 简介", callback_data: `pad_threads_profile_bio_${padCode}` }],
-            [{ text: "🏷 修改 Threads 名稱", callback_data: `pad_threads_profile_name_${padCode}` }],
-            [{ text: "🖼 修改 Threads 頭像", callback_data: `pad_threads_profile_avatar_${padCode}` }],
-            [{ text: "Threads自动回复", callback_data: `pad_threads_auto_reply_${padCode}` }],
-            ...buildAllowedWarmupRows(padCode),
-            [{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }],
-          ],
+          inline_keyboard: buildPadDetailActionRows(),
         },
       });
       return;
@@ -20730,6 +20754,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
           ? "persona_style"
           : undefined;
       const isSentimentImported = isSentimentHotImportedPost(post);
+      if (rewriteMode && !isSentimentImported) {
+        await safeEditOrSend(bot, chatId, msgId, [
+          "⚠️ 這個重寫模式只適用於熱點導入推文。",
+          "",
+          "普通推文請使用「AI 重新生成」，系統會按當前人設和原推文主題重新生成。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+        });
+        return;
+      }
       if (data === "post_regen_ai" && isSentimentImported) {
         const sourcePosts = resolveArchivePostCollection(archive, action.source);
         const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
