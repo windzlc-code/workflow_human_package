@@ -9922,6 +9922,40 @@ async function recoverThreadsSearchOverlayAfterCaptionInput(
 
 type ThreadsCaptionInputMethod = "android-input" | "vmos-inputtext" | "adb-broadcast";
 
+const THREADS_PUBLISH_CAPTION_LIMIT = 500;
+
+export function normalizeThreadsPublishCaptionForInput(caption: string, limit = THREADS_PUBLISH_CAPTION_LIMIT): string {
+  const raw = String(caption || "").replace(/\r/g, "").trim();
+  if (!raw) return " ";
+  if (raw.length <= limit) return `${raw} `;
+
+  const urlMatches = Array.from(raw.matchAll(/https?:\/\/[^\s<>"']+/gi));
+  const lastUrl = urlMatches[urlMatches.length - 1];
+  if (!lastUrl || lastUrl.index === undefined) {
+    return `${raw.slice(0, limit).trimEnd()} `;
+  }
+
+  const urlStart = lastUrl.index;
+  const urlLineStart = raw.lastIndexOf("\n", Math.max(0, urlStart - 1)) + 1;
+  const beforeUrlLine = raw.slice(0, urlLineStart).trimEnd();
+  const previousLineStart = beforeUrlLine.lastIndexOf("\n") + 1;
+  const previousLine = beforeUrlLine.slice(previousLineStart).trim();
+  const shouldKeepPreviousLine = Boolean(
+    previousLine
+    && previousLine.length <= 80
+    && !/^https?:\/\//i.test(previousLine)
+    && urlLineStart - previousLineStart <= 120,
+  );
+  const suffixStart = shouldKeepPreviousLine ? previousLineStart : urlLineStart;
+  const suffix = raw.slice(suffixStart).trim();
+  if (suffix.length >= limit) return `${suffix.slice(Math.max(0, suffix.length - limit)).trim()} `;
+
+  const bodyBudget = Math.max(0, limit - suffix.length - 1);
+  const body = raw.slice(0, suffixStart).trimEnd();
+  const prefix = bodyBudget > 0 ? body.slice(0, bodyBudget).trimEnd() : "";
+  return `${[prefix, suffix].filter(Boolean).join("\n").trim()} `;
+}
+
 async function typeThreadsComposerCaptionText(
   config: VmosConfig,
   padCode: string,
@@ -15897,7 +15931,7 @@ async function publishThreads(
   const { padCode, caption, mediaUrl } = task;
   const throwIfCancelled = () => options.cancellationToken?.throwIfCancelled?.();
   throwIfCancelled();
-  const normalizedCaption = `${caption.slice(0, 500).trimEnd()} `;
+  const normalizedCaption = normalizeThreadsPublishCaptionForInput(caption);
   const isVideoMedia = Boolean(mediaUrl) && isVideoMediaUrl(mediaUrl);
   const publishMediaKind: "text" | "image" | "video" = !mediaUrl ? "text" : isVideoMedia ? "video" : "image";
   const acpFastTextPath = shouldUseAcpThreadsFastTextPath(padCode, mediaUrl);

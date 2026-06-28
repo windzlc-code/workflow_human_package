@@ -64,12 +64,42 @@ import {
   looksLikeThreadsThreadDetailUiXml,
   parsePublishVisionResult,
   planRiskManagedWarmupConfig,
+  normalizeThreadsPublishCaptionForInput,
   sanitizeWarmupComment,
   scalePointBetweenScreens,
   scalePointFromReferenceScreen,
   scaleScreenshotPointToAdbPointForSizes,
   shouldUseThreadsShareIntentPath,
 } from "@/lib/vmos-publisher";
+
+describe("normalizeThreadsPublishCaptionForInput", () => {
+  it("keeps legacy 500-character truncation when there is no URL", () => {
+    const caption = "a".repeat(520);
+    const normalized = normalizeThreadsPublishCaptionForInput(caption);
+
+    expect(normalized).toBe(`${"a".repeat(500)} `);
+  });
+
+  it("preserves a trailing link template when the body is too long", () => {
+    const url = "https://example.com/more";
+    const caption = `${"這是一段很長的正文".repeat(45)}\n想看更多整理，我放这里\n${url}`;
+    const normalized = normalizeThreadsPublishCaptionForInput(caption);
+    const trimmed = normalized.trim();
+
+    expect(trimmed.length).toBeLessThanOrEqual(500);
+    expect(trimmed).toContain("想看更多整理，我放这里");
+    expect(trimmed.endsWith(url)).toBe(true);
+  });
+
+  it("preserves a trailing URL even without an ending sentence", () => {
+    const url = "https://threads.net/@ann.54088/post/example";
+    const caption = `${"正文內容".repeat(90)}\n${url}`;
+    const normalized = normalizeThreadsPublishCaptionForInput(caption).trim();
+
+    expect(normalized.length).toBeLessThanOrEqual(500);
+    expect(normalized.endsWith(url)).toBe(true);
+  });
+});
 
 async function makePngDataUrl(
   width: number,
