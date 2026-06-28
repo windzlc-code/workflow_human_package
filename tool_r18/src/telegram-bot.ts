@@ -4549,7 +4549,7 @@ async function handlePendingLinkEndingPresetInput(args: {
   text: string;
   msg: TelegramBot.Message;
 }) {
-  const archive = await loadPersonaForThisBot(args.archiveId).catch(() => null);
+  const archive = await loadPersonaArchive(args.archiveId).catch(() => null);
   if (!archive) {
     await args.bot.sendMessage(args.chatId, "❌ 當前 Bot 不能讀取這個人設。", {
       reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
