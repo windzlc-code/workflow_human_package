@@ -702,6 +702,16 @@ describe("buildStoredPostPublishConfirmRows", () => {
     expect(callbacks).toContain("dop_threads");
   });
 
+  it("shows link template selection when selectable presets exist", () => {
+    const rows = buildStoredPostPublishConfirmRows({
+      archiveId: "archive-1",
+      hasSelectableLinkTemplates: true,
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
+    expect(callbacks).toContain("post_link_templates");
+  });
+
   it("keeps normal stored post advanced publish options", () => {
     const rows = buildStoredPostPublishConfirmRows({
       archiveId: "archive-1",

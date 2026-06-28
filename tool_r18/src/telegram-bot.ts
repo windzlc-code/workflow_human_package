@@ -702,6 +702,8 @@ const pendingScheduledPublishes = new Map<number, {
   taskId?: string;
   platformFilter?: TelegramPublishPlatform;
   batchMode?: "reschedule" | "cancel";
+  linkEndingPresetApplied?: boolean;
+  contentOverride?: string;
   selectedDate?: string;
   selectedHour?: number;
   selectedMinute?: number;
@@ -716,6 +718,8 @@ const pendingManualPublishes = new Map<number, {
   startIndex?: number;
   page?: number;
   groupContentType?: TelegramGroupContentType;
+  linkEndingPresetApplied?: boolean;
+  contentOverrides?: Record<string, string>;
   stage: "choose_platform" | "choose_post" | "choose_count" | "preview_confirm";
 }>();
 
@@ -735,6 +739,7 @@ type PendingCustomPublish = {
   fileKind?: "photo" | "video" | "document";
   mimeType?: string;
   linkEndingPresetApplied?: boolean;
+  linkEndingPresetBaseText?: string;
 };
 
 const pendingCustomPublishes = new Map<number, PendingCustomPublish>();
@@ -779,6 +784,8 @@ const pendingPostActions = new Map<number, {
   postId: string;
   source?: "posts" | "favorites";
   groupContentType?: TelegramGroupContentType;
+  linkEndingPresetApplied?: boolean;
+  contentOverride?: string;
 }>();
 
 type SentimentHotRewriteMode = "source_structure" | "persona_style";
@@ -820,6 +827,8 @@ type PendingPublishPadSelection = {
   groupContentType?: TelegramGroupContentType;
   retryPostIdsByPad?: Record<string, string[]>;
   completedPadCodesByPost?: Record<string, string[]>;
+  linkEndingPresetApplied?: boolean;
+  contentOverrides?: Record<string, string>;
   selectedPadCodes: string[];
   availablePadCodes: string[];
   backCallback?: string;
@@ -869,6 +878,8 @@ type PendingBulkPostAction = {
   platform?: TelegramPublishPlatform;
   padCodes?: string[];
   groupContentType?: TelegramGroupContentType;
+  linkEndingPresetApplied?: boolean;
+  contentOverrides?: Record<string, string>;
 };
 
 const pendingBulkPostActions = new Map<number, PendingBulkPostAction>();
@@ -879,6 +890,7 @@ type PendingMatrixPublish = {
   source?: "posts" | "favorites";
   count?: number | "all";
   platform?: TelegramPublishPlatform;
+  linkEndingPresetApplied?: boolean;
   stage: "choose_personas" | "choose_source" | "choose_platform" | "choose_count" | "confirm" | "running";
   createdAt: number;
 };
@@ -4528,6 +4540,41 @@ function buildPersonaPublishCaption(content: string, setup: any): string {
   const active = getActiveLinkEndingPreset(setup) || buildLegacyLinkEndingPreset(setup);
   if (!active) return String(content || "").trim();
   return applyLinkEndingPresetToText(content, active);
+}
+
+function withoutAutoLinkEndingSetup(setup: any) {
+  return {
+    ...(setup || {}),
+    linkEndingPresets: [],
+    activeLinkEndingPresetId: "",
+    tweetStyleLinkUrl: "",
+    tweetStyleLinkText: "",
+  };
+}
+
+function archiveWithoutAutoLinkEnding(archive: PersonaArchive): PersonaArchive {
+  return { ...archive, setup: withoutAutoLinkEndingSetup(archive.setup) } as PersonaArchive;
+}
+
+function buildPostWithPublishContentOverride(
+  post: PersonaArchive["posts"][number],
+  contentOverride?: string,
+): PersonaArchive["posts"][number] {
+  const content = String(contentOverride || "").trim();
+  if (!content) return post;
+  return {
+    ...post,
+    content,
+    wordCount: content.length,
+  };
+}
+
+function applyPublishContentOverrides(
+  posts: PersonaArchive["posts"],
+  contentOverrides?: Record<string, string>,
+): PersonaArchive["posts"] {
+  if (!contentOverrides || !Object.keys(contentOverrides).length) return posts;
+  return posts.map((post) => buildPostWithPublishContentOverride(post, contentOverrides[post.id]));
 }
 
 export function applyLinkEndingPresetToText(content: string, active: { linkUrl?: string; endingText?: string }): string {
@@ -12691,6 +12738,7 @@ export function buildStoredPostPublishConfirmRows(args: {
   groupContentType?: TelegramGroupContentType;
   isSentimentImported?: boolean;
   platforms?: TelegramPublishPlatform[];
+  hasSelectableLinkTemplates?: boolean;
 }) {
   const platforms = args.platforms?.length ? args.platforms : [DEFAULT_PUBLISH_PLATFORM];
   const source = args.source || "posts";
@@ -12701,6 +12749,7 @@ export function buildStoredPostPublishConfirmRows(args: {
     return platform;
   };
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
+    ...(args.hasSelectableLinkTemplates ? [[{ text: "🔗 选择链接模板", callback_data: "post_link_templates" }]] : []),
     ...platforms.map((platform) => ([{
       text: `发布 ${platformText(platform)}`,
       callback_data: `dop_${platform}`,
@@ -14613,11 +14662,16 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     groupContentType?: TelegramGroupContentType;
     statusPrefix?: string;
     postsByPad?: Record<string, string[]>;
+    skipAutoLinkEnding?: boolean;
+    contentOverrides?: Record<string, string>;
   }) => {
     const padCodes = uniquePadCodes(args.padCodes);
     const results = await Promise.all(padCodes.map(async (padCode) => {
       const padPostIdSet = args.postsByPad?.[padCode]?.length ? new Set(args.postsByPad[padCode]) : null;
-      const padPosts = padPostIdSet ? args.posts.filter((post) => padPostIdSet.has(post.id)) : args.posts;
+      const padPosts = applyPublishContentOverrides(
+        padPostIdSet ? args.posts.filter((post) => padPostIdSet.has(post.id)) : args.posts,
+        args.contentOverrides,
+      );
       if (!padPosts.length) {
         return { padCode, ok: true, logs: [], screenshots: [], publishedPostIds: [] as string[] };
       }
@@ -14642,7 +14696,9 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       try {
         for (let index = 0; index < padPosts.length; index += 1) {
           const post = padPosts[index];
-          const finalCaption = buildPersonaPublishCaption(post.content, args.archive.setup);
+          const finalCaption = args.skipAutoLinkEnding
+            ? String(post.content || "").trim()
+            : buildPersonaPublishCaption(post.content, args.archive.setup);
           assertPadOperationNotCancelled(padOperationKey);
           logs.push(`▶️ ${args.statusPrefix || "发布"} ${index + 1}/${padPosts.length}`);
           const result = await publishPost(
@@ -14754,16 +14810,19 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     const source = state.source || "posts";
     const detailLines: string[] = [];
     let plannedPosts = 0;
+    let activeTemplatePersonas = 0;
     for (const archiveId of state.archiveIds) {
       const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
       if (!archive) {
         detailLines.push(`${archiveId}：找不到人設`);
         continue;
       }
+      if (getActiveLinkEndingPreset(archive.setup as any)) activeTemplatePersonas += 1;
       const sourcePosts = resolveArchivePostCollection(archive, source);
       const selectedCount = count === "all" ? sourcePosts.length : Math.min(sourcePosts.length, count);
       plannedPosts += selectedCount;
-      detailLines.push(`${archive.name}：${selectedCount} 篇，雲機 ${archive.boundPadCode || defaultPadCode}`);
+      const templateHint = state.linkEndingPresetApplied && getActiveLinkEndingPreset(archive.setup as any) ? "，链接模板已启用" : "";
+      detailLines.push(`${archive.name}：${selectedCount} 篇，雲機 ${archive.boundPadCode || defaultPadCode}${templateHint}`);
     }
     await safeEditOrSend(bot, chatId, msgId, [
       "🚀 *矩陣發布確認*",
@@ -14773,6 +14832,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       `平台：${state.platform || "threads"}`,
       `數量：${formatMatrixCountLabel(count)}`,
       `計劃推文：${plannedPosts} 篇`,
+      state.linkEndingPresetApplied ? `链接模板：使用各人设当前启用模板（${activeTemplatePersonas}/${state.archiveIds.length} 个人设有模板）` : "",
       "",
       ...detailLines.slice(0, 12),
       detailLines.length > 12 ? `...還有 ${detailLines.length - 12} 個人設` : "",
@@ -14782,6 +14842,8 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [
+          ...(activeTemplatePersonas > 0 && !state.linkEndingPresetApplied ? [[{ text: "🔗 使用各人设链接模板预览", callback_data: "mxlink_apply" }]] : []),
+          ...(state.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板预览", callback_data: "mxlink_clear" }]] : []),
           [{ text: "✅ 開始矩陣發布", callback_data: "mxrun" }],
           [{ text: "◀️ 返回數量", callback_data: `mxplat_${state.platform || "threads"}` }],
           [{ text: "👤 重新選人設", callback_data: "matrix_start" }],
@@ -14931,6 +14993,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
 
   const customPublishFinalPublishRows = (state: PendingCustomPublish) => [
     ...(state.archiveId ? [[{ text: "🔗 选择链接模板", callback_data: "custom_publish_link_templates" }]] : []),
+    ...(state.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "custom_publish_link_clear" }]] : []),
     [{ text: `✅ 发布到绑定云机 ${state.padCode || defaultPadCode}`, callback_data: "custom_publish_publish_now" }],
     [{ text: "📱 选择多云机发布", callback_data: "custom_publish_multi_now" }],
     [customPublishResetButton],
@@ -14964,6 +15027,34 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
         : ["当前人设还没有链接模板。"]),
     ];
     return lines.join("\n");
+  };
+
+  const buildStoredPostLinkTemplateRows = (archive: PersonaArchive) => {
+    const presets = getSelectableLinkEndingPresets(archive.setup as any);
+    const rows = presets.slice(0, 10).map((preset, index) => ([{
+      text: `${preset.name || preset.endingText || preset.linkUrl || "模板"}`,
+      callback_data: `post_link_apply_${index}`,
+    }]));
+    rows.push([{ text: "◀️ 返回发布确认", callback_data: "post_action" }]);
+    return rows;
+  };
+
+  const buildStoredPostLinkTemplateText = (archive: PersonaArchive, post: PersonaArchive["posts"][number]) => {
+    const presets = getSelectableLinkEndingPresets(archive.setup as any);
+    return [
+      "🔗 发布前选择链接模板",
+      "",
+      `人设：${archive.name}`,
+      "",
+      post.content?.trim()
+        ? `当前文案：${post.content.trim().slice(0, 180)}${post.content.trim().length > 180 ? "..." : ""}`
+        : "当前文案：-",
+      "",
+      "请选择要添加到本次发布文案里的模板：",
+      ...(presets.length
+        ? presets.slice(0, 10).map((preset, index) => `${index + 1}. ${preset.name || "模板"}${preset.endingText ? ` / ${preset.endingText.slice(0, 40)}` : ""}${preset.linkUrl ? ` / ${preset.linkUrl}` : ""}`)
+        : ["当前人设还没有链接模板。"]),
+    ].join("\n");
   };
 
   const customPublishContentSummary = (state: PendingCustomPublish) => {
@@ -15091,7 +15182,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       mediaUrl: mediaUrl || "",
     } as PersonaArchive["posts"][number];
     const customArchive = state.linkEndingPresetApplied && archive
-      ? ({ ...archive, setup: { ...(archive.setup || {}), linkEndingPresets: [], activeLinkEndingPresetId: "", tweetStyleLinkUrl: "", tweetStyleLinkText: "" } } as PersonaArchive)
+      ? archiveWithoutAutoLinkEnding(archive)
       : archive || ({
       id: state.archiveId || `custom-${chatId}`,
       name: state.archiveName || "自定义发布",
@@ -15377,11 +15468,16 @@ function enqueueScheduledArchivePost(args: {
   padCode: string;
   scheduledAt: string;
   telegramChatId: number;
+  skipAutoLinkEnding?: boolean;
+  contentOverride?: string;
 }) {
   return loadPersonaArchive(args.archiveId).then((archive) => {
     const post = archive?.posts.find((item) => item.id === args.postId);
     if (!archive || !post) throw new Error("沒有找到要定時發佈的推文");
-    const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
+    const postForPublish = buildPostWithPublishContentOverride(post, args.contentOverride);
+    const finalCaption = args.skipAutoLinkEnding
+      ? String(postForPublish.content || "").trim()
+      : buildPersonaPublishCaption(postForPublish.content, archive.setup);
     return repo.enqueueTask({
       archive_id: args.archiveId,
       archive_post_id: args.postId,
@@ -15559,6 +15655,8 @@ async function applyScheduledTimeSelection(chatId: number, msgId: number | undef
       padCode,
       scheduledAt,
       telegramChatId: chatId,
+      skipAutoLinkEnding: state.linkEndingPresetApplied,
+      contentOverride: state.contentOverride,
     })));
     pendingScheduledPublishes.delete(chatId);
     await safeEditOrSend(bot, chatId, msgId, `✅ 已加入定時發佈佇列\n\n${buildScheduledPublishSummary({ ...state, padCodes, scheduledAtText: formatScheduledTaskTime(scheduledAt) })}\n任務數：${tasks.length}\n任務ID：${tasks.map((task) => task.id.slice(0, 8)).join(", ")}`, {
@@ -15653,8 +15751,10 @@ function buildManualPostChoicePreview(posts: Array<{ content: string; imageUrl?:
     .join("\n\n");
 }
 
-function buildManualPreviewRows(archiveId: string, platform: TelegramPublishPlatform, startIndex: number, count: number) {
+function buildManualPreviewRows(archiveId: string, platform: TelegramPublishPlatform, startIndex: number, count: number, options: { hasLinkTemplates?: boolean; linkEndingPresetApplied?: boolean } = {}) {
   return [
+    ...(options.hasLinkTemplates ? [[{ text: "🔗 选择链接模板", callback_data: "manual_link_templates" }]] : []),
+    ...(options.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "manual_link_clear" }]] : []),
     [{ text: "✅ 确认发布到绑定云机", callback_data: buildManualConfirmCallback(archiveId, platform, startIndex, count) }],
     [{ text: "📱 选择多云机发布", callback_data: "mconfirm_multi" }],
     [{ text: "◀️ 返回改數量", callback_data: `ms_${startIndex + 1}` }],
@@ -16923,6 +17023,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       || data === "mxback_platform"
       || data === "mxb_confirm"
       || data === "mxrun"
+      || data === "mxlink_apply"
+      || data === "mxlink_clear"
     ) {
       const allPersonas = filterPersonaMenuList(await listPersonasCached());
       let state = pendingMatrixPublishes.get(chatId) || {
@@ -17060,6 +17162,18 @@ function sendMainMenu(chatId: number, msgId?: number) {
         state = { ...state, count, stage: "confirm" };
         pendingMatrixPublishes.set(chatId, state);
         await renderMatrixPublishConfirm(chatId, msgId, state, count);
+        return;
+      }
+      if (data === "mxlink_apply" || data === "mxlink_clear") {
+        if (!state.count) {
+          await safeEditOrSend(bot, chatId, msgId, "矩阵发布状态不完整，请重新选择数量。", {
+            reply_markup: { inline_keyboard: [[{ text: "🚀 重新开始", callback_data: "matrix_start" }]] },
+          });
+          return;
+        }
+        state = { ...state, linkEndingPresetApplied: data === "mxlink_apply", stage: "confirm" };
+        pendingMatrixPublishes.set(chatId, state);
+        await renderMatrixPublishConfirm(chatId, msgId, state, state.count);
         return;
       }
       if (data === "mxrun") {
@@ -19876,6 +19990,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
             platform: state.platform,
             padCode: selectedPadCodes[0],
             padCodes: selectedPadCodes,
+            linkEndingPresetApplied: state.linkEndingPresetApplied,
+            contentOverride: state.contentOverrides?.[post.id],
           });
           pendingPublishPadSelections.delete(chatId);
           await showScheduledTimePicker(chatId, msgId, pendingScheduledPublishes.get(chatId)!);
@@ -19894,6 +20010,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           label: state.mode === "bulk_posts" ? "批量发布" : state.mode === "manual_posts" ? "人工发布" : "发布",
           groupContentType: state.groupContentType,
           postsByPad: state.retryPostIdsByPad,
+          skipAutoLinkEnding: state.linkEndingPresetApplied,
+          contentOverrides: state.contentOverrides,
         });
         stopTyping();
         const failures = results.filter((item) => !item.ok);
@@ -19978,6 +20096,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       || data === "bpublish_confirm"
       || data === "bmulti_confirm"
       || data === "bdelete_confirm"
+      || data === "bulk_link_templates"
+      || data.startsWith("bulk_link_apply_")
+      || data === "bulk_link_clear"
     ) {
       const state = pendingBulkPostActions.get(chatId);
       if (!state?.archiveId) {
@@ -20085,7 +20206,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return;
         }
         pendingBulkPostActions.set(chatId, { ...state, platform, selectedPostIds: selectedPosts.map((post) => post.id), page: visiblePage });
-        const preview = selectedPosts.slice(0, 5).map((post) => {
+        const previewPosts = applyPublishContentOverrides(selectedPosts, state.contentOverrides);
+        const preview = previewPosts.slice(0, 5).map((post) => {
           const displayIndex = archive.posts.findIndex((item) => item.id === post.id) + 1;
           return `【第${displayIndex}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`;
         }).join("\n\n");
@@ -20094,6 +20216,96 @@ function sendMainMenu(chatId: number, msgId?: number) {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
+              ...(getSelectableLinkEndingPresets(archive.setup as any).length ? [[{ text: "🔗 选择链接模板", callback_data: "bulk_link_templates" }]] : []),
+              ...(state.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "bulk_link_clear" }]] : []),
+              [{ text: `✅ 发布到绑定云机 ${selectedPosts.length} 篇`, callback_data: "bpublish_confirm" }],
+              [{ text: "📱 选择多云机发布", callback_data: "bmulti_confirm" }],
+              [{ text: "◀️ 返回选平台", callback_data: "bconfirm" }],
+            ],
+          },
+        });
+        return;
+      }
+      if (data === "bulk_link_templates") {
+        const selectedPosts = scopedPosts.filter((post) => selected.has(post.id));
+        if (!selectedPosts.length || !state.platform) {
+          await renderSelection({ ...state, selectedPostIds: [...selected], page: visiblePage });
+          return;
+        }
+        const presets = getSelectableLinkEndingPresets(archive.setup as any);
+        const rows = presets.slice(0, 10).map((preset, index) => ([{
+          text: `${preset.name || preset.endingText || preset.linkUrl || "模板"}`,
+          callback_data: `bulk_link_apply_${index}`,
+        }]));
+        rows.push([{ text: "◀️ 返回批量发布确认", callback_data: `bpubplat_${state.platform}` }]);
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🔗 批量发布前选择链接模板",
+          "",
+          `人设：${archive.name}`,
+          `已选：${selectedPosts.length} 篇`,
+          "",
+          "选择后会把同一个模板追加到本次批量发布的每篇文案预览中，不会修改原推文。",
+          "",
+          ...(presets.length
+            ? presets.slice(0, 10).map((preset, index) => `${index + 1}. ${preset.name || "模板"}${preset.endingText ? ` / ${preset.endingText.slice(0, 40)}` : ""}${preset.linkUrl ? ` / ${preset.linkUrl}` : ""}`)
+            : ["当前人设还没有链接模板。"]),
+        ].join("\n"), {
+          disable_web_page_preview: true,
+          reply_markup: { inline_keyboard: rows },
+        });
+        return;
+      }
+      if (data.startsWith("bulk_link_apply_")) {
+        const presetIndex = Number.parseInt(data.slice("bulk_link_apply_".length), 10);
+        const selectedPosts = scopedPosts.filter((post) => selected.has(post.id));
+        const preset = getSelectableLinkEndingPresets(archive.setup as any)[presetIndex];
+        if (!selectedPosts.length || !state.platform || !preset) {
+          await renderSelection({ ...state, selectedPostIds: [...selected], page: visiblePage });
+          return;
+        }
+        const contentOverrides = Object.fromEntries(selectedPosts.map((post) => [
+          post.id,
+          applyLinkEndingPresetToText(post.content || "", preset),
+        ]));
+        pendingBulkPostActions.set(chatId, { ...state, selectedPostIds: selectedPosts.map((post) => post.id), linkEndingPresetApplied: true, contentOverrides });
+        const previewPosts = applyPublishContentOverrides(selectedPosts, contentOverrides);
+        const preview = previewPosts.slice(0, 5).map((post) => {
+          const displayIndex = archive.posts.findIndex((item) => item.id === post.id) + 1;
+          return `【第${displayIndex}篇】${post.content.slice(0, 80)}${post.content.length > 80 ? "..." : ""}`;
+        }).join("\n\n");
+        await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板（仅本次批量发布预览）\n\n${preview}`, {
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "✅ 返回批量发布确认", callback_data: `bpubplat_${state.platform}` }],
+              [{ text: "↩️ 撤回链接模板", callback_data: "bulk_link_clear" }],
+            ],
+          },
+        });
+        return;
+      }
+      if (data === "bulk_link_clear") {
+        if (!state.platform) {
+          await renderSelection({ ...state, selectedPostIds: [...selected], page: visiblePage });
+          return;
+        }
+        const nextState = { ...state, linkEndingPresetApplied: false, contentOverrides: undefined };
+        pendingBulkPostActions.set(chatId, nextState);
+        const selectedPosts = scopedPosts.filter((post) => selected.has(post.id));
+        if (!selectedPosts.length) {
+          await renderSelection({ ...nextState, selectedPostIds: [], page: visiblePage });
+          return;
+        }
+        const preview = selectedPosts.slice(0, 5).map((post) => {
+          const displayIndex = archive.posts.findIndex((item) => item.id === post.id) + 1;
+          return `【第${displayIndex}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`;
+        }).join("\n\n");
+        const targetGroupLine = buildTelegramPublishPreviewTargetLine(nextState.platform, archive, selectedPosts[0], nextState.groupContentType);
+        await safeEditOrSend(bot, chatId, msgId, `↩️ 已撤回链接模板\n\n👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${nextState.platform}${targetGroupLine}\n云机：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              ...(getSelectableLinkEndingPresets(archive.setup as any).length ? [[{ text: "🔗 选择链接模板", callback_data: "bulk_link_templates" }]] : []),
               [{ text: `✅ 发布到绑定云机 ${selectedPosts.length} 篇`, callback_data: "bpublish_confirm" }],
               [{ text: "📱 选择多云机发布", callback_data: "bmulti_confirm" }],
               [{ text: "◀️ 返回选平台", callback_data: "bconfirm" }],
@@ -20117,6 +20329,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           selectedPostIds: selectedPosts.map((post) => post.id),
           page: visiblePage,
           groupContentType: state.groupContentType,
+          linkEndingPresetApplied: state.linkEndingPresetApplied,
+          contentOverrides: state.contentOverrides,
           selectedPadCodes: state.padCodes || [archive.boundPadCode || defaultPadCode],
         }, `🚀 *多云机批量发布*\n\n人设：${archive.name}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, selectedPosts[0], state.groupContentType)}\n发布数量：${selectedPosts.length} 篇\n\n请选择要同时发布的云机：`, "bconfirm");
         return;
@@ -20176,10 +20390,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const publishedOriginals: Record<string, string> = {};
         const publishMeta: Record<string, { platform: TelegramPublishPlatform; padCode: string; imageUrl?: string; screenshotUrl?: string }> = {};
         const logs: string[] = [];
+        const postsForPublish = applyPublishContentOverrides(selectedPosts, state.contentOverrides);
         try {
-          for (let i = 0; i < selectedPosts.length; i += 1) {
-            const post = selectedPosts[i];
-            const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
+          for (let i = 0; i < postsForPublish.length; i += 1) {
+            const post = postsForPublish[i];
+            const finalCaption = state.linkEndingPresetApplied
+              ? String(post.content || "").trim()
+              : buildPersonaPublishCaption(post.content, archive.setup);
             logs.push(`▶️ 发布第 ${i + 1}/${selectedPosts.length} 篇`);
             const result = await publishPost(
               credentials,
@@ -20187,7 +20404,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 padCode,
                 platform: platform as any,
                 caption: finalCaption,
-                mediaUrl: post.imageUrl,
+                mediaUrl: getStoredPostPrimaryMediaUrl(post) || post.imageUrl,
                 telegramChatId: chatId,
                 telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, state.groupContentType) : undefined,
                 telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, state.groupContentType) : undefined,
@@ -21331,18 +21548,120 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType });
+      const postForPreview = buildPostWithPublishContentOverride(post, action?.contentOverride);
+      pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType, linkEndingPresetApplied: action?.linkEndingPresetApplied, contentOverride: action?.contentOverride });
       await safeEditOrSend(bot, chatId, msgId, `🚀 *確認發布推文*
 
-"${post.content.slice(0, 80)}..."`, {
+"${postForPreview.content.slice(0, 80)}..."`, {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            ...buildStoredPostPublishConfirmRows({
+              archiveId,
+              source,
+              groupContentType,
+              isSentimentImported: isSentimentHotImportedPost(postForPreview),
+              platforms: allowedPublishPlatforms,
+              hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+            }),
+            ...(action?.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }]] : []),
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data === "post_link_templates") {
+      const action = pendingPostActions.get(chatId);
+      if (!action?.archiveId || !action.postId) {
+        await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "👥 人设列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(action.archiveId);
+      const post = archive ? findArchivePostBySource(archive, action.postId, action.source) : null;
+      if (!archive || !post) {
+        await safeEditOrSend(bot, chatId, msgId, "没有找到这篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回推文列表", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] },
+        });
+        return;
+      }
+      await safeEditOrSend(bot, chatId, msgId, buildStoredPostLinkTemplateText(archive, post), {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buildStoredPostLinkTemplateRows(archive) },
+      });
+      return;
+    }
+
+    if (data.startsWith("post_link_apply_")) {
+      const action = pendingPostActions.get(chatId);
+      const presetIndex = Number.parseInt(data.slice("post_link_apply_".length), 10);
+      if (!action?.archiveId || !action.postId || !Number.isInteger(presetIndex)) {
+        await safeEditOrSend(bot, chatId, msgId, "链接模板选择已过期，请重新打开推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "👥 人设列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(action.archiveId);
+      const post = archive ? findArchivePostBySource(archive, action.postId, action.source) : null;
+      const presets = getSelectableLinkEndingPresets(archive?.setup as any);
+      const preset = presets[presetIndex];
+      if (!archive || !post || !preset) {
+        await safeEditOrSend(bot, chatId, msgId, "这个链接模板不存在或已被删除，请重新选择。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回发布确认", callback_data: "post_action" }]] },
+        });
+        return;
+      }
+      const nextContent = applyLinkEndingPresetToText(post.content || "", preset);
+      const previewPost = buildPostWithPublishContentOverride(post, nextContent);
+      pendingPostActions.set(chatId, { ...action, linkEndingPresetApplied: true, contentOverride: nextContent });
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板（仅本次发布预览）\n\n${String(previewPost.content || "").slice(0, 220)}${String(previewPost.content || "").length > 220 ? "..." : ""}\n\n可以直接发布，也可以撤回模板。`, {
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            ...buildStoredPostPublishConfirmRows({
+              archiveId: action.archiveId,
+              source: action.source,
+              groupContentType: action.groupContentType,
+              isSentimentImported: isSentimentHotImportedPost(previewPost),
+              platforms: allowedPublishPlatforms,
+              hasSelectableLinkTemplates: presets.length > 0,
+            }),
+            [{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data === "post_link_clear") {
+      const action = pendingPostActions.get(chatId);
+      if (!action?.archiveId || !action.postId) {
+        await safeEditOrSend(bot, chatId, msgId, "链接模板选择已过期，请重新打开推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "👥 人设列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaForThisBot(action.archiveId);
+      const post = archive ? findArchivePostBySource(archive, action.postId, action.source) : null;
+      if (!archive || !post) {
+        await safeEditOrSend(bot, chatId, msgId, "没有找到这篇推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回推文列表", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] },
+        });
+        return;
+      }
+      pendingPostActions.set(chatId, { ...action, linkEndingPresetApplied: false, contentOverride: undefined });
+      await safeEditOrSend(bot, chatId, msgId, `↩️ 已撤回链接模板\n\n🚀 *確認發布推文*\n\n"${post.content.slice(0, 80)}..."`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: buildStoredPostPublishConfirmRows({
-            archiveId,
-            source,
-            groupContentType,
+            archiveId: action.archiveId,
+            source: action.source,
+            groupContentType: action.groupContentType,
             isSentimentImported: isSentimentHotImportedPost(post),
             platforms: allowedPublishPlatforms,
+            hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
           }),
         },
       });
@@ -22264,7 +22583,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       });
       await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n选择编号：第 ${startIndex + 1} 篇\n发布數量：1 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
         reply_markup: {
-          inline_keyboard: buildManualPreviewRows(archiveId, platform, startIndex, 1),
+          inline_keyboard: buildManualPreviewRows(archiveId, platform, startIndex, 1, {
+            hasLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+          }),
         },
       });
       return;
@@ -22329,11 +22650,103 @@ function sendMainMenu(chatId: number, msgId?: number) {
         startIndex,
         count,
         groupContentType: prevManual?.groupContentType,
+        linkEndingPresetApplied: prevManual?.linkEndingPresetApplied,
+        contentOverrides: prevManual?.contentOverrides,
         stage: "preview_confirm",
       });
-      await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${count} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
+      const previewPosts = applyPublishContentOverrides(scopedPosts.slice(startIndex, startIndex + count), prevManual?.contentOverrides);
+      const previewSelection = prevManual?.contentOverrides ? summarizeManualPublishSelection(previewPosts, startIndex, previewPosts.length) : selection;
+      await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${count} 篇\n\n${previewSelection.hint}\n\n${previewSelection.preview.join("\n\n")}`, {
         reply_markup: {
-          inline_keyboard: buildManualPreviewRows(archiveId, platform, startIndex, count),
+          inline_keyboard: buildManualPreviewRows(archiveId, platform, startIndex, count, {
+            hasLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+            linkEndingPresetApplied: prevManual?.linkEndingPresetApplied,
+          }),
+        },
+      });
+      return;
+    }
+
+    if (data === "manual_link_templates" || data.startsWith("manual_link_apply_") || data === "manual_link_clear" || data === "manual_link_back") {
+      const state = pendingManualPublishes.get(chatId);
+      if (!state?.archiveId || !state.platform || state.startIndex === undefined || !state.count) {
+        await safeEditOrSend(bot, chatId, msgId, "人工发布状态已过期，请重新选择推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回主菜单", callback_data: "fresh_main_menu" }]] },
+        });
+        return;
+      }
+      const archive = await loadPersonaArchive(state.archiveId).catch(() => null);
+      const scopedPosts = archive ? filterByTelegramGroupContentType(archive.posts || [], state.groupContentType) : [];
+      const posts = scopedPosts.slice(state.startIndex, state.startIndex + Math.max(1, Math.min(state.count, scopedPosts.length - state.startIndex)));
+      if (!archive || !posts.length) {
+        await safeEditOrSend(bot, chatId, msgId, "当前没有可人工发布的推文。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: state.archiveId ? buildPersonaPublishCallback(state.archiveId, state.groupContentType) : "fresh_main_menu" }]] },
+        });
+        return;
+      }
+      if (data === "manual_link_templates") {
+        const presets = getSelectableLinkEndingPresets(archive.setup as any);
+        const rows = presets.slice(0, 10).map((preset, index) => ([{
+          text: `${preset.name || preset.endingText || preset.linkUrl || "模板"}`,
+          callback_data: `manual_link_apply_${index}`,
+        }]));
+        rows.push([{ text: "◀️ 返回人工发布预览", callback_data: "manual_link_back" }]);
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🔗 人工发布前选择链接模板",
+          "",
+          `人设：${archive.name}`,
+          `发布数量：${posts.length} 篇`,
+          "",
+          "选择后会把同一个模板追加到本次人工发布的每篇文案预览中，不会修改原推文。",
+          "",
+          ...(presets.length
+            ? presets.slice(0, 10).map((preset, index) => `${index + 1}. ${preset.name || "模板"}${preset.endingText ? ` / ${preset.endingText.slice(0, 40)}` : ""}${preset.linkUrl ? ` / ${preset.linkUrl}` : ""}`)
+            : ["当前人设还没有链接模板。"]),
+        ].join("\n"), {
+          disable_web_page_preview: true,
+          reply_markup: { inline_keyboard: rows },
+        });
+        return;
+      }
+      if (data.startsWith("manual_link_apply_")) {
+        const presetIndex = Number.parseInt(data.slice("manual_link_apply_".length), 10);
+        const preset = getSelectableLinkEndingPresets(archive.setup as any)[presetIndex];
+        if (!preset) {
+          await safeEditOrSend(bot, chatId, msgId, "这个链接模板不存在或已被删除，请重新选择。", {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人工发布预览", callback_data: "manual_link_back" }]] },
+          });
+          return;
+        }
+        const contentOverrides = Object.fromEntries(posts.map((post) => [
+          post.id,
+          applyLinkEndingPresetToText(post.content || "", preset),
+        ]));
+        const nextState = { ...state, linkEndingPresetApplied: true, contentOverrides };
+        pendingManualPublishes.set(chatId, nextState);
+        const previewPosts = applyPublishContentOverrides(posts, contentOverrides);
+        const selection = summarizeManualPublishSelection(previewPosts, state.startIndex, previewPosts.length);
+        await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板（仅本次人工发布预览）\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: buildManualPreviewRows(state.archiveId, state.platform, state.startIndex, previewPosts.length, {
+              hasLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+              linkEndingPresetApplied: true,
+            }),
+          },
+        });
+        return;
+      }
+      const isClear = data === "manual_link_clear";
+      const nextState = isClear ? { ...state, linkEndingPresetApplied: false, contentOverrides: undefined } : state;
+      pendingManualPublishes.set(chatId, nextState);
+      const selection = summarizeManualPublishSelection(posts, state.startIndex, posts.length);
+      const targetGroupLine = buildTelegramPublishPreviewTargetLine(state.platform, archive, posts[0], state.groupContentType);
+      await safeEditOrSend(bot, chatId, msgId, `${isClear ? "↩️ 已撤回链接模板\n\n" : ""}👀 发布前预览\n\n人設：${archive.name}\n平台：${state.platform}${targetGroupLine}\n起始位置：第 ${state.startIndex + 1} 篇\n发布數量：${posts.length} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
+        reply_markup: {
+          inline_keyboard: buildManualPreviewRows(state.archiveId, state.platform, state.startIndex, posts.length, {
+            hasLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+            linkEndingPresetApplied: !isClear && state.linkEndingPresetApplied,
+          }),
         },
       });
       return;
@@ -22370,6 +22783,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           startIndex,
           count: manualPosts.length,
           groupContentType,
+          linkEndingPresetApplied: prevManual?.linkEndingPresetApplied,
+          contentOverrides: prevManual?.contentOverrides,
           selectedPadCodes: [archive.boundPadCode || defaultPadCode],
         }, `🚀 *多云机人工发布*\n\n人设：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布数量：${manualPosts.length} 篇\n\n请选择要同时发布的云机：`, `mpage_${Math.floor(startIndex / 8)}`);
         return;
@@ -22381,7 +22796,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const posts = scopedPosts.slice(startIndex, startIndex + Math.max(1, Math.min(count, scopedPosts.length - startIndex)));
-      const selection = summarizeManualPublishSelection(scopedPosts, startIndex, posts.length);
+      const postsForPublish = applyPublishContentOverrides(posts, prevManual?.contentOverrides);
+      const selection = summarizeManualPublishSelection(postsForPublish, startIndex, postsForPublish.length);
       const padCode = archive.boundPadCode || defaultPadCode;
       const publishLockKey = `manual:${archiveId}:${platform}:${startIndex}:${posts.map((post) => post.id).join(",")}`;
       const publishScopeKey = `pad:${padCode}`;
@@ -22402,10 +22818,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const publishedIds: string[] = [];
         const publishMeta: Record<string, { platform: TelegramPublishPlatform; padCode: string; imageUrl?: string; screenshotUrl?: string }> = {};
         const publishWarnings: string[] = [];
-        for (let index = 0; index < posts.length; index += 1) {
+        for (let index = 0; index < postsForPublish.length; index += 1) {
           assertPadOperationNotCancelled(padOperationKey);
-          const post = posts[index];
-          const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
+          const post = postsForPublish[index];
+          const finalCaption = prevManual?.linkEndingPresetApplied
+            ? String(post.content || "").trim()
+            : buildPersonaPublishCaption(post.content, archive.setup);
           logs.push(`▶️ 开始发布第 ${startIndex + index + 1} 篇（${describePostMedia(post)}）`);
           void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs, `发布第 ${startIndex + index + 1} 篇`);
           const result = await publishPost(
@@ -22414,7 +22832,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               padCode,
               platform: platform as any,
               caption: finalCaption,
-              mediaUrl: post.imageUrl,
+              mediaUrl: getStoredPostPrimaryMediaUrl(post) || post.imageUrl,
               telegramChatId: chatId,
               telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, groupContentType) : undefined,
               telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, groupContentType) : undefined,
@@ -22455,7 +22873,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await markArchiveEpisodesPublished(
           archiveId,
           publishedIds,
-          Object.fromEntries(posts.map((post) => [post.id, buildPersonaPublishCaption(post.content, archive.setup)])),
+          Object.fromEntries(postsForPublish.map((post) => [post.id, prevManual?.linkEndingPresetApplied ? String(post.content || "").trim() : buildPersonaPublishCaption(post.content, archive.setup)])),
           publishMeta,
         ).catch(() => null);
         invalidatePersonaListCache();
@@ -22866,7 +23284,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         sendMainMenu(chatId, msgId);
         return;
       }
-      const nextState = { ...prev, stage: "ready_to_publish" as const, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined, linkEndingPresetApplied: false };
+      const nextState = { ...prev, stage: "ready_to_publish" as const, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined, linkEndingPresetApplied: false, linkEndingPresetBaseText: undefined };
       pendingCustomPublishes.set(chatId, nextState);
       await safeEditOrSend(bot, chatId, msgId, `${nextState.publishWithGeneratedImage ? "🖼" : "✅"} 已清除上一輪內容\n${customPublishContentSummary(nextState)}\n\n請重新發送${nextState.publishWithGeneratedImage ? "純文字推文內容" : "文字、圖片/視頻+文字，或先發媒體再補文字"}。`, {
         reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
@@ -22940,10 +23358,31 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const nextText = applyLinkEndingPresetToText(prev.text || "", preset);
-      const nextState = { ...prev, text: nextText, archiveName: prev.archiveName || archive.name, linkEndingPresetApplied: true };
+      const baseText = prev.linkEndingPresetApplied ? (prev.linkEndingPresetBaseText || "") : (prev.text || "");
+      const nextText = applyLinkEndingPresetToText(baseText, preset);
+      const nextState = { ...prev, text: nextText, archiveName: prev.archiveName || archive.name, linkEndingPresetApplied: true, linkEndingPresetBaseText: baseText };
       pendingCustomPublishes.set(chatId, nextState);
       await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板\n\n${customPublishContentSummary(nextState)}\n\n可以直接发布，或继续返回修改内容。`, {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: customPublishFinalPublishRows(nextState) },
+      });
+      return;
+    }
+
+    if (data === "custom_publish_link_clear") {
+      const prev = pendingCustomPublishes.get(chatId);
+      if (!prev || prev.stage !== "ready_to_publish") {
+        sendMainMenu(chatId, msgId);
+        return;
+      }
+      const nextState = {
+        ...prev,
+        text: prev.linkEndingPresetBaseText ?? prev.text,
+        linkEndingPresetApplied: false,
+        linkEndingPresetBaseText: undefined,
+      };
+      pendingCustomPublishes.set(chatId, nextState);
+      await safeEditOrSend(bot, chatId, msgId, `↩️ 已撤回链接模板\n\n${customPublishContentSummary(nextState)}`, {
         disable_web_page_preview: true,
         reply_markup: { inline_keyboard: customPublishFinalPublishRows(nextState) },
       });
@@ -23136,6 +23575,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         platform,
         source: action.source,
         groupContentType: action.groupContentType,
+        linkEndingPresetApplied: action.linkEndingPresetApplied,
+        contentOverrides: action.contentOverride ? { [postId]: action.contentOverride } : undefined,
         selectedPadCodes: [archive.boundPadCode || defaultPadCode],
       }, `🚀 *多云机发布*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n请选择要同时发布的云机：`, "post_action");
       return;
@@ -23165,7 +23606,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      pendingPostActions.set(chatId, { archiveId, postId });
+      pendingPostActions.set(chatId, { archiveId, postId, source: action?.source, groupContentType: action?.groupContentType, linkEndingPresetApplied: action?.linkEndingPresetApplied, contentOverride: action?.contentOverride });
       if (multiPadSchedule) {
         await showPublishPadSelection(chatId, msgId, {
           mode: "scheduled_post",
@@ -23173,6 +23614,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           postId,
           platform,
           groupContentType: action?.groupContentType,
+          linkEndingPresetApplied: action?.linkEndingPresetApplied,
+          contentOverrides: action?.contentOverride ? { [postId]: action.contentOverride } : undefined,
           selectedPadCodes: [archive.boundPadCode || defaultPadCode],
         }, `⏰ *多云机定时发布*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action?.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "post_action");
         return;
@@ -23185,6 +23628,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         postPreview: `${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`,
         platform,
         padCode: archive.boundPadCode || defaultPadCode,
+        linkEndingPresetApplied: action?.linkEndingPresetApplied,
+        contentOverride: action?.contentOverride,
       };
       pendingScheduledPublishes.set(chatId, nextState);
       await showScheduledTimePicker(chatId, msgId, nextState);
@@ -23376,7 +23821,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType });
+      const postForPublish = buildPostWithPublishContentOverride(post, action?.contentOverride);
+      pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType, linkEndingPresetApplied: action?.linkEndingPresetApplied, contentOverride: action?.contentOverride });
       if (!credentials.ak || !credentials.sk) {
         bot.editMessageText("❌ VMOS 凭据未配置", { chat_id: chatId, message_id: msgId });
         return;
@@ -23398,14 +23844,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const stopTyping = startTelegramTyping(bot, chatId);
       try {
         const logs: string[] = [];
-        const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
+        const finalCaption = action?.linkEndingPresetApplied
+          ? String(postForPublish.content || "").trim()
+          : buildPersonaPublishCaption(postForPublish.content, archive.setup);
         const result = await publishPost(
           credentials,
           {
             padCode,
             platform: platform as any,
             caption: finalCaption,
-            mediaUrl: getStoredPostPrimaryMediaUrl(post) || post.imageUrl,
+            mediaUrl: getStoredPostPrimaryMediaUrl(postForPublish) || postForPublish.imageUrl,
             telegramChatId: chatId,
             telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, groupContentType) : undefined,
             telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, groupContentType) : undefined,
@@ -23428,9 +23876,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
             [postId]: {
               platform,
               padCode,
-              imageUrl: getStoredPostPrimaryMediaUrl(post) || post.imageUrl,
+              imageUrl: getStoredPostPrimaryMediaUrl(postForPublish) || postForPublish.imageUrl,
               screenshotUrl: publishScreenshotUrl,
-              sourceMeta: post.sourceMeta,
+              sourceMeta: postForPublish.sourceMeta,
               ...(await buildPublishedMetaFromResultWithInitialMetrics(platform, result)),
             },
           },
@@ -24348,6 +24796,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (text) {
         nextState.text = text;
         nextState.linkEndingPresetApplied = false;
+        nextState.linkEndingPresetBaseText = undefined;
       }
       if (media?.file_id && !nextState.publishWithGeneratedImage) {
         nextState.fileId = media.file_id;
