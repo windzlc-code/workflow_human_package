@@ -35,6 +35,9 @@ const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 45_000;
 const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 95_000;
+const SENTIMENT_HOT_FAST_RETURN_COUNT = 5;
+const SENTIMENT_HOT_SUPPLEMENT_MIN_REMAINING_MS = 15_000;
+const THREADS_BROWSER_EMPTY_SHELL_LIMIT = 3;
 const SENTIMENT_HOT_TIMEOUT_WARNING = "\u71b1\u9ede\u6293\u53d6\u5df2\u8d85\u6642\uff0c\u5df2\u505c\u6b62\u5f8c\u7e8c\u8017\u6642\u6b65\u9a5f\uff1b\u8acb\u7a0d\u5f8c\u5237\u65b0\u6216\u6aa2\u67e5 Cookie / sessionid\u3002";
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
@@ -1231,10 +1234,12 @@ export async function fetchSentimentHotCandidates(args: {
       : "已從當前人設候選池刷新熱點。");
   }
 
+  const hasFastReturnCandidates = candidates.length >= Math.min(limit, SENTIMENT_HOT_FAST_RETURN_COUNT);
+
   const preInstagramReadyCount = hasSearchKeywords
     ? sortRelevantHotCandidates(candidates, keywords, poolLimit).length
     : 0;
-  if (shouldFetchLiveCandidates && preInstagramReadyCount < limit && hasSentimentHotTotalBudget(startedAt, 9_000)) {
+  if (shouldFetchLiveCandidates && !hasFastReturnCandidates && preInstagramReadyCount < limit && hasSentimentHotTotalBudget(startedAt, SENTIMENT_HOT_SUPPLEMENT_MIN_REMAINING_MS)) {
     const beforeInstagramCount = candidates.length;
     const instagramCandidates = await measureSentimentStage(
       warnings,
@@ -1271,6 +1276,8 @@ export async function fetchSentimentHotCandidates(args: {
       warnings.push(args.refresh ? `已即時刷新 Instagram reader 候選 ${instagramCandidates.length} 篇。` : `已加入 Instagram reader 候選 ${instagramCandidates.length} 篇。`);
     }
     channelStats.push(`Instagram 原始 ${instagramCandidates.length}，新增 ${instagramAddedCount}，補充前 ${beforeInstagramCount}`);
+  } else if (shouldFetchLiveCandidates && hasFastReturnCandidates) {
+    channelStats.push(`Instagram 已跳過，已有 ${candidates.length}/${limit} 篇候選，使用快速返回`);
   } else if (shouldFetchLiveCandidates && preInstagramReadyCount < limit) {
     pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
     channelStats.push("Instagram 已跳過，剩餘時間不足");
@@ -1289,15 +1296,15 @@ export async function fetchSentimentHotCandidates(args: {
     { platform: "threads" as const, health: "unknown" as const, label: "Threads", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
     { platform: "instagram" as const, health: "unknown" as const, label: "Instagram", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
   ]));
-  if (shouldFetchLiveCandidates && runtime.ok && hasSentimentHotTotalBudget(startedAt, 7_000)) {
+  if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok && hasSentimentHotTotalBudget(startedAt, 7_000)) {
     cookieStatuses = await measureSentimentStage(warnings, "cookie-refresh", () => withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), Math.min(35_000, remainingSentimentHotTotalBudgetMs(startedAt, 5_000)), cookieStatuses));
-  } else if (shouldFetchLiveCandidates && runtime.ok) {
+  } else if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok) {
     pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
   }
   const usableSources = cookieStatuses
     .filter(sentimentCookieStatusHasUsableCookies)
     .map((status) => status.platform);
-  if (shouldFetchLiveCandidates && runtime.ok && usableSources.length > 0 && hasSentimentHotTotalBudget(startedAt, 4_000)) {
+  if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok && usableSources.length > 0 && hasSentimentHotTotalBudget(startedAt, 4_000)) {
     await measureSentimentStage(warnings, "realtime-scan", () => withSentimentTimeout(triggerRealtimeSentimentScan(usableSources, warnings), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 3_000)), undefined));
   }
 
@@ -1321,7 +1328,7 @@ export async function fetchSentimentHotCandidates(args: {
     }
     channelStats.push(`資料庫原始 ${databaseCandidates.length}，新增 ${databaseAddedCount}，補充前 ${beforeDatabaseCount}`);
   }
-  if (shouldFetchLiveCandidates && runtime.ok && usableSources.length > 0 && hasSearchKeywords && candidates.length < limit && hasSentimentHotTotalBudget(startedAt, 5_000)) {
+  if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok && usableSources.length > 0 && hasSearchKeywords && candidates.length < limit && hasSentimentHotTotalBudget(startedAt, 5_000)) {
     const beforeWaitCount = candidates.length;
     candidates = await waitForMoreSentimentHotCandidates({
       archiveId,
@@ -1742,6 +1749,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   const selectedOrImportedIds = getSentimentHotExcludedIds(args.archiveId);
   const primaryExcluded = args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : selectedOrImportedIds;
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
+  const fastReturnTarget = Math.min(args.limit, SENTIMENT_HOT_FAST_RETURN_COUNT);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
 
@@ -1772,6 +1780,7 @@ async function fetchThreadsSearchPageCandidates(args: {
       if (byId.size >= args.limit) break;
     }
     browserResults = [...byId.values()];
+    if (browserResults.length >= fastReturnTarget) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
     if (browserResults.length >= args.limit) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
   }
 
@@ -1783,6 +1792,11 @@ async function fetchThreadsSearchPageCandidates(args: {
     refresh: args.refresh,
     excludeIds: primaryExcluded,
   }).catch(() => []);
+  if (readerResults.length >= fastReturnTarget) {
+    const merged = sortSentimentHotCandidatePool([...new Map([...browserResults, ...readerResults].map((candidate) => [candidate.id, candidate])).values()], args.keywords, args.limit);
+    writeThreadsSearchCandidateCache(args.archiveId, args.keywords, merged);
+    return merged;
+  }
 
   if (readerResults.length < args.limit) {
     const existing = new Map(readerResults.map((candidate) => [candidate.id, candidate]));
@@ -1805,6 +1819,7 @@ async function fetchThreadsSearchPageCandidates(args: {
         }
         if (existing.size >= args.limit) break;
       }
+      if (existing.size >= fastReturnTarget) break;
     }
     readerResults = [...existing.values()];
   }
@@ -1822,6 +1837,11 @@ async function fetchThreadsSearchPageCandidates(args: {
       if (byId.size >= args.limit) break;
     }
     readerResults = [...byId.values()];
+    if (readerResults.length >= fastReturnTarget) {
+      const merged = sortSentimentHotCandidatePool(readerResults, args.keywords, args.limit);
+      writeThreadsSearchCandidateCache(args.archiveId, args.keywords, merged);
+      return merged;
+    }
   }
 
   if (readerResults.length > 0) {
@@ -1852,6 +1872,7 @@ async function fetchThreadsBrowserSearchCandidates(args: {
   const excluded = args.excludeIds || getSentimentHotRefreshExcludedIds(args.archiveId);
   const results: SentimentHotCandidate[] = [];
   const resultKeys = new Set<string>();
+  let emptyShellCount = 0;
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch({
@@ -1869,6 +1890,10 @@ async function fetchThreadsBrowserSearchCandidates(args: {
       for (const query of args.queries) {
         if (results.length >= args.limit) break;
         if (args.deadlineAt && Date.now() >= args.deadlineAt) break;
+        if (args.deadlineAt && remainingSentimentDeadlineMs(args.deadlineAt, 0) < 3_000) {
+          console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} status=stop_deadline_remaining total=${results.length}`);
+          break;
+        }
         const search = await readThreadsSearchPageText(page, query, args.deadlineAt);
         if (detectThreadsProfileLoginWall(search.text)) break;
         const parsed = parseThreadsSearchTextCandidates({
@@ -1907,6 +1932,15 @@ async function fetchThreadsBrowserSearchCandidates(args: {
           if (results.length >= args.limit) break;
         }
         console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} query=${JSON.stringify(query)} textLen=${search.text.length} parsed=${parsed.length} accepted=${acceptedCount} total=${results.length} excluded=${excludedCount} short=${shortCount} keywordMiss=${keywordMissCount} duplicate=${duplicateCount} url=${search.url}`);
+        if (parsed.length === 0 && search.text.trim().length <= 180) {
+          emptyShellCount += 1;
+          if (emptyShellCount >= THREADS_BROWSER_EMPTY_SHELL_LIMIT) {
+            console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} status=stop_empty_shell count=${emptyShellCount} total=${results.length}`);
+            break;
+          }
+        } else {
+          emptyShellCount = 0;
+        }
       }
       await context.close();
     } finally {
