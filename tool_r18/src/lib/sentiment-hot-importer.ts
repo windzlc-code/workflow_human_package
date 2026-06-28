@@ -3804,7 +3804,7 @@ async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: 
     await page.keyboard.type(query).catch(() => undefined);
   });
   await page.keyboard.press("Enter").catch(() => undefined);
-  await page.waitForTimeout(Math.min(4_000, remainingSentimentDeadlineMs(deadlineAt, 4_000)));
+  await page.waitForTimeout(Math.min(2_500, remainingSentimentDeadlineMs(deadlineAt, 2_500)));
   if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || searchUrl };
   const text = await page.locator("body").innerText({ timeout: Math.min(5_000, remainingSentimentDeadlineMs(deadlineAt, 5_000)) }).catch(() => "");
   return { text, url: page.url() || directSearchUrl };
