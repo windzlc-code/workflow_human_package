@@ -58,15 +58,43 @@ function memorySummaryForPrompt(summary: string): string {
 
 function buildTweetStyleInstruction(setup: any): string {
   const profile = String(setup?.tweetStyleProfile || "").trim();
-  const linkUrl = String(setup?.tweetStyleLinkUrl || "").trim();
-  if (!profile && !linkUrl) return "";
+  if (!profile) return "";
   return [
     "【固定推文风格】",
     "该人设已设置专属推文风格。生成时只能模仿格式结构、内容推进方式、语气和互动钩子；禁止复述案例里的具体事件、事实、人物、福利话术或连续原句。",
     profile ? `风格分析：${profile}` : "",
-    linkUrl ? `固定链接：${linkUrl}` : "",
-    linkUrl ? "Every generated post must include this fixed link exactly once. The fixed link must be the final line of the post; do not add body text, questions, emojis, or punctuation after the link." : "",
     "必须使用当前人设、记忆和用户提示生成全新内容；如果没有明确主题，就换一个同人设的日常/观点/互动主题，不要沿用案例主题。",
+  ].filter(Boolean).join("\n");
+}
+
+function resolveActiveLinkEndingPreset(setup: any): { linkUrl: string; endingText: string } | null {
+  const presets = Array.isArray(setup?.linkEndingPresets) ? setup.linkEndingPresets : [];
+  const activeId = String(setup?.activeLinkEndingPresetId || "").trim();
+  const active = presets.find((preset: any) =>
+    preset
+    && preset.enabled !== false
+    && String(preset.id || "").trim()
+    && (!activeId || String(preset.id || "").trim() === activeId));
+  if (active) {
+    const linkUrl = String(active.linkUrl || "").trim();
+    const endingText = String(active.endingText || "").trim();
+    return linkUrl || endingText ? { linkUrl, endingText } : null;
+  }
+  const legacyLinkUrl = String(setup?.tweetStyleLinkUrl || "").trim();
+  const legacyEndingText = String(setup?.tweetStyleLinkText || "").trim();
+  return legacyLinkUrl || legacyEndingText ? { linkUrl: legacyLinkUrl, endingText: legacyEndingText } : null;
+}
+
+function buildLinkEndingInstruction(setup: any): string {
+  const preset = resolveActiveLinkEndingPreset(setup);
+  if (!preset) return "";
+  return [
+    "【固定链接结尾】",
+    "该人设已开启链接设置预设。每篇生成推文结尾必须自动追加以下结尾语句/链接，不要改写，不要省略。",
+    preset.endingText ? `结尾语句：${preset.endingText}` : "",
+    preset.linkUrl ? `固定链接：${preset.linkUrl}` : "",
+    preset.linkUrl ? "The fixed link must appear exactly once and must be the final line of the post." : "",
+    "正文可以按人设和主题自由生成，但不要在固定结尾之后再添加任何文字、标点、表情或标签。",
   ].filter(Boolean).join("\n");
 }
 
@@ -106,11 +134,26 @@ function moveTweetStyleLinkToEnd(content: string, linkUrl: string) {
   return `${withoutLink}\n${link}`.trim();
 }
 
-function ensurePostsContainTweetStyleLink(posts: EpisodeScript[], setup: any): EpisodeScript[] {
-  const linkUrl = String(setup?.tweetStyleLinkUrl || "").trim();
-  if (!linkUrl) return posts;
+function applyLinkEndingPresetToContent(content: string, preset: { linkUrl: string; endingText: string }): string {
+  let next = String(content || "").trim();
+  const endingText = String(preset.endingText || "").trim();
+  const linkUrl = String(preset.linkUrl || "").trim();
+  if (endingText) {
+    next = next
+      .replace(new RegExp(escapeRegExpText(endingText), "g"), "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    next = `${next}\n${endingText}`.trim();
+  }
+  if (linkUrl) next = moveTweetStyleLinkToEnd(next, linkUrl);
+  return next.trim();
+}
+
+function ensurePostsContainLinkEndingPreset(posts: EpisodeScript[], setup: any): EpisodeScript[] {
+  const preset = resolveActiveLinkEndingPreset(setup);
+  if (!preset) return posts;
   return posts.map((post) => {
-    const nextContent = moveTweetStyleLinkToEnd(String(post.content || ""), linkUrl);
+    const nextContent = applyLinkEndingPresetToContent(String(post.content || ""), preset);
     return {
       ...post,
       content: nextContent,
@@ -405,11 +448,13 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
             chineseScript: "traditional",
           };
       const tweetStyleInstruction = buildTweetStyleInstruction(effectiveSetup);
+      const linkEndingInstruction = buildLinkEndingInstruction(effectiveSetup);
       const chineseScriptInstruction = buildChineseScriptInstruction(archive);
       const customInstruction = [
         input.customInstruction || "",
         chineseScriptInstruction,
         tweetStyleInstruction,
+        linkEndingInstruction,
         selectedMemoryInstruction,
       ].filter((part) => part.trim()).join("\n\n");
       const trendIntel = await fetchPersonaTrendIntelForNode(
@@ -432,7 +477,7 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
 
       const textModelBranch = input.textModelBranch === "paid" ? "paid" : "free";
       const generated = await generateTextWithGemini(prompt, targetCount, textModelBranch);
-      let posts = ensurePostsContainTweetStyleLink(parsePosts(generated, targetCount), archive.setup);
+      let posts = ensurePostsContainLinkEndingPreset(parsePosts(generated, targetCount), archive.setup);
 
       let attempts = 0;
       while (posts.length < targetCount && attempts < 3) {
@@ -446,7 +491,7 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
           "不要输出思考过程、不要输出说明、不要输出检查文本、不要输出标题说明。",
         ].join("\n");
         const retryGenerated = await generateTextWithGemini(retryPrompt, missing, textModelBranch);
-        const retryPosts = ensurePostsContainTweetStyleLink(parsePosts(retryGenerated, missing), archive.setup).map((post, index) => ({
+        const retryPosts = ensurePostsContainLinkEndingPreset(parsePosts(retryGenerated, missing), archive.setup).map((post, index) => ({
           ...post,
           number: posts.length + index + 1,
           title: `第${posts.length + index + 1}篇`,
@@ -511,12 +556,16 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
         const telegramTargetChatId = platform === "telegram"
           ? (telegramGroupType === "paid" ? archive.boundTelegramPaidGroupId : archive.boundTelegramFreeGroupId)
           : undefined;
+        const activeLinkEndingPreset = resolveActiveLinkEndingPreset(archive.setup);
+        const finalCaption = activeLinkEndingPreset
+          ? applyLinkEndingPresetToContent(post.content, activeLinkEndingPreset)
+          : post.content;
         const task = repo.enqueueTask({
           archive_id: archive.id,
           archive_post_id: post.id,
           pad_code: padCode,
           platform,
-          caption: post.content,
+          caption: finalCaption,
           media_url: post.imageUrl,
           telegram_chat_id: input.telegramChatId,
           telegram_target_chat_id: telegramTargetChatId,

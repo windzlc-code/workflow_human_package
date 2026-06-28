@@ -177,7 +177,14 @@ describe("persona generation memory", () => {
         targetMarket: "cn",
         chineseScript: "traditional",
         tweetStyleProfile: "短句型；多段换行；结尾带轻互动；少量表情符号",
-        tweetStyleLinkUrl: "https://example.com/more",
+        linkEndingPresets: [{
+          id: "preset-more",
+          name: "更多整理",
+          endingText: "想看更多整理，我放这里",
+          linkUrl: "https://example.com/more",
+          enabled: true,
+        }],
+        activeLinkEndingPresetId: "preset-more",
         tweetStyleSample: "最近发现咖啡店的冷气真的太强。\n\n坐十分钟，就开始怀疑自己是不是穿少了。\n你们也会这样吗？",
       },
     } as any);
@@ -212,8 +219,11 @@ describe("persona generation memory", () => {
     expect(generationPrompt).not.toContain("咖啡店的冷气");
     expect(generationPrompt).not.toContain("你们也会这样吗");
     expect(generationPrompt).not.toContain("污染草稿");
+    expect(generationPrompt).toContain("【固定链接结尾】");
     expect(generationPrompt).toContain("固定链接：https://example.com/more");
+    expect(generationPrompt).toContain("结尾语句：想看更多整理，我放这里");
     expect(generationPrompt).toContain("禁止复述案例里的具体事件");
+    expect(result.posts?.[0].content).toContain("想看更多整理，我放这里");
     expect(result.posts?.[0].content).toContain("https://example.com/more");
   });
 

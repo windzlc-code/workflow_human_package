@@ -553,7 +553,7 @@ interface PersonaLocal {
 }
 
 const pendingActions = new Map<number, {
-  type: "bind-pad" | "edit-persona-name" | "edit-persona-content" | "create-persona" | "set-persona-tweet-style" | "set-telegram-group-binding";
+  type: "bind-pad" | "edit-persona-name" | "edit-persona-content" | "create-persona" | "set-persona-tweet-style" | "set-persona-link-ending-preset" | "set-telegram-group-binding";
   archiveId: string;
   stage?: "await_name" | "await_prompt" | "await_keywords";
   personaName?: string;
@@ -733,6 +733,7 @@ type PendingCustomPublish = {
   fileId?: string;
   fileKind?: "photo" | "video" | "document";
   mimeType?: string;
+  linkEndingPresetApplied?: boolean;
 };
 
 const pendingCustomPublishes = new Map<number, PendingCustomPublish>();
@@ -3456,6 +3457,7 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
       { text: "\uD83E\uDDFE \u63A8\u6587\u98A8\u683C", callback_data: `tweetstyle_${id}` },
     ],
     [{ text: "🧾 人設簡介", callback_data: `editcontent_${id}` }],
+    [{ text: "🔗 链接设置", callback_data: `linksettings_${id}` }],
     [{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }],
     [{ text: "🔐 帳號管理", callback_data: `acctmgmt_${id}` }],
   ];
@@ -4339,6 +4341,179 @@ function getTweetStyleLinkPresentation(setup: any): { url: string; text: string 
   if (!url) return null;
   const text = String(setup?.tweetStyleLinkText || "").trim();
   return { url, text: text || url };
+}
+
+type LinkEndingPreset = {
+  id: string;
+  name?: string;
+  linkUrl?: string;
+  endingText?: string;
+  enabled?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+function normalizeLinkEndingPresetId(value: unknown): string {
+  return String(value || "").replace(/[^a-zA-Z0-9-]/g, "").slice(0, 40);
+}
+
+function getLinkEndingPresets(setup: any): LinkEndingPreset[] {
+  return Array.isArray(setup?.linkEndingPresets)
+    ? setup.linkEndingPresets
+      .map((preset: any) => ({
+        id: normalizeLinkEndingPresetId(preset?.id),
+        name: String(preset?.name || "").trim(),
+        linkUrl: normalizeTweetStyleLinkUrl(String(preset?.linkUrl || "")) || "",
+        endingText: String(preset?.endingText || "").trim(),
+        enabled: preset?.enabled !== false,
+        createdAt: String(preset?.createdAt || "").trim(),
+        updatedAt: String(preset?.updatedAt || "").trim(),
+      }))
+      .filter((preset) => preset.id && (preset.linkUrl || preset.endingText))
+    : [];
+}
+
+function getActiveLinkEndingPreset(setup: any): LinkEndingPreset | null {
+  const presets = getLinkEndingPresets(setup);
+  const activeId = normalizeLinkEndingPresetId(setup?.activeLinkEndingPresetId);
+  return presets.find((preset) => preset.enabled !== false && (!activeId || preset.id === activeId)) || null;
+}
+
+function getSelectableLinkEndingPresets(setup: any): LinkEndingPreset[] {
+  const presets = getLinkEndingPresets(setup);
+  const legacy = buildLegacyLinkEndingPreset(setup);
+  if (!legacy || presets.some((preset) => preset.linkUrl === legacy.linkUrl && preset.endingText === legacy.endingText)) return presets;
+  return [...presets, legacy];
+}
+
+function buildLegacyLinkEndingPreset(setup: any): LinkEndingPreset | null {
+  const linkUrl = normalizeTweetStyleLinkUrl(String(setup?.tweetStyleLinkUrl || ""));
+  const linkText = String(setup?.tweetStyleLinkText || "").trim();
+  if (!linkUrl && !linkText) return null;
+  return {
+    id: "legacy-tweet-style-link",
+    name: "推文風格提取",
+    linkUrl: linkUrl || "",
+    endingText: linkText && linkText !== linkUrl ? linkText : "",
+    enabled: true,
+    createdAt: String(setup?.tweetStyleUpdatedAt || "").trim(),
+    updatedAt: String(setup?.tweetStyleUpdatedAt || "").trim(),
+  };
+}
+
+function ensureLinkEndingPresetsFromLegacy(setup: any): { setup: any; changed: boolean } {
+  const presets = getLinkEndingPresets(setup);
+  const legacy = buildLegacyLinkEndingPreset(setup);
+  if (!legacy) {
+    return { setup, changed: false };
+  }
+  const legacyPreset = presets.find((preset) => preset.linkUrl === legacy.linkUrl && preset.endingText === legacy.endingText);
+  const nextPresets = legacyPreset
+    ? presets
+    : (presets.length ? [...presets, { ...legacy, enabled: false }] : [legacy]);
+  const activeId = setup?.activeLinkEndingPresetId || legacyPreset?.id || legacy.id;
+  return {
+    setup: {
+      ...(setup || {}),
+      tweetStyleLinkUrl: "",
+      tweetStyleLinkText: "",
+      linkEndingPresets: nextPresets,
+      activeLinkEndingPresetId: activeId,
+    },
+    changed: true,
+  };
+}
+
+function buildLinkEndingSettingsText(archive: PersonaArchive): string {
+  const setup: any = archive.setup || {};
+  const presets = getLinkEndingPresets(setup);
+  const active = getActiveLinkEndingPreset(setup);
+  const lines = [
+    "🔗 鏈接設置",
+    "",
+    `人設：${archive.name}`,
+    "",
+    active
+      ? `目前啟用：${active.name || active.endingText || active.linkUrl || active.id}`
+      : "目前啟用：未啟用",
+    "",
+    "預設模板：",
+    ...(presets.length
+      ? presets.flatMap((preset, index) => [
+        `${index + 1}. ${preset.enabled !== false && active?.id === preset.id ? "✅ " : ""}${preset.name || "未命名模板"}`,
+        preset.endingText ? `結尾語句：${preset.endingText}` : "結尾語句：-",
+        preset.linkUrl ? `鏈接：${preset.linkUrl}` : "鏈接：-",
+      ])
+      : ["尚未設定。"]),
+    "",
+    "新增模板時只需要發送結尾語句和鏈接；不要放正文範例。",
+  ];
+  return lines.join("\n");
+}
+
+function buildLinkEndingSettingsRows(archiveId: string, setup: any): Array<Array<{ text: string; callback_data: string }>> {
+  const presets = getLinkEndingPresets(setup);
+  const active = getActiveLinkEndingPreset(setup);
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [
+    [{ text: "➕ 新增模板", callback_data: `linkpreset_add_${archiveId}` }],
+  ];
+  for (const [index, preset] of presets.slice(0, 8).entries()) {
+    rows.push([
+      { text: `${active?.id === preset.id && preset.enabled !== false ? "✅" : "⭕"} ${preset.name || "模板"}`, callback_data: `lpu_${archiveId}_${index}` },
+      { text: "刪除", callback_data: `lpd_${archiveId}_${index}` },
+    ]);
+  }
+  if (active) rows.push([{ text: "⏸ 停用結尾預設", callback_data: `linkpreset_off_${archiveId}` }]);
+  rows.push([{ text: "◀️ 返回人設設定", callback_data: `settings_${archiveId}` }]);
+  return rows;
+}
+
+function parseLinkEndingPresetFromText(input: string, msg?: TelegramBot.Message): Omit<LinkEndingPreset, "id" | "createdAt" | "updatedAt" | "enabled"> | null {
+  const raw = String(input || "").trim();
+  const linkUrl = extractTweetStyleLinkUrl(raw) || (msg ? extractTweetStyleLinkUrlFromTelegramMessage(msg) : undefined) || "";
+  const endingText = raw
+    .replace(linkUrl, "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 240);
+  const cleanLink = normalizeTweetStyleLinkUrl(linkUrl) || "";
+  if (!cleanLink && !endingText) return null;
+  const name = (endingText || cleanLink).replace(/\s+/g, " ").slice(0, 24);
+  return { name, linkUrl: cleanLink, endingText };
+}
+
+function escapeLinkEndingText(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildPersonaPublishCaption(content: string, setup: any): string {
+  const active = getActiveLinkEndingPreset(setup) || buildLegacyLinkEndingPreset(setup);
+  if (!active) return String(content || "").trim();
+  return applyLinkEndingPresetToText(content, active);
+}
+
+function applyLinkEndingPresetToText(content: string, active: { linkUrl?: string; endingText?: string }): string {
+  let next = String(content || "").trim();
+  const endingText = String(active.endingText || "").trim();
+  const linkUrl = String(active.linkUrl || "").trim();
+  if (endingText) {
+    next = next
+      .replace(new RegExp(escapeLinkEndingText(endingText), "g"), "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    next = `${next}\n${endingText}`.trim();
+  }
+  if (linkUrl) {
+    next = next
+      .replace(new RegExp(escapeLinkEndingText(linkUrl), "g"), "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    next = `${next}\n${linkUrl}`.trim();
+  }
+  return next.trim();
 }
 
 function isJinjunyaLinkPersona(setup: any): boolean {
@@ -10196,6 +10371,7 @@ async function rewriteSentimentHotImportedPostContent(args: {
   const startedAt = Date.now();
   const sourceMeta = args.post.sourceMeta || {};
   const setup: any = args.archive.setup || {};
+  const activeLinkEndingPreset = getActiveLinkEndingPreset(setup);
   const personaCoreLines = [
     `人設名稱：${args.archive.name}`,
     args.archive.content ? `人設完整簡介：${args.archive.content}` : "",
@@ -10206,7 +10382,10 @@ async function rewriteSentimentHotImportedPostContent(args: {
     setup.personaStyle ? `說話方式：${setup.personaStyle}` : "",
     Array.isArray(setup.genres) && setup.genres.length ? `類型標籤：${setup.genres.join("、")}` : "",
     Array.isArray(setup.interests) && setup.interests.length ? `常聊興趣：${setup.interests.join("、")}` : "",
-    setup.tweetStyleLinkText ? `推文風格參考：${String(setup.tweetStyleLinkText).slice(0, 500)}` : "",
+    activeLinkEndingPreset ? `链接结尾预设：${[
+      activeLinkEndingPreset.endingText ? `结尾语句=${activeLinkEndingPreset.endingText}` : "",
+      activeLinkEndingPreset.linkUrl ? `链接=${activeLinkEndingPreset.linkUrl}` : "",
+    ].filter(Boolean).join("；")}` : "",
   ].filter(Boolean).join("\n");
   const sourceLines = [
     sourceMeta.platform ? `平台：${sourceMeta.platform}` : "",
@@ -14216,11 +14395,13 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       const logs: string[] = [];
       const screenshots: string[] = [];
       const publishedPostIds: string[] = [];
+      const publishedContentByPost: Record<string, string> = {};
       const publishMetaByPost: Record<string, Pick<NonNullable<PersonaArchive["publishHistory"]>[number], "publishedUrl" | "publishedMeta">> = {};
       const publishTargetByPost: Record<string, NonNullable<NonNullable<PersonaArchive["publishHistory"]>[number]["publishedTargets"]>[number]> = {};
       try {
         for (let index = 0; index < padPosts.length; index += 1) {
           const post = padPosts[index];
+          const finalCaption = buildPersonaPublishCaption(post.content, args.archive.setup);
           assertPadOperationNotCancelled(padOperationKey);
           logs.push(`▶️ ${args.statusPrefix || "发布"} ${index + 1}/${padPosts.length}`);
           const result = await publishPost(
@@ -14228,7 +14409,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
             {
               padCode,
               platform: args.platform as any,
-              caption: post.content,
+              caption: finalCaption,
               mediaUrl: getStoredPostPrimaryMediaUrl(post),
               telegramChatId: args.chatId,
               telegramTargetGroupName: args.platform === "telegram" ? resolveTelegramTargetGroupNameForPost(args.archive, post, args.groupContentType) : undefined,
@@ -14245,6 +14426,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
             { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
           );
           publishedPostIds.push(post.id);
+          publishedContentByPost[post.id] = finalCaption;
           const publishMeta = await buildPublishedMetaFromResultWithInitialMetrics(args.platform, result);
           publishMetaByPost[post.id] = publishMeta;
           const publishedTarget = buildPublishedTargetFromMeta({
@@ -14264,7 +14446,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
             ).catch(() => undefined);
           }
         }
-        return { padCode, ok: true, logs, screenshots, publishedPostIds, publishMetaByPost, publishTargetByPost };
+        return { padCode, ok: true, logs, screenshots, publishedPostIds, publishedContentByPost, publishMetaByPost, publishTargetByPost };
       } catch (error: any) {
         return { padCode, ok: false, logs, screenshots, publishedPostIds, error: formatUserFacingError(error, "发布失败，请人工检查当前界面后重试。") };
       } finally {
@@ -14455,7 +14637,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
             await (source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
               archive.id,
               publishedPosts.map((post) => post.id),
-              Object.fromEntries(publishedPosts.map((post) => [post.id, post.content])),
+              Object.fromEntries(publishedPosts.map((post) => [post.id, result?.publishedContentByPost?.[post.id] || post.content])),
               meta,
             ).catch(() => null);
           }
@@ -14507,11 +14689,41 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   const customPublishResetButton = { text: "♻️ 清除并重发内容", callback_data: "custom_publish_clear_content" };
 
   const customPublishFinalPublishRows = (state: PendingCustomPublish) => [
+    ...(state.archiveId ? [[{ text: "🔗 选择链接模板", callback_data: "custom_publish_link_templates" }]] : []),
     [{ text: `✅ 发布到绑定云机 ${state.padCode || defaultPadCode}`, callback_data: "custom_publish_publish_now" }],
     [{ text: "📱 选择多云机发布", callback_data: "custom_publish_multi_now" }],
     [customPublishResetButton],
     [customPublishBackToMethodButton(state)],
   ];
+
+  const buildCustomPublishLinkTemplateRows = (archive: PersonaArchive) => {
+    const presets = getSelectableLinkEndingPresets(archive.setup as any);
+    const rows = presets.slice(0, 10).map((preset, index) => ([{
+      text: `${preset.name || preset.endingText || preset.linkUrl || "模板"}`,
+      callback_data: `custom_publish_link_apply_${index}`,
+    }]));
+    rows.push([{ text: "◀️ 返回发布确认", callback_data: "custom_publish_publish_options" }]);
+    return rows;
+  };
+
+  const buildCustomPublishLinkTemplateText = (state: PendingCustomPublish, archive: PersonaArchive) => {
+    const presets = getSelectableLinkEndingPresets(archive.setup as any);
+    const lines = [
+      "🔗 发布前选择链接模板",
+      "",
+      `人设：${archive.name}`,
+      "",
+      state.text?.trim()
+        ? `当前文案：${state.text.trim().slice(0, 180)}${state.text.trim().length > 180 ? "..." : ""}`
+        : "当前文案：未收到文字，选择模板后会把模板作为文案结尾。",
+      "",
+      "请选择要添加到本次发布文案里的模板：",
+      ...(presets.length
+        ? presets.slice(0, 10).map((preset, index) => `${index + 1}. ${preset.name || "模板"}${preset.endingText ? ` / ${preset.endingText.slice(0, 40)}` : ""}${preset.linkUrl ? ` / ${preset.linkUrl}` : ""}`)
+        : ["当前人设还没有链接模板。"]),
+    ];
+    return lines.join("\n");
+  };
 
   const customPublishContentSummary = (state: PendingCustomPublish) => {
     const lines = [
@@ -14637,7 +14849,9 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       imageUrl: mediaUrl || "",
       mediaUrl: mediaUrl || "",
     } as PersonaArchive["posts"][number];
-    const customArchive = archive || ({
+    const customArchive = state.linkEndingPresetApplied && archive
+      ? ({ ...archive, setup: { ...(archive.setup || {}), linkEndingPresets: [], activeLinkEndingPresetId: "", tweetStyleLinkUrl: "", tweetStyleLinkText: "" } } as PersonaArchive)
+      : archive || ({
       id: state.archiveId || `custom-${chatId}`,
       name: state.archiveName || "自定义发布",
       content: "",
@@ -14926,12 +15140,13 @@ function enqueueScheduledArchivePost(args: {
   return loadPersonaArchive(args.archiveId).then((archive) => {
     const post = archive?.posts.find((item) => item.id === args.postId);
     if (!archive || !post) throw new Error("沒有找到要定時發佈的推文");
+    const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
     return repo.enqueueTask({
       archive_id: args.archiveId,
       archive_post_id: args.postId,
       pad_code: args.padCode || archive.boundPadCode || defaultPadCode,
       platform: args.platform,
-      caption: post.content,
+      caption: finalCaption,
       media_url: post.imageUrl,
       scheduled_at: args.scheduledAt,
       telegram_chat_id: String(args.telegramChatId),
@@ -19480,7 +19695,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           await (state.source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
             archive.id,
             fullyPublishedPosts.map((post) => post.id),
-            Object.fromEntries(fullyPublishedPosts.map((post) => [post.id, post.content])),
+            Object.fromEntries(fullyPublishedPosts.map((post) => [post.id, results.map((item) => item.publishedContentByPost?.[post.id]).find(Boolean) || post.content])),
             meta,
           ).catch(() => null);
           invalidatePersonaListCache();
@@ -19733,13 +19948,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         try {
           for (let i = 0; i < selectedPosts.length; i += 1) {
             const post = selectedPosts[i];
+            const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
             logs.push(`▶️ 发布第 ${i + 1}/${selectedPosts.length} 篇`);
             const result = await publishPost(
               credentials,
               {
                 padCode,
                 platform: platform as any,
-                caption: post.content,
+                caption: finalCaption,
                 mediaUrl: post.imageUrl,
                 telegramChatId: chatId,
                 telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, state.groupContentType) : undefined,
@@ -19754,7 +19970,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
             );
             publishedIds.push(post.id);
-            publishedOriginals[post.id] = post.content;
+            publishedOriginals[post.id] = finalCaption;
             const publishScreenshotUrl = result.screenshotUrl;
             publishMeta[post.id] = {
               platform,
@@ -21172,6 +21388,92 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data.startsWith("linksettings_")) {
+      const id = data.slice("linksettings_".length);
+      let archive = await loadPersonaForThisBot(id).catch(() => null);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const migrated = ensureLinkEndingPresetsFromLegacy(archive.setup as any);
+      if (migrated.changed) {
+        archive = await updatePersonaArchiveProfile(id, { setup: migrated.setup as any }).catch(() => archive) || archive;
+        invalidatePersonaListCache();
+      }
+      await safeEditOrSend(bot, chatId, msgId, buildLinkEndingSettingsText(archive), {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buildLinkEndingSettingsRows(id, archive.setup as any) },
+      });
+      return;
+    }
+
+    if (data.startsWith("linkpreset_add_")) {
+      const id = data.slice("linkpreset_add_".length);
+      const archive = await loadPersonaForThisBot(id).catch(() => null);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      pendingActions.set(chatId, { type: "set-persona-link-ending-preset", archiveId: id });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔗 新增链接设置模板",
+        "",
+        `人设：${archive.name}`,
+        "",
+        "请发送结尾语句和链接。",
+        "格式示例：",
+        "想看更多整理，我放这里",
+        "https://example.com/more",
+        "",
+        "这里只保存结尾语句和链接，不要发送整篇推文正文。",
+      ].join("\n"), {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: [[{ text: "取消", callback_data: `linksettings_${id}` }]] },
+      });
+      return;
+    }
+
+    if (data.startsWith("linkpreset_off_")) {
+      const id = data.slice("linkpreset_off_".length);
+      const archive = await loadPersonaForThisBot(id).catch(() => null);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const presets = getLinkEndingPresets(archive.setup as any).map((preset) => ({ ...preset, enabled: false }));
+      const updated = await updatePersonaArchiveProfile(id, {
+        setup: { ...(archive.setup || {}), linkEndingPresets: presets, activeLinkEndingPresetId: "" } as any,
+      }).catch(() => null);
+      invalidatePersonaListCache();
+      const latest = updated || archive;
+      await safeEditOrSend(bot, chatId, msgId, buildLinkEndingSettingsText(latest), {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buildLinkEndingSettingsRows(id, latest.setup as any) },
+      });
+      return;
+    }
+
+    if (data.startsWith("lpu_") || data.startsWith("lpd_")) {
+      const prefix = data.startsWith("lpu_") ? "lpu_" : "lpd_";
+      const rest = data.slice(prefix.length);
+      const splitIndex = rest.lastIndexOf("_");
+      if (splitIndex <= 0) { sendMainMenu(chatId, msgId); return; }
+      const id = rest.slice(0, splitIndex);
+      const presetIndex = Number.parseInt(rest.slice(splitIndex + 1), 10);
+      const archive = await loadPersonaForThisBot(id).catch(() => null);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const presets = getLinkEndingPresets(archive.setup as any);
+      const targetPreset = Number.isInteger(presetIndex) ? presets[presetIndex] : undefined;
+      if (!targetPreset) { sendMainMenu(chatId, msgId); return; }
+      const nextPresets = data.startsWith("lpd_")
+        ? presets.filter((_, index) => index !== presetIndex)
+        : presets.map((preset, index) => ({ ...preset, enabled: index === presetIndex }));
+      const activeId = data.startsWith("lpd_")
+        ? (getActiveLinkEndingPreset(archive.setup as any)?.id === targetPreset.id ? "" : String((archive.setup as any)?.activeLinkEndingPresetId || ""))
+        : targetPreset.id;
+      const updated = await updatePersonaArchiveProfile(id, {
+        setup: { ...(archive.setup || {}), linkEndingPresets: nextPresets, activeLinkEndingPresetId: activeId } as any,
+      }).catch(() => null);
+      invalidatePersonaListCache();
+      const latest = updated || archive;
+      await safeEditOrSend(bot, chatId, msgId, buildLinkEndingSettingsText(latest), {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buildLinkEndingSettingsRows(id, latest.setup as any) },
+      });
+      return;
+    }
+
 
     if (data.startsWith("tweetstyle_") && !data.startsWith("tweetstyle_reset_")) {
       const id = data.slice("tweetstyle_".length);
@@ -21813,6 +22115,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         for (let index = 0; index < posts.length; index += 1) {
           assertPadOperationNotCancelled(padOperationKey);
           const post = posts[index];
+          const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
           logs.push(`▶️ 开始发布第 ${startIndex + index + 1} 篇（${describePostMedia(post)}）`);
           void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs, `发布第 ${startIndex + index + 1} 篇`);
           const result = await publishPost(
@@ -21820,7 +22123,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             {
               padCode,
               platform: platform as any,
-              caption: post.content,
+              caption: finalCaption,
               mediaUrl: post.imageUrl,
               telegramChatId: chatId,
               telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, groupContentType) : undefined,
@@ -21862,7 +22165,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await markArchiveEpisodesPublished(
           archiveId,
           publishedIds,
-          Object.fromEntries(posts.map((post) => [post.id, post.content])),
+          Object.fromEntries(posts.map((post) => [post.id, buildPersonaPublishCaption(post.content, archive.setup)])),
           publishMeta,
         ).catch(() => null);
         invalidatePersonaListCache();
@@ -21940,13 +22243,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
       try {
         const logs: string[] = [];
+        const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
         console.log(`[telegram][dopub_trace] stage=publish_start chat=${chatId} archive=${id} post=${post.id} pad=${padCode}`);
         const result = await publishPost(
           credentials,
           {
             padCode,
             platform: platform as any,
-            caption: post.content,
+            caption: finalCaption,
             mediaUrl: post.imageUrl,
             telegramChatId: chatId,
             telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
@@ -21967,7 +22271,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await markArchiveEpisodesPublished(
           id,
           [post.id],
-          { [post.id]: post.content },
+          { [post.id]: finalCaption },
           {
             [post.id]: {
               platform,
@@ -22272,7 +22576,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         sendMainMenu(chatId, msgId);
         return;
       }
-      const nextState = { ...prev, stage: "ready_to_publish" as const, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
+      const nextState = { ...prev, stage: "ready_to_publish" as const, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined, linkEndingPresetApplied: false };
       pendingCustomPublishes.set(chatId, nextState);
       await safeEditOrSend(bot, chatId, msgId, `${nextState.publishWithGeneratedImage ? "🖼" : "✅"} 已清除上一輪內容\n${customPublishContentSummary(nextState)}\n\n請重新發送${nextState.publishWithGeneratedImage ? "純文字推文內容" : "文字、圖片/視頻+文字，或先發媒體再補文字"}。`, {
         reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
@@ -22307,6 +22611,52 @@ function sendMainMenu(chatId: number, msgId?: number) {
         groupContentType: prev.groupContentType,
         selectedPadCodes: prev.padCodes || [prev.padCode || defaultPadCode],
       }, "请选择要同时发布的云机：", "custom_publish_publish_options");
+      return;
+    }
+
+    if (data === "custom_publish_link_templates") {
+      const prev = pendingCustomPublishes.get(chatId);
+      if (!prev || prev.stage !== "ready_to_publish" || !prev.archiveId) {
+        sendMainMenu(chatId, msgId);
+        return;
+      }
+      const archive = await loadPersonaForThisBot(prev.archiveId).catch(() => null);
+      if (!archive) {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 没有找到当前人设，无法读取链接模板。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回发布确认", callback_data: "custom_publish_publish_options" }]] },
+        });
+        return;
+      }
+      await safeEditOrSend(bot, chatId, msgId, buildCustomPublishLinkTemplateText(prev, archive), {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buildCustomPublishLinkTemplateRows(archive) },
+      });
+      return;
+    }
+
+    if (data.startsWith("custom_publish_link_apply_")) {
+      const prev = pendingCustomPublishes.get(chatId);
+      const presetIndex = Number.parseInt(data.slice("custom_publish_link_apply_".length), 10);
+      if (!prev || prev.stage !== "ready_to_publish" || !prev.archiveId || !Number.isInteger(presetIndex)) {
+        sendMainMenu(chatId, msgId);
+        return;
+      }
+      const archive = await loadPersonaForThisBot(prev.archiveId).catch(() => null);
+      const presets = getSelectableLinkEndingPresets(archive?.setup as any);
+      const preset = presets[presetIndex];
+      if (!archive || !preset) {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 这个链接模板不存在或已被删除，请重新选择。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回发布确认", callback_data: "custom_publish_publish_options" }]] },
+        });
+        return;
+      }
+      const nextText = applyLinkEndingPresetToText(prev.text || "", preset);
+      const nextState = { ...prev, text: nextText, archiveName: prev.archiveName || archive.name, linkEndingPresetApplied: true };
+      pendingCustomPublishes.set(chatId, nextState);
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板\n\n${customPublishContentSummary(nextState)}\n\n可以直接发布，或继续返回修改内容。`, {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: customPublishFinalPublishRows(nextState) },
+      });
       return;
     }
 
@@ -22758,12 +23108,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const stopTyping = startTelegramTyping(bot, chatId);
       try {
         const logs: string[] = [];
+        const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
         const result = await publishPost(
           credentials,
           {
             padCode,
             platform: platform as any,
-            caption: post.content,
+            caption: finalCaption,
             mediaUrl: getStoredPostPrimaryMediaUrl(post) || post.imageUrl,
             telegramChatId: chatId,
             telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, groupContentType) : undefined,
@@ -22782,7 +23133,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await (source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
           archiveId,
           [postId],
-          { [postId]: post.content },
+          { [postId]: finalCaption },
           {
             [postId]: {
               platform,
@@ -23666,7 +24017,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (customPublish?.stage === "ready_to_publish") {
       const nextState = { ...customPublish } as any;
-      if (text) nextState.text = text;
+      if (text) {
+        nextState.text = text;
+        nextState.linkEndingPresetApplied = false;
+      }
       if (media?.file_id && !nextState.publishWithGeneratedImage) {
         nextState.fileId = media.file_id;
         nextState.fileKind = photo ? "photo" : video ? "video" : documentMedia ? "document" : nextState.fileKind;
@@ -24387,13 +24741,32 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const profile = analyzeTweetStyleSample(sample);
       const linkUrl = extractTweetStyleLinkUrl(sample) || extractTweetStyleLinkUrlFromTelegramMessage(msg);
       const linkText = extractTweetStyleLinkTextFromTelegramMessage(msg);
+      const existingPresets = getLinkEndingPresets(archive.setup as any);
+      const now = new Date().toISOString();
+      const extractedPreset = linkUrl
+        ? {
+          id: `style-${Date.now().toString(36)}`,
+          name: "推文風格提取",
+          linkUrl,
+          endingText: linkText || "",
+          enabled: existingPresets.length === 0,
+          createdAt: now,
+          updatedAt: now,
+        }
+        : null;
       const updated = await updatePersonaArchiveProfile(pending.archiveId, {
         setup: {
           ...archive.setup,
           tweetStyleSample: sample,
           tweetStyleProfile: profile,
-          tweetStyleLinkUrl: linkUrl,
-          tweetStyleLinkText: linkText,
+          tweetStyleLinkUrl: "",
+          tweetStyleLinkText: "",
+          linkEndingPresets: extractedPreset
+            ? [...existingPresets, extractedPreset]
+            : existingPresets,
+          activeLinkEndingPresetId: extractedPreset && existingPresets.length === 0
+            ? extractedPreset.id
+            : (archive.setup as any)?.activeLinkEndingPresetId,
           tweetStyleUpdatedAt: new Date().toISOString(),
         } as any,
       }).catch((error: any) => {
@@ -24414,6 +24787,55 @@ function sendMainMenu(chatId: number, msgId?: number) {
             [{ text: "\u25C0\uFE0F \u8FD4\u56DE\u8A2D\u5B9A", callback_data: `settings_${pending.archiveId}` }],
           ],
         },
+      });
+      return;
+    }
+
+    if (pending?.type === "set-persona-link-ending-preset") {
+      pendingActions.delete(chatId);
+      const archive = await loadPersonaForThisBot(pending.archiveId).catch(() => null);
+      if (!archive) {
+        await bot.sendMessage(chatId, "❌ 當前 Bot 不能讀取這個人設。", {
+          reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+        });
+        return;
+      }
+      const presetInput = parseLinkEndingPresetFromText(text || "", msg);
+      if (!presetInput) {
+        await bot.sendMessage(chatId, "❌ 沒有讀取到結尾語句或鏈接。請重新進入「鏈接設置」後再新增。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回鏈接設置", callback_data: `linksettings_${pending.archiveId}` }]] },
+        });
+        return;
+      }
+      const now = new Date().toISOString();
+      const preset: LinkEndingPreset = {
+        id: `lp-${Date.now().toString(36)}`,
+        ...presetInput,
+        enabled: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const existingPresets = getLinkEndingPresets(archive.setup as any).map((item) => ({ ...item, enabled: false }));
+      const updated = await updatePersonaArchiveProfile(pending.archiveId, {
+        setup: {
+          ...(archive.setup || {}),
+          linkEndingPresets: [...existingPresets, preset],
+          activeLinkEndingPresetId: preset.id,
+        } as any,
+      }).catch((error: any) => {
+        console.error("[telegram][save_link_ending_preset_error]", error?.message || error);
+        return null;
+      });
+      if (!updated) {
+        await bot.sendMessage(chatId, "❌ 鏈接設置保存失敗，請稍後重試。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回鏈接設置", callback_data: `linksettings_${pending.archiveId}` }]] },
+        });
+        return;
+      }
+      invalidatePersonaListCache();
+      await bot.sendMessage(chatId, "✅ 鏈接設置模板已保存並啟用。", {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: [[{ text: "🔗 查看鏈接設置", callback_data: `linksettings_${pending.archiveId}` }]] },
       });
       return;
     }

@@ -13,6 +13,16 @@ export type ArchiveSetup = Partial<DramaSetup> & {
   tweetStyleLinkUrl?: string;
   tweetStyleLinkText?: string;
   tweetStyleUpdatedAt?: string;
+  linkEndingPresets?: Array<{
+    id: string;
+    name?: string;
+    linkUrl?: string;
+    endingText?: string;
+    enabled?: boolean;
+    createdAt?: string;
+    updatedAt?: string;
+  }>;
+  activeLinkEndingPresetId?: string;
   hotMetrics?: Record<string, {
     platform?: string;
     padCode?: string;

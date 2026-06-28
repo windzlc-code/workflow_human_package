@@ -248,6 +248,16 @@ export interface DramaSetup {
   tweetStyleSample?: string;
   tweetStyleLinkUrl?: string;
   tweetStyleLinkText?: string;
+  linkEndingPresets?: Array<{
+    id: string;
+    name?: string;
+    linkUrl?: string;
+    endingText?: string;
+    enabled?: boolean;
+    createdAt?: string;
+    updatedAt?: string;
+  }>;
+  activeLinkEndingPresetId?: string;
   freePostTemplate?: "jinjunya-hook" | "default";
   // Persona image consistency
   personaAvatarUrl?: string;   // base64 data URL of uploaded reference image
