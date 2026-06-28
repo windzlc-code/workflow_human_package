@@ -9,7 +9,6 @@ import {
   buildPostDetailText,
   buildPostImagePreviewOptions,
   buildPostImageRegenerateCallback,
-  buildPersonaHotMetricsPanelRows,
   buildPersonaSettingsRows,
   buildPersonaPlatformAccountRows,
   formatPersonaSettingsHotMetricsLines,
@@ -124,6 +123,19 @@ describe("buildPersonaSettingsRows", () => {
     expect(buttons).toContainEqual({ text: "🧾 人設簡介", callback_data: `editcontent_${archive.id}` });
   });
 
+  it("shows link settings in the main two-column persona settings layout", () => {
+    const archive = archiveForSettings();
+    const rows = buildPersonaSettingsRows(archive);
+    const buttons = rows.flat();
+
+    expect(buttons).toContainEqual({ text: "🔗 链接设置", callback_data: `linksettings_${archive.id}` });
+    expect(rows[1]).toEqual([
+      { text: "🧾 人設簡介", callback_data: `editcontent_${archive.id}` },
+      { text: "🔗 链接设置", callback_data: `linksettings_${archive.id}` },
+    ]);
+    expect(rows.every((row) => row.length <= 2)).toBe(true);
+  });
+
   it("shows the persona hot-data panel entry by default", () => {
     const texts = flattenButtonTexts(buildPersonaSettingsRows(archiveForSettings()));
 
@@ -140,20 +152,6 @@ describe("buildPersonaSettingsRows", () => {
     expect(texts).toContain("🔥 人設熱點數據");
     expect(texts).not.toContain("🔄 刷新數據");
     expect(texts).not.toContain("✅ 粉絲");
-  });
-
-  it("builds light/detail controls and filters for the independent hot-data panel", () => {
-    const texts = flattenButtonTexts(buildPersonaHotMetricsPanelRows("persona-settings-test", {
-      mode: "detail",
-      fields: ["followers", "views"],
-    }));
-
-    expect(texts).toContain("⚡ 輕量版");
-    expect(texts).toContain("✅ 📊 詳細版");
-    expect(texts).toContain("🔄 刷新詳細數據");
-    expect(texts).toContain("✅ 👥 粉絲");
-    expect(texts).toContain("✅ 📊 瀏覽");
-    expect(texts).toContain("⬜ ❤️ 點讚");
   });
 
   it("hides persona-image controls for workflow personas", () => {
@@ -202,7 +200,7 @@ describe("buildPersonaPlatformAccountRows", () => {
 });
 
 describe("formatPersonaSettingsHotMetricsLines", () => {
-  it("renders light metrics with recent views", () => {
+  it("renders account metrics with recent views", () => {
     const archive = archiveForSettings({
       setup: {
         ...archiveForSettings().setup!,
@@ -223,10 +221,11 @@ describe("formatPersonaSettingsHotMetricsLines", () => {
     });
 
     const lines = formatPersonaSettingsHotMetricsLines(archive, { mode: "light" });
+    const text = lines.join("\n");
 
-    expect(lines[0]).toContain("輕量版：Threads：帳號 @stevie875443");
-    expect(lines[0]).toContain("粉絲 4");
-    expect(lines[0]).toContain("最近瀏覽 6.1萬");
+    expect(lines[0]).toContain("Threads：帳號 @stevie875443");
+    expect(text).toContain("粉絲 4");
+    expect(text).toContain("最近瀏覽 6.1萬");
   });
 
   it("renders detail metrics without duplicated summary wording", () => {

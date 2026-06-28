@@ -3451,35 +3451,39 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
   const id = archive.id;
   const isWorkflow = isWorkflowPersonaListItem(archive);
   const referenceImageUrl = getExplicitPersonaReferenceImageUrl(archive);
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [
-    [
-      { text: "✏️ 改名稱", callback_data: `editname_${id}` },
-      { text: "\uD83E\uDDFE \u63A8\u6587\u98A8\u683C", callback_data: `tweetstyle_${id}` },
-    ],
-    [{ text: "🧾 人設簡介", callback_data: `editcontent_${id}` }],
-    [{ text: "🔗 链接设置", callback_data: `linksettings_${id}` }],
-    [{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }],
-    [{ text: "🔐 帳號管理", callback_data: `acctmgmt_${id}` }],
+  const buttons: Array<{ text: string; callback_data: string }> = [
+    { text: "✏️ 改名稱", callback_data: `editname_${id}` },
+    { text: "\uD83E\uDDFE \u63A8\u6587\u98A8\u683C", callback_data: `tweetstyle_${id}` },
+    { text: "🧾 人設簡介", callback_data: `editcontent_${id}` },
+    { text: "🔗 链接设置", callback_data: `linksettings_${id}` },
+    { text: "📱 綁定雲機", callback_data: `bindpad_${id}` },
+    { text: "🔐 帳號管理", callback_data: `acctmgmt_${id}` },
+    { text: "🔥 人設熱點數據", callback_data: `shs_${id}` },
+    ...(isWorkflow
+      ? [
+          { text: "TG免費群", callback_data: `bindtg_free_${id}` },
+          { text: "TG付費群", callback_data: `bindtg_paid_${id}` },
+        ]
+      : [{ text: "TG通用群", callback_data: `bindtg_free_${id}` }]),
   ];
-  rows.push([{ text: "🔥 人設熱點數據", callback_data: `shs_${id}` }]);
-  rows.push(isWorkflow
-    ? [
-        { text: "TG免費群", callback_data: `bindtg_free_${id}` },
-        { text: "TG付費群", callback_data: `bindtg_paid_${id}` },
-      ]
-    : [{ text: "TG通用群", callback_data: `bindtg_free_${id}` }]);
 
   if (!isWorkflow) {
-    rows.push(referenceImageUrl
-      ? [
-          { text: "👁 查看人设图", callback_data: `viewimg_${id}` },
-          { text: "🔄 重新生成人设图", callback_data: `regenimg_${id}` },
-        ]
-      : [{ text: "🎨 生成人设图", callback_data: `genimg_${id}` }]);
-    rows.push([{ text: "🗑 删除人设", callback_data: `del_${id}` }]);
+    if (referenceImageUrl) {
+      buttons.push(
+        { text: "👁 查看人设图", callback_data: `viewimg_${id}` },
+        { text: "🔄 重新生成人设图", callback_data: `regenimg_${id}` },
+      );
+    } else {
+      buttons.push({ text: "🎨 生成人设图", callback_data: `genimg_${id}` });
+    }
+    buttons.push({ text: "🗑 删除人设", callback_data: `del_${id}` });
   }
 
-  rows.push([{ text: "◀️ 返回人設詳情", callback_data: `pd_${id}` }]);
+  buttons.push({ text: "◀️ 返回人設詳情", callback_data: `pd_${id}` });
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let index = 0; index < buttons.length; index += 2) {
+    rows.push(buttons.slice(index, index + 2));
+  }
   return rows;
 }
 
