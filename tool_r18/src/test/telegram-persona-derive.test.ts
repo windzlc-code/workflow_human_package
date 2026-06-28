@@ -17,6 +17,7 @@ import {
   calculateSentimentHotRewriteMinLength,
   formatPersonaSettingsHotMetricsLines,
   buildPostDetailActionRows,
+  buildStoredPostPublishConfirmRows,
   buildStoredPostMediaManageKeyboard,
   buildStoredPostsListView,
   derivePersonaSpecFromPrompt,
@@ -690,6 +691,37 @@ describe("buildPostDetailActionRows", () => {
     expect(callbacks).toContain("favs_archive-1_p0");
   });
 });
+
+describe("buildStoredPostPublishConfirmRows", () => {
+  it("keeps normal stored post advanced publish options", () => {
+    const rows = buildStoredPostPublishConfirmRows({
+      archiveId: "archive-1",
+      platforms: ["threads", "telegram"] as any,
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
+    expect(callbacks).toContain("dop_threads");
+    expect(callbacks).toContain("dopm_threads");
+    expect(callbacks).toContain("sch_threads");
+    expect(callbacks).toContain("schm_threads");
+  });
+
+  it("aligns sentiment hot imported posts with the simple publish platform picker", () => {
+    const rows = buildStoredPostPublishConfirmRows({
+      archiveId: "archive-1",
+      isSentimentImported: true,
+      platforms: ["threads", "telegram"] as any,
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
+    expect(callbacks).toContain("dop_threads");
+    expect(callbacks).toContain("dop_telegram");
+    expect(callbacks).not.toContain("dopm_threads");
+    expect(callbacks).not.toContain("sch_threads");
+    expect(callbacks).not.toContain("schm_threads");
+  });
+});
+
 describe("buildPublishPadSelectionRows", () => {
   it("builds selectable rows for multi-pad publishing", () => {
     const rows = buildPublishPadSelectionRows({

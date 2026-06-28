@@ -12685,6 +12685,51 @@ export function buildPostDetailActionRows(args: {
   ];
 }
 
+export function buildStoredPostPublishConfirmRows(args: {
+  archiveId: string;
+  source?: "posts" | "favorites";
+  groupContentType?: TelegramGroupContentType;
+  isSentimentImported?: boolean;
+  platforms?: TelegramPublishPlatform[];
+}) {
+  const platforms = args.platforms?.length ? args.platforms : allowedPublishPlatforms;
+  const source = args.source || "posts";
+  const backText = source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表";
+  const platformText = (platform: TelegramPublishPlatform) => {
+    if (platform === "threads") return "🧵 Threads";
+    if (platform === "telegram") return "📣 Telegram 群组";
+    return platform;
+  };
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [
+    ...platforms.map((platform) => ([{
+      text: `发布 ${platformText(platform)}`,
+      callback_data: `dop_${platform}`,
+    }])),
+  ];
+  if (!args.isSentimentImported) {
+    rows.push(
+      ...platforms.map((platform) => ([{
+        text: `多云机发布 ${platformText(platform).replace(/^.+?\s/, "")}`,
+        callback_data: `dopm_${platform}`,
+      }])),
+    );
+    if (source !== "favorites") {
+      rows.push(
+        ...platforms.map((platform) => ([{
+          text: `定时发布 ${platformText(platform).replace(/^.+?\s/, "")}`,
+          callback_data: `sch_${platform}`,
+        }])),
+        ...platforms.map((platform) => ([{
+          text: `多云机定时 ${platformText(platform).replace(/^.+?\s/, "")}`,
+          callback_data: `schm_${platform}`,
+        }])),
+      );
+    }
+  }
+  rows.push([{ text: backText, callback_data: buildPostSourcePageCallback(args.archiveId, source, 0, args.groupContentType) }]);
+  return rows;
+}
+
 function buildGeneratePostInstruction(args: {
   textOnly: boolean;
   prompt: string;
@@ -21292,25 +21337,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
 "${post.content.slice(0, 80)}..."`, {
         parse_mode: "Markdown",
         reply_markup: {
-          inline_keyboard: [
-            ...allowedPublishPlatforms.map((platform) => ([{
-              text: `發布 ${platformButtons[platform].text}`,
-              callback_data: `dop_${platform}`,
-            }])),
-            ...allowedPublishPlatforms.map((platform) => ([{
-              text: `多雲機發布 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
-              callback_data: `dopm_${platform}`,
-            }])),
-            ...(source === "favorites" ? [] : allowedPublishPlatforms.map((platform) => ([{
-              text: `定時發布 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
-              callback_data: `sch_${platform}`,
-            }]))),
-            ...(source === "favorites" ? [] : allowedPublishPlatforms.map((platform) => ([{
-              text: `多雲機定時 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
-              callback_data: `schm_${platform}`,
-            }]))),
-            [{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(archiveId, source, 0, groupContentType) }],
-          ],
+          inline_keyboard: buildStoredPostPublishConfirmRows({
+            archiveId,
+            source,
+            groupContentType,
+            isSentimentImported: isSentimentHotImportedPost(post),
+          }),
         },
       });
       return;
