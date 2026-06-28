@@ -12692,7 +12692,7 @@ export function buildStoredPostPublishConfirmRows(args: {
   isSentimentImported?: boolean;
   platforms?: TelegramPublishPlatform[];
 }) {
-  const platforms = args.platforms?.length ? args.platforms : allowedPublishPlatforms;
+  const platforms = args.platforms?.length ? args.platforms : [DEFAULT_PUBLISH_PLATFORM];
   const source = args.source || "posts";
   const backText = source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表";
   const platformText = (platform: TelegramPublishPlatform) => {
@@ -21342,6 +21342,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             source,
             groupContentType,
             isSentimentImported: isSentimentHotImportedPost(post),
+            platforms: allowedPublishPlatforms,
           }),
         },
       });

@@ -693,6 +693,15 @@ describe("buildPostDetailActionRows", () => {
 });
 
 describe("buildStoredPostPublishConfirmRows", () => {
+  it("uses a safe default publish platform outside the bot runtime scope", () => {
+    const rows = buildStoredPostPublishConfirmRows({
+      archiveId: "archive-1",
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
+    expect(callbacks).toContain("dop_threads");
+  });
+
   it("keeps normal stored post advanced publish options", () => {
     const rows = buildStoredPostPublishConfirmRows({
       archiveId: "archive-1",
