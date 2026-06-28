@@ -1985,6 +1985,7 @@ export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHo
   const keywords = options?.keywords || [];
   const sorted = candidates
     .filter((candidate) => isUsefulHotCandidate(candidate) && hasMinimumSentimentHotContentLength(candidate))
+    .filter((candidate) => keywords.length === 0 || candidateMatchesCurrentKeywords(candidate, keywords))
     .filter((candidate) => !(options?.excludeShown && shownIds.has(candidate.id)))
     .sort((a, b) => {
       const aShown = shownIds.has(a.id) ? 1 : 0;
@@ -3038,10 +3039,10 @@ export async function fetchThreadsProfileLightMetrics(usernameInput: string): Pr
   const profileUrl = buildThreadsProfileUrl(username);
   const cookies = readSentimentBrowserAuthCookies("threads");
   if (!process.env.VITEST_WORKER_ID) {
-    const cookieAttempts = [
-      [],
-      ...(hasThreadsProfileLoginSessionCookie(cookies) ? [cookies] : []),
-    ];
+    const hasLoginSessionCookie = hasThreadsProfileLoginSessionCookie(cookies);
+    const cookieAttempts = hasLoginSessionCookie
+      ? [cookies, []]
+      : [[]];
     for (const attemptCookies of cookieAttempts) {
       let browser: any = null;
       try {
@@ -3117,10 +3118,10 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
   const profileUrl = buildThreadsProfileUrl(username);
   const cookies = readSentimentBrowserAuthCookies("threads");
   if (!process.env.VITEST_WORKER_ID) {
-    const cookieAttempts = [
-      [],
-      ...(hasThreadsProfileLoginSessionCookie(cookies) ? [cookies] : []),
-    ];
+    const hasLoginSessionCookie = hasThreadsProfileLoginSessionCookie(cookies);
+    const cookieAttempts = hasLoginSessionCookie
+      ? [cookies, []]
+      : [[]];
     let bestBrowserMetrics: ThreadsProfileHotMetrics | null = null;
     for (const attemptCookies of cookieAttempts) {
       let browser: any = null;
@@ -3216,7 +3217,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
       });
       if (detectThreadsProfileLoginWall(visible.text) && !visible.hasUsableProfileSignals) {
         if (attemptCookies.length && bestBrowserMetrics) return bestBrowserMetrics;
-        if (attemptCookies.length) return buildThreadsProfileIncompleteMetrics(username, refreshedAt, "public_partial", visible.rawText);
+        if (attemptCookies.length) continue;
         continue;
       }
       let parsed = { ...visible.parsed };
@@ -3311,7 +3312,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
           rawText: visible.rawText.slice(0, 4000),
           error: complete ? undefined : "Threads 已抓到全量帖子互动，但仍有部分帖子浏览量未能完成读取。",
         };
-        if (complete || attemptCookies.length || !hasThreadsProfileLoginSessionCookie(cookies)) return browserMetrics;
+        if (complete || attemptCookies.length || !hasLoginSessionCookie) return browserMetrics;
         bestBrowserMetrics = browserMetrics;
       }
     } catch {

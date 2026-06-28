@@ -3374,6 +3374,44 @@ function buildPersonaHotMetricsPostsPanelRows(archiveId: string, page: number, t
   return rows;
 }
 
+function buildPersonaHotMetricsSummaryPanelRows(archiveId: string, totalPosts: number): Array<Array<{ text: string; callback_data: string }>> {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [
+    [{ text: "🔄 刷新數據", callback_data: `shr_${archiveId}` }],
+  ];
+  if (totalPosts > 0) {
+    rows.push([{ text: `📋 查看推文數據（${totalPosts} 篇）`, callback_data: `shp_0_${archiveId}` }]);
+  }
+  rows.push([{ text: "◀️ 返回人設設定", callback_data: `settings_${archiveId}` }]);
+  return rows;
+}
+
+async function renderPersonaHotMetricsSummaryPanel(
+  bot: TelegramBot,
+  chatId: number,
+  msgId: number | undefined,
+  archive: PersonaArchive,
+) {
+  const metrics: any = resolvePersonaThreadsHotMetrics(archive);
+  const postMetrics = getPersonaHotMetricPosts(metrics);
+  const completeLabel = metrics?.complete === true ? "已完整刷新" : (metrics ? "部分資料" : "尚未刷新");
+  const lines = [
+    "🔥 人設熱點數據",
+    "",
+    `人設：${archive.name}`,
+    "平台：Threads",
+    `狀態：${completeLabel}`,
+    "",
+    ...formatPersonaSettingsHotMetricsLines(archive),
+    "",
+    `推文數據：${postMetrics.length ? `已讀取 ${postMetrics.length} 篇，點擊下方按鈕查看` : "尚未讀取到單帖資料"}`,
+  ];
+  await safeEditOrSend(bot, chatId, msgId, lines.join("\n"), {
+    reply_markup: {
+      inline_keyboard: buildPersonaHotMetricsSummaryPanelRows(archive.id, postMetrics.length),
+    },
+  });
+}
+
 async function renderPersonaHotMetricsPostsPanel(
   bot: TelegramBot,
   chatId: number,
@@ -3401,6 +3439,7 @@ async function renderPersonaHotMetricsPostsPanel(
       : ["請點擊下方「刷新數據」讀取綁定帳號下每篇推文的發布數據。"]),
   ];
   await safeEditOrSend(bot, chatId, msgId, lines.join("\n"), {
+    disable_web_page_preview: true,
     reply_markup: {
       inline_keyboard: buildPersonaHotMetricsPostsPanelRows(archive.id, safePage, postMetrics.length),
     },
@@ -3420,7 +3459,7 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
     [{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }],
     [{ text: "🔐 帳號管理", callback_data: `acctmgmt_${id}` }],
   ];
-  rows.push([{ text: "🔥 人設熱點數據", callback_data: `shp_0_${id}` }]);
+  rows.push([{ text: "🔥 人設熱點數據", callback_data: `shs_${id}` }]);
   rows.push(isWorkflow
     ? [
         { text: "TG免費群", callback_data: `bindtg_free_${id}` },
@@ -16679,7 +16718,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const id = data.slice(prefix.length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      await renderPersonaHotMetricsPostsPanel(bot, chatId, msgId, archive, 0);
+      await renderPersonaHotMetricsSummaryPanel(bot, chatId, msgId, archive);
       return;
     }
 
@@ -16698,7 +16737,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      await renderPersonaHotMetricsPostsPanel(bot, chatId, msgId, archive, 0);
+      await renderPersonaHotMetricsSummaryPanel(bot, chatId, msgId, archive);
+      return;
+    }
+
+    if (data.startsWith("shs_")) {
+      const id = data.slice("shs_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      await renderPersonaHotMetricsSummaryPanel(bot, chatId, msgId, archive);
       return;
     }
 
@@ -16721,9 +16768,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       await refreshPersonaThreadsHotMetricsFromTelegram(bot, chatId, msgId, archive, id, defaultPadCode, {
-        returnCallback: `shp_0_${id}`,
+        returnCallback: `shs_${id}`,
         onSuccessRender: async (latestArchive) => {
-          await renderPersonaHotMetricsPostsPanel(bot, chatId, msgId, latestArchive, 0);
+          await renderPersonaHotMetricsSummaryPanel(bot, chatId, msgId, latestArchive);
         },
       });
       return;

@@ -195,6 +195,36 @@ describe("sentiment hot importer", () => {
     expect(candidateMatchesCurrentKeywords(candidate, keywords)).toBe(true);
   });
 
+  it("keeps daily-life posts only when they still match persona keywords", () => {
+    const base = {
+      platform: "threads",
+      media: [],
+      hotScore: 9000,
+      metrics: {},
+      capturedAt: new Date().toISOString(),
+    };
+    const keywords = ["海外金融", "工薪信貸", "信用卡"];
+    const genericDaily = {
+      ...base,
+      id: "generic-daily",
+      sourceUrl: "https://www.threads.net/@demo/post/generic-daily",
+      author: "daily",
+      content: "今天想分享一點日常生活，最近和朋友聊天聊到心情、工作節奏、吃飯散步和週末安排，大家都說生活有時候就是慢慢調整，找到舒服的方式就好。",
+    };
+    const personaDaily = {
+      ...base,
+      id: "persona-daily",
+      sourceUrl: "https://www.threads.net/@demo/post/persona-daily",
+      author: "finance",
+      content: "今天想分享海外工薪族的日常理財壓力，很多人一邊處理信用卡週轉，一邊比較銀行貸款和信貸利率，生活開銷、收入證明、還款節奏都會影響後續規劃。",
+    };
+
+    expect(candidateMatchesCurrentKeywords(genericDaily as any, keywords)).toBe(false);
+    expect(candidateMatchesCurrentKeywords(personaDaily as any, keywords)).toBe(true);
+    expect(finalizeSentimentHotCandidatesForDisplay([genericDaily as any, personaDaily as any], 10, { keywords }))
+      .toEqual([personaDaily]);
+  });
+
   it("parses hot candidate QA decisions and rejects low-quality scores", () => {
     const decisions = parseSentimentHotCandidateQaDecisions(JSON.stringify([
       { index: 1, pass: true, relevance: 86, quality: 78, rewriteValue: 82, audienceFit: 75, risk: 12 },
