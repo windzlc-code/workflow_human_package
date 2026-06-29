@@ -616,12 +616,17 @@ const pendingThreadsAutoReplyDaysInputs = new Map<number, {
 
 const pendingThreadsOwnPostReplyInputs = new Map<number, {
   archiveId: string;
+  stage: "await_reply_text" | "await_min_views" | "await_days";
+  replyText?: string;
+  minViews?: number;
   createdAt: number;
 }>();
 
 const pendingThreadsOwnPostReplyRuns = new Map<number, {
   archiveId: string;
   replyText: string;
+  minViews: number;
+  maxAgeDays: number;
   createdAt: number;
 }>();
 
@@ -1780,16 +1785,21 @@ export function buildPersonaContentTypePickerRows(args: {
   archiveId: string;
   target: PersonaContentTypeTarget;
   counts?: Partial<Record<TelegramGroupContentType, number>>;
+  favoriteCount?: number;
 }) {
   const freeCount = Number(args.counts?.free || 0);
   const paidCount = Number(args.counts?.paid || 0);
-  return [
+  const rows = [
     [
       { text: `免費內容（${freeCount}）`, callback_data: buildPersonaContentTypeCallback(args.target, args.archiveId, "free") },
       { text: `付費內容（${paidCount}）`, callback_data: buildPersonaContentTypeCallback(args.target, args.archiveId, "paid") },
     ],
-    [{ text: "◀️ 返回人設詳情", callback_data: `pd_${args.archiveId}` }],
   ];
+  if (args.target === "history") {
+    rows.push([{ text: `⭐ 收藏推文（${Math.max(0, Math.floor(args.favoriteCount || 0))}）`, callback_data: buildFavoritePostsPageCallback(args.archiveId, 0) }]);
+  }
+  rows.push([{ text: "◀️ 返回人設詳情", callback_data: `pd_${args.archiveId}` }]);
+  return rows;
 }
 
 function buildStoredPostsPageCallback(archiveId: string, page: number, groupContentType?: TelegramGroupContentType) {
@@ -3705,35 +3715,37 @@ function buildPersonaAutoReplyModeText(archive: PersonaArchive) {
     `人設：${archive.name}`,
     "",
     "請先選擇自動回覆方式。",
-    "原自動回覆：沿用原本鏈路，掃描自己推文下方留言並自然回覆。",
-    "自動回覆熱點推文：只在自己已發布且未回覆過的 Threads 推文內，使用你自訂的內容回覆。",
+    "自動回覆評論：沿用原本鏈路，掃描自己推文下方留言並自然回覆。",
+    "自動回覆熱點推文：只在自己已發布、符合瀏覽量和天數條件、且未回覆過的 Threads 推文內，使用你自訂的內容回覆。",
   ].join("\n");
 }
 
 function buildPersonaAutoReplyModeRows(archiveId: string): Array<Array<{ text: string; callback_data: string }>> {
   return [
-    [{ text: "💬 原自動回覆", callback_data: `persona_autoreply_original_${archiveId}` }],
+    [{ text: "💬 自動回覆評論", callback_data: `persona_autoreply_original_${archiveId}` }],
     [{ text: "🔥 自動回覆熱點推文", callback_data: `persona_autoreply_hot_${archiveId}` }],
     [{ text: "◀️ 返回人設詳情", callback_data: `pd_${archiveId}` }],
   ];
 }
 
-function buildPersonaOwnPostAutoReplyPlatformText(archive: PersonaArchive, replyText: string) {
+function buildPersonaOwnPostAutoReplyPlatformText(archive: PersonaArchive, run: { replyText: string; minViews: number; maxAgeDays: number }) {
   return [
     "🔥 自動回覆熱點推文",
     "",
     `人設：${archive.name}`,
-    `回覆內容：${replyText}`,
+    `回覆內容：${run.replyText}`,
+    `瀏覽量條件：大於等於 ${formatCompactCount(run.minViews)}`,
+    `查看天數：${run.maxAgeDays} 天內`,
     "",
-    "條件：只回覆自己已發布、有真實 Threads 發布連結、且未回覆過的推文。",
+    "條件：只回覆自己已發布、有真實 Threads 發布連結、符合瀏覽量和天數、且未回覆過的推文。",
     "請選擇平台後開始執行。",
   ].join("\n");
 }
 
 function buildPersonaOwnPostAutoReplyPlatformRows(archiveId: string): Array<Array<{ text: string; callback_data: string }>> {
   return [
-    [{ text: "Threads", callback_data: `acctautoreplyhot_threads_${archiveId}` }],
-    [{ text: "✍️ 重新輸入回覆內容", callback_data: `persona_autoreply_hot_${archiveId}` }],
+    [{ text: "💬 Threads 內部評論", callback_data: `acctautoreplyhot_threads_${archiveId}` }],
+    [{ text: "✍️ 重新設定條件", callback_data: `persona_autoreply_hot_${archiveId}` }],
     [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${archiveId}` }],
   ];
 }
@@ -3746,26 +3758,54 @@ function normalizeThreadsOwnPostReplyHistoryUrl(raw: unknown): string {
     .replace(/[)\].,，。]+$/g, "");
 }
 
+function parseThreadsOwnPostReplyMinViewsInput(text: string): number | null {
+  const normalized = String(text || "").trim().replace(/,/g, "");
+  const match = normalized.match(/(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const base = Number(match[1]);
+  if (!Number.isFinite(base) || base < 0) return null;
+  const multiplier = /萬|万/.test(normalized)
+    ? 10_000
+    : /k/i.test(normalized)
+      ? 1_000
+      : 1;
+  return Math.floor(base * multiplier);
+}
+
+function extractThreadsOwnPostViewCount(meta?: PersonaArchive["posts"][number]["sourceMeta"]): number | undefined {
+  if (!meta) return undefined;
+  const engagement = (meta as any).engagement || {};
+  return numberFromMetric(engagement.viewCount ?? engagement.view_count)
+    ?? pickMetricNumber((meta as any).metrics, ["view_count", "views", "play_count", "plays", "impression_count", "seenCount"]);
+}
+
 function collectPublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): ThreadsOwnPostReplyTarget[] {
   const seen = new Set<string>();
   const targets: ThreadsOwnPostReplyTarget[] = [];
-  const add = (url: unknown, label: string, expectedText?: string) => {
+  const add = (url: unknown, label: string, expectedText?: string, meta?: PersonaArchive["posts"][number]["sourceMeta"], publishedAt?: string) => {
     const normalized = normalizeThreadsOwnPostReplyHistoryUrl(url);
     if (!/^https:\/\/www\.threads\.net\/@[^/\s]+\/post\/[^?\s#)]+/i.test(normalized)) return;
     if (seen.has(normalized)) return;
     seen.add(normalized);
-    targets.push({ url: normalized, label, expectedText });
+    targets.push({
+      url: normalized,
+      label,
+      expectedText,
+      viewCount: extractThreadsOwnPostViewCount(meta),
+      publishedAt,
+    });
   };
   for (const record of archive.publishHistory || []) {
     if (String(record.platform || "").toLowerCase() !== "threads") continue;
     const expectedText = record.content || record.title || "";
-    add(isPublishHistoryOriginalSourceUrl(record, record.publishedUrl) ? "" : record.publishedUrl, record.title || record.id || "published", expectedText);
+    const aggregateMeta = aggregatePublishedTargets(record);
+    add(isPublishHistoryOriginalSourceUrl(record, record.publishedUrl) ? "" : record.publishedUrl, record.title || record.id || "published", expectedText, aggregateMeta, record.publishedAt);
     const meta = getPublishHistoryValidPublishedMeta(record, record.publishedMeta);
-    add(isPublishHistoryOriginalSourceUrl(record, meta?.sourceUrl) ? "" : meta?.sourceUrl, record.title || record.id || "published", expectedText);
+    add(isPublishHistoryOriginalSourceUrl(record, meta?.sourceUrl) ? "" : meta?.sourceUrl, record.title || record.id || "published", expectedText, meta, record.publishedAt);
     for (const target of Array.isArray(record.publishedTargets) ? record.publishedTargets : []) {
-      add(isPublishHistoryOriginalSourceUrl(record, target?.publishedUrl) ? "" : target?.publishedUrl, target?.padName || record.title || record.id || "published", expectedText);
+      add(isPublishHistoryOriginalSourceUrl(record, target?.publishedUrl) ? "" : target?.publishedUrl, target?.padName || record.title || record.id || "published", expectedText, getPublishHistoryValidPublishedMeta(record, target?.publishedMeta), record.publishedAt);
       const targetMeta = getPublishHistoryValidPublishedMeta(record, target?.publishedMeta);
-      add(isPublishHistoryOriginalSourceUrl(record, targetMeta?.sourceUrl) ? "" : targetMeta?.sourceUrl, target?.padName || record.title || record.id || "published", expectedText);
+      add(isPublishHistoryOriginalSourceUrl(record, targetMeta?.sourceUrl) ? "" : targetMeta?.sourceUrl, target?.padName || record.title || record.id || "published", expectedText, targetMeta, record.publishedAt);
     }
   }
   return targets;
@@ -3784,9 +3824,24 @@ function getThreadsOwnPostReplyHistory(archive: PersonaArchive): Array<{ url: st
     : [];
 }
 
-function filterUnrepliedThreadsOwnPostTargets(archive: PersonaArchive, targets: ThreadsOwnPostReplyTarget[]) {
+function filterUnrepliedThreadsOwnPostTargets(
+  archive: PersonaArchive,
+  targets: ThreadsOwnPostReplyTarget[],
+  options: { minViews?: number; maxAgeDays?: number } = {},
+) {
   const replied = new Set(getThreadsOwnPostReplyHistory(archive).map((item) => item.url));
-  return targets.filter((target) => !replied.has(normalizeThreadsOwnPostReplyHistoryUrl(target.url)));
+  const minViews = Math.max(0, Math.floor(options.minViews || 0));
+  const maxAgeDays = Math.max(0, Math.floor(options.maxAgeDays || 0));
+  const minPublishedAt = maxAgeDays > 0 ? Date.now() - maxAgeDays * 24 * 60 * 60 * 1000 : 0;
+  return targets.filter((target) => {
+    if (replied.has(normalizeThreadsOwnPostReplyHistoryUrl(target.url))) return false;
+    if (minViews > 0 && Number(target.viewCount || 0) < minViews) return false;
+    if (minPublishedAt > 0) {
+      const publishedAt = Date.parse(String(target.publishedAt || ""));
+      if (!Number.isFinite(publishedAt) || publishedAt < minPublishedAt) return false;
+    }
+    return true;
+  });
 }
 
 function formatThreadsOwnPostReplyProgressLines(
@@ -17459,7 +17514,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 { text: "📝 查看推文", callback_data: workflowPersona ? `posts_branch_${id}` : buildStoredPostsPageCallback(id, 0) },
                 { text: "🕘 发布历史", callback_data: workflowPersona ? `history_branch_${id}` : buildPersonaHistoryCallback(id) },
               ],
-              [{ text: `⭐ 收藏推文（${archive.favoritePosts?.length || 0}）`, callback_data: buildFavoritePostsPageCallback(id, 0) }],
               [
                 { text: "✍️ 新建推文", callback_data: `genpost_branch_${id}` },
                 { text: "⚙️ 人设设置", callback_data: `settings_${id}` },
@@ -17603,7 +17657,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const targets = filterUnrepliedThreadsOwnPostTargets(archive, collectPublishedThreadsOwnPostReplyTargets(archive));
-      pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, createdAt: Date.now() });
+      pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_reply_text", createdAt: Date.now() });
       await safeEditOrSend(bot, chatId, msgId, [
         "🔥 自動回覆熱點推文",
         "",
@@ -17611,7 +17665,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         `可回覆推文：${targets.length} 篇`,
         "",
         "請直接輸入要回覆到自己已發布推文內的內容。",
-        "系統只會處理未回覆過且有真實 Threads 發布連結的推文。",
+        "下一步會設定瀏覽量門檻和查看天數。",
       ].join("\n"), {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }]] },
       });
@@ -17811,15 +17865,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const allTargets = collectPublishedThreadsOwnPostReplyTargets(archive);
-      const targets = filterUnrepliedThreadsOwnPostTargets(archive, allTargets).slice(0, 3);
+      const targets = filterUnrepliedThreadsOwnPostTargets(archive, allTargets, {
+        minViews: runState.minViews,
+        maxAgeDays: runState.maxAgeDays,
+      }).slice(0, 3);
       if (!targets.length) {
         await safeEditOrSend(bot, chatId, msgId, [
-          "ℹ️ 沒有可回覆的已發布 Threads 推文。",
+          "ℹ️ 沒有符合條件的已發布 Threads 推文。",
           "",
           `人設：${archive.name}`,
           `已發布連結：${allTargets.length} 篇`,
+          `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
+          `查看天數：${runState.maxAgeDays} 天內`,
           "",
-          "可能原因：沒有真實發布連結，或所有已發布推文都已回覆過。",
+          "可能原因：沒有真實發布連結、瀏覽量不足、超出天數、或已回覆過。",
         ].join("\n"), {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
         });
@@ -17837,6 +17896,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           `人設：${archive.name}`,
           `雲機：${boundPad.padName}`,
           `目標：${targets.length} 篇`,
+          `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
+          `查看天數：${runState.maxAgeDays} 天內`,
           "",
           "正在打開已發布推文。",
         ].join("\n"), {
@@ -20035,7 +20096,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const branchTitle = parsedHistory?.groupContentType === "paid" ? "付費內容" : parsedHistory?.groupContentType === "free" ? "免費內容" : "";
         await safeEditOrSend(bot, chatId, msgId, `<b>\uD83D\uDD58 \u767C\u5E03\u6B77\u53F2${branchTitle ? ` - ${branchTitle}` : ""}</b>\n\n\u76EE\u524D\u6C92\u6709\u767C\u5E03\u6B77\u53F2\u8A18\u9304\u3002`, {
           parse_mode: "HTML",
-          reply_markup: { inline_keyboard: [[{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: parsedHistory?.groupContentType ? `history_branch_${id}` : `pd_${id}` }]] },
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: `⭐ 收藏推文（${archive.favoritePosts?.length || 0}）`, callback_data: buildFavoritePostsPageCallback(id, 0) }],
+              [{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: parsedHistory?.groupContentType ? `history_branch_${id}` : `pd_${id}` }],
+            ],
+          },
         });
         return;
       }
@@ -20071,6 +20137,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         totalPages,
         callbackForPage: (targetPage) => buildPersonaHistoryCallback(id, parsedHistory?.groupContentType, targetPage),
       }));
+      keyboard.push([{ text: `⭐ 收藏推文（${archive.favoritePosts?.length || 0}）`, callback_data: buildFavoritePostsPageCallback(id, 0) }]);
       keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: parsedHistory?.groupContentType ? `history_branch_${id}` : `pd_${id}` }]);
       const branchTitle = parsedHistory?.groupContentType === "paid" ? "付費內容" : parsedHistory?.groupContentType === "free" ? "免費內容" : "";
       await safeEditOrSend(bot, chatId, msgId, `<b>\uD83D\uDD58 \u767C\u5E03\u6B77\u53F2${branchTitle ? ` - ${branchTitle}` : ""}</b>\uFF08\u5171 ${history.length} \u689D\uFF0C\u7B2C ${safePage + 1}/${totalPages} \u9801\uFF09\n\n${lines.join("\n\n")}`, {
@@ -20180,7 +20247,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const counts = countByTelegramGroupContentType(countSource as Array<{ telegramGroupContentType?: "free" | "paid" }>);
         const title = target === "history" ? "發布歷史" : target === "publish" ? "發布推文" : "待發布推文";
         await safeEditOrSend(bot, chatId, msgId, `請選擇要查看的${title}內容類型：`, {
-          reply_markup: { inline_keyboard: buildPersonaContentTypePickerRows({ archiveId: id, target, counts }) },
+          reply_markup: { inline_keyboard: buildPersonaContentTypePickerRows({ archiveId: id, target, counts, favoriteCount: archive.favoritePosts?.length || 0 }) },
         });
         return;
       }
@@ -24543,23 +24610,82 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await bot.sendMessage(chatId, "❌ 自動回覆熱點推文內容輸入已逾時，請重新進入自動回覆。");
         return;
       }
-      const replyText = text.trim();
-      if (!replyText || replyText.length > 220) {
-        await bot.sendMessage(chatId, "❌ 回覆內容格式不正確，請輸入 1-220 字的回覆內容。");
-        return;
-      }
-      pendingThreadsOwnPostReplyInputs.delete(chatId);
-      pendingThreadsOwnPostReplyRuns.set(chatId, {
-        archiveId: pendingOwnPostReplyInput.archiveId,
-        replyText,
-        createdAt: Date.now(),
-      });
       const archive = await loadPersonaForThisBot(pendingOwnPostReplyInput.archiveId).catch(() => null);
       if (!archive) {
         await bot.sendMessage(chatId, "❌ 找不到人設，請重新進入自動回覆。");
         return;
       }
-      await bot.sendMessage(chatId, buildPersonaOwnPostAutoReplyPlatformText(archive, replyText), {
+      if (pendingOwnPostReplyInput.stage === "await_reply_text") {
+        const replyText = text.trim();
+        if (!replyText || replyText.length > 220) {
+          await bot.sendMessage(chatId, "❌ 回覆內容格式不正確，請輸入 1-220 字的回覆內容。");
+          return;
+        }
+        pendingThreadsOwnPostReplyInputs.set(chatId, {
+          ...pendingOwnPostReplyInput,
+          stage: "await_min_views",
+          replyText,
+          createdAt: Date.now(),
+        });
+        await bot.sendMessage(chatId, [
+          "🔥 自動回覆熱點推文",
+          "",
+          `人設：${archive.name}`,
+          `回覆內容：${replyText}`,
+          "",
+          "請輸入瀏覽量門檻。",
+          "只有已發布推文瀏覽量大於等於這個值時才會自動評論。",
+          "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }]] },
+        });
+        return;
+      }
+      if (pendingOwnPostReplyInput.stage === "await_min_views") {
+        const minViews = parseThreadsOwnPostReplyMinViewsInput(text);
+        if (minViews === null) {
+          await bot.sendMessage(chatId, "❌ 瀏覽量格式不正確，請輸入數字，例如：10000、1萬、2.5萬。");
+          return;
+        }
+        pendingThreadsOwnPostReplyInputs.set(chatId, {
+          ...pendingOwnPostReplyInput,
+          stage: "await_days",
+          minViews,
+          createdAt: Date.now(),
+        });
+        await bot.sendMessage(chatId, [
+          "🔥 自動回覆熱點推文",
+          "",
+          `人設：${archive.name}`,
+          `瀏覽量條件：大於等於 ${formatCompactCount(minViews)}`,
+          "",
+          "請輸入查看天數，規則和自動回覆評論一致。",
+          "可輸入：1-7，例如：2。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }]] },
+        });
+        return;
+      }
+      const days = parseThreadsAutoReplyDaysInput(text);
+      if (!days) {
+        await bot.sendMessage(chatId, "❌ 查看天數格式不正確。\n\n請輸入 1-7 之間的數字，例如：2。");
+        return;
+      }
+      const runState = {
+        archiveId: pendingOwnPostReplyInput.archiveId,
+        replyText: pendingOwnPostReplyInput.replyText || "",
+        minViews: Math.max(0, Math.floor(pendingOwnPostReplyInput.minViews || 0)),
+        maxAgeDays: days,
+        createdAt: Date.now(),
+      };
+      if (!runState.replyText) {
+        pendingThreadsOwnPostReplyInputs.delete(chatId);
+        await bot.sendMessage(chatId, "❌ 回覆內容已失效，請重新進入自動回覆熱點推文。");
+        return;
+      }
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
+      pendingThreadsOwnPostReplyRuns.set(chatId, runState);
+      await bot.sendMessage(chatId, buildPersonaOwnPostAutoReplyPlatformText(archive, runState), {
         reply_markup: { inline_keyboard: buildPersonaOwnPostAutoReplyPlatformRows(pendingOwnPostReplyInput.archiveId) },
       });
       return;

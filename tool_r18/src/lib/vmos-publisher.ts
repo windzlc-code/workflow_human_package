@@ -22023,6 +22023,8 @@ export interface ThreadsOwnPostReplyTarget {
   url: string;
   label?: string;
   expectedText?: string;
+  viewCount?: number;
+  publishedAt?: string;
 }
 
 export interface ThreadsOwnPostReplyProgress {
