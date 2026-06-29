@@ -1785,7 +1785,6 @@ export function buildPersonaContentTypePickerRows(args: {
   archiveId: string;
   target: PersonaContentTypeTarget;
   counts?: Partial<Record<TelegramGroupContentType, number>>;
-  favoriteCount?: number;
 }) {
   const freeCount = Number(args.counts?.free || 0);
   const paidCount = Number(args.counts?.paid || 0);
@@ -1795,9 +1794,6 @@ export function buildPersonaContentTypePickerRows(args: {
       { text: `付費內容（${paidCount}）`, callback_data: buildPersonaContentTypeCallback(args.target, args.archiveId, "paid") },
     ],
   ];
-  if (args.target === "history") {
-    rows.push([{ text: `⭐ 收藏推文（${Math.max(0, Math.floor(args.favoriteCount || 0))}）`, callback_data: buildFavoritePostsPageCallback(args.archiveId, 0) }]);
-  }
   rows.push([{ text: "◀️ 返回人設詳情", callback_data: `pd_${args.archiveId}` }]);
   return rows;
 }
@@ -2221,6 +2217,7 @@ export function buildStoredPostsListView(
   pageSize = STORED_POSTS_PAGE_SIZE,
   linkPresentation: { url: string; text: string } | null = null,
   groupContentType?: TelegramGroupContentType,
+  favoriteCount?: number,
 ) {
   const scopedPosts = filterByTelegramGroupContentType(posts, groupContentType);
   const totalPages = Math.max(1, Math.ceil(scopedPosts.length / pageSize));
@@ -2249,6 +2246,9 @@ export function buildStoredPostsListView(
     totalPages,
     callbackForPage: (targetPage) => buildStoredPostsPageCallback(archiveId, targetPage, groupContentType),
   }));
+  if (typeof favoriteCount === "number") {
+    keyboard.push([{ text: `⭐ 收藏推文（${Math.max(0, Math.floor(favoriteCount))}）`, callback_data: buildFavoritePostsPageCallback(archiveId, 0) }]);
+  }
   const branchSuffix = groupContentType ? `_ct_${groupContentType}` : "";
   keyboard.push([
     { text: "\uD83D\uDE80 \u767C\u5E03\u63A8\u6587", callback_data: `bulkpub_${archiveId}${branchSuffix}_p${safePage}` },
@@ -20098,7 +20098,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
           parse_mode: "HTML",
           reply_markup: {
             inline_keyboard: [
-              [{ text: `⭐ 收藏推文（${archive.favoritePosts?.length || 0}）`, callback_data: buildFavoritePostsPageCallback(id, 0) }],
               [{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: parsedHistory?.groupContentType ? `history_branch_${id}` : `pd_${id}` }],
             ],
           },
@@ -20137,7 +20136,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         totalPages,
         callbackForPage: (targetPage) => buildPersonaHistoryCallback(id, parsedHistory?.groupContentType, targetPage),
       }));
-      keyboard.push([{ text: `⭐ 收藏推文（${archive.favoritePosts?.length || 0}）`, callback_data: buildFavoritePostsPageCallback(id, 0) }]);
       keyboard.push([{ text: "\u25C0\uFE0F \u8FD4\u56DE", callback_data: parsedHistory?.groupContentType ? `history_branch_${id}` : `pd_${id}` }]);
       const branchTitle = parsedHistory?.groupContentType === "paid" ? "付費內容" : parsedHistory?.groupContentType === "free" ? "免費內容" : "";
       await safeEditOrSend(bot, chatId, msgId, `<b>\uD83D\uDD58 \u767C\u5E03\u6B77\u53F2${branchTitle ? ` - ${branchTitle}` : ""}</b>\uFF08\u5171 ${history.length} \u689D\uFF0C\u7B2C ${safePage + 1}/${totalPages} \u9801\uFF09\n\n${lines.join("\n\n")}`, {
@@ -20247,7 +20245,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const counts = countByTelegramGroupContentType(countSource as Array<{ telegramGroupContentType?: "free" | "paid" }>);
         const title = target === "history" ? "發布歷史" : target === "publish" ? "發布推文" : "待發布推文";
         await safeEditOrSend(bot, chatId, msgId, `請選擇要查看的${title}內容類型：`, {
-          reply_markup: { inline_keyboard: buildPersonaContentTypePickerRows({ archiveId: id, target, counts, favoriteCount: archive.favoritePosts?.length || 0 }) },
+          reply_markup: { inline_keyboard: buildPersonaContentTypePickerRows({ archiveId: id, target, counts }) },
         });
         return;
       }
@@ -20280,6 +20278,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         STORED_POSTS_PAGE_SIZE,
         getTweetStyleLinkPresentation(archive.setup),
         parsed?.groupContentType,
+        archive.favoritePosts?.length || 0,
       );
       pendingPostSelections.set(chatId, {
         archiveId: id,
