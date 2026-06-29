@@ -14607,6 +14607,22 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     repo.releasePadLock(padCode, key);
   };
 
+  const releaseRuntimeAndPublishCommand = (
+    chatId: number,
+    padCode: string,
+    padOperationKey: string,
+    publishLockKey: string,
+    publishScopeKey: string,
+  ) => {
+    try {
+      releaseRuntimePadOperation(padCode, padOperationKey);
+    } catch (error: any) {
+      console.warn("[telegram][release_runtime_pad_operation_error]", error?.message || error);
+    } finally {
+      releasePublishCommand(chatId, publishLockKey, publishScopeKey);
+    }
+  };
+
   const resolvePublishPadOptions = async (defaultSelection?: string | string[]) => {
     const pads = await listPadsForThisBot();
     const runningPads = pads.filter((pad) => pad.padStatus === 10);
@@ -14747,8 +14763,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       } catch (error: any) {
         return { padCode, ok: false, logs, screenshots, publishedPostIds, error: formatUserFacingError(error, "发布失败，请人工检查当前界面后重试。") };
       } finally {
-        releaseRuntimePadOperation(padCode, padOperationKey);
-        releasePublishCommand(args.chatId, publishLockKey, publishScopeKey);
+        releaseRuntimeAndPublishCommand(args.chatId, padCode, padOperationKey, publishLockKey, publishScopeKey);
       }
     }));
     return results;
@@ -15304,8 +15319,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
         inlineKeyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]],
       });
     } finally {
-      releaseRuntimePadOperation(padCode, padOperationKey);
-      releasePublishCommand(chatId, publishLockKey, publishScopeKey);
+      releaseRuntimeAndPublishCommand(chatId, padCode, padOperationKey, publishLockKey, publishScopeKey);
       pendingCustomPublishes.delete(chatId);
     }
   };
@@ -20482,8 +20496,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             inlineKeyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(state.archiveId, visiblePage, state.groupContentType) }]],
           });
         } finally {
-          releaseRuntimePadOperation(padCode, padOperationKey);
-          releasePublishCommand(chatId, publishLockKey, publishScopeKey);
+          releaseRuntimeAndPublishCommand(chatId, padCode, padOperationKey, publishLockKey, publishScopeKey);
         }
         return;
       }
@@ -22937,9 +22950,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inlineKeyboard: [[{ text: "🔄 重试", callback_data: retryCallback }], [{ text: "◀️ 返回", callback_data: buildPersonaPublishCallback(archiveId, groupContentType) }]],
         });
       } finally {
-        console.log(`[telegram][dopub_trace] stage=release chat=${chatId} archive=${id} post=${post.id} pad=${padCode}`);
-        releaseRuntimePadOperation(padCode, padOperationKey);
-        releasePublishCommand(chatId, publishLockKey, publishScopeKey);
+        releaseRuntimeAndPublishCommand(chatId, padCode, padOperationKey, publishLockKey, publishScopeKey);
+        console.log(`[telegram][manual_publish_release] chat=${chatId} archive=${archiveId} pad=${padCode}`);
       }
       return;
     }
@@ -23054,8 +23066,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inlineKeyboard: [[{ text: "🔄 重试", callback_data: data }, { text: "🏠 主選單", callback_data: "back_main" }]],
         });
       } finally {
-        releaseRuntimePadOperation(padCode, padOperationKey);
-        releasePublishCommand(chatId, publishLockKey, publishScopeKey);
+        releaseRuntimeAndPublishCommand(chatId, padCode, padOperationKey, publishLockKey, publishScopeKey);
       }
       return;
     }
@@ -23949,8 +23960,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inlineKeyboard: [[{ text: "🔄 重試", callback_data: retryCallback }, { text: "◀️ 返回", callback_data: buildPostSourcePageCallback(archiveId, source, 0, groupContentType) }]],
         });
       } finally {
-        releaseRuntimePadOperation(padCode, padOperationKey);
-        releasePublishCommand(chatId, publishLockKey, publishScopeKey);
+        releaseRuntimeAndPublishCommand(chatId, padCode, padOperationKey, publishLockKey, publishScopeKey);
       }
       return;
     }
