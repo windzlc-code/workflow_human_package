@@ -22019,6 +22019,23 @@ export interface ThreadsAutoReplyProgress {
   error?: string;
 }
 
+export interface ThreadsOwnPostReplyTarget {
+  url: string;
+  label?: string;
+  expectedText?: string;
+}
+
+export interface ThreadsOwnPostReplyProgress {
+  step: string;
+  scannedPosts: number;
+  replied: number;
+  skipped: number;
+  replyScreenshots?: string[];
+  repliedUrls?: string[];
+  done: boolean;
+  error?: string;
+}
+
 type WarmupRiskDayState = {
   date: string;
   sessions: number;
@@ -34565,6 +34582,168 @@ export async function executeWarmupCandidate(
   }
 
   return { ok: false, message: "未知候选类型" };
+}
+
+function normalizeThreadsOwnPostReplyUrl(raw: unknown): string {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  const normalized = value
+    .replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/")
+    .replace(/[)\].,，。]+$/g, "");
+  if (!/^https:\/\/www\.threads\.net\/@[^/\s]+\/post\/[^?\s#)]+/i.test(normalized)) return "";
+  return normalized.split(/[?#]/, 1)[0];
+}
+
+function buildThreadsOwnPostReplyExpectedTokens(raw: unknown): string[] {
+  const text = normalizeSingleLine(String(raw || ""))
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[@#][\w.:-]+/g, " ");
+  if (text.length < 8) return [];
+  const chunks = text.match(/[\p{Script=Han}A-Za-z0-9]{2,}/gu) || [];
+  const tokens = chunks
+    .flatMap((chunk) => {
+      if (/^[\p{Script=Han}]+$/u.test(chunk)) {
+        const out: string[] = [];
+        const size = chunk.length >= 6 ? 4 : Math.min(3, chunk.length);
+        for (let i = 0; i <= chunk.length - size; i += size) out.push(chunk.slice(i, i + size));
+        return out;
+      }
+      return [chunk.toLowerCase()];
+    })
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2 && !/^\d+$/.test(token));
+  return [...new Set(tokens)].slice(0, 16);
+}
+
+async function verifyThreadsOwnPostReplyTargetOnScreen(
+  config: VmosConfig,
+  padCode: string,
+  target: ThreadsOwnPostReplyTarget,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const expectedTokens = buildThreadsOwnPostReplyExpectedTokens(target.expectedText || target.label || "");
+  if (!expectedTokens.length) return { ok: true };
+  const uiXml = await dumpUiXmlQuick(config, padCode, 2500).catch(() => "");
+  const preview = extractWarmupPostPreviewFromUiXml(uiXml);
+  if (!preview) return { ok: false, reason: "無法讀取當前推文內容，未確認目標帖" };
+  const normalizedPreview = normalizeSingleLine(preview).toLowerCase();
+  const matched = expectedTokens.filter((token) => normalizedPreview.includes(token.toLowerCase()));
+  const required = expectedTokens.length >= 4 ? 2 : 1;
+  if (matched.length >= required) return { ok: true };
+  return { ok: false, reason: `當前頁面內容與目標推文不匹配：${preview.slice(0, 60)}` };
+}
+
+export async function replyOwnPublishedThreadsPosts(
+  config: VmosConfig,
+  padCode: string,
+  cfg: {
+    targets: ThreadsOwnPostReplyTarget[];
+    replyText: string;
+    maxReplies?: number;
+  },
+  onProgress?: (progress: ThreadsOwnPostReplyProgress) => void,
+): Promise<ThreadsOwnPostReplyProgress> {
+  const replyText = normalizeSingleLine(cfg.replyText);
+  if (!replyText) throw new Error("自動回覆熱點推文內容不能為空");
+  const targets = Array.from(new Map(
+    (cfg.targets || [])
+      .map((target) => ({ ...target, url: normalizeThreadsOwnPostReplyUrl(target.url) }))
+      .filter((target) => target.url)
+      .map((target) => [target.url, target]),
+  ).values());
+  const maxReplies = Math.max(1, Math.min(10, Math.floor(cfg.maxReplies || 3)));
+  let scannedPosts = 0;
+  let replied = 0;
+  let skipped = 0;
+  const replyScreenshots: string[] = [];
+  const repliedUrls: string[] = [];
+  const errors: string[] = [];
+  const report = (progress: Partial<ThreadsOwnPostReplyProgress>) => {
+    onProgress?.({
+      step: progress.step || "Threads 自動回覆熱點推文進行中",
+      scannedPosts: progress.scannedPosts ?? scannedPosts,
+      replied: progress.replied ?? replied,
+      skipped: progress.skipped ?? skipped,
+      replyScreenshots,
+      repliedUrls,
+      done: progress.done ?? false,
+      error: progress.error,
+    });
+  };
+
+  if (!targets.length) {
+    const result: ThreadsOwnPostReplyProgress = {
+      step: "Threads 自動回覆熱點推文完成：沒有可回覆推文",
+      scannedPosts,
+      replied,
+      skipped,
+      replyScreenshots,
+      repliedUrls,
+      done: true,
+      error: "沒有找到未回覆且有真實發布連結的 Threads 推文",
+    };
+    onProgress?.(result);
+    return result;
+  }
+
+  for (const target of targets) {
+    if (replied >= maxReplies) break;
+    scannedPosts += 1;
+    report({ step: `正在打開已發布推文 ${scannedPosts}/${targets.length}` });
+    try {
+      await execAdbForText(
+        config,
+        padCode,
+        `am start -W -a android.intent.action.VIEW -d ${shellSingleQuote(target.url)} ${THREADS_PACKAGE}; sleep 4`,
+        30_000,
+        1200,
+      );
+      await waitForThreadsForegroundOrVisible(config, padCode, 8_000).catch(() => false);
+      const screenCheck = await verifyThreadsOwnPostReplyTargetOnScreen(config, padCode, target);
+      if (!screenCheck.ok) {
+        skipped += 1;
+        errors.push(`${target.label || target.url}: ${screenCheck.reason}`);
+        report({ step: "未確認目標推文，已跳過", error: screenCheck.reason });
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        continue;
+      }
+      const commentBtn = await warmupFindCommentButton(config, padCode);
+      if (!commentBtn) {
+        skipped += 1;
+        errors.push(`${target.label || target.url}: 找不到可靠評論入口`);
+        report({ step: "找不到可靠評論入口，已跳過" });
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+        continue;
+      }
+      const result = await warmupExecuteCommentAtPoint(config, padCode, commentBtn, replyText, {
+        sourceScreenshotUrl: commentBtn.screenshotUrl,
+        debugReason: [commentBtn.debugReason, "auto_reply_own_published_post"].filter(Boolean).join(" | "),
+      });
+      replied += 1;
+      repliedUrls.push(target.url);
+      if (result.screenshotUrl) replyScreenshots.push(result.screenshotUrl);
+      report({ step: "已完成一篇已發布推文回覆" });
+    } catch (error) {
+      skipped += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${target.label || target.url}: ${message}`);
+      report({ step: "回覆失敗，已跳過", error: message });
+      await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
+    }
+  }
+
+  const finalError = replied > 0 ? errors.slice(-2).join("；") || undefined : errors.slice(-3).join("；") || "沒有成功回覆任何推文";
+  const result: ThreadsOwnPostReplyProgress = {
+    step: replied > 0 ? "Threads 自動回覆熱點推文完成" : "Threads 自動回覆熱點推文完成：無成功回覆",
+    scannedPosts,
+    replied,
+    skipped,
+    replyScreenshots,
+    repliedUrls,
+    done: true,
+    error: finalError,
+  };
+  onProgress?.(result);
+  return result;
 }
 
 export async function warmupThreadsAccount(

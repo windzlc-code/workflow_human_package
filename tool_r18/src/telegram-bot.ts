@@ -17,7 +17,7 @@ import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
 import { buildRegeneratePostInstruction, calculateRegeneratedPostSimilarity, isRegeneratedPostTooSimilar } from "@/core/persona/regenerate-post-instruction";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
-import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, buildWarmupInterestKeywords, extractThreadsPublishedPostUrlFromReaderMarkdown, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress } from "@/lib/vmos-publisher";
+import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, replyOwnPublishedThreadsPosts, buildWarmupInterestKeywords, extractThreadsPublishedPostUrlFromReaderMarkdown, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress, type ThreadsOwnPostReplyProgress, type ThreadsOwnPostReplyTarget } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updateArchivePostMedia, updatePersonaArchivePostDraft, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, markFavoritePostsPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
@@ -26,7 +26,7 @@ import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinju
 import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
-import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, fetchThreadsProfileHotMetrics, getSentimentBrowserAuthProfileBinding, refreshSentimentBrowserCookiesForPlatform, refreshSentimentSourceMetrics, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
+import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, fetchThreadsProfileHotMetrics, getLiveSentimentBrowserAuthProfileBinding, getSentimentBrowserAuthProfileBinding, refreshSentimentBrowserCookiesForPlatform, refreshSentimentSourceMetrics, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
 import { rememberSentimentHotImported, rememberSentimentHotSelected, type SentimentHotCandidate } from "@/lib/sentiment-candidate-store";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import { buildPersonaVisualIdentityCue } from "@/lib/persona-image-search";
@@ -611,6 +611,17 @@ const pendingThreadsAutoReplyDaysInputs = new Map<number, {
   type: "pad" | "persona";
   padCode?: string;
   archiveId?: string;
+  createdAt: number;
+}>();
+
+const pendingThreadsOwnPostReplyInputs = new Map<number, {
+  archiveId: string;
+  createdAt: number;
+}>();
+
+const pendingThreadsOwnPostReplyRuns = new Map<number, {
+  archiveId: string;
+  replyText: string;
   createdAt: number;
 }>();
 
@@ -3544,6 +3555,19 @@ function resolveThreadsHotAuthBinding() {
   };
 }
 
+async function resolveThreadsHotAuthBindingLive() {
+  const status = await getLiveSentimentBrowserAuthProfileBinding("threads", { maxAgeMs: 60_000 }).catch(() => getSentimentBrowserAuthProfileBinding("threads"));
+  const ok = (status.health === "healthy" || status.health === "watch") && status.hasRequiredSessionCookie !== false;
+  return {
+    ok,
+    profileKey: status.profileKey || "threads",
+    status,
+    message: ok
+      ? "Threads authorization is live."
+      : status.message || "Threads authorization is missing or expired. Re-login in the authorization helper and sync sessionid.",
+  };
+}
+
 function resolvePersonaThreadsHotMetrics(archive: PersonaArchive, legacyPadCode?: string) {
   const hotMetrics = (archive.setup as any)?.hotMetrics || {};
   const username = normalizePersonaHotMetricsUsername((archive.setup as any)?.accountManagement?.threads?.handle);
@@ -3671,6 +3695,112 @@ function buildPersonaAutomationPlatformRows(archiveId: string, action: "autorepl
   return [
     [{ text: "Threads", callback_data: threadsCallback }],
     [{ text: "◀️ 返回人設詳情", callback_data: `pd_${archiveId}` }],
+  ];
+}
+
+function buildPersonaAutoReplyModeText(archive: PersonaArchive) {
+  return [
+    "💬 自動回覆",
+    "",
+    `人設：${archive.name}`,
+    "",
+    "請先選擇自動回覆方式。",
+    "原自動回覆：沿用原本鏈路，掃描自己推文下方留言並自然回覆。",
+    "自動回覆熱點推文：只在自己已發布且未回覆過的 Threads 推文內，使用你自訂的內容回覆。",
+  ].join("\n");
+}
+
+function buildPersonaAutoReplyModeRows(archiveId: string): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{ text: "💬 原自動回覆", callback_data: `persona_autoreply_original_${archiveId}` }],
+    [{ text: "🔥 自動回覆熱點推文", callback_data: `persona_autoreply_hot_${archiveId}` }],
+    [{ text: "◀️ 返回人設詳情", callback_data: `pd_${archiveId}` }],
+  ];
+}
+
+function buildPersonaOwnPostAutoReplyPlatformText(archive: PersonaArchive, replyText: string) {
+  return [
+    "🔥 自動回覆熱點推文",
+    "",
+    `人設：${archive.name}`,
+    `回覆內容：${replyText}`,
+    "",
+    "條件：只回覆自己已發布、有真實 Threads 發布連結、且未回覆過的推文。",
+    "請選擇平台後開始執行。",
+  ].join("\n");
+}
+
+function buildPersonaOwnPostAutoReplyPlatformRows(archiveId: string): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{ text: "Threads", callback_data: `acctautoreplyhot_threads_${archiveId}` }],
+    [{ text: "✍️ 重新輸入回覆內容", callback_data: `persona_autoreply_hot_${archiveId}` }],
+    [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${archiveId}` }],
+  ];
+}
+
+function normalizeThreadsOwnPostReplyHistoryUrl(raw: unknown): string {
+  return String(raw || "")
+    .trim()
+    .replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/")
+    .replace(/[?#].*$/, "")
+    .replace(/[)\].,，。]+$/g, "");
+}
+
+function collectPublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): ThreadsOwnPostReplyTarget[] {
+  const seen = new Set<string>();
+  const targets: ThreadsOwnPostReplyTarget[] = [];
+  const add = (url: unknown, label: string, expectedText?: string) => {
+    const normalized = normalizeThreadsOwnPostReplyHistoryUrl(url);
+    if (!/^https:\/\/www\.threads\.net\/@[^/\s]+\/post\/[^?\s#)]+/i.test(normalized)) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    targets.push({ url: normalized, label, expectedText });
+  };
+  for (const record of archive.publishHistory || []) {
+    if (String(record.platform || "").toLowerCase() !== "threads") continue;
+    const expectedText = record.content || record.title || "";
+    add(isPublishHistoryOriginalSourceUrl(record, record.publishedUrl) ? "" : record.publishedUrl, record.title || record.id || "published", expectedText);
+    const meta = getPublishHistoryValidPublishedMeta(record, record.publishedMeta);
+    add(isPublishHistoryOriginalSourceUrl(record, meta?.sourceUrl) ? "" : meta?.sourceUrl, record.title || record.id || "published", expectedText);
+    for (const target of Array.isArray(record.publishedTargets) ? record.publishedTargets : []) {
+      add(isPublishHistoryOriginalSourceUrl(record, target?.publishedUrl) ? "" : target?.publishedUrl, target?.padName || record.title || record.id || "published", expectedText);
+      const targetMeta = getPublishHistoryValidPublishedMeta(record, target?.publishedMeta);
+      add(isPublishHistoryOriginalSourceUrl(record, targetMeta?.sourceUrl) ? "" : targetMeta?.sourceUrl, target?.padName || record.title || record.id || "published", expectedText);
+    }
+  }
+  return targets;
+}
+
+function getThreadsOwnPostReplyHistory(archive: PersonaArchive): Array<{ url: string; replyText?: string; repliedAt?: string }> {
+  const raw = (archive.setup as any)?.threadsOwnPostAutoReply?.repliedPosts;
+  return Array.isArray(raw)
+    ? raw
+      .map((item) => ({
+        url: normalizeThreadsOwnPostReplyHistoryUrl(item?.url),
+        replyText: typeof item?.replyText === "string" ? item.replyText : undefined,
+        repliedAt: typeof item?.repliedAt === "string" ? item.repliedAt : undefined,
+      }))
+      .filter((item) => item.url)
+    : [];
+}
+
+function filterUnrepliedThreadsOwnPostTargets(archive: PersonaArchive, targets: ThreadsOwnPostReplyTarget[]) {
+  const replied = new Set(getThreadsOwnPostReplyHistory(archive).map((item) => item.url));
+  return targets.filter((target) => !replied.has(normalizeThreadsOwnPostReplyHistoryUrl(target.url)));
+}
+
+function formatThreadsOwnPostReplyProgressLines(
+  progress: ThreadsOwnPostReplyProgress,
+  args: { persona: string; padName: string },
+): string[] {
+  return [
+    "🔥 正在自動回覆熱點推文...",
+    `人設：${args.persona}`,
+    `雲機：${args.padName}`,
+    `狀態：${progress.step}`,
+    `已掃描：${progress.scannedPosts}`,
+    `已回覆：${progress.replied}`,
+    `已跳過：${progress.skipped}`,
   ];
 }
 
@@ -4041,7 +4171,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
       });
       return;
     }
-    const authBinding = resolveThreadsHotAuthBinding();
+    const authBinding = await resolveThreadsHotAuthBindingLive();
     if (!authBinding.ok) {
       stopTyping();
       await safeEditOrSend(bot, chatId, msgId, [
@@ -4074,7 +4204,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
       ok: false,
       message: error instanceof Error ? error.message : String(error || "unknown"),
     }));
-    const latestAuthBinding = resolveThreadsHotAuthBinding();
+    const latestAuthBinding = await resolveThreadsHotAuthBindingLive();
     if (!latestAuthBinding.ok) {
       stopTyping();
       await safeEditOrSend(bot, chatId, msgId, [
@@ -17449,17 +17579,64 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    if (data.startsWith("persona_autoreply_original_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsProfileActions.delete(chatId);
+      pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
+      pendingThreadsOwnPostReplyRuns.delete(chatId);
+      const id = data.slice("persona_autoreply_original_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      await safeEditOrSend(bot, chatId, msgId, buildPersonaAutomationPlatformText(archive, "autoreply"), {
+        reply_markup: { inline_keyboard: buildPersonaAutomationPlatformRows(id, "autoreply") },
+      });
+      return;
+    }
+
+    if (data.startsWith("persona_autoreply_hot_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsProfileActions.delete(chatId);
+      pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      pendingThreadsOwnPostReplyRuns.delete(chatId);
+      const id = data.slice("persona_autoreply_hot_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const targets = filterUnrepliedThreadsOwnPostTargets(archive, collectPublishedThreadsOwnPostReplyTargets(archive));
+      pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, createdAt: Date.now() });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔥 自動回覆熱點推文",
+        "",
+        `人設：${archive.name}`,
+        `可回覆推文：${targets.length} 篇`,
+        "",
+        "請直接輸入要回覆到自己已發布推文內的內容。",
+        "系統只會處理未回覆過且有真實 Threads 發布連結的推文。",
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }]] },
+      });
+      return;
+    }
+
     if (data.startsWith("persona_autoreply_") || data.startsWith("persona_warmup_")) {
       pendingPersonaAccountActions.delete(chatId);
       pendingThreadsProfileActions.delete(chatId);
       pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
+      pendingThreadsOwnPostReplyRuns.delete(chatId);
       const action: "autoreply" | "warmup" = data.startsWith("persona_autoreply_") ? "autoreply" : "warmup";
       const id = data.slice((action === "autoreply" ? "persona_autoreply_" : "persona_warmup_").length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      await safeEditOrSend(bot, chatId, msgId, buildPersonaAutomationPlatformText(archive, action), {
-        reply_markup: { inline_keyboard: buildPersonaAutomationPlatformRows(id, action) },
-      });
+      if (action === "autoreply") {
+        await safeEditOrSend(bot, chatId, msgId, buildPersonaAutoReplyModeText(archive), {
+          reply_markup: { inline_keyboard: buildPersonaAutoReplyModeRows(id) },
+        });
+      } else {
+        await safeEditOrSend(bot, chatId, msgId, buildPersonaAutomationPlatformText(archive, action), {
+          reply_markup: { inline_keyboard: buildPersonaAutomationPlatformRows(id, action) },
+        });
+      }
       return;
     }
 
@@ -17607,6 +17784,138 @@ function sendMainMenu(chatId: number, msgId?: number) {
           ],
         },
       });
+      return;
+    }
+
+    if (data.startsWith("acctautoreplyhot_threads_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
+      const id = data.slice("acctautoreplyhot_threads_".length);
+      const runState = pendingThreadsOwnPostReplyRuns.get(chatId);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      if (!runState || runState.archiveId !== id || Date.now() - runState.createdAt > 30 * 60 * 1000) {
+        pendingThreadsOwnPostReplyRuns.delete(chatId);
+        await safeEditOrSend(bot, chatId, msgId, "❌ 自動回覆熱點推文設定已失效，請重新輸入回覆內容。", {
+          reply_markup: { inline_keyboard: [[{ text: "✍️ 輸入回覆內容", callback_data: `persona_autoreply_hot_${id}` }], [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }]] },
+        });
+        return;
+      }
+      const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
+      const returnCallback = `persona_autoreply_${id}`;
+      if (!boundPad) {
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行自動回覆熱點推文。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
+        });
+        return;
+      }
+      const allTargets = collectPublishedThreadsOwnPostReplyTargets(archive);
+      const targets = filterUnrepliedThreadsOwnPostTargets(archive, allTargets).slice(0, 3);
+      if (!targets.length) {
+        await safeEditOrSend(bot, chatId, msgId, [
+          "ℹ️ 沒有可回覆的已發布 Threads 推文。",
+          "",
+          `人設：${archive.name}`,
+          `已發布連結：${allTargets.length} 篇`,
+          "",
+          "可能原因：沒有真實發布連結，或所有已發布推文都已回覆過。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
+        });
+        return;
+      }
+      const padOperationKey = `threads-own-post-autoreply:${boundPad.padCode}:${chatId}:${Date.now()}`;
+      if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, padOperationKey, "Threads自動回覆熱點推文"))) return;
+      const stopTyping = startTelegramTyping(bot, chatId);
+      try {
+        const creds = resolveVmosCredentials();
+        let lastProgress: ThreadsOwnPostReplyProgress | null = null;
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🔥 Threads 自動回覆熱點推文執行中...",
+          "",
+          `人設：${archive.name}`,
+          `雲機：${boundPad.padName}`,
+          `目標：${targets.length} 篇`,
+          "",
+          "正在打開已發布推文。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
+        });
+        const result = await replyOwnPublishedThreadsPosts(
+          creds,
+          boundPad.padCode,
+          { targets, replyText: runState.replyText, maxReplies: 3 },
+          (p) => {
+            assertPadOperationNotCancelled(padOperationKey);
+            lastProgress = p;
+            void updateTelegramPublishStatus(bot, chatId, msgId, "threads_auto_reply", formatThreadsOwnPostReplyProgressLines(p, {
+              persona: archive.name,
+              padName: boundPad.padName,
+            }), p.step);
+          },
+        );
+        assertPadOperationNotCancelled(padOperationKey);
+        stopTyping();
+        if (result.repliedUrls?.length) {
+          const latestArchive = await loadPersonaForThisBot(id).catch(() => archive) || archive;
+          const existing = getThreadsOwnPostReplyHistory(latestArchive);
+          const existingUrls = new Set(existing.map((item) => item.url));
+          const nowIso = new Date().toISOString();
+          const appended = result.repliedUrls
+            .map((url) => ({
+              url: normalizeThreadsOwnPostReplyHistoryUrl(url),
+              replyText: runState.replyText,
+              repliedAt: nowIso,
+            }))
+            .filter((item) => item.url && !existingUrls.has(item.url));
+          if (appended.length) {
+            await updatePersonaArchiveProfile(id, {
+              setup: {
+                ...(latestArchive.setup || {}),
+                threadsOwnPostAutoReply: {
+                  ...((latestArchive.setup as any)?.threadsOwnPostAutoReply || {}),
+                  repliedPosts: [...existing, ...appended].slice(-500),
+                },
+              } as any,
+            });
+          }
+        }
+        pendingThreadsOwnPostReplyRuns.delete(chatId);
+        const screenshots = result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [];
+        await bot.sendMessage(chatId, `✅ Threads 自動回覆熱點推文完成\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n已掃描：${result.scannedPosts}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
+        });
+        for (let i = 0; i < screenshots.length; i += 1) {
+          await bot.sendPhoto(chatId, resolveTelegramPhotoInput(screenshots[i]), {
+            caption: `📳 Threads 自動回覆熱點推文證據 ${i + 1}/${screenshots.length}`,
+          }).catch(() => undefined);
+        }
+      } catch (error: any) {
+        stopTyping();
+        if (isTelegramTaskCancelledError(error)) {
+          await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆熱點推文任務\n\n雲機：${boundPad.padName}`);
+          return;
+        }
+        if (await sendCloudAccountStateNotice(
+          bot,
+          chatId,
+          error,
+          { action: "Threads自動回覆熱點推文", padName: boundPad.padName, padCode: boundPad.padCode },
+          [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]],
+        )) {
+          return;
+        }
+        await sendManualInterventionFailure(bot, chatId, error, {
+          action: "Threads自動回覆熱點推文",
+          padName: boundPad.padName,
+          padCode: boundPad.padCode,
+          fallback: "Threads 自動回覆熱點推文失敗，請人工檢查目前 Threads 頁面後重試。",
+          inlineKeyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]],
+        });
+      } finally {
+        releaseRuntimePadOperation(boundPad.padCode, padOperationKey);
+      }
       return;
     }
 
@@ -24223,6 +24532,35 @@ function sendMainMenu(chatId: number, msgId?: number) {
         presetIndex: Number(priorityPendingAction.linkPresetIndex),
         text,
         msg,
+      });
+      return;
+    }
+
+    const pendingOwnPostReplyInput = pendingThreadsOwnPostReplyInputs.get(chatId);
+    if (pendingOwnPostReplyInput) {
+      if (Date.now() - pendingOwnPostReplyInput.createdAt > 10 * 60 * 1000) {
+        pendingThreadsOwnPostReplyInputs.delete(chatId);
+        await bot.sendMessage(chatId, "❌ 自動回覆熱點推文內容輸入已逾時，請重新進入自動回覆。");
+        return;
+      }
+      const replyText = text.trim();
+      if (!replyText || replyText.length > 220) {
+        await bot.sendMessage(chatId, "❌ 回覆內容格式不正確，請輸入 1-220 字的回覆內容。");
+        return;
+      }
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
+      pendingThreadsOwnPostReplyRuns.set(chatId, {
+        archiveId: pendingOwnPostReplyInput.archiveId,
+        replyText,
+        createdAt: Date.now(),
+      });
+      const archive = await loadPersonaForThisBot(pendingOwnPostReplyInput.archiveId).catch(() => null);
+      if (!archive) {
+        await bot.sendMessage(chatId, "❌ 找不到人設，請重新進入自動回覆。");
+        return;
+      }
+      await bot.sendMessage(chatId, buildPersonaOwnPostAutoReplyPlatformText(archive, replyText), {
+        reply_markup: { inline_keyboard: buildPersonaOwnPostAutoReplyPlatformRows(pendingOwnPostReplyInput.archiveId) },
       });
       return;
     }
