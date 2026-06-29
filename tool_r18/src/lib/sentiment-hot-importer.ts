@@ -114,6 +114,7 @@ export interface SentimentCookieStatus {
   authorizationNeedsRefresh?: boolean;
   recommendedAction?: string;
   lastAuthorizedAt?: string | null;
+  liveCheckedAt?: string;
 }
 
 export interface FetchSentimentHotCandidatesResult {
@@ -408,6 +409,72 @@ function buildSentimentCookieStatusFromProfile(platform: SentimentHotPlatform, p
 export function getSentimentBrowserAuthProfileBinding(platform: SentimentHotPlatform): SentimentCookieStatus {
   const profile = readSentimentBrowserAuthProfilesConfig().find((item: any) => sentimentProfileMatchesPlatform(item, platform));
   return buildSentimentCookieStatusFromProfile(platform, profile);
+}
+
+const liveSentimentBrowserAuthStatusCache = new Map<string, { expiresAt: number; status: SentimentCookieStatus }>();
+
+function buildSentimentCookieLiveFailureStatus(status: SentimentCookieStatus, message: string): SentimentCookieStatus {
+  return {
+    ...status,
+    health: status.health === "missing" ? "missing" : "degraded",
+    hasRequiredSessionCookie: false,
+    authorizationNeedsRefresh: true,
+    recommendedAction: status.health === "missing" ? "authorize-profile" : "reauthorize-profile",
+    liveCheckedAt: new Date().toISOString(),
+    message,
+  };
+}
+
+export async function getLiveSentimentBrowserAuthProfileBinding(platform: SentimentHotPlatform, options?: { maxAgeMs?: number }): Promise<SentimentCookieStatus> {
+  const status = getSentimentBrowserAuthProfileBinding(platform);
+  if (platform !== "threads" || process.env.VITEST_WORKER_ID) return status;
+  const maxAgeMs = Math.max(0, Number(options?.maxAgeMs ?? 60_000));
+  const cacheKey = `${platform}:${status.profileKey || platform}`;
+  const cached = liveSentimentBrowserAuthStatusCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.status;
+
+  const cookies = readSentimentBrowserAuthCookies(platform)
+    .map((cookie: any) => normalizeCookieForBrowserAuth(cookie, "threads.com"))
+    .filter(Boolean);
+  if (!hasValidThreadsSessionCookieForDomain(cookies, "threads.com")) {
+    const next = buildSentimentCookieLiveFailureStatus(status, "Threads 已保存 Cookie，但缺少可用的 threads.com sessionid；请重新登录 Threads 后用授权助手同步。");
+    liveSentimentBrowserAuthStatusCache.set(cacheKey, { expiresAt: Date.now() + maxAgeMs, status: next });
+    return next;
+  }
+
+  let browser: any = null;
+  try {
+    const { chromium } = await import("playwright");
+    browser = await chromium.launch(buildLocalChromiumLaunchOptions());
+    const context = await browser.newContext({
+      locale: "zh-TW",
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    });
+    await addCookiesBestEffort(context, cookies as any[]);
+    const page = await context.newPage();
+    await page.goto("https://www.threads.com/", { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => null);
+    await page.waitForTimeout(1500);
+    const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+    const title = await page.title().catch(() => "");
+    const href = page.url();
+    const refreshedCookies = activeUniqueCookies((await context.cookies(["https://www.threads.com/", "https://www.threads.net/"]))
+      .map((cookie) => normalizeCookieForBrowserAuth(cookie, "threads.com"))
+      .filter(Boolean));
+    await context.close().catch(() => undefined);
+    const loginWall = /accounts\/login|log in|login|登入|登录|使用 Instagram|Instagram 帳號|Instagram 账号/i.test(`${title}\n${href}\n${bodyText}`);
+    const retainedThreadsComSession = hasValidThreadsSessionCookieForDomain(refreshedCookies, "threads.com");
+    const next = loginWall || !retainedThreadsComSession
+      ? buildSentimentCookieLiveFailureStatus(status, "Threads sessionid 已保存，但实时打开 Threads 后未保持真实登录态；请在授权助手里重新登录并同步。")
+      : { ...status, health: status.health === "missing" ? "missing" : "healthy", hasRequiredSessionCookie: true, authorizationNeedsRefresh: false, recommendedAction: "keep", liveCheckedAt: new Date().toISOString(), message: `${status.message}；实时登录态可用。` };
+    liveSentimentBrowserAuthStatusCache.set(cacheKey, { expiresAt: Date.now() + maxAgeMs, status: next });
+    return next;
+  } catch (error: any) {
+    const next = buildSentimentCookieLiveFailureStatus(status, `Threads 实时授权探测失败：${error instanceof Error ? error.message : String(error || "unknown")}`);
+    liveSentimentBrowserAuthStatusCache.set(cacheKey, { expiresAt: Date.now() + Math.min(maxAgeMs, 15_000), status: next });
+    return next;
+  } finally {
+    await browser?.close?.().catch?.(() => undefined);
+  }
 }
 
 function segmentPersonaWords(value: string): string[] {
