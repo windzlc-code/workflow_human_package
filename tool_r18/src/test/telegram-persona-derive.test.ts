@@ -20,6 +20,7 @@ import {
   buildStoredPostPublishConfirmRows,
   buildStoredPostMediaManageKeyboard,
   buildStoredPostsListView,
+  aggregatePublishedTargets,
   derivePersonaSpecFromPrompt,
   filterPersonaMenuList,
   formatCloudAccountStateNotice,
@@ -119,6 +120,93 @@ describe("stored post media previews", () => {
 
     expect(inferStoredPostMediaKind("https://example.com/generated?id=123")).toBe("image");
     expect(JSON.stringify(options)).toContain("prefer_large_media");
+  });
+});
+
+describe("publish history metrics", () => {
+  it("does not treat imported hot-source metrics as published account metrics", () => {
+    const sourceUrl = "https://www.threads.net/@source/post/original";
+    const record: NonNullable<PersonaArchive["publishHistory"]>[number] = {
+      id: "history-source-pollution",
+      archivePostId: "post-1",
+      title: "published imported hot post",
+      content: "reposted content",
+      wordCount: 16,
+      publishedAt: "2026-06-28T00:00:00.000Z",
+      platform: "threads",
+      sourceMeta: {
+        source: "sentiment_hot_import",
+        platform: "threads",
+        sourceUrl,
+        hotScore: 50000,
+        engagement: { likeCount: 1000, commentCount: 100, viewCount: 50000 },
+      },
+      publishedMeta: {
+        source: "published_post",
+        platform: "threads",
+        sourceUrl,
+        hotScore: 50000,
+        engagement: { likeCount: 1000, commentCount: 100, viewCount: 50000 },
+      },
+      publishedTargets: [
+        {
+          platform: "threads",
+          padCode: "PAD-1",
+          publishedUrl: sourceUrl,
+          publishedMeta: {
+            source: "published_post",
+            platform: "threads",
+            sourceUrl,
+            hotScore: 50000,
+            engagement: { likeCount: 1000, commentCount: 100, viewCount: 50000 },
+          },
+        },
+      ],
+    };
+
+    expect(aggregatePublishedTargets(record)).toBeUndefined();
+  });
+
+  it("keeps valid published target metrics even when the source post exists", () => {
+    const sourceUrl = "https://www.threads.net/@source/post/original";
+    const ownUrl = "https://www.threads.net/@mine/post/repost";
+    const record: NonNullable<PersonaArchive["publishHistory"]>[number] = {
+      id: "history-valid-published",
+      archivePostId: "post-1",
+      title: "published imported hot post",
+      content: "reposted content",
+      wordCount: 16,
+      publishedAt: "2026-06-28T00:00:00.000Z",
+      platform: "threads",
+      sourceMeta: {
+        source: "sentiment_hot_import",
+        platform: "threads",
+        sourceUrl,
+        hotScore: 50000,
+        engagement: { likeCount: 1000, commentCount: 100, viewCount: 50000 },
+      },
+      publishedTargets: [
+        {
+          platform: "threads",
+          padCode: "PAD-1",
+          publishedUrl: ownUrl,
+          publishedMeta: {
+            source: "published_post",
+            platform: "threads",
+            sourceUrl: ownUrl,
+            hotScore: 25,
+            engagement: { likeCount: 2, commentCount: 1, viewCount: 25 },
+            metrics: { like_count: 2, comment_count: 1, view_count: 25 },
+          },
+        },
+      ],
+    };
+
+    expect(aggregatePublishedTargets(record)).toMatchObject({
+      source: "published_post_aggregate",
+      hotScore: 25,
+      engagement: { likeCount: 2, commentCount: 1, viewCount: 25 },
+    });
   });
 });
 

@@ -13,6 +13,7 @@ import {
   parseThreadsBrowserPostDetailMetrics,
   parseThreadsBrowserProfilePublishedPosts,
   parseThreadsGraphqlProfilePagePayload,
+  normalizeThreadsRelativeTime,
   parseThreadsPostViewCountFromText,
   parseThreadsReaderSearchMarkdownCandidates,
   parseThreadsDetailEngagementMarkdown,
@@ -919,6 +920,14 @@ Instagram
     }]);
     expect(parsed.endCursor).toBe("cursor-1");
     expect(parsed.hasNextPage).toBe(true);
+  });
+
+  it("normalizes relative Threads profile post times for fresh posts", () => {
+    const now = Date.UTC(2026, 5, 29, 16, 0, 0);
+
+    expect(normalizeThreadsRelativeTime("2小時", now)).toBe("2026-06-29T14:00:00.000Z");
+    expect(normalizeThreadsRelativeTime("1天", now)).toBe("2026-06-28T16:00:00.000Z");
+    expect(normalizeThreadsRelativeTime("15h", now)).toBe("2026-06-29T01:00:00.000Z");
   });
 
   it("parses Threads post view counts directly from the detail page text", () => {

@@ -3655,6 +3655,25 @@ function buildPersonaAccountManagementRows(archiveId: string): Array<Array<{ tex
   ];
 }
 
+function buildPersonaAutomationPlatformText(archive: PersonaArchive, action: "autoreply" | "warmup") {
+  const title = action === "autoreply" ? "💬 自動回覆" : "🌱 養號";
+  return [
+    title,
+    "",
+    `人設：${archive.name}`,
+    "",
+    "請先選擇平台，再進入對應功能設定。",
+  ].join("\n");
+}
+
+function buildPersonaAutomationPlatformRows(archiveId: string, action: "autoreply" | "warmup"): Array<Array<{ text: string; callback_data: string }>> {
+  const threadsCallback = action === "autoreply" ? `acctautoreply_${archiveId}` : `acctwarmup_threads_${archiveId}`;
+  return [
+    [{ text: "Threads", callback_data: threadsCallback }],
+    [{ text: "◀️ 返回人設詳情", callback_data: `pd_${archiveId}` }],
+  ];
+}
+
 async function renderPersonaSettingsPage(
   bot: TelegramBot,
   chatId: number,
@@ -3967,10 +3986,6 @@ export function buildPersonaPlatformAccountRows(archiveId: string, platform: Per
           { text: "🏷 修改 Threads 名稱", callback_data: `acctprofile_name_${archiveId}` },
           { text: "🖼 修改 Threads 頭像", callback_data: `acctprofile_avatar_${archiveId}` },
         ],
-        [
-          { text: "💬 Threads 自動回覆", callback_data: `acctautoreply_${archiveId}` },
-          { text: "🌱 Threads 養號", callback_data: `acctwarmup_threads_${archiveId}` },
-        ],
       );
     }
   } else {
@@ -4089,10 +4104,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
       && scannedPosts > 0
       && Array.isArray((metrics as any).postMetrics)
       && (metrics as any).postMetrics.length >= scannedPosts;
-    const hasRefreshablePostMetrics = scannedPosts > 0
-      && Array.isArray((metrics as any).postMetrics)
-      && (metrics as any).postMetrics.length > 0;
-    if (!hasUsableAccountMetrics || (!hasCompleteAccountMetrics && !hasRefreshablePostMetrics)) {
+    if (!hasUsableAccountMetrics || !hasCompleteAccountMetrics) {
       stopTyping();
       if (existingHotMetrics[hotMetricsKey]?.complete !== true) {
         await updatePersonaArchiveProfile(archiveId, {
@@ -4106,7 +4118,8 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
                 complete: false,
                 scope: metrics.scope,
                 refreshedAt: metrics.refreshedAt,
-                error: metrics.error || (hasUsableAccountMetrics ? `Threads profile refresh returned partial data only (${scannedPosts} posts). Full account metrics were not saved.` : undefined),
+                scannedPosts,
+                error: metrics.error || (hasUsableAccountMetrics ? `本次只讀取到 ${scannedPosts} 篇 partial 資料，未確認為全量，已停止覆蓋人設熱點數據。` : undefined),
               },
             },
           },
@@ -4123,10 +4136,14 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
         `後台自動刷新：${autoRefreshResult.ok ? "已完成" : "未恢復登入態"}`,
         autoRefreshResult.ok ? "" : `原因：${autoRefreshResult.message || metrics.error || "Threads Cookie 無效"}`,
         "",
-        "目前 Threads 舆情登入態不足，無法取得此帳號旗下推文資料。",
-        "系統已停止寫入本次空資料，避免把失敗結果覆蓋到人設熱點面板。",
+        hasUsableAccountMetrics
+          ? `本次只讀取到 ${scannedPosts} 篇，尚未確認為該帳號全量資料。`
+          : "目前 Threads 舆情登入態不足，無法取得此帳號旗下推文資料。",
+        existingHotMetrics[hotMetricsKey]?.complete === true
+          ? "系統已保留上一次完整熱點資料，沒有用本次 partial 結果覆蓋。"
+          : "系統已停止寫入本次局部數據，避免把不完整結果當成全量資料。",
         "",
-        "請先在後台完成 Threads 真實登入授權；完成後重新點擊熱點刷新即可。",
+        "請先確認 Threads 授權有效，或稍後重新點擊刷新數據。",
       ].join("\n"), {
         reply_markup: {
           inline_keyboard: [
@@ -11817,11 +11834,11 @@ function buildSentimentSourceInfoHtml(sourceMeta?: PersonaArchive["posts"][numbe
   return lines;
 }
 
-function aggregatePublishedTargets(record: NonNullable<PersonaArchive["publishHistory"]>[number]): PersonaArchive["posts"][number]["sourceMeta"] | undefined {
+export function aggregatePublishedTargets(record: NonNullable<PersonaArchive["publishHistory"]>[number]): PersonaArchive["posts"][number]["sourceMeta"] | undefined {
   const targets = Array.isArray(record.publishedTargets)
-    ? record.publishedTargets.filter((target) => target?.publishedMeta)
+    ? record.publishedTargets.filter((target) => getPublishHistoryValidPublishedMeta(record, target?.publishedMeta))
     : [];
-  if (!targets.length) return record.publishedMeta;
+  if (!targets.length) return getPublishHistoryValidPublishedMeta(record, record.publishedMeta);
   const engagement: Record<string, number> = {};
   const metrics: Record<string, number> = {};
   for (const target of targets) {
@@ -11838,18 +11855,18 @@ function aggregatePublishedTargets(record: NonNullable<PersonaArchive["publishHi
     }
   }
   const hotScore = Math.max(
-    Number(record.publishedMeta?.hotScore || 0),
     ...targets.map((target) => Number(target.publishedMeta?.hotScore || 0)),
     Number(engagement.viewCount || 0),
     Number(engagement.likeCount || 0),
   );
+  const firstTargetMeta = targets.map((target) => getPublishHistoryValidPublishedMeta(record, target.publishedMeta)).find(Boolean);
   return {
-    ...(record.publishedMeta || {}),
+    ...(firstTargetMeta || {}),
     source: "published_post_aggregate",
     platform: record.platform,
     hotScore,
-    metrics: { ...(record.publishedMeta?.metrics || {}), ...metrics, target_count: targets.length },
-    engagement: { ...(record.publishedMeta?.engagement || {}), ...engagement },
+    metrics: { ...metrics, target_count: targets.length },
+    engagement,
     capturedAt: new Date().toISOString(),
   };
 }
@@ -11864,7 +11881,9 @@ function buildPublishedPostInfoHtml(record: NonNullable<PersonaArchive["publishH
   ];
   const targetCount = Array.isArray(record.publishedTargets) ? record.publishedTargets.length : 0;
   if (targetCount > 0) lines.push(`云机发布数: ${targetCount}`);
-  const publishedUrl = String(record.publishedUrl || publishedMeta?.sourceUrl || "").trim();
+  const directPublishedUrl = isPublishHistoryOriginalSourceUrl(record, record.publishedUrl) ? "" : record.publishedUrl;
+  const directMetaUrl = isPublishHistoryOriginalSourceUrl(record, publishedMeta?.sourceUrl) ? "" : publishedMeta?.sourceUrl;
+  const publishedUrl = String(directPublishedUrl || directMetaUrl || "").trim();
   if (publishedUrl) lines.push(`发布链接: ${escapeHtmlText(publishedUrl)}`);
   if (publishedMeta) {
     lines.push(`数据: ${escapeHtmlText(formatSentimentMetricLine({
@@ -11891,6 +11910,24 @@ type PublishHistoryRecord = NonNullable<PersonaArchive["publishHistory"]>[number
 
 const THREADS_PROFILE_READER_PREFIX = "https://r.jina.ai/http://r.jina.ai/http://";
 
+function isPublishHistoryOriginalSourceUrl(
+  record: Pick<PublishHistoryRecord, "sourceMeta"> | null | undefined,
+  url: unknown,
+) {
+  const candidate = String(url || "").trim();
+  const sourceUrl = String(record?.sourceMeta?.source === "sentiment_hot_import" ? record.sourceMeta.sourceUrl || "" : "").trim();
+  return Boolean(candidate && sourceUrl && candidate.replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/") === sourceUrl.replace(/^https:\/\/www\.threads\.com\//i, "https://www.threads.net/"));
+}
+
+function getPublishHistoryValidPublishedMeta(
+  record: Pick<PublishHistoryRecord, "sourceMeta">,
+  publishedMeta: PersonaArchive["posts"][number]["sourceMeta"] | undefined,
+) {
+  if (!publishedMeta || publishedMeta.source === "sentiment_hot_import") return undefined;
+  if (isPublishHistoryOriginalSourceUrl(record, publishedMeta.sourceUrl)) return undefined;
+  return publishedMeta;
+}
+
 function normalizeThreadsUsernameForHistoryLookup(raw: unknown): string {
   return String(raw || "")
     .trim()
@@ -11901,11 +11938,21 @@ function normalizeThreadsUsernameForHistoryLookup(raw: unknown): string {
     .trim();
 }
 
-function hasPublishHistorySourceUrl(record?: Pick<PublishHistoryRecord, "publishedMeta" | "publishedUrl" | "publishedTargets"> | null) {
-  const publishedMeta = record?.publishedMeta;
-  const publishedUrl = String(record?.publishedUrl || publishedMeta?.sourceUrl || "").trim();
+function hasPublishHistorySourceUrl(record?: Pick<PublishHistoryRecord, "publishedMeta" | "publishedUrl" | "publishedTargets" | "sourceMeta"> | null) {
+  const publishedMeta = record ? getPublishHistoryValidPublishedMeta(record, record.publishedMeta) : undefined;
+  const directPublishedUrl = isPublishHistoryOriginalSourceUrl(record, record?.publishedUrl) ? "" : record?.publishedUrl;
+  const directMetaUrl = isPublishHistoryOriginalSourceUrl(record, publishedMeta?.sourceUrl) ? "" : publishedMeta?.sourceUrl;
+  const publishedUrl = String(directPublishedUrl || directMetaUrl || "").trim();
   const targetUrl = Array.isArray(record?.publishedTargets)
-    ? record.publishedTargets.some((target) => String(target?.publishedUrl || target?.publishedMeta?.sourceUrl || "").trim())
+    ? record.publishedTargets.some((target) => {
+      const targetMeta = getPublishHistoryValidPublishedMeta(record, target?.publishedMeta);
+      const targetMetaUrl = targetMeta?.sourceUrl;
+      return String(
+        (isPublishHistoryOriginalSourceUrl(record, target?.publishedUrl) ? "" : target?.publishedUrl)
+        || (isPublishHistoryOriginalSourceUrl(record, targetMetaUrl) ? "" : targetMetaUrl)
+        || "",
+      ).trim();
+    })
     : false;
   return Boolean(publishedUrl || targetUrl);
 }
@@ -11981,7 +12028,12 @@ async function attachMissingPublishHistoryThreadsUrls(record: PublishHistoryReco
   if (Array.isArray(record.publishedTargets) && record.publishedTargets.length > 0) {
     let changed = false;
     const publishedTargets = await Promise.all(record.publishedTargets.map(async (target) => {
-      const existingUrl = String(target.publishedUrl || target.publishedMeta?.sourceUrl || "").trim();
+      const targetMeta = getPublishHistoryValidPublishedMeta(record, target.publishedMeta);
+      const existingUrl = String(
+        (isPublishHistoryOriginalSourceUrl(record, target.publishedUrl) ? "" : target.publishedUrl)
+        || (isPublishHistoryOriginalSourceUrl(record, targetMeta?.sourceUrl) ? "" : targetMeta?.sourceUrl)
+        || "",
+      ).trim();
       if (existingUrl) return target;
       const resolvedUrl = await resolvePublishHistoryThreadsUrlByPad({ padCode: target.padCode || record.padCode, content });
       if (!resolvedUrl) return target;
@@ -11990,7 +12042,7 @@ async function attachMissingPublishHistoryThreadsUrls(record: PublishHistoryReco
         ...target,
         publishedUrl: resolvedUrl,
         publishedMeta: {
-          ...(target.publishedMeta || {}),
+          ...(targetMeta || {}),
           source: "published_post",
           platform: target.platform || record.platform,
           sourceUrl: resolvedUrl,
@@ -12000,7 +12052,12 @@ async function attachMissingPublishHistoryThreadsUrls(record: PublishHistoryReco
     }));
     return changed ? { ...record, publishedTargets } : record;
   }
-  const existingUrl = String(record.publishedUrl || record.publishedMeta?.sourceUrl || "").trim();
+  const publishedMeta = getPublishHistoryValidPublishedMeta(record, record.publishedMeta);
+  const existingUrl = String(
+    (isPublishHistoryOriginalSourceUrl(record, record.publishedUrl) ? "" : record.publishedUrl)
+    || (isPublishHistoryOriginalSourceUrl(record, publishedMeta?.sourceUrl) ? "" : publishedMeta?.sourceUrl)
+    || "",
+  ).trim();
   if (existingUrl) return record;
   const resolvedUrl = await resolvePublishHistoryThreadsUrlByPad({ padCode: record.padCode, content });
   if (!resolvedUrl) return record;
@@ -12008,7 +12065,7 @@ async function attachMissingPublishHistoryThreadsUrls(record: PublishHistoryReco
     ...record,
     publishedUrl: resolvedUrl,
     publishedMeta: {
-      ...(record.publishedMeta || {}),
+      ...(publishedMeta || {}),
       source: "published_post",
       platform: record.platform,
       sourceUrl: resolvedUrl,
@@ -12058,7 +12115,7 @@ async function refreshStoredPostSentimentMetrics(args: {
   });
 }
 
-function canRefreshPublishHistoryMetrics(record?: Pick<PublishHistoryRecord, "publishedMeta" | "publishedUrl" | "publishedTargets" | "platform" | "padCode"> | null) {
+function canRefreshPublishHistoryMetrics(record?: Pick<PublishHistoryRecord, "publishedMeta" | "publishedUrl" | "publishedTargets" | "platform" | "padCode" | "sourceMeta"> | null) {
   return Boolean(
     String(record?.platform || "").toLowerCase() === "threads"
       && (hasPublishHistorySourceUrl(record) || hasPublishHistoryPadLookup(record)),
@@ -12078,38 +12135,51 @@ async function refreshPublishHistorySentimentMetrics(args: {
   if (!hasPublishHistorySourceUrl(record)) {
     throw new Error("未能从该云机账号主页匹配到这条历史发布帖链接，请确认云机仍登录原 Threads 账号且该帖未删除。");
   }
-  const publishedMeta = record.publishedMeta;
-  const publishedUrl = String(record.publishedUrl || publishedMeta?.sourceUrl || "").trim();
-  if (Array.isArray(record.publishedTargets) && record.publishedTargets.some((target) => String(target?.publishedUrl || target?.publishedMeta?.sourceUrl || "").trim())) {
+  const publishedMeta = getPublishHistoryValidPublishedMeta(record, record.publishedMeta);
+  const publishedUrl = String(
+    (isPublishHistoryOriginalSourceUrl(record, record.publishedUrl) ? "" : record.publishedUrl)
+    || (isPublishHistoryOriginalSourceUrl(record, publishedMeta?.sourceUrl) ? "" : publishedMeta?.sourceUrl)
+    || "",
+  ).trim();
+  if (Array.isArray(record.publishedTargets) && record.publishedTargets.some((target) => {
+    const targetMeta = getPublishHistoryValidPublishedMeta(record, target?.publishedMeta);
+    const targetMetaUrl = targetMeta?.sourceUrl;
+    return String(
+      (isPublishHistoryOriginalSourceUrl(record, target?.publishedUrl) ? "" : target?.publishedUrl)
+      || (isPublishHistoryOriginalSourceUrl(record, targetMetaUrl) ? "" : targetMetaUrl)
+      || "",
+    ).trim();
+  })) {
     const refreshedTargets = await Promise.all(record.publishedTargets.map(async (target) => {
-      const targetUrl = String(target.publishedUrl || target.publishedMeta?.sourceUrl || "").trim();
+      const targetMeta = getPublishHistoryValidPublishedMeta(record, target.publishedMeta);
+      const targetUrl = String(
+        (isPublishHistoryOriginalSourceUrl(record, target.publishedUrl) ? "" : target.publishedUrl)
+        || (isPublishHistoryOriginalSourceUrl(record, targetMeta?.sourceUrl) ? "" : targetMeta?.sourceUrl)
+        || "",
+      ).trim();
       if (!targetUrl) return target;
       const refreshed = await refreshSentimentSourceMetrics({
-        platform: target.publishedMeta?.platform || target.platform || record.platform,
+        platform: targetMeta?.platform || target.platform || record.platform,
         sourceUrl: targetUrl,
-        existingEngagement: target.publishedMeta?.engagement as any,
-        existingMedia: target.publishedMeta?.mediaItems as any,
-        existingHotScore: target.publishedMeta?.hotScore,
+        existingMedia: targetMeta?.mediaItems as any,
       });
       if (!refreshed.ok) return target;
       return {
         ...target,
         publishedUrl: targetUrl,
         publishedMeta: {
-          ...(target.publishedMeta || {}),
+          ...(targetMeta || {}),
           source: "published_post",
           platform: target.platform || record.platform,
           sourceUrl: targetUrl,
           hotScore: refreshed.hotScore,
           metrics: {
-            ...(target.publishedMeta?.metrics || {}),
             ...(refreshed.metrics || {}),
           },
           engagement: {
-            ...(target.publishedMeta?.engagement || {}),
             ...(refreshed.engagement || {}),
           },
-          mediaItems: refreshed.media || target.publishedMeta?.mediaItems,
+          mediaItems: refreshed.media || targetMeta?.mediaItems,
           capturedAt: new Date().toISOString(),
         },
       };
@@ -12130,9 +12200,7 @@ async function refreshPublishHistorySentimentMetrics(args: {
   const refreshed = await refreshSentimentSourceMetrics({
     platform: publishedMeta?.platform || record.platform,
     sourceUrl: publishedUrl,
-    existingEngagement: publishedMeta?.engagement as any,
     existingMedia: publishedMeta?.mediaItems as any,
-    existingHotScore: publishedMeta?.hotScore,
   });
   if (!refreshed.ok) throw new Error(refreshed.message);
   const updatedRecord = {
@@ -12145,11 +12213,9 @@ async function refreshPublishHistorySentimentMetrics(args: {
       sourceUrl: publishedUrl,
       hotScore: refreshed.hotScore,
       metrics: {
-        ...(publishedMeta?.metrics || {}),
         ...(refreshed.metrics || {}),
       },
       engagement: {
-        ...(publishedMeta?.engagement || {}),
         ...(refreshed.engagement || {}),
       },
       mediaItems: refreshed.media || publishedMeta?.mediaItems,
@@ -12203,7 +12269,6 @@ function buildPublishHistoryDetailText(args: {
     `云机: ${escapeHtmlText(String(record.padName || record.padCode || "-"))}`,
     `发布时间: ${escapeHtmlText(String(record.publishedAt || "-").slice(0, 16).replace("T", " "))}`,
     ...buildPublishedPostInfoHtml(record),
-    ...buildSentimentSourceInfoHtml(record.sourceMeta),
     "",
     escapeHtmlText(record.content || "（无内容）"),
   ].join("\n");
@@ -17270,6 +17335,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 { text: "⚙️ 人设设置", callback_data: `settings_${id}` },
               ],
               [
+                { text: "💬 自動回覆", callback_data: `persona_autoreply_${id}` },
+                { text: "🌱 養號", callback_data: `persona_warmup_${id}` },
+              ],
+              [
                 { text: "🚀 发布推文", callback_data: workflowPersona ? `pub_branch_${id}` : buildPersonaPublishCallback(id) },
               ],
               [{ text: "◀️ 返回", callback_data: "list_personas" }],
@@ -17377,6 +17446,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       await refreshPersonaThreadsHotMetricsFromTelegram(bot, chatId, msgId, archive, id, defaultPadCode);
+      return;
+    }
+
+    if (data.startsWith("persona_autoreply_") || data.startsWith("persona_warmup_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsProfileActions.delete(chatId);
+      pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      const action: "autoreply" | "warmup" = data.startsWith("persona_autoreply_") ? "autoreply" : "warmup";
+      const id = data.slice((action === "autoreply" ? "persona_autoreply_" : "persona_warmup_").length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      await safeEditOrSend(bot, chatId, msgId, buildPersonaAutomationPlatformText(archive, action), {
+        reply_markup: { inline_keyboard: buildPersonaAutomationPlatformRows(id, action) },
+      });
       return;
     }
 
@@ -19657,12 +19740,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const when = item.publishedAt ? String(item.publishedAt).slice(0, 16).replace("T", " ") : "-";
         const content = String(item.content || item.caption || "\uFF08\u7121\u5167\u5BB9\uFF09");
         const aggregatedPublishedMeta = aggregatePublishedTargets(item);
-        const metricSource = aggregatedPublishedMeta || item.sourceMeta;
-        const metricLabel = aggregatedPublishedMeta ? "发布帖汇总" : item.sourceMeta ? "来源" : "";
-        const metricLine = metricSource ? `\n${escapeHtmlText(metricLabel)}: ${escapeHtmlText(formatSentimentMetricLine({
-          hotScore: metricSource.hotScore,
-          metrics: metricSource.metrics,
-          engagement: metricSource.engagement,
+        const metricLine = aggregatedPublishedMeta ? `\n${escapeHtmlText("发布帖汇总")}: ${escapeHtmlText(formatSentimentMetricLine({
+          hotScore: aggregatedPublishedMeta.hotScore,
+          metrics: aggregatedPublishedMeta.metrics,
+          engagement: aggregatedPublishedMeta.engagement,
         }))}` : "";
         const preview = content.slice(0, 100) + (content.length > 100 ? "..." : "");
         return `<b>\u3010${displayIndex}\u3011</b>${escapeHtmlText(when)} \u00B7 ${escapeHtmlText(String(item.platform || "-"))}${metricLine}\n${escapeHtmlText(preview)}`;

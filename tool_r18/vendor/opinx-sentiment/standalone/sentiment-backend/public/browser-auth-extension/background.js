@@ -1,4 +1,5 @@
 const DEFAULT_API_BASE = "http://43.167.237.120";
+const DEFAULT_AUTH_TOKEN = "";
 
 const PROFILES = [
   {
@@ -193,6 +194,11 @@ async function apiBase() {
   return String(values.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
 }
 
+async function authToken() {
+  const values = await storageGet(["authToken"]);
+  return String(values.authToken || DEFAULT_AUTH_TOKEN || "").trim();
+}
+
 function profileForUrl(url = "") {
   return profilesForUrl(url)[0] || null;
 }
@@ -278,9 +284,17 @@ async function syncProfileCookies(profile) {
     return { ok: false, savedCookieCount: 0 };
   }
   const base = await apiBase();
+  const token = await authToken();
+  if (!token) {
+    await storageSet({ lastStatus: `${profile.key}: missing auth token` });
+    return { ok: false, savedCookieCount: 0, error: "missing auth token" };
+  }
   const response = await fetch(`${base}/api/sentiment/browser-auth/cookies`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-sentiment-browser-auth": token,
+    },
     body: JSON.stringify({
       profileKey: profile.key,
       sourceKey: profile.sourceKey,
@@ -310,7 +324,13 @@ async function openAuthorizationPages() {
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  await storageSet({ apiBase: DEFAULT_API_BASE, profiles: PROFILES, lastStatus: "授权助手已安装" });
+  const values = await storageGet(["apiBase", "authToken"]);
+  await storageSet({
+    apiBase: values.apiBase || DEFAULT_API_BASE,
+    authToken: values.authToken || "",
+    profiles: PROFILES,
+    lastStatus: "授权助手已安装",
+  });
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -365,6 +385,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const base = String(message.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
       await storageSet({ apiBase: base });
       sendResponse({ ok: true, apiBase: base });
+      return;
+    }
+    if (message?.type === "set-auth-token") {
+      const token = String(message.authToken || "").trim();
+      await storageSet({ authToken: token });
+      sendResponse({ ok: true, hasAuthToken: Boolean(token) });
       return;
     }
     sendResponse({ ok: false, error: "unknown message" });

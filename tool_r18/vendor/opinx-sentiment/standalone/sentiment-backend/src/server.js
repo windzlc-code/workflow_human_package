@@ -161,15 +161,16 @@ function createStoredZip(files = []) {
   return Buffer.concat([...localParts, ...centralParts, end]);
 }
 
-function buildBrowserAuthExtensionZip() {
+function buildBrowserAuthExtensionZip(config) {
   const baseDir = path.resolve(PUBLIC_DIR, "browser-auth-extension");
   const fileNames = ["manifest.json", "background.js", "popup.html", "popup.js", "install.html"];
   const files = fileNames.map((name) => {
     const filePath = path.resolve(baseDir, name);
     const stat = fs.statSync(filePath);
+    const data = fs.readFileSync(filePath);
     return {
       name: `opinx-browser-auth-helper/${name}`,
-      data: fs.readFileSync(filePath),
+      data,
       mtime: stat.mtime,
     };
   });
@@ -557,7 +558,7 @@ export function createSentimentBackendApp({
   });
 
   app.get("/browser-auth-extension/download", () => {
-    const zip = buildBrowserAuthExtensionZip();
+    const zip = buildBrowserAuthExtensionZip(config);
     return new Response(zip, {
       headers: {
         "content-type": "application/zip",

@@ -334,6 +334,17 @@ function hasValidThreadsSessionCookie(cookies: any[]) {
   });
 }
 
+function hasValidThreadsSessionCookieForDomain(cookies: any[], domain: "threads.com" | "threads.net") {
+  const nowSeconds = Date.now() / 1000;
+  return (cookies || []).some((cookie: any) => {
+    const expires = Number(cookie?.expires);
+    return String(cookie?.name || "").toLowerCase() === "sessionid"
+      && String(cookie?.value || "").trim().length > 0
+      && cookieDomainMatchesAny(cookie, [domain])
+      && (!Number.isFinite(expires) || expires <= 0 || expires > nowSeconds);
+  });
+}
+
 function buildSentimentCookieStatusFromProfile(platform: SentimentHotPlatform, profile: any): SentimentCookieStatus {
   const cookies = Array.isArray(profile?.cookies) ? profile.cookies.filter((item: any) => item && typeof item === "object") : [];
   const nowSeconds = Date.now() / 1000;
@@ -1020,7 +1031,7 @@ export async function refreshSentimentBrowserCookiesForPlatform(platform: Sentim
   ].filter(Boolean);
 
   const { chromium } = await import("playwright");
-  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+  const browser = await chromium.launch(buildLocalChromiumLaunchOptions());
   try {
     const context = await browser.newContext({
       locale: "zh-TW",
@@ -1038,8 +1049,8 @@ export async function refreshSentimentBrowserCookiesForPlatform(platform: Sentim
     if (stillLoggedOut || refreshedCookies.length === 0) {
       return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} 自动刷新未保持登录态，需要人工重新登录授权。` };
     }
-    if (platform === "threads" && !hasValidThreadsSessionCookie(refreshedCookies)) {
-      return { ok: false, message: "Threads Cookie 已讀取，但缺少 threads.net/threads.com 的有效 sessionid；請在後台瀏覽器打開 Threads 並完成登入後重新同步。" };
+    if (platform === "threads" && !hasValidThreadsSessionCookieForDomain(refreshedCookies, "threads.com")) {
+      return { ok: false, message: "Threads sessionid was read, but threads.com cleared or did not retain the login session. Re-login in the authorization helper and sync again." };
     }
     const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/browser-auth/cookies`, {
       method: "POST",
@@ -2526,6 +2537,31 @@ function normalizeThreadsVisibleDate(value: unknown): string | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
+export function normalizeThreadsRelativeTime(value: unknown, now = Date.now()): string | undefined {
+  const text = String(value || "").replace(/\s+/g, "").trim();
+  const match = text.match(/^(\d+(?:[.,]\d+)?)(秒|分鐘|分钟|分|小時|小时|時|时|天|日|週|周|月|年|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days|w|wk|wks|mo|mos|y|yr|yrs)$/i);
+  if (!match) return undefined;
+  const amount = Number(String(match[1]).replace(",", "."));
+  if (!Number.isFinite(amount) || amount < 0) return undefined;
+  const unit = String(match[2] || "").toLowerCase();
+  const millis =
+    /^(秒|s|sec|secs)$/.test(unit) ? amount * 1000 :
+    /^(分鐘|分钟|分|m|min|mins)$/.test(unit) ? amount * 60_000 :
+    /^(小時|小时|時|时|h|hr|hrs)$/.test(unit) ? amount * 3_600_000 :
+    /^(天|日|d|day|days)$/.test(unit) ? amount * 86_400_000 :
+    /^(週|周|w|wk|wks)$/.test(unit) ? amount * 7 * 86_400_000 :
+    /^(月|mo|mos)$/.test(unit) ? amount * 30 * 86_400_000 :
+    /^(年|y|yr|yrs)$/.test(unit) ? amount * 365 * 86_400_000 :
+    0;
+  if (!millis) return undefined;
+  const date = new Date(now - millis);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function normalizeThreadsVisiblePublishedAt(value: unknown): string | undefined {
+  return normalizeThreadsVisibleDate(value) || normalizeThreadsRelativeTime(value);
+}
+
 function parseThreadsVisibleMetric(actionTexts: string[], labelPattern: RegExp): number | undefined {
   for (const actionText of actionTexts || []) {
     const compact = String(actionText || "").replace(/\s+/g, "").trim();
@@ -2558,9 +2594,12 @@ async function extractThreadsVisibleProfilePosts(args: {
       const matchesProfile = href.toLowerCase().includes("/@" + String(targetUsername || "").toLowerCase() + "/post/");
       const dateText = normalize(anchor.textContent || "");
       const matchesDate = /20\d{2}[\/-]\d{1,2}[\/-]\d{1,2}/.test(dateText);
-      if (debug && debugRows.length < 8) debugRows.push({ href, dateText, matchesProfile, matchesDate });
+      const matchesRelativeTime = /^\d+(?:[.,]\d+)?(?:秒|分鐘|分钟|分|小時|小时|時|时|天|日|週|周|月|年|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days|w|wk|wks|mo|mos|y|yr|yrs)$/i.test(dateText.replace(/\s+/g, ""));
+      const looksLikePostLink = /\/post\/[^/?#]+(?:[?#].*)?$/i.test(href);
+      if (debug && debugRows.length < 8) debugRows.push({ href, dateText, matchesProfile, matchesDate, matchesRelativeTime, looksLikePostLink });
       if (!matchesProfile) continue;
-      if (!matchesDate) continue;
+      if (!looksLikePostLink) continue;
+      if (!matchesDate && !matchesRelativeTime) continue;
       let node = anchor;
       let best = null;
       for (let depth = 0; node && depth < 8; depth += 1) {
@@ -2622,7 +2661,7 @@ async function extractThreadsVisibleProfilePosts(args: {
       code,
       sourceUrl,
       ...(content ? { content } : {}),
-      ...(normalizeThreadsVisibleDate(row.dateText) ? { publishedAt: normalizeThreadsVisibleDate(row.dateText) } : {}),
+      ...(normalizeThreadsVisiblePublishedAt(row.dateText) ? { publishedAt: normalizeThreadsVisiblePublishedAt(row.dateText) } : {}),
       likeCount: parseThreadsVisibleMetric(row.actionTexts, /^(?:Like|Likes|讚|赞|喜歡|喜欢)/i) || 0,
       commentCount: parseThreadsVisibleMetric(row.actionTexts, /^(?:Comment|Comments|Reply|Replies|留言|回覆|回复|評論|评论)/i) || 0,
       repostCount: parseThreadsVisibleMetric(row.actionTexts, /^(?:Repost|Reposts|轉發|转发)/i) || 0,
@@ -2900,7 +2939,6 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
           if (!/graphql\/query/i.test(String(response.url?.() || response.url || ""))) return;
           const request = response.request?.();
           const postData = request?.postData?.() || "";
-          if (!/BarcelonaProfileThreadsTabRefetchableDirectQuery/.test(postData)) return;
           const template = parseThreadsGraphqlRequestTemplate(postData);
           if (!template) return;
           const payload = safeJson(await response.text().catch(() => ""));
@@ -3033,7 +3071,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
           }));
           parsed = {
             ...visible.parsed,
-            posts: allPosts.length,
+            posts: Math.max(Number(visible.parsed.posts || 0), allPosts.length),
             scannedPosts: allPosts.length,
             likes: allPosts.reduce((sum, post) => sum + (post.likeCount || 0), 0),
             comments: allPosts.reduce((sum, post) => sum + (post.commentCount || 0), 0),
@@ -3050,6 +3088,14 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
           ...parsed,
           ...(await buildThreadsProfileAggregateMetricsFromBrowserPage({ page, username, links })),
         };
+      }
+      if (!Array.isArray((parsed as any).postMetrics) || (parsed as any).postMetrics.length === 0) {
+        delete (parsed as any).scannedPosts;
+        delete (parsed as any).likes;
+        delete (parsed as any).comments;
+        delete (parsed as any).reposts;
+        delete (parsed as any).shares;
+        delete (parsed as any).views;
       }
       const complete = threadsProfileHotMetricsHasValue(parsed)
         && typeof parsed.scannedPosts === "number"
