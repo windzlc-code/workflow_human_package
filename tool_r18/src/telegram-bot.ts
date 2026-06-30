@@ -807,6 +807,7 @@ const pendingPostActions = new Map<number, {
   groupContentType?: TelegramGroupContentType;
   linkEndingPresetApplied?: boolean;
   contentOverride?: string;
+  publishPlatform?: TelegramPublishPlatform;
 }>();
 
 type SentimentHotRewriteMode = "source_structure" | "persona_style";
@@ -13341,6 +13342,7 @@ export function buildStoredPostPublishConfirmRows(args: {
   isSentimentImported?: boolean;
   platforms?: TelegramPublishPlatform[];
   hasSelectableLinkTemplates?: boolean;
+  selectedPlatform?: TelegramPublishPlatform;
 }) {
   const platforms = args.platforms?.length ? args.platforms : [DEFAULT_PUBLISH_PLATFORM];
   const source = args.source || "posts";
@@ -13352,15 +13354,29 @@ export function buildStoredPostPublishConfirmRows(args: {
   };
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
     ...(args.hasSelectableLinkTemplates ? [[{ text: "🔗 选择链接模板", callback_data: "post_link_templates" }]] : []),
-    ...platforms.map((platform) => ([{
-      text: `✅ 确认发布到绑定智能體手機 ${platformText(platform).replace(/^.+?\s/, "")}`,
-      callback_data: `dop_${platform}`,
-    }])),
-    ...platforms.map((platform) => ([{
-      text: `📱 选择多智能體手機发布 ${platformText(platform).replace(/^.+?\s/, "")}`,
-      callback_data: `dopm_${platform}`,
-    }])),
   ];
+  const selectedPlatform = args.selectedPlatform && platforms.includes(args.selectedPlatform)
+    ? args.selectedPlatform
+    : undefined;
+  if (!selectedPlatform) {
+    rows.push(...platforms.map((platform) => ([{
+      text: `选择发布平台 ${platformText(platform).replace(/^.+?\s/, "")}`,
+      callback_data: `post_action_${platform}`,
+    }])));
+  } else {
+    const label = platformText(selectedPlatform).replace(/^.+?\s/, "");
+    rows.push(
+      [{
+        text: `✅ 确认发布到绑定智能體手機 ${label}`,
+        callback_data: `dop_${selectedPlatform}`,
+      }],
+      [{
+        text: `📱 选择多智能體手機发布 ${label}`,
+        callback_data: `dopm_${selectedPlatform}`,
+      }],
+      [{ text: "◀️ 返回选择平台", callback_data: "post_action_clear" }],
+    );
+  }
   rows.push([{ text: backText, callback_data: buildPostSourcePageCallback(args.archiveId, source, 0, args.groupContentType) }]);
   return rows;
 }
@@ -22648,15 +22664,28 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("pubpost_") || data.startsWith("pp_") || data === "post_action") {
+    if (data.startsWith("pubpost_") || data.startsWith("pp_") || data === "post_action" || data.startsWith("post_action_")) {
       await deletePendingStoredPostMediaMessages(bot, chatId);
       const selected = data.startsWith("pp_") ? resolvePendingPostSelection(chatId, data, "pp_") : null;
-      const action = data === "post_action" ? pendingPostActions.get(chatId) : null;
+      const action = data === "post_action" || data.startsWith("post_action_") ? pendingPostActions.get(chatId) : null;
+      const requestedPlatform = data.startsWith("post_action_") ? data.slice("post_action_".length) : "";
+      const publishPlatform = requestedPlatform === "clear"
+        ? undefined
+        : requestedPlatform
+          ? parseShortPostPlatform(data, "post_action_") || undefined
+          : action?.publishPlatform;
       const [, legacyArchiveId, legacyPostId] = data.startsWith("pubpost_") ? data.split("_") : [];
       const archiveId = selected?.archiveId || action?.archiveId || legacyArchiveId;
       const postId = selected?.postId || action?.postId || legacyPostId;
       const source = selected?.source || action?.source || "posts";
       const groupContentType = selected?.groupContentType || action?.groupContentType;
+      if (requestedPlatform && requestedPlatform !== "clear" && !publishPlatform) {
+        await safeEditOrSend(bot, chatId, msgId, "发布平台已失效，请重新选择。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action" }]] },
+        });
+        return;
+      }
+      if (publishPlatform && !(await ensurePlatformAllowed(chatId, msgId, publishPlatform))) return;
       if (!archiveId || !postId) {
         await safeEditOrSend(bot, chatId, msgId, "請先從推文列表選擇一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
@@ -22672,7 +22701,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const postForPreview = buildPostWithPublishContentOverride(post, action?.contentOverride);
-      pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType, linkEndingPresetApplied: action?.linkEndingPresetApplied, contentOverride: action?.contentOverride });
+      pendingPostActions.set(chatId, {
+        archiveId,
+        postId,
+        source,
+        groupContentType,
+        linkEndingPresetApplied: action?.linkEndingPresetApplied,
+        contentOverride: action?.contentOverride,
+        publishPlatform,
+      });
       await safeEditOrSend(bot, chatId, msgId, `🚀 *確認發布推文*
 
 "${postForPreview.content.slice(0, 80)}..."`, {
@@ -22686,6 +22723,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               isSentimentImported: isSentimentHotImportedPost(postForPreview),
               platforms: allowedPublishPlatforms,
               hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+              selectedPlatform: publishPlatform,
             }),
             ...(action?.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }]] : []),
           ],
@@ -22758,6 +22796,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               isSentimentImported: isSentimentHotImportedPost(previewPost),
               platforms: allowedPublishPlatforms,
               hasSelectableLinkTemplates: presets.length > 0,
+              selectedPlatform: action.publishPlatform,
             }),
             [{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }],
           ],
@@ -22793,6 +22832,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             isSentimentImported: isSentimentHotImportedPost(post),
             platforms: allowedPublishPlatforms,
             hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+            selectedPlatform: action.publishPlatform,
           }),
         },
       });

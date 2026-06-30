@@ -820,7 +820,8 @@ describe("buildStoredPostPublishConfirmRows", () => {
     });
     const callbacks = flattenButtonCallbacks(rows);
 
-    expect(callbacks).toContain("dop_threads");
+    expect(callbacks).toContain("post_action_threads");
+    expect(callbacks).not.toContain("dop_threads");
   });
 
   it("shows link template selection when selectable presets exist", () => {
@@ -833,15 +834,34 @@ describe("buildStoredPostPublishConfirmRows", () => {
     expect(callbacks).toContain("post_link_templates");
   });
 
-  it("aligns normal stored post publish options with the standard publish preview", () => {
+  it("asks for a publish platform before showing direct publish options", () => {
     const rows = buildStoredPostPublishConfirmRows({
       archiveId: "archive-1",
       platforms: ["threads", "telegram"] as any,
     });
     const callbacks = flattenButtonCallbacks(rows);
 
+    expect(callbacks).toContain("post_action_threads");
+    expect(callbacks).toContain("post_action_telegram");
+    expect(callbacks).not.toContain("dop_threads");
+    expect(callbacks).not.toContain("dopm_threads");
+    expect(callbacks).not.toContain("sch_threads");
+    expect(callbacks).not.toContain("schm_threads");
+  });
+
+  it("shows only the selected platform publish options after platform selection", () => {
+    const rows = buildStoredPostPublishConfirmRows({
+      archiveId: "archive-1",
+      platforms: ["threads", "telegram"] as any,
+      selectedPlatform: "threads" as any,
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
     expect(callbacks).toContain("dop_threads");
     expect(callbacks).toContain("dopm_threads");
+    expect(callbacks).toContain("post_action_clear");
+    expect(callbacks).not.toContain("dop_telegram");
+    expect(callbacks).not.toContain("dopm_telegram");
     expect(callbacks).not.toContain("sch_threads");
     expect(callbacks).not.toContain("schm_threads");
   });
@@ -854,9 +874,11 @@ describe("buildStoredPostPublishConfirmRows", () => {
     });
     const callbacks = flattenButtonCallbacks(rows);
 
-    expect(callbacks).toContain("dop_threads");
-    expect(callbacks).toContain("dop_telegram");
-    expect(callbacks).toContain("dopm_threads");
+    expect(callbacks).toContain("post_action_threads");
+    expect(callbacks).toContain("post_action_telegram");
+    expect(callbacks).not.toContain("dop_threads");
+    expect(callbacks).not.toContain("dop_telegram");
+    expect(callbacks).not.toContain("dopm_threads");
     expect(callbacks).not.toContain("sch_threads");
     expect(callbacks).not.toContain("schm_threads");
   });
