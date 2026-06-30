@@ -529,6 +529,37 @@ def _json_loads(text: Any, default: Any) -> Any:
         return default
 
 
+def _extract_json_from_text(text: Any) -> dict[str, Any]:
+    parsed = _json_loads(text, {})
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _guess_file_kind(path_or_name: Any) -> str:
+    name = str(path_or_name or "").lower()
+    if name.endswith(".zip"):
+        return "zip"
+    if re.search(r"\.(png|jpg|jpeg|webp|bmp|gif)$", name):
+        return "image"
+    if re.search(r"\.(mp4|mov|avi|mkv|webm)$", name):
+        return "video"
+    if re.search(r"\.(mp3|wav|m4a|aac|flac|ogg)$", name):
+        return "audio"
+    return "file"
+
+
+def _format_uploaded_files(files: Any) -> str:
+    if not isinstance(files, list) or not files:
+        return "无文件"
+    rows: list[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or Path(str(item.get("path") or "")).name or "未命名文件")
+        kind = str(item.get("kind") or "file")
+        rows.append(f"{name}:{kind}")
+    return "、".join(rows) if rows else "无文件"
+
+
 def _is_secret_key(key: str) -> bool:
     low = str(key or "").strip().lower()
     return any(hint in low for hint in SECRET_KEY_HINTS)
@@ -1054,6 +1085,52 @@ def _sentiment_profiles_container(config: dict[str, Any]) -> list[dict[str, Any]
     return profiles
 
 
+SENTIMENT_BROWSER_AUTH_ALLOWED_PROFILE_KEYS = {
+    "threads",
+    "instagram",
+    "xsearch",
+    "facebooksearch",
+    "xiaohongshusearch",
+}
+
+SENTIMENT_BROWSER_AUTH_PROFILE_ALIASES = {
+    "threads": "threads",
+    "instagram": "instagram",
+    "x": "xsearch",
+    "xsearch": "xsearch",
+    "x_search": "xsearch",
+    "twitter": "xsearch",
+    "twittersearch": "xsearch",
+    "twitter_search": "xsearch",
+    "facebook": "facebooksearch",
+    "facebooksearch": "facebooksearch",
+    "facebook_search": "facebooksearch",
+    "fb": "facebooksearch",
+    "xiaohongshu": "xiaohongshusearch",
+    "xiaohongshusearch": "xiaohongshusearch",
+    "xiaohongshu_search": "xiaohongshusearch",
+    "rednote": "xiaohongshusearch",
+    "xhs": "xiaohongshusearch",
+}
+
+
+def _sentiment_browser_auth_profile_key(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    compact = re.sub(r"[\s\-_]+", "", raw).lower()
+    snake = raw.strip().lower()
+    return SENTIMENT_BROWSER_AUTH_PROFILE_ALIASES.get(snake) or SENTIMENT_BROWSER_AUTH_PROFILE_ALIASES.get(compact) or compact
+
+
+def _sentiment_browser_auth_profile_allowed(profile: dict[str, Any]) -> bool:
+    for field in ("key", "platform", "sourceKey"):
+        key = _sentiment_browser_auth_profile_key(profile.get(field))
+        if key in SENTIMENT_BROWSER_AUTH_ALLOWED_PROFILE_KEYS:
+            return True
+    return False
+
+
 def _normalize_threads_sentiment_profile(profile: dict[str, Any]) -> None:
     key = str(profile.get("key") or profile.get("platform") or profile.get("sourceKey") or "").strip().lower()
     if key != "threads":
@@ -1189,6 +1266,8 @@ def _sentiment_browser_auth_host_permissions() -> list[str]:
         return []
     domains: list[str] = []
     for profile in _sentiment_profiles_container(config):
+        if not _sentiment_browser_auth_profile_allowed(profile):
+            continue
         for value in [profile.get("domain"), *(profile.get("cookieDomains") if isinstance(profile.get("cookieDomains"), list) else []), *(profile.get("matchDomains") if isinstance(profile.get("matchDomains"), list) else [])]:
             domain = str(value or "").strip().lower().lstrip(".")
             if domain and domain not in domains:
@@ -1215,6 +1294,8 @@ def _sentiment_browser_auth_profiles_for_extension() -> list[dict[str, Any]]:
         return []
     rows: list[dict[str, Any]] = []
     for profile in profiles:
+        if not _sentiment_browser_auth_profile_allowed(profile):
+            continue
         key = str(profile.get("key") or profile.get("platform") or "").strip()
         domain = str(profile.get("domain") or "").strip().lstrip(".")
         if not domain:
@@ -16285,6 +16366,14 @@ class SentimentBrowserAuthExtensionCookiePayload(BaseModel):
     cookies: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class PersonaDashboardThreadsBindingPayload(BaseModel):
+    username: str = ""
+
+
+class PersonaDashboardRefreshPayload(BaseModel):
+    archive_id: str = ""
+
+
 class InternalTgSubmitPayload(BaseModel):
     task_type: str
     tg_chat_id: int
@@ -16345,6 +16434,92 @@ def _extract_persona_archive_list(raw: Any) -> list[dict[str, Any]]:
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
     return []
+
+
+PERSONA_DASHBOARD_REFRESH_TASKS: dict[str, dict[str, Any]] = {}
+PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
+
+
+def _normalize_threads_username(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^https?://(?:www\.)?threads\.(?:net|com)/", "", text, flags=re.I)
+    text = text.lstrip("@").split("?")[0].split("#")[0].split("/")[0].strip()
+    return text
+
+
+def _persona_archive_source_for_write() -> tuple[Path, Any, list[dict[str, Any]]]:
+    primary = TOOL_R18_RUNTIME_DIR / "persona_archives.json"
+    fallback = TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json"
+    for path in (primary, fallback):
+        raw = _read_json_file(path)
+        archives = _extract_persona_archive_list(raw)
+        if archives:
+            return path, raw, archives
+    return primary, [], []
+
+
+def _write_persona_archives_preserving_shape(path: Path, raw: Any, archives: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(raw, list):
+        payload: Any = archives
+    elif isinstance(raw, dict):
+        payload = dict(raw)
+        target_key = "persona_archives_v2"
+        for key in ("persona_archives_v2", "persona_archives", "archives", "items"):
+            if key in payload:
+                target_key = key
+                break
+        if isinstance(payload.get(target_key), str):
+            payload[target_key] = json.dumps(archives, ensure_ascii=False)
+        else:
+            payload[target_key] = archives
+    else:
+        payload = archives
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _bind_persona_threads_username(archive_id: str, username: str) -> dict[str, Any]:
+    clean_id = str(archive_id or "").strip()
+    clean_username = _normalize_threads_username(username)
+    if not clean_id:
+        raise HTTPException(status_code=400, detail="缺少人设 ID。")
+    if not clean_username or len(clean_username) < 2:
+        raise HTTPException(status_code=400, detail="请输入有效的 Threads 用户名。")
+    path, raw, archives = _persona_archive_source_for_write()
+    changed = False
+    for archive in archives:
+        if str(archive.get("id") or "").strip() != clean_id:
+            continue
+        setup = archive.get("setup") if isinstance(archive.get("setup"), dict) else {}
+        account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
+        threads = account_management.get("threads") if isinstance(account_management.get("threads"), dict) else {}
+        previous_username = _normalize_threads_username(threads.get("handle"))
+        hot_metrics = setup.get("hotMetrics") if isinstance(setup.get("hotMetrics"), dict) else {}
+        if previous_username and previous_username.lower() != clean_username.lower():
+            hot_metrics = {
+                key: value for key, value in hot_metrics.items()
+                if _normalize_threads_username((value or {}).get("username") if isinstance(value, dict) else "").lower() != previous_username.lower()
+                and str(key).lower() != f"threads:{previous_username.lower()}"
+            }
+        archive["setup"] = {
+            **setup,
+            "accountManagement": {
+                **account_management,
+                "threads": {
+                    **threads,
+                    "handle": clean_username,
+                    "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                },
+            },
+            "hotMetrics": hot_metrics,
+        }
+        archive["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        changed = True
+        break
+    if not changed:
+        raise HTTPException(status_code=404, detail="人设不存在。")
+    _write_persona_archives_preserving_shape(path, raw, archives)
+    return {"ok": True, "archive_id": clean_id, "username": clean_username, "path": path.name}
 
 
 def _read_tool_r18_persona_archives() -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -16577,6 +16752,87 @@ def _compact_hot_post(raw: Any) -> dict[str, Any]:
     }
 
 
+def _persona_dashboard_warnings(setup: dict[str, Any], hot_platforms: list[dict[str, Any]], post_metric_rows: list[dict[str, Any]]) -> list[str]:
+    account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
+    threads = account_management.get("threads") if isinstance(account_management.get("threads"), dict) else {}
+    warnings: list[str] = []
+    if not _normalize_threads_username(threads.get("handle")):
+        warnings.append("未绑定 Threads 用户名，无法刷新账号热点。")
+    if not hot_platforms:
+        warnings.append("缓存中没有平台热点指标，请先手动刷新。")
+    elif not any(item.get("complete") for item in hot_platforms):
+        warnings.append("已有热点数据不是完整全量结果，可能缺少有效授权或未翻到账号末尾。")
+    if not post_metric_rows:
+        warnings.append("暂无逐帖指标，通常是没有完整 postMetrics 或逐帖浏览未解析。")
+    return warnings
+
+
+def _persona_dashboard_refresh_worker(task_id: str, archive_id: str = "") -> None:
+    with PERSONA_DASHBOARD_REFRESH_LOCK:
+        PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+            "status": "running",
+            "message": "正在刷新 Threads 全量热点数据...",
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+    script = ROOT_DIR / "tool_r18" / "scripts" / "skills" / "persona-dashboard-refresh.ts"
+    args = ["node", "--import", "tsx", str(script)]
+    if archive_id:
+        args.append(f"--archive-id={archive_id}")
+    env = os.environ.copy()
+    env.setdefault("TOOL_R18_RUNTIME_DIR", str(TOOL_R18_RUNTIME_DIR))
+    env.setdefault("NODE_PATH", str(ROOT_DIR / "tool_r18" / "node_modules"))
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(ROOT_DIR / "tool_r18"),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=900,
+        )
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        parsed: Any = None
+        if stdout:
+            try:
+                parsed = json.loads(stdout[stdout.find("{"):])
+            except Exception:
+                parsed = {"raw": stdout[-4000:]}
+        status = "success" if proc.returncode == 0 and isinstance(parsed, dict) and parsed.get("ok") else "failed"
+        message = "刷新完成" if status == "success" else "刷新未完成，请查看结果提示。"
+        with PERSONA_DASHBOARD_REFRESH_LOCK:
+            PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+                "status": status,
+                "message": message,
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "result": parsed,
+                "stderr": stderr[-4000:],
+                "returncode": proc.returncode,
+            })
+    except Exception as exc:
+        with PERSONA_DASHBOARD_REFRESH_LOCK:
+            PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+                "status": "failed",
+                "message": str(exc),
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
+
+
+def _start_persona_dashboard_refresh(archive_id: str = "") -> dict[str, Any]:
+    task_id = f"pdr_{uuid.uuid4().hex[:12]}"
+    with PERSONA_DASHBOARD_REFRESH_LOCK:
+        PERSONA_DASHBOARD_REFRESH_TASKS[task_id] = {
+            "id": task_id,
+            "archive_id": str(archive_id or "").strip(),
+            "status": "queued",
+            "message": "已加入刷新队列。",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    thread = threading.Thread(target=_persona_dashboard_refresh_worker, args=(task_id, str(archive_id or "").strip()), daemon=True)
+    thread.start()
+    return PERSONA_DASHBOARD_REFRESH_TASKS[task_id]
+
+
 def _build_persona_dashboard_overview() -> dict[str, Any]:
     archives, archives_source = _read_tool_r18_persona_archives()
     queue_stats = _read_tool_r18_publish_queue_stats()
@@ -16727,6 +16983,9 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
                 })
 
         queue_for_archive = (queue_stats.get("by_archive") or {}).get(archive_id, {})
+        account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
+        threads_account = account_management.get("threads") if isinstance(account_management.get("threads"), dict) else {}
+        threads_handle = _normalize_threads_username(threads_account.get("handle"))
         post_count = len(posts)
         published_count = len(publish_history)
         image_count = len(image_library)
@@ -16749,6 +17008,12 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
                 "free_group": archive.get("boundTelegramFreeGroupName") or archive.get("boundTelegramFreeGroupId"),
                 "paid_group": archive.get("boundTelegramPaidGroupName") or archive.get("boundTelegramPaidGroupId"),
             },
+            "threads_account": {
+                "handle": threads_handle,
+                "bound": bool(threads_handle),
+                "auth_profile_key": threads_account.get("authProfileKey"),
+                "updated_at": threads_account.get("updatedAt"),
+            },
             "setup": _compact_dashboard_setup(setup),
             "counts": {
                 "posts": post_count,
@@ -16761,6 +17026,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
             "post_metrics": post_metric_rows[:80],
             "publish_history": [_compact_publish_record(item) for item in publish_history[:20] if isinstance(item, dict)],
             "queue": queue_for_archive,
+            "warnings": _persona_dashboard_warnings(setup, hot_platforms, post_metric_rows),
         })
 
     personas.sort(key=lambda item: _number(item.get("hot", {}).get("hot_score"), 0), reverse=True)
@@ -17348,6 +17614,21 @@ def create_app() -> FastAPI:
     @app.get("/api/persona_dashboard/overview")
     def api_persona_dashboard_overview():
         return _build_persona_dashboard_overview()
+
+    @app.post("/api/persona_dashboard/personas/{archive_id}/threads_binding")
+    def api_persona_dashboard_bind_threads(archive_id: str, payload: PersonaDashboardThreadsBindingPayload):
+        return _bind_persona_threads_username(archive_id, payload.username)
+
+    @app.post("/api/persona_dashboard/refresh")
+    def api_persona_dashboard_refresh(payload: PersonaDashboardRefreshPayload):
+        return _start_persona_dashboard_refresh(payload.archive_id)
+
+    @app.get("/api/persona_dashboard/refresh/{task_id}")
+    def api_persona_dashboard_refresh_status(task_id: str):
+        task = PERSONA_DASHBOARD_REFRESH_TASKS.get(str(task_id or "").strip())
+        if not task:
+            raise HTTPException(status_code=404, detail="刷新任务不存在。")
+        return task
 
     @app.get("/api/client_defaults")
     def api_client_defaults(user: dict[str, Any] = Depends(get_current_user)):
@@ -18871,7 +19152,7 @@ def create_app() -> FastAPI:
         profiles = _sentiment_profiles_container(config)
         profile_key = str(payload.profileKey or payload.sourceKey or "").strip()
         profile = _find_sentiment_profile(profiles, profile_key)
-        if not profile:
+        if not profile or not _sentiment_browser_auth_profile_allowed(profile):
             return JSONResponse({"ok": False, "error": "sentiment cookie profile not found"}, status_code=404, headers=cors_headers)
         fallback_domain = str(payload.domain or profile.get("domain") or _cookie_default_domain(str(profile.get("platform") or profile_key))).strip()
         cookies: list[dict[str, Any]] = []
@@ -18943,6 +19224,7 @@ def create_app() -> FastAPI:
             _sentiment_profile_for_client(profile)
             for profile in profiles
             if str(profile.get("key") or profile.get("platform") or "").strip()
+            and _sentiment_browser_auth_profile_allowed(profile)
         ]
         action_profiles = [row for row in rows if row.get("authorizationNeedsRefresh")]
         return {
@@ -18974,7 +19256,7 @@ def create_app() -> FastAPI:
         config = _read_sentiment_config_file()
         profiles = _sentiment_profiles_container(config)
         profile = _find_sentiment_profile(profiles, profile_key)
-        if not profile:
+        if not profile or not _sentiment_browser_auth_profile_allowed(profile):
             raise HTTPException(status_code=404, detail="舆情 Cookie profile 不存在。")
         fallback_domain = str(profile.get("domain") or _cookie_default_domain(str(profile.get("platform") or profile_key))).strip()
         cookies = _parse_manual_cookie_payload(payload.cookies_text, fallback_domain)
@@ -18996,7 +19278,7 @@ def create_app() -> FastAPI:
         config = _read_sentiment_config_file()
         profiles = _sentiment_profiles_container(config)
         profile = _find_sentiment_profile(profiles, profile_key)
-        if not profile:
+        if not profile or not _sentiment_browser_auth_profile_allowed(profile):
             raise HTTPException(status_code=404, detail="舆情 Cookie profile 不存在。")
         profile["cookies"] = []
         profile["lastAuthorizedAt"] = ""

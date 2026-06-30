@@ -1414,6 +1414,498 @@ async function loadPersonaDashboard() {
   }
 }
 
+let personaDashboardRefreshTaskId = "";
+
+const PERSONA_DASHBOARD_LABELS = {
+  likes: "点赞",
+  comments: "评论",
+  shares: "分享",
+  reposts: "转发",
+  complete: "完整数据",
+  partial_or_unknown: "部分/未知",
+  none: "暂无数据",
+  queued: "排队中",
+  running: "运行中",
+  done: "已完成",
+  success: "成功",
+  failed: "失败",
+  cancelled: "已取消",
+  pending: "待处理",
+};
+
+function personaDashboardLabel(value) {
+  const key = String(value || "").trim();
+  return PERSONA_DASHBOARD_LABELS[key] || key || "-";
+}
+
+function formatDashboardNumber(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return "0";
+  if (Math.abs(n) >= 100000000) return `${(n / 100000000).toFixed(1)}亿`;
+  if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(1)}万`;
+  return String(Math.round(n));
+}
+
+function dashboardEntries(value) {
+  return Object.entries(value || {})
+    .map(([label, count]) => ({ label: personaDashboardLabel(label), value: Number(count || 0) }))
+    .filter((item) => item.value > 0)
+    .sort((a, b) => b.value - a.value);
+}
+
+function personaDashboardDateInRange(value) {
+  const days = getPersonaDashboardRangeDays();
+  if (!days) return true;
+  const ts = new Date(value || 0).getTime();
+  if (!Number.isFinite(ts)) return false;
+  return ts >= Date.now() - days * 24 * 60 * 60 * 1000;
+}
+
+function filterPersonaDashboardTrend(rows) {
+  return (rows || []).filter((row) => personaDashboardDateInRange(row.date));
+}
+
+function personaDashboardPlatformFilter() {
+  return String((el("personaDashboardPlatform") && el("personaDashboardPlatform").value) || "").trim().toLowerCase();
+}
+
+function personaDashboardPostRows(persona) {
+  const platform = personaDashboardPlatformFilter();
+  return (persona.post_metrics || []).filter((row) => {
+    if (platform && String(row.platform || "").toLowerCase() !== platform) return false;
+    return personaDashboardDateInRange(row.published_at || row.captured_at);
+  });
+}
+
+function buildVisiblePersonaSummary(visiblePersonas) {
+  const padSet = new Set();
+  const summary = {
+    persona_count: visiblePersonas.length,
+    post_count: 0,
+    published_count: 0,
+    image_count: 0,
+    bound_pad_count: 0,
+    total_interactions: 0,
+    recent_views: 0,
+    post_views: 0,
+    hot_score: 0,
+  };
+  visiblePersonas.forEach((persona) => {
+    const counts = persona.counts || {};
+    const hot = persona.hot || {};
+    summary.post_count += Number(counts.posts || 0);
+    summary.published_count += Number(counts.published || 0);
+    summary.image_count += Number(counts.images || 0);
+    summary.recent_views += Number(hot.recent_views || 0);
+    summary.post_views += Number(hot.post_views || 0);
+    summary.hot_score += Number(hot.hot_score || 0);
+    summary.total_interactions += Number(hot.likes || 0) + Number(hot.comments || 0) + Number(hot.shares || 0) + Number(hot.reposts || 0);
+    if (persona.bound_pad_code) padSet.add(String(persona.bound_pad_code));
+  });
+  summary.bound_pad_count = padSet.size;
+  return summary;
+}
+
+function buildPersonaDashboardCharts(visiblePersonas, data) {
+  const platformDistribution = {};
+  const engagement = { likes: 0, comments: 0, shares: 0, reposts: 0 };
+  const taskStatus = {};
+  const coverage = { complete: 0, partial_or_unknown: 0, none: 0 };
+  visiblePersonas.forEach((persona) => {
+    const hot = persona.hot || {};
+    Object.keys(engagement).forEach((key) => { engagement[key] += Number(hot[key] || 0); });
+    (persona.hot_platforms || []).forEach((item) => {
+      const platform = String(item.platform || "").trim();
+      if (platform) platformDistribution[platform] = (platformDistribution[platform] || 0) + 1;
+    });
+    Object.keys((persona.counts && persona.counts.platform_posts) || {}).forEach((platform) => {
+      const count = Number(persona.counts.platform_posts[platform] || 0);
+      if (count > 0) platformDistribution[platform] = (platformDistribution[platform] || 0) + count;
+    });
+    const platforms = persona.hot_platforms || [];
+    if (!platforms.length) coverage.none += 1;
+    else if (platforms.some((item) => item.complete)) coverage.complete += 1;
+    else coverage.partial_or_unknown += 1;
+    Object.entries((persona.queue && persona.queue.by_status) || {}).forEach(([status, count]) => {
+      taskStatus[status] = (taskStatus[status] || 0) + Number(count || 0);
+    });
+  });
+  return {
+    platform_distribution: platformDistribution,
+    engagement_mix: engagement,
+    task_status_distribution: taskStatus,
+    hot_coverage: coverage,
+    trend: filterPersonaDashboardTrend(data.charts && data.charts.trend),
+  };
+}
+
+function renderBarChart(hostId, rows, opts = {}) {
+  const host = el(hostId);
+  if (!host) return;
+  const items = (rows || []).filter((row) => Number(row.value || 0) > 0).slice(0, opts.limit || 12);
+  if (!items.length) {
+    host.innerHTML = `<div class="persona-chart-empty">暂无可展示数据</div>`;
+    return;
+  }
+  const max = Math.max(...items.map((row) => Number(row.value || 0)), 1);
+  host.innerHTML = `
+    <div class="persona-bar-list">
+      ${items.map((row, index) => {
+        const pct = Math.max(3, Math.round((Number(row.value || 0) / max) * 100));
+        return `
+          <div class="persona-bar-row">
+            <div class="persona-bar-label"><span>${index + 1}</span>${escapeHtml(row.label || row.name || "-")}</div>
+            <div class="persona-bar-track"><div class="persona-bar-fill" style="width:${pct}%"></div></div>
+            <div class="persona-bar-value">${escapeHtml(formatDashboardNumber(row.value))}</div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderDonutChart(hostId, entries) {
+  const host = el(hostId);
+  if (!host) return;
+  const rows = dashboardEntries(entries);
+  const total = rows.reduce((sum, row) => sum + row.value, 0);
+  if (!total) {
+    host.innerHTML = `<div class="persona-chart-empty">暂无可展示数据</div>`;
+    return;
+  }
+  const colors = ["#2563eb", "#f59e0b", "#16a34a", "#dc2626", "#7c3aed", "#0f766e"];
+  let cursor = 0;
+  const segments = rows.map((row, index) => {
+    const start = cursor;
+    const size = (row.value / total) * 100;
+    cursor += size;
+    return `${colors[index % colors.length]} ${start}% ${cursor}%`;
+  }).join(", ");
+  host.innerHTML = `
+    <div class="persona-donut-wrap">
+      <div class="persona-donut" style="background: conic-gradient(${segments})">
+        <div><strong>${formatDashboardNumber(total)}</strong><span>总计</span></div>
+      </div>
+      <div class="persona-donut-legend">
+        ${rows.map((row, index) => `
+          <div><span style="background:${colors[index % colors.length]}"></span>${escapeHtml(row.label)}<b>${escapeHtml(formatDashboardNumber(row.value))}</b></div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderTrendChart(hostId, rows) {
+  const host = el(hostId);
+  if (!host) return;
+  const items = (rows || []).slice(-30);
+  if (!items.length) {
+    host.innerHTML = `<div class="persona-chart-empty">暂无走势数据</div>`;
+    return;
+  }
+  const width = 720;
+  const height = 220;
+  const pad = 28;
+  const series = [
+    { key: "published", label: "发布", color: "#2563eb" },
+    { key: "post_views", label: "帖子浏览", color: "#f59e0b" },
+    { key: "likes", label: "点赞", color: "#16a34a" },
+  ];
+  const max = Math.max(1, ...items.flatMap((row) => series.map((s) => Number(row[s.key] || 0))));
+  const x = (index) => pad + (items.length === 1 ? 0 : (index / (items.length - 1)) * (width - pad * 2));
+  const y = (value) => height - pad - (Number(value || 0) / max) * (height - pad * 2);
+  const pathFor = (key) => items.map((row, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(row[key]).toFixed(1)}`).join(" ");
+  host.innerHTML = `
+    <svg class="persona-line-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="流量走势图">
+      <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" class="persona-axis" />
+      <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" class="persona-axis" />
+      ${series.map((s) => `<path d="${pathFor(s.key)}" fill="none" stroke="${s.color}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />`).join("")}
+      ${items.map((row, index) => `<text x="${x(index)}" y="${height - 6}" text-anchor="middle">${escapeHtml(String(row.date || "").slice(5))}</text>`).join("")}
+    </svg>
+    <div class="persona-line-legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${s.label}</span>`).join("")}</div>
+  `;
+}
+
+function personaMatchesFilters(persona) {
+  const search = String((el("personaDashboardSearch") && el("personaDashboardSearch").value) || "").trim().toLowerCase();
+  const platform = personaDashboardPlatformFilter();
+  const pad = String((el("personaDashboardPad") && el("personaDashboardPad").value) || "").trim();
+  const haystack = [persona.name, persona.content, persona.bound_pad_code, persona.bound_pad_name, persona.owner_bot_name, persona.threads_account && persona.threads_account.handle].join(" ").toLowerCase();
+  if (search && !haystack.includes(search)) return false;
+  if (pad && String(persona.bound_pad_code || "") !== pad) return false;
+  if (platform) {
+    const platforms = (persona.hot_platforms || []).map((item) => String(item.platform || "").toLowerCase());
+    const platformPosts = Object.keys((persona.counts && persona.counts.platform_posts) || {}).map((item) => item.toLowerCase());
+    if (!platforms.includes(platform) && !platformPosts.includes(platform)) return false;
+  }
+  return personaDashboardDateInRange(persona.updated_at || persona.created_at);
+}
+
+function renderPersonaDashboardSummary(data, visiblePersonas) {
+  const host = el("personaDashboardSummary");
+  if (!host) return;
+  const globalSummary = data.summary || {};
+  const summary = buildVisiblePersonaSummary(visiblePersonas);
+  const cards = [
+    { label: "人设总数", value: summary.persona_count, hint: `全部 ${globalSummary.persona_count || 0}` },
+    { label: "已生成帖子", value: summary.post_count, hint: "当前筛选归档帖子" },
+    { label: "已发布", value: summary.published_count, hint: "当前筛选发布记录" },
+    { label: "素材库图片", value: summary.image_count, hint: "当前筛选图片素材" },
+    { label: "绑定云手机", value: summary.bound_pad_count, hint: "当前筛选设备数" },
+    { label: "总互动量", value: summary.total_interactions, hint: "点赞、评论、转发、分享" },
+    { label: "账号主页浏览", value: summary.recent_views, hint: "账号主页级浏览" },
+    { label: "逐帖浏览合计", value: summary.post_views, hint: "逐帖浏览，不与主页浏览合并" },
+    { label: "筛选热度", value: summary.hot_score, hint: "当前列表合计" },
+  ];
+  host.innerHTML = cards.map((card) => `
+    <div class="kpi persona-kpi">
+      <div class="label">${escapeHtml(card.label)}</div>
+      <div class="num">${escapeHtml(formatDashboardNumber(card.value))}</div>
+      <div class="small">${escapeHtml(card.hint)}</div>
+    </div>
+  `).join("");
+}
+
+function renderPersonaCard(persona) {
+  const hot = persona.hot || {};
+  const counts = persona.counts || {};
+  const rows = personaDashboardPostRows(persona);
+  const pageSize = Math.max(5, Math.min(100, Number(appState.personaDashboardPageSize || 10)));
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  appState.personaDashboardPostPage = Math.max(1, Math.min(pageCount, Number(appState.personaDashboardPostPage || 1)));
+  const start = (appState.personaDashboardPostPage - 1) * pageSize;
+  const threads = persona.threads_account || {};
+  const warnings = (persona.warnings || []).map((item) => `<div class="persona-warning-item">${escapeHtml(item)}</div>`).join("");
+  const platforms = (persona.hot_platforms || []).map((item) => `
+    <div class="persona-platform-row">
+      <strong>${escapeHtml(item.platform || "-")}</strong>
+      <span>账号主页浏览 ${escapeHtml(formatDashboardNumber(item.recent_views))}</span>
+      <span>逐帖浏览 ${escapeHtml(formatDashboardNumber(item.post_views))}</span>
+      <span>赞 ${escapeHtml(formatDashboardNumber(item.likes))}</span>
+      <span>评 ${escapeHtml(formatDashboardNumber(item.comments))}</span>
+      <span>${item.complete ? "完整" : "部分/未知"}</span>
+    </div>
+  `).join("");
+  const postRows = rows.slice(start, start + pageSize).map((row) => `
+    <tr>
+      <td>${escapeHtml(row.platform || "-")}</td>
+      <td>${escapeHtml(String(row.content || row.source_url || "-").slice(0, 100))}</td>
+      <td>${escapeHtml(formatDashboardNumber(row.like_count))}</td>
+      <td>${escapeHtml(formatDashboardNumber(row.comment_count))}</td>
+      <td>${escapeHtml(formatDashboardNumber(row.share_count || row.repost_count))}</td>
+      <td>${escapeHtml(formatDashboardNumber(row.view_count))}</td>
+    </tr>
+  `).join("");
+  return `
+    <article class="persona-detail-card">
+      <div class="persona-detail-head">
+        <div>
+          <h3>${escapeHtml(persona.name || "未命名人设")}</h3>
+          <div class="small">云手机：${escapeHtml(persona.bound_pad_name || persona.bound_pad_code || "未绑定")} · 机器人：${escapeHtml(persona.owner_bot_name || "-")}</div>
+        </div>
+        <div class="persona-score">
+          <span>热度</span>
+          <strong>${escapeHtml(formatDashboardNumber(hot.hot_score))}</strong>
+        </div>
+      </div>
+      ${warnings ? `<div class="persona-warning-list">${warnings}</div>` : ""}
+      <div class="persona-bind-panel">
+        <label for="personaThreadsInput">Threads 用户名</label>
+        <div class="persona-bind-row">
+          <input id="personaThreadsInput" type="text" value="${escapeHtml(threads.handle || "")}" placeholder="例如 username 或 @username" />
+          <button class="ghost" type="button" id="personaBindThreadsBtn">保存绑定</button>
+          <button class="primary" type="button" id="personaRefreshCurrentBtn">刷新当前人设</button>
+        </div>
+        <div class="small">没有绑定时无法抓取该人设账号热点；刷新会使用服务器端已保存的浏览器授权。</div>
+      </div>
+      <div class="persona-detail-grid">
+        <div><span>帖子</span><strong>${escapeHtml(formatDashboardNumber(counts.posts))}</strong></div>
+        <div><span>发布</span><strong>${escapeHtml(formatDashboardNumber(counts.published))}</strong></div>
+        <div><span>素材</span><strong>${escapeHtml(formatDashboardNumber(counts.images))}</strong></div>
+        <div><span>互动</span><strong>${escapeHtml(formatDashboardNumber(Number(hot.likes || 0) + Number(hot.comments || 0) + Number(hot.shares || 0) + Number(hot.reposts || 0)))}</strong></div>
+        <div><span>账号主页浏览</span><strong>${escapeHtml(formatDashboardNumber(hot.recent_views))}</strong></div>
+        <div><span>逐帖浏览</span><strong>${escapeHtml(formatDashboardNumber(hot.post_views))}</strong></div>
+      </div>
+      <div class="persona-content-preview">${escapeHtml(persona.content || "暂无人设描述")}</div>
+      <div class="persona-platform-list">${platforms || `<div class="small">暂无平台热点指标</div>`}</div>
+      <div class="persona-table-wrap">
+        <div class="persona-table-toolbar">
+          <strong>逐帖指标</strong>
+          <span>第 ${escapeHtml(String(appState.personaDashboardPostPage))} / ${escapeHtml(String(pageCount))} 页 · 共 ${escapeHtml(String(rows.length))} 条</span>
+        </div>
+        <table class="persona-post-table">
+          <thead><tr><th>平台</th><th>帖子/来源</th><th>赞</th><th>评</th><th>转/分享</th><th>浏览</th></tr></thead>
+          <tbody>${postRows || `<tr><td colspan="6">暂无逐帖指标</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="persona-pager">
+        <button class="ghost" type="button" id="personaPostPrev" ${appState.personaDashboardPostPage <= 1 ? "disabled" : ""}>上一页</button>
+        <span>每页 ${escapeHtml(String(pageSize))} 条</span>
+        <button class="ghost" type="button" id="personaPostNext" ${appState.personaDashboardPostPage >= pageCount ? "disabled" : ""}>下一页</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderPersonaSettings() {
+  const settings = el("personaDashboardSettings");
+  if (!settings) return;
+  settings.innerHTML = `
+    <div class="persona-settings-card">
+      <div>
+        <h3>设置</h3>
+        <div class="small">调整单个人设推文表的分页数量，并可手动刷新全部已绑定账号。</div>
+      </div>
+      <label for="personaPageSizeInput">每页推文数量</label>
+      <div class="persona-settings-row">
+        <input id="personaPageSizeInput" type="number" min="5" max="100" step="5" value="${escapeHtml(String(appState.personaDashboardPageSize))}" />
+        <button class="primary" type="button" id="personaPageSizeApply">应用</button>
+      </div>
+      <div class="persona-settings-row persona-settings-row-left">
+        <button class="primary" type="button" id="personaRefreshAllBtn">全量刷新全部已绑定人设</button>
+        <span class="small">无绑定的人设会跳过并在结果里提示。</span>
+      </div>
+      <div class="small">可设置 5 到 100 条。刷新过程中可留在页面查看任务状态。</div>
+    </div>
+  `;
+  const apply = el("personaPageSizeApply");
+  if (apply) {
+    apply.addEventListener("click", () => {
+      const input = el("personaPageSizeInput");
+      const next = Math.max(5, Math.min(100, Number(input && input.value) || 10));
+      appState.personaDashboardPageSize = next;
+      appState.personaDashboardPostPage = 1;
+      localStorage.setItem("personaDashboardPageSize", String(next));
+      renderPersonaDashboard();
+    });
+  }
+  const refreshAll = el("personaRefreshAllBtn");
+  if (refreshAll) refreshAll.addEventListener("click", () => startPersonaDashboardRefresh(""));
+}
+
+function renderPersonaDashboard() {
+  const data = appState.personaDashboard;
+  const list = el("personaDashboardList");
+  const empty = el("personaDashboardEmpty");
+  const meta = el("personaDashboardMeta");
+  const overview = el("personaOverviewPane");
+  const settings = el("personaDashboardSettings");
+  if (!data || !list || !empty) return;
+  const visible = (data.personas || []).filter(personaMatchesFilters);
+  let selected = visible.find((persona, index) => personaDashboardKey(persona, index) === String(appState.personaDashboardSelectedId || ""));
+  if (!["__overview__", "__settings__"].includes(appState.personaDashboardSelectedId) && !selected && visible.length) {
+    selected = visible[0];
+    appState.personaDashboardSelectedId = personaDashboardKey(selected, 0);
+  }
+  const charts = buildPersonaDashboardCharts(visible, data);
+  renderPersonaDashboardSummary(data, visible);
+  renderBarChart("personaHotRankChart", visible.map((item) => ({ label: item.name, value: item.hot && item.hot.hot_score })));
+  renderDonutChart("personaPlatformChart", charts.platform_distribution);
+  renderDonutChart("personaCoverageChart", charts.hot_coverage);
+  renderTrendChart("personaTrendChart", charts.trend);
+  renderDonutChart("personaEngagementChart", charts.engagement_mix);
+  renderDonutChart("personaTaskStatusChart", charts.task_status_distribution);
+  renderPersonaTabs(visible, selected);
+  renderPersonaSettings();
+  const mode = appState.personaDashboardSelectedId;
+  if (overview) overview.style.display = mode === "__overview__" ? "grid" : "none";
+  if (settings) settings.style.display = mode === "__settings__" ? "grid" : "none";
+  list.style.display = selected && mode !== "__overview__" && mode !== "__settings__" ? "grid" : "none";
+  if (meta) meta.textContent = selected ? `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设 · 已选：${selected.name || "未命名人设"}` : `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设`;
+  empty.style.display = visible.length ? "none" : "block";
+  list.innerHTML = selected ? renderPersonaCard(selected) : "";
+  const prev = el("personaPostPrev");
+  const next = el("personaPostNext");
+  const bind = el("personaBindThreadsBtn");
+  const refreshCurrent = el("personaRefreshCurrentBtn");
+  if (prev) prev.addEventListener("click", () => { appState.personaDashboardPostPage -= 1; renderPersonaDashboard(); });
+  if (next) next.addEventListener("click", () => { appState.personaDashboardPostPage += 1; renderPersonaDashboard(); });
+  if (bind && selected) bind.addEventListener("click", () => bindPersonaDashboardThreads(selected));
+  if (refreshCurrent && selected) refreshCurrent.addEventListener("click", () => startPersonaDashboardRefresh(selected.id));
+}
+
+function syncPersonaPadFilter(data) {
+  const select = el("personaDashboardPad");
+  if (!select) return;
+  const current = select.value;
+  const pads = Array.from(new Set((data.personas || []).map((item) => String(item.bound_pad_code || "").trim()).filter(Boolean))).sort();
+  select.innerHTML = `<option value="">全部云手机</option>${pads.map((pad) => `<option value="${escapeHtml(pad)}">${escapeHtml(pad)}</option>`).join("")}`;
+  if (pads.includes(current)) select.value = current;
+}
+
+function setPersonaDashboardMessage(text, ok = true) {
+  const msg = el("personaDashboardMsg");
+  if (!msg) return;
+  msg.textContent = text || "";
+  msg.className = text ? `msg ${ok ? "ok" : "err"}` : "msg";
+}
+
+async function loadPersonaDashboard() {
+  setPersonaDashboardMessage("正在加载人设数据...", true);
+  try {
+    const data = await api("/api/persona_dashboard/overview");
+    appState.personaDashboard = data;
+    syncPersonaPadFilter(data);
+    if (el("personaDashboardUpdated")) {
+      const latest = data.summary && data.summary.latest_data_at;
+      el("personaDashboardUpdated").textContent = `缓存读取：${formatDashboardDate(data.updated_at)} · 最近数据：${formatDashboardDate(latest)}`;
+    }
+    setPersonaDashboardMessage("", true);
+    renderPersonaDashboard();
+  } catch (err) {
+    setPersonaDashboardMessage(publicMessage(err.detail || err.message || String(err)), false);
+  }
+}
+
+async function bindPersonaDashboardThreads(persona) {
+  const input = el("personaThreadsInput");
+  try {
+    setPersonaDashboardMessage("正在保存 Threads 绑定...", true);
+    await api(`/api/persona_dashboard/personas/${encodeURIComponent(persona.id)}/threads_binding`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: input ? input.value : "" }),
+    });
+    setPersonaDashboardMessage("绑定已保存。可以点击刷新当前人设抓取数据。", true);
+    await loadPersonaDashboard();
+  } catch (err) {
+    setPersonaDashboardMessage(publicMessage(err.detail || err.message || String(err)), false);
+  }
+}
+
+async function startPersonaDashboardRefresh(archiveId) {
+  try {
+    setPersonaDashboardMessage(archiveId ? "已请求刷新当前人设..." : "已请求全量刷新...", true);
+    const task = await api("/api/persona_dashboard/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archive_id: archiveId || "" }),
+    });
+    personaDashboardRefreshTaskId = task.id;
+    pollPersonaDashboardRefresh(task.id);
+  } catch (err) {
+    setPersonaDashboardMessage(publicMessage(err.detail || err.message || String(err)), false);
+  }
+}
+
+async function pollPersonaDashboardRefresh(taskId) {
+  if (!taskId || taskId !== personaDashboardRefreshTaskId) return;
+  try {
+    const task = await api(`/api/persona_dashboard/refresh/${encodeURIComponent(taskId)}`);
+    setPersonaDashboardMessage(`刷新任务：${personaDashboardLabel(task.status)}。${task.message || ""}`, task.status !== "failed");
+    if (["queued", "running"].includes(String(task.status))) {
+      window.setTimeout(() => pollPersonaDashboardRefresh(taskId), 2500);
+      return;
+    }
+    personaDashboardRefreshTaskId = "";
+    await loadPersonaDashboard();
+    setPersonaDashboardMessage(task.status === "failed" ? `刷新失败：${task.message || "请检查浏览器授权或账号绑定。"}` : "刷新完成，数据已重新读取。", task.status !== "failed");
+  } catch (err) {
+    personaDashboardRefreshTaskId = "";
+    setPersonaDashboardMessage(publicMessage(err.detail || err.message || String(err)), false);
+  }
+}
+
 async function loadTasks() {
   const list = await api("/api/tasks?limit=120");
   const tasks = list.items || [];
@@ -2777,10 +3269,16 @@ function bindActions() {
   if (el("btnPersonaDashboardRefresh")) {
     el("btnPersonaDashboardRefresh").addEventListener("click", () => loadPersonaDashboard());
   }
+  if (el("btnPersonaDashboardRefreshAll")) {
+    el("btnPersonaDashboardRefreshAll").addEventListener("click", () => startPersonaDashboardRefresh(""));
+  }
   ["personaDashboardSearch", "personaDashboardPlatform", "personaDashboardPad", "personaDashboardRange"].forEach((id) => {
     const node = el(id);
     if (!node) return;
-    node.addEventListener(id === "personaDashboardSearch" ? "input" : "change", () => renderPersonaDashboard());
+    node.addEventListener(id === "personaDashboardSearch" ? "input" : "change", () => {
+      appState.personaDashboardPostPage = 1;
+      renderPersonaDashboard();
+    });
   });
   if (el("btnChangePassword")) {
     el("btnChangePassword").addEventListener("click", async () => {

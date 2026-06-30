@@ -5616,6 +5616,48 @@ body.page-admin {
   gap: 8px;
 }
 
+.persona-warning-list {
+  display: grid;
+  gap: 8px;
+}
+
+.persona-warning-item {
+  padding: 9px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-radius: 10px;
+  background: rgba(255, 251, 235, 0.92);
+  color: #92400e;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.persona-bind-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 12px;
+  background: rgba(239, 246, 255, 0.7);
+}
+
+.persona-bind-panel label {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.persona-bind-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.persona-bind-row input {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
 .persona-platform-row {
   display: flex;
   flex-wrap: wrap;
@@ -5643,6 +5685,11 @@ body.page-admin {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.persona-settings-row-left {
+  justify-content: flex-start;
+  flex-wrap: wrap;
 }
 
 .persona-table-toolbar {

@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -181,6 +182,10 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertEqual(data["data_sources"]["sentiment_hot_candidates"]["shown_count"], 1)
         data_sources = json.dumps(data["data_sources"], ensure_ascii=False)
         self.assertNotIn(str(self.tool_runtime_dir), data_sources)
+        persona = data["personas"][0]
+        self.assertIn("threads_account", persona)
+        self.assertFalse(persona["threads_account"]["bound"])
+        self.assertTrue(any("Threads" in item for item in persona["warnings"]))
 
     def test_recent_views_and_post_views_are_separate(self):
         self._write_archives()
@@ -209,6 +214,25 @@ class PersonaDashboardApiTests(unittest.TestCase):
         data = resp.json()
         self.assertEqual(data["summary"]["task_count"], 0)
         self.assertFalse(data["data_sources"]["publish_queue"]["exists"])
+
+    def test_public_threads_binding_updates_archive(self):
+        self._write_archives()
+        resp = self.unauth_client.post(
+            "/api/persona_dashboard/personas/persona-1/threads_binding",
+            json={"username": "https://www.threads.net/@history_user?x=1"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["username"], "history_user")
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        self.assertTrue(persona["threads_account"]["bound"])
+        self.assertEqual(persona["threads_account"]["handle"], "history_user")
+
+    def test_public_refresh_endpoint_returns_task_status(self):
+        with mock.patch.object(server, "_start_persona_dashboard_refresh", return_value={"id": "pdr_test", "status": "queued", "message": "已加入刷新队列。"}):
+            resp = self.unauth_client.post("/api/persona_dashboard/refresh", json={"archive_id": "persona-1"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["id"], "pdr_test")
 
 
 if __name__ == "__main__":

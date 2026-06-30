@@ -332,10 +332,11 @@
             </div>
             <div class="admin-model-tab-panels">
                 <div class="admin-runtime-block admin-model-tab-panel is-active" data-model-panel="text">
-                  <div class="admin-config-card-title">文字模型</div>
+                  <div class="admin-config-card-title">文字大模型（Gemini）</div>
                   <div class="small">用于自动生成口播文案、视频提示词、素材识别和错误分析。</div>
                   <label>API Base URL</label>
                   <input id="rtLlmBaseUrl" placeholder="http://202.90.21.53:3008">
+                  <input id="rtLlmApiKey" type="hidden">
                   <input id="rtLlmApiKeyGemini" type="hidden">
                   <label>API Key</label>
                   <input id="rtLlmApiKeyGpt" type="password" placeholder="文字模型 API Key">
@@ -376,10 +377,14 @@
                   <div id="rtLlmModelSummary" class="admin-model-summary small"></div>
                 </div>
                 <div class="admin-runtime-block admin-model-tab-panel" data-model-panel="image">
-                  <div class="admin-config-card-title">图片模型</div>
+                  <div class="admin-config-card-title">图片生成服务</div>
                   <div class="small">用于闭源图片、人设配图和推文配图；这里的 API、Key 和模型会同步到 Bot 实际生图配置。</div>
                   <label>API Base URL</label>
                   <input id="rtImageBaseUrl" placeholder="http://202.90.21.53:3008">
+                  <input id="rtImageRunninghubWorkflowId" type="hidden">
+                  <input id="rtImageModelProviderBaseUrl" type="hidden">
+                  <input id="rtImageModelProviderApiKeyGemini" type="hidden">
+                  <input id="rtImageModelProviderApiKeyGpt" type="hidden">
                   <label>API Key</label>
                   <input id="rtImageGeminiApiKey" type="password" placeholder="图片模型 API Key">
                   <label>候选模型</label>
