@@ -296,7 +296,25 @@ function readSentimentBrowserFallbackConfig() {
 
 function readSentimentBrowserAuthProfilesConfig(): any[] {
   const fallback = readSentimentBrowserFallbackConfig();
-  return Array.isArray((fallback as any).profiles) ? (fallback as any).profiles : [];
+  return Array.isArray((fallback as any).profiles)
+    ? (fallback as any).profiles.map(normalizeSentimentBrowserAuthProfile)
+    : [];
+}
+
+function normalizeSentimentBrowserAuthProfile(profile: any): any {
+  if (!profile || typeof profile !== "object") return profile;
+  const key = cleanText(profile.key || profile.platform || profile.sourceKey).toLowerCase();
+  if (key !== "threads") return profile;
+  return {
+    ...profile,
+    domain: "threads.com",
+    authUrl: "https://www.threads.com/",
+    authUrls: ["https://www.threads.com/", "https://www.threads.net/", "https://www.instagram.com/accounts/login/"],
+    cookieDomains: ["threads.com", "threads.net", "instagram.com", "facebook.com"],
+    matchDomains: ["threads.com", "threads.net", "instagram.com", "facebook.com"],
+    urlTemplate: "https://www.threads.com/search?q={query}",
+    linkPattern: "threads.com/",
+  };
 }
 
 function readSentimentBrowserAuthToken(): string {
@@ -1091,7 +1109,8 @@ export async function refreshSentimentBrowserCookiesForPlatform(platform: Sentim
     .filter(Boolean);
   if (!cookies.length) return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} 缺少有效 Cookie，无法自动刷新；需要先人工重新授权登录。` };
 
-  const authUrl = cleanText(Array.isArray(profile.authUrls) ? profile.authUrls[0] : profile.authUrl)
+  const authUrl = cleanText(profile.authUrl)
+    || cleanText(Array.isArray(profile.authUrls) ? profile.authUrls[0] : "")
     || (platform === "threads" ? "https://www.threads.net/" : "https://www.instagram.com/");
   const cookieUrls = [
     authUrl,
@@ -1110,13 +1129,14 @@ export async function refreshSentimentBrowserCookiesForPlatform(platform: Sentim
     const page = await context.newPage();
     await page.goto(authUrl, { waitUntil: "domcontentloaded", timeout: 25_000 }).catch(() => undefined);
     await page.waitForTimeout(2500);
+    const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
     const title = await page.title().catch(() => "");
     const href = page.url();
-    const stillLoggedOut = /login|登入|登录|log in|accounts\/login/i.test(`${title} ${href}`);
+    const stillLoggedOut = /accounts\/login|log in|login|登入|登录|使用 Instagram|Instagram 帳號|Instagram 账号/i.test(`${title}\n${href}\n${bodyText}`);
     const refreshedCookies = activeUniqueCookies((await context.cookies(cookieUrls)).map((cookie) => normalizeCookieForBrowserAuth(cookie, profile.domain || `${platform}.net`)).filter(Boolean));
     await context.close().catch(() => undefined);
     if (stillLoggedOut || refreshedCookies.length === 0) {
-      return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} 自动刷新未保持登录态，需要人工重新登录授权。` };
+      return { ok: false, message: `${sentimentCookiePlatformLabel(platform)} 自动刷新未通过真实登录态检测${stillLoggedOut ? "：页面返回登录墙" : ""}；请重新登录可用账号并等待授权助手自动同步。` };
     }
     if (platform === "threads" && !hasValidThreadsSessionCookieForDomain(refreshedCookies, "threads.com")) {
       return { ok: false, message: "Threads sessionid was read, but threads.com cleared or did not retain the login session. Re-login in the authorization helper and sync again." };
@@ -2096,7 +2116,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
   const allKeys = new Set<string>();
   const searches = await Promise.all(
     args.queries.map(async (query, index) => {
-      const targetUrl = `https://www.threads.net/search?q=${encodeURIComponent(query)}`;
+      const targetUrl = `https://www.threads.com/search?q=${encodeURIComponent(query)}`;
       const readerTargetUrl = args.refresh ? `${targetUrl}&__r=${Date.now().toString(36)}${index}` : targetUrl;
       try {
         const response = await fetch(`${JINA_READER_PREFIX}${readerTargetUrl}`, {
@@ -3213,7 +3233,8 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
         && Array.isArray((parsed as any).postMetrics)
         && (parsed as any).postMetrics.length >= parsed.scannedPosts
         && (parsed as any).profileReachedEnd === true;
-      const visibleProfileComplete = !attemptCookies.length
+      const visibleProfileComplete = !hasLoginSessionCookie
+        && !attemptCookies.length
         && threadsProfileHotMetricsHasValue(parsed)
         && typeof parsed.scannedPosts === "number"
         && parsed.scannedPosts > 0
@@ -3591,7 +3612,7 @@ async function lookupThreadsPublishedPostFromBrowserSearchPage(args: {
     `${username} ${content.replace(/\s+/g, " ").slice(0, 48)}`,
   ].map((item) => item.trim()).filter((item) => item.length >= 6)));
   for (const query of queries.slice(0, 4)) {
-    await args.page.goto(`https://www.threads.net/search?q=${encodeURIComponent(query)}`, {
+    await args.page.goto(`https://www.threads.com/search?q=${encodeURIComponent(query)}`, {
       waitUntil: "domcontentloaded",
       timeout: 35_000,
     }).catch(() => null);
@@ -4073,7 +4094,7 @@ function isLikelyInstagramAuthor(value: string) {
 
 async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: number): Promise<{ text: string; url: string }> {
   const encodedQuery = encodeURIComponent(query);
-  const primarySearchUrl = `https://www.threads.net/search?q=${encodedQuery}`;
+  const primarySearchUrl = `https://www.threads.com/search?q=${encodedQuery}`;
   const searchUrl = "https://www.threads.com/search";
   const directSearchUrl = `https://www.threads.com/search?q=${encodedQuery}&serp_type=default`;
   await page.goto(primarySearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(8_000, remainingSentimentDeadlineMs(deadlineAt, 8_000)) }).catch(() => undefined);

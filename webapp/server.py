@@ -1010,7 +1010,23 @@ def _sentiment_profiles_container(config: dict[str, Any]) -> list[dict[str, Any]
     profiles = browser_fallback.setdefault("profiles", [])
     if not isinstance(profiles, list):
         raise HTTPException(status_code=500, detail="舆情 Cookie profiles 配置格式异常。")
+    for profile in profiles:
+        if isinstance(profile, dict):
+            _normalize_threads_sentiment_profile(profile)
     return profiles
+
+
+def _normalize_threads_sentiment_profile(profile: dict[str, Any]) -> None:
+    key = str(profile.get("key") or profile.get("platform") or profile.get("sourceKey") or "").strip().lower()
+    if key != "threads":
+        return
+    profile["domain"] = "threads.com"
+    profile["authUrl"] = "https://www.threads.com/"
+    profile["authUrls"] = ["https://www.threads.com/", "https://www.threads.net/", "https://www.instagram.com/accounts/login/"]
+    profile["cookieDomains"] = ["threads.com", "threads.net", "instagram.com", "facebook.com"]
+    profile["matchDomains"] = ["threads.com", "threads.net", "instagram.com", "facebook.com"]
+    profile["urlTemplate"] = "https://www.threads.com/search?q={query}"
+    profile["linkPattern"] = "threads.com/"
 
 
 def _sentiment_browser_fallback_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -1113,6 +1129,21 @@ def _sentiment_browser_auth_text(file_name: str, request: Request) -> tuple[byte
     return body.encode("utf-8"), allowed[file_name]
 
 
+def _sentiment_browser_auth_extension_config(request: Request, config: dict[str, Any] | None = None, *, include_auth_token: bool = True) -> dict[str, Any]:
+    if config is None:
+        config = _read_sentiment_config_file()
+    payload: dict[str, Any] = {
+        "ok": True,
+        "version": "1.0.6",
+        "apiBase": _request_public_origin(request),
+        "profiles": _sentiment_browser_auth_profiles_for_extension(),
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if include_auth_token:
+        payload["authToken"] = _sentiment_browser_auth_token(config, create=True)
+    return payload
+
+
 def _sentiment_browser_auth_host_permissions() -> list[str]:
     try:
         config = _read_sentiment_config_file()
@@ -1181,6 +1212,19 @@ def _sentiment_browser_auth_profiles_for_extension() -> list[dict[str, Any]]:
     return rows
 
 
+def _sentiment_browser_auth_config_access(request: Request) -> tuple[dict[str, Any], bool]:
+    config = _read_sentiment_config_file()
+    expected_token = _sentiment_browser_auth_token(config, create=False)
+    provided_token = str(request.headers.get("x-sentiment-browser-auth") or "").strip()
+    if expected_token and provided_token and hmac.compare_digest(provided_token, expected_token):
+        return config, False
+    with contextlib.suppress(HTTPException):
+        user = get_current_user(session_token=request.cookies.get(SESSION_COOKIE))
+        require_admin(user)
+        return config, True
+    raise HTTPException(status_code=403, detail="invalid browser auth token")
+
+
 def _build_sentiment_browser_auth_extension_zip(request: Request) -> bytes:
     file_names = ["manifest.json", "background.js", "popup.html", "popup.js", "install.html"]
     from io import BytesIO
@@ -1208,7 +1252,7 @@ def _find_sentiment_profile(profiles: list[dict[str, Any]], key: str) -> dict[st
 
 def _cookie_default_domain(platform: str) -> str:
     return {
-        "threads": ".threads.net",
+        "threads": ".threads.com",
         "instagram": ".instagram.com",
         "x": ".x.com",
         "dcard": ".dcard.tw",
@@ -18229,6 +18273,26 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/browser-auth-extension/config.json")
+    def browser_auth_extension_config(request: Request):
+        config, is_admin = _sentiment_browser_auth_config_access(request)
+        return JSONResponse(
+            _sentiment_browser_auth_extension_config(request, config, include_auth_token=is_admin),
+            headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.options("/browser-auth-extension/config.json")
+    def browser_auth_extension_config_options():
+        return Response(
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Content-Type, X-Sentiment-Browser-Auth",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+
     @app.get("/browser-auth-extension/{file_name}")
     def browser_auth_extension_file(file_name: str, request: Request, user: dict[str, Any] = Depends(require_admin)):
         body, media_type = _sentiment_browser_auth_text(file_name, request)
@@ -18290,6 +18354,20 @@ def create_app() -> FastAPI:
         profile["lastAuthorizedBy"] = "browser-auth-helper"
         profile["lastAuthorizationNote"] = f"synced by browser auth helper for {fallback_domain}"[:240]
         _write_sentiment_config_file(config)
+        if _sentiment_profile_requires_sessionid(profile, profile_key):
+            live_auth = _sentiment_threads_live_auth_state(profile, cookies)
+            if live_auth.get("liveAuthUsable") is False:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": str(live_auth.get("liveAuthMessage") or "Threads sessionid 已保存，但真实浏览器登录态不可用。"),
+                        "profileKey": str(profile.get("key") or profile_key),
+                        "savedCookieCount": len(cookies),
+                        **live_auth,
+                    },
+                    status_code=409,
+                    headers=cors_headers,
+                )
         return JSONResponse(
             {"ok": True, "profileKey": str(profile.get("key") or profile_key), "savedCookieCount": len(cookies)},
             headers=cors_headers,

@@ -2399,7 +2399,9 @@ function sentimentCookieStatusDetails(profile) {
     ? "ready"
     : liveStatus === "probe_failed"
       ? "unknown"
-      : sessionidReady ? "ready" : "missing";
+      : liveStatus === "invalid" || liveStatus === "missing_sessionid"
+        ? "missing"
+        : sessionidReady ? "ready" : "missing";
   const solutionText = liveMessage || (sessionidReady
     ? "提示：刷新状态会自动检测 Threads sessionid 是否真实可用；如果账号被封、受限或跳登录，请重新登录可用账号并等待授权助手自动同步。"
     : "提示：Threads 全量搜索需要可用账号的 sessionid；登录可用账号后，授权助手会自动同步，也可以点击同步当前标签页。");
@@ -2500,7 +2502,8 @@ function selectedSentimentCookieProfile(profileKey = "") {
 function sentimentCookieAuthUrl(profile) {
   if (!profile) return "";
   const urls = Array.isArray(profile.authUrls) ? profile.authUrls.map((item) => String(item || "").trim()).filter(Boolean) : [];
-  return urls[0] || String(profile.authUrl || "").trim() || (profile.domain ? `https://${String(profile.domain).replace(/^\.+/, "")}/` : "");
+  const primary = String(profile.authUrl || "").trim();
+  return primary || urls[0] || (profile.domain ? `https://${String(profile.domain).replace(/^\.+/, "")}/` : "");
 }
 
 function openSentimentCookieAuthPage(profileKey = "") {
@@ -2536,7 +2539,7 @@ async function rotateSentimentCookieHelperToken() {
   const token = String(payload?.token || "").trim();
   if (!token) throw new Error("同步令牌轮换失败，请稍后重试。");
   await navigator.clipboard.writeText(token);
-  setMsg("sentimentCookieMsg", "同步令牌已轮换并复制。旧授权助手包会失效，请重新下载助手或在助手中保存新令牌。", true);
+  setMsg("sentimentCookieMsg", "同步令牌已轮换并复制。新版授权助手会自动刷新后台配置；如果同步提示令牌失效，请在助手中保存新令牌或重新加载新版助手。", true);
 }
 
 function sentimentDownloadFilename(disposition) {
@@ -2575,7 +2578,7 @@ async function downloadSentimentCookieHelper() {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
-  setMsg("sentimentCookieMsg", "授权助手已开始下载，后端地址和同步令牌已自动写入安装包。解压后在扩展管理页加载该目录即可，后续会自动同步已登录站点 Cookie。", true);
+  setMsg("sentimentCookieMsg", "授权助手已开始下载，后端地址和同步令牌已自动写入安装包。加载新版助手后会自动同步已登录站点 Cookie，并定时刷新后台配置。", true);
 }
 
 async function loadSentimentCookieProfiles() {

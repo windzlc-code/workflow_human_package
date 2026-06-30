@@ -1,8 +1,10 @@
 const DEFAULT_API_BASE = "http://43.167.237.120";
 const DEFAULT_AUTH_TOKEN = "";
+const DEFAULT_EXTENSION_VERSION = "1.0.6";
 const AUTO_SYNC_ALARM = "opinx-browser-auth-auto-sync";
 const AUTO_SYNC_INTERVAL_MINUTES = 10;
 const MIN_PROFILE_SYNC_GAP_MS = 2 * 60 * 1000;
+const CONFIG_REFRESH_GAP_MS = 10 * 60 * 1000;
 
 const PROFILES = [
   {
@@ -202,19 +204,49 @@ async function authToken() {
   return String(values.authToken || DEFAULT_AUTH_TOKEN || "").trim();
 }
 
-function profileForUrl(url = "") {
-  return profilesForUrl(url)[0] || null;
+async function refreshExtensionConfig(options = {}) {
+  if (!options.force) {
+    const values = await storageGet(["lastConfigRefreshAt"]);
+    const lastRefreshAt = Date.parse(values.lastConfigRefreshAt || "");
+    if (Number.isFinite(lastRefreshAt) && Date.now() - lastRefreshAt < CONFIG_REFRESH_GAP_MS) {
+      return { ok: true, skipped: true, reason: "recently-refreshed" };
+    }
+  }
+  const base = await apiBase();
+  const token = await authToken();
+  const response = await fetch(`${base}/browser-auth-extension/config.json?t=${Date.now()}`, {
+    cache: "no-store",
+    credentials: "include",
+    headers: token ? { "x-sentiment-browser-auth": token } : {},
+  });
+  if (!response.ok) {
+    throw new Error(`配置刷新失败：HTTP ${response.status}`);
+  }
+  const payload = await response.json();
+  if (!payload?.ok) {
+    throw new Error(payload?.error || "配置刷新失败");
+  }
+  const next = {
+    lastConfigRefreshAt: new Date().toISOString(),
+    extensionVersion: String(payload.version || DEFAULT_EXTENSION_VERSION),
+  };
+  if (payload.apiBase) next.apiBase = String(payload.apiBase).replace(/\/+$/, "");
+  if (payload.authToken) next.authToken = String(payload.authToken).trim();
+  if (Array.isArray(payload.profiles) && payload.profiles.length) next.profiles = payload.profiles;
+  await storageSet(next);
+  return { ok: true, version: next.extensionVersion, profileCount: Array.isArray(next.profiles) ? next.profiles.length : undefined };
 }
 
-function profilesForUrl(url = "") {
+async function activeProfiles() {
+  const values = await storageGet(["profiles"]);
+  return Array.isArray(values.profiles) && values.profiles.length ? values.profiles : PROFILES;
+}
+
+function profilesForUrlFromList(url = "", profiles = PROFILES) {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "");
     const normalizeDomain = (domain = "") => String(domain || "").replace(/^\.+/, "").replace(/^www\./, "");
-    const matchesDomain = (domain = "") => {
-      const normalized = normalizeDomain(domain);
-      return normalized && (host === normalized || host.endsWith(`.${normalized}`));
-    };
-    return PROFILES.filter(profile => {
+    return profiles.filter(profile => {
       const domains = [profile.domain, ...(profile.matchDomains || []), ...(profile.cookieDomains || [])]
         .map(normalizeDomain)
         .filter(Boolean);
@@ -223,6 +255,10 @@ function profilesForUrl(url = "") {
   } catch {
     return [];
   }
+}
+
+async function profilesForUrl(url = "") {
+  return profilesForUrlFromList(url, await activeProfiles());
 }
 
 function cookieUrlForProfile(profile) {
@@ -324,7 +360,9 @@ async function syncProfileCookies(profile, options = {}) {
 }
 
 async function openAuthorizationPages() {
-  for (const profile of PROFILES) {
+  await refreshExtensionConfig().catch(() => undefined);
+  const profiles = await activeProfiles();
+  for (const profile of profiles) {
     const urls = Array.isArray(profile.authUrls) && profile.authUrls.length ? profile.authUrls : [profile.authUrl];
     for (const url of urls.filter(Boolean)) {
       await chrome.tabs.create({ url, active: false });
@@ -334,15 +372,17 @@ async function openAuthorizationPages() {
 }
 
 async function syncAllProfiles(options = {}) {
+  await refreshExtensionConfig(options).catch(() => undefined);
+  const profiles = await activeProfiles();
   const token = await authToken();
   if (!token) {
     await storageSet({ lastStatus: "missing auth token" });
     return [];
   }
-  const results = await Promise.allSettled(PROFILES.map(profile => syncProfileCookies(profile, options)));
+  const results = await Promise.allSettled(profiles.map(profile => syncProfileCookies(profile, options)));
   const okCount = results.filter(result => result.status === "fulfilled" && result.value?.ok).length;
   const failed = results
-    .map((result, index) => ({ result, profile: PROFILES[index] }))
+    .map((result, index) => ({ result, profile: profiles[index] }))
     .filter(item => item.result.status === "rejected" || !item.result.value?.ok);
   const failedText = failed.slice(0, 3).map(item => {
     if (item.result.status === "rejected") return `${item.profile.key}: ${item.result.reason?.message || item.result.reason}`;
@@ -350,7 +390,7 @@ async function syncAllProfiles(options = {}) {
   }).join("；");
   await storageSet({
     lastAutoSyncAt: new Date().toISOString(),
-    lastStatus: failed.length ? `auto sync ${okCount}/${PROFILES.length}; ${failedText}` : `auto sync ${okCount}/${PROFILES.length}`,
+    lastStatus: failed.length ? `auto sync ${okCount}/${profiles.length}; ${failedText}` : `auto sync ${okCount}/${profiles.length}`,
   });
   return results;
 }
@@ -372,11 +412,13 @@ chrome.runtime.onInstalled.addListener(async () => {
     lastStatus: "授权助手已安装",
   });
   ensureAutoSyncAlarm();
+  await refreshExtensionConfig({ force: true }).catch(() => undefined);
   void syncAllProfiles({ force: true }).catch(() => undefined);
 });
 
 chrome.runtime.onStartup?.addListener(() => {
   ensureAutoSyncAlarm();
+  void refreshExtensionConfig().catch(() => undefined);
   void syncAllProfiles().catch(() => undefined);
 });
 
@@ -387,9 +429,9 @@ chrome.alarms?.onAlarm?.addListener((alarm) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete" || !tab?.url) return;
-  const profiles = profilesForUrl(tab.url);
-  if (!profiles.length) return;
-  Promise.allSettled(profiles.map(profile => syncProfileCookies(profile))).then(async results => {
+  profilesForUrl(tab.url).then(profiles => {
+    if (!profiles.length) return null;
+    return Promise.allSettled(profiles.map(profile => syncProfileCookies(profile))).then(async results => {
     const statusText = results.map((result, index) => {
       const profile = profiles[index];
       return result.status === "fulfilled"
@@ -397,6 +439,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         : `${profile.key}: ${result.reason?.message || result.reason}`;
     }).join("；");
     await storageSet({ lastStatus: statusText });
+    });
   });
 });
 
@@ -408,8 +451,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
     if (message?.type === "sync-current-tab") {
+      await refreshExtensionConfig({ force: true }).catch(() => undefined);
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      const profiles = profilesForUrl(tab?.url || "");
+      const profiles = await profilesForUrl(tab?.url || "");
       if (!profiles.length) {
         sendResponse({ ok: false, error: "当前标签页不是受支持的授权站点" });
         return;

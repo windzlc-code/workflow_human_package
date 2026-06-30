@@ -3366,7 +3366,7 @@ export function formatPersonaSettingsHotMetricsLines(archive: PersonaArchive, op
   }
   const detailTimestamp = formatPersonaHotMetricsTimestamp(metrics.refreshedAt);
   const viewCoverage = typeof metrics.viewResolvedPosts === "number" && typeof metrics.scannedPosts === "number"
-    ? `瀏覽解析：${metrics.viewResolvedPosts}/${metrics.scannedPosts} 篇${Number(metrics.viewMissingPosts || 0) > 0 ? `，${metrics.viewMissingPosts} 篇待補` : ""}`
+    ? `瀏覽解析：${metrics.viewResolvedPosts}/${metrics.scannedPosts} 篇${Number(metrics.viewMissingPosts || 0) > 0 ? `，${metrics.viewMissingPosts} 篇平台未公開` : ""}`
     : "";
   return [
     `Threads：${usernamePart || "已刷新"}`,
@@ -3401,7 +3401,7 @@ function formatPersonaHotPostMetricsLine(post: any, displayIndex: number) {
     typeof post.commentCount === "number" ? `評 ${formatPersonaHotMetricCount(post.commentCount)}` : "",
     typeof post.repostCount === "number" ? `轉發 ${formatPersonaHotMetricCount(post.repostCount)}` : "",
     typeof post.shareCount === "number" ? `分享 ${formatPersonaHotMetricCount(post.shareCount)}` : "",
-    typeof post.viewCount === "number" ? `瀏覽 ${formatPersonaHotMetricCount(post.viewCount)}` : "瀏覽 待補",
+    typeof post.viewCount === "number" ? `瀏覽 ${formatPersonaHotMetricCount(post.viewCount)}` : "瀏覽 平台未公開",
   ].filter(Boolean);
   const content = String(post.content || "").replace(/\s+/g, " ").trim();
   const label = content
@@ -4287,9 +4287,10 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
     const previousMetrics: any = existingHotMetrics[hotMetricsKey] || {};
     const scannedPosts = typeof metrics.scannedPosts === "number" ? metrics.scannedPosts : 0;
     const hasUsableAccountMetrics = scannedPosts > 0
-      || ["followers", "following", "posts", "likes", "comments", "reposts", "shares", "views"]
+      || ["followers", "following", "recentViews", "posts", "likes", "comments", "reposts", "shares", "views"]
         .some((field) => typeof (metrics as any)[field] === "number");
     const hasCompleteAccountMetrics = metrics.complete === true
+      && metrics.scope === "authenticated_full_profile"
       && scannedPosts > 0
       && Array.isArray((metrics as any).postMetrics)
       && (metrics as any).postMetrics.length >= scannedPosts;
@@ -4350,6 +4351,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
         username: metrics.username || threadsHandle,
         followers: metrics.followers,
         following: metrics.following,
+        recentViews: metrics.recentViews,
         posts: metrics.posts,
         likes: metrics.likes,
         comments: metrics.comments,
