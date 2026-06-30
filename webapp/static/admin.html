@@ -228,10 +228,15 @@
             <button id="btnSentimentCookieDownloadHelper" class="primary" type="button">下载授权助手</button>
             <a class="btn ghost" href="/browser-auth-extension/install.html" target="_blank" rel="noopener">安装说明</a>
             <button id="btnSentimentCookieOpenAuth" class="ghost" type="button">打开当前平台授权页</button>
-            <button id="btnSentimentCookieCopyExtensionUrl" class="ghost" type="button">复制扩展管理页地址</button>
-            <button id="btnSentimentCookieCopyBase" class="ghost" type="button">复制助手接口地址</button>
-            <button id="btnSentimentCookieCopyToken" class="ghost" type="button">复制同步令牌</button>
-            <button id="btnSentimentCookieRotateToken" class="danger ghost" type="button">轮换同步令牌</button>
+            <details class="sentiment-cookie-advanced">
+              <summary>高级维护</summary>
+              <div class="sentiment-cookie-advanced-actions">
+                <button id="btnSentimentCookieCopyExtensionUrl" class="ghost" type="button">复制扩展管理页地址</button>
+                <button id="btnSentimentCookieCopyBase" class="ghost" type="button">复制助手接口地址</button>
+                <button id="btnSentimentCookieCopyToken" class="ghost" type="button">复制同步令牌</button>
+                <button id="btnSentimentCookieRotateToken" class="danger ghost" type="button">轮换同步令牌</button>
+              </div>
+            </details>
           </div>
         </div>
         <div class="table-wrap admin-table-shell">

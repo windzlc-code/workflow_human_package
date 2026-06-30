@@ -1134,7 +1134,7 @@ def _sentiment_browser_auth_extension_config(request: Request, config: dict[str,
         config = _read_sentiment_config_file()
     payload: dict[str, Any] = {
         "ok": True,
-        "version": "1.0.6",
+        "version": "1.0.7",
         "apiBase": _request_public_origin(request),
         "profiles": _sentiment_browser_auth_profiles_for_extension(),
         "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

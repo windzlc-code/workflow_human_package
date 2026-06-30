@@ -245,6 +245,24 @@ a {
   gap: 8px;
 }
 
+.sentiment-cookie-advanced {
+  width: 100%;
+  color: #475569;
+  font-size: 13px;
+}
+
+.sentiment-cookie-advanced summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.sentiment-cookie-advanced-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .sentiment-cookie-steps {
   margin: 8px 0 0;
   padding-left: 18px;
@@ -263,6 +281,12 @@ a {
 .sentiment-cookie-names {
   max-width: 320px;
   word-break: break-word;
+}
+
+.sentiment-cookie-detail {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 
 .sentiment-cookie-detail.ready {
@@ -4994,6 +5018,52 @@ body.page-admin {
 
 .page-admin .table td {
   background: #ffffff;
+}
+
+.page-admin .sentiment-cookie-table {
+  min-width: 980px;
+  table-layout: auto;
+}
+
+.page-admin .sentiment-cookie-table th,
+.page-admin .sentiment-cookie-table td {
+  width: auto;
+  vertical-align: top;
+}
+
+.page-admin .sentiment-cookie-table td {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.page-admin .sentiment-cookie-table th:nth-child(1),
+.page-admin .sentiment-cookie-table td:nth-child(1) {
+  width: 16%;
+}
+
+.page-admin .sentiment-cookie-table th:nth-child(2),
+.page-admin .sentiment-cookie-table td:nth-child(2) {
+  width: 30%;
+}
+
+.page-admin .sentiment-cookie-table th:nth-child(3),
+.page-admin .sentiment-cookie-table td:nth-child(3),
+.page-admin .sentiment-cookie-table th:nth-child(4),
+.page-admin .sentiment-cookie-table td:nth-child(4),
+.page-admin .sentiment-cookie-table th:nth-child(5),
+.page-admin .sentiment-cookie-table td:nth-child(5) {
+  width: 11%;
+}
+
+.page-admin .sentiment-cookie-table th:nth-child(6),
+.page-admin .sentiment-cookie-table td:nth-child(6) {
+  width: 14%;
+}
+
+.page-admin .sentiment-cookie-table th:nth-child(7),
+.page-admin .sentiment-cookie-table td:nth-child(7) {
+  width: 7%;
 }
 
 .page-admin .task-toolbar {

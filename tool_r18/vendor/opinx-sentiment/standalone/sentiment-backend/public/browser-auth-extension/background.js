@@ -1,6 +1,6 @@
 const DEFAULT_API_BASE = "http://43.167.237.120";
 const DEFAULT_AUTH_TOKEN = "";
-const DEFAULT_EXTENSION_VERSION = "1.0.6";
+const DEFAULT_EXTENSION_VERSION = "1.0.7";
 const AUTO_SYNC_ALARM = "opinx-browser-auth-auto-sync";
 const AUTO_SYNC_INTERVAL_MINUTES = 10;
 const MIN_PROFILE_SYNC_GAP_MS = 2 * 60 * 1000;
@@ -481,6 +481,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const base = String(message.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
       await storageSet({ apiBase: base });
       ensureAutoSyncAlarm();
+      await refreshExtensionConfig({ force: true }).catch(() => undefined);
       sendResponse({ ok: true, apiBase: base });
       return;
     }
