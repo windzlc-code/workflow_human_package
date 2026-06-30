@@ -286,11 +286,46 @@ function readSentimentBrowserFallbackConfig() {
   const configPath = path.join(resolveSentimentDataDir(), "sentiment-config.json");
   if (!fs.existsSync(configPath)) return {};
   try {
-    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const config = parseSentimentConfigJson(fs.readFileSync(configPath, "utf8"));
     const fallback = config?.sentimentSearch?.browserFallback || config?.browserFallback || {};
     return fallback && typeof fallback === "object" ? fallback : {};
   } catch {
     return {};
+  }
+}
+
+function parseSentimentConfigJson(raw: string): any {
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const first = raw.indexOf("{");
+    if (first < 0) throw error;
+    let inString = false;
+    let escaped = false;
+    let depth = 0;
+    for (let index = first; index < raw.length; index += 1) {
+      const char = raw[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+      if (char === "{") depth += 1;
+      if (char === "}") {
+        depth -= 1;
+        if (depth === 0) return JSON.parse(raw.slice(first, index + 1));
+      }
+    }
+    throw error;
   }
 }
 

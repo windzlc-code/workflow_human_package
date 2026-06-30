@@ -987,9 +987,22 @@ def _read_sentiment_config_file() -> dict[str, Any]:
     if not SENTIMENT_CONFIG_PATH.exists():
         raise HTTPException(status_code=404, detail=f"舆情 Cookie 配置不存在：{SENTIMENT_CONFIG_PATH}")
     try:
-        return json.loads(SENTIMENT_CONFIG_PATH.read_text(encoding="utf-8"))
+        raw = SENTIMENT_CONFIG_PATH.read_text(encoding="utf-8")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed, end = json.JSONDecoder().raw_decode(raw)
+            if raw[end:].strip():
+                tmp_path = SENTIMENT_CONFIG_PATH.with_suffix(SENTIMENT_CONFIG_PATH.suffix + ".tmp")
+                tmp_path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                tmp_path.replace(SENTIMENT_CONFIG_PATH)
+        if not isinstance(parsed, dict):
+            raise ValueError("舆情 Cookie 配置根节点必须是对象。")
+        return parsed
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail=f"舆情 Cookie 配置 JSON 无法解析：{exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"舆情 Cookie 配置读取失败：{exc}") from exc
 
