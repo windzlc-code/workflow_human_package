@@ -158,6 +158,8 @@ export type ThreadsProfileHotMetrics = {
   reposts?: number;
   shares?: number;
   views?: number;
+  viewResolvedPosts?: number;
+  viewMissingPosts?: number;
   scannedPosts?: number;
   refreshedAt: string;
   method: "browser" | "reader" | "failed";
@@ -1119,7 +1121,18 @@ export async function refreshSentimentBrowserCookiesForPlatform(platform: Sentim
     if (platform === "threads" && !hasValidThreadsSessionCookieForDomain(refreshedCookies, "threads.com")) {
       return { ok: false, message: "Threads sessionid was read, but threads.com cleared or did not retain the login session. Re-login in the authorization helper and sync again." };
     }
-    const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/browser-auth/cookies`, {
+    const runtime = await ensureSentimentRuntime().catch((error: any) => ({
+      ok: false,
+      url: resolveSentimentBackendUrl(),
+      warning: error instanceof Error ? error.message : String(error || "unknown"),
+    }));
+    if (!runtime.ok) {
+      return {
+        ok: false,
+        message: `${sentimentCookiePlatformLabel(platform)} Cookie auto refresh could not start sentiment backend: ${runtime.warning || "unknown"}`,
+      };
+    }
+    const response = await fetch(`${runtime.url}/api/sentiment/browser-auth/cookies`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -2571,24 +2584,44 @@ async function scrollThreadsProfileUntilGraphqlEnd(args: {
   capturedGraphqlPages: Map<string, { payload: any; template: ThreadsGraphqlRequestTemplate }>;
   username: string;
   maxScrolls?: number;
+  afterScroll?: () => Promise<void>;
 }) {
   let stagnantRounds = 0;
-  let lastCount = args.capturedGraphqlPages.size;
-  for (let scroll = 0; scroll < (args.maxScrolls || 80); scroll += 1) {
+  let lastGraphqlCount = args.capturedGraphqlPages.size;
+  let lastVisibleKeyCount = 0;
+  let lastScrollY = -1;
+  const seenVisiblePostKeys = new Set<string>();
+  for (let scroll = 0; scroll < (args.maxScrolls || 160); scroll += 1) {
     const reachedEnd = [...args.capturedGraphqlPages.values()].some(({ payload }) => {
       const pageResult = parseThreadsGraphqlProfilePagePayload({ username: args.username, payload });
       return pageResult.pageInfoResolved && pageResult.hasNextPage !== true;
     });
     if (reachedEnd) return;
+    const visibleKeys = await args.page.evaluate((targetUsername: string) => {
+      const normalizedUsername = String(targetUsername || "").replace(/^@+/, "").trim().toLowerCase();
+      return Array.from(document.querySelectorAll("a[href*='/post/']"))
+        .map((anchor: any) => String(anchor.href || anchor.getAttribute?.("href") || ""))
+        .filter((href) => href.toLowerCase().includes("/@" + normalizedUsername + "/post/"))
+        .map((href) => href.replace(/[?#].*$/, "").replace(/\/+$/, ""));
+    }, args.username).catch(() => []);
+    for (const key of visibleKeys || []) {
+      if (key) seenVisiblePostKeys.add(key);
+    }
+    await args.afterScroll?.().catch(() => undefined);
     await args.page.mouse.wheel(0, 1800).catch(() => undefined);
-    await args.page.waitForTimeout(900);
-    const nextCount = args.capturedGraphqlPages.size;
-    if (nextCount === lastCount) {
+    await args.page.waitForTimeout(1200);
+    const nextGraphqlCount = args.capturedGraphqlPages.size;
+    const scrollY = await args.page.evaluate(() => Math.round(window.scrollY || document.documentElement?.scrollTop || 0)).catch(() => -1);
+    if (nextGraphqlCount === lastGraphqlCount
+      && seenVisiblePostKeys.size <= lastVisibleKeyCount
+      && Math.abs(scrollY - lastScrollY) < 40) {
       stagnantRounds += 1;
-      if (stagnantRounds >= 5) return;
+      if (stagnantRounds >= 12) return;
     } else {
       stagnantRounds = 0;
-      lastCount = nextCount;
+      lastGraphqlCount = nextGraphqlCount;
+      lastVisibleKeyCount = seenVisiblePostKeys.size;
+      lastScrollY = scrollY;
     }
   }
 }
@@ -3061,6 +3094,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
         page,
         capturedGraphqlPages,
         username,
+        afterScroll: seedVisiblePosts,
       });
       await seedVisiblePosts();
       const bodyText = await page.locator("body").innerText({ timeout: 8_000 }).catch(() => "");
@@ -3136,6 +3170,12 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             viewCount: typeof viewsByUrl[post.sourceUrl] === "number" ? viewsByUrl[post.sourceUrl] : post.viewCount,
             capturedAt: refreshedAt,
           }));
+          const resolvedViewPosts = postMetrics.filter((post) => typeof post.viewCount === "number").length;
+          const totalResolvedViews = postMetrics.reduce((sum, post) => sum + (typeof post.viewCount === "number" ? post.viewCount : 0), 0);
+          const visiblePostTotal = Number(visible.parsed.posts);
+          const reachedEndByVisibleTotal = Number.isFinite(visiblePostTotal)
+            && visiblePostTotal > 0
+            && allPosts.length >= visiblePostTotal;
           parsed = {
             ...visible.parsed,
             posts: Math.max(Number(visible.parsed.posts || 0), allPosts.length),
@@ -3144,11 +3184,14 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             comments: allPosts.reduce((sum, post) => sum + (post.commentCount || 0), 0),
             reposts: allPosts.reduce((sum, post) => sum + (post.repostCount || 0), 0),
             shares: allPosts.reduce((sum, post) => sum + (post.shareCount || 0), 0),
-            ...(views.resolvedPosts === allPosts.length ? { views: views.totalViews } : {}),
+            ...(resolvedViewPosts > 0 ? { views: totalResolvedViews } : {}),
+            viewResolvedPosts: resolvedViewPosts,
+            viewMissingPosts: Math.max(0, allPosts.length - resolvedViewPosts),
             postMetrics,
           };
           (parsed as any).profileReachedEnd = capturedReachedEnd
-            || collection.reachedEnd;
+            || collection.reachedEnd
+            || reachedEndByVisibleTotal;
         }
       } else {
         parsed = {
@@ -3164,11 +3207,19 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
         delete (parsed as any).shares;
         delete (parsed as any).views;
       }
-      const complete = threadsProfileHotMetricsHasValue(parsed)
+      const authenticatedProfileComplete = attemptCookies.length > 0
+        && typeof parsed.scannedPosts === "number"
+        && parsed.scannedPosts > 0
+        && Array.isArray((parsed as any).postMetrics)
+        && (parsed as any).postMetrics.length >= parsed.scannedPosts
+        && (parsed as any).profileReachedEnd === true;
+      const visibleProfileComplete = !attemptCookies.length
+        && threadsProfileHotMetricsHasValue(parsed)
         && typeof parsed.scannedPosts === "number"
         && parsed.scannedPosts > 0
         && typeof parsed.views === "number"
         && (parsed as any).profileReachedEnd === true;
+      const complete = authenticatedProfileComplete || visibleProfileComplete;
       if (threadsProfileHotMetricsHasValue(parsed)) {
         const { profileReachedEnd: _profileReachedEnd, ...publicParsed } = parsed as any;
         const browserMetrics: ThreadsProfileHotMetrics = {
@@ -3180,7 +3231,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
           complete,
           scope: complete && attemptCookies.length ? "authenticated_full_profile" : complete ? "profile_visible_light" : "public_partial",
           rawText: visible.rawText.slice(0, 4000),
-          error: complete ? undefined : "Threads 已抓到全量帖子互动，但仍有部分帖子浏览量未能完成读取。",
+          error: complete ? undefined : "Threads live login was not verified or profile pagination did not reach the end; only partial public profile data was read, so this result cannot be treated as full account metrics.",
         };
         if (complete || attemptCookies.length || !hasLoginSessionCookie) return browserMetrics;
         bestBrowserMetrics = browserMetrics;

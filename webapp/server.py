@@ -5,6 +5,7 @@ import base64
 import contextlib
 import copy
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -56,7 +57,7 @@ OUTPUT_ROOT = DATA_DIR / "outputs"
 TOOL_R18_UPLOAD_ROOT = Path(os.getenv("TOOL_R18_UPLOAD_HOST_DIR", str(DATA_DIR / "tool_r18_uploads"))).resolve()
 RUNTIME_CONFIG_PATH = Path(os.getenv("APP_RUNTIME_CONFIG_PATH", str(DATA_DIR / "runtime_config.json"))).resolve()
 TG_WORKBENCH_DB_PATH = Path(os.getenv("TG_WORKBENCH_DB_PATH", str(DATA_DIR / "workbench.db"))).resolve()
-TOOL_R18_RUNTIME_DIR = Path(os.getenv("TOOL_R18_RUNTIME_DIR", str(ROOT_DIR / "tool_r18" / ".runtime"))).resolve()
+TOOL_R18_RUNTIME_DIR = Path(os.getenv("TOOL_R18_RUNTIME_DIR", str(ROOT_DIR / "tool_r18" / ".runtime" / "automatic-script"))).resolve()
 
 
 def _resolve_sentiment_config_path() -> Path:
@@ -687,6 +688,166 @@ def _sentiment_now_seconds() -> float:
     return time.time()
 
 
+_SENTIMENT_THREADS_LIVE_AUTH_CACHE: dict[str, dict[str, Any]] = {}
+_SENTIMENT_THREADS_LIVE_AUTH_CACHE_TTL_SECONDS = 60
+
+
+def _active_sentiment_cookies(cookies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    now = _sentiment_now_seconds()
+    rows: list[dict[str, Any]] = []
+    for cookie in cookies:
+        if not isinstance(cookie, dict) or not cookie.get("name") or not cookie.get("value"):
+            continue
+        try:
+            expires = float(cookie.get("expires"))
+        except Exception:
+            expires = -1
+        if expires > 0 and expires <= now:
+            continue
+        rows.append(cookie)
+    return rows
+
+
+def _sentiment_threads_live_auth_cache_key(profile: dict[str, Any], cookies: list[dict[str, Any]]) -> str:
+    profile_key = str(profile.get("key") or profile.get("platform") or "threads").strip()
+    fingerprint_rows = []
+    for cookie in cookies:
+        fingerprint_rows.append({
+            "name": str(cookie.get("name") or ""),
+            "domain": str(cookie.get("domain") or ""),
+            "path": str(cookie.get("path") or "/"),
+            "expires": cookie.get("expires"),
+            "valueHash": hashlib.sha256(str(cookie.get("value") or "").encode("utf-8")).hexdigest(),
+        })
+    payload = json.dumps({"profile": profile_key, "cookies": fingerprint_rows}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _response_clears_threads_sessionid(response: requests.Response) -> bool:
+    set_cookie_values: list[str] = []
+    with contextlib.suppress(Exception):
+        set_cookie_values.extend(response.raw.headers.get_all("Set-Cookie") or [])
+    if not set_cookie_values:
+        value = str(response.headers.get("Set-Cookie") or "")
+        if value:
+            set_cookie_values.append(value)
+    text = "\n".join(set_cookie_values)
+    return bool(re.search(r"sessionid=\s*;(?:[^\n]*(?:expires=Thu,\s*01\s*Jan\s*1970|max-age=0))", text, re.I))
+
+
+def _probe_threads_live_auth_with_browser(cookies: list[dict[str, Any]]) -> dict[str, Any]:
+    script_path = ROOT_DIR / "tool_r18" / "scripts" / "probe-threads-auth.mjs"
+    if not script_path.exists():
+        return {"status": "probe_failed", "ok": None, "reason": "threads auth probe script missing"}
+    payload = json.dumps({"cookies": cookies}, ensure_ascii=False)
+    try:
+        completed = subprocess.run(
+            ["node", str(script_path)],
+            input=payload,
+            text=True,
+            capture_output=True,
+            cwd=str(ROOT_DIR / "tool_r18"),
+            timeout=32,
+            check=False,
+        )
+    except Exception as exc:
+        return {"status": "probe_failed", "ok": None, "reason": str(exc)}
+    output = (completed.stdout or "").strip().splitlines()[-1:] or [""]
+    try:
+        result = json.loads(output[0])
+    except Exception:
+        result = {"status": "probe_failed", "ok": None, "reason": (completed.stderr or completed.stdout or "invalid probe output")[:300]}
+    if completed.returncode not in {0, None} and result.get("status") != "probe_failed":
+        result = {"status": "probe_failed", "ok": None, "reason": (completed.stderr or f"node exited {completed.returncode}")[:300]}
+    return result if isinstance(result, dict) else {"status": "probe_failed", "ok": None, "reason": "invalid probe result"}
+
+
+def _sentiment_threads_live_auth_state(profile: dict[str, Any], cookies: list[dict[str, Any]]) -> dict[str, Any]:
+    checked_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    active_cookies = _active_sentiment_cookies(cookies)
+    if not _sentiment_cookies_have_threads_sessionid(active_cookies):
+        return {
+            "liveAuthStatus": "missing_sessionid",
+            "liveAuthUsable": False,
+            "liveAuthCheckedAt": checked_at,
+            "liveAuthMessage": "Threads sessionid 未授权；请登录可用账号后等待授权助手自动同步，或点击同步当前标签页。",
+            "liveAuthAction": "reauthorize-profile",
+        }
+    cache_key = _sentiment_threads_live_auth_cache_key(profile, active_cookies)
+    cached = _SENTIMENT_THREADS_LIVE_AUTH_CACHE.get(cache_key)
+    if cached and float(cached.get("expiresAt") or 0) > time.time():
+        return dict(cached.get("value") or {})
+
+    try:
+        session = requests.Session()
+        for cookie in active_cookies:
+            domain = str(cookie.get("domain") or "").strip() or ".threads.com"
+            path_value = str(cookie.get("path") or "/").strip() or "/"
+            session.cookies.set(str(cookie.get("name")), str(cookie.get("value")), domain=domain, path=path_value)
+        response = session.get(
+            "https://www.threads.com/",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout=8,
+            allow_redirects=True,
+        )
+        text_sample = response.text[:3000] if response.text else ""
+        final_url = str(response.url or "")
+        cleared = _response_clears_threads_sessionid(response)
+        login_wall = bool(re.search(r"accounts/login|log in or sign up for Threads|log in with Instagram|登入或註冊 Threads|使用 Instagram 帳號|使用 Instagram 账号", f"{final_url}\n{text_sample}", re.I))
+        if cleared or response.status_code in {401, 403} or login_wall:
+            result = {
+                "liveAuthStatus": "invalid",
+                "liveAuthUsable": False,
+                "liveAuthCheckedAt": checked_at,
+                "liveAuthMessage": "Threads sessionid 已保存，但实时检测不可用；请退出受限/失效账号，重新登录可用账号并等待授权助手自动同步。",
+                "liveAuthAction": "reauthorize-profile",
+            }
+        else:
+            browser_probe = _probe_threads_live_auth_with_browser(active_cookies)
+            probe_status = str(browser_probe.get("status") or "").strip()
+            probe_reason = str(browser_probe.get("reason") or "").strip()
+            if browser_probe.get("ok") is True:
+                result = {
+                    "liveAuthStatus": "verified",
+                    "liveAuthUsable": True,
+                    "liveAuthCheckedAt": checked_at,
+                    "liveAuthMessage": "Threads sessionid 已通过真实浏览器登录态检测；后台可以用该账号进行真实抓取。",
+                    "liveAuthAction": "keep",
+                }
+            elif probe_status == "invalid" or browser_probe.get("ok") is False:
+                result = {
+                    "liveAuthStatus": "invalid",
+                    "liveAuthUsable": False,
+                    "liveAuthCheckedAt": checked_at,
+                    "liveAuthMessage": f"Threads sessionid 已保存，但真实浏览器检测不可用{f'：{probe_reason}' if probe_reason else ''}；请重新登录可用账号并等待授权助手自动同步。",
+                    "liveAuthAction": "reauthorize-profile",
+                }
+            else:
+                result = {
+                    "liveAuthStatus": "probe_failed",
+                    "liveAuthUsable": None,
+                    "liveAuthCheckedAt": checked_at,
+                    "liveAuthMessage": f"Threads sessionid 已保存，但真实浏览器检测未完成{f'：{probe_reason}' if probe_reason else ''}；请稍后刷新，若持续失败再检查后台 Playwright/Node 环境。",
+                    "liveAuthAction": "retry-later",
+                }
+    except Exception as exc:
+        result = {
+            "liveAuthStatus": "probe_failed",
+            "liveAuthUsable": None,
+            "liveAuthCheckedAt": checked_at,
+            "liveAuthMessage": f"Threads sessionid 实时检测失败：{exc}；请稍后刷新，若持续失败再重新登录同步。",
+            "liveAuthAction": "retry-later",
+        }
+    _SENTIMENT_THREADS_LIVE_AUTH_CACHE[cache_key] = {
+        "expiresAt": time.time() + _SENTIMENT_THREADS_LIVE_AUTH_CACHE_TTL_SECONDS,
+        "value": result,
+    }
+    return result
+
+
 def _sentiment_auth_state(cookies: list[dict[str, Any]], last_authorized_at: str | None = None, platform: str | None = None) -> dict[str, Any]:
     now = _sentiment_now_seconds()
     valid = 0
@@ -866,7 +1027,17 @@ def _sentiment_browser_auth_token(config: dict[str, Any], *, create: bool = Fals
     if not token and create:
         token = uuid.uuid4().hex + uuid.uuid4().hex
         browser_fallback["authHelperToken"] = token
+        browser_fallback["authHelperTokenRotatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _write_sentiment_config_file(config)
+    return token
+
+
+def _rotate_sentiment_browser_auth_token(config: dict[str, Any]) -> str:
+    browser_fallback = _sentiment_browser_fallback_config(config)
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    browser_fallback["authHelperToken"] = token
+    browser_fallback["authHelperTokenRotatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _write_sentiment_config_file(config)
     return token
 
 
@@ -900,7 +1071,18 @@ def _sentiment_browser_auth_text(file_name: str, request: Request) -> tuple[byte
     origin = _request_public_origin(request)
     if file_name == "background.js":
         auth_token = _sentiment_browser_auth_token(_read_sentiment_config_file(), create=True)
-        body = body.replace('const DEFAULT_API_BASE = "http://47.250.188.76";', f'const DEFAULT_API_BASE = "{origin}";')
+        body = re.sub(
+            r'const DEFAULT_API_BASE = "https?://[^"]+";',
+            f'const DEFAULT_API_BASE = "{origin}";',
+            body,
+            count=1,
+        )
+        body = re.sub(
+            r'const DEFAULT_AUTH_TOKEN = ".*?";',
+            f'const DEFAULT_AUTH_TOKEN = "{auth_token}";',
+            body,
+            count=1,
+        )
         extension_profiles = _sentiment_browser_auth_profiles_for_extension()
         if extension_profiles:
             profiles_js = json.dumps(extension_profiles, ensure_ascii=False, indent=2)
@@ -910,12 +1092,13 @@ def _sentiment_browser_auth_text(file_name: str, request: Request) -> tuple[byte
                 body,
                 count=1,
             )
-        body = body.replace(
-            'headers: { "Content-Type": "application/json" },',
-            f'headers: {{ "Content-Type": "application/json", "X-Sentiment-Browser-Auth": "{auth_token}" }},',
-        )
     elif file_name == "popup.js":
-        body = body.replace('$("apiBase").value = values.apiBase || "http://47.250.188.76";', f'$("apiBase").value = values.apiBase || "{origin}";')
+        body = re.sub(
+            r'\$\("apiBase"\)\.value = values\.apiBase \|\| "https?://[^"]+";',
+            f'$("apiBase").value = values.apiBase || "{origin}";',
+            body,
+            count=1,
+        )
     elif file_name == "manifest.json":
         with contextlib.suppress(Exception):
             parsed = json.loads(body)
@@ -1103,6 +1286,7 @@ def _parse_manual_cookie_payload(raw: str, fallback_domain: str) -> list[dict[st
 def _sentiment_profile_for_client(profile: dict[str, Any]) -> dict[str, Any]:
     cookies = profile.get("cookies") if isinstance(profile.get("cookies"), list) else []
     last_authorized_at = str(profile.get("lastAuthorizedAt") or profile.get("last_authorized_at") or "").strip() or None
+    platform_key = str(profile.get("platform") or profile.get("key") or "").strip().lower()
     safe = {
         "key": profile.get("key"),
         "label": profile.get("label"),
@@ -1119,8 +1303,23 @@ def _sentiment_profile_for_client(profile: dict[str, Any]) -> dict[str, Any]:
     safe.update(_sentiment_auth_state(
         [cookie for cookie in cookies if isinstance(cookie, dict)],
         last_authorized_at,
-        str(profile.get("platform") or profile.get("key") or ""),
+        platform_key,
     ))
+    if platform_key == "threads":
+        live_state = _sentiment_threads_live_auth_state(profile, [cookie for cookie in cookies if isinstance(cookie, dict)])
+        safe.update(live_state)
+        if live_state.get("liveAuthUsable") is False:
+            safe["authHealth"] = "degraded"
+            safe["authStatus"] = "invalid"
+            safe["authorizationNeedsRefresh"] = True
+            safe["recommendedAction"] = live_state.get("liveAuthAction") or "reauthorize-profile"
+            safe["hasRequiredSessionCookie"] = False
+            reasons = list(safe.get("statusReasons") or [])
+            if "live-session-invalid" not in reasons:
+                reasons.append("live-session-invalid")
+            safe["statusReasons"] = reasons
+        elif live_state.get("liveAuthUsable") is True:
+            safe["hasRequiredSessionCookie"] = True
     return safe
 
 
@@ -6924,7 +7123,7 @@ def _analyze_generated_person_face_framing_quality(
             "Return strict JSON only. Put issues in Chinese.",
             "JSON schema:",
             "{",
-            '  "summary": "???????",',
+            '  "summary": "脸部完整性检查结论",',
             '  "faceVisible": false,',
             '  "fullFaceVisible": false,',
             '  "foreheadVisible": false,',
@@ -6934,7 +7133,7 @@ def _analyze_generated_person_face_framing_quality(
             '  "chinVisible": false,',
             '  "faceCroppedOrMissing": false,',
             '  "confidence": 0,',
-            '  "issues": ["????1"]',
+            '  "issues": ["脸部裁切或缺失问题"]',
             "}",
         ]
     )
@@ -6962,7 +7161,7 @@ def _analyze_generated_person_face_framing_quality(
             "inspected": True,
             "selected_model": str(selected.get("model") or "").strip() if isinstance(selected, dict) else "",
             "attempts": attempts,
-            "summary": str(parsed.get("summary") or "???? QA ?????").strip(),
+            "summary": str(parsed.get("summary") or "脸部 QA 检查完成。").strip(),
             "face_visible": parsed.get("faceVisible") is True,
             "full_face_visible": parsed.get("fullFaceVisible") is True,
             "forehead_visible": parsed.get("foreheadVisible") is True,
@@ -6978,9 +7177,9 @@ def _analyze_generated_person_face_framing_quality(
         return {
             "inspected": False,
             "qa_unavailable": True,
-            "summary": "???? QA ?????????????",
+            "summary": "脸部 QA 暂不可用，已跳过专项复审。",
             "error": str(exc),
-            "issues": ["???? QA ???????????????"],
+            "issues": ["脸部 QA 未完成，不能确认脸部构图完整。"],
         }
 
 
@@ -7017,7 +7216,7 @@ def _merge_generated_person_face_framing_audit(report: dict[str, Any], audit: di
     if audit_issues:
         issues.extend(audit_issues)
     else:
-        issues.append(str(audit.get("summary") or "??????????????????").strip())
+        issues.append(str(audit.get("summary") or "脸部构图不完整或被裁切。").strip())
     report["issues"] = _parse_qa_string_list(issues, 6)
 
 def _analyze_generated_person_body_shape_quality(
@@ -18053,7 +18252,7 @@ def create_app() -> FastAPI:
         config = _read_sentiment_config_file()
         expected_token = _sentiment_browser_auth_token(config, create=False)
         provided_token = str(request.headers.get("x-sentiment-browser-auth") or "").strip()
-        if not expected_token or provided_token != expected_token:
+        if not expected_token or not provided_token or not hmac.compare_digest(provided_token, expected_token):
             return JSONResponse({"ok": False, "error": "invalid browser auth token"}, status_code=403, headers=cors_headers)
         profiles = _sentiment_profiles_container(config)
         profile_key = str(payload.profileKey or payload.sourceKey or "").strip()
@@ -18095,6 +18294,18 @@ def create_app() -> FastAPI:
             {"ok": True, "profileKey": str(profile.get("key") or profile_key), "savedCookieCount": len(cookies)},
             headers=cors_headers,
         )
+
+    @app.get("/api/admin/sentiment/browser_auth/helper_token")
+    def api_admin_sentiment_browser_auth_helper_token(user: dict[str, Any] = Depends(require_admin)):
+        config = _read_sentiment_config_file()
+        token = _sentiment_browser_auth_token(config, create=True)
+        return {"ok": True, "token": token}
+
+    @app.post("/api/admin/sentiment/browser_auth/helper_token/rotate")
+    def api_admin_sentiment_browser_auth_helper_token_rotate(user: dict[str, Any] = Depends(require_admin)):
+        config = _read_sentiment_config_file()
+        token = _rotate_sentiment_browser_auth_token(config)
+        return {"ok": True, "token": token, "rotatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
     @app.get("/api/admin/sentiment/browser_auth/profiles")
     def api_admin_sentiment_browser_auth_profiles(user: dict[str, Any] = Depends(require_admin)):

@@ -2373,25 +2373,42 @@ function sentimentCookieStatusDetails(profile) {
     ? `普通 Cookie：已授权（${validCookieCount}）`
     : "普通 Cookie：未授权";
   const sessionidReady = profile?.hasRequiredSessionCookie !== false && ordinaryCookieReady;
-  const sessionidText = sessionidReady
-    ? "sessionid：已授权（需确认账号可正常访问 Threads）"
-    : ordinaryCookieReady
-      ? "sessionid：未授权，当前只有普通 Cookie"
-      : "sessionid：未授权";
   if (!requiresSessionid) {
     return [
       { text: ordinaryCookieText, state: ordinaryCookieReady ? "ready" : "missing" },
       { text: "sessionid：未授权（当前平台不要求）", state: "unknown" },
     ];
   }
+  const liveStatus = String(profile?.liveAuthStatus || "").trim();
+  const liveMessage = String(profile?.liveAuthMessage || "").trim();
+  const checkedAt = profile?.liveAuthCheckedAt ? formatAdminDate(profile.liveAuthCheckedAt) : "";
+  const sessionidText = !ordinaryCookieReady
+    ? "sessionid：未授权"
+    : liveStatus === "verified"
+      ? "sessionid：已授权，实时检测可用"
+      : liveStatus === "invalid"
+        ? "sessionid：已授权，但实时检测不可用"
+        : liveStatus === "probe_failed"
+          ? "sessionid：已授权，实时检测失败"
+          : liveStatus === "missing_sessionid"
+            ? "sessionid：未授权，当前只有普通 Cookie"
+            : sessionidReady
+              ? "sessionid：已授权，等待实时检测"
+              : "sessionid：未授权，当前只有普通 Cookie";
+  const sessionidState = liveStatus === "verified"
+    ? "ready"
+    : liveStatus === "probe_failed"
+      ? "unknown"
+      : sessionidReady ? "ready" : "missing";
+  const solutionText = liveMessage || (sessionidReady
+    ? "提示：刷新状态会自动检测 Threads sessionid 是否真实可用；如果账号被封、受限或跳登录，请重新登录可用账号并等待授权助手自动同步。"
+    : "提示：Threads 全量搜索需要可用账号的 sessionid；登录可用账号后，授权助手会自动同步，也可以点击同步当前标签页。");
   return [
     { text: ordinaryCookieText, state: ordinaryCookieReady ? "ready" : "missing" },
-    { text: sessionidText, state: sessionidReady ? "ready" : "missing" },
+    { text: checkedAt ? `${sessionidText}（检测时间：${checkedAt}）` : sessionidText, state: sessionidState },
     {
-      text: sessionidReady
-        ? "提示：如果授权账号被封、受限、需验证，或打开 Threads 自动跳首页，请退出旧账号后用可用账号重新同步。"
-        : "提示：Threads 全量搜索需要可用账号的 sessionid，请登录可用账号并用授权助手同步当前站点。",
-      state: sessionidReady ? "unknown" : "missing",
+      text: solutionText,
+      state: liveStatus === "verified" ? "ready" : (liveStatus === "probe_failed" ? "unknown" : "missing"),
     },
   ];
 }
@@ -2506,6 +2523,22 @@ async function copySentimentCookieExtensionUrl() {
   setMsg("sentimentCookieMsg", "已复制扩展管理页地址：chrome://extensions/。浏览器限制网页直接打开该地址，请粘贴到地址栏进入。", true);
 }
 
+async function copySentimentCookieHelperToken() {
+  const payload = await api("/api/admin/sentiment/browser_auth/helper_token");
+  const token = String(payload?.token || "").trim();
+  if (!token) throw new Error("未取得同步令牌，请刷新后台后重试。");
+  await navigator.clipboard.writeText(token);
+  setMsg("sentimentCookieMsg", "已复制同步令牌。请粘贴到浏览器授权助手的同步令牌输入框并保存。", true);
+}
+
+async function rotateSentimentCookieHelperToken() {
+  const payload = await api("/api/admin/sentiment/browser_auth/helper_token/rotate", { method: "POST" });
+  const token = String(payload?.token || "").trim();
+  if (!token) throw new Error("同步令牌轮换失败，请稍后重试。");
+  await navigator.clipboard.writeText(token);
+  setMsg("sentimentCookieMsg", "同步令牌已轮换并复制。旧授权助手包会失效，请重新下载助手或在助手中保存新令牌。", true);
+}
+
 function sentimentDownloadFilename(disposition) {
   const text = String(disposition || "");
   const utf8Match = text.match(/filename\*=UTF-8''([^;]+)/i);
@@ -2542,7 +2575,7 @@ async function downloadSentimentCookieHelper() {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
-  setMsg("sentimentCookieMsg", "授权助手已开始下载。浏览器不允许网页直接一键安装未上架扩展，请解压后在扩展管理页加载该目录。", true);
+  setMsg("sentimentCookieMsg", "授权助手已开始下载，后端地址和同步令牌已自动写入安装包。解压后在扩展管理页加载该目录即可，后续会自动同步已登录站点 Cookie。", true);
 }
 
 async function loadSentimentCookieProfiles() {
@@ -3287,6 +3320,24 @@ function bindActions() {
     el("btnSentimentCookieCopyBase").addEventListener("click", async () => {
       try {
         await copySentimentCookieHelperBase();
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnSentimentCookieCopyToken")) {
+    el("btnSentimentCookieCopyToken").addEventListener("click", async () => {
+      try {
+        await copySentimentCookieHelperToken();
+      } catch (err) {
+        setMsg("sentimentCookieMsg", getErrorMessage(err), false);
+      }
+    });
+  }
+  if (el("btnSentimentCookieRotateToken")) {
+    el("btnSentimentCookieRotateToken").addEventListener("click", async () => {
+      try {
+        await rotateSentimentCookieHelperToken();
       } catch (err) {
         setMsg("sentimentCookieMsg", getErrorMessage(err), false);
       }

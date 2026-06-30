@@ -9,8 +9,9 @@ function send(message) {
 }
 
 async function loadState() {
-  const values = await chrome.storage.local.get(["apiBase", "lastStatus"]);
+  const values = await chrome.storage.local.get(["apiBase", "authToken", "lastStatus"]);
   $("apiBase").value = values.apiBase || "http://43.167.237.120";
+  $("authToken").value = values.authToken || "";
   setStatus(values.lastStatus || "等待授权");
 }
 
@@ -18,6 +19,12 @@ $("saveApi").addEventListener("click", async () => {
   const apiBase = $("apiBase").value.trim();
   const result = await send({ type: "set-api-base", apiBase });
   setStatus(result.ok ? `已保存：${result.apiBase}` : result.error);
+});
+
+$("saveToken").addEventListener("click", async () => {
+  const authToken = $("authToken").value.trim();
+  const result = await send({ type: "set-auth-token", authToken });
+  setStatus(result.ok ? (result.hasAuthToken ? "同步令牌已保存" : "同步令牌已清空") : result.error);
 });
 
 $("openAuth").addEventListener("click", async () => {

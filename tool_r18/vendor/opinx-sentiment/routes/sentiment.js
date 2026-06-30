@@ -3,6 +3,7 @@
  * plugin-manager 格式：export default Hono app
  */
 
+import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { getDb } from "../db/db.js";
 import { getTaiwanRecentWhereClause } from "../scrapers/filters.js";
@@ -430,6 +431,15 @@ function activeBrowserAuthCookies(cookies = [], now = new Date()) {
     byKey.set(key, cookie);
   }
   return [...byKey.values()];
+}
+
+function browserAuthRequestAuthorized(c, settings = {}) {
+  const expected = String(settings.browserFallback?.authHelperToken || "").trim();
+  const provided = String(c.req.header("x-sentiment-browser-auth") || "").trim();
+  if (!expected || !provided) return false;
+  const expectedBuffer = Buffer.from(expected);
+  const providedBuffer = Buffer.from(provided);
+  return expectedBuffer.length === providedBuffer.length && timingSafeEqual(expectedBuffer, providedBuffer);
 }
 
 function browserAuthProfilesForClient(settings = {}) {
@@ -2147,6 +2157,9 @@ app.post("/browser-auth/cookies", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const ctx = pluginCtx(c);
   const settings = readSentimentSearchSettings(ctx.config);
+  if (!browserAuthRequestAuthorized(c, settings)) {
+    return corsJson(c, { ok: false, error: "invalid browser auth token" }, 403);
+  }
   const browserFallback = settings.browserFallback || {};
   const profiles = Array.isArray(browserFallback.profiles) ? browserFallback.profiles : [];
   const profileKey = cleanCookieValue(body.profileKey || body.profile_key || body.key, 80);

@@ -3481,6 +3481,8 @@ export function normalizeSentimentBrowserFallbackSettings(input = {}) {
   return {
     enabled: input.enabled !== false,
     headless: input.headless !== false,
+    authHelperToken: clean(input.authHelperToken || input.auth_helper_token || "", 160),
+    authHelperTokenRotatedAt: clean(input.authHelperTokenRotatedAt || input.auth_helper_token_rotated_at || "", 80),
     maxKeywords: clampInteger(input.maxKeywords ?? input.max_keywords, defaults.maxKeywords, 1, 20),
     maxProfilesPerKeyword: clampInteger(input.maxProfilesPerKeyword ?? input.max_profiles_per_keyword, defaults.maxProfilesPerKeyword, 1, 30),
     maxItemsPerKeyword: clampInteger(input.maxItemsPerKeyword ?? input.max_items_per_keyword, defaults.maxItemsPerKeyword, 1, 30),

@@ -60,7 +60,12 @@
       后端地址
       <input id="apiBase" placeholder="http://47.250.188.76">
     </label>
+    <label>
+      同步令牌（安装包通常已自动配置）
+      <input id="authToken" placeholder="同步失败时再从后台复制令牌" type="password">
+    </label>
     <button id="saveApi">保存后端地址</button>
+    <button id="saveToken" class="secondary">保存同步令牌</button>
     <button id="openAuth">打开全部授权页面</button>
     <button id="syncCurrent" class="secondary">同步当前标签页</button>
     <div id="status">正在读取状态...</div>

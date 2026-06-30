@@ -3306,13 +3306,13 @@ function hotMetricFieldLabel(field: PersonaHotMetricField) {
   switch (field) {
     case "followers": return "粉絲";
     case "following": return "追蹤中";
-    case "recentViews": return "最近瀏覽";
+    case "recentViews": return "帳號最近瀏覽";
     case "posts": return "推文";
     case "likes": return "點讚";
     case "comments": return "留言";
     case "reposts": return "轉發";
     case "shares": return "分享";
-    case "views": return "瀏覽";
+    case "views": return "單帖瀏覽合計";
     default: return field;
   }
 }
@@ -3365,9 +3365,13 @@ export function formatPersonaSettingsHotMetricsLines(archive: PersonaArchive, op
     ];
   }
   const detailTimestamp = formatPersonaHotMetricsTimestamp(metrics.refreshedAt);
+  const viewCoverage = typeof metrics.viewResolvedPosts === "number" && typeof metrics.scannedPosts === "number"
+    ? `瀏覽解析：${metrics.viewResolvedPosts}/${metrics.scannedPosts} 篇${Number(metrics.viewMissingPosts || 0) > 0 ? `，${metrics.viewMissingPosts} 篇待補` : ""}`
+    : "";
   return [
     `Threads：${usernamePart || "已刷新"}`,
     detailParts.length ? detailParts.join("；") : "目前沒有可展示的資料項",
+    ...(viewCoverage ? [viewCoverage] : []),
     ...(detailTimestamp ? [`更新時間：${detailTimestamp}`] : []),
   ];
 }
@@ -3397,7 +3401,7 @@ function formatPersonaHotPostMetricsLine(post: any, displayIndex: number) {
     typeof post.commentCount === "number" ? `評 ${formatPersonaHotMetricCount(post.commentCount)}` : "",
     typeof post.repostCount === "number" ? `轉發 ${formatPersonaHotMetricCount(post.repostCount)}` : "",
     typeof post.shareCount === "number" ? `分享 ${formatPersonaHotMetricCount(post.shareCount)}` : "",
-    typeof post.viewCount === "number" ? `瀏覽 ${formatPersonaHotMetricCount(post.viewCount)}` : "",
+    typeof post.viewCount === "number" ? `瀏覽 ${formatPersonaHotMetricCount(post.viewCount)}` : "瀏覽 待補",
   ].filter(Boolean);
   const content = String(post.content || "").replace(/\s+/g, " ").trim();
   const label = content
@@ -4352,6 +4356,8 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
         reposts: metrics.reposts,
         shares: metrics.shares,
         views: metrics.views,
+        viewResolvedPosts: (metrics as any).viewResolvedPosts,
+        viewMissingPosts: (metrics as any).viewMissingPosts,
         scannedPosts: metrics.scannedPosts,
         postMetrics: Array.isArray((metrics as any).postMetrics) ? (metrics as any).postMetrics : previousMetrics.postMetrics,
         complete: metrics.complete === true,

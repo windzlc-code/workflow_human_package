@@ -1,5 +1,8 @@
 const DEFAULT_API_BASE = "http://43.167.237.120";
 const DEFAULT_AUTH_TOKEN = "";
+const AUTO_SYNC_ALARM = "opinx-browser-auth-auto-sync";
+const AUTO_SYNC_INTERVAL_MINUTES = 10;
+const MIN_PROFILE_SYNC_GAP_MS = 2 * 60 * 1000;
 
 const PROFILES = [
   {
@@ -256,7 +259,14 @@ async function getCookiesForDomain(domain = "") {
     });
 }
 
-async function syncProfileCookies(profile) {
+async function syncProfileCookies(profile, options = {}) {
+  if (!options.force) {
+    const values = await storageGet([`lastSync:${profile.key}`]);
+    const lastSyncAt = Date.parse(values[`lastSync:${profile.key}`] || "");
+    if (Number.isFinite(lastSyncAt) && Date.now() - lastSyncAt < MIN_PROFILE_SYNC_GAP_MS) {
+      return { ok: true, skipped: true, reason: "recently-synced" };
+    }
+  }
   const domains = [profile.domain, ...(profile.cookieDomains || [])]
     .map(domain => String(domain || "").replace(/^\.+/, "").replace(/^www\./, ""))
     .filter(Boolean);
@@ -323,6 +333,36 @@ async function openAuthorizationPages() {
   await storageSet({ lastStatus: "已打开授权页面，登录完成后扩展会自动同步 Cookie" });
 }
 
+async function syncAllProfiles(options = {}) {
+  const token = await authToken();
+  if (!token) {
+    await storageSet({ lastStatus: "missing auth token" });
+    return [];
+  }
+  const results = await Promise.allSettled(PROFILES.map(profile => syncProfileCookies(profile, options)));
+  const okCount = results.filter(result => result.status === "fulfilled" && result.value?.ok).length;
+  const failed = results
+    .map((result, index) => ({ result, profile: PROFILES[index] }))
+    .filter(item => item.result.status === "rejected" || !item.result.value?.ok);
+  const failedText = failed.slice(0, 3).map(item => {
+    if (item.result.status === "rejected") return `${item.profile.key}: ${item.result.reason?.message || item.result.reason}`;
+    return `${item.profile.key}: ${item.result.value?.error || item.result.value?.reason || "no valid cookies"}`;
+  }).join("；");
+  await storageSet({
+    lastAutoSyncAt: new Date().toISOString(),
+    lastStatus: failed.length ? `auto sync ${okCount}/${PROFILES.length}; ${failedText}` : `auto sync ${okCount}/${PROFILES.length}`,
+  });
+  return results;
+}
+
+function ensureAutoSyncAlarm() {
+  if (!chrome.alarms?.create) return;
+  chrome.alarms.create(AUTO_SYNC_ALARM, {
+    delayInMinutes: 1,
+    periodInMinutes: AUTO_SYNC_INTERVAL_MINUTES,
+  });
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const values = await storageGet(["apiBase", "authToken"]);
   await storageSet({
@@ -331,6 +371,18 @@ chrome.runtime.onInstalled.addListener(async () => {
     profiles: PROFILES,
     lastStatus: "授权助手已安装",
   });
+  ensureAutoSyncAlarm();
+  void syncAllProfiles({ force: true }).catch(() => undefined);
+});
+
+chrome.runtime.onStartup?.addListener(() => {
+  ensureAutoSyncAlarm();
+  void syncAllProfiles().catch(() => undefined);
+});
+
+chrome.alarms?.onAlarm?.addListener((alarm) => {
+  if (alarm?.name !== AUTO_SYNC_ALARM) return;
+  void syncAllProfiles().catch(() => undefined);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -362,7 +414,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: false, error: "当前标签页不是受支持的授权站点" });
         return;
       }
-      const results = await Promise.allSettled(profiles.map(profile => syncProfileCookies(profile)));
+      const results = await Promise.allSettled(profiles.map(profile => syncProfileCookies(profile, { force: true })));
       const failures = results
         .map((result, index) => ({ result, profile: profiles[index] }))
         .filter(item => item.result.status === "rejected");
@@ -384,12 +436,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "set-api-base") {
       const base = String(message.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
       await storageSet({ apiBase: base });
+      ensureAutoSyncAlarm();
       sendResponse({ ok: true, apiBase: base });
       return;
     }
     if (message?.type === "set-auth-token") {
       const token = String(message.authToken || "").trim();
       await storageSet({ authToken: token });
+      ensureAutoSyncAlarm();
+      if (token) void syncAllProfiles({ force: true }).catch(() => undefined);
       sendResponse({ ok: true, hasAuthToken: Boolean(token) });
       return;
     }
