@@ -1338,8 +1338,10 @@ export async function fetchSentimentHotCandidates(args: {
     && candidates.length >= limit
     && cachedReadyCount >= limit;
   const shouldFetchLiveCandidates = hasSearchKeywords
-    && !canReturnCachedWhileRefreshing
-    && (candidates.length < limit || cachedReadyCount < limit || (args.refresh === true && !canUseCandidatePoolForRefresh));
+    && (
+      args.refresh === true
+      || (!canReturnCachedWhileRefreshing && (candidates.length < limit || cachedReadyCount < limit || (args.refresh === true && !canUseCandidatePoolForRefresh)))
+    );
   if (hasSearchKeywords && args.refresh === true && candidates.length >= limit && !shouldFetchLiveCandidates) {
     warnings.push("已使用當前人設候選池刷新；高品質候選仍足夠，已跳過短時間內重複抓取以降低平台風控。");
   }
@@ -1927,11 +1929,11 @@ async function fetchThreadsSearchPageCandidates(args: {
   refresh?: boolean;
 }): Promise<SentimentHotCandidate[]> {
   const baseQueries = buildThreadsSearchQueries(args.keywords);
-  const shownIds = getSentimentHotShownIds(args.archiveId);
   const selectedOrImportedIds = getSentimentHotExcludedIds(args.archiveId);
-  const primaryExcluded = args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : selectedOrImportedIds;
+  const shownIds = getSentimentHotShownIds(args.archiveId);
+  const primaryExcluded = selectedOrImportedIds;
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
-  const fastReturnTarget = Math.min(args.limit, 2);
+  const fastReturnTarget = args.refresh ? Math.min(args.limit, 30) : Math.min(args.limit, 2);
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
 
@@ -1962,7 +1964,7 @@ async function fetchThreadsSearchPageCandidates(args: {
       if (byId.size >= args.limit) break;
     }
     browserResults = [...byId.values()];
-    if (browserResults.length >= fastReturnTarget) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
+    if (!args.refresh && browserResults.length >= fastReturnTarget) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
     if (browserResults.length >= args.limit) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
   }
 
