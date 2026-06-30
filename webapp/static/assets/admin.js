@@ -3261,6 +3261,12 @@ function bindActions() {
     });
   }
 
+  if (el("btnPersonaDashboard")) {
+    el("btnPersonaDashboard").addEventListener("click", () => {
+      location.href = "/persona-dashboard.html";
+    });
+  }
+
   if (el("btnTaskRefresh")) {
     el("btnTaskRefresh").addEventListener("click", async () => {
       try {
