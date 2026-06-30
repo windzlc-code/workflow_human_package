@@ -543,6 +543,31 @@ def _mask_secret(value: Any) -> str:
     return f"{text[:visible]}{'•' * masked_len}{text[-visible:]}"
 
 
+def _date_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.match(r"^\d{4}-\d{2}-\d{2}", text):
+        return text[:10]
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(float(text)))
+    except Exception:
+        return ""
+
+
+def _number(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _sum_numbers(*values: Any) -> int:
+    return sum(_number(value, 0) for value in values)
+
+
 def _read_dotenv_values(path: Path | None = None) -> dict[str, str]:
     env_path = path or (ROOT_DIR / ".env")
     if not env_path.exists():
@@ -16298,6 +16323,441 @@ class InternalTgAgentSubmitPayload(BaseModel):
     duration_seconds: int = 15
 
 
+def _read_json_file(path: Path) -> Any:
+    try:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+
+
+def _extract_persona_archive_list(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, dict):
+        for key in ("persona_archives_v2", "persona_archives", "archives", "items"):
+            value = raw.get(key)
+            if isinstance(value, str):
+                parsed = _json_loads(value, [])
+                if isinstance(parsed, list):
+                    return [item for item in parsed if isinstance(item, dict)]
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _read_tool_r18_persona_archives() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    primary = TOOL_R18_RUNTIME_DIR / "persona_archives.json"
+    fallback = TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json"
+    for path in (primary, fallback):
+        raw = _read_json_file(path)
+        archives = _extract_persona_archive_list(raw)
+        if archives:
+            return archives, {
+                "path": path.name,
+                "exists": True,
+                "count": len(archives),
+                "fallback": path == fallback,
+            }
+    return [], {
+        "path": primary.name,
+        "exists": primary.exists() or fallback.exists(),
+        "count": 0,
+        "fallback": fallback.exists() and not primary.exists(),
+    }
+
+
+def _read_tool_r18_publish_queue_stats() -> dict[str, Any]:
+    db_path = TOOL_R18_RUNTIME_DIR / "publish_queue.db"
+    empty = {
+        "path": db_path.name,
+        "exists": db_path.exists(),
+        "total": 0,
+        "by_status": {},
+        "by_platform": {},
+        "by_pad": {},
+        "by_archive": {},
+        "unbound": 0,
+        "rows": [],
+    }
+    if not db_path.exists():
+        return empty
+    try:
+        with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = [dict(row) for row in conn.execute("SELECT * FROM publish_tasks").fetchall()]
+    except Exception as exc:
+        return {**empty, "error": str(exc)}
+    by_status: dict[str, int] = {}
+    by_platform: dict[str, int] = {}
+    by_pad: dict[str, int] = {}
+    by_archive: dict[str, dict[str, Any]] = {}
+    unbound = 0
+    compact_rows: list[dict[str, Any]] = []
+    for row in rows:
+        status = str(row.get("status") or "unknown").strip() or "unknown"
+        platform = str(row.get("platform") or "unknown").strip() or "unknown"
+        pad = str(row.get("pad_code") or "unknown").strip() or "unknown"
+        archive_id = str(row.get("archive_id") or "").strip()
+        by_status[status] = by_status.get(status, 0) + 1
+        by_platform[platform] = by_platform.get(platform, 0) + 1
+        by_pad[pad] = by_pad.get(pad, 0) + 1
+        if archive_id:
+            item = by_archive.setdefault(archive_id, {"total": 0, "by_status": {}, "by_platform": {}, "latest": ""})
+            item["total"] += 1
+            item["by_status"][status] = item["by_status"].get(status, 0) + 1
+            item["by_platform"][platform] = item["by_platform"].get(platform, 0) + 1
+            latest = str(row.get("finished_at") or row.get("started_at") or row.get("scheduled_at") or row.get("created_at") or "")
+            if latest and latest > str(item.get("latest") or ""):
+                item["latest"] = latest
+        else:
+            unbound += 1
+        compact_rows.append({
+            "id": row.get("id"),
+            "archive_id": archive_id,
+            "archive_post_id": row.get("archive_post_id"),
+            "pad_code": row.get("pad_code"),
+            "platform": platform,
+            "status": status,
+            "scheduled_at": row.get("scheduled_at"),
+            "finished_at": row.get("finished_at"),
+        })
+    return {
+        **empty,
+        "total": len(rows),
+        "by_status": by_status,
+        "by_platform": by_platform,
+        "by_pad": by_pad,
+        "by_archive": by_archive,
+        "unbound": unbound,
+        "rows": compact_rows[:500],
+    }
+
+
+def _read_tool_r18_sentiment_hot_stats() -> dict[str, Any]:
+    path = TOOL_R18_RUNTIME_DIR / "sentiment_hot_candidates.json"
+    raw = _read_json_file(path)
+    shown_count = 0
+    cache_count = 0
+    archive_count = 0
+    if isinstance(raw, dict):
+        shown = raw.get("shown")
+        if isinstance(shown, dict):
+            archive_count = len(shown)
+            for value in shown.values():
+                if isinstance(value, list):
+                    shown_count += len(value)
+        for key, value in raw.items():
+            if key == "shown":
+                continue
+            if isinstance(value, list):
+                cache_count += len(value)
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    if isinstance(nested, list):
+                        cache_count += len(nested)
+    return {
+        "path": path.name,
+        "exists": path.exists(),
+        "shown_count": shown_count,
+        "cache_count": cache_count,
+        "archive_count": archive_count,
+    }
+
+
+def _sanitize_dashboard_value(value: Any, key: str = "") -> Any:
+    if _is_secret_key(key):
+        return {"configured": bool(str(value or "").strip()), "masked": _mask_secret(value) if value else ""}
+    if isinstance(value, dict):
+        return {str(k): _sanitize_dashboard_value(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_dashboard_value(item, key) for item in value[:80]]
+    return value
+
+
+def _metric_value(metrics: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        if key in metrics:
+            return _number(metrics.get(key), 0)
+    return 0
+
+
+def _source_metric(source: Any, *keys: str) -> int:
+    if not isinstance(source, dict):
+        return 0
+    engagement = source.get("engagement") if isinstance(source.get("engagement"), dict) else {}
+    metrics = source.get("metrics") if isinstance(source.get("metrics"), dict) else {}
+    for key in keys:
+        if key in engagement:
+            return _number(engagement.get(key), 0)
+        if key in metrics:
+            return _number(metrics.get(key), 0)
+    return _number(source.get(keys[0]), 0) if keys else 0
+
+
+def _compact_hot_post(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "pk": raw.get("pk"),
+        "code": raw.get("code"),
+        "source_url": raw.get("sourceUrl") or raw.get("source_url"),
+        "content": str(raw.get("content") or "")[:220],
+        "published_at": raw.get("publishedAt") or raw.get("published_at"),
+        "captured_at": raw.get("capturedAt") or raw.get("captured_at"),
+        "like_count": _metric_value(raw, "likeCount", "like_count"),
+        "comment_count": _metric_value(raw, "commentCount", "comment_count"),
+        "repost_count": _metric_value(raw, "repostCount", "repost_count"),
+        "share_count": _metric_value(raw, "shareCount", "share_count", "send_count"),
+        "view_count": _metric_value(raw, "viewCount", "view_count"),
+    }
+
+
+def _build_persona_dashboard_overview() -> dict[str, Any]:
+    archives, archives_source = _read_tool_r18_persona_archives()
+    queue_stats = _read_tool_r18_publish_queue_stats()
+    sentiment_stats = _read_tool_r18_sentiment_hot_stats()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    platform_counts: dict[str, int] = {}
+    pad_counts: dict[str, int] = {}
+    task_status_counts = dict(queue_stats.get("by_status") or {})
+    daily: dict[str, dict[str, int]] = {}
+    personas: list[dict[str, Any]] = []
+    totals = {
+        "posts": 0,
+        "published": 0,
+        "images": 0,
+        "likes": 0,
+        "comments": 0,
+        "shares": 0,
+        "reposts": 0,
+        "recent_views": 0,
+        "post_views": 0,
+        "hot_score": 0,
+        "complete_hot_metrics": 0,
+        "partial_hot_metrics": 0,
+    }
+    latest_update = ""
+
+    for archive in archives:
+        archive_id = str(archive.get("id") or "").strip()
+        setup = archive.get("setup") if isinstance(archive.get("setup"), dict) else {}
+        posts = archive.get("posts") if isinstance(archive.get("posts"), list) else []
+        platform_posts = archive.get("platformPosts") if isinstance(archive.get("platformPosts"), dict) else {}
+        publish_history = archive.get("publishHistory") if isinstance(archive.get("publishHistory"), list) else []
+        image_library = archive.get("personaImageLibrary") if isinstance(archive.get("personaImageLibrary"), list) else []
+        hot_metrics_raw = setup.get("hotMetrics") if isinstance(setup.get("hotMetrics"), dict) else {}
+        pad_code = str(archive.get("boundPadCode") or "").strip()
+        if pad_code:
+            pad_counts[pad_code] = pad_counts.get(pad_code, 0) + 1
+        latest_update = max(latest_update, str(archive.get("updatedAt") or archive.get("createdAt") or ""))
+
+        persona_hot = {
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "reposts": 0,
+            "recent_views": 0,
+            "post_views": 0,
+            "hot_score": 0,
+            "scanned_posts": 0,
+            "view_resolved_posts": 0,
+            "view_missing_posts": 0,
+        }
+        hot_platforms: list[dict[str, Any]] = []
+        post_metric_rows: list[dict[str, Any]] = []
+
+        for platform, metric_value in hot_metrics_raw.items():
+            if not isinstance(metric_value, dict):
+                continue
+            platform_name = str(metric_value.get("platform") or platform or "unknown").strip() or "unknown"
+            platform_counts[platform_name] = platform_counts.get(platform_name, 0) + 1
+            post_metrics = metric_value.get("postMetrics") if isinstance(metric_value.get("postMetrics"), list) else []
+            platform_likes = _number(metric_value.get("likes"), 0)
+            platform_comments = _number(metric_value.get("comments"), 0)
+            platform_shares = _number(metric_value.get("shares"), 0)
+            platform_reposts = _number(metric_value.get("reposts"), 0)
+            platform_recent_views = _number(metric_value.get("recentViews"), 0)
+            platform_post_views = _number(metric_value.get("views"), 0)
+            if not platform_post_views:
+                platform_post_views = sum(_metric_value(row, "viewCount", "view_count") for row in post_metrics if isinstance(row, dict))
+            platform_hot_score = _sum_numbers(platform_likes, platform_comments, platform_shares, platform_reposts, platform_post_views)
+            persona_hot["likes"] += platform_likes
+            persona_hot["comments"] += platform_comments
+            persona_hot["shares"] += platform_shares
+            persona_hot["reposts"] += platform_reposts
+            persona_hot["recent_views"] += platform_recent_views
+            persona_hot["post_views"] += platform_post_views
+            persona_hot["hot_score"] += platform_hot_score
+            persona_hot["scanned_posts"] += _number(metric_value.get("scannedPosts") or metric_value.get("posts"), 0)
+            persona_hot["view_resolved_posts"] += _number(metric_value.get("viewResolvedPosts"), 0)
+            persona_hot["view_missing_posts"] += _number(metric_value.get("viewMissingPosts"), 0)
+            if metric_value.get("complete") is True:
+                totals["complete_hot_metrics"] += 1
+            else:
+                totals["partial_hot_metrics"] += 1
+            for row in post_metrics:
+                compact = _compact_hot_post(row)
+                if compact:
+                    compact["platform"] = platform_name
+                    post_metric_rows.append(compact)
+            hot_platforms.append({
+                "platform": platform_name,
+                "username": metric_value.get("username"),
+                "followers": _number(metric_value.get("followers"), 0),
+                "following": _number(metric_value.get("following"), 0),
+                "recent_views": platform_recent_views,
+                "post_views": platform_post_views,
+                "likes": platform_likes,
+                "comments": platform_comments,
+                "shares": platform_shares,
+                "reposts": platform_reposts,
+                "posts": _number(metric_value.get("posts"), 0),
+                "scanned_posts": _number(metric_value.get("scannedPosts"), 0),
+                "complete": bool(metric_value.get("complete")),
+                "refreshed_at": metric_value.get("refreshedAt") or metric_value.get("lightRefreshedAt"),
+                "error": metric_value.get("error"),
+            })
+
+        for record in publish_history:
+            if not isinstance(record, dict):
+                continue
+            platform = str(record.get("platform") or "unknown").strip() or "unknown"
+            platform_counts[platform] = platform_counts.get(platform, 0) + 1
+            day = _date_key(record.get("publishedAt"))
+            if day:
+                bucket = daily.setdefault(day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "post_views": 0})
+                bucket["published"] += 1
+            published_meta = record.get("publishedMeta") if isinstance(record.get("publishedMeta"), dict) else {}
+            targets = record.get("publishedTargets") if isinstance(record.get("publishedTargets"), list) else []
+            sources = [published_meta] + [target.get("publishedMeta") for target in targets if isinstance(target, dict)]
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                day = _date_key(source.get("capturedAt") or record.get("publishedAt"))
+                if day:
+                    bucket = daily.setdefault(day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "post_views": 0})
+                    bucket["likes"] += _source_metric(source, "likeCount", "like_count")
+                    bucket["comments"] += _source_metric(source, "commentCount", "comment_count")
+                    bucket["shares"] += _source_metric(source, "shareCount", "share_count", "send_count")
+                    bucket["post_views"] += _source_metric(source, "viewCount", "view_count")
+            latest_update = max(latest_update, str(record.get("publishedAt") or ""))
+
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            for meta_key in ("sourceMeta", "publishedMeta"):
+                source = post.get(meta_key) if isinstance(post.get(meta_key), dict) else {}
+                if not source:
+                    continue
+                post_metric_rows.append({
+                    "platform": source.get("platform"),
+                    "source_url": source.get("sourceUrl"),
+                    "content": str(source.get("originalContent") or post.get("content") or "")[:220],
+                    "published_at": source.get("publishedAt") or post.get("publishedAt"),
+                    "captured_at": source.get("capturedAt"),
+                    "like_count": _source_metric(source, "likeCount", "like_count"),
+                    "comment_count": _source_metric(source, "commentCount", "comment_count"),
+                    "share_count": _source_metric(source, "shareCount", "share_count", "send_count"),
+                    "view_count": _source_metric(source, "viewCount", "view_count"),
+                })
+
+        queue_for_archive = (queue_stats.get("by_archive") or {}).get(archive_id, {})
+        post_count = len(posts)
+        published_count = len(publish_history)
+        image_count = len(image_library)
+        totals["posts"] += post_count
+        totals["published"] += published_count
+        totals["images"] += image_count
+        for key in ("likes", "comments", "shares", "reposts", "recent_views", "post_views", "hot_score"):
+            totals[key] += int(persona_hot.get(key) or 0)
+        personas.append({
+            "id": archive_id,
+            "name": archive.get("name") or "未命名人设",
+            "content": str(archive.get("content") or "")[:800],
+            "created_at": archive.get("createdAt"),
+            "updated_at": archive.get("updatedAt"),
+            "bound_pad_code": archive.get("boundPadCode"),
+            "bound_pad_name": archive.get("boundPadName"),
+            "owner_bot_name": archive.get("ownerBotName"),
+            "telegram": {
+                "chat_id": archive.get("boundTelegramChatId"),
+                "free_group": archive.get("boundTelegramFreeGroupName") or archive.get("boundTelegramFreeGroupId"),
+                "paid_group": archive.get("boundTelegramPaidGroupName") or archive.get("boundTelegramPaidGroupId"),
+            },
+            "setup": _sanitize_dashboard_value(setup),
+            "counts": {
+                "posts": post_count,
+                "published": published_count,
+                "images": image_count,
+                "platform_posts": {str(k): len(v) if isinstance(v, list) else 0 for k, v in platform_posts.items()},
+            },
+            "hot": persona_hot,
+            "hot_platforms": hot_platforms,
+            "post_metrics": post_metric_rows[:80],
+            "publish_history": [_sanitize_dashboard_value(item) for item in publish_history[:50] if isinstance(item, dict)],
+            "queue": queue_for_archive,
+        })
+
+    personas.sort(key=lambda item: _number(item.get("hot", {}).get("hot_score"), 0), reverse=True)
+    trend = [{"date": day, **values} for day, values in sorted(daily.items())]
+    return {
+        "ok": True,
+        "updated_at": now,
+        "summary": {
+            "persona_count": len(personas),
+            "post_count": totals["posts"],
+            "published_count": totals["published"],
+            "image_count": totals["images"],
+            "bound_pad_count": len(pad_counts),
+            "task_count": queue_stats.get("total", 0),
+            "total_interactions": _sum_numbers(totals["likes"], totals["comments"], totals["shares"], totals["reposts"]),
+            "likes": totals["likes"],
+            "comments": totals["comments"],
+            "shares": totals["shares"],
+            "reposts": totals["reposts"],
+            "recent_views": totals["recent_views"],
+            "post_views": totals["post_views"],
+            "hot_score": totals["hot_score"],
+            "latest_data_at": latest_update,
+            "cached_hot_candidates": sentiment_stats.get("cache_count", 0),
+            "shown_hot_candidates": sentiment_stats.get("shown_count", 0),
+        },
+        "charts": {
+            "persona_hot_rank": [
+                {"id": item["id"], "name": item["name"], "value": item["hot"]["hot_score"]}
+                for item in personas[:12]
+            ],
+            "persona_content_counts": [
+                {"id": item["id"], "name": item["name"], **item["counts"]}
+                for item in personas[:16]
+            ],
+            "engagement_mix": {
+                "likes": totals["likes"],
+                "comments": totals["comments"],
+                "shares": totals["shares"],
+                "reposts": totals["reposts"],
+            },
+            "platform_distribution": platform_counts,
+            "task_status_distribution": task_status_counts,
+            "hot_coverage": {
+                "complete": totals["complete_hot_metrics"],
+                "partial_or_unknown": totals["partial_hot_metrics"],
+                "none": max(0, len(personas) - totals["complete_hot_metrics"] - totals["partial_hot_metrics"]),
+            },
+            "trend": trend[-90:],
+            "pad_distribution": pad_counts,
+        },
+        "personas": personas,
+        "data_sources": {
+            "archives": archives_source,
+            "publish_queue": {k: v for k, v in queue_stats.items() if k != "rows"},
+            "sentiment_hot_candidates": sentiment_stats,
+        },
+    }
+
+
 def create_app() -> FastAPI:
     _ensure_dirs()
     init_db()
@@ -16376,6 +16836,16 @@ def create_app() -> FastAPI:
             replacements={
                 "__STYLE_VERSION__": _asset_version("assets", "style.css"),
                 "__QUICK_SETUP_JS_VERSION__": _asset_version("assets", "quick-setup.js"),
+            },
+        )
+
+    @app.get("/persona-dashboard.html", include_in_schema=False)
+    def page_persona_dashboard() -> HTMLResponse:
+        return _html_response_with_versions(
+            "persona-dashboard.html",
+            replacements={
+                "__STYLE_VERSION__": _asset_version("assets", "style.css"),
+                "__PERSONA_DASHBOARD_JS_VERSION__": _asset_version("assets", "persona-dashboard.js"),
             },
         )
 
@@ -16811,6 +17281,10 @@ def create_app() -> FastAPI:
     @app.get("/api/auth/me")
     def api_auth_me(user: dict[str, Any] = Depends(get_current_user)):
         return api_me(user)
+
+    @app.get("/api/persona_dashboard/overview")
+    def api_persona_dashboard_overview():
+        return _build_persona_dashboard_overview()
 
     @app.get("/api/client_defaults")
     def api_client_defaults(user: dict[str, Any] = Depends(get_current_user)):
