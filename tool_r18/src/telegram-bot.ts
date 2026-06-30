@@ -3358,8 +3358,18 @@ export function formatPersonaSettingsHotMetricsLines(archive: PersonaArchive, op
   }
   const usernamePart = metrics.username ? `帳號 @${metrics.username}` : "";
   const selectedFields = normalizePersonaDetailHotFields(options?.fields);
-  const detailParts = buildPersonaHotMetricParts(metrics, selectedFields);
-  if (metrics.complete !== true && detailParts.length === 0) {
+  const accountFields = selectedFields.filter((field) => ["followers", "following", "posts", "recentViews"].includes(field));
+  const interactionFields = selectedFields.filter((field) => ["likes", "comments", "reposts", "shares"].includes(field));
+  const viewFields = selectedFields.filter((field) => field === "views");
+  const accountParts = buildPersonaHotMetricParts(metrics, accountFields);
+  const interactionParts = buildPersonaHotMetricParts(metrics, interactionFields);
+  const viewParts = buildPersonaHotMetricParts(metrics, viewFields);
+  const detailLines = [
+    accountParts.length ? `帳號數據：${accountParts.join("；")}` : "",
+    interactionParts.length ? `互動合計：${interactionParts.join("；")}` : "",
+    ...viewParts,
+  ].filter(Boolean);
+  if (metrics.complete !== true && detailLines.length === 0) {
     return [
       `Threads：${metrics.error || "尚未刷新"}`,
     ];
@@ -3370,7 +3380,7 @@ export function formatPersonaSettingsHotMetricsLines(archive: PersonaArchive, op
     : "";
   return [
     `Threads：${usernamePart || "已刷新"}`,
-    detailParts.length ? detailParts.join("；") : "目前沒有可展示的資料項",
+    ...(detailLines.length ? detailLines : ["目前沒有可展示的資料項"]),
     ...(viewCoverage ? [viewCoverage] : []),
     ...(detailTimestamp ? [`更新時間：${detailTimestamp}`] : []),
   ];
