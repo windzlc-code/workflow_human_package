@@ -3839,6 +3839,18 @@ function collectPublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): Th
       add(isPublishHistoryOriginalSourceUrl(record, targetMeta?.sourceUrl) ? "" : targetMeta?.sourceUrl, target?.padName || record.title || record.id || "published", expectedText, targetMeta, record.publishedAt);
     }
   }
+  const knownTargets = (archive.setup as any)?.threadsOwnPostAutoReply?.knownPostTargets;
+  if (Array.isArray(knownTargets)) {
+    for (const item of knownTargets) {
+      add(
+        item?.url,
+        item?.label || "known-own-post",
+        item?.expectedText || item?.label || "",
+        typeof item?.viewCount === "number" ? { engagement: { viewCount: item.viewCount } } as any : undefined,
+        item?.publishedAt,
+      );
+    }
+  }
   return targets;
 }
 
@@ -18215,6 +18227,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
             normalizeThreadsOwnPostReplyHistoryUrl(item.url),
             item.comment,
           ]));
+          const targetByUrl = new Map(targets.map((target) => [
+            normalizeThreadsOwnPostReplyHistoryUrl(target.url),
+            target,
+          ]));
           const appended = result.repliedUrls
             .map((url) => ({
               url: normalizeThreadsOwnPostReplyHistoryUrl(url),
@@ -18222,6 +18238,25 @@ function sendMainMenu(chatId: number, msgId?: number) {
               repliedAt: nowIso,
             }))
             .filter((item) => item.url && !existingUrls.has(item.url));
+          const existingKnownTargets = Array.isArray((latestArchive.setup as any)?.threadsOwnPostAutoReply?.knownPostTargets)
+            ? (latestArchive.setup as any).threadsOwnPostAutoReply.knownPostTargets
+            : [];
+          const knownTargetByUrl = new Map(existingKnownTargets
+            .map((item: any) => [normalizeThreadsOwnPostReplyHistoryUrl(item?.url), item])
+            .filter(([url]) => Boolean(url)));
+          for (const url of result.repliedUrls) {
+            const normalizedUrl = normalizeThreadsOwnPostReplyHistoryUrl(url);
+            if (!normalizedUrl || knownTargetByUrl.has(normalizedUrl)) continue;
+            const target = targetByUrl.get(normalizedUrl);
+            knownTargetByUrl.set(normalizedUrl, {
+              url: normalizedUrl,
+              label: target?.label || "known-own-post",
+              expectedText: target?.expectedText || "",
+              viewCount: target?.viewCount,
+              publishedAt: target?.publishedAt,
+              rememberedAt: nowIso,
+            });
+          }
           if (appended.length) {
             await updatePersonaArchiveProfile(id, {
               setup: {
@@ -18229,6 +18264,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 threadsOwnPostAutoReply: {
                   ...((latestArchive.setup as any)?.threadsOwnPostAutoReply || {}),
                   repliedPosts: [...existing, ...appended].slice(-500),
+                  knownPostTargets: [...knownTargetByUrl.values()].slice(-500),
+                },
+              } as any,
+            });
+          } else if (knownTargetByUrl.size !== existingKnownTargets.length) {
+            await updatePersonaArchiveProfile(id, {
+              setup: {
+                ...(latestArchive.setup || {}),
+                threadsOwnPostAutoReply: {
+                  ...((latestArchive.setup as any)?.threadsOwnPostAutoReply || {}),
+                  knownPostTargets: [...knownTargetByUrl.values()].slice(-500),
                 },
               } as any,
             });
