@@ -402,8 +402,8 @@ function pdRenderPersonaCard(persona) {
           <div class="persona-account-actions">
             <button class="ghost" type="button" id="personaBindThreadsBtn" ${isThreadsPlatform ? "" : "disabled"}>保存</button>
             <button class="ghost persona-unbind-btn" type="button" id="personaUnbindThreadsBtn" ${isThreadsPlatform && threads.handle ? "" : "disabled"}>解绑</button>
-            <button class="primary" type="button" id="personaRefreshCurrentBtn">刷新当前人设</button>
-            <button class="primary persona-hot-refresh-btn" type="button" id="personaRefreshBoundHotBtn" ${isThreadsPlatform && threads.handle ? "" : "disabled"}>刷新绑定账号热点</button>
+            <button class="primary" type="button" id="personaRefreshCurrentBtn">刷新人设</button>
+            <button class="primary persona-hot-refresh-btn" type="button" id="personaRefreshBoundHotBtn" ${isThreadsPlatform && threads.handle ? "" : "disabled"}>刷新热点</button>
           </div>
         </div>
         <div class="persona-score">

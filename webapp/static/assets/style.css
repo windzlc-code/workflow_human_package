@@ -5583,7 +5583,7 @@ body.page-admin {
 
 .persona-detail-head {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(520px, 1.15fr) minmax(150px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(150px, auto);
   gap: 12px;
   align-items: start;
 }
@@ -5614,12 +5614,15 @@ body.page-admin {
 
 .persona-account-compact {
   display: grid;
-  grid-template-columns: minmax(96px, 0.5fr) 120px minmax(170px, 1fr);
-  gap: 8px;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  grid-template-columns: minmax(88px, 0.28fr) 112px minmax(120px, 1fr) minmax(300px, max-content);
+  gap: 6px;
   align-items: center;
   align-self: start;
   min-width: 0;
   max-width: 100%;
+  overflow: hidden;
   padding: 8px 10px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 12px;
@@ -5628,49 +5631,52 @@ body.page-admin {
 
 .persona-account-title {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   align-self: center;
+  min-width: 0;
 }
 
 .persona-account-title span {
   color: #64748b;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .persona-account-compact label {
   color: #334155;
   font-size: 12px;
   font-weight: 900;
+  white-space: nowrap;
 }
 
 .persona-account-grid {
-  display: grid;
-  grid-column: span 2;
-  grid-template-columns: 120px minmax(160px, 1fr);
-  gap: 8px;
-  align-items: center;
-  min-width: 0;
+  display: contents;
 }
 
 .persona-account-grid input,
 .persona-account-grid select {
   min-width: 0;
-  height: 40px;
+  height: 36px;
+  padding-inline: 10px;
+  font-size: 13px;
 }
 
 .persona-account-actions {
-  grid-column: 1 / -1;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
   align-items: center;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 .persona-account-actions button {
-  min-height: 40px;
-  padding-inline: 11px;
+  min-height: 36px;
+  padding-inline: 10px;
+  font-size: 13px;
   white-space: nowrap;
 }
 
@@ -6127,11 +6133,6 @@ body.page-admin {
     grid-template-columns: 1fr minmax(150px, auto);
   }
 
-  .persona-account-compact {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-
   .persona-chart-panel-wide {
     grid-column: span 2;
   }
@@ -6151,10 +6152,14 @@ body.page-admin {
     grid-template-columns: 1fr;
   }
 
-  .persona-account-compact,
-  .persona-account-grid,
-  .persona-account-actions {
-    grid-template-columns: 1fr;
+  .persona-account-compact {
+    grid-template-columns: 82px 104px minmax(100px, 1fr) minmax(268px, max-content);
+    gap: 5px;
+  }
+
+  .persona-account-actions button {
+    padding-inline: 8px;
+    font-size: 12px;
   }
 
   .persona-post-modal-grid {
