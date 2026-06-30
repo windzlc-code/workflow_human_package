@@ -16562,6 +16562,91 @@ def _unbind_persona_threads_username(archive_id: str) -> dict[str, Any]:
     return {"ok": True, "archive_id": clean_id, "path": path.name}
 
 
+def _delete_persona_dashboard_post(archive_id: str, post_key: str) -> dict[str, Any]:
+    clean_id = str(archive_id or "").strip()
+    clean_key = str(post_key or "").strip()
+    if not clean_id or not clean_key:
+        raise HTTPException(status_code=400, detail="缺少人设 ID 或帖子 ID。")
+    path, raw, archives = _persona_archive_source_for_write()
+    deleted = 0
+    deleted_post_ids: set[str] = set()
+    for archive in archives:
+        if str(archive.get("id") or "").strip() != clean_id:
+            continue
+        setup = archive.get("setup") if isinstance(archive.get("setup"), dict) else {}
+        hot_metrics = setup.get("hotMetrics") if isinstance(setup.get("hotMetrics"), dict) else {}
+        for metric_value in hot_metrics.values():
+            if not isinstance(metric_value, dict):
+                continue
+            post_metrics = metric_value.get("postMetrics") if isinstance(metric_value.get("postMetrics"), list) else []
+            next_metrics = []
+            for row in post_metrics:
+                if isinstance(row, dict) and _persona_dashboard_post_key(clean_id, row) == clean_key:
+                    deleted += 1
+                    metric_value["likes"] = max(0, _number(metric_value.get("likes"), 0) - _metric_value(row, "likeCount", "like_count"))
+                    metric_value["comments"] = max(0, _number(metric_value.get("comments"), 0) - _metric_value(row, "commentCount", "comment_count"))
+                    metric_value["shares"] = max(0, _number(metric_value.get("shares"), 0) - _metric_value(row, "shareCount", "share_count", "send_count"))
+                    metric_value["reposts"] = max(0, _number(metric_value.get("reposts"), 0) - _metric_value(row, "repostCount", "repost_count"))
+                    metric_value["views"] = max(0, _number(metric_value.get("views"), 0) - _metric_value(row, "viewCount", "view_count"))
+                    if row.get("id"):
+                        deleted_post_ids.add(str(row.get("id")))
+                    continue
+                next_metrics.append(row)
+            metric_value["postMetrics"] = next_metrics
+            if deleted:
+                metric_value["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        posts = archive.get("posts") if isinstance(archive.get("posts"), list) else []
+        next_posts = []
+        for post in posts:
+            if not isinstance(post, dict):
+                next_posts.append(post)
+                continue
+            post_matches = False
+            if _persona_dashboard_post_key(clean_id, post) == clean_key:
+                post_matches = True
+            for meta_key in ("sourceMeta", "publishedMeta"):
+                source = post.get(meta_key) if isinstance(post.get(meta_key), dict) else {}
+                if source and _persona_dashboard_post_key(clean_id, {**source, "id": post.get("id"), "content": post.get("content")}) == clean_key:
+                    post_matches = True
+            if post_matches:
+                deleted += 1
+                if post.get("id"):
+                    deleted_post_ids.add(str(post.get("id")))
+                continue
+            next_posts.append(post)
+        archive["posts"] = next_posts
+
+        platform_posts = archive.get("platformPosts") if isinstance(archive.get("platformPosts"), dict) else {}
+        for platform, rows in list(platform_posts.items()):
+            if not isinstance(rows, list):
+                continue
+            platform_posts[platform] = [
+                row for row in rows
+                if not (isinstance(row, dict) and (str(row.get("id") or "") in deleted_post_ids or _persona_dashboard_post_key(clean_id, row) == clean_key))
+            ]
+
+        publish_history = archive.get("publishHistory") if isinstance(archive.get("publishHistory"), list) else []
+        archive["publishHistory"] = [
+            record for record in publish_history
+            if not (
+                isinstance(record, dict)
+                and (
+                    _persona_dashboard_post_key(clean_id, record) == clean_key
+                    or str(record.get("archivePostId") or record.get("archive_post_id") or "") in deleted_post_ids
+                )
+            )
+        ]
+        archive["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        break
+    else:
+        raise HTTPException(status_code=404, detail="人设不存在。")
+    if deleted <= 0:
+        raise HTTPException(status_code=404, detail="帖子不存在或已经删除。")
+    _write_persona_archives_preserving_shape(path, raw, archives)
+    return {"ok": True, "archive_id": clean_id, "post_key": clean_key, "deleted": deleted, "path": path.name}
+
+
 def _read_tool_r18_persona_archives() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     primary = TOOL_R18_RUNTIME_DIR / "persona_archives.json"
     fallback = TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json"
@@ -16774,14 +16859,34 @@ def _source_metric(source: Any, *keys: str) -> int:
     return _number(source.get(keys[0]), 0) if keys else 0
 
 
-def _compact_hot_post(raw: Any) -> dict[str, Any]:
+def _persona_dashboard_post_key(archive_id: str, row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    parts = [
+        archive_id,
+        str(row.get("id") or row.get("archivePostId") or row.get("archive_post_id") or ""),
+        str(row.get("pk") or ""),
+        str(row.get("code") or ""),
+        str(row.get("sourceUrl") or row.get("source_url") or ""),
+        str(row.get("publishedAt") or row.get("published_at") or row.get("capturedAt") or row.get("captured_at") or ""),
+        str(row.get("content") or row.get("originalContent") or row.get("title") or "")[:240],
+    ]
+    digest = hashlib.sha1("|".join(parts).encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"post_{digest}"
+
+
+def _compact_hot_post(raw: Any, archive_id: str = "") -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
+    full_content = str(raw.get("content") or raw.get("originalContent") or raw.get("text") or "")
     return {
+        "post_key": _persona_dashboard_post_key(archive_id, raw),
+        "id": raw.get("id"),
         "pk": raw.get("pk"),
         "code": raw.get("code"),
         "source_url": raw.get("sourceUrl") or raw.get("source_url"),
-        "content": str(raw.get("content") or "")[:220],
+        "content": full_content[:220],
+        "full_content": full_content[:5000],
         "published_at": raw.get("publishedAt") or raw.get("published_at"),
         "captured_at": raw.get("capturedAt") or raw.get("captured_at"),
         "like_count": _metric_value(raw, "likeCount", "like_count"),
@@ -16789,6 +16894,7 @@ def _compact_hot_post(raw: Any) -> dict[str, Any]:
         "repost_count": _metric_value(raw, "repostCount", "repost_count"),
         "share_count": _metric_value(raw, "shareCount", "share_count", "send_count"),
         "view_count": _metric_value(raw, "viewCount", "view_count"),
+        "details": _sanitize_dashboard_value(raw, "post"),
     }
 
 
@@ -16865,12 +16971,104 @@ def _start_persona_dashboard_refresh(archive_id: str = "") -> dict[str, Any]:
             "id": task_id,
             "archive_id": str(archive_id or "").strip(),
             "status": "queued",
+            "step": "排队中",
+            "progress": 0,
+            "scope": "单个人设" if archive_id else "全部已绑定人设",
             "message": "已加入刷新队列。",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-    thread = threading.Thread(target=_persona_dashboard_refresh_worker, args=(task_id, str(archive_id or "").strip()), daemon=True)
+    thread = threading.Thread(target=_persona_dashboard_refresh_worker_v2, args=(task_id, str(archive_id or "").strip()), daemon=True)
     thread.start()
     return PERSONA_DASHBOARD_REFRESH_TASKS[task_id]
+
+
+def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "") -> None:
+    started = time.time()
+    scope = "单个人设" if archive_id else "全部已绑定人设"
+    with PERSONA_DASHBOARD_REFRESH_LOCK:
+        PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+            "status": "running",
+            "step": "准备刷新",
+            "progress": 8,
+            "scope": scope,
+            "message": "正在准备刷新 Threads 全量热点数据...",
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+    script = ROOT_DIR / "tool_r18" / "scripts" / "skills" / "persona-dashboard-refresh.ts"
+    args = ["node", "--import", "tsx", str(script)]
+    if archive_id:
+        args.append(f"--archive-id={archive_id}")
+    env = os.environ.copy()
+    env.setdefault("TOOL_R18_RUNTIME_DIR", str(TOOL_R18_RUNTIME_DIR))
+    env.setdefault("NODE_PATH", str(ROOT_DIR / "tool_r18" / "node_modules"))
+    try:
+        with PERSONA_DASHBOARD_REFRESH_LOCK:
+            PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+                "step": "启动采集脚本",
+                "progress": 18,
+                "message": "正在启动浏览器授权与热点采集脚本...",
+            })
+        proc = subprocess.Popen(
+            args,
+            cwd=str(ROOT_DIR / "tool_r18"),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        while proc.poll() is None:
+            elapsed = int(time.time() - started)
+            if elapsed > 900:
+                proc.kill()
+                raise TimeoutError("刷新超时，已停止本次任务。")
+            with PERSONA_DASHBOARD_REFRESH_LOCK:
+                PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+                    "step": "采集中",
+                    "progress": min(88, 25 + elapsed // 12),
+                    "elapsed_seconds": elapsed,
+                    "message": f"正在刷新{scope}的 Threads 全量热点数据，已执行 {elapsed} 秒...",
+                })
+            time.sleep(2)
+        stdout, stderr = proc.communicate(timeout=10)
+        stdout = (stdout or "").strip()
+        stderr = (stderr or "").strip()
+        with PERSONA_DASHBOARD_REFRESH_LOCK:
+            PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+                "step": "解析结果",
+                "progress": 92,
+                "elapsed_seconds": int(time.time() - started),
+                "message": "采集脚本已结束，正在解析结果并更新缓存...",
+                "latest_output": (stdout or stderr or "")[-1200:],
+            })
+        parsed: Any = None
+        if stdout:
+            try:
+                parsed = json.loads(stdout[stdout.find("{"):])
+            except Exception:
+                parsed = {"raw": stdout[-4000:]}
+        status = "success" if proc.returncode == 0 and isinstance(parsed, dict) and parsed.get("ok") else "failed"
+        with PERSONA_DASHBOARD_REFRESH_LOCK:
+            PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+                "status": status,
+                "step": "完成" if status == "success" else "失败",
+                "progress": 100,
+                "message": "刷新完成，缓存数据已更新。" if status == "success" else "刷新未完成，请查看结果提示。",
+                "elapsed_seconds": int(time.time() - started),
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "result": parsed,
+                "stderr": stderr[-4000:],
+                "returncode": proc.returncode,
+            })
+    except Exception as exc:
+        with PERSONA_DASHBOARD_REFRESH_LOCK:
+            PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
+                "status": "failed",
+                "step": "失败",
+                "progress": 100,
+                "message": str(exc),
+                "elapsed_seconds": int(time.time() - started),
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
 
 
 def _build_persona_dashboard_overview() -> dict[str, Any]:
@@ -16957,7 +17155,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
             else:
                 totals["partial_hot_metrics"] += 1
             for row in post_metrics:
-                compact = _compact_hot_post(row)
+                compact = _compact_hot_post(row, archive_id)
                 if compact:
                     compact["platform"] = platform_name
                     post_metric_rows.append(compact)
@@ -17010,17 +17208,26 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
                 source = post.get(meta_key) if isinstance(post.get(meta_key), dict) else {}
                 if not source:
                     continue
-                post_metric_rows.append({
+                metric_row = {
+                    "post_key": _persona_dashboard_post_key(archive_id, {
+                        **source,
+                        "id": post.get("id"),
+                        "content": post.get("content"),
+                    }),
+                    "id": post.get("id"),
                     "platform": source.get("platform"),
                     "source_url": source.get("sourceUrl"),
                     "content": str(source.get("originalContent") or post.get("content") or "")[:220],
+                    "full_content": str(source.get("originalContent") or post.get("content") or "")[:5000],
                     "published_at": source.get("publishedAt") or post.get("publishedAt"),
                     "captured_at": source.get("capturedAt"),
                     "like_count": _source_metric(source, "likeCount", "like_count"),
                     "comment_count": _source_metric(source, "commentCount", "comment_count"),
                     "share_count": _source_metric(source, "shareCount", "share_count", "send_count"),
                     "view_count": _source_metric(source, "viewCount", "view_count"),
-                })
+                    "details": _sanitize_dashboard_value({"post": post, meta_key: source}, "post"),
+                }
+                post_metric_rows.append(metric_row)
 
         queue_for_archive = (queue_stats.get("by_archive") or {}).get(archive_id, {})
         account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
@@ -17663,6 +17870,10 @@ def create_app() -> FastAPI:
     @app.delete("/api/persona_dashboard/personas/{archive_id}/threads_binding")
     def api_persona_dashboard_unbind_threads(archive_id: str):
         return _unbind_persona_threads_username(archive_id)
+
+    @app.delete("/api/persona_dashboard/personas/{archive_id}/posts/{post_key}")
+    def api_persona_dashboard_delete_post(archive_id: str, post_key: str):
+        return _delete_persona_dashboard_post(archive_id, post_key)
 
     @app.post("/api/persona_dashboard/refresh")
     def api_persona_dashboard_refresh(payload: PersonaDashboardRefreshPayload):

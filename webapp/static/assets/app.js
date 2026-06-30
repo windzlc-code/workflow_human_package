@@ -37,6 +37,8 @@ const appState = {
   personaDashboardPostPage: 1,
   personaDashboardPageSize: Number(localStorage.getItem("personaDashboardPageSize") || 10) || 10,
   personaDashboardAccountPlatform: localStorage.getItem("personaDashboardAccountPlatform") || "threads",
+  personaDashboardTabPage: 1,
+  personaDashboardPostModalKey: "",
 };
 const APP_PAGES = new Set(["generate", "tasks", "persona-dashboard", "account"]);
 const APP_PAGE_LABELS = {
@@ -1222,6 +1224,10 @@ function renderPersonaCard(persona) {
       <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.comment_count))}</td>
       <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.share_count || row.repost_count))}</td>
       <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.view_count))}</td>
+      <td class="persona-post-actions">
+        <button class="ghost" type="button" data-post-view="${escapeHtml(row.post_key || "")}">查看</button>
+        <button class="ghost persona-post-delete" type="button" data-post-delete="${escapeHtml(row.post_key || "")}">删除</button>
+      </td>
     </tr>
   `).join("");
   return `
@@ -1252,8 +1258,8 @@ function renderPersonaCard(persona) {
           <span>第 ${escapeHtml(String(appState.personaDashboardPostPage))} / ${escapeHtml(String(pageCount))} 页 · 共 ${escapeHtml(String(rows.length))} 条</span>
         </div>
         <table class="persona-post-table">
-          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th></tr></thead>
-          <tbody>${postRows || `<tr><td colspan="6">暂无发送推文指标</td></tr>`}</tbody>
+          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th><th>操作</th></tr></thead>
+          <tbody>${postRows || `<tr><td colspan="7">暂无发送推文指标</td></tr>`}</tbody>
         </table>
       </div>
       <div class="persona-pager">
@@ -1261,6 +1267,7 @@ function renderPersonaCard(persona) {
         <span>每页 ${escapeHtml(String(pageSize))} 条</span>
         <button class="ghost" type="button" id="personaPostNext" ${appState.personaDashboardPostPage >= pageCount ? "disabled" : ""}>下一页</button>
       </div>
+      ${renderPersonaPostModal(persona)}
     </article>
   `;
 }
@@ -1269,9 +1276,47 @@ function personaDashboardKey(persona, index = 0) {
   return String((persona && (persona.id || persona.name || persona.bound_pad_code)) || `persona-${index}`);
 }
 
+function findPersonaDashboardPostRow(persona, postKey) {
+  const key = String(postKey || "");
+  return (filteredPersonaPostRows(persona) || []).find((row) => String(row.post_key || "") === key) || null;
+}
+
+function renderPersonaPostModal(persona) {
+  const row = appState.personaDashboardPostModalKey ? findPersonaDashboardPostRow(persona, appState.personaDashboardPostModalKey) : null;
+  if (!row) return "";
+  const details = row.details ? JSON.stringify(row.details, null, 2) : "";
+  return `
+    <div class="persona-post-modal" role="dialog" aria-modal="true" aria-label="推文详情">
+      <div class="persona-post-modal-card">
+        <div class="persona-post-modal-head">
+          <div>
+            <strong>推文详情</strong>
+            <span>${escapeHtml(row.platform || "-")} · ${escapeHtml(row.published_at || row.captured_at || "无时间")}</span>
+          </div>
+          <button class="ghost" type="button" id="personaPostModalClose">关闭</button>
+        </div>
+        <div class="persona-post-modal-grid">
+          <div><span>点赞</span><strong>${escapeHtml(formatDashboardNumber(row.like_count))}</strong></div>
+          <div><span>评论</span><strong>${escapeHtml(formatDashboardNumber(row.comment_count))}</strong></div>
+          <div><span>转发/分享</span><strong>${escapeHtml(formatDashboardNumber(row.share_count || row.repost_count))}</strong></div>
+          <div><span>逐帖浏览</span><strong>${escapeHtml(formatDashboardNumber(row.view_count))}</strong></div>
+        </div>
+        <div class="persona-post-full-content">${escapeHtml(row.full_content || row.content || "暂无内容")}</div>
+        ${row.source_url ? `<a class="persona-post-source-link" href="${escapeHtml(row.source_url)}" target="_blank" rel="noreferrer">打开原始链接</a>` : ""}
+        <pre class="persona-post-raw">${escapeHtml(details || "暂无更多结构化信息")}</pre>
+      </div>
+    </div>
+  `;
+}
+
 function renderPersonaTabs(visiblePersonas, selectedPersona) {
   const tabs = el("personaDashboardTabs");
   if (!tabs) return;
+  const tabPageSize = 10;
+  const tabPageCount = Math.max(1, Math.ceil(visiblePersonas.length / tabPageSize));
+  appState.personaDashboardTabPage = Math.max(1, Math.min(tabPageCount, Number(appState.personaDashboardTabPage || 1)));
+  const tabStart = (appState.personaDashboardTabPage - 1) * tabPageSize;
+  const tabPersonas = visiblePersonas.slice(tabStart, tabStart + tabPageSize);
   tabs.innerHTML = `
     <div class="persona-tab-rail-head">
       <strong>分栏</strong>
@@ -1286,7 +1331,8 @@ function renderPersonaTabs(visiblePersonas, selectedPersona) {
       </button>
       </div>
       <div class="persona-tab-section persona-tab-section-personas">
-      ${visiblePersonas.map((persona, index) => {
+      ${tabPersonas.map((persona, pageIndex) => {
+        const index = tabStart + pageIndex;
         const hot = persona.hot || {};
         const counts = persona.counts || {};
         const key = personaDashboardKey(persona, index);
@@ -1305,6 +1351,13 @@ function renderPersonaTabs(visiblePersonas, selectedPersona) {
           </button>
         `;
       }).join("")}
+      ${visiblePersonas.length > tabPageSize ? `
+        <div class="persona-tab-pager">
+          <button class="ghost" type="button" id="personaTabPrev" ${appState.personaDashboardTabPage <= 1 ? "disabled" : ""}>上一页</button>
+          <span>第 ${escapeHtml(String(appState.personaDashboardTabPage))} / ${escapeHtml(String(tabPageCount))} 页</span>
+          <button class="ghost" type="button" id="personaTabNext" ${appState.personaDashboardTabPage >= tabPageCount ? "disabled" : ""}>下一页</button>
+        </div>
+      ` : ""}
       </div>
       <div class="persona-tab-section persona-tab-section-system persona-tab-section-bottom">
       <button class="persona-tab persona-tab-settings ${appState.personaDashboardSelectedId === "__settings__" ? "is-active" : ""}" type="button" data-persona-id="__settings__" aria-current="${appState.personaDashboardSelectedId === "__settings__" ? "true" : "false"}">
@@ -1322,6 +1375,10 @@ function renderPersonaTabs(visiblePersonas, selectedPersona) {
       renderPersonaDashboard();
     });
   });
+  const tabPrev = el("personaTabPrev");
+  const tabNext = el("personaTabNext");
+  if (tabPrev) tabPrev.addEventListener("click", () => { appState.personaDashboardTabPage -= 1; renderPersonaDashboard(); });
+  if (tabNext) tabNext.addEventListener("click", () => { appState.personaDashboardTabPage += 1; renderPersonaDashboard(); });
 }
 
 function renderPersonaSettings() {
@@ -1733,6 +1790,10 @@ function renderPersonaCard(persona) {
       <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.comment_count))}</td>
       <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.share_count || row.repost_count))}</td>
       <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.view_count))}</td>
+      <td class="persona-post-actions">
+        <button class="ghost" type="button" data-post-view="${escapeHtml(row.post_key || "")}">查看</button>
+        <button class="ghost persona-post-delete" type="button" data-post-delete="${escapeHtml(row.post_key || "")}">删除</button>
+      </td>
     </tr>
   `).join("");
   return `
@@ -1787,8 +1848,8 @@ function renderPersonaCard(persona) {
           <span>第 ${escapeHtml(String(appState.personaDashboardPostPage))} / ${escapeHtml(String(pageCount))} 页 · 共 ${escapeHtml(String(rows.length))} 条</span>
         </div>
         <table class="persona-post-table">
-          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th></tr></thead>
-          <tbody>${postRows || `<tr><td colspan="6">暂无发送推文指标</td></tr>`}</tbody>
+          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th><th>操作</th></tr></thead>
+          <tbody>${postRows || `<tr><td colspan="7">暂无发送推文指标</td></tr>`}</tbody>
         </table>
       </div>
       <div class="persona-pager">
@@ -1796,6 +1857,7 @@ function renderPersonaCard(persona) {
         <span>每页 ${escapeHtml(String(pageSize))} 条</span>
         <button class="ghost" type="button" id="personaPostNext" ${appState.personaDashboardPostPage >= pageCount ? "disabled" : ""}>下一页</button>
       </div>
+      ${renderPersonaPostModal(persona)}
     </article>
   `;
 }
@@ -1874,6 +1936,7 @@ function renderPersonaDashboard() {
   const accountPlatform = el("personaAccountPlatform");
   const refreshCurrent = el("personaRefreshCurrentBtn");
   const refreshBoundHot = el("personaRefreshBoundHotBtn");
+  const modalClose = el("personaPostModalClose");
   if (prev) prev.addEventListener("click", () => { appState.personaDashboardPostPage -= 1; renderPersonaDashboard(); });
   if (next) next.addEventListener("click", () => { appState.personaDashboardPostPage += 1; renderPersonaDashboard(); });
   if (bind && selected) bind.addEventListener("click", () => bindPersonaDashboardThreads(selected));
@@ -1887,6 +1950,19 @@ function renderPersonaDashboard() {
   }
   if (refreshCurrent && selected) refreshCurrent.addEventListener("click", () => startPersonaDashboardRefresh(selected.id, "已请求刷新当前人设..."));
   if (refreshBoundHot && selected) refreshBoundHot.addEventListener("click", () => startPersonaDashboardRefresh(selected.id, "已请求刷新该绑定账号的全量热点信息..."));
+  if (modalClose) modalClose.addEventListener("click", () => { appState.personaDashboardPostModalKey = ""; renderPersonaDashboard(); });
+  list.querySelectorAll("[data-post-view]").forEach((node) => {
+    node.addEventListener("click", () => {
+      appState.personaDashboardPostModalKey = String(node.getAttribute("data-post-view") || "");
+      renderPersonaDashboard();
+    });
+  });
+  list.querySelectorAll("[data-post-delete]").forEach((node) => {
+    node.addEventListener("click", () => {
+      const postKey = String(node.getAttribute("data-post-delete") || "");
+      if (selected && postKey) deletePersonaDashboardPost(selected, postKey);
+    });
+  });
 }
 
 function syncPersonaPadFilter(data) {
@@ -1951,6 +2027,22 @@ async function unbindPersonaDashboardThreads(persona) {
   }
 }
 
+async function deletePersonaDashboardPost(persona, postKey) {
+  const ok = window.confirm("确认删除这条推文记录？删除后会立即从当前看板缓存中移除。");
+  if (!ok) return;
+  try {
+    setPersonaDashboardMessage("正在删除推文记录...", true);
+    await api(`/api/persona_dashboard/personas/${encodeURIComponent(persona.id)}/posts/${encodeURIComponent(postKey)}`, {
+      method: "DELETE",
+    });
+    appState.personaDashboardPostModalKey = "";
+    setPersonaDashboardMessage("推文记录已删除，正在刷新看板...", true);
+    await loadPersonaDashboard();
+  } catch (err) {
+    setPersonaDashboardMessage(publicMessage(err.detail || err.message || String(err)), false);
+  }
+}
+
 async function startPersonaDashboardRefresh(archiveId, message) {
   try {
     setPersonaDashboardMessage(message || (archiveId ? "已请求刷新当前人设..." : "已请求全量刷新..."), true);
@@ -1970,7 +2062,10 @@ async function pollPersonaDashboardRefresh(taskId) {
   if (!taskId || taskId !== personaDashboardRefreshTaskId) return;
   try {
     const task = await api(`/api/persona_dashboard/refresh/${encodeURIComponent(taskId)}`);
-    setPersonaDashboardMessage(`刷新任务：${personaDashboardLabel(task.status)}。${task.message || ""}`, task.status !== "failed");
+    const progress = Number(task.progress || 0);
+    const step = task.step ? `步骤：${task.step} · ` : "";
+    const elapsed = task.elapsed_seconds ? ` · 已执行 ${task.elapsed_seconds} 秒` : "";
+    setPersonaDashboardMessage(`刷新任务：${personaDashboardLabel(task.status)} · ${step}进度 ${progress}%${elapsed}。${task.message || ""}`, task.status !== "failed");
     if (["queued", "running"].includes(String(task.status))) {
       window.setTimeout(() => pollPersonaDashboardRefresh(taskId), 2500);
       return;
@@ -3355,6 +3450,7 @@ function bindActions() {
     if (!node) return;
     node.addEventListener(id === "personaDashboardSearch" ? "input" : "change", () => {
       appState.personaDashboardPostPage = 1;
+      appState.personaDashboardTabPage = 1;
       renderPersonaDashboard();
     });
   });

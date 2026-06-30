@@ -37,6 +37,8 @@ let personaDashboardPostPage = 1;
 let personaDashboardPageSize = Number(localStorage.getItem("personaDashboardPageSize") || 10) || 10;
 let personaDashboardRefreshTask = "";
 let personaDashboardAccountPlatform = localStorage.getItem("personaDashboardAccountPlatform") || "threads";
+let personaDashboardTabPage = 1;
+let personaDashboardPostModalKey = "";
 
 const PD_LABELS = {
   likes: "点赞",
@@ -372,6 +374,10 @@ function pdRenderPersonaCard(persona) {
       <td class="persona-post-number">${pdEscape(pdNumber(row.comment_count))}</td>
       <td class="persona-post-number">${pdEscape(pdNumber(row.share_count || row.repost_count))}</td>
       <td class="persona-post-number">${pdEscape(pdNumber(row.view_count))}</td>
+      <td class="persona-post-actions">
+        <button class="ghost" type="button" data-post-view="${pdEscape(row.post_key || "")}">查看</button>
+        <button class="ghost persona-post-delete" type="button" data-post-delete="${pdEscape(row.post_key || "")}">删除</button>
+      </td>
     </tr>
   `).join("");
   return `
@@ -426,8 +432,8 @@ function pdRenderPersonaCard(persona) {
           <span>第 ${pdEscape(String(personaDashboardPostPage))} / ${pdEscape(String(pageCount))} 页 · 共 ${pdEscape(String(rows.length))} 条</span>
         </div>
         <table class="persona-post-table">
-          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th></tr></thead>
-          <tbody>${postRows || `<tr><td colspan="6">暂无发送推文指标</td></tr>`}</tbody>
+          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th><th>操作</th></tr></thead>
+          <tbody>${postRows || `<tr><td colspan="7">暂无发送推文指标</td></tr>`}</tbody>
         </table>
       </div>
       <div class="persona-pager">
@@ -435,6 +441,7 @@ function pdRenderPersonaCard(persona) {
         <span>每页 ${pdEscape(String(pageSize))} 条</span>
         <button class="ghost" type="button" id="personaPostNext" ${personaDashboardPostPage >= pageCount ? "disabled" : ""}>下一页</button>
       </div>
+      ${pdRenderPostModal(persona)}
     </article>
   `;
 }
@@ -443,9 +450,47 @@ function pdPersonaKey(persona, index = 0) {
   return String((persona && (persona.id || persona.name || persona.bound_pad_code)) || `persona-${index}`);
 }
 
+function pdFindPostRow(persona, postKey) {
+  const key = String(postKey || "");
+  return (pdFilteredPostRows(persona) || []).find((row) => String(row.post_key || "") === key) || null;
+}
+
+function pdRenderPostModal(persona) {
+  const row = personaDashboardPostModalKey ? pdFindPostRow(persona, personaDashboardPostModalKey) : null;
+  if (!row) return "";
+  const details = row.details ? JSON.stringify(row.details, null, 2) : "";
+  return `
+    <div class="persona-post-modal" role="dialog" aria-modal="true" aria-label="推文详情">
+      <div class="persona-post-modal-card">
+        <div class="persona-post-modal-head">
+          <div>
+            <strong>推文详情</strong>
+            <span>${pdEscape(row.platform || "-")} · ${pdEscape(row.published_at || row.captured_at || "无时间")}</span>
+          </div>
+          <button class="ghost" type="button" id="personaPostModalClose">关闭</button>
+        </div>
+        <div class="persona-post-modal-grid">
+          <div><span>点赞</span><strong>${pdEscape(pdNumber(row.like_count))}</strong></div>
+          <div><span>评论</span><strong>${pdEscape(pdNumber(row.comment_count))}</strong></div>
+          <div><span>转发/分享</span><strong>${pdEscape(pdNumber(row.share_count || row.repost_count))}</strong></div>
+          <div><span>逐帖浏览</span><strong>${pdEscape(pdNumber(row.view_count))}</strong></div>
+        </div>
+        <div class="persona-post-full-content">${pdEscape(row.full_content || row.content || "暂无内容")}</div>
+        ${row.source_url ? `<a class="persona-post-source-link" href="${pdEscape(row.source_url)}" target="_blank" rel="noreferrer">打开原始链接</a>` : ""}
+        <pre class="persona-post-raw">${pdEscape(details || "暂无更多结构化信息")}</pre>
+      </div>
+    </div>
+  `;
+}
+
 function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
   const tabs = pdEl("personaDashboardTabs");
   if (!tabs) return;
+  const tabPageSize = 10;
+  const tabPageCount = Math.max(1, Math.ceil(visiblePersonas.length / tabPageSize));
+  personaDashboardTabPage = Math.max(1, Math.min(tabPageCount, Number(personaDashboardTabPage || 1)));
+  const tabStart = (personaDashboardTabPage - 1) * tabPageSize;
+  const tabPersonas = visiblePersonas.slice(tabStart, tabStart + tabPageSize);
   tabs.innerHTML = `
     <div class="persona-tab-rail-head">
       <strong>分栏</strong>
@@ -460,7 +505,8 @@ function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
       </button>
       </div>
       <div class="persona-tab-section persona-tab-section-personas">
-      ${visiblePersonas.map((persona, index) => {
+      ${tabPersonas.map((persona, pageIndex) => {
+        const index = tabStart + pageIndex;
         const hot = persona.hot || {};
         const counts = persona.counts || {};
         const key = pdPersonaKey(persona, index);
@@ -479,6 +525,13 @@ function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
           </button>
         `;
       }).join("")}
+      ${visiblePersonas.length > tabPageSize ? `
+        <div class="persona-tab-pager">
+          <button class="ghost" type="button" id="personaTabPrev" ${personaDashboardTabPage <= 1 ? "disabled" : ""}>上一页</button>
+          <span>第 ${pdEscape(String(personaDashboardTabPage))} / ${pdEscape(String(tabPageCount))} 页</span>
+          <button class="ghost" type="button" id="personaTabNext" ${personaDashboardTabPage >= tabPageCount ? "disabled" : ""}>下一页</button>
+        </div>
+      ` : ""}
       </div>
       <div class="persona-tab-section persona-tab-section-system persona-tab-section-bottom">
       <button class="persona-tab persona-tab-settings ${personaDashboardSelectedId === "__settings__" ? "is-active" : ""}" type="button" data-persona-id="__settings__">
@@ -496,6 +549,10 @@ function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
       pdRenderDashboard();
     });
   });
+  const tabPrev = pdEl("personaTabPrev");
+  const tabNext = pdEl("personaTabNext");
+  if (tabPrev) tabPrev.addEventListener("click", () => { personaDashboardTabPage -= 1; pdRenderDashboard(); });
+  if (tabNext) tabNext.addEventListener("click", () => { personaDashboardTabPage += 1; pdRenderDashboard(); });
 }
 
 function pdRenderSettings() {
@@ -572,6 +629,7 @@ function pdRenderDashboard() {
   const accountPlatform = pdEl("personaAccountPlatform");
   const refreshCurrent = pdEl("personaRefreshCurrentBtn");
   const refreshBoundHot = pdEl("personaRefreshBoundHotBtn");
+  const modalClose = pdEl("personaPostModalClose");
   if (prev) prev.addEventListener("click", () => { personaDashboardPostPage -= 1; pdRenderDashboard(); });
   if (next) next.addEventListener("click", () => { personaDashboardPostPage += 1; pdRenderDashboard(); });
   if (bind && selected) bind.addEventListener("click", () => pdBindThreads(selected));
@@ -585,6 +643,19 @@ function pdRenderDashboard() {
   }
   if (refreshCurrent && selected) refreshCurrent.addEventListener("click", () => pdStartRefresh(selected.id, "已请求刷新当前人设..."));
   if (refreshBoundHot && selected) refreshBoundHot.addEventListener("click", () => pdStartRefresh(selected.id, "已请求刷新该绑定账号的全量热点信息..."));
+  if (modalClose) modalClose.addEventListener("click", () => { personaDashboardPostModalKey = ""; pdRenderDashboard(); });
+  list.querySelectorAll("[data-post-view]").forEach((node) => {
+    node.addEventListener("click", () => {
+      personaDashboardPostModalKey = String(node.getAttribute("data-post-view") || "");
+      pdRenderDashboard();
+    });
+  });
+  list.querySelectorAll("[data-post-delete]").forEach((node) => {
+    node.addEventListener("click", () => {
+      const postKey = String(node.getAttribute("data-post-delete") || "");
+      if (selected && postKey) pdDeletePost(selected, postKey);
+    });
+  });
 }
 
 function pdSyncPadFilter(data) {
@@ -650,6 +721,22 @@ async function pdUnbindThreads(persona) {
   }
 }
 
+async function pdDeletePost(persona, postKey) {
+  const ok = window.confirm("确认删除这条推文记录？删除后会立即从当前看板缓存中移除。");
+  if (!ok) return;
+  try {
+    pdSetMsg("正在删除推文记录...", "ok");
+    await pdApi(`/api/persona_dashboard/personas/${encodeURIComponent(persona.id)}/posts/${encodeURIComponent(postKey)}`, {
+      method: "DELETE",
+    });
+    personaDashboardPostModalKey = "";
+    pdSetMsg("推文记录已删除，正在刷新看板...", "ok");
+    await pdLoadDashboard();
+  } catch (err) {
+    pdSetMsg(String((err && (err.detail || err.message)) || err || "删除推文失败"), "err");
+  }
+}
+
 async function pdStartRefresh(archiveId, message) {
   try {
     pdSetMsg(message || (archiveId ? "已请求刷新当前人设..." : "已请求全量刷新..."), "ok");
@@ -669,7 +756,10 @@ async function pdPollRefresh(taskId) {
   try {
     const task = await pdApi(`/api/persona_dashboard/refresh/${encodeURIComponent(taskId)}`);
     const status = pdLabel(task.status);
-    pdSetMsg(`刷新任务：${status}。${task.message || ""}`, task.status === "failed" ? "err" : "ok");
+    const progress = Number(task.progress || 0);
+    const step = task.step ? `步骤：${task.step} · ` : "";
+    const elapsed = task.elapsed_seconds ? ` · 已执行 ${task.elapsed_seconds} 秒` : "";
+    pdSetMsg(`刷新任务：${status} · ${step}进度 ${progress}%${elapsed}。${task.message || ""}`, task.status === "failed" ? "err" : "ok");
     if (["queued", "running"].includes(String(task.status))) {
       window.setTimeout(() => pdPollRefresh(taskId), 2500);
       return;
@@ -697,6 +787,7 @@ window.addEventListener("DOMContentLoaded", () => {
     if (!node) return;
     node.addEventListener(id === "personaDashboardSearch" ? "input" : "change", () => {
       personaDashboardPostPage = 1;
+      personaDashboardTabPage = 1;
       pdRenderDashboard();
     });
   });

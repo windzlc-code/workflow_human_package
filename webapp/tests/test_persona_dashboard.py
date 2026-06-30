@@ -250,6 +250,20 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["id"], "pdr_test")
 
+    def test_public_delete_post_removes_metric_row(self):
+        self._write_archives()
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        post_key = persona["post_metrics"][0]["post_key"]
+        resp = self.unauth_client.delete(f"/api/persona_dashboard/personas/persona-1/posts/{post_key}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreaterEqual(resp.json()["deleted"], 1)
+        next_overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        next_persona = next_overview["personas"][0]
+        self.assertEqual(next_persona["post_metrics"], [])
+        self.assertEqual(next_persona["hot"]["likes"], 0)
+        self.assertEqual(next_persona["hot"]["post_views"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
