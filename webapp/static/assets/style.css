@@ -5840,7 +5840,7 @@ body.page-admin {
 
 .persona-post-table {
   width: 100%;
-  min-width: 1040px;
+  min-width: 1120px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -5865,19 +5865,24 @@ body.page-admin {
 }
 
 .persona-post-table th:nth-child(3),
+.persona-post-table td:nth-child(3) {
+  width: 142px;
+}
+
 .persona-post-table th:nth-child(4),
 .persona-post-table th:nth-child(5),
 .persona-post-table th:nth-child(6),
-.persona-post-table td:nth-child(3),
+.persona-post-table th:nth-child(7),
 .persona-post-table td:nth-child(4),
 .persona-post-table td:nth-child(5),
-.persona-post-table td:nth-child(6) {
+.persona-post-table td:nth-child(6),
+.persona-post-table td:nth-child(7) {
   width: 86px;
   text-align: right;
 }
 
-.persona-post-table th:nth-child(7),
-.persona-post-table td:nth-child(7) {
+.persona-post-table th:nth-child(8),
+.persona-post-table td:nth-child(8) {
   width: 124px;
   text-align: right;
 }
@@ -5890,6 +5895,12 @@ body.page-admin {
 
 .persona-post-platform {
   color: #0f172a;
+  font-weight: 800;
+}
+
+.persona-post-time {
+  color: #475569;
+  font-size: 12px;
   font-weight: 800;
 }
 

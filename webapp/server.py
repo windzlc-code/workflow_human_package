@@ -16919,6 +16919,8 @@ def _looks_like_media_url(value: Any) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
+    if re.match(r"^data:(?:image|video)/", text, re.I):
+        return True
     return bool(re.search(r"(?:^https?://|^/|^data:|^content://).+\.(?:png|jpe?g|webp|gif|mp4|mov|m4v|webm)(?:[?#].*)?$", text, re.I))
 
 
@@ -16939,7 +16941,8 @@ def _compact_dashboard_media_items(*sources: Any) -> list[dict[str, str]]:
         text = str(url or "").strip()
         if not text or text in seen:
             return
-        if not (_looks_like_media_url(text) or str(typ or "").strip()):
+        trusted_media_field = bool(re.search(r"(?:media|image|photo|video|thumb|attachment)", str(label or typ or ""), re.I))
+        if not (_looks_like_media_url(text) or trusted_media_field):
             return
         seen.add(text)
         media.append({
@@ -16966,6 +16969,62 @@ def _compact_dashboard_media_items(*sources: Any) -> list[dict[str, str]]:
     for source in sources:
         walk(source)
     return media[:12]
+
+
+def _dashboard_post_match_tokens(row: Any) -> set[str]:
+    if not isinstance(row, dict):
+        return set()
+    tokens: set[str] = set()
+    for key in ("id", "archivePostId", "archive_post_id", "pk", "code", "sourceUrl", "source_url", "publishedUrl", "published_url"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            tokens.add(value.lower())
+    content = str(row.get("content") or row.get("originalContent") or row.get("title") or "").strip()
+    if content:
+        tokens.add(re.sub(r"\s+", " ", content).lower()[:160])
+    return tokens
+
+
+def _dashboard_rows_match(left: Any, right: Any) -> bool:
+    left_tokens = _dashboard_post_match_tokens(left)
+    right_tokens = _dashboard_post_match_tokens(right)
+    return bool(left_tokens and right_tokens and left_tokens.intersection(right_tokens))
+
+
+def _related_dashboard_media_items(row: dict[str, Any], posts: list[Any], publish_history: list[Any]) -> list[dict[str, str]]:
+    sources: list[Any] = [row]
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        related = _dashboard_rows_match(row, post)
+        for meta_key in ("sourceMeta", "publishedMeta"):
+            meta = post.get(meta_key) if isinstance(post.get(meta_key), dict) else {}
+            if meta and _dashboard_rows_match(row, {**meta, "id": post.get("id"), "content": post.get("content")}):
+                related = True
+        if related:
+            sources.append(post)
+            for meta_key in ("sourceMeta", "publishedMeta"):
+                meta = post.get(meta_key) if isinstance(post.get(meta_key), dict) else {}
+                if meta:
+                    sources.append(meta)
+    for record in publish_history:
+        if not isinstance(record, dict):
+            continue
+        related = _dashboard_rows_match(row, record)
+        published_meta = record.get("publishedMeta") if isinstance(record.get("publishedMeta"), dict) else {}
+        if published_meta and _dashboard_rows_match(row, {**published_meta, "id": record.get("archivePostId") or record.get("id"), "content": record.get("content")}):
+            related = True
+        if related:
+            sources.append(record)
+            if published_meta:
+                sources.append(published_meta)
+            targets = record.get("publishedTargets") if isinstance(record.get("publishedTargets"), list) else []
+            for target in targets:
+                if isinstance(target, dict):
+                    sources.append(target)
+                    if isinstance(target.get("publishedMeta"), dict):
+                        sources.append(target.get("publishedMeta"))
+    return _compact_dashboard_media_items(*sources)
 
 
 def _persona_dashboard_post_key(archive_id: str, row: Any) -> str:
@@ -17309,6 +17368,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
                 compact = _compact_hot_post(row, archive_id)
                 if compact:
                     compact["platform"] = platform_name
+                    compact["media_items"] = _related_dashboard_media_items(row, posts, publish_history)
                     post_metric_rows.append(compact)
             hot_platforms.append({
                 "platform": platform_name,

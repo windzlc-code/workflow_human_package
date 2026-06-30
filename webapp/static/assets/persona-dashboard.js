@@ -370,6 +370,7 @@ function pdRenderPersonaCard(persona) {
       <td class="persona-post-source">
         <div>${pdEscape(String(row.content || row.source_url || "-").slice(0, 120))}</div>
       </td>
+      <td class="persona-post-time">${pdEscape(pdDate(row.published_at || row.captured_at))}</td>
       <td class="persona-post-number">${pdEscape(pdNumber(row.like_count))}</td>
       <td class="persona-post-number">${pdEscape(pdNumber(row.comment_count))}</td>
       <td class="persona-post-number">${pdEscape(pdNumber(row.share_count || row.repost_count))}</td>
@@ -432,8 +433,8 @@ function pdRenderPersonaCard(persona) {
           <span>第 ${pdEscape(String(personaDashboardPostPage))} / ${pdEscape(String(pageCount))} 页 · 共 ${pdEscape(String(rows.length))} 条</span>
         </div>
         <table class="persona-post-table">
-          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th><th>操作</th></tr></thead>
-          <tbody>${postRows || `<tr><td colspan="7">暂无发送推文指标</td></tr>`}</tbody>
+          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>发布时间</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th><th>操作</th></tr></thead>
+          <tbody>${postRows || `<tr><td colspan="8">暂无发送推文指标</td></tr>`}</tbody>
         </table>
       </div>
       <div class="persona-pager">
