@@ -25868,6 +25868,8 @@ function isCompleteGeneratedWarmupComment(comment: string, postPreview: string):
   const normalized = sanitizeWarmupComment(comment);
   const length = warmupCommentContentLength(normalized);
   if (!normalized || !isUsableWarmupComment(normalized)) return false;
+  if (/^(comment|comments|reply|replies|text|preview|summary)$/i.test(normalized)) return false;
+  if (!/\p{Script=Han}/u.test(normalized)) return false;
   if (/[，、,]$/.test(normalized)) return false;
   if (/[的之和與与跟及在把對对給给為为是了着著]$/.test(normalized)) return false;
   if (/^(勇敢踏出第一步|加油|支持|不错|不錯|认同|認同)[，。,.!?！？]?$/.test(normalized)) return false;
