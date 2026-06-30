@@ -13353,30 +13353,14 @@ export function buildStoredPostPublishConfirmRows(args: {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
     ...(args.hasSelectableLinkTemplates ? [[{ text: "🔗 选择链接模板", callback_data: "post_link_templates" }]] : []),
     ...platforms.map((platform) => ([{
-      text: `发布 ${platformText(platform)}`,
+      text: `✅ 确认发布到绑定智能體手機 ${platformText(platform).replace(/^.+?\s/, "")}`,
       callback_data: `dop_${platform}`,
     }])),
+    ...platforms.map((platform) => ([{
+      text: `📱 选择多智能體手機发布 ${platformText(platform).replace(/^.+?\s/, "")}`,
+      callback_data: `dopm_${platform}`,
+    }])),
   ];
-  if (!args.isSentimentImported) {
-    rows.push(
-      ...platforms.map((platform) => ([{
-        text: `多智能體手機发布 ${platformText(platform).replace(/^.+?\s/, "")}`,
-        callback_data: `dopm_${platform}`,
-      }])),
-    );
-    if (source !== "favorites") {
-      rows.push(
-        ...platforms.map((platform) => ([{
-          text: `定时发布 ${platformText(platform).replace(/^.+?\s/, "")}`,
-          callback_data: `sch_${platform}`,
-        }])),
-        ...platforms.map((platform) => ([{
-          text: `多智能體手機定时 ${platformText(platform).replace(/^.+?\s/, "")}`,
-          callback_data: `schm_${platform}`,
-        }])),
-      );
-    }
-  }
   rows.push([{ text: backText, callback_data: buildPostSourcePageCallback(args.archiveId, source, 0, args.groupContentType) }]);
   return rows;
 }

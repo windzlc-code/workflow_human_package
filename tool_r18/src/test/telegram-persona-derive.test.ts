@@ -833,7 +833,7 @@ describe("buildStoredPostPublishConfirmRows", () => {
     expect(callbacks).toContain("post_link_templates");
   });
 
-  it("keeps normal stored post advanced publish options", () => {
+  it("aligns normal stored post publish options with the standard publish preview", () => {
     const rows = buildStoredPostPublishConfirmRows({
       archiveId: "archive-1",
       platforms: ["threads", "telegram"] as any,
@@ -842,11 +842,11 @@ describe("buildStoredPostPublishConfirmRows", () => {
 
     expect(callbacks).toContain("dop_threads");
     expect(callbacks).toContain("dopm_threads");
-    expect(callbacks).toContain("sch_threads");
-    expect(callbacks).toContain("schm_threads");
+    expect(callbacks).not.toContain("sch_threads");
+    expect(callbacks).not.toContain("schm_threads");
   });
 
-  it("aligns sentiment hot imported posts with the simple publish platform picker", () => {
+  it("keeps sentiment hot imported posts on the same publish preview path", () => {
     const rows = buildStoredPostPublishConfirmRows({
       archiveId: "archive-1",
       isSentimentImported: true,
@@ -856,7 +856,7 @@ describe("buildStoredPostPublishConfirmRows", () => {
 
     expect(callbacks).toContain("dop_threads");
     expect(callbacks).toContain("dop_telegram");
-    expect(callbacks).not.toContain("dopm_threads");
+    expect(callbacks).toContain("dopm_threads");
     expect(callbacks).not.toContain("sch_threads");
     expect(callbacks).not.toContain("schm_threads");
   });
