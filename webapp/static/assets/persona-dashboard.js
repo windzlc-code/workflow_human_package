@@ -369,6 +369,7 @@ function pdRenderPersonaCard(persona) {
       <td class="persona-post-platform">${pdEscape(row.platform || "-")}</td>
       <td class="persona-post-source">
         <div>${pdEscape(String(row.content || row.source_url || "-").slice(0, 120))}</div>
+        ${pdRenderTelegramContentBadges(row)}
       </td>
       <td class="persona-post-time">${pdEscape(pdDate(row.published_at || row.captured_at))}</td>
       <td class="persona-post-number">${pdEscape(pdNumber(row.like_count))}</td>
@@ -463,13 +464,32 @@ function pdMediaType(item) {
   return "link";
 }
 
+function pdPostComposition(row) {
+  const media = Array.isArray(row.media_items) ? row.media_items.filter((item) => item && item.url) : [];
+  const imageCount = media.filter((item) => pdMediaType(item) === "image").length;
+  const videoCount = media.filter((item) => pdMediaType(item) === "video").length;
+  const otherCount = Math.max(0, media.length - imageCount - videoCount);
+  const hasText = Boolean(String(row.full_content || row.content || "").trim());
+  return { hasText, imageCount, videoCount, otherCount, totalMedia: media.length };
+}
+
+function pdRenderTelegramContentBadges(row) {
+  const parts = pdPostComposition(row);
+  const badges = [];
+  badges.push(`<span class="${parts.hasText ? "is-on" : "is-off"}">文字${parts.hasText ? "" : " 0"}</span>`);
+  badges.push(`<span class="${parts.imageCount ? "is-on" : "is-off"}">图片 ${pdEscape(String(parts.imageCount))}</span>`);
+  badges.push(`<span class="${parts.videoCount ? "is-on" : "is-off"}">视频 ${pdEscape(String(parts.videoCount))}</span>`);
+  if (parts.otherCount) badges.push(`<span class="is-on">其他 ${pdEscape(String(parts.otherCount))}</span>`);
+  return `<div class="persona-post-content-badges" aria-label="Telegram 内容组成">${badges.join("")}</div>`;
+}
+
 function pdRenderPostMedia(row) {
   const items = Array.isArray(row.media_items) ? row.media_items.filter((item) => item && item.url) : [];
   if (!items.length) {
     return `<div class="persona-post-media-empty">暂无媒体文件</div>`;
   }
   return `
-    <div class="persona-post-media-grid">
+    <div class="persona-post-media-grid ${items.length === 1 ? "persona-post-media-grid-single" : ""}">
       ${items.map((item, index) => {
         const url = String(item.url || "");
         const type = pdMediaType(item);
@@ -478,7 +498,7 @@ function pdRenderPostMedia(row) {
           return `<a class="persona-post-media-item" href="${pdEscape(url)}" target="_blank" rel="noreferrer"><img src="${pdEscape(url)}" alt="${pdEscape(label)}" loading="lazy" /></a>`;
         }
         if (type === "video") {
-          return `<div class="persona-post-media-item"><video src="${pdEscape(url)}" controls preload="metadata"></video><a href="${pdEscape(url)}" target="_blank" rel="noreferrer">打开视频</a></div>`;
+          return `<div class="persona-post-media-item persona-post-media-video"><video src="${pdEscape(url)}" controls preload="metadata"></video><a href="${pdEscape(url)}" target="_blank" rel="noreferrer">打开视频</a></div>`;
         }
         return `<a class="persona-post-media-link" href="${pdEscape(url)}" target="_blank" rel="noreferrer">${pdEscape(label || url)}</a>`;
       }).join("")}
@@ -525,6 +545,10 @@ function pdRenderPostModal(persona) {
           <div><span>转发/分享</span><strong>${pdEscape(pdNumber(row.share_count || row.repost_count))}</strong></div>
           <div><span>逐帖浏览</span><strong>${pdEscape(pdNumber(row.view_count))}</strong></div>
         </div>
+        <section class="persona-post-section">
+          <h4>Telegram 内容组成</h4>
+          ${pdRenderTelegramContentBadges(row)}
+        </section>
         <section class="persona-post-section">
           <h4>完整推文内容</h4>
           <div class="persona-post-full-content">${pdEscape(row.full_content || row.content || "暂无内容")}</div>
