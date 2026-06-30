@@ -5583,7 +5583,7 @@ body.page-admin {
 
 .persona-detail-head {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(520px, 0.95fr) minmax(120px, auto);
+  grid-template-columns: minmax(280px, 1fr) minmax(520px, 1.15fr) minmax(150px, auto);
   gap: 12px;
   align-items: start;
 }
@@ -5614,11 +5614,13 @@ body.page-admin {
 
 .persona-account-compact {
   display: grid;
-  grid-template-columns: minmax(160px, 0.6fr) minmax(260px, 1fr) auto;
-  gap: 10px;
-  align-items: end;
+  grid-template-columns: minmax(96px, 0.5fr) 120px minmax(170px, 1fr);
+  gap: 8px;
+  align-items: center;
   align-self: start;
-  padding: 9px 10px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 10px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 12px;
   background: rgba(248, 250, 252, 0.82);
@@ -5644,9 +5646,11 @@ body.page-admin {
 
 .persona-account-grid {
   display: grid;
-  grid-template-columns: 118px minmax(150px, 1fr);
+  grid-column: span 2;
+  grid-template-columns: 120px minmax(160px, 1fr);
   gap: 8px;
   align-items: center;
+  min-width: 0;
 }
 
 .persona-account-grid input,
@@ -5656,15 +5660,17 @@ body.page-admin {
 }
 
 .persona-account-actions {
-  display: grid;
-  grid-template-columns: auto auto auto minmax(160px, auto);
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  justify-content: flex-end;
 }
 
 .persona-account-actions button {
   min-height: 40px;
-  padding-inline: 12px;
+  padding-inline: 11px;
   white-space: nowrap;
 }
 
@@ -5992,6 +5998,87 @@ body.page-admin {
   white-space: pre-wrap;
 }
 
+.persona-post-section {
+  display: grid;
+  gap: 8px;
+}
+
+.persona-post-section h4 {
+  margin: 0;
+  color: #334155;
+  font-size: 14px;
+}
+
+.persona-post-media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.persona-post-media-item,
+.persona-post-media-link,
+.persona-post-media-empty {
+  display: grid;
+  min-height: 120px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.9);
+  color: #0f766e;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.persona-post-media-item img,
+.persona-post-media-item video {
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  background: #0f172a;
+}
+
+.persona-post-media-item a {
+  padding: 8px;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.persona-post-media-empty {
+  min-height: 72px;
+  color: #64748b;
+}
+
+.persona-post-info-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.persona-post-info-list div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(241, 245, 249, 0.9);
+}
+
+.persona-post-info-list span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.persona-post-info-list strong,
+.persona-post-info-list a {
+  overflow-wrap: anywhere;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 900;
+}
+
 .persona-post-source-link {
   color: #0f766e;
   font-weight: 900;
@@ -6036,6 +6123,15 @@ body.page-admin {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .persona-detail-head {
+    grid-template-columns: 1fr minmax(150px, auto);
+  }
+
+  .persona-account-compact {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
   .persona-chart-panel-wide {
     grid-column: span 2;
   }
@@ -6063,6 +6159,11 @@ body.page-admin {
 
   .persona-post-modal-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .persona-post-info-list,
+  .persona-post-media-grid {
+    grid-template-columns: 1fr;
   }
 
   .persona-dashboard-actions,

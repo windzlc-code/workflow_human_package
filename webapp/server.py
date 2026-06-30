@@ -16915,6 +16915,59 @@ def _source_metric(source: Any, *keys: str) -> int:
     return _number(source.get(keys[0]), 0) if keys else 0
 
 
+def _looks_like_media_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(re.search(r"(?:^https?://|^/|^data:|^content://).+\.(?:png|jpe?g|webp|gif|mp4|mov|m4v|webm)(?:[?#].*)?$", text, re.I))
+
+
+def _guess_media_type(value: Any, fallback: Any = "") -> str:
+    text = f"{value or ''} {fallback or ''}".lower()
+    if re.search(r"(?:video|mp4|mov|m4v|webm)", text):
+        return "video"
+    if re.search(r"(?:image|photo|png|jpe?g|webp|gif)", text):
+        return "image"
+    return "unknown"
+
+
+def _compact_dashboard_media_items(*sources: Any) -> list[dict[str, str]]:
+    media: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(url: Any, typ: Any = "", label: Any = "") -> None:
+        text = str(url or "").strip()
+        if not text or text in seen:
+            return
+        if not (_looks_like_media_url(text) or str(typ or "").strip()):
+            return
+        seen.add(text)
+        media.append({
+            "url": text,
+            "type": _guess_media_type(text, typ),
+            "label": str(label or typ or "").strip()[:80],
+        })
+
+    def walk(value: Any, label: str = "") -> None:
+        if isinstance(value, dict):
+            for key in ("url", "mediaUrl", "media_url", "imageUrl", "image_url", "videoUrl", "video_url", "thumbnailUrl", "thumbnail_url", "localPath", "path"):
+                if key in value:
+                    add(value.get(key), value.get("type") or value.get("mediaType") or value.get("media_type"), label or key)
+            for key in ("mediaItems", "media", "attachments", "images", "videos", "imageUrls", "image_urls", "originalMediaUrls"):
+                nested = value.get(key)
+                if nested is not None:
+                    walk(nested, key)
+        elif isinstance(value, list):
+            for item in value[:20]:
+                walk(item, label)
+        elif _looks_like_media_url(value):
+            add(value, "", label)
+
+    for source in sources:
+        walk(source)
+    return media[:12]
+
+
 def _persona_dashboard_post_key(archive_id: str, row: Any) -> str:
     if not isinstance(row, dict):
         return ""
@@ -16950,6 +17003,7 @@ def _compact_hot_post(raw: Any, archive_id: str = "") -> dict[str, Any]:
         "repost_count": _metric_value(raw, "repostCount", "repost_count"),
         "share_count": _metric_value(raw, "shareCount", "share_count", "send_count"),
         "view_count": _metric_value(raw, "viewCount", "view_count"),
+        "media_items": _compact_dashboard_media_items(raw),
         "details": _sanitize_dashboard_value(raw, "post"),
     }
 
@@ -17326,6 +17380,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
                     "comment_count": _source_metric(source, "commentCount", "comment_count"),
                     "share_count": _source_metric(source, "shareCount", "share_count", "send_count"),
                     "view_count": _source_metric(source, "viewCount", "view_count"),
+                    "media_items": _compact_dashboard_media_items(post, source),
                     "details": _sanitize_dashboard_value({"post": post, meta_key: source}, "post"),
                 }
                 post_metric_rows.append(metric_row)

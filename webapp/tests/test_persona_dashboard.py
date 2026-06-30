@@ -89,6 +89,7 @@ class PersonaDashboardApiTests(unittest.TestCase):
                                     "shareCount": 2,
                                     "viewCount": 300,
                                     "capturedAt": "2026-06-30T01:00:00Z",
+                                    "mediaItems": [{"url": "https://example.test/a.jpg", "type": "image"}],
                                 }
                             ],
                         }
@@ -197,6 +198,7 @@ class PersonaDashboardApiTests(unittest.TestCase):
         persona = data["personas"][0]
         self.assertEqual(persona["hot"]["recent_views"], 1234)
         self.assertEqual(persona["hot"]["post_views"], 300)
+        self.assertEqual(persona["post_metrics"][0]["media_items"][0]["url"], "https://example.test/a.jpg")
         self.assertIn("逐帖浏览", persona["hot_score_formula"])
         self.assertIn("不包含账号主页浏览", persona["hot_score_formula"])
 

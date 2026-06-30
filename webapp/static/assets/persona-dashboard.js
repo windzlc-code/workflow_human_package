@@ -455,10 +455,59 @@ function pdFindPostRow(persona, postKey) {
   return (pdFilteredPostRows(persona) || []).find((row) => String(row.post_key || "") === key) || null;
 }
 
+function pdMediaType(item) {
+  const text = `${(item && item.type) || ""} ${(item && item.url) || ""}`.toLowerCase();
+  if (/(video|mp4|mov|m4v|webm)/.test(text)) return "video";
+  if (/(image|photo|png|jpe?g|webp|gif)/.test(text)) return "image";
+  return "link";
+}
+
+function pdRenderPostMedia(row) {
+  const items = Array.isArray(row.media_items) ? row.media_items.filter((item) => item && item.url) : [];
+  if (!items.length) {
+    return `<div class="persona-post-media-empty">暂无媒体文件</div>`;
+  }
+  return `
+    <div class="persona-post-media-grid">
+      ${items.map((item, index) => {
+        const url = String(item.url || "");
+        const type = pdMediaType(item);
+        const label = item.label || `媒体 ${index + 1}`;
+        if (type === "image") {
+          return `<a class="persona-post-media-item" href="${pdEscape(url)}" target="_blank" rel="noreferrer"><img src="${pdEscape(url)}" alt="${pdEscape(label)}" loading="lazy" /></a>`;
+        }
+        if (type === "video") {
+          return `<div class="persona-post-media-item"><video src="${pdEscape(url)}" controls preload="metadata"></video><a href="${pdEscape(url)}" target="_blank" rel="noreferrer">打开视频</a></div>`;
+        }
+        return `<a class="persona-post-media-link" href="${pdEscape(url)}" target="_blank" rel="noreferrer">${pdEscape(label || url)}</a>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function pdRenderPostInfo(row) {
+  const items = [
+    ["平台", row.platform || "-"],
+    ["发布时间", pdDate(row.published_at)],
+    ["采集时间", pdDate(row.captured_at)],
+    ["原始链接", row.source_url || ""],
+    ["帖子编号", row.id || row.code || row.pk || ""],
+  ].filter((item) => String(item[1] || "").trim());
+  return `
+    <div class="persona-post-info-list">
+      ${items.map(([label, value]) => `
+        <div>
+          <span>${pdEscape(label)}</span>
+          ${label === "原始链接" ? `<a href="${pdEscape(value)}" target="_blank" rel="noreferrer">${pdEscape(value)}</a>` : `<strong>${pdEscape(value)}</strong>`}
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function pdRenderPostModal(persona) {
   const row = personaDashboardPostModalKey ? pdFindPostRow(persona, personaDashboardPostModalKey) : null;
   if (!row) return "";
-  const details = row.details ? JSON.stringify(row.details, null, 2) : "";
   return `
     <div class="persona-post-modal" role="dialog" aria-modal="true" aria-label="推文详情">
       <div class="persona-post-modal-card">
@@ -475,9 +524,18 @@ function pdRenderPostModal(persona) {
           <div><span>转发/分享</span><strong>${pdEscape(pdNumber(row.share_count || row.repost_count))}</strong></div>
           <div><span>逐帖浏览</span><strong>${pdEscape(pdNumber(row.view_count))}</strong></div>
         </div>
-        <div class="persona-post-full-content">${pdEscape(row.full_content || row.content || "暂无内容")}</div>
-        ${row.source_url ? `<a class="persona-post-source-link" href="${pdEscape(row.source_url)}" target="_blank" rel="noreferrer">打开原始链接</a>` : ""}
-        <pre class="persona-post-raw">${pdEscape(details || "暂无更多结构化信息")}</pre>
+        <section class="persona-post-section">
+          <h4>完整推文内容</h4>
+          <div class="persona-post-full-content">${pdEscape(row.full_content || row.content || "暂无内容")}</div>
+        </section>
+        <section class="persona-post-section">
+          <h4>媒体文件</h4>
+          ${pdRenderPostMedia(row)}
+        </section>
+        <section class="persona-post-section">
+          <h4>相关信息</h4>
+          ${pdRenderPostInfo(row)}
+        </section>
       </div>
     </div>
   `;
