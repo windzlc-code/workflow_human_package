@@ -33,6 +33,7 @@ const appState = {
   generatedSceneImagePath: "",
   recentRailOpen: false,
   personaDashboard: null,
+  personaDashboardSelectedId: "",
 };
 const APP_PAGES = new Set(["generate", "tasks", "persona-dashboard", "account"]);
 const APP_PAGE_LABELS = {
@@ -1245,6 +1246,52 @@ function renderPersonaCard(persona) {
   `;
 }
 
+function personaDashboardKey(persona, index = 0) {
+  return String((persona && (persona.id || persona.name || persona.bound_pad_code)) || `persona-${index}`);
+}
+
+function renderPersonaTabs(visiblePersonas, selectedPersona) {
+  const tabs = el("personaDashboardTabs");
+  if (!tabs) return;
+  if (!visiblePersonas.length) {
+    tabs.innerHTML = "";
+    return;
+  }
+  tabs.innerHTML = `
+    <div class="persona-tab-rail-head">
+      <strong>人设分栏</strong>
+      <span>${escapeHtml(String(visiblePersonas.length))} 个</span>
+    </div>
+    <div class="persona-tab-list">
+      ${visiblePersonas.map((persona, index) => {
+        const hot = persona.hot || {};
+        const counts = persona.counts || {};
+        const key = personaDashboardKey(persona, index);
+        const active = selectedPersona && personaDashboardKey(selectedPersona, index) === key;
+        return `
+          <button class="persona-tab ${active ? "is-active" : ""}" type="button" data-persona-id="${escapeHtml(key)}" aria-current="${active ? "true" : "false"}">
+            <span class="persona-tab-index">${index + 1}</span>
+            <span class="persona-tab-main">
+              <strong>${escapeHtml(persona.name || "未命名人设")}</strong>
+              <span>${escapeHtml(persona.bound_pad_name || persona.bound_pad_code || "未绑定云手机")}</span>
+            </span>
+            <span class="persona-tab-metrics">
+              <b>${escapeHtml(formatDashboardNumber(hot.hot_score))}</b>
+              <span>${escapeHtml(formatDashboardNumber(counts.published))} 发布</span>
+            </span>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+  tabs.querySelectorAll("[data-persona-id]").forEach((node) => {
+    node.addEventListener("click", () => {
+      appState.personaDashboardSelectedId = String(node.getAttribute("data-persona-id") || "");
+      renderPersonaDashboard();
+    });
+  });
+}
+
 function renderPersonaDashboard() {
   const data = appState.personaDashboard;
   const list = el("personaDashboardList");
@@ -1252,6 +1299,11 @@ function renderPersonaDashboard() {
   const meta = el("personaDashboardMeta");
   if (!data || !list || !empty) return;
   const visible = (data.personas || []).filter(personaMatchesFilters);
+  let selected = visible.find((persona, index) => personaDashboardKey(persona, index) === String(appState.personaDashboardSelectedId || ""));
+  if (!selected && visible.length) {
+    selected = visible[0];
+    appState.personaDashboardSelectedId = personaDashboardKey(selected, 0);
+  }
   renderPersonaDashboardSummary(data, visible);
   renderBarChart("personaHotRankChart", visible.map((item) => ({ label: item.name, value: item.hot && item.hot.hot_score })));
   renderDonutChart("personaPlatformChart", data.charts && data.charts.platform_distribution);
@@ -1259,9 +1311,10 @@ function renderPersonaDashboard() {
   renderTrendChart("personaTrendChart", filterPersonaDashboardTrend(data.charts && data.charts.trend));
   renderDonutChart("personaEngagementChart", data.charts && data.charts.engagement_mix);
   renderDonutChart("personaTaskStatusChart", data.charts && data.charts.task_status_distribution);
-  if (meta) meta.textContent = `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设`;
+  renderPersonaTabs(visible, selected);
+  if (meta) meta.textContent = selected ? `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设 · 已选：${selected.name || "未命名人设"}` : `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设`;
   empty.style.display = visible.length ? "none" : "block";
-  list.innerHTML = visible.map(renderPersonaCard).join("");
+  list.innerHTML = selected ? renderPersonaCard(selected) : "";
 }
 
 function syncPersonaPadFilter(data) {

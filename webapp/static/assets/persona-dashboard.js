@@ -26,6 +26,7 @@ function pdEscape(value) {
 }
 
 let personaDashboardData = null;
+let personaDashboardSelectedId = "";
 
 function pdNumber(value) {
   const n = Number(value || 0);
@@ -287,6 +288,52 @@ function pdRenderPersonaCard(persona) {
   `;
 }
 
+function pdPersonaKey(persona, index = 0) {
+  return String((persona && (persona.id || persona.name || persona.bound_pad_code)) || `persona-${index}`);
+}
+
+function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
+  const tabs = pdEl("personaDashboardTabs");
+  if (!tabs) return;
+  if (!visiblePersonas.length) {
+    tabs.innerHTML = "";
+    return;
+  }
+  tabs.innerHTML = `
+    <div class="persona-tab-rail-head">
+      <strong>人设分栏</strong>
+      <span>${pdEscape(String(visiblePersonas.length))} 个</span>
+    </div>
+    <div class="persona-tab-list">
+      ${visiblePersonas.map((persona, index) => {
+        const hot = persona.hot || {};
+        const counts = persona.counts || {};
+        const key = pdPersonaKey(persona, index);
+        const active = selectedPersona && pdPersonaKey(selectedPersona, index) === key;
+        return `
+          <button class="persona-tab ${active ? "is-active" : ""}" type="button" data-persona-id="${pdEscape(key)}" aria-current="${active ? "true" : "false"}">
+            <span class="persona-tab-index">${index + 1}</span>
+            <span class="persona-tab-main">
+              <strong>${pdEscape(persona.name || "未命名人设")}</strong>
+              <span>${pdEscape(persona.bound_pad_name || persona.bound_pad_code || "未绑定云手机")}</span>
+            </span>
+            <span class="persona-tab-metrics">
+              <b>${pdEscape(pdNumber(hot.hot_score))}</b>
+              <span>${pdEscape(pdNumber(counts.published))} 发布</span>
+            </span>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+  tabs.querySelectorAll("[data-persona-id]").forEach((node) => {
+    node.addEventListener("click", () => {
+      personaDashboardSelectedId = String(node.getAttribute("data-persona-id") || "");
+      pdRenderDashboard();
+    });
+  });
+}
+
 function pdRenderDashboard() {
   const data = personaDashboardData;
   const list = pdEl("personaDashboardList");
@@ -294,6 +341,11 @@ function pdRenderDashboard() {
   const meta = pdEl("personaDashboardMeta");
   if (!data || !list || !empty) return;
   const visible = (data.personas || []).filter(pdMatches);
+  let selected = visible.find((persona, index) => pdPersonaKey(persona, index) === String(personaDashboardSelectedId || ""));
+  if (!selected && visible.length) {
+    selected = visible[0];
+    personaDashboardSelectedId = pdPersonaKey(selected, 0);
+  }
   pdRenderSummary(data, visible);
   pdRenderBarChart("personaHotRankChart", visible.map((item) => ({ label: item.name, value: item.hot && item.hot.hot_score })));
   pdRenderDonutChart("personaPlatformChart", data.charts && data.charts.platform_distribution);
@@ -301,9 +353,10 @@ function pdRenderDashboard() {
   pdRenderTrendChart("personaTrendChart", pdFilterTrend(data.charts && data.charts.trend));
   pdRenderDonutChart("personaEngagementChart", data.charts && data.charts.engagement_mix);
   pdRenderDonutChart("personaTaskStatusChart", data.charts && data.charts.task_status_distribution);
-  if (meta) meta.textContent = `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设`;
+  pdRenderPersonaTabs(visible, selected);
+  if (meta) meta.textContent = selected ? `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设 · 已选：${selected.name || "未命名人设"}` : `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设`;
   empty.style.display = visible.length ? "none" : "block";
-  list.innerHTML = visible.map(pdRenderPersonaCard).join("");
+  list.innerHTML = selected ? pdRenderPersonaCard(selected) : "";
 }
 
 function pdSyncPadFilter(data) {
