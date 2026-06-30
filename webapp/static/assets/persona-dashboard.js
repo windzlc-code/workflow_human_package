@@ -113,6 +113,32 @@ function pdFilteredPostRows(persona) {
   });
 }
 
+function pdPersonaHot(persona) {
+  const platform = pdPlatformFilter();
+  const base = persona.hot || {};
+  if (!platform) return base;
+  const rows = (persona.hot_platforms || []).filter((item) => String(item.platform || "").toLowerCase() === platform);
+  if (!rows.length) return {
+    likes: 0,
+    comments: 0,
+    shares: 0,
+    reposts: 0,
+    recent_views: 0,
+    post_views: 0,
+    hot_score: 0,
+  };
+  return rows.reduce((sum, row) => {
+    sum.likes += Number(row.likes || 0);
+    sum.comments += Number(row.comments || 0);
+    sum.shares += Number(row.shares || 0);
+    sum.reposts += Number(row.reposts || 0);
+    sum.recent_views += Number(row.recent_views || 0);
+    sum.post_views += Number(row.post_views || 0);
+    sum.hot_score += Number(row.likes || 0) + Number(row.comments || 0) + Number(row.shares || 0) + Number(row.reposts || 0) + Number(row.post_views || 0);
+    return sum;
+  }, { likes: 0, comments: 0, shares: 0, reposts: 0, recent_views: 0, post_views: 0, hot_score: 0 });
+}
+
 function pdVisibleSummary(visiblePersonas) {
   const padSet = new Set();
   const summary = {
@@ -128,7 +154,7 @@ function pdVisibleSummary(visiblePersonas) {
   };
   visiblePersonas.forEach((persona) => {
     const counts = persona.counts || {};
-    const hot = persona.hot || {};
+    const hot = pdPersonaHot(persona);
     summary.post_count += Number(counts.posts || 0);
     summary.published_count += Number(counts.published || 0);
     summary.image_count += Number(counts.images || 0);
@@ -149,7 +175,7 @@ function pdBuildFilteredCharts(visiblePersonas, data) {
   const coverage = { complete: 0, partial_or_unknown: 0, none: 0 };
 
   visiblePersonas.forEach((persona) => {
-    const hot = persona.hot || {};
+    const hot = pdPersonaHot(persona);
     Object.keys(engagement).forEach((key) => { engagement[key] += Number(hot[key] || 0); });
     (persona.hot_platforms || []).forEach((item) => {
       const platform = String(item.platform || "").trim();
@@ -289,11 +315,11 @@ function pdRenderSummary(data, visiblePersonas) {
     { label: "已生成帖子", value: summary.post_count, hint: "当前筛选归档帖子" },
     { label: "已发布", value: summary.published_count, hint: "当前筛选发布记录" },
     { label: "素材库图片", value: summary.image_count, hint: "当前筛选图片素材" },
-    { label: "绑定云手机", value: summary.bound_pad_count, hint: "当前筛选设备数" },
+    { label: "绑定智能体手机", value: summary.bound_pad_count, hint: "当前筛选设备数" },
     { label: "总互动量", value: summary.total_interactions, hint: "点赞、评论、转发、分享" },
     { label: "账号主页浏览", value: summary.recent_views, hint: "账号主页级浏览" },
     { label: "逐帖浏览合计", value: summary.post_views, hint: "逐帖浏览，不与主页浏览合并" },
-    { label: "筛选热度", value: summary.hot_score, hint: "当前列表合计" },
+    { label: "筛选热度", value: summary.hot_score, hint: "逐帖浏览 + 点赞 + 评论 + 分享 + 转发" },
   ];
   host.innerHTML = cards.map((card) => `
     <div class="kpi persona-kpi">
@@ -315,7 +341,7 @@ function pdPersonaWarnings(persona) {
 }
 
 function pdRenderPersonaCard(persona) {
-  const hot = persona.hot || {};
+  const hot = pdPersonaHot(persona);
   const counts = persona.counts || {};
   const rows = pdFilteredPostRows(persona);
   const pageSize = Math.max(5, Math.min(100, Number(personaDashboardPageSize || 10)));
@@ -348,22 +374,26 @@ function pdRenderPersonaCard(persona) {
       <div class="persona-detail-head">
         <div>
           <h3>${pdEscape(persona.name || "未命名人设")}</h3>
-          <div class="small">云手机：${pdEscape(persona.bound_pad_name || persona.bound_pad_code || "未绑定")} · 机器人：${pdEscape(persona.owner_bot_name || "-")}</div>
+          <div class="small">智能体手机：${pdEscape(persona.bound_pad_name || persona.bound_pad_code || "未绑定")} · 机器人：${pdEscape(persona.owner_bot_name || "-")}</div>
+        </div>
+        <div class="persona-account-compact">
+          <label for="personaThreadsInput">Threads 用户名</label>
+          <div class="persona-account-row">
+            <input id="personaThreadsInput" type="text" value="${pdEscape(threads.handle || "")}" placeholder="username" />
+            <button class="ghost" type="button" id="personaBindThreadsBtn">保存</button>
+            <button class="ghost persona-unbind-btn" type="button" id="personaUnbindThreadsBtn" ${threads.handle ? "" : "disabled"}>解绑</button>
+          </div>
         </div>
         <div class="persona-score">
           <span>热度</span>
           <strong>${pdEscape(pdNumber(hot.hot_score))}</strong>
+          <small>${pdEscape(persona.hot_score_formula || "热度 = 逐帖浏览 + 点赞 + 评论 + 分享 + 转发")}</small>
         </div>
       </div>
       ${pdPersonaWarnings(persona)}
-      <div class="persona-bind-panel">
-        <label for="personaThreadsInput">Threads 用户名</label>
-        <div class="persona-bind-row">
-          <input id="personaThreadsInput" type="text" value="${pdEscape(threads.handle || "")}" placeholder="例如 username 或 @username" />
-          <button class="ghost" type="button" id="personaBindThreadsBtn">保存绑定</button>
-          <button class="primary" type="button" id="personaRefreshCurrentBtn">刷新当前人设</button>
-        </div>
-        <div class="small">没有绑定时无法抓取该人设账号热点；刷新会使用服务器端已保存的浏览器授权。</div>
+      <div class="persona-bind-hint">
+        <span>没有绑定时无法抓取该人设账号热点；刷新会使用服务器端已保存的浏览器授权。</span>
+        <button class="primary" type="button" id="personaRefreshCurrentBtn">刷新当前人设</button>
       </div>
       <div class="persona-detail-grid">
         <div><span>帖子</span><strong>${pdEscape(pdNumber(counts.posts))}</strong></div>
@@ -422,7 +452,7 @@ function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
             <span class="persona-tab-index">${index + 1}</span>
             <span class="persona-tab-main">
               <strong>${pdEscape(persona.name || "未命名人设")}</strong>
-              <span>${pdEscape(persona.bound_pad_name || persona.bound_pad_code || "未绑定云手机")}</span>
+              <span>${pdEscape(persona.bound_pad_name || persona.bound_pad_code || "未绑定智能体手机")}</span>
             </span>
             <span class="persona-tab-metrics">
               <b>${pdEscape(pdNumber(hot.hot_score))}</b>
@@ -517,10 +547,12 @@ function pdRenderDashboard() {
   const prev = pdEl("personaPostPrev");
   const next = pdEl("personaPostNext");
   const bind = pdEl("personaBindThreadsBtn");
+  const unbind = pdEl("personaUnbindThreadsBtn");
   const refreshCurrent = pdEl("personaRefreshCurrentBtn");
   if (prev) prev.addEventListener("click", () => { personaDashboardPostPage -= 1; pdRenderDashboard(); });
   if (next) next.addEventListener("click", () => { personaDashboardPostPage += 1; pdRenderDashboard(); });
   if (bind && selected) bind.addEventListener("click", () => pdBindThreads(selected));
+  if (unbind && selected) unbind.addEventListener("click", () => pdUnbindThreads(selected));
   if (refreshCurrent && selected) refreshCurrent.addEventListener("click", () => pdStartRefresh(selected.id));
 }
 
@@ -529,7 +561,7 @@ function pdSyncPadFilter(data) {
   if (!select) return;
   const current = select.value;
   const pads = Array.from(new Set((data.personas || []).map((item) => String(item.bound_pad_code || "").trim()).filter(Boolean))).sort();
-  select.innerHTML = `<option value="">全部云手机</option>${pads.map((pad) => `<option value="${pdEscape(pad)}">${pdEscape(pad)}</option>`).join("")}`;
+  select.innerHTML = `<option value="">全部智能体手机</option>${pads.map((pad) => `<option value="${pdEscape(pad)}">${pdEscape(pad)}</option>`).join("")}`;
   if (pads.includes(current)) select.value = current;
 }
 
@@ -571,6 +603,19 @@ async function pdBindThreads(persona) {
     await pdLoadDashboard();
   } catch (err) {
     pdSetMsg(String((err && (err.detail || err.message)) || err || "保存绑定失败"), "err");
+  }
+}
+
+async function pdUnbindThreads(persona) {
+  try {
+    pdSetMsg("正在解除 Threads 绑定...", "ok");
+    await pdApi(`/api/persona_dashboard/personas/${encodeURIComponent(persona.id)}/threads_binding`, {
+      method: "DELETE",
+    });
+    pdSetMsg("账号绑定已解除，旧账号热点缓存已清理。", "ok");
+    await pdLoadDashboard();
+  } catch (err) {
+    pdSetMsg(String((err && (err.detail || err.message)) || err || "解除绑定失败"), "err");
   }
 }
 

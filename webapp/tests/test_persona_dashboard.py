@@ -197,6 +197,8 @@ class PersonaDashboardApiTests(unittest.TestCase):
         persona = data["personas"][0]
         self.assertEqual(persona["hot"]["recent_views"], 1234)
         self.assertEqual(persona["hot"]["post_views"], 300)
+        self.assertIn("逐帖浏览", persona["hot_score_formula"])
+        self.assertIn("不包含账号主页浏览", persona["hot_score_formula"])
 
     def test_sensitive_values_are_masked(self):
         self._write_archives()
@@ -227,6 +229,20 @@ class PersonaDashboardApiTests(unittest.TestCase):
         persona = overview["personas"][0]
         self.assertTrue(persona["threads_account"]["bound"])
         self.assertEqual(persona["threads_account"]["handle"], "history_user")
+
+    def test_public_threads_unbinding_clears_handle(self):
+        self._write_archives()
+        bind_resp = self.unauth_client.post(
+            "/api/persona_dashboard/personas/persona-1/threads_binding",
+            json={"username": "history_user"},
+        )
+        self.assertEqual(bind_resp.status_code, 200)
+        resp = self.unauth_client.delete("/api/persona_dashboard/personas/persona-1/threads_binding")
+        self.assertEqual(resp.status_code, 200)
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        self.assertFalse(persona["threads_account"]["bound"])
+        self.assertEqual(persona["threads_account"]["handle"], "")
 
     def test_public_refresh_endpoint_returns_task_status(self):
         with mock.patch.object(server, "_start_persona_dashboard_refresh", return_value={"id": "pdr_test", "status": "queued", "message": "已加入刷新队列。"}):

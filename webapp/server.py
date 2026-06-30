@@ -16522,6 +16522,46 @@ def _bind_persona_threads_username(archive_id: str, username: str) -> dict[str, 
     return {"ok": True, "archive_id": clean_id, "username": clean_username, "path": path.name}
 
 
+def _unbind_persona_threads_username(archive_id: str) -> dict[str, Any]:
+    clean_id = str(archive_id or "").strip()
+    if not clean_id:
+        raise HTTPException(status_code=400, detail="缺少人设 ID。")
+    path, raw, archives = _persona_archive_source_for_write()
+    changed = False
+    for archive in archives:
+        if str(archive.get("id") or "").strip() != clean_id:
+            continue
+        setup = archive.get("setup") if isinstance(archive.get("setup"), dict) else {}
+        account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
+        threads = account_management.get("threads") if isinstance(account_management.get("threads"), dict) else {}
+        previous_username = _normalize_threads_username(threads.get("handle"))
+        hot_metrics = setup.get("hotMetrics") if isinstance(setup.get("hotMetrics"), dict) else {}
+        if previous_username:
+            hot_metrics = {
+                key: value for key, value in hot_metrics.items()
+                if _normalize_threads_username((value or {}).get("username") if isinstance(value, dict) else "").lower() != previous_username.lower()
+                and str(key).lower() != f"threads:{previous_username.lower()}"
+            }
+        next_threads = dict(threads)
+        next_threads.pop("handle", None)
+        next_threads["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        archive["setup"] = {
+            **setup,
+            "accountManagement": {
+                **account_management,
+                "threads": next_threads,
+            },
+            "hotMetrics": hot_metrics,
+        }
+        archive["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        changed = True
+        break
+    if not changed:
+        raise HTTPException(status_code=404, detail="人设不存在。")
+    _write_persona_archives_preserving_shape(path, raw, archives)
+    return {"ok": True, "archive_id": clean_id, "path": path.name}
+
+
 def _read_tool_r18_persona_archives() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     primary = TOOL_R18_RUNTIME_DIR / "persona_archives.json"
     fallback = TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json"
@@ -17022,6 +17062,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
                 "platform_posts": {str(k): len(v) if isinstance(v, list) else 0 for k, v in platform_posts.items()},
             },
             "hot": persona_hot,
+            "hot_score_formula": "热度 = 逐帖浏览合计 + 点赞 + 评论 + 分享 + 转发；不包含账号主页浏览。",
             "hot_platforms": hot_platforms,
             "post_metrics": post_metric_rows[:80],
             "publish_history": [_compact_publish_record(item) for item in publish_history[:20] if isinstance(item, dict)],
@@ -17618,6 +17659,10 @@ def create_app() -> FastAPI:
     @app.post("/api/persona_dashboard/personas/{archive_id}/threads_binding")
     def api_persona_dashboard_bind_threads(archive_id: str, payload: PersonaDashboardThreadsBindingPayload):
         return _bind_persona_threads_username(archive_id, payload.username)
+
+    @app.delete("/api/persona_dashboard/personas/{archive_id}/threads_binding")
+    def api_persona_dashboard_unbind_threads(archive_id: str):
+        return _unbind_persona_threads_username(archive_id)
 
     @app.post("/api/persona_dashboard/refresh")
     def api_persona_dashboard_refresh(payload: PersonaDashboardRefreshPayload):
