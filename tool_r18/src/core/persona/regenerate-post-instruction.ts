@@ -19,6 +19,29 @@ function normalizeSimilarityText(value: string): string {
     .toLowerCase();
 }
 
+function stripStableTrailingContactBlock(value: string): string {
+  const lines = String(value || "").split(/\r?\n/);
+  const nonEmptyItems = lines
+    .map((line, index) => ({ line: line.trim(), index }))
+    .filter((item) => item.line);
+  if (!nonEmptyItems.length) return String(value || "");
+  const contactLinePattern = /(?:https?:\/\/|www\.|t\.me\/|line\s*[:：]|telegram|聯絡|联系|電話|电话|手機|手机|行動|微信|wechat|@|0\d{1,3}[-\s]?\d{3,}|\d{3,}[-\s]\d{3,})/i;
+  const contactBlockPattern = /(?:專案|专案|方案|利率|低息|諮詢|咨询|私訊|私讯|聯絡|联系|補個|补个|詳情|详情|教程|更多|預約|预约|申請|申请|放款|貸款|贷款)/i;
+  let cursor = nonEmptyItems.length - 1;
+  while (cursor >= 0 && !contactLinePattern.test(nonEmptyItems[cursor].line)) cursor -= 1;
+  if (cursor < 0 || nonEmptyItems.length - 1 - cursor > 2) return String(value || "");
+
+  let start = cursor;
+  for (let index = cursor - 1; index >= 0 && cursor - index <= 3; index -= 1) {
+    const line = nonEmptyItems[index].line;
+    if (line.length > 80) break;
+    if (!contactLinePattern.test(line) && !contactBlockPattern.test(line)) break;
+    start = index;
+  }
+  const next = lines.slice(0, nonEmptyItems[start].index).join("\n").trim();
+  return next ? next : String(value || "");
+}
+
 function bigramSet(value: string): Set<string> {
   const set = new Set<string>();
   for (let index = 0; index < value.length - 1; index += 1) {
@@ -49,9 +72,7 @@ function hasCopiedListStructure(originalContent: string, generatedContent: strin
   return originalMarkers >= 2 && generatedMarkers >= 2;
 }
 
-export function calculateRegeneratedPostSimilarity(originalContent: string, generatedContent: string): number {
-  const original = normalizeSimilarityText(originalContent);
-  const generated = normalizeSimilarityText(generatedContent);
+function calculateNormalizedSimilarity(original: string, generated: string, denominator: "min" | "max" = "min"): number {
   if (!original || !generated) return 0;
   if (original === generated) return 1;
   const originalSet = bigramSet(original);
@@ -61,22 +82,38 @@ export function calculateRegeneratedPostSimilarity(originalContent: string, gene
   for (const item of generatedSet) {
     if (originalSet.has(item)) overlap += 1;
   }
-  return overlap / Math.min(originalSet.size, generatedSet.size);
+  const base = denominator === "max"
+    ? Math.max(originalSet.size, generatedSet.size)
+    : Math.min(originalSet.size, generatedSet.size);
+  return overlap / base;
+}
+
+export function calculateRegeneratedPostSimilarity(originalContent: string, generatedContent: string): number {
+  return calculateNormalizedSimilarity(
+    normalizeSimilarityText(originalContent),
+    normalizeSimilarityText(generatedContent),
+  );
 }
 
 export function isRegeneratedPostTooSimilar(
   originalContent: string,
   generatedContent: string,
-  options: { allowSameListStructure?: boolean; similarityThreshold?: number } = {},
+  options: { allowSameListStructure?: boolean; similarityThreshold?: number; allowShortTemplateReuse?: boolean; ignoreStableTrailingContactBlock?: boolean } = {},
 ): boolean {
-  const original = normalizeSimilarityText(originalContent);
-  const generated = normalizeSimilarityText(generatedContent);
+  const fullOriginal = normalizeSimilarityText(originalContent);
+  const fullGenerated = normalizeSimilarityText(generatedContent);
+  if (!fullOriginal || !fullGenerated) return false;
+  if (fullOriginal === fullGenerated) return true;
+  const comparisonOriginalContent = options.ignoreStableTrailingContactBlock ? stripStableTrailingContactBlock(originalContent) : originalContent;
+  const comparisonGeneratedContent = options.ignoreStableTrailingContactBlock ? stripStableTrailingContactBlock(generatedContent) : generatedContent;
+  const original = normalizeSimilarityText(comparisonOriginalContent);
+  const generated = normalizeSimilarityText(comparisonGeneratedContent);
   if (!original || !generated) return false;
-  if (original === generated) return true;
+  const isShortTemplateRewrite = Boolean(options.allowShortTemplateReuse) && original.length < 90;
   const shortOriginal = original.slice(0, Math.min(original.length, 80));
   const shortGenerated = generated.slice(0, Math.min(generated.length, 80));
-  if (shortOriginal.length >= 20 && (generated.includes(shortOriginal) || original.includes(shortGenerated))) return true;
-  if (hasLongSharedFragment(original, generated)) return true;
+  if (!isShortTemplateRewrite && shortOriginal.length >= 20 && (generated.includes(shortOriginal) || original.includes(shortGenerated))) return true;
+  if (hasLongSharedFragment(original, generated, isShortTemplateRewrite ? 36 : 24)) return true;
   if (!options.allowSameListStructure && hasCopiedListStructure(originalContent, generatedContent)) return true;
-  return calculateRegeneratedPostSimilarity(originalContent, generatedContent) >= (options.similarityThreshold ?? 0.72);
+  return calculateNormalizedSimilarity(original, generated, options.ignoreStableTrailingContactBlock ? "max" : "min") >= (options.similarityThreshold ?? 0.72);
 }

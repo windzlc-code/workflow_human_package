@@ -850,6 +850,8 @@ type PendingPublishPadSelection = {
   completedPadCodesByPost?: Record<string, string[]>;
   linkEndingPresetApplied?: boolean;
   contentOverrides?: Record<string, string>;
+  padPage?: number;
+  promptText?: string;
   selectedPadCodes: string[];
   availablePadCodes: string[];
   backCallback?: string;
@@ -2406,17 +2408,41 @@ function uniquePadCodes(codes: string[]): string[] {
 export function buildPublishPadSelectionRows(args: {
   pads: Array<{ padCode: string; padName?: string }>;
   selectedPadCodes: string[];
+  page?: number;
+  pageSize?: number;
   confirmCallback?: string;
   backCallback?: string;
 }) {
   const selected = new Set(uniquePadCodes(args.selectedPadCodes));
-  const rows = args.pads.slice(0, 12).map((pad, index) => {
+  const pageSize = args.pageSize || 10;
+  const totalPages = Math.max(1, Math.ceil(args.pads.length / pageSize));
+  const safePage = Math.min(Math.max(0, args.page || 0), totalPages - 1);
+  const start = safePage * pageSize;
+  const visiblePads = args.pads.slice(start, start + pageSize);
+  const rows = visiblePads.map((pad, index) => {
     const checked = selected.has(pad.padCode);
     return [{
       text: `${checked ? "✅ " : "☐ "}${pad.padName || pad.padCode}`,
       callback_data: `pubpad_toggle_${index}`,
     }];
   });
+  if (visiblePads.length) {
+    rows.push([
+      { text: "☑️ 全选本页", callback_data: "pubpad_select_page" },
+      { text: "⬜ 清空本页", callback_data: "pubpad_clear_page" },
+    ]);
+  }
+  if (args.pads.length > pageSize) {
+    rows.push([
+      { text: "☑️ 全选全部", callback_data: "pubpad_select_all" },
+      { text: "⬜ 清空全部", callback_data: "pubpad_clear_all" },
+    ]);
+  }
+  rows.push(...buildListPaginationRows({
+    page: safePage,
+    totalPages,
+    callbackForPage: (targetPage) => `pubpad_page_${targetPage}`,
+  }));
   rows.push([{ text: `✅ 确认发布到 ${selected.size || 0} 台智能體手機`, callback_data: args.confirmCallback || "pubpad_confirm" }]);
   rows.push([{ text: "◀️ 返回", callback_data: args.backCallback || "pubpad_back" }]);
   return rows;
@@ -4868,6 +4894,15 @@ function escapeLinkEndingText(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function removeTrailingLinkEndingSegment(content: string, segment: string): string {
+  const source = String(content || "").trimEnd();
+  const normalizedSegment = String(segment || "").trim();
+  if (!source || !normalizedSegment) return source.trim();
+  const escaped = escapeLinkEndingText(normalizedSegment).replace(/\r?\n/g, "\\s*\\n\\s*");
+  const next = source.replace(new RegExp(`(?:\\s*\\n\\s*|\\s+)${escaped}\\s*$`, "i"), "").trimEnd();
+  return next === source ? source.trim() : next.trim();
+}
+
 function buildPersonaPublishCaption(content: string, setup: any): string {
   const active = getActiveLinkEndingPreset(setup) || buildLegacyLinkEndingPreset(setup);
   if (!active) return String(content || "").trim();
@@ -4928,6 +4963,16 @@ export function applyLinkEndingPresetToText(content: string, active: { linkUrl?:
       .trim();
     next = `${next}\n${linkUrl}`.trim();
   }
+  return next.trim();
+}
+
+export function removeLinkEndingPresetFromText(content: string, active: { linkUrl?: string; endingText?: string } | null | undefined): string {
+  let next = String(content || "").trim();
+  if (!active) return next;
+  const endingText = String(active.endingText || "").trim();
+  const linkUrl = String(active.linkUrl || "").trim();
+  if (linkUrl) next = removeTrailingLinkEndingSegment(next, linkUrl);
+  if (endingText) next = removeTrailingLinkEndingSegment(next, endingText);
   return next.trim();
 }
 
@@ -11050,6 +11095,8 @@ async function rewriteSentimentHotImportedPostContent(args: {
   const sourceMeta = args.post.sourceMeta || {};
   const setup: any = args.archive.setup || {};
   const activeLinkEndingPreset = getActiveLinkEndingPreset(setup);
+  const sourcePostContent = removeLinkEndingPresetFromText(args.post.content, activeLinkEndingPreset);
+  const sourceOriginalContent = removeLinkEndingPresetFromText(String(sourceMeta.originalContent || ""), activeLinkEndingPreset);
   const personaCoreLines = [
     `人設名稱：${args.archive.name}`,
     args.archive.content ? `人設完整簡介：${args.archive.content}` : "",
@@ -11069,7 +11116,7 @@ async function rewriteSentimentHotImportedPostContent(args: {
     sourceMeta.platform ? `平台：${sourceMeta.platform}` : "",
     sourceMeta.sourceUrl ? `原帖連結：${sourceMeta.sourceUrl}` : "",
     sourceMeta.metrics ? `原帖數據：${JSON.stringify(sourceMeta.metrics).slice(0, 500)}` : "",
-    sourceMeta.originalContent ? `原始抓取文案：${String(sourceMeta.originalContent).trim()}` : "",
+    sourceOriginalContent ? `原始抓取文案（已排除當前鏈接結尾模板）：${sourceOriginalContent}` : "",
   ].filter(Boolean).join("\n");
   const modeLines = args.mode === "source_structure"
     ? [
@@ -11110,8 +11157,8 @@ async function rewriteSentimentHotImportedPostContent(args: {
     sourceLines ? `【熱點素材，只能作為信息來源，不得模仿文風】\n${sourceLines}` : "",
     "",
     args.mode === "source_structure"
-      ? `【原帖文案，可借鑑結構但不得複製文字】\n${args.post.content}`
-      : `【原帖文案，只提取素材，不要沿用結構】\n${args.post.content}`,
+      ? `【原帖文案，已排除當前鏈接結尾模板；可借鑑結構但不得複製文字】\n${sourcePostContent}`
+      : `【原帖文案，已排除當前鏈接結尾模板；只提取素材，不要沿用結構】\n${sourcePostContent}`,
   ].filter(Boolean).join("\n");
   const { data, model } = await callTextUnderstandingModelWithFallback(
     resolveTelegramTextModelPreference(args.post.telegramGroupContentType === "paid" ? "paid" : "free"),
@@ -11145,6 +11192,7 @@ async function rewriteNormalArchivePostContent(args: {
   const startedAt = Date.now();
   const setup: any = args.archive.setup || {};
   const activeLinkEndingPreset = getActiveLinkEndingPreset(setup) || buildLegacyLinkEndingPreset(setup);
+  const originalContentWithoutLinkEnding = removeLinkEndingPresetFromText(args.post.content, activeLinkEndingPreset);
   const personaCoreLines = [
     `Persona name: ${args.archive.name}`,
     args.archive.content ? `Persona profile: ${args.archive.content}` : "",
@@ -11164,13 +11212,15 @@ async function rewriteNormalArchivePostContent(args: {
     "Output only the final post body. Do not output analysis, title, numbering, markdown fence, or explanations.",
     "Do not create multiple posts. Do not use --- separators.",
     "The rewritten post must replace the original post, so keep the same broad topic while changing wording, angle, and expression.",
+    "For short template-like posts, change the opening phrase, concrete scene, object/clothing detail, and rhythm. Do not only swap one or two words.",
+    "Fixed link ending text may stay the same, but the main body before the fixed ending must be clearly rewritten.",
     activeLinkEndingPreset ? "If a link ending preset is provided, include it exactly once at the end." : "",
     "",
     "Persona context:",
     personaCoreLines,
     "",
     "Rewrite instruction:",
-    buildRegeneratePostInstruction(args.post.content, args.attempt),
+    buildRegeneratePostInstruction(originalContentWithoutLinkEnding, args.attempt),
   ].filter(Boolean).join("\n");
   const { data, model } = await callTextUnderstandingModelWithFallback(
     resolveTelegramTextModelPreference(args.post.telegramGroupContentType === "paid" ? "paid" : "free"),
@@ -11244,6 +11294,9 @@ async function regenerateArchivePostContent(args: {
     }
     if (!isRegeneratedPostTooSimilar(original.content, generatedContent, {
       allowSameListStructure: isSentimentHotImportedPost(original) && (args.rewriteMode || "persona_style") === "source_structure",
+      allowShortTemplateReuse: !isSentimentHotImportedPost(original),
+      ignoreStableTrailingContactBlock: !isSentimentHotImportedPost(original),
+      similarityThreshold: isSentimentHotImportedPost(original) ? undefined : 0.88,
     })) break;
     if (attempt === 3) {
       throw new Error("AI 連續返回與原推文過於相似的內容，請稍後再試或換一個生成方向。");
@@ -15175,7 +15228,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   const resolvePublishPadOptions = async (defaultSelection?: string | string[]) => {
     const pads = await listPadsForThisBot();
     const runningPads = pads.filter((pad) => pad.padStatus === 10);
-    const candidates = (runningPads.length ? runningPads : pads).slice(0, 12);
+    const candidates = runningPads.length ? runningPads : pads;
     const defaultCodes = uniquePadCodes(Array.isArray(defaultSelection) ? defaultSelection : [defaultSelection || defaultPadCode]);
     const availableCodes = new Set(candidates.map((pad) => pad.padCode));
     const selected = defaultCodes.filter((code) => availableCodes.has(code));
@@ -15201,6 +15254,8 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       ...selection,
       selectedPadCodes: uniquePadCodes(selection.selectedPadCodes).filter((code) => resolved.pads.some((pad) => pad.padCode === code)),
       availablePadCodes: resolved.pads.map((pad) => pad.padCode),
+      padPage: selection.padPage || 0,
+      promptText: text,
       backCallback,
       createdAt: Date.now(),
     };
@@ -15211,6 +15266,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
         inline_keyboard: buildPublishPadSelectionRows({
           pads: resolved.pads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
           selectedPadCodes: nextState.selectedPadCodes,
+          page: nextState.padPage,
           backCallback,
         }),
       },
@@ -20914,7 +20970,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("pubpad_toggle_") || data === "pubpad_confirm" || data === "pubpad_back") {
+    if (data.startsWith("pubpad_toggle_") || data.startsWith("pubpad_page_") || data === "pubpad_select_page" || data === "pubpad_clear_page" || data === "pubpad_select_all" || data === "pubpad_clear_all" || data === "pubpad_confirm" || data === "pubpad_back") {
       const state = pendingPublishPadSelections.get(chatId);
       if (!state) {
         await safeEditOrSend(bot, chatId, msgId, "发布智能體手機选择已过期，请重新进入发布流程。", {
@@ -20923,49 +20979,64 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const pads = await listPadsForThisBot();
-      const visiblePads = state.availablePadCodes
+      const allPads = state.availablePadCodes
         .map((code) => pads.find((pad) => pad.padCode === code) || { padCode: code, padName: getRememberedPadName(code), padStatus: 0 })
         .filter((pad) => pad.padCode);
+      const pageSize = 10;
+      const totalPages = Math.max(1, Math.ceil(allPads.length / pageSize));
+      const currentPage = Math.min(Math.max(0, state.padPage || 0), totalPages - 1);
+      const pagePads = allPads.slice(currentPage * pageSize, currentPage * pageSize + pageSize);
       const selectedPads = new Set(state.selectedPadCodes);
       const backCallback = state.backCallback || (state.mode === "bulk_posts" ? "bconfirm"
         : state.mode === "manual_posts" ? `mpage_${Math.floor((state.startIndex || 0) / 8)}`
         : state.mode === "scheduled_post" ? "post_action"
         : state.mode === "single_post" ? "post_action"
         : state.archiveId ? `custom_publish_platform_${state.platform}` : "custom_publish");
+      const renderPadSelection = async (nextState: PendingPublishPadSelection, text?: string) => {
+        pendingPublishPadSelections.set(chatId, nextState);
+        await safeEditOrSend(bot, chatId, msgId, text || nextState.promptText || "请选择要同时发布的智能體手機：", {
+          reply_markup: {
+            inline_keyboard: buildPublishPadSelectionRows({
+              pads: allPads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
+              selectedPadCodes: nextState.selectedPadCodes,
+              page: nextState.padPage,
+              pageSize,
+              backCallback,
+            }),
+          },
+        });
+      };
       if (data === "pubpad_back") {
         pendingPublishPadSelections.delete(chatId);
         data = backCallback;
       } else if (data.startsWith("pubpad_toggle_")) {
         const index = Math.max(0, Number(data.slice("pubpad_toggle_".length) || 0));
-        const padCode = visiblePads[index]?.padCode;
+        const padCode = pagePads[index]?.padCode;
         if (padCode) {
           if (selectedPads.has(padCode)) selectedPads.delete(padCode);
           else selectedPads.add(padCode);
         }
-        const nextState = { ...state, selectedPadCodes: [...selectedPads] };
-        pendingPublishPadSelections.set(chatId, nextState);
-        await safeEditOrSend(bot, chatId, msgId, "请选择要同时发布的智能體手機：", {
-          reply_markup: {
-            inline_keyboard: buildPublishPadSelectionRows({
-              pads: visiblePads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
-              selectedPadCodes: nextState.selectedPadCodes,
-              backCallback,
-            }),
-          },
-        });
+        const nextState = { ...state, padPage: currentPage, selectedPadCodes: [...selectedPads] };
+        await renderPadSelection(nextState);
+        return;
+      } else if (data.startsWith("pubpad_page_")) {
+        const page = Number.parseInt(data.slice("pubpad_page_".length), 10);
+        const nextState = { ...state, padPage: Number.isFinite(page) ? Math.min(Math.max(0, page), totalPages - 1) : currentPage };
+        await renderPadSelection(nextState);
+        return;
+      } else if (data === "pubpad_select_page" || data === "pubpad_clear_page" || data === "pubpad_select_all" || data === "pubpad_clear_all") {
+        const targetPads = data.endsWith("_all") ? allPads : pagePads;
+        for (const pad of targetPads) {
+          if (data.includes("clear")) selectedPads.delete(pad.padCode);
+          else selectedPads.add(pad.padCode);
+        }
+        const nextState = { ...state, padPage: currentPage, selectedPadCodes: [...selectedPads] };
+        await renderPadSelection(nextState);
         return;
       } else if (data === "pubpad_confirm") {
         const selectedPadCodes = uniquePadCodes([...selectedPads]);
         if (!selectedPadCodes.length) {
-          await safeEditOrSend(bot, chatId, msgId, "请至少选择一台智能體手機。", {
-            reply_markup: {
-              inline_keyboard: buildPublishPadSelectionRows({
-                pads: visiblePads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
-                selectedPadCodes,
-                backCallback,
-              }),
-            },
-          });
+          await renderPadSelection({ ...state, padPage: currentPage, selectedPadCodes }, "请至少选择一台智能體手機。");
           return;
         }
         if (!credentials.ak || !credentials.sk) {

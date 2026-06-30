@@ -33,6 +33,7 @@ import {
   parsePersonaContentTypeCallback,
   parseStoredPostsCallback,
   applyLinkEndingPresetToText,
+  removeLinkEndingPresetFromText,
 } from "@/telegram-bot";
 import type { PersonaArchive } from "@/core/archives/persona-archive-domain";
 
@@ -369,6 +370,38 @@ describe("link ending presets", () => {
     expect(next.endsWith("你好啊\nhttps://example.com/more")).toBe(true);
     expect(next.match(/你好啊/g)).toHaveLength(1);
     expect(next.match(/https:\/\/example\.com\/more/g)).toHaveLength(1);
+  });
+
+  it("removes the active ending and link before rewrite prompts", () => {
+    const content = [
+      "core body before rewrite",
+      "fixed ending block",
+      "https://example.com/more",
+    ].join("\n");
+    const next = removeLinkEndingPresetFromText(content, {
+      endingText: "fixed ending block",
+      linkUrl: "https://example.com/more",
+    });
+
+    expect(next).toBe("core body before rewrite");
+  });
+
+  it("only removes active ending text from the trailing template block", () => {
+    const content = [
+      "fixed ending block 这句在正文里也有价值，不能被删除。",
+      "core body before rewrite",
+      "fixed ending block",
+      "https://example.com/more",
+    ].join("\n");
+    const next = removeLinkEndingPresetFromText(content, {
+      endingText: "fixed ending block",
+      linkUrl: "https://example.com/more",
+    });
+
+    expect(next).toBe([
+      "fixed ending block 这句在正文里也有价值，不能被删除。",
+      "core body before rewrite",
+    ].join("\n"));
   });
 });
 
@@ -843,6 +876,28 @@ describe("buildPublishPadSelectionRows", () => {
     expect(buttons[0]?.callback_data).toBe("pubpad_toggle_0");
     expect(buttons[1]?.callback_data).toBe("pubpad_toggle_1");
     expect(buttons.find((button) => button.callback_data === "pubpad_confirm")?.text).toContain("1");
+  });
+
+  it("keeps page selection controls for large multi-pad publishing lists", () => {
+    const pads = Array.from({ length: 13 }, (_, index) => ({
+      padCode: `PAD${index + 1}`,
+      padName: `Cloud ${index + 1}`,
+    }));
+    const rows = buildPublishPadSelectionRows({
+      pads,
+      selectedPadCodes: ["PAD12"],
+      page: 1,
+      pageSize: 10,
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
+    expect(callbacks).toContain("pubpad_toggle_0");
+    expect(callbacks).toContain("pubpad_select_page");
+    expect(callbacks).toContain("pubpad_clear_page");
+    expect(callbacks).toContain("pubpad_select_all");
+    expect(callbacks).toContain("pubpad_clear_all");
+    expect(callbacks).toContain("pubpad_page_0");
+    expect(callbacks).toContain("pubpad_confirm");
   });
 });
 describe("buildPostImageRegenerateCallback", () => {
