@@ -27,6 +27,43 @@ function ensureParentDir(filePath: string) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+const ARCHIVE_LOCK_TIMEOUT_MS = 30_000;
+const ARCHIVE_LOCK_POLL_MS = 100;
+
+function getLockPath() {
+  return resolveRuntimeFile("persona_archives.lock");
+}
+
+function sleepSync(ms: number) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withArchiveFileLock<T>(fn: () => T): T {
+  const lockPath = getLockPath();
+  ensureParentDir(lockPath);
+  const started = Date.now();
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try {
+      fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, `${process.pid} ${Date.now()}\n`, "utf-8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") throw error;
+      if (Date.now() - started > ARCHIVE_LOCK_TIMEOUT_MS) {
+        throw new Error("persona archive write lock timeout");
+      }
+      sleepSync(ARCHIVE_LOCK_POLL_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+}
+
 // ─── 内存缓存 ─────────────────────────────────────────────────────────────────
 let _cache: PersonaArchiveRecord[] | null = null;
 let _cacheFileMtime = 0;
@@ -62,7 +99,7 @@ function readAll(): PersonaArchiveRecord[] {
   }
 }
 
-function writeAll(items: PersonaArchiveRecord[]) {
+function writeAllUnlocked(items: PersonaArchiveRecord[]) {
   const filePath = getStorePath();
   ensureParentDir(filePath);
   fs.writeFileSync(filePath, JSON.stringify(items, null, 2), "utf-8");
@@ -78,11 +115,13 @@ export function installNodePersonaArchiveBridge() {
 
   globalAny.window.electronAPI.personaArchives = {
     async save(archive: PersonaArchiveRecord) {
-      const items = readAll();
-      const idx = items.findIndex((item) => item.id === archive.id);
-      if (idx >= 0) items[idx] = archive;
-      else items.unshift(archive);
-      writeAll(items);
+      withArchiveFileLock(() => {
+        const items = readAll();
+        const idx = items.findIndex((item) => item.id === archive.id);
+        if (idx >= 0) items[idx] = archive;
+        else items.unshift(archive);
+        writeAllUnlocked(items);
+      });
       return { ok: true };
     },
     async load(id: string) {
@@ -92,8 +131,10 @@ export function installNodePersonaArchiveBridge() {
       return readAll();
     },
     async delete(id: string) {
-      const items = readAll().filter((item) => item.id !== id);
-      writeAll(items);
+      withArchiveFileLock(() => {
+        const items = readAll().filter((item) => item.id !== id);
+        writeAllUnlocked(items);
+      });
       return { ok: true };
     },
   };

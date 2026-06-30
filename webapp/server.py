@@ -16,6 +16,7 @@ import signal
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -16438,6 +16439,59 @@ def _extract_persona_archive_list(raw: Any) -> list[dict[str, Any]]:
 
 PERSONA_DASHBOARD_REFRESH_TASKS: dict[str, dict[str, Any]] = {}
 PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
+PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
+
+
+@contextlib.contextmanager
+def _persona_archive_file_lock(timeout_seconds: int = PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS):
+    lock_path = TOOL_R18_RUNTIME_DIR / "persona_archives.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    fd: int | None = None
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()} {time.time()}\n".encode("utf-8"))
+            break
+        except FileExistsError:
+            if time.time() - started > timeout_seconds:
+                raise HTTPException(status_code=409, detail="人设归档正在写入，请稍后重试。")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            with contextlib.suppress(Exception):
+                os.close(fd)
+        with contextlib.suppress(FileNotFoundError):
+            lock_path.unlink()
+
+
+def _read_persona_dashboard_deleted_posts() -> dict[str, set[str]]:
+    path = TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_posts.json"
+    raw = _read_json_file(path)
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, set[str]] = {}
+    for archive_id, values in raw.items():
+        if isinstance(values, list):
+            out[str(archive_id)] = {str(item) for item in values if str(item or "").strip()}
+    return out
+
+
+def _add_persona_dashboard_deleted_post(archive_id: str, post_key: str) -> None:
+    with _persona_archive_file_lock():
+        _add_persona_dashboard_deleted_post_unlocked(archive_id, post_key)
+
+
+def _add_persona_dashboard_deleted_post_unlocked(archive_id: str, post_key: str) -> None:
+    path = TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_posts.json"
+    deleted = _read_persona_dashboard_deleted_posts()
+    keys = deleted.setdefault(str(archive_id), set())
+    keys.add(str(post_key))
+    payload = {key: sorted(values) for key, values in deleted.items() if values}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _normalize_threads_username(value: Any) -> str:
@@ -16459,23 +16513,24 @@ def _persona_archive_source_for_write() -> tuple[Path, Any, list[dict[str, Any]]
 
 
 def _write_persona_archives_preserving_shape(path: Path, raw: Any, archives: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(raw, list):
-        payload: Any = archives
-    elif isinstance(raw, dict):
-        payload = dict(raw)
-        target_key = "persona_archives_v2"
-        for key in ("persona_archives_v2", "persona_archives", "archives", "items"):
-            if key in payload:
-                target_key = key
-                break
-        if isinstance(payload.get(target_key), str):
-            payload[target_key] = json.dumps(archives, ensure_ascii=False)
+    with _persona_archive_file_lock():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(raw, list):
+            payload: Any = archives
+        elif isinstance(raw, dict):
+            payload = dict(raw)
+            target_key = "persona_archives_v2"
+            for key in ("persona_archives_v2", "persona_archives", "archives", "items"):
+                if key in payload:
+                    target_key = key
+                    break
+            if isinstance(payload.get(target_key), str):
+                payload[target_key] = json.dumps(archives, ensure_ascii=False)
+            else:
+                payload[target_key] = archives
         else:
-            payload[target_key] = archives
-    else:
-        payload = archives
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            payload = archives
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _bind_persona_threads_username(archive_id: str, username: str) -> dict[str, Any]:
@@ -16643,6 +16698,7 @@ def _delete_persona_dashboard_post(archive_id: str, post_key: str) -> dict[str, 
         raise HTTPException(status_code=404, detail="人设不存在。")
     if deleted <= 0:
         raise HTTPException(status_code=404, detail="帖子不存在或已经删除。")
+    _add_persona_dashboard_deleted_post(clean_id, clean_key)
     _write_persona_archives_preserving_shape(path, raw, archives)
     return {"ok": True, "archive_id": clean_id, "post_key": clean_key, "deleted": deleted, "path": path.name}
 
@@ -16982,6 +17038,14 @@ def _start_persona_dashboard_refresh(archive_id: str = "") -> dict[str, Any]:
     return PERSONA_DASHBOARD_REFRESH_TASKS[task_id]
 
 
+def _read_text_tail(path: Path, max_chars: int = 1200) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+    return text[-max_chars:]
+
+
 def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "") -> None:
     started = time.time()
     scope = "单个人设" if archive_id else "全部已绑定人设"
@@ -17008,30 +17072,45 @@ def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "") -> 
                 "progress": 18,
                 "message": "正在启动浏览器授权与热点采集脚本...",
             })
+        tmpdir = tempfile.TemporaryDirectory(prefix="persona_dashboard_refresh_")
+        stdout_path = Path(tmpdir.name) / "stdout.log"
+        stderr_path = Path(tmpdir.name) / "stderr.log"
+        stdout_file = stdout_path.open("w", encoding="utf-8", errors="replace")
+        stderr_file = stderr_path.open("w", encoding="utf-8", errors="replace")
         proc = subprocess.Popen(
             args,
             cwd=str(ROOT_DIR / "tool_r18"),
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=stdout_file,
+            stderr=stderr_file,
         )
         while proc.poll() is None:
             elapsed = int(time.time() - started)
             if elapsed > 900:
                 proc.kill()
+                proc.wait(timeout=10)
                 raise TimeoutError("刷新超时，已停止本次任务。")
+            stdout_file.flush()
+            stderr_file.flush()
+            latest_output = (_read_text_tail(stdout_path) or _read_text_tail(stderr_path)).strip()
             with PERSONA_DASHBOARD_REFRESH_LOCK:
                 PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
                     "step": "采集中",
                     "progress": min(88, 25 + elapsed // 12),
                     "elapsed_seconds": elapsed,
+                    "latest_output": latest_output,
                     "message": f"正在刷新{scope}的 Threads 全量热点数据，已执行 {elapsed} 秒...",
                 })
             time.sleep(2)
-        stdout, stderr = proc.communicate(timeout=10)
-        stdout = (stdout or "").strip()
-        stderr = (stderr or "").strip()
+        proc.wait(timeout=10)
+        stdout_file.flush()
+        stderr_file.flush()
+        stdout_file.close()
+        stderr_file.close()
+        stdout = _read_text_tail(stdout_path, 200000).strip()
+        stderr = _read_text_tail(stderr_path, 200000).strip()
+        tmpdir.cleanup()
         with PERSONA_DASHBOARD_REFRESH_LOCK:
             PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
                 "step": "解析结果",
@@ -17075,6 +17154,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
     archives, archives_source = _read_tool_r18_persona_archives()
     queue_stats = _read_tool_r18_publish_queue_stats()
     sentiment_stats = _read_tool_r18_sentiment_hot_stats()
+    deleted_posts = _read_persona_dashboard_deleted_posts()
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     platform_counts: dict[str, int] = {}
     pad_counts: dict[str, int] = {}
@@ -17105,6 +17185,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
         publish_history = archive.get("publishHistory") if isinstance(archive.get("publishHistory"), list) else []
         image_library = archive.get("personaImageLibrary") if isinstance(archive.get("personaImageLibrary"), list) else []
         hot_metrics_raw = setup.get("hotMetrics") if isinstance(setup.get("hotMetrics"), dict) else {}
+        deleted_post_keys = deleted_posts.get(archive_id, set())
         pad_code = str(archive.get("boundPadCode") or "").strip()
         if pad_code:
             pad_counts[pad_code] = pad_counts.get(pad_code, 0) + 1
@@ -17137,8 +17218,22 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
             platform_reposts = _number(metric_value.get("reposts"), 0)
             platform_recent_views = _number(metric_value.get("recentViews"), 0)
             platform_post_views = _number(metric_value.get("views"), 0)
+            deleted_metric_rows = [
+                row for row in post_metrics
+                if isinstance(row, dict) and _persona_dashboard_post_key(archive_id, row) in deleted_post_keys
+            ]
+            if deleted_metric_rows:
+                platform_likes = max(0, platform_likes - sum(_metric_value(row, "likeCount", "like_count") for row in deleted_metric_rows))
+                platform_comments = max(0, platform_comments - sum(_metric_value(row, "commentCount", "comment_count") for row in deleted_metric_rows))
+                platform_shares = max(0, platform_shares - sum(_metric_value(row, "shareCount", "share_count", "send_count") for row in deleted_metric_rows))
+                platform_reposts = max(0, platform_reposts - sum(_metric_value(row, "repostCount", "repost_count") for row in deleted_metric_rows))
+                platform_post_views = max(0, platform_post_views - sum(_metric_value(row, "viewCount", "view_count") for row in deleted_metric_rows))
             if not platform_post_views:
-                platform_post_views = sum(_metric_value(row, "viewCount", "view_count") for row in post_metrics if isinstance(row, dict))
+                platform_post_views = sum(
+                    _metric_value(row, "viewCount", "view_count")
+                    for row in post_metrics
+                    if isinstance(row, dict) and _persona_dashboard_post_key(archive_id, row) not in deleted_post_keys
+                )
             platform_hot_score = _sum_numbers(platform_likes, platform_comments, platform_shares, platform_reposts, platform_post_views)
             persona_hot["likes"] += platform_likes
             persona_hot["comments"] += platform_comments
@@ -17155,6 +17250,8 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
             else:
                 totals["partial_hot_metrics"] += 1
             for row in post_metrics:
+                if isinstance(row, dict) and _persona_dashboard_post_key(archive_id, row) in deleted_post_keys:
+                    continue
                 compact = _compact_hot_post(row, archive_id)
                 if compact:
                     compact["platform"] = platform_name
@@ -17204,9 +17301,13 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
         for post in posts:
             if not isinstance(post, dict):
                 continue
+            if _persona_dashboard_post_key(archive_id, post) in deleted_post_keys:
+                continue
             for meta_key in ("sourceMeta", "publishedMeta"):
                 source = post.get(meta_key) if isinstance(post.get(meta_key), dict) else {}
                 if not source:
+                    continue
+                if _persona_dashboard_post_key(archive_id, {**source, "id": post.get("id"), "content": post.get("content")}) in deleted_post_keys:
                     continue
                 metric_row = {
                     "post_key": _persona_dashboard_post_key(archive_id, {

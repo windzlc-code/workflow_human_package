@@ -258,6 +258,24 @@ class PersonaDashboardApiTests(unittest.TestCase):
         resp = self.unauth_client.delete(f"/api/persona_dashboard/personas/persona-1/posts/{post_key}")
         self.assertEqual(resp.status_code, 200)
         self.assertGreaterEqual(resp.json()["deleted"], 1)
+        deleted_posts = json.loads((self.tool_runtime_dir / "persona_dashboard_deleted_posts.json").read_text(encoding="utf-8"))
+        self.assertIn(post_key, deleted_posts["persona-1"])
+        next_overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        next_persona = next_overview["personas"][0]
+        self.assertEqual(next_persona["post_metrics"], [])
+        self.assertEqual(next_persona["hot"]["likes"], 0)
+        self.assertEqual(next_persona["hot"]["post_views"], 0)
+
+    def test_deleted_post_tombstone_filters_restored_metric_rows(self):
+        self._write_archives()
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        post_key = persona["post_metrics"][0]["post_key"]
+        (self.tool_runtime_dir / "persona_dashboard_deleted_posts.json").write_text(
+            json.dumps({"persona-1": [post_key]}),
+            encoding="utf-8",
+        )
+
         next_overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
         next_persona = next_overview["personas"][0]
         self.assertEqual(next_persona["post_metrics"], [])
