@@ -143,7 +143,7 @@ async function main() {
 
   const pads = await listPads(config);
   const pad = pads.find((item) => item.padCode === input.padCode);
-  if (!pad) throw new Error("当前人设绑定的云机不存在，请进入人设设置重新绑定可用云机。");
+  if (!pad) throw new Error("当前人设绑定的智能體手機不存在，请进入人设设置重新绑定可用智能體手機。");
   const packageName = await detectTikTokPackage(config, input.padCode);
 
   const shotDir = input.screenshotDir || ".runtime/automatic-script/tiktok-warmup";

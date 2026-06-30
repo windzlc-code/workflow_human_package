@@ -1,11 +1,11 @@
 ﻿/**
  * Instagram / Threads 自動發文流程
- * 透過 VMOSCloud asyncCmd (ADB) 控制雲機 UI 完成發文
+ * 透過 VMOSCloud asyncCmd (ADB) 控制智能體手機 UI 完成發文
  *
  * 關鍵約束（已實測驗證）：
  * - 只有 asyncCmd 介面可用，其他介面均返回 500
  * - 採用 fire-and-forget 模型：傳送命令 → 固定等待 → 繼續下一步
- * - 實測雲機解析度：720x1600 / 360dpi
+ * - 實測智能體手機解析度：720x1600 / 360dpi
  * - 文字輸入用 base64 編碼避免 shell 轉義問題
  *
  * 實測座標（720x1600 / 360dpi）：
@@ -55,10 +55,10 @@ export interface PublishTask {
    * 媒體檔案的公網 URL 或 data URL（圖片或影片）
    */
   mediaUrl?: string;
-  /** 兼容旧队列字段；VMOS Telegram 群组发布会使用云机当前打开的群组页面 */
+  /** 兼容旧队列字段；VMOS Telegram 群组发布会使用智能體手機当前打开的群组页面 */
   telegramChatId?: string | number;
   telegramTargetChatId?: string;
-  /** Telegram 群组名；提供后会先尝试在云机 Telegram 内搜索并进入目标群 */
+  /** Telegram 群组名；提供后会先尝试在智能體手機 Telegram 内搜索并进入目标群 */
   telegramTargetGroupName?: string;
   telegramGroupContentType?: "free" | "paid";
   /** ACP 的 Instagram 無圖 fallback：先渲染成文字卡圖片再發布 */
@@ -1064,7 +1064,7 @@ async function requirePublicMediaUrlForVmosUpload(
       throw new Error(`${mediaLabel}公网 URL 不可达，已停止发布，未回退慢速通道：${mediaUrl}；${reachable.detail}`);
     }
     onProgress?.({
-      step: `已确认${mediaLabel}公网 URL 可访问，使用云机直传...`,
+      step: `已确认${mediaLabel}公网 URL 可访问，使用智能體手機直传...`,
       done: false,
     });
     return mediaUrl;
@@ -1113,7 +1113,7 @@ async function requirePublicMediaUrlForVmosUpload(
     throw new Error(`${mediaLabel}公网 staging 文件不可达，已停止发布，未回退慢速通道：${publicUrl}；${reachable.detail}`);
   }
   onProgress?.({
-    step: "已準備可直傳媒體 URL，改用雲機直傳以加快上傳...",
+    step: "已準備可直傳媒體 URL，改用智能體手機直傳以加快上傳...",
     done: false,
   });
   return publicUrl;
@@ -5734,7 +5734,7 @@ async function confirmThreadsGallerySelection(
     screenshotUrl: finalState?.screenshotUrl,
     expectedPages: ["compose_editor"],
   });
-  throw new Error(appendSamplePath("確認選圖後仍停在 Threads 圖庫，請檢查雲機圖庫選取狀態", samplePath));
+  throw new Error(appendSamplePath("確認選圖後仍停在 Threads 圖庫，請檢查智能體手機圖庫選取狀態", samplePath));
 }
 
 function parseScreenSizeFromLayout(layout?: string): { width: number; height: number } | null {
@@ -7575,7 +7575,7 @@ async function captureThreadsProfileVideoTabBaselineForPublish(
   const beforeProfileVideoTabShot = await getInlineData(beforeProfileVideoTabUrl);
   const blockedReason = await detectThreadsBlockedScreenOnDevice(config, padCode, beforeProfileVideoTabShot);
   if (blockedReason) {
-    throw new Error(`Threads 影音頁目前停在阻斷頁：${blockedReason}，請先在雲機完成設定或驗證後再重試`);
+    throw new Error(`Threads 影音頁目前停在阻斷頁：${blockedReason}，請先在智能體手機完成設定或驗證後再重試`);
   }
   return beforeProfileVideoTabUrl;
 }
@@ -9062,7 +9062,7 @@ async function prepareThreadsPublishContext(
       }
       return undefined;
     }
-    throw new Error(`Threads 個人頁目前停在阻斷頁：${profileBlockedReason}，請先在雲機完成設定或驗證後再重試`);
+    throw new Error(`Threads 個人頁目前停在阻斷頁：${profileBlockedReason}，請先在智能體手機完成設定或驗證後再重試`);
   }
   onProgress({ step: "回到首頁準備發布...", done: false });
   await relaunchThreads(config, padCode, 4000);
@@ -10345,7 +10345,7 @@ async function stageMediaOnDevice(
     const reusableRemotePath = await getReusableStagedMediaPath(config, padCode, publicMediaUrl, remotePath);
     if (reusableRemotePath) {
       onProgress?.({
-        step: `复用已写入云机的${mediaLabel}，跳过重复上传...`,
+        step: `复用已写入智能體手機的${mediaLabel}，跳过重复上传...`,
         done: false,
       });
       return reusableRemotePath;
@@ -10354,7 +10354,7 @@ async function stageMediaOnDevice(
 
   const beforeDownloadPaths = await listRecentDownloadMediaPaths(config, padCode, isVideoMedia);
   onProgress?.({
-    step: `直傳${mediaLabel}到雲機...`,
+    step: `直傳${mediaLabel}到智能體手機...`,
     done: false,
   });
   const taskId = await uploadFileByUrl(config, padCode, publicMediaUrl, remotePath);
@@ -10380,7 +10380,7 @@ async function stageMediaOnDevice(
     undefined,
   );
   if (isVideoMedia && !indexed) {
-    throw new Error("影片已寫入雲機，但尚未被系統圖庫索引，請稍後重試");
+    throw new Error("影片已寫入智能體手機，但尚未被系統圖庫索引，請稍後重試");
   }
   await delay(600);
   rememberStagedMediaPath(padCode, publicMediaUrl, actualRemotePath);
@@ -12047,7 +12047,7 @@ async function ensureThreadsHomeFeed(
       continue;
     }
     if (current.reason === "LOCAL_ANDROID_LAUNCHER") {
-      onProgress?.({ step: "Threads 已退到云机桌面，强制重新启动 App...", done: false });
+      onProgress?.({ step: "Threads 已退到智能體手機桌面，强制重新启动 App...", done: false });
       await relaunchThreads(config, padCode, 5000);
       await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
       continue;
@@ -12078,7 +12078,7 @@ async function ensureThreadsHomeFeed(
     const currentFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
     if (currentFocus && !currentFocus.includes(THREADS_PACKAGE)) {
       if (isGooglePlayFocus(currentFocus)) {
-        onProgress?.({ step: "云机停在 Google Play，先关闭后重启 Threads...", done: false });
+        onProgress?.({ step: "智能體手機停在 Google Play，先关闭后重启 Threads...", done: false });
         await execAdbForText(config, padCode, `am force-stop ${GOOGLE_PLAY_PACKAGE}; input keyevent KEYCODE_HOME`, 8000, 500).catch(() => "");
         await delay(1000);
       }
@@ -12164,7 +12164,7 @@ async function ensureThreadsHomeFeed(
     }
 
     if (current.page === "unknown" && current.reason === "LOCAL_ANDROID_LAUNCHER") {
-      onProgress?.({ step: "Threads 已退到云机桌面，重新启动 App...", done: false });
+      onProgress?.({ step: "Threads 已退到智能體手機桌面，重新启动 App...", done: false });
       await relaunchThreads(config, padCode, 5000);
       await tapViaAdbAbsolute(config, padCode, homeFallbackTap.x, homeFallbackTap.y, 1800);
       continue;
@@ -12369,7 +12369,7 @@ async function ensureThreadsHomeFeedForPublish(
     }
   }
   if (lastError instanceof Error) throw lastError;
-  throw new Error("发布前未能稳定回到 Threads 首页，请确认云机没有停在桌面或其他应用。");
+  throw new Error("发布前未能稳定回到 Threads 首页，请确认智能體手機没有停在桌面或其他应用。");
 }
 
 async function ensureThreadsHomeFeedForPublishBounded(
@@ -14499,7 +14499,7 @@ async function verifyThreadsPublish(
     const immediateFocus = normalizeSingleLine(await getAndroidCurrentFocus(config, padCode).catch(() => ""));
     if (!immediateFocus.includes(THREADS_PACKAGE) && await detectAndroidLauncherLocally(immediateUrl).catch(() => false)) {
       onProgress?.({
-        step: "发布后回到云机桌面，重新打开 Threads 复查结果...",
+        step: "发布后回到智能體手機桌面，重新打开 Threads 复查结果...",
         done: false,
       });
       await relaunchThreads(config, padCode, 5000).catch(() => undefined);
@@ -17059,13 +17059,13 @@ async function publishRednote(
   const isVideoMedia = isVideoMediaUrl(mediaUrl);
   const mimeType = isVideoMedia ? "video/mp4" : getThreadsShareMimeType(mediaUrl);
 
-  onProgress({ step: isVideoMedia ? "写入视频到云机..." : "写入图片到云机...", done: false });
+  onProgress({ step: isVideoMedia ? "写入视频到智能體手機..." : "写入图片到智能體手機...", done: false });
   await ensurePermissions(config, padCode, REDNOTE_PACKAGE, CAMERA_MEDIA_PERMISSIONS);
   const remotePath = buildStableDeviceMediaRemotePath("rednote_post", mediaUrl);
   const stagedRemotePath = await stageMediaOnDevice(config, padCode, mediaUrl, remotePath, onProgress);
   const contentUri = await queryMediaStoreContentUri(config, padCode, stagedRemotePath, isVideoMedia);
   if (!contentUri) {
-    throw new Error(`${isVideoMedia ? "视频" : "图片"}已写入云机，但未找到 MediaStore content:// 记录`);
+    throw new Error(`${isVideoMedia ? "视频" : "图片"}已写入智能體手機，但未找到 MediaStore content:// 记录`);
   }
 
   await launchRednoteShareIntent(config, padCode, contentUri, caption, mimeType, onProgress);
@@ -17134,7 +17134,7 @@ async function publishRednoteWithRecovery(
       lastError = error;
       const msg = error instanceof Error ? error.message : String(error);
       const canRetry = !publishTapped
-        && !/小红书发布文案不能为空|已写入云机，但未找到 MediaStore content:\/\/ 记录/.test(msg);
+        && !/小红书发布文案不能为空|已写入智能體手機，但未找到 MediaStore content:\/\/ 记录/.test(msg);
       onProgress({
         step: `小红书发布第 ${attempt}/${maxAttempts} 次失败：${normalizeSingleLine(msg).slice(0, 160)}`,
         done: false,
@@ -17671,7 +17671,7 @@ function threadsAccountMatchesExpected(result: { username?: string; email?: stri
 
 function isTransientThreadsAccountCheckError(message: string | undefined | null): boolean {
   const text = normalizeSingleLine(message || "");
-  return /timeout|timed?\s*out|任務超時|任务超时|fetch failed|network|socket|ECONN|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|502|503|504|Bad Gateway|Service Unavailable|Gateway Timeout|VMOS|云机|雲機|白屏|啟動中|启动中|載入中|载入中|加载中|Threads 未在前台|unknown/i.test(text);
+  return /timeout|timed?\s*out|任務超時|任务超时|fetch failed|network|socket|ECONN|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|502|503|504|Bad Gateway|Service Unavailable|Gateway Timeout|VMOS|智能體手機|白屏|啟動中|启动中|載入中|载入中|加载中|Threads 未在前台|unknown/i.test(text);
 }
 
 async function confirmThreadsAccountBeforeLogin(
@@ -17713,7 +17713,7 @@ async function confirmThreadsAccountBeforeLogin(
       const detected = checked.username ? `@${checked.username}` : checked.email || "未识别到可读账号";
       return {
         action: "login_required",
-        reason: `当前云机已登录其他 Threads 账号：${detected}，将重新登录目标账号。`,
+        reason: `当前智能體手機已登录其他 Threads 账号：${detected}，将重新登录目标账号。`,
         screenshotUrl: checked.screenshotUrl,
       };
     }
@@ -17734,7 +17734,7 @@ async function confirmThreadsAccountBeforeLogin(
     result: {
       ok: false,
       state: "failed",
-      message: `登录前无法稳定确认云机 Threads 当前状态，已停止重登以避免误清账号。原因：${lastReason || "外部网络/VMOS 超时"}`,
+      message: `登录前无法稳定确认智能體手機 Threads 当前状态，已停止重登以避免误清账号。原因：${lastReason || "外部网络/VMOS 超时"}`,
       screenshotUrl: lastScreenshotUrl,
     },
   };
@@ -17820,7 +17820,7 @@ function classifyTelegramLoginChallengeText(text: string, savedEmail?: string): 
   if (/SMS Fee|High SMS Costs|Verification Required|Support via Telegram Premium|Sign up for US\$|Telegram Premium|短信費|簡訊費|短信验证|簡訊驗證/i.test(normalized)) {
     return {
       state: "challenge_manual",
-      message: "Telegram 自動登入已走到最後的短信付費/短信驗證階段。此階段需要人工介入處理；請依截圖在雲機內完成後再檢測登入狀態。",
+      message: "Telegram 自動登入已走到最後的短信付費/短信驗證階段。此階段需要人工介入處理；請依截圖在智能體手機內完成後再檢測登入狀態。",
     };
   }
   if (/verification code|login code|code was sent|enter code|验证码|驗證碼|登入碼|登录码|代碼|代码/i.test(normalized)) {
@@ -17840,7 +17840,7 @@ function classifyTelegramLoginChallengeText(text: string, savedEmail?: string): 
       state: "challenge_manual",
       message: savedEmail
         ? `Telegram 要求設定或選擇登入 Email/Google。已保存登入 Email：${savedEmail}；系統會優先嘗試填入，若進入 Google 授權或驗證頁，請按截圖人工完成後再檢測登入狀態。`
-        : "Telegram 要求設定或選擇登入 Email/Google。尚未保存登入 Email；請按截圖在雲機內人工完成，或返回帳號管理補充 Email 後再重試。",
+        : "Telegram 要求設定或選擇登入 Email/Google。尚未保存登入 Email；請按截圖在智能體手機內人工完成，或返回帳號管理補充 Email 後再重試。",
     };
   }
   if (/start messaging|your phone|phone number|country|國家|国家|手機號碼|手机号码/i.test(normalized)) {
@@ -17884,7 +17884,7 @@ async function classifyTelegramSmsFeeScreenshot(screenshotUrl?: string): Promise
     return {
       ok: false,
       state: "challenge_manual",
-      message: `Telegram 自動登入已走到最後的短信付費/短信驗證階段。此階段視為自動流程完成，需要人工介入處理；請依截圖在雲機內完成後再檢測登入狀態。${parsed.evidence ? `\n\n識別依據：${String(parsed.evidence).slice(0, 160)}` : ""}`,
+      message: `Telegram 自動登入已走到最後的短信付費/短信驗證階段。此階段視為自動流程完成，需要人工介入處理；請依截圖在智能體手機內完成後再檢測登入狀態。${parsed.evidence ? `\n\n識別依據：${String(parsed.evidence).slice(0, 160)}` : ""}`,
       screenshotUrl,
     };
   } catch {
@@ -18869,7 +18869,7 @@ export async function loginThreadsAccount(
   const handle = credential.username;
   const password = credential.password;
 
-  // Step 0: 每次都真实确认云机当前账号；不直接使用缓存，避免云机被别人改过后误判。
+  // Step 0: 每次都真实确认智能體手機当前账号；不直接使用缓存，避免智能體手機被别人改过后误判。
   if (!options.forceFreshLogin) {
     const precheck = await confirmThreadsAccountBeforeLogin(config, padCode, handle);
     if (precheck.action === "already_logged_in") return precheck.result;
@@ -19232,7 +19232,7 @@ export async function clearThreadsAccountSession(
     return {
       ok: false,
       state: "failed",
-      message: `已执行清除数据，但 Threads 仍显示已登录页面：${state.page}。请重试登出或人工检查云机。`,
+      message: `已执行清除数据，但 Threads 仍显示已登录页面：${state.page}。请重试登出或人工检查智能體手機。`,
       screenshotUrl: shotUrl,
     };
   }
@@ -19260,7 +19260,7 @@ export async function queryTelegramAccountSession(
     return {
       ok: false,
       state: "not_installed",
-      message: "這台雲機未檢測到 Telegram App，請先安裝並登入 Telegram。",
+      message: "這台智能體手機未檢測到 Telegram App，請先安裝並登入 Telegram。",
       screenshotUrl: shotUrl,
     };
   }
@@ -19542,12 +19542,12 @@ export async function clearTelegramAccountSession(
   return {
     ok: true,
     state: "logged_out",
-    message: "已清除 Telegram App 数据。若要继续使用 Telegram 发布，请先在云机内重新登录。",
+    message: "已清除 Telegram App 数据。若要继续使用 Telegram 发布，请先在智能體手機内重新登录。",
     screenshotUrl: shotUrl,
   };
 }
 
-// ─── 查询云机账号 ─────────────────────────────────────────────────────────────
+// ─── 查询智能體手機账号 ─────────────────────────────────────────────────────────────
 
 export interface PadAccountInfo {
   padCode: string;
@@ -20989,9 +20989,9 @@ export async function updateThreadsProfileAvatar(
   const opened = await openThreadsEditProfilePage(config, padCode, onProgress);
   await assertThreadsActionNotBlocked(config, padCode, "頭像修改打開編輯個人資料後檢測到帳號狀態阻斷");
   const stagedRemotePath = await withTimeout(
-    staging.wait("等待頭像圖片寫入雲機圖庫..."),
+    staging.wait("等待頭像圖片寫入智能體手機圖庫..."),
     60_000,
-    "頭像圖片寫入雲機圖庫逾時，請稍後重試",
+    "頭像圖片寫入智能體手機圖庫逾時，請稍後重試",
   );
   await assertThreadsActionNotBlocked(config, padCode, "頭像修改等待圖片寫入後檢測到帳號狀態阻斷");
   await execAdbForText(
@@ -21856,14 +21856,14 @@ export async function publishPost(
       if (task.mediaUrl) {
         const isVideoMedia = isVideoMediaUrl(task.mediaUrl);
         const mediaLabel = isVideoMedia ? "视频" : "图片";
-        onProgress({ step: `写入 Telegram ${mediaLabel}到云机...`, done: false });
+        onProgress({ step: `写入 Telegram ${mediaLabel}到智能體手機...`, done: false });
         await ensurePermissions(config, task.padCode, TELEGRAM_PACKAGE, MEDIA_PERMISSIONS);
         const remotePath = buildStableDeviceMediaRemotePath("telegram_group", task.mediaUrl);
         const stagedRemotePath = await stageMediaOnDevice(config, task.padCode, task.mediaUrl, remotePath, onProgress);
         options.cancellationToken?.throwIfCancelled?.();
         const contentUri = await queryMediaStoreContentUri(config, task.padCode, stagedRemotePath, isVideoMedia);
         if (!contentUri) {
-          throw new Error(`${mediaLabel}已写入云机，但未找到 MediaStore content:// 记录`);
+          throw new Error(`${mediaLabel}已写入智能體手機，但未找到 MediaStore content:// 记录`);
         }
         return await publishTelegramGroupPost(config, {
           ...task,
@@ -22738,10 +22738,10 @@ export function detectInstagramWarmupBlockedFromUiXml(uiXml: string): string | n
   const hasMetaBrand = /\bMeta\b/i.test(text);
   const hasInstagramBrand = /\bInstagram\b/i.test(text);
   if (hasAccountInput && hasPassword && hasLoginButton) {
-    return "Instagram 登录页：需要先在云机内登录账号";
+    return "Instagram 登录页：需要先在智能體手機内登录账号";
   }
   if (hasInstagramBrand && hasLoginButton && (hasPassword || hasAccountInput || hasMetaBrand)) {
-    return "Instagram 登录页：需要先在云机内登录账号";
+    return "Instagram 登录页：需要先在智能體手機内登录账号";
   }
   if (/(安全驗證|安全验证|驗證碼|验证码|captcha|challenge|checkpoint|suspicious|unusual activity|Confirm it's you|Help us confirm)/i.test(text)) {
     return "Instagram 验证页：请先处理当前页面";
@@ -24780,6 +24780,26 @@ function isCleanWarmupSearchKeywordToken(keyword: string): boolean {
   return true;
 }
 
+function isUsableWarmupSearchKeywordToken(keyword: string): boolean {
+  const cleaned = normalizeSingleLine(String(keyword || "")).replace(/^#/, "").trim();
+  if (cleaned.length < 2 || cleaned.length > 10 || !/\p{Script=Han}/u.test(cleaned)) return false;
+  if (/[，。,.!?！？、：:；;（）()[\]{}]/.test(cleaned)) return false;
+  if (/[A-Za-z0-9]/.test(cleaned)) return false;
+  if (/^(人設|人设|人格|語氣|语气|口吻|風格|风格|繁體中文|简体中文|台灣地區|台湾地区|不限|真實|真实|左右|附近|最近|日常|分享)$/.test(cleaned)) return false;
+  if (/^(老師|老师|博主|達人|达人|中介|仲介|顧問|顾问|專家|专家|作者|創作者|创作者)$/.test(cleaned)) return false;
+  return true;
+}
+
+function normalizeWarmupSearchKeywordLiteral(keyword: string): string {
+  return normalizeSingleLine(String(keyword || ""))
+    .replace(/^#/, "")
+    .replace(/[「」『』"'“”‘’]/g, "")
+    .replace(/^\d{1,3}\s*(?:歲|岁|years?\s*old)\s*/i, "")
+    .replace(/(?:人設|人设|人格|口吻|語氣|语气|風格|风格|繁體中文|简体中文|台灣地區|台湾地区)/gu, "")
+    .replace(/^(?:關注|关注|分享|喜歡|喜欢|常提到|常聊|想看|研究|觀察|观察)/u, "")
+    .trim();
+}
+
 function normalizeWarmupSearchKeywordCandidate(keyword: string, persona?: WarmupCommentPersona): string {
   const personaName = normalizeSingleLine(String(persona?.name || "")).trim();
   let cleaned = normalizeSingleLine(String(keyword || ""))
@@ -24808,38 +24828,24 @@ function extractGenericWarmupKeywordCandidates(
   const sources = [
     ...explicitKeywords,
     ...(persona?.interests || []),
-    persona?.description || "",
-    persona?.style || "",
-    persona?.personality || "",
   ];
   const candidates: string[] = [];
   for (const source of sources) {
     const text = normalizeSingleLine(String(source || ""));
     if (!text) continue;
     for (const piece of text.split(/[，,。.!！？?、；;：:\s/|｜與与和及跟]+/u)) {
-      const cleaned = normalizeWarmupSearchKeywordCandidate(piece, persona);
+      const cleaned = normalizeWarmupSearchKeywordLiteral(piece);
       if (cleaned) candidates.push(cleaned);
-    }
-    const matches = text.match(/[\p{Script=Han}]{2,8}/gu) || [];
-    for (const match of matches) {
-      const cleaned = normalizeWarmupSearchKeywordCandidate(match, persona);
-      if (cleaned) candidates.push(cleaned);
-      for (let size = 2; size <= Math.min(4, cleaned.length); size += 1) {
-        for (let i = 0; i <= cleaned.length - size; i += 1) {
-          const gram = normalizeWarmupSearchKeywordCandidate(cleaned.slice(i, i + size), persona);
-          if (gram) candidates.push(gram);
-        }
-      }
     }
   }
-  const personaNameCore = normalizeWarmupSearchKeywordCandidate(personaName, persona);
+  const personaNameCore = normalizeWarmupSearchKeywordLiteral(personaName);
   if (personaNameCore && personaNameCore !== personaName) candidates.push(personaNameCore);
 
   const seen = new Set<string>();
   return candidates
-    .map((item) => normalizeWarmupSearchKeywordCandidate(item, persona))
+    .map((item) => normalizeWarmupSearchKeywordLiteral(item))
     .filter((item) => item.length >= 2 && item.length <= 12)
-    .filter((item) => isCleanWarmupSearchKeywordToken(item))
+    .filter((item) => isUsableWarmupSearchKeywordToken(item))
     .filter((item) => !personaName || item !== personaName)
     .filter((item) => {
       const key = item.toLowerCase();
@@ -24854,28 +24860,28 @@ export function buildWarmupInterestKeywords(
   persona?: WarmupCommentPersona,
   explicitKeywords: string[] = [],
 ): string[] {
-  return extractGenericWarmupKeywordCandidates(persona, explicitKeywords).slice(0, 8);
+  const seen = new Set<string>();
+  const keywords: string[] = [];
+  for (const source of [...explicitKeywords, ...(persona?.interests || [])]) {
+    const text = normalizeSingleLine(String(source || ""));
+    if (!text) continue;
+    for (const piece of text.split(/[，,。.!！？?、；;：:\s/|｜與与和及跟]+/u)) {
+      const cleaned = normalizeWarmupSearchKeywordLiteral(piece);
+      if (cleaned.length < 2 || cleaned.length > 10) continue;
+      if (!/[\u3400-\u9fff]/.test(cleaned)) continue;
+      if (/[A-Za-z0-9，。,.!?！？、：:；;（）()[\]{}]/.test(cleaned)) continue;
+      if (isBannedWarmupSearchKeyword(cleaned)) continue;
+      const key = cleaned.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      keywords.push(cleaned);
+    }
+  }
+  return keywords.slice(0, 8);
 }
 
 function isBannedWarmupSearchKeyword(item: string): boolean {
   return /^(人設|人设|人格|自然口語|自然口语|繁體中文|简体中文|台灣地區|台湾地区|不限|真實|真实|風格|风格|直接|故事化|老師|老师|博主|達人|达人|中介|仲介|顧問|顾问|專家|专家)$/.test(normalizeSingleLine(item));
-}
-
-function expandGenericWarmupSearchPhrases(candidates: string[]): string[] {
-  const suffixes = ["事件", "知识", "知識", "资料", "資料", "趣闻", "趣聞", "案例"];
-  const bases: string[] = [];
-  const expanded: string[] = [];
-  for (const raw of candidates) {
-    const base = normalizeSingleLine(raw).replace(/\s+/g, "");
-    if (base.length < 2 || base.length > 6 || !/\p{Script=Han}/u.test(base)) continue;
-    bases.push(base);
-    if (base.length >= 4 && /(?:事件|知识|知識|资料|資料|趣闻|趣聞|案例)$/.test(base)) continue;
-    for (const suffix of suffixes) {
-      if (base.endsWith(suffix)) continue;
-      expanded.push(`${base}${suffix}`);
-    }
-  }
-  return [...bases, ...expanded];
 }
 
 function isWarmupSearchKeywordRelevantToPersona(
@@ -24884,10 +24890,11 @@ function isWarmupSearchKeywordRelevantToPersona(
   explicitKeywords: string[] = [],
 ): boolean {
   const cleaned = normalizeWarmupSearchKeywordCandidate(keyword, persona);
-  if (!isCleanWarmupSearchKeywordToken(cleaned)) return false;
+  const literal = normalizeWarmupSearchKeywordLiteral(keyword);
+  const normalizedKeyword = normalizeWarmupRelevanceText(literal || cleaned).replace(/\s+/g, "");
+  if (!isUsableWarmupSearchKeywordToken(literal || cleaned)) return false;
   const personaText = warmupCommentPersonaText(persona);
   const explicitSet = new Set(explicitKeywords.map((item) => normalizeWarmupRelevanceText(item).replace(/\s+/g, "")));
-  const normalizedKeyword = normalizeWarmupRelevanceText(cleaned).replace(/\s+/g, "");
   if (explicitSet.has(normalizedKeyword)) return true;
   const personaNormalized = normalizeWarmupRelevanceText(personaText).replace(/\s+/g, "");
   if (personaNormalized.includes(normalizedKeyword)) return true;
@@ -24941,13 +24948,11 @@ export function buildWarmupSearchKeywordCandidates(
   persona?: WarmupCommentPersona,
   explicitKeywords: string[] = [],
 ): string[] {
-  const extracted = extractGenericWarmupKeywordCandidates(persona, explicitKeywords);
-  const candidates = expandGenericWarmupSearchPhrases(extracted);
+  const candidates = buildWarmupInterestKeywords(persona, explicitKeywords);
   const seen = new Set<string>();
   return candidates
-    .map((item) => normalizeWarmupSearchKeywordCandidate(item, persona))
-    .filter((item) => item.length >= 2 && item.length <= 24)
-    .filter((item) => /\p{Script=Han}/u.test(item))
+    .map((item) => normalizeWarmupSearchKeywordLiteral(item))
+    .filter((item) => isUsableWarmupSearchKeywordToken(item))
     .filter((item) => !isBannedWarmupSearchKeyword(item))
     .filter((item) => isWarmupSearchKeywordRelevantToPersona(item, persona, explicitKeywords))
     .filter((item) => {
@@ -24994,10 +24999,10 @@ async function buildWarmupSearchKeywords(
     const merged = [...modelKeywords, ...fallback];
     const seen = new Set<string>();
     return merged
-      .map((item) => normalizeWarmupSearchKeywordCandidate(item, persona))
+      .map((item) => normalizeWarmupSearchKeywordLiteral(item))
       .filter((item) => item.length >= 2 && item.length <= 24)
       .filter((item) => /\p{Script=Han}/u.test(item))
-      .filter((item) => isCleanWarmupSearchKeywordToken(item))
+      .filter((item) => isUsableWarmupSearchKeywordToken(item))
       .filter((item) => !isBannedWarmupSearchKeyword(item))
       .filter((item) => {
         const key = item.toLowerCase().replace(/\s+/g, " ");
@@ -25799,7 +25804,7 @@ function finalizeGeneratedWarmupCommentOnly(
   if (
     previewReadable
     && comment
-    && isUsableWarmupComment(comment)
+    && isCompleteGeneratedWarmupComment(comment, postPreview)
     && !isGenericWarmupComment(comment)
     && !isLongUnpunctuatedWarmupComment(comment)
   ) {
@@ -25857,6 +25862,24 @@ function hasWarmupCommentNaturalPause(comment: string): boolean {
 function isLongUnpunctuatedWarmupComment(comment: string): boolean {
   const length = warmupCommentContentLength(comment);
   return length >= 16 && !hasWarmupCommentNaturalPause(comment);
+}
+
+function isCompleteGeneratedWarmupComment(comment: string, postPreview: string): boolean {
+  const normalized = sanitizeWarmupComment(comment);
+  const length = warmupCommentContentLength(normalized);
+  if (!normalized || !isUsableWarmupComment(normalized)) return false;
+  if (/[，、,]$/.test(normalized)) return false;
+  if (/[的之和與与跟及在把對对給给為为是了着著]$/.test(normalized)) return false;
+  if (/^(勇敢踏出第一步|加油|支持|不错|不錯|认同|認同)[，。,.!?！？]?$/.test(normalized)) return false;
+  if (isShortLowInfoWarmupPost(postPreview)) return isUsableShortWarmupReaction(normalized) || length >= 8;
+  if (length < 10) return false;
+  return true;
+}
+
+export function isUsableGeneratedWarmupCommentForTest(comment: string, postPreview: string): boolean {
+  return isCompleteGeneratedWarmupComment(comment, postPreview)
+    && !isGenericWarmupComment(comment)
+    && !isLongUnpunctuatedWarmupComment(comment);
 }
 
 function warmupModelText(raw: unknown): string {
@@ -25951,7 +25974,7 @@ async function warmupGenerateCommentForPost(
 - 如果原帖有明確資訊量，回 10 到 30 個有效字即可，留言要帶出原帖中的具體名詞、場景、風險、情緒或判斷。
 - 短反應可以沒有標點；如果留言超過 15 個有效字，必須至少有一個自然停頓標點，例如逗號、句號、問號或驚嘆號，但不要堆疊標點。
 - 不要把多個資訊點連成一整段無標點長句，語氣要像真人按人設自然說話。
-- 必須是完整短句，不要停在“的”“和”“在”這類未完成語尾。
+- 必須是完整短句，不要停在“的”“和”“在”“把”“對”“給”“是”“了”這類未完成語尾，也不要以逗號或頓號結尾。
 - 不要重複同一個詞或同一句話，不可輸出「這個角度很自然這個角度很自然」這類拼接內容。
 - 內容必須貼合推文內容，不要泛泛說“不錯”“支持”“這個角度很自然”“這段分享蠻有共鳴”。
 - 不要輸出舊模板句或萬用句，例如「值得參考」「這個角度很自然」「這段分享蠻有共鳴」「這個點我認同」；若人設有專業領域，也不要把留言寫成制式廣告。
@@ -25972,6 +25995,7 @@ ${templateHint}
 - 10 到 30 個有效字。
 - 短反應可以沒有標點；如果留言超過 15 個有效字，必須至少有一個自然停頓標點，例如逗號、句號、問號或驚嘆號，但不要堆疊標點。
 - 不要把多個資訊點連成一整段無標點長句，語氣要像真人按目前人設自然說話。
+- 必須是完整句子，不能只輸出半句，不能以逗號或頓號結尾。
 - 不要表情符號、hashtag、@ 或連結。
 - 必須自然像真人留言，語氣和用詞要符合目前人設：${personaHint || "未指定，使用台灣 Threads 自然口語"}。
 - 不要硬銷售，不要模板句，不要把留言寫成客服廣告。
@@ -26088,7 +26112,7 @@ async function warmupGenerateCommentFromScreenshot(
     }
     if (text.length <= 140) {
       const looseFirst = normalizeSingleLine(text.split(/\s{2,}|(?:帖子摘要|摘要|summary|preview)\s*[:：]/i)[0] || text);
-      const firstChunk = (looseFirst.length > 42 ? looseFirst.slice(0, 42) : looseFirst).replace(/[的之和與跟及在]$/u, "");
+      const firstChunk = (looseFirst.length > 42 ? looseFirst.slice(0, 42) : looseFirst).replace(/[的之和與与跟及在把對对給给為为是了着著，、,]$/u, "");
       const result = build(firstChunk, text);
       if (result.comment && result.preview) return result;
     }
@@ -26115,7 +26139,7 @@ async function warmupGenerateCommentFromScreenshot(
 不要輸出舊模板句或萬用句，例如「值得參考」「這個角度很自然」「這段分享蠻有共鳴」「這個點我認同」；若人設領域有專業話術，也不要照抄成模板廣告。
 若人設有明確領域，優先用人設口吻自然呼應帖子內容；不要因為沒有命中固定詞而留空，但也不要回和畫面明顯衝突的內容。
 不要重複同一個詞或同一句話，不可輸出「這個角度很自然這個角度很自然」這類拼接內容。
-留言必須是完整短句，不要停在“的”“和”“在”這類未完成語尾。
+留言必須是完整短句，不要停在“的”“和”“在”“把”“對”“給”“是”“了”這類未完成語尾，也不要以逗號或頓號結尾。
 ${templates.length ? `\n可参考这些语气模板，但不要照抄：${templates.map((t) => `「${sanitizeWarmupComment(t)}」`).filter(Boolean).join("、")}` : ""}
 只按這個格式返回：評論|完整帖子摘要`;
   let lastError = "";
@@ -34992,9 +35016,14 @@ export async function warmupThreadsAccount(
       modelUnavailable
       && isWarmupSearchKeywordRelevantToPersona(keyword, effectiveCfg.commentPersona, effectiveCfg.keywords || [])
     ) {
-      acpSearchKeywordFallbackLikeOnly = true;
+      acpSearchKeywordFallbackLikeOnly = !options.allowKeywordComment;
+      acpSearchLenientInteractionArmed = Boolean(options.allowKeywordComment);
       acpSearchRejectedCandidates = 0;
-      report(`模型暂不可用，但搜索关键词「${keyword}」已通过人设领域筛选，本次只允许低频点赞不留言`);
+      if (options.allowKeywordComment) {
+        report(`模型暂不可用，但搜索关键词「${keyword}」已通过人设领域筛选，继续进入留言链路；留言文案仍由模型根据当前推文生成`);
+      } else {
+        report(`模型暂不可用，但搜索关键词「${keyword}」已通过人设领域筛选，本次只允许低频点赞不留言`);
+      }
       return true;
     }
     if (searchCandidateHasKeywordHit(current, keyword)) {
@@ -35068,9 +35097,9 @@ export async function warmupThreadsAccount(
     await revealAcpSearchResultActionRow();
     return false;
   };
-  const locateAcpSearchResultVisibleActions = async (options: { allowKeywordOnlyLike?: boolean; allowKeywordComment?: boolean } = {}): Promise<WarmupFeedActionTargets | null> => {
+  const locateAcpSearchResultVisibleActions = async (options: { allowKeywordOnlyLike?: boolean; allowKeywordComment?: boolean; skipRelevanceCheck?: boolean } = {}): Promise<WarmupFeedActionTargets | null> => {
     if (!isAcpPad(padCode) || !/^search/.test(activeRelevantSurfaceReason)) return null;
-    if (!(await searchResultPageRelevantBeforeOpen(options))) return null;
+    if (!options.skipRelevanceCheck && !(await searchResultPageRelevantBeforeOpen(options))) return null;
     const locateByFreshScreenshot = async (reason: string): Promise<WarmupFeedActionTargets | null> => {
       const shot = await screenshot(config, padCode).then((url) => freezeScreenshotUrl(url)).catch(() => "");
       if (!shot) return null;
@@ -35413,6 +35442,18 @@ export async function warmupThreadsAccount(
       && isWarmupSearchKeywordRelevantToPersona(keyword, effectiveCfg.commentPersona, effectiveCfg.keywords || [])
     ) {
       report(`互动前跳过二次模型等待，按中文人设关键词「${keyword}」只允许点赞通过`);
+      return true;
+    }
+    if (acpSearchCurrentCandidateModelConfirmed) {
+      report(`互动前沿用点击前模型确认结果，跳过二次模型等待：${(acpSearchLastModelConfirmedPreview || keyword).slice(0, 42)}`);
+      return true;
+    }
+    if (
+      acpSearchLenientInteractionArmed
+      && commentRequiredThisRun
+      && isWarmupSearchKeywordRelevantToPersona(keyword, effectiveCfg.commentPersona, effectiveCfg.keywords || [])
+    ) {
+      report(`互动前沿用点击前关键词兜底结果，跳过二次模型等待：${keyword}`);
       return true;
     }
     const current = await warmupCurrentPostRelevance(config, padCode, effectiveCfg, {
@@ -36320,7 +36361,7 @@ export async function warmupThreadsAccount(
         if (isAcpPad(padCode) && /^search/.test(activeRelevantSurfaceReason)) {
           report("留言前重新校准当前可见互动栏，避免模型校验期间页面位移");
           const previousCommentActions = commentActions;
-          const freshCommentActions = await locateAcpSearchResultVisibleActions({ allowKeywordComment: true }).catch((error) => ({
+          const freshCommentActions = await locateAcpSearchResultVisibleActions({ allowKeywordComment: true, skipRelevanceCheck: true }).catch((error) => ({
             like: undefined,
             comment: undefined,
             screenshotUrl: previousCommentActions?.screenshotUrl,

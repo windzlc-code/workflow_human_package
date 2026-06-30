@@ -350,9 +350,9 @@ async function resolvePublishPadBinding(
   }
 
   const bindingLabel = boundPadCode
-    ? `当前绑定云机 ${boundPadCode} 已不在 VMOS 云机列表中。`
-    : "当前人设还没有绑定云机，且預設雲機已不在 VMOS 云机列表中。";
-  throw new Error(`${bindingLabel}请先进入人设设置重新绑定可用云机。`);
+    ? `当前绑定智能體手機 ${boundPadCode} 已不在 VMOS 智能體手機列表中。`
+    : "当前人设还没有绑定智能體手機，且預設智能體手機已不在 VMOS 智能體手機列表中。";
+  throw new Error(`${bindingLabel}请先进入人设设置重新绑定可用智能體手機。`);
 }
 
 async function hydratePadNames(pads: Array<{ padCode: string; padName?: string; padStatus: number; padGrade?: string; padType?: string }>) {
@@ -417,7 +417,7 @@ async function listPadsCached(options: { force?: boolean } = {}) {
       console.warn(`[telegram][pad_list_refresh_error] ${error?.message || error}`);
     });
     return options.force
-      ? await withTimeout(refresh, PAD_LIST_FORCE_REFRESH_TIMEOUT_MS, `VMOS 云机列表刷新超时（${PAD_LIST_FORCE_REFRESH_TIMEOUT_MS / 1000} 秒）`)
+      ? await withTimeout(refresh, PAD_LIST_FORCE_REFRESH_TIMEOUT_MS, `VMOS 智能體手機列表刷新超时（${PAD_LIST_FORCE_REFRESH_TIMEOUT_MS / 1000} 秒）`)
       : await refresh;
   } catch (error: any) {
     const fallback = applyPersistedPadListCache();
@@ -678,30 +678,33 @@ async function resolveWarmupCommentPersonaForPad(padCode: string): Promise<Warmu
   const stableCandidates = candidates.filter((archive) => !String(archive.id || "").startsWith("cpm-"));
   const archive = [...(stableCandidates.length ? stableCandidates : candidates)]
     .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())[0];
-  const persona = {
-    name: archive.name,
-    description: archive.personaDescription || archive.contentPreview,
-    style: archive.personaStyle,
-    personality: archive.personaPersonality,
-    language: archive.language || "台灣地區繁體中文",
-  };
-  return {
-    ...persona,
-    interests: normalizePersonaInterestTags(archive.setup?.interests, buildWarmupInterestKeywords(persona)),
-  };
+  return buildWarmupCommentPersonaFromArchive(archive);
 }
 
 function buildWarmupCommentPersonaFromArchive(archive: PersonaArchive): WarmupCommentPersona {
+  const setup = archive.setup || {};
+  const legacy = archive as PersonaArchive & Record<string, unknown>;
+  const description = [
+    legacy.personaDescription,
+    legacy.contentPreview,
+    setup.personaDescription,
+    setup.contentTheme,
+    setup.customTopic,
+    archive.content,
+  ]
+    .map((item) => typeof item === "string" ? item.trim() : "")
+    .filter(Boolean)
+    .join(" ");
   const persona = {
-    name: archive.name,
-    description: archive.personaDescription || archive.contentPreview,
-    style: archive.personaStyle,
-    personality: archive.personaPersonality,
-    language: archive.language || "台灣在地繁體中文",
+    name: archive.name || setup.personaName,
+    description,
+    style: pickString(legacy.personaStyle, setup.personaStyle),
+    personality: pickString(legacy.personaPersonality, setup.personaPersonality),
+    language: pickString(legacy.language, setup.language || setup.chineseScript || "台灣在地繁體中文"),
   };
   return {
     ...persona,
-    interests: buildWarmupInterestKeywords(persona),
+    interests: normalizePersonaInterestTags([...(setup.genres || []), ...(setup.interests || [])], buildWarmupInterestKeywords(persona)),
   };
 }
 
@@ -1630,7 +1633,7 @@ async function sendPadBusyNotice(bot: TelegramBot, chatId: number, padCode: stri
   const minutes = Math.max(1, Math.ceil((Date.now() - active.startedAt) / 60_000));
   await bot.sendMessage(
     chatId,
-    `⚠️ 雲機正在執行任務\n\n雲機：${padCode}\n目前任務：${active.label}\n已執行：約 ${minutes} 分鐘\n\n同一台雲機不能同時發布/養號/登入，請等目前任務結束後再試。`,
+    `⚠️ 智能體手機正在執行任務\n\n智能體手機：${padCode}\n目前任務：${active.label}\n已執行：約 ${minutes} 分鐘\n\n同一台智能體手機不能同時發布/養號/登入，請等目前任務結束後再試。`,
   ).catch(() => undefined);
 }
 
@@ -1669,7 +1672,7 @@ async function resumePendingThreadsProfileAction(bot: TelegramBot, chatId: numbe
   const statusMsg = await bot.sendMessage(chatId, [
     progressTitle,
     "",
-    `雲機：${resume.padName || resume.padCode}`,
+    `智能體手機：${resume.padName || resume.padCode}`,
     `${valueLabel}：${resume.input}`,
     "",
     "✅ Threads 登入流程已完成，正在繼續執行剛才的資料修改...",
@@ -1681,7 +1684,7 @@ async function resumePendingThreadsProfileAction(bot: TelegramBot, chatId: numbe
     bot.editMessageText([
       progressTitle,
       "",
-      `雲機：${resume.padName || resume.padCode}`,
+      `智能體手機：${resume.padName || resume.padCode}`,
       `${valueLabel}：${resume.input}`,
       "",
       `${p.done ? "✅" : "⏳"} ${p.step}`,
@@ -1703,7 +1706,7 @@ async function resumePendingThreadsProfileAction(bot: TelegramBot, chatId: numbe
     await bot.sendMessage(chatId, [
       result.state === "verified" ? `✅ Threads ${valueLabel}已更新` : `⚠️ Threads ${valueLabel}已提交`,
       "",
-      `雲機：${resume.padName || resume.padCode}`,
+      `智能體手機：${resume.padName || resume.padCode}`,
       `${valueLabel}：${resume.input}`,
       result.detail,
     ].join("\n"), {
@@ -1724,7 +1727,7 @@ async function resumePendingThreadsProfileAction(bot: TelegramBot, chatId: numbe
       ? [
           "⚠️ Threads 仍未登入，資料修改已停止",
           "",
-          `雲機：${resume.padName || resume.padCode}`,
+          `智能體手機：${resume.padName || resume.padCode}`,
           `${valueLabel}：${resume.input}`,
           "",
           "請完成登入後再次點擊修改動作。",
@@ -1732,7 +1735,7 @@ async function resumePendingThreadsProfileAction(bot: TelegramBot, chatId: numbe
       : [
           `❌ Threads ${valueLabel}修改失敗`,
           "",
-          `雲機：${resume.padName || resume.padCode}`,
+          `智能體手機：${resume.padName || resume.padCode}`,
           `原因：${formatUserFacingError(error, "請稍後重試。")}`,
         ].join("\n"), {
       chat_id: chatId,
@@ -2327,7 +2330,7 @@ function buildBulkStoredPostsSelectView(args: {
   return {
     page: safePage,
     text: args.mode === "publish"
-      ? `请选择要发布的推文：\n已選：${selected.size} 篇\n下一步选择平台；确认页可选择绑定云机发布或多云机发布。\n\n${lines.join("\n\n")}`
+      ? `请选择要发布的推文：\n已選：${selected.size} 篇\n下一步选择平台；确认页可选择绑定智能體手機发布或多智能體手機发布。\n\n${lines.join("\n\n")}`
       : `请选择要${actionText}的推文：\n已選：${selected.size} 篇\n\n${lines.join("\n\n")}`,
     keyboard,
   };
@@ -2411,7 +2414,7 @@ export function buildPublishPadSelectionRows(args: {
       callback_data: `pubpad_toggle_${index}`,
     }];
   });
-  rows.push([{ text: `✅ 确认发布到 ${selected.size || 0} 台云机`, callback_data: args.confirmCallback || "pubpad_confirm" }]);
+  rows.push([{ text: `✅ 确认发布到 ${selected.size || 0} 台智能體手機`, callback_data: args.confirmCallback || "pubpad_confirm" }]);
   rows.push([{ text: "◀️ 返回", callback_data: args.backCallback || "pubpad_back" }]);
   return rows;
 }
@@ -2942,15 +2945,15 @@ export function formatUserFacingError(errorOrMessage: unknown, fallback = "操�
   } else if (!message || message === "[截图内容已省略]") {
     message = fallback;
   } else if (/(VMOSCloud\s+API|VMOS\s*API|vmos).*?(2020|Instance not found)|Instance not found/i.test(message)) {
-    message = "当前人设绑定的云机不存在，请进入人设设置重新绑定可用云机。";
-  } else if (/该人设绑定的云机上未检测到\s*Telegram|未能打开 VMOS 上的 Telegram|未能打开.*Telegram|Telegram.*(未安装|未檢測|未检测)|org\.telegram\.messenger.*(not found|does not exist|No activities found|unable to resolve|not installed)|Activity class.*org\.telegram\.messenger/i.test(rawForMatch)) {
-    message = "该人设绑定的云机上未检测到 Telegram 应用，请先在这台云机安装并登录 Telegram。";
+    message = "当前人设绑定的智能體手機不存在，请进入人设设置重新绑定可用智能體手機。";
+  } else if (/该人设绑定的智能體手機上未检测到\s*Telegram|未能打开 VMOS 上的 Telegram|未能打开.*Telegram|Telegram.*(未安装|未檢測|未检测)|org\.telegram\.messenger.*(not found|does not exist|No activities found|unable to resolve|not installed)|Activity class.*org\.telegram\.messenger/i.test(rawForMatch)) {
+    message = "该人设绑定的智能體手機上未检测到 Telegram 应用，请先在这台智能體手機安装并登录 Telegram。";
   } else if (/Telegram 分享入口未进入 Telegram|目前画面：|mCurrentFocus|mFocusedApp/i.test(rawForMatch) && /Telegram/i.test(rawForMatch)) {
-    message = "没有进入 Telegram 分享页面，请先确认这台云机已安装并登录 Telegram。";
+    message = "没有进入 Telegram 分享页面，请先确认这台智能體手機已安装并登录 Telegram。";
   } else if (/Telegram 群组媒体分享未离开选择聊天页|选择聊天页|选择聊天頁|share picker/i.test(rawForMatch)) {
-    message = "Telegram 分享页没有选中目标群组，请先在云机 Telegram 里打开目标群组后重试。";
-  } else if (/Telegram 群组媒体发布缺少|缺少 contentUri|缺少已写入云机的媒体记录|mediaContentUri/i.test(rawForMatch)) {
-    message = "图片或视频没有成功写入云机，请重新上传媒体后再发布。";
+    message = "Telegram 分享页没有选中目标群组，请先在智能體手機 Telegram 里打开目标群组后重试。";
+  } else if (/Telegram 群组媒体发布缺少|缺少 contentUri|缺少已写入智能體手機的媒体记录|mediaContentUri/i.test(rawForMatch)) {
+    message = "图片或视频没有成功写入智能體手機，请重新上传媒体后再发布。";
   } else if (/下載 Telegram 素材失敗|Telegram 文件下載失敗|Telegram 檔案下載失敗|Telegram file.*download|file download/i.test(rawForMatch)) {
     message = message || "Telegram 素材下載失敗，請確認本地 Bot 代理可用後重新上傳。";
   } else if (/R18 後台連線失敗|Tool_R18 後台連線失敗|fetch failed|Failed to fetch/i.test(rawForMatch)) {
@@ -2960,23 +2963,23 @@ export function formatUserFacingError(errorOrMessage: unknown, fallback = "操�
   } else if (/Telegram 群组输入失败|inputText|输入失败/i.test(rawForMatch) && /Telegram/i.test(rawForMatch)) {
     message = "Telegram 输入消息失败，请确认当前停留在目标群组聊天页。";
   } else if (/未能打开.*Instagram|Instagram.*(未安装|未檢測|未检测)|com\.instagram\.android.*(not found|does not exist|No activities found|unable to resolve|not installed)|Activity class.*com\.instagram\.android/i.test(rawForMatch)) {
-    message = "该人设绑定的云机上未检测到 Instagram 应用，请先在这台云机安装并登录 Instagram。";
+    message = "该人设绑定的智能體手機上未检测到 Instagram 应用，请先在这台智能體手機安装并登录 Instagram。";
   } else if (/未能打开.*Threads|Threads.*(未安装|未檢測|未检测)|com\.instagram\.barcelona.*(not found|does not exist|No activities found|unable to resolve|not installed)|Activity class.*com\.instagram\.barcelona/i.test(rawForMatch)) {
-    message = "该人设绑定的云机上未检测到 Threads 应用，请先在这台云机安装并登录 Threads。";
+    message = "该人设绑定的智能體手機上未检测到 Threads 应用，请先在这台智能體手機安装并登录 Threads。";
   } else if (/未能打开.*小红书|未能打开.*小紅書|RedNote.*(未安装|未檢測|未检测)|com\.xingin\.xhs.*(not found|does not exist|No activities found|unable to resolve|not installed)|Activity class.*com\.xingin\.xhs/i.test(rawForMatch)) {
-    message = "该人设绑定的云机上未检测到小红书应用，请先在这台云机安装并登录小红书。";
+    message = "该人设绑定的智能體手機上未检测到小红书应用，请先在这台智能體手機安装并登录小红书。";
   } else if (/No Activity found to handle Intent|unable to resolve Intent|Activity class.*does not exist|not installed|package.*not found|Failure \[not installed/i.test(rawForMatch)) {
-    message = "该人设绑定的云机上未检测到目标应用，请先在这台云机安装并登录对应平台。";
+    message = "该人设绑定的智能體手機上未检测到目标应用，请先在这台智能體手機安装并登录对应平台。";
   } else if (/發布後仍停留在输入頁|发布后仍停留在输入页|仍停留在新串文|仍在编辑页|新串文编辑页/.test(message)) {
     message = "发布按钮没有生效，页面仍停在新串文编辑页。系统会在重试时重新定位发布按钮；请确认当前页面右下角仍能看到“发布”按钮。";
   } else if (/發布前未找到新串文输入|发布前未找到新串文输入|未找到新串文.*控件|composer-controls-missing/i.test(message)) {
     message = "没有识别到新串文输入框或发布按钮。请确认当前已经进入 Threads 新串文编辑页后再重试。";
   } else if (/未能确认 Threads 首页|未能切回 Threads 首页|手机桌面/.test(message)) {
-    message = "没有稳定回到 Threads 首页，可能停在手机桌面、侧边栏或其他页面。请先把云机切回 Threads 首页后重试。";
+    message = "没有稳定回到 Threads 首页，可能停在手机桌面、侧边栏或其他页面。请先把智能體手機切回 Threads 首页后重试。";
   } else if (/Threads\s*\u6587\u6848\u8f93\u5165\u672a\u786e\u8ba4|\u7070\u8272\u53d1\u5e03\u6309\u94ae/i.test(rawForMatch)) { // captionNotConfirmed
     message = "Threads \u6587\u6848\u6ca1\u6709\u786e\u8ba4\u8f93\u5165\u6210\u529f\uff0c\u7cfb\u7edf\u5df2\u505c\u6b62\u53d1\u5e03\uff0c\u907f\u514d\u8bef\u70b9\u7070\u8272\u53d1\u5e03\u6309\u94ae\u3002\u8bf7\u91cd\u8bd5\u53d1\u5e03\uff1b\u5982\u679c\u8fde\u7eed\u51fa\u73b0\uff0c\u8bf7\u5148\u5728\u4e91\u673a\u786e\u8ba4 Threads \u8f93\u5165\u6846\u548c\u952e\u76d8\u72b6\u6001\u3002";
   } else if (/timeout|timed out|超時|超时/i.test(message)) {
-    message = "等待页面响应超时。可能是云机卡顿、网络慢，或当前页面没有按预期跳转。";
+    message = "等待页面响应超时。可能是智能體手機卡顿、网络慢，或当前页面没有按预期跳转。";
   } else if (/401\s+Unauthorized|unauthorized/i.test(message) && /OpenAI Codex|Codex|provider:\s*openai/i.test(message)) {
     message = "后台 Codex 认证已失效，请在 ECS 上重新登录 Codex 或配置可用的 OpenAI API Key。";
   } else if (/429|RESOURCE_EXHAUSTED|rate limit|quota/i.test(message)) {
@@ -2986,9 +2989,9 @@ export function formatUserFacingError(errorOrMessage: unknown, fallback = "操�
   } else if (/API key|api key|金鑰|密钥|unauthorized|forbidden|permission/i.test(message)) {
     message = "接口权限或 API Key 配置异常，请检查后台配置。";
   } else if (/任務失敗|任务失败|taskStatus/.test(message)) {
-    message = "云机指令执行失败，可能是云机无响应或当前应用状态不正确。";
+    message = "智能體手機指令执行失败，可能是智能體手機无响应或当前应用状态不正确。";
   } else if (/截图|screenshot|screencap/i.test(rawForMatch) && /失败|失敗|failed|error/i.test(rawForMatch)) {
-    message = "未能获取当前云机截图，请直接进入云机查看当前停留页面。";
+    message = "未能获取当前智能體手機截图，请直接进入智能體手機查看当前停留页面。";
   }
 
   if (message.length > 180) {
@@ -3522,7 +3525,7 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
     { text: "\uD83E\uDDFE \u63A8\u6587\u98A8\u683C", callback_data: `tweetstyle_${id}` },
     { text: "🧾 人設簡介", callback_data: `editcontent_${id}` },
     { text: "🔗 链接设置", callback_data: `linksettings_${id}` },
-    { text: "📱 綁定雲機", callback_data: `bindpad_${id}` },
+    { text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` },
     { text: "🔐 帳號管理", callback_data: `acctmgmt_${id}` },
     { text: "🔥 人設熱點數據", callback_data: `shs_${id}` },
     ...(isWorkflow
@@ -3554,7 +3557,7 @@ export function buildPersonaSettingsRows(archive: PersonaArchive): Array<Array<{
 }
 
 export function buildPadDetailActionRows(): Array<Array<{ text: string; callback_data: string }>> {
-  return [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]];
+  return [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]];
 }
 
 function normalizePersonaHotMetricsUsername(value?: string | null) {
@@ -3759,6 +3762,11 @@ function buildPersonaOwnPostAutoReplyPlatformText(archive: PersonaArchive, run: 
 function buildPersonaOwnPostAutoReplyPlatformRows(archiveId: string): Array<Array<{ text: string; callback_data: string }>> {
   return [
     [{ text: "💬 Threads 內部評論", callback_data: `acctautoreplyhot_threads_${archiveId}` }],
+    [{ text: "✏️ 修改回覆內容", callback_data: `ownreply_text_${archiveId}` }],
+    [
+      { text: "👁 修改瀏覽量", callback_data: `ownreply_views_${archiveId}` },
+      { text: "📅 修改天數", callback_data: `ownreply_days_${archiveId}` },
+    ],
     [{ text: "✍️ 重新設定條件", callback_data: `persona_autoreply_hot_${archiveId}` }],
     [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${archiveId}` }],
   ];
@@ -3865,7 +3873,7 @@ function formatThreadsOwnPostReplyProgressLines(
   return [
     "🔥 正在自動回覆熱點推文...",
     `人設：${args.persona}`,
-    `雲機：${args.padName}`,
+    `智能體手機：${args.padName}`,
     `狀態：${progress.step}`,
     `已掃描：${progress.scannedPosts}`,
     `已回覆：${progress.replied}`,
@@ -3891,7 +3899,7 @@ async function renderPersonaSettingsPage(
     "⚙️ 人設設定",
     "",
     `人設：${nextArchive.name}`,
-    `綁定雲機：${boundPadName}`,
+    `綁定智能體手機：${boundPadName}`,
     ...(isWorkflowPersona ? [
       `TG免費群：${tgFreeGroupName}`,
       `TG付費群：${tgPaidGroupName}`,
@@ -3926,8 +3934,8 @@ async function runPadThreadsAutoReplyFromTelegram(
   const pads = await listPadsForThisBot();
   const allowedPad = pads.find((p) => p.padCode === padCode);
   if (!allowedPad) {
-    await bot.sendMessage(chatId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
-      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+    await bot.sendMessage(chatId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]] },
     });
     return;
   }
@@ -3939,8 +3947,8 @@ async function runPadThreadsAutoReplyFromTelegram(
     const creds = resolveVmosCredentials();
     const commentPersona = await resolveWarmupCommentPersonaForPad(padCode);
     let lastProgress: ThreadsAutoReplyProgress | null = null;
-    const statusMessage = await bot.sendMessage(chatId, `💬 Threads自动回复執行中...\n\n雲機：${padName}\n人設：${commentPersona?.name || "未綁定人設"}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
-      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+    const statusMessage = await bot.sendMessage(chatId, `💬 Threads自动回复執行中...\n\n智能體手機：${padName}\n人設：${commentPersona?.name || "未綁定人設"}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]] },
     });
     const result = await autoReplyThreadsAccount(
       creds,
@@ -3959,9 +3967,9 @@ async function runPadThreadsAutoReplyFromTelegram(
     );
     assertPadOperationNotCancelled(padOperationKey);
     stopTyping();
-    await bot.sendMessage(chatId, `✅ *Threads自动回复完成*\n\n雲機：${padName}\n查看範圍：${maxAgeDays} 天內\n本次目標：${result.targetReplies || 3} 條\n已掃描貼文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.completionReason ? `\n完成說明：${result.completionReason}` : ""}${result.error ? `\n補充：${result.error}` : ""}`, {
+    await bot.sendMessage(chatId, `✅ *Threads自动回复完成*\n\n智能體手機：${padName}\n查看範圍：${maxAgeDays} 天內\n本次目標：${result.targetReplies || 3} 條\n已掃描貼文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.completionReason ? `\n完成說明：${result.completionReason}` : ""}${result.error ? `\n補充：${result.error}` : ""}`, {
       parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]] },
     });
     const screenshots = result.replied > 0
       ? (result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [])
@@ -3979,7 +3987,7 @@ async function runPadThreadsAutoReplyFromTelegram(
   } catch (error: any) {
     stopTyping();
     if (isTelegramTaskCancelledError(error)) {
-      await bot.sendMessage(chatId, `🚫 已中止 Threads自动回复任務\n\n雲機：${padName}`);
+      await bot.sendMessage(chatId, `🚫 已中止 Threads自动回复任務\n\n智能體手機：${padName}`);
       return;
     }
     if (await sendCloudAccountStateNotice(
@@ -3987,7 +3995,7 @@ async function runPadThreadsAutoReplyFromTelegram(
       chatId,
       error,
       { action: "Threads自动回复", padName, padCode },
-      [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]],
+      [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]],
     )) {
       return;
     }
@@ -4019,8 +4027,8 @@ async function runPersonaThreadsAutoReplyFromTelegram(
   const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
   const returnCallback = `acctplatform_threads_${archiveId}`;
   if (!boundPad) {
-    await bot.sendMessage(chatId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 自動回覆。`, {
-      reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${archiveId}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+    await bot.sendMessage(chatId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 自動回覆。`, {
+      reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${archiveId}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
     });
     return;
   }
@@ -4031,7 +4039,7 @@ async function runPersonaThreadsAutoReplyFromTelegram(
     const creds = resolveVmosCredentials();
     const commentPersona = buildWarmupCommentPersonaFromArchive(archive);
     let lastProgress: ThreadsAutoReplyProgress | null = null;
-    const statusMessage = await bot.sendMessage(chatId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
+    const statusMessage = await bot.sendMessage(chatId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
       reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
     });
     const result = await autoReplyThreadsAccount(
@@ -4051,7 +4059,7 @@ async function runPersonaThreadsAutoReplyFromTelegram(
     );
     assertPadOperationNotCancelled(padOperationKey);
     stopTyping();
-    await bot.sendMessage(chatId, `✅ *Threads 自動回覆完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n本次目標：${result.targetReplies || 3} 條\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.completionReason ? `\n完成說明：${result.completionReason}` : ""}${result.error ? `\n補充：${result.error}` : ""}`, {
+    await bot.sendMessage(chatId, `✅ *Threads 自動回覆完成*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n本次目標：${result.targetReplies || 3} 條\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.completionReason ? `\n完成說明：${result.completionReason}` : ""}${result.error ? `\n補充：${result.error}` : ""}`, {
       parse_mode: "Markdown",
       reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
     });
@@ -4071,7 +4079,7 @@ async function runPersonaThreadsAutoReplyFromTelegram(
   } catch (error: any) {
     stopTyping();
     if (isTelegramTaskCancelledError(error)) {
-      await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆任務\n\n雲機：${boundPad.padName}`);
+      await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆任務\n\n智能體手機：${boundPad.padName}`);
       return;
     }
     if (await sendCloudAccountStateNotice(
@@ -4115,8 +4123,8 @@ function formatPersonaAccountRuntimeStatus(status?: PersonaAccountRuntimeStatus)
 function buildPersonaPlatformAccountText(archive: PersonaArchive, platform: PersonaAccountPlatform, status?: PersonaAccountRuntimeStatus) {
   const accounts = getPersonaAccountManagement(archive);
   const padLine = archive.boundPadCode
-    ? `綁定雲機：${archive.boundPadName ? `${archive.boundPadName}（${archive.boundPadCode}）` : archive.boundPadCode}`
-    : "綁定雲機：未綁定";
+    ? `綁定智能體手機：${archive.boundPadName ? `${archive.boundPadName}（${archive.boundPadCode}）` : archive.boundPadCode}`
+    : "綁定智能體手機：未綁定";
   if (platform === "threads") {
     const current = accounts.threads;
     return [
@@ -4234,7 +4242,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
         "平台：Threads",
         "",
         "請直接傳送這個人設要綁定的 Threads 使用者名稱。",
-        "之後熱點資料會按這個使用者名稱刷新，和切換雲機無關。",
+        "之後熱點資料會按這個使用者名稱刷新，和切換智能體手機無關。",
       ].join("\n"), {
         reply_markup: { inline_keyboard: [[{ text: "取消", callback_data: returnCallback }]] },
       });
@@ -4265,7 +4273,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
       "平台：Threads",
       `使用者名稱：@${threadsHandle}`,
       "",
-      "正在透過代碼讀取 Threads Profile 熱點資料，不會打開雲機。",
+      "正在透過代碼讀取 Threads Profile 熱點資料，不會打開智能體手機。",
     ].join("\n"), {
       reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: returnCallback }]] },
     });
@@ -4413,7 +4421,7 @@ async function refreshPersonaThreadsHotMetricsFromTelegram(
       "平台：Threads",
       `原因：${message}`,
       "",
-      "這次刷新未打開雲機，請稍後重試或檢查 Threads 使用者名稱。",
+      "這次刷新未打開智能體手機，請稍後重試或檢查 Threads 使用者名稱。",
     ].join("\n"), {
       reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: returnCallback }]] },
     });
@@ -4461,14 +4469,14 @@ async function beginPersonaThreadsSwitchLoginFromTelegram(
   const returnCallback = `acctplatform_threads_${archiveId}`;
   if (!boundPad) {
     await safeEditOrSend(bot, chatId, messageId, [
-      "❌ 這個人設還沒有綁定可用雲機。",
+      "❌ 這個人設還沒有綁定可用智能體手機。",
       "",
       `人設：${archive.name}`,
       "平台：Threads",
       "",
-      "請先綁定雲機，再切換 Threads 登入帳號。",
+      "請先綁定智能體手機，再切換 Threads 登入帳號。",
     ].join("\n"), {
-      reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${archiveId}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+      reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${archiveId}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
     });
     return;
   }
@@ -4482,7 +4490,7 @@ async function beginPersonaThreadsSwitchLoginFromTelegram(
     "🔄 *切換登入帳號*",
     "",
     `人設：${archive.name}`,
-    `雲機：${boundPad.padName}`,
+    `智能體手機：${boundPad.padName}`,
     "平台：Threads",
     "",
     "⭐ 請輸入 Threads 使用者名 ⭐",
@@ -11717,19 +11725,19 @@ export function formatCloudAccountStateNotice(
       : kind === "login_required"
         ? "未登入/需重新登入"
         : "帳號狀態被攔截";
-  const pad = context.padName || context.padCode || "目前雲機";
+  const pad = context.padName || context.padCode || "目前智能體手機";
   const reason = normalizeInternalPageLabel(stripCloudAccountDebugSuffix(normalized))
     .replace(/\s+/g, " ")
     .slice(0, 180);
   const text = [
     "⚠️ 帳號狀態需要處理",
     "",
-    `雲機：${pad}`,
+    `智能體手機：${pad}`,
     `操作：${context.action}`,
     `狀態：${status}`,
     reason ? `識別資訊：${reason}` : "",
     "",
-    "這不是任務執行失敗。請先進入雲機完成驗證或重新登入 Threads，再回來重試目前操作。",
+    "這不是任務執行失敗。請先進入智能體手機完成驗證或重新登入 Threads，再回來重試目前操作。",
   ].filter(Boolean).join("\n");
 
   return {
@@ -11857,7 +11865,7 @@ async function sendManualInterventionFailure(
   },
 ) {
   const padLine = context.padName || context.padCode
-    ? `\n云机：${context.padName || context.padCode}`
+    ? `\n智能體手機：${context.padName || context.padCode}`
     : "";
   await bot.sendMessage(
     chatId,
@@ -11875,7 +11883,7 @@ async function sendManualInterventionFailure(
   if (context.padCode) {
     const sent = await sendCurrentPadScreenshot(bot, chatId, context.padCode, "📸 失败时当前界面截图").catch(() => false);
     if (!sent) {
-      await bot.sendMessage(chatId, "未能获取当前云机截图，请直接进入云机查看当前停留页面。").catch(() => undefined);
+      await bot.sendMessage(chatId, "未能获取当前智能體手機截图，请直接进入智能體手機查看当前停留页面。").catch(() => undefined);
     }
   }
 }
@@ -12083,7 +12091,7 @@ function buildPublishedPostInfoHtml(record: NonNullable<PersonaArchive["publishH
     `平台: ${escapeHtmlText(String(record.platform || publishedMeta?.platform || "-"))}`,
   ];
   const targetCount = Array.isArray(record.publishedTargets) ? record.publishedTargets.length : 0;
-  if (targetCount > 0) lines.push(`云机发布数: ${targetCount}`);
+  if (targetCount > 0) lines.push(`智能體手機发布数: ${targetCount}`);
   const directPublishedUrl = isPublishHistoryOriginalSourceUrl(record, record.publishedUrl) ? "" : record.publishedUrl;
   const directMetaUrl = isPublishHistoryOriginalSourceUrl(record, publishedMeta?.sourceUrl) ? "" : publishedMeta?.sourceUrl;
   const publishedUrl = String(directPublishedUrl || directMetaUrl || "").trim();
@@ -12099,8 +12107,8 @@ function buildPublishedPostInfoHtml(record: NonNullable<PersonaArchive["publishH
     const hasPad = Boolean(String(record.padCode || "").trim())
       || (Array.isArray(record.publishedTargets) && record.publishedTargets.some((target) => String(target?.padCode || "").trim()));
     lines.push(hasPad
-      ? "数据: 暂无实际发布帖链接，可点击刷新热度尝试按云机账号找回发布帖并刷新"
-      : "数据: 暂无实际发布帖链接，且缺少云机信息，不能实时刷新该发布帖热度");
+      ? "数据: 暂无实际发布帖链接，可点击刷新热度尝试按智能體手機账号找回发布帖并刷新"
+      : "数据: 暂无实际发布帖链接，且缺少智能體手機信息，不能实时刷新该发布帖热度");
   } else if (platform === "telegram") {
     lines.push("数据: Telegram 发布记录暂未保存消息链接/消息 ID，不能实时刷新群消息数据");
   } else {
@@ -12336,7 +12344,7 @@ async function refreshPublishHistorySentimentMetrics(args: {
     ? await attachMissingPublishHistoryThreadsUrls(originalRecord)
     : originalRecord;
   if (!hasPublishHistorySourceUrl(record)) {
-    throw new Error("未能从该云机账号主页匹配到这条历史发布帖链接，请确认云机仍登录原 Threads 账号且该帖未删除。");
+    throw new Error("未能从该智能體手機账号主页匹配到这条历史发布帖链接，请确认智能體手機仍登录原 Threads 账号且该帖未删除。");
   }
   const publishedMeta = getPublishHistoryValidPublishedMeta(record, record.publishedMeta);
   const publishedUrl = String(
@@ -12469,7 +12477,7 @@ function buildPublishHistoryDetailText(args: {
   return [
     `🕘 <b>第 ${args.displayIndex} 条发布历史</b>`,
     `平台: ${escapeHtmlText(String(record.platform || "-"))}`,
-    `云机: ${escapeHtmlText(String(record.padName || record.padCode || "-"))}`,
+    `智能體手機: ${escapeHtmlText(String(record.padName || record.padCode || "-"))}`,
     `发布时间: ${escapeHtmlText(String(record.publishedAt || "-").slice(0, 16).replace("T", " "))}`,
     ...buildPublishedPostInfoHtml(record),
     "",
@@ -13026,7 +13034,7 @@ export function buildStoredPostPublishConfirmRows(args: {
   if (!args.isSentimentImported) {
     rows.push(
       ...platforms.map((platform) => ([{
-        text: `多云机发布 ${platformText(platform).replace(/^.+?\s/, "")}`,
+        text: `多智能體手機发布 ${platformText(platform).replace(/^.+?\s/, "")}`,
         callback_data: `dopm_${platform}`,
       }])),
     );
@@ -13037,7 +13045,7 @@ export function buildStoredPostPublishConfirmRows(args: {
           callback_data: `sch_${platform}`,
         }])),
         ...platforms.map((platform) => ([{
-          text: `多云机定时 ${platformText(platform).replace(/^.+?\s/, "")}`,
+          text: `多智能體手機定时 ${platformText(platform).replace(/^.+?\s/, "")}`,
           callback_data: `schm_${platform}`,
         }])),
       );
@@ -13936,7 +13944,7 @@ export async function fastPathPersonaDetail(userPrompt: string): Promise<string 
             `风格：${archive.setup?.personaStyle || "-"}`,
             `待发布推文：${archive.posts.length}`,
             `已发布：${archive.publishHistory?.length || 0}`,
-            `绑定云机：${archive.boundPadCode || DEFAULT_PAD_CODE}`,
+            `绑定智能體手機：${archive.boundPadCode || DEFAULT_PAD_CODE}`,
             "",
             archive.content,
           ].join("\n");
@@ -13956,7 +13964,7 @@ export async function fastPathPersonaDetail(userPrompt: string): Promise<string 
     `风格：${archive.setup?.personaStyle || "-"}`,
     `待发布推文：${archive.posts.length}`,
     `已发布：${archive.publishHistory?.length || 0}`,
-    `绑定云机：${archive.boundPadCode || DEFAULT_PAD_CODE}`,
+    `绑定智能體手機：${archive.boundPadCode || DEFAULT_PAD_CODE}`,
     "",
     archive.content,
   ].join("\n");
@@ -14210,7 +14218,7 @@ function formatThreadsAutoReplyProgressLines(
     `当前状态：${currentTask}`,
     `运行指标：${scope} / 扫描 3-5 篇 / 最多回复 3 条`,
     context.persona ? `人设：${context.persona}` : "",
-    context.padName ? `云机：${context.padName}` : "",
+    context.padName ? `智能體手機：${context.padName}` : "",
     `已扫描推文：${progress.scannedPosts}`,
     `候选评论：${progress.scannedComments}`,
     `已回复：${progress.replied}`,
@@ -14791,7 +14799,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       `风格：${archive.setup?.personaStyle || "-"}`,
       `待发布推文：${archive.posts.length}`,
       `已发布：${archive.publishHistory?.length || 0}`,
-      `绑定云机：${archive.boundPadCode || defaultPadCode}`,
+      `绑定智能體手機：${archive.boundPadCode || defaultPadCode}`,
       "",
       archive.content,
     ].join("\n");
@@ -14863,7 +14871,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       releasePadOperation(padCode, key);
       await bot.sendMessage(
         chatId,
-        `⚠️ 云机正在执行队列任务\n\n云机：${padCode}\n当前可能是定時發佈或另一个后台任务。\n\n同一台云机不能同时发布/养号/登录，请等当前任务结束后再试。`,
+        `⚠️ 智能體手機正在执行队列任务\n\n智能體手機：${padCode}\n当前可能是定時發佈或另一个后台任务。\n\n同一台智能體手機不能同时发布/养号/登录，请等当前任务结束后再试。`,
       ).catch(() => undefined);
       return false;
     }
@@ -14911,7 +14919,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   ) => {
     const resolved = await resolvePublishPadOptions(selection.selectedPadCodes);
     if (!resolved.pads.length) {
-      await safeEditOrSend(bot, chatId, msgId, "❌ 当前没有可用于发布的云机。", {
+      await safeEditOrSend(bot, chatId, msgId, "❌ 当前没有可用于发布的智能體手機。", {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: backCallback }]] },
       });
       return;
@@ -14967,7 +14975,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       const padOperationKey = `publish:${padCode}:${publishLockKey}`;
       if (!(await acquireRuntimePadOperation(args.chatId, padCode, padOperationKey, args.label))) {
         releasePublishCommand(args.chatId, publishLockKey, publishScopeKey);
-        return { padCode, ok: false, logs: [], screenshots: [], publishedPostIds: [] as string[], error: "云机正在执行其他任务。" };
+        return { padCode, ok: false, logs: [], screenshots: [], publishedPostIds: [] as string[], error: "智能體手機正在执行其他任务。" };
       }
       const statusMessage = await sendTelegramPublishStatusMessage(bot, args.chatId, `${args.platform}/${padCode}`).catch(() => null);
       const statusMessageId = statusMessage?.message_id;
@@ -15023,7 +15031,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
               bot,
               args.chatId,
               result.screenshotUrl,
-              `📸 发布验证截图：${args.platform}，云机 ${padCode}，第 ${index + 1}/${padPosts.length} 篇`,
+              `📸 发布验证截图：${args.platform}，智能體手機 ${padCode}，第 ${index + 1}/${padPosts.length} 篇`,
             ).catch(() => undefined);
           }
         }
@@ -15105,7 +15113,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       const selectedCount = count === "all" ? sourcePosts.length : Math.min(sourcePosts.length, count);
       plannedPosts += selectedCount;
       const templateHint = state.linkEndingPresetApplied && getActiveLinkEndingPreset(archive.setup as any) ? "，链接模板已启用" : "";
-      detailLines.push(`${archive.name}：${selectedCount} 篇，雲機 ${archive.boundPadCode || defaultPadCode}${templateHint}`);
+      detailLines.push(`${archive.name}：${selectedCount} 篇，智能體手機 ${archive.boundPadCode || defaultPadCode}${templateHint}`);
     }
     await safeEditOrSend(bot, chatId, msgId, [
       "🚀 *矩陣發布確認*",
@@ -15120,7 +15128,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       ...detailLines.slice(0, 12),
       detailLines.length > 12 ? `...還有 ${detailLines.length - 12} 個人設` : "",
       "",
-      "系統會使用各人設綁定雲機，按順序發布。",
+      "系統會使用各人設綁定智能體手機，按順序發布。",
     ].filter(Boolean).join("\n"), {
       parse_mode: "Markdown",
       reply_markup: {
@@ -15183,7 +15191,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
             padBinding = await resolvePublishPadBinding(archive, undefined, defaultPadCode, pads);
           } catch (error: any) {
             failedJobs += selectedPosts.length;
-            failedLines.push(`${archive.name}：${formatUserFacingError(error, "雲機不可用")}`);
+            failedLines.push(`${archive.name}：${formatUserFacingError(error, "智能體手機不可用")}`);
             continue;
           }
           await safeEditOrSend(bot, chatId, msgId, [
@@ -15192,7 +15200,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
             `人設進度：${archiveIndex + 1}/${totalPersonas}`,
             `目前人設：${archive.name}`,
             `平台：${platform}`,
-            `雲機：${padBinding.padName || padBinding.padCode}`,
+            `智能體手機：${padBinding.padName || padBinding.padCode}`,
             `推文：${selectedPosts.length} 篇`,
           ].join("\n"), {
             reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "fresh_main_menu" }]] },
@@ -15277,8 +15285,8 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   const customPublishFinalPublishRows = (state: PendingCustomPublish) => [
     ...(state.archiveId ? [[{ text: "🔗 选择链接模板", callback_data: "custom_publish_link_templates" }]] : []),
     ...(state.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "custom_publish_link_clear" }]] : []),
-    [{ text: `✅ 发布到绑定云机 ${state.padCode || defaultPadCode}`, callback_data: "custom_publish_publish_now" }],
-    [{ text: "📱 选择多云机发布", callback_data: "custom_publish_multi_now" }],
+    [{ text: `✅ 发布到绑定智能體手機 ${state.padCode || defaultPadCode}`, callback_data: "custom_publish_publish_now" }],
+    [{ text: "📱 选择多智能體手機发布", callback_data: "custom_publish_multi_now" }],
     [customPublishResetButton],
     [customPublishBackToMethodButton(state)],
   ];
@@ -15364,7 +15372,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     const lines = [
       `人設：${state.archiveName || state.archiveId || "未命名人設"}`,
       `平台：${state.platform || effectiveDefaultPublishPlatform}`,
-      `云机：${state.padCode || defaultPadCode}`,
+      `智能體手機：${state.padCode || defaultPadCode}`,
     ];
     if (state.fileId) {
       const kind = state.fileKind === "video" ? "視頻" : state.fileKind === "document" ? "文件" : "圖片";
@@ -15388,14 +15396,14 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
       const pads = await listPadsForThisBot();
       padBinding = await resolvePublishPadBinding(archive, state.padCode, defaultPadCode, pads);
     } catch (error: any) {
-      await bot.sendMessage(chatId, `❌ 云机不可用\n\n${formatUserFacingError(error, "请先进入人设设置重新绑定可用云机。")}`, {
+      await bot.sendMessage(chatId, `❌ 智能體手機不可用\n\n${formatUserFacingError(error, "请先进入人设设置重新绑定可用智能體手機。")}`, {
         reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
       });
       return;
     }
     const padCode = padBinding.padCode;
     if (!(await isPadAllowedForThisBot(padCode))) {
-      await bot.sendMessage(chatId, "❌ 这台云机不属于当前 Bot 的 VMOS 账号范围，请重新绑定当前 Bot 可见的云机。", {
+      await bot.sendMessage(chatId, "❌ 这台智能體手機不属于当前 Bot 的 VMOS 账号范围，请重新绑定当前 Bot 可见的智能體手機。", {
         reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
       });
       return;
@@ -15510,7 +15518,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     const failures = results.filter((item) => !item.ok);
     await bot.sendMessage(chatId, failures.length
       ? `⚠️ 自定义发布部分失败\n\n成功：${results.filter((item) => item.ok).map((item) => item.padCode).join(", ") || "-"}\n失败：${failures.map((item) => `${item.padCode}：${item.error}`).join("\n")}`
-      : `✅ 已完成自定义发布\n平台：${customPlatform}\n云机：${targetPadCodes.join(", ")}`, {
+      : `✅ 已完成自定义发布\n平台：${customPlatform}\n智能體手機：${targetPadCodes.join(", ")}`, {
       reply_markup: { inline_keyboard: [[{ text: "🏠 主菜单", callback_data: "back_main" }]] },
     });
     return;
@@ -15548,7 +15556,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
         { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
       );
       stopTyping();
-      await bot.sendMessage(chatId, `${publishFinalTitle(result, "已完成自定义发布")}\n人設：${archive?.name || state.archiveName || "未命名人設"}\n平台：${state.platform || effectiveDefaultPublishPlatform}\n云机：${padName}\n\n${logs.slice(-5).join("\n")}`, {
+      await bot.sendMessage(chatId, `${publishFinalTitle(result, "已完成自定义发布")}\n人設：${archive?.name || state.archiveName || "未命名人設"}\n平台：${state.platform || effectiveDefaultPublishPlatform}\n智能體手機：${padName}\n\n${logs.slice(-5).join("\n")}`, {
         reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
       });
       const publishScreenshotUrl = result && typeof result === "object" && "screenshotUrl" in result && result.screenshotUrl
@@ -15567,7 +15575,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     } catch (error: any) {
       stopTyping();
       if (isTelegramTaskCancelledError(error)) {
-        await bot.sendMessage(chatId, `🛑 已中止自定义发布任务\n\n人設：${archive?.name || state.archiveName || "未命名人設"}\n云机：${padCode}`);
+        await bot.sendMessage(chatId, `🛑 已中止自定义发布任务\n\n人設：${archive?.name || state.archiveName || "未命名人設"}\n智能體手機：${padCode}`);
         return;
       }
       if (await sendCloudAccountStateNotice(
@@ -15757,7 +15765,7 @@ function buildScheduledPublishSummary(state: {
   return [
     `人設：${state.archiveName || "-"}`,
     `平台：${state.platform || "-"}`,
-    `雲機：${padLine || defaultPadCode}`,
+    `智能體手機：${padLine || defaultPadCode}`,
     `時間：${state.scheduledAtText || "-"}`,
     state.postPreview ? `推文：${state.postPreview}` : undefined,
   ].filter(Boolean).join("\n");
@@ -15991,7 +15999,7 @@ function summarizeManualPublishSelection(posts: PersonaArchive["posts"], startIn
   const mediaKinds = new Set(selected.map((post) => describePostMedia(post)));
   const preview = selected.slice(0, 3).map((post, idx) => `【第${startIndex + idx + 1}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`);
   const hint = mediaKinds.size > 1
-    ? "⚠️ 本次發佈包含純文字 / 圖文 / 視頻混合內容，雲機發佈過程中頁面形態可能变化，請留意每篇的發佈控制項。"
+    ? "⚠️ 本次發佈包含純文字 / 圖文 / 視頻混合內容，智能體手機發佈過程中頁面形態可能变化，請留意每篇的發佈控制項。"
     : mediaKinds.has("視頻")
       ? "ℹ️ 本次發佈為視頻内容，請留意原片上傳耗時会更長。"
       : mediaKinds.has("圖文")
@@ -16040,8 +16048,8 @@ function buildManualPostChoiceRows(
 }
 
 function buildManualPostChoiceIntro(postCount: number) {
-  if (postCount === 1) return "請選擇發佈操作，下一步可选择一台或多台云机：";
-  return "請選擇要發佈的推文編號：\n- 单篇按钮：只發佈该編號\n- 批量按钮：从第 1 篇开始连续發佈\n- 下一步可选择一台或多台云机同时发布";
+  if (postCount === 1) return "請選擇發佈操作，下一步可选择一台或多台智能體手機：";
+  return "請選擇要發佈的推文編號：\n- 单篇按钮：只發佈该編號\n- 批量按钮：从第 1 篇开始连续發佈\n- 下一步可选择一台或多台智能體手機同时发布";
 }
 
 function buildManualPostChoicePreview(posts: Array<{ content: string; imageUrl?: string | null }>, page = 0, pageSize = 8) {
@@ -16057,8 +16065,8 @@ function buildManualPreviewRows(archiveId: string, platform: TelegramPublishPlat
   return [
     ...(options.hasLinkTemplates ? [[{ text: "🔗 选择链接模板", callback_data: "manual_link_templates" }]] : []),
     ...(options.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "manual_link_clear" }]] : []),
-    [{ text: "✅ 确认发布到绑定云机", callback_data: buildManualConfirmCallback(archiveId, platform, startIndex, count) }],
-    [{ text: "📱 选择多云机发布", callback_data: "mconfirm_multi" }],
+    [{ text: "✅ 确认发布到绑定智能體手機", callback_data: buildManualConfirmCallback(archiveId, platform, startIndex, count) }],
+    [{ text: "📱 选择多智能體手機发布", callback_data: "mconfirm_multi" }],
     [{ text: "◀️ 返回改數量", callback_data: `ms_${startIndex + 1}` }],
     [{ text: "🔢 重新选編號", callback_data: `mpage_${Math.floor(startIndex / 8)}` }],
   ];
@@ -16185,14 +16193,14 @@ function queueBackTarget(status: "pending" | "failed", archiveId?: string) {
 
 const MAIN_REPLY_MENU_ROWS = [
   ["👤 我的人設", "📊 排程狀態"],
-  ["⏰ 定時任務", "📱 雲機管理"],
+  ["⏰ 定時任務", "📱 智能體手機管理"],
   ["🛑 強制中止目前任務"],
 ];
 const MAIN_REPLY_MENU_ACTIONS = new Map<string, string>([
   ["👤 我的人設", "list_personas"],
   ["📊 排程狀態", "menu_status"],
   ["⏰ 定時任務", "schedule_publish"],
-  ["📱 雲機管理", "pad_mgmt"],
+  ["📱 智能體手機管理", "pad_mgmt"],
   ["🛑 強制中止目前任務", "force_stop_current_task"],
   ["🏠 主選單", "fresh_main_menu"],
 ]);
@@ -16397,7 +16405,7 @@ async function getPadMenuPayload(options: { force?: boolean } = {}): Promise<Tel
   const pads = await listPadsForThisBot(options);
   if (!pads.length) {
     const payload = {
-      text: "📱 *雲機管理*\n\n目前沒有可用的雲機。",
+      text: "📱 *智能體手機管理*\n\n目前沒有可用的智能體手機。",
       options: {
         parse_mode: "Markdown",
       },
@@ -16412,10 +16420,10 @@ async function getPadMenuPayload(options: { force?: boolean } = {}): Promise<Tel
     return `${status} ${padDisplayName(p)}`;
   });
   const refreshNotice = _lastPadListRefreshFallbackReason
-    ? `\n\n⚠️ VMOS 雲機列表刷新暫時超時，已先顯示最近快取。`
+    ? `\n\n⚠️ VMOS 智能體手機列表刷新暫時超時，已先顯示最近快取。`
     : "";
   const payload = {
-    text: `📱 *雲機管理*\n\n共 ${pads.length} 台 · 運行中 ${running.length} 台\n\n${lines.join("\n")}${refreshNotice}\n\n請選擇要管理的雲機：`,
+    text: `📱 *智能體手機管理*\n\n共 ${pads.length} 台 · 運行中 ${running.length} 台\n\n${lines.join("\n")}${refreshNotice}\n\n請選擇要管理的智能體手機：`,
     options: {
       parse_mode: "Markdown",
       reply_markup: {
@@ -16437,7 +16445,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     setReplyMenuActions(chatId, MAIN_REPLY_MENU_ACTIONS);
     const defaultPlatformLabel = formatPublishPlatformLabel(effectiveDefaultPublishPlatform);
     const title = "🤖 *自動化推文營運控制台*";
-    const text = `${title}\n\n預設雲機：${defaultPadCode}\n預設平台：${defaultPlatformLabel}\n\n你可以直接發送自然語言指令，也可以點擊按鈕操作：`;
+    const text = `${title}\n\n預設智能體手機：${defaultPadCode}\n預設平台：${defaultPlatformLabel}\n\n你可以直接發送自然語言指令，也可以點擊按鈕操作：`;
     const opts: any = {
       parse_mode: "Markdown",
       reply_markup: buildReplyKeyboard(MAIN_REPLY_MENU_ROWS),
@@ -16534,11 +16542,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const result = await forceStopCurrentTelegramTask(chatId);
       const stoppedCount = result.padOperations.length + result.publishCommands.length + result.publishingTasks.length;
       if (stoppedCount === 0) {
-        await bot.sendMessage(chatId, "目前沒有偵測到正在執行的發佈、養號或雲機操作。");
+        await bot.sendMessage(chatId, "目前沒有偵測到正在執行的發佈、養號或智能體手機操作。");
         return;
       }
       const padLines = result.padOperations
-        .map((item) => `雲機 ${item.padCode}：${item.label}`)
+        .map((item) => `智能體手機 ${item.padCode}：${item.label}`)
         .slice(0, 6);
       const queueLines = result.publishingTasks
         .map((task) => `佇列任務 ${task.id.slice(0, 8)}：${task.platform} / ${task.pad_code}`)
@@ -16550,7 +16558,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         ...queueLines,
         result.publishCommands.length ? `已清理執行锁：${result.publishCommands.length} 个` : "",
         "",
-        "如果雲機 App 仍停在發佈或養號頁面，系統已嘗試把相關 App 停止並返回桌面；正在執行的腳本會在下一次進度檢查時退出。",
+        "如果智能體手機 App 仍停在發佈或養號頁面，系統已嘗試把相關 App 停止並返回桌面；正在執行的腳本會在下一次進度檢查時退出。",
       ].filter(Boolean).join("\n"));
       return;
     }
@@ -16576,13 +16584,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const pad = pads.find((p) => p.padCode === padCode);
       if (!pad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 沒有找到這台雲機。", {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 沒有找到這台智能體手機。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "pad_mgmt" }]] },
         });
         return;
       }
       const statusLabel = pad.padStatus === 10 ? "🟢 運行中" : "🔴 已關機";
-      await safeEditOrSend(bot, chatId, msgId, `📱 *雲機詳情*\n\n編號：${pad.padCode}\n名稱：${padDisplayName(pad)}\n狀態：${statusLabel}`, {
+      await safeEditOrSend(bot, chatId, msgId, `📱 *智能體手機詳情*\n\n編號：${pad.padCode}\n名稱：${padDisplayName(pad)}\n狀態：${statusLabel}`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: buildPadDetailActionRows(),
@@ -16596,13 +16604,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const allowedPad = pads.find((p) => p.padCode === padCode);
       if (!allowedPad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]] },
         });
         return;
       }
       const padName = padDisplayName(allowedPad);
-      await safeEditOrSend(bot, chatId, msgId, `🔍 正在查詢雲機「${padName}」的 Threads 帳號...`, {
+      await safeEditOrSend(bot, chatId, msgId, `🔍 正在查詢智能體手機「${padName}」的 Threads 帳號...`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `pad_detail_${padCode}` }]] },
       });
       const creds = resolveVmosCredentials();
@@ -16616,14 +16624,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (!result.loggedIn && (result.method === "failed" || (!result.username && !result.email))) {
         const accountState = formatCloudAccountStateNotice(result.error || "", { action: "帳號查詢", padName, padCode });
         msg = accountState
-          ? `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n⚠️ ${accountState.status}\n\n請先進入雲機处理帳號狀態，再回来重試查詢或操作。`
-          : `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n❌ 未识别到帳號${result.error ? `\n原因：${formatUserFacingError(result.error, "目前页面沒有识别到 Threads 帳號信息。")}` : ""}`;
+          ? `🔍 *智能體手機帳號查詢*\n\n智能體手機：${padName}\n平台：Threads\n\n⚠️ ${accountState.status}\n\n請先進入智能體手機处理帳號狀態，再回来重試查詢或操作。`
+          : `🔍 *智能體手機帳號查詢*\n\n智能體手機：${padName}\n平台：Threads\n\n❌ 未识别到帳號${result.error ? `\n原因：${formatUserFacingError(result.error, "目前页面沒有识别到 Threads 帳號信息。")}` : ""}`;
       } else {
-        msg = `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n✅ 已登录帳號：\n${result.username ? `使用者名：@${result.username}\n` : ""}${result.email ? `信箱：${result.email}\n` : ""}识别方式：${result.method === "adb" ? "ADB 直读" : "截图识别"}`;
+        msg = `🔍 *智能體手機帳號查詢*\n\n智能體手機：${padName}\n平台：Threads\n\n✅ 已登录帳號：\n${result.username ? `使用者名：@${result.username}\n` : ""}${result.email ? `信箱：${result.email}\n` : ""}识别方式：${result.method === "adb" ? "ADB 直读" : "截图识别"}`;
       }
       await bot.sendMessage(chatId, msg, {
         parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]] },
       });
       return;
     }
@@ -16634,21 +16642,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const allowedPad = pads.find((p) => p.padCode === padCode);
       if (!allowedPad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]] },
         });
         return;
       }
       const padName = padDisplayName(allowedPad);
       const persona = await resolveWarmupCommentPersonaForPad(padCode);
       const personaName = persona?.name || "未綁定人設";
-      await safeEditOrSend(bot, chatId, msgId, `💬 *Threads自动回复*\n\n雲機：${padName}\n人設：${personaName}\n\n執行規則：\n- 預設只查看 2 天內自己發布且有評論角標的貼文。\n- 可調整查看天數，最多 7 天；沒有評論會直接報告退出。\n- 先篩掉廣告、辱罵、無意義、純表情和過短留言。\n- 只挑和人設或貼文內容相關的留言回覆。\n- 回覆會使用自然口語，不做客服式套話。\n\n預設最多掃描 3 篇貼文，最多回覆 3 條留言。`, {
+      await safeEditOrSend(bot, chatId, msgId, `💬 *Threads自动回复*\n\n智能體手機：${padName}\n人設：${personaName}\n\n執行規則：\n- 預設只查看 2 天內自己發布且有評論角標的貼文。\n- 可調整查看天數，最多 7 天；沒有評論會直接報告退出。\n- 先篩掉廣告、辱罵、無意義、純表情和過短留言。\n- 只挑和人設或貼文內容相關的留言回覆。\n- 回覆會使用自然口語，不做客服式套話。\n\n預設最多掃描 3 篇貼文，最多回覆 3 條留言。`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             [{ text: "✅ 開始（預設 2 天）", callback_data: `pad_threads_auto_reply_run_d2_${padCode}` }],
             [{ text: "✍️ 輸入查看天數", callback_data: `pad_threads_auto_reply_days_${padCode}` }],
-            [{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }],
+            [{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }],
           ],
         },
       });
@@ -16660,14 +16668,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const allowedPad = pads.find((p) => p.padCode === padCode);
       if (!allowedPad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]] },
         });
         return;
       }
       pendingThreadsAutoReplyDaysInputs.set(chatId, { type: "pad", padCode, createdAt: Date.now() });
-      await safeEditOrSend(bot, chatId, msgId, `✍️ 請輸入 Threads 自動回覆要查看的天數。\n\n雲機：${padDisplayName(allowedPad)}\n預設：2 天\n可輸入：1-7\n\n例如：2`, {
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+      await safeEditOrSend(bot, chatId, msgId, `✍️ 請輸入 Threads 自動回覆要查看的天數。\n\n智能體手機：${padDisplayName(allowedPad)}\n預設：2 天\n可輸入：1-7\n\n例如：2`, {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]] },
       });
       return;
     }
@@ -16680,8 +16688,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const allowedPad = pads.find((p) => p.padCode === padCode);
       if (!allowedPad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]] },
         });
         return;
       }
@@ -16693,8 +16701,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const creds = resolveVmosCredentials();
         const commentPersona = await resolveWarmupCommentPersonaForPad(padCode);
         let lastProgress: ThreadsAutoReplyProgress | null = null;
-        await safeEditOrSend(bot, chatId, msgId, `💬 Threads自动回复執行中...\n\n雲機：${padName}\n人設：${commentPersona?.name || "未綁定人設"}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+        await safeEditOrSend(bot, chatId, msgId, `💬 Threads自动回复執行中...\n\n智能體手機：${padName}\n人設：${commentPersona?.name || "未綁定人設"}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]] },
         });
         const result = await autoReplyThreadsAccount(
           creds,
@@ -16713,9 +16721,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         );
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
-        await bot.sendMessage(chatId, `✅ *Threads自动回复完成*\n\n雲機：${padName}\n本次目標：${result.targetReplies || 3} 條\n已掃描貼文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.completionReason ? `\n完成說明：${result.completionReason}` : ""}${result.error ? `\n補充：${result.error}` : ""}`, {
+        await bot.sendMessage(chatId, `✅ *Threads自动回复完成*\n\n智能體手機：${padName}\n本次目標：${result.targetReplies || 3} 條\n已掃描貼文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.completionReason ? `\n完成說明：${result.completionReason}` : ""}${result.error ? `\n補充：${result.error}` : ""}`, {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]] },
         });
         const screenshots = result.replied > 0
           ? (result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [])
@@ -16734,7 +16742,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stopTyping();
         console.error(`[telegram][dopub_error] chat=${chatId} archive=${id} post=${post.id} pad=${padCode} error=${error?.message || error}`);
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🚫 已中止 Threads自动回复任務\n\n雲機：${padName}`);
+          await bot.sendMessage(chatId, `🚫 已中止 Threads自动回复任務\n\n智能體手機：${padName}`);
           return;
         }
         if (await sendCloudAccountStateNotice(
@@ -16742,7 +16750,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           chatId,
           error,
           { action: "Threads自动回复", padName, padCode },
-          [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }]],
+          [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]],
         )) {
           return;
         }
@@ -16764,8 +16772,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const allowedPad = pads.find((p) => p.padCode === padCode);
       if (!allowedPad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]] },
         });
         return;
       }
@@ -16775,7 +16783,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         bot,
         chatId,
         msgId,
-        `🔗 *Threads 简介新增链接*\n\n雲機：${padName}\n\n⭐ 請發送要添加到 Threads 个人简介里的链接 ⭐\n例如：https://example.com`,
+        `🔗 *Threads 简介新增链接*\n\n智能體手機：${padName}\n\n⭐ 請發送要添加到 Threads 个人简介里的链接 ⭐\n例如：https://example.com`,
         {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${padCode}` }]] },
@@ -16799,8 +16807,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const allowedPad = pads.find((p) => p.padCode === padCode);
       if (!allowedPad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]] },
         });
         return;
       }
@@ -16813,7 +16821,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         : kind === "name"
           ? "⭐ 請發送新的 Threads 名稱 ⭐\n建议 30 字以内。"
           : "⭐ 請直接發送一張圖片作為新的 Threads 頭像 ⭐";
-      await safeEditOrSend(bot, chatId, msgId, `${title}\n\n雲機：${padName}\n\n${hint}`, {
+      await safeEditOrSend(bot, chatId, msgId, `${title}\n\n智能體手機：${padName}\n\n${hint}`, {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${padCode}` }]] },
       });
@@ -16823,7 +16831,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("warmup_start_")) {
       const parts = data.slice("warmup_start_".length).split("_");
       if (parts[0] !== "threads") {
-        await safeEditOrSend(bot, chatId, msgId, "此養號入口已移除，請返回雲機詳情重新選擇。", {
+        await safeEditOrSend(bot, chatId, msgId, "此養號入口已移除，請返回智能體手機詳情重新選擇。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "pad_mgmt" }]] },
         });
         return;
@@ -16850,7 +16858,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stopOnRiskLimit: true,
         stage: "choose_engagement",
       });
-      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号设置*\n\n雲機：${padName}\n平台：${formatWarmupPlatformLabel(platform)}\n留言人設：${commentPersona?.name || "未綁定，預設台湾繁中"}\n\n執行规则：\n- 每次滑动浏览 7-10 分鐘，每天最多 2 次\n- 每滑过约 2-3 篇，随机挑选 1 篇點讚或留言\n- 不会每篇都互动；达到风险阈值会停止并提示人工介入\n\n請選擇互动策略：`, {
+      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号设置*\n\n智能體手機：${padName}\n平台：${formatWarmupPlatformLabel(platform)}\n留言人設：${commentPersona?.name || "未綁定，預設台湾繁中"}\n\n執行规则：\n- 每次滑动浏览 7-10 分鐘，每天最多 2 次\n- 每滑过约 2-3 篇，随机挑选 1 篇點讚或留言\n- 不会每篇都互动；达到风险阈值会停止并提示人工介入\n\n請選擇互动策略：`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
@@ -16858,7 +16866,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             [{ text: "滑动 + 随机點讚", callback_data: `warmup_engage_${platform}_${padCode}_like` }],
             [{ text: "滑动 + 随机留言", callback_data: `warmup_engage_${platform}_${padCode}_comment` }],
             [{ text: "滑动 + 随机點讚/留言", callback_data: `warmup_engage_${platform}_${padCode}_both` }],
-            [{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${padCode}` }],
+            [{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }],
           ],
         },
       });
@@ -16878,7 +16886,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stage: "choose_engagement",
       });
       const warmupStartCallback = prev.startCallback || `warmup_start_${prev.platform || "threads"}_${padCode}`;
-      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号设置*\n\n雲機：${prev.padName || padCode}\n浏览數量：${browseCount} 條\n\n請選擇互动策略：\n\n严格执行所选目标；未达到浏览、点赞或留言目标会提示失败并请求人工介入。`, {
+      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号设置*\n\n智能體手機：${prev.padName || padCode}\n浏览數量：${browseCount} 條\n\n請選擇互动策略：\n\n严格执行所选目标；未达到浏览、点赞或留言目标会提示失败并请求人工介入。`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
@@ -16897,7 +16905,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const parts = data.slice("warmup_engage_".length).split("_");
       const hasPlatformPrefix = parts[0] === "threads";
       if (!hasPlatformPrefix && (parts[0] === "instagram" || parts[0] === "rednote")) {
-        await safeEditOrSend(bot, chatId, msgId, "此養號入口已移除，請返回雲機詳情重新選擇。", {
+        await safeEditOrSend(bot, chatId, msgId, "此養號入口已移除，請返回智能體手機詳情重新選擇。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "pad_mgmt" }]] },
         });
         return;
@@ -16927,7 +16935,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           riskManaged: false,
           stage: "ready",
         });
-        await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：只滑动浏览\n规则：滑动速度快慢混合，遇到风险阈值停止并提示人工介入\n\n確認开始？`, {
+        await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n智能體手機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：只滑动浏览\n规则：滑动速度快慢混合，遇到风险阈值停止并提示人工介入\n\n確認开始？`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: warmupStartCallback }]] },
         });
@@ -16950,7 +16958,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           riskManaged: false,
           stage: "ready",
         });
-        await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机點讚 1 次\n點讚风险上限：${plannedLikes} 个/日内预算内\n规则：精准點擊，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
+        await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n智能體手機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机點讚 1 次\n點讚风险上限：${plannedLikes} 个/日内预算内\n规则：精准點擊，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: warmupStartCallback }]] },
         });
@@ -16973,7 +16981,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           riskManaged: false,
           stage: "ready",
         });
-        await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机留言 1 次\n留言风险上限：${plannedComments} 个/日内预算内\n留言规则：按人設生成，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
+        await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n智能體手機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机留言 1 次\n留言风险上限：${plannedComments} 个/日内预算内\n留言规则：按人設生成，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: warmupStartCallback }]] },
         });
@@ -16997,7 +17005,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           riskManaged: false,
           stage: "ready",
         });
-        await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n雲機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机挑选點讚或留言 1 次\n點讚风险上限：${plannedLikes} 个/日内预算内\n留言风险上限：${plannedComments} 个/日内预算内\n规则：不每篇互动，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
+        await safeEditOrSend(bot, chatId, msgId, `🌱 *养号確認*\n\n智能體手機：${prev.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n时长：${prev.minSessionMinutes || 7}-${prev.maxSessionMinutes || 10} 分鐘\n互动：每 ${prev.interactionEveryMinPosts || 2}-${prev.interactionEveryMaxPosts || 3} 篇随机挑选點讚或留言 1 次\n點讚风险上限：${plannedLikes} 个/日内预算内\n留言风险上限：${plannedComments} 个/日内预算内\n规则：不每篇互动，失敗跳过；达到风险阈值停止并提示人工介入\n\n確認开始？`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "✅ 开始养号", callback_data: `warmup_run_${platform}_${padCode}` }], [{ text: "◀️ 返回改策略", callback_data: warmupStartCallback }]] },
         });
@@ -17008,7 +17016,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("warmup_run_")) {
       const parts = data.slice("warmup_run_".length).split("_");
       if (parts[0] !== "threads") {
-        await safeEditOrSend(bot, chatId, msgId, "此養號入口已移除，請返回雲機詳情重新選擇。", {
+        await safeEditOrSend(bot, chatId, msgId, "此養號入口已移除，請返回智能體手機詳情重新選擇。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "pad_mgmt" }]] },
         });
         return;
@@ -17023,13 +17031,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const warmupReturnCallback = cfg.returnCallback || `pad_detail_${padCode}`;
-      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号執行中*\n\n雲機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n滑动时长：${cfg.minSessionMinutes || 7}-${cfg.maxSessionMinutes || 10} 分鐘\n互动间隔：每 ${cfg.interactionEveryMinPosts || 2}-${cfg.interactionEveryMaxPosts || 3} 篇最多 1 次\n目标點讚：${cfg.maxLikes || 0} 个\n目标留言：${cfg.maxComments || 0} 个\n模式：严格执行，未达目标会提示失败并请求人工介入\n\n⏳ 正在執行，請稍候...`, {
+      await safeEditOrSend(bot, chatId, msgId, `🌱 *养号執行中*\n\n智能體手機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n滑动时长：${cfg.minSessionMinutes || 7}-${cfg.maxSessionMinutes || 10} 分鐘\n互动间隔：每 ${cfg.interactionEveryMinPosts || 2}-${cfg.interactionEveryMaxPosts || 3} 篇最多 1 次\n目标點讚：${cfg.maxLikes || 0} 个\n目标留言：${cfg.maxComments || 0} 个\n模式：严格执行，未达目标会提示失败并请求人工介入\n\n⏳ 正在執行，請稍候...`, {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: warmupReturnCallback }]] },
       });
       const padOperationKey = `warmup:${padCode}:${chatId}:${Date.now()}`;
       if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "养号"))) {
-        const progressLine = `[telegram][warmup_progress] chat=${chatId} pad=${padCode} browsed=0 liked=0 commented=0 done=1 step=养号未启动 error=雲機正在執行其他任務`;
+        const progressLine = `[telegram][warmup_progress] chat=${chatId} pad=${padCode} browsed=0 liked=0 commented=0 done=1 step=养号未启动 error=智能體手機正在執行其他任務`;
         console.log(progressLine);
         appendWarmupProgressLog(progressLine);
         return;
@@ -17039,6 +17047,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const creds = resolveVmosCredentials();
         const commentPersona = cfg.commentPersona || await resolveWarmupCommentPersonaForPad(padCode);
         const keywords = cfg.keywords?.length ? cfg.keywords : buildWarmupInterestKeywords(commentPersona);
+        console.log(`[telegram][warmup_config] chat=${chatId} pad=${padCode} persona=${JSON.stringify(commentPersona?.name || "")} keywords=${JSON.stringify((keywords || []).slice(0, 8))} browseCount=${cfg.browseCount || 0} minSession=${cfg.minSessionMinutes ?? ""} maxSession=${cfg.maxSessionMinutes ?? ""} searchChance=${platform === "threads" ? (cfg.searchChance ?? 16) : 0} requireRelevantContent=${(cfg as any).requireRelevantContent ?? "default"} modeLikes=${cfg.maxLikes || 0} modeComments=${cfg.maxComments || 0}`);
         const result = await warmupThreadsAccount(
           creds,
           padCode,
@@ -17086,7 +17095,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         );
         stopTyping();
         pendingWarmupConfigs.delete(chatId);
-        await bot.sendMessage(chatId, `✅ *养号完成*\n\n雲機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n${formatWarmupStepForTelegram(result.step)}\n已浏览：${result.browsed} 條\n已點讚：${result.liked} 个\n已留言：${result.commented} 个\n\n已按所选目标完成。`, {
+        await bot.sendMessage(chatId, `✅ *养号完成*\n\n智能體手機：${cfg.padName || padCode}\n平台：${formatWarmupPlatformLabel(platform)}\n${formatWarmupStepForTelegram(result.step)}\n已浏览：${result.browsed} 條\n已點讚：${result.liked} 个\n已留言：${result.commented} 个\n\n已按所选目标完成。`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: warmupReturnCallback }]] },
         });
@@ -17108,7 +17117,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stopTyping();
         pendingWarmupConfigs.delete(chatId);
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止养号任務\n\n雲機：${cfg.padName || padCode}`);
+          await bot.sendMessage(chatId, `🛑 已中止养号任務\n\n智能體手機：${cfg.padName || padCode}`);
           return;
         }
         const errorMessage = rawErrorMessage(error).slice(0, 200);
@@ -17158,7 +17167,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         assertPadOperationNotCancelled(padOperationKey);
         pendingWarmupCandidates.delete(candidateId);
         await bot.sendMessage(chatId, `✅ ${result.message}`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${candidate.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${candidate.padCode}` }]] },
         });
         if (result.screenshotUrl) {
           await sendOriginalScreenshotDocument(bot, chatId, result.screenshotUrl, "📸 執行后截图").catch(() => undefined);
@@ -17166,7 +17175,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } catch (error: any) {
         pendingWarmupCandidates.delete(candidateId);
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止${candidate.type === "comment" ? "留言" : "點讚"}任務\n\n雲機：${candidate.padCode}`);
+          await bot.sendMessage(chatId, `🛑 已中止${candidate.type === "comment" ? "留言" : "點讚"}任務\n\n智能體手機：${candidate.padCode}`);
           return;
         }
         if (await sendCloudAccountStateNotice(
@@ -17174,7 +17183,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           chatId,
           error,
           { action: candidate.type === "comment" ? "养号留言" : "养号點讚", padCode: candidate.padCode },
-          [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${candidate.padCode}` }]],
+          [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${candidate.padCode}` }]],
         )) {
           return;
         }
@@ -17196,7 +17205,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (entry) {
         pendingWarmupCandidates.delete(candidateId);
         await safeEditOrSend(bot, chatId, msgId, `⏭ 已跳过这条${entry.candidate.type === "comment" ? "留言" : "點讚"}候选。`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機詳情", callback_data: `pad_detail_${entry.candidate.padCode}` }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${entry.candidate.padCode}` }]] },
         });
       }
       return;
@@ -17207,14 +17216,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const pad = pads.find((p) => p.padCode === padCode);
       if (!pad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回雲機列表", callback_data: "pad_mgmt" }]] },
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機列表", callback_data: "pad_mgmt" }]] },
         });
         return;
       }
       const padName = padDisplayName(pad);
       pendingLoginActions.set(chatId, { padCode, padName, stage: "await_username" });
-      await safeEditOrSend(bot, chatId, msgId, `🔄 *切换登录帳號*\n\n雲機：${padName}\n平台：Threads\n\n⭐ 請輸入 Threads 使用者名 ⭐\n　　@username 或信箱均可。`, {
+      await safeEditOrSend(bot, chatId, msgId, `🔄 *切换登录帳號*\n\n智能體手機：${padName}\n平台：Threads\n\n⭐ 請輸入 Threads 使用者名 ⭐\n　　@username 或信箱均可。`, {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `pad_detail_${padCode}` }]] },
       });
@@ -17232,7 +17241,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const loginReturnCallback = loginState.returnCallback || `pad_detail_${padCode}`;
       const padName = loginState.padName || padCode;
-      void safeEditOrSend(bot, chatId, msgId, `🔄 *正在登入 Threads*\n\n雲機：${padName}\n帳號：${loginState.username}\n\n⏳ 正在清除舊資料並啟動登入流程，請稍候（約 30-60 秒）...`, {
+      void safeEditOrSend(bot, chatId, msgId, `🔄 *正在登入 Threads*\n\n智能體手機：${padName}\n帳號：${loginState.username}\n\n⏳ 正在清除舊資料並啟動登入流程，請稍候（約 30-60 秒）...`, {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
       });
@@ -17253,7 +17262,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         pendingLoginActions.delete(chatId);
         if (result.ok) {
           await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 Threads 登入成功確認畫面");
-          await bot.sendMessage(chatId, `✅ Threads 登入成功並已確認\n\n雲機：${padName}\n帳號：${loginState.username}\n\n${result.message}`, {
+          await bot.sendMessage(chatId, `✅ Threads 登入成功並已確認\n\n智能體手機：${padName}\n帳號：${loginState.username}\n\n${result.message}`, {
             reply_markup: {
               inline_keyboard: loginReturnCallback.startsWith("acctplatform_threads_")
                 ? [[{ text: "◀️ 返回 Threads 帳號", callback_data: loginReturnCallback }]]
@@ -17266,12 +17275,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         } else if (result.state === "challenge_otp") {
           pendingLoginActions.set(chatId, { ...loginState, stage: "await_otp" });
           await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 目前驗證碼畫面");
-          await bot.sendMessage(chatId, `📱 Threads 需要驗證碼\n\n雲機：${padName}\n\n${result.message}\n\n⭐ 請直接回覆 6 位驗證碼 ⭐\n　　　只需要發送數字即可。`, {
+          await bot.sendMessage(chatId, `📱 Threads 需要驗證碼\n\n智能體手機：${padName}\n\n${result.message}\n\n⭐ 請直接回覆 6 位驗證碼 ⭐\n　　　只需要發送數字即可。`, {
             reply_markup: { inline_keyboard: [[{ text: "❌ 取消登入", callback_data: loginReturnCallback }]] },
           });
         } else {
           await sendAccountActionScreenshot(bot, chatId, padCode, result.screenshotUrl, "📸 Threads 登入失敗畫面");
-          await bot.sendMessage(chatId, `❌ Threads 登入失敗\n\n雲機：${padName}\n\n${result.message}`, {
+          await bot.sendMessage(chatId, `❌ Threads 登入失敗\n\n智能體手機：${padName}\n\n${result.message}`, {
             reply_markup: { inline_keyboard: [[{ text: "🔄 重試", callback_data: `pad_switch_account_${padCode}` }], [{ text: "◀️ 返回", callback_data: loginReturnCallback }]] },
           });
         }
@@ -17279,7 +17288,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stopTyping();
         pendingLoginActions.delete(chatId);
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止登入任務\n\n雲機：${padName}`);
+          await bot.sendMessage(chatId, `🛑 已中止登入任務\n\n智能體手機：${padName}`);
           return;
         }
         await bot.sendMessage(chatId, `❌ 登入異常：${formatUserFacingError(error, "登入流程異常，請稍後重試。")}`, {
@@ -17522,7 +17531,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         `性格: ${archive.setup?.personaPersonality || "-"}\n` +
         `待发布推文: ${archive.posts.length} 篇\n` +
         `已发布: ${archive.publishHistory?.length || 0} 篇\n` +
-        `绑定云机: ${archive.boundPadCode || defaultPadCode}${archive.boundPadName ? ` (${archive.boundPadName})` : ""}\n\n` +
+        `绑定智能體手機: ${archive.boundPadCode || defaultPadCode}${archive.boundPadName ? ` (${archive.boundPadName})` : ""}\n\n` +
         `${interestLine}${archive.content.slice(0, 200)}`,
         {
           parse_mode: "Markdown",
@@ -17789,8 +17798,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
       const returnCallback = `acctplatform_threads_${id}`;
       if (!boundPad) {
-        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 資料修改。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 資料修改。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
         });
         return;
       }
@@ -17804,7 +17813,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           : kind === "name"
             ? "請直接發送新的 Threads 名稱，建議 30 字以內。"
             : "請直接發送一張圖片作為新的 Threads 頭像。";
-      await safeEditOrSend(bot, chatId, msgId, `${title}\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${hint}`, {
+      await safeEditOrSend(bot, chatId, msgId, `${title}\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n\n${hint}`, {
         reply_markup: { inline_keyboard: [[{ text: "✖️ 取消", callback_data: returnCallback }]] },
       });
       return;
@@ -17818,8 +17827,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
       const returnCallback = `acctplatform_threads_${id}`;
       if (!boundPad) {
-        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 養號。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 養號。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
         });
         return;
       }
@@ -17844,7 +17853,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         returnCallback,
         startCallback: `acctwarmup_threads_${id}`,
       });
-      await safeEditOrSend(bot, chatId, msgId, `🌱 *養號設定*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n平台：Threads\n留言人設：${commentPersona.name || archive.name}\n\n執行規則：\n- 每次滑動瀏覽 7-10 分鐘，每天最多 2 次\n- 每滑過約 2-3 篇，隨機挑選 1 篇點讚或留言\n- 不會每篇都互動；達到風險閾值會停止並提示人工介入\n\n請選擇互動策略：`, {
+      await safeEditOrSend(bot, chatId, msgId, `🌱 *養號設定*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n平台：Threads\n留言人設：${commentPersona.name || archive.name}\n\n執行規則：\n- 每次滑動瀏覽 7-10 分鐘，每天最多 2 次\n- 每滑過約 2-3 篇，隨機挑選 1 篇點讚或留言\n- 不會每篇都互動；達到風險閾值會停止並提示人工介入\n\n請選擇互動策略：`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
@@ -17853,6 +17862,108 @@ function sendMainMenu(chatId: number, msgId?: number) {
             [{ text: "滑動 + 隨機留言", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_comment` }],
             [{ text: "滑動 + 隨機點讚/留言", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_both` }],
             [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("ownreply_text_") || data.startsWith("ownreply_views_") || data.startsWith("ownreply_days_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      const mode = data.startsWith("ownreply_text_")
+        ? "text"
+        : data.startsWith("ownreply_views_")
+          ? "views"
+          : "days";
+      const id = data.slice(`ownreply_${mode}_`.length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const inputState = pendingThreadsOwnPostReplyInputs.get(chatId);
+      const runState = pendingThreadsOwnPostReplyRuns.get(chatId);
+      const replyText = String(inputState?.replyText || runState?.replyText || "").trim();
+      const minViews = Number(inputState?.minViews ?? runState?.minViews ?? 0);
+      if (mode !== "text" && !replyText) {
+        pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_reply_text", createdAt: Date.now() });
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🔥 自動回覆熱點推文",
+          "",
+          `人設：${archive.name}`,
+          "",
+          "請先輸入要回覆到自己已發布推文內的內容。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }]] },
+        });
+        return;
+      }
+      if (mode === "text") {
+        pendingThreadsOwnPostReplyInputs.set(chatId, {
+          archiveId: id,
+          stage: "await_reply_text",
+          minViews: Number.isFinite(minViews) ? Math.max(0, Math.floor(minViews)) : undefined,
+          createdAt: Date.now(),
+        });
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🔥 自動回覆熱點推文",
+          "",
+          `人設：${archive.name}`,
+          replyText ? `目前回覆內容：${replyText}` : "",
+          "",
+          "請重新輸入要回覆的內容。",
+        ].filter(Boolean).join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }]] },
+        });
+        return;
+      }
+      if (mode === "views") {
+        pendingThreadsOwnPostReplyInputs.set(chatId, {
+          archiveId: id,
+          stage: "await_min_views",
+          replyText,
+          minViews: Number.isFinite(minViews) ? Math.max(0, Math.floor(minViews)) : undefined,
+          createdAt: Date.now(),
+        });
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🔥 自動回覆熱點推文",
+          "",
+          `人設：${archive.name}`,
+          `回覆內容：${replyText}`,
+          "",
+          "請重新輸入瀏覽量門檻。",
+          "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "✏️ 上一步：編輯文案", callback_data: `ownreply_text_${id}` }],
+              [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }],
+            ],
+          },
+        });
+        return;
+      }
+      const safeMinViews = Number.isFinite(minViews) ? Math.max(0, Math.floor(minViews)) : 0;
+      pendingThreadsOwnPostReplyInputs.set(chatId, {
+        archiveId: id,
+        stage: "await_days",
+        replyText,
+        minViews: safeMinViews,
+        createdAt: Date.now(),
+      });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔥 自動回覆熱點推文",
+        "",
+        `人設：${archive.name}`,
+        `回覆內容：${replyText}`,
+        `瀏覽量條件：大於等於 ${formatCompactCount(safeMinViews)}`,
+        "",
+        "請重新輸入查看天數，規則和自動回覆評論一致。",
+        "可輸入：1-7，例如：2。",
+      ].join("\n"), {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "👁 上一步：修改瀏覽量", callback_data: `ownreply_views_${id}` }],
+            [{ text: "✏️ 編輯文案", callback_data: `ownreply_text_${id}` }],
+            [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }],
           ],
         },
       });
@@ -17877,8 +17988,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
       const returnCallback = `persona_autoreply_${id}`;
       if (!boundPad) {
-        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行自動回覆熱點推文。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行自動回覆熱點推文。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
         });
         return;
       }
@@ -17912,7 +18023,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "🔥 Threads 自動回覆熱點推文執行中...",
           "",
           `人設：${archive.name}`,
-          `雲機：${boundPad.padName}`,
+          `智能體手機：${boundPad.padName}`,
           `目標：${targets.length} 篇`,
           `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
           `查看天數：${runState.maxAgeDays} 天內`,
@@ -17962,7 +18073,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
         pendingThreadsOwnPostReplyRuns.delete(chatId);
         const screenshots = result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [];
-        await bot.sendMessage(chatId, `✅ Threads 自動回覆熱點推文完成\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n已掃描：${result.scannedPosts}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
+        await bot.sendMessage(chatId, `✅ Threads 自動回覆熱點推文完成\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n已掃描：${result.scannedPosts}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
         });
         for (let i = 0; i < screenshots.length; i += 1) {
@@ -17973,7 +18084,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } catch (error: any) {
         stopTyping();
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆熱點推文任務\n\n雲機：${boundPad.padName}`);
+          await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆熱點推文任務\n\n智能體手機：${boundPad.padName}`);
           return;
         }
         if (await sendCloudAccountStateNotice(
@@ -18007,12 +18118,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
       const returnCallback = `acctplatform_threads_${id}`;
       if (!boundPad) {
-        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 自動回覆。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 自動回覆。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
         });
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, `💬 *Threads 自動回覆*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n執行規則：\n- 預設只查看 2 天內自己發布且有評論角標的推文。\n- 可調整查看天數，最多 7 天；沒有評論會直接報告退出。\n- 先過濾廣告、辱罵、釣魚、純表情和過短留言。\n- 只挑和人設或推文內容相關的留言回覆。\n- 回覆會使用自然口語，不做客服式套話。\n\n預設最多掃描 3 篇推文，最多回覆 3 條留言。`, {
+      await safeEditOrSend(bot, chatId, msgId, `💬 *Threads 自動回覆*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n\n執行規則：\n- 預設只查看 2 天內自己發布且有評論角標的推文。\n- 可調整查看天數，最多 7 天；沒有評論會直接報告退出。\n- 先過濾廣告、辱罵、釣魚、純表情和過短留言。\n- 只挑和人設或推文內容相關的留言回覆。\n- 回覆會使用自然口語，不做客服式套話。\n\n預設最多掃描 3 篇推文，最多回覆 3 條留言。`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
@@ -18033,13 +18144,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
       const returnCallback = `acctplatform_threads_${id}`;
       if (!boundPad) {
-        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 自動回覆。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 自動回覆。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
         });
         return;
       }
       pendingThreadsAutoReplyDaysInputs.set(chatId, { type: "persona", archiveId: id, createdAt: Date.now() });
-      await safeEditOrSend(bot, chatId, msgId, `✍️ 請輸入 Threads 自動回覆要查看的天數。\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n預設：2 天\n可輸入：1-7\n\n例如：2`, {
+      await safeEditOrSend(bot, chatId, msgId, `✍️ 請輸入 Threads 自動回覆要查看的天數。\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n預設：2 天\n可輸入：1-7\n\n例如：2`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
       });
       return;
@@ -18057,8 +18168,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
       const returnCallback = `acctplatform_threads_${id}`;
       if (!boundPad) {
-        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定雲機，再執行 Threads 自動回覆。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定雲機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 自動回覆。`, {
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
         });
         return;
       }
@@ -18070,7 +18181,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const commentPersona = buildWarmupCommentPersonaFromArchive(archive);
         console.log(`[telegram][acctautoreply_trace] stage=lock_acquired chat=${chatId} archive=${id} pad=${boundPad.padCode} key=${padOperationKey}`);
         let lastProgress: ThreadsAutoReplyProgress | null = null;
-        await safeEditOrSend(bot, chatId, msgId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
+        await safeEditOrSend(bot, chatId, msgId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
         });
         const result = await autoReplyThreadsAccount(
@@ -18091,7 +18202,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
         const completionMessage = result.replied > 0
-          ? `✅ *Threads 自動回覆完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`
+          ? `✅ *Threads 自動回覆完成*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`
           : `✅ Threads 自動回覆完成\n\n本次沒有可發送的回覆截圖。\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`;
         await bot.sendMessage(chatId, completionMessage, {
           parse_mode: "Markdown",
@@ -18113,7 +18224,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } catch (error: any) {
         stopTyping();
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆任務\n\n雲機：${boundPad.padName}`);
+          await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆任務\n\n智能體手機：${boundPad.padName}`);
           return;
         }
         if (await sendCloudAccountStateNotice(
@@ -18172,7 +18283,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         },
       }).catch(() => null);
       invalidatePersonaListCache();
-      await safeEditOrSend(bot, chatId, msgId, `✅ 已清除 ${platform === "threads" ? "Threads" : "Telegram"} 已保存登录资料。\n\n這只會清除本地保存的帳號/密碼，不會登出雲機 App。`, {
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已清除 ${platform === "threads" ? "Threads" : "Telegram"} 已保存登录资料。\n\n這只會清除本地保存的帳號/密碼，不會登出智能體手機 App。`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回平台设置", callback_data: `acctplatform_${platform}_${id}` }], [{ text: "◀️ 返回账号管理", callback_data: `acctmgmt_${id}` }]] },
       });
       return;
@@ -18190,7 +18301,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const rows = buildPersonaAccountPlatformRowsForResult(id, platform);
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
       if (!boundPad) {
-        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設沒有可用的綁定雲機。\n\n人設：${archive.name}\n平台：${platformLabel}\n\n請先在人設設定中綁定雲機，再執行登入/登出/檢測。`, {
+        await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：${platformLabel}\n\n請先在人設設定中綁定智能體手機，再執行登入/登出/檢測。`, {
           reply_markup: { inline_keyboard: rows },
         });
         return;
@@ -18201,10 +18312,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "⚠️ Telegram 自動登入尚未接入底層腳本。",
           "",
           `人設：${archive.name}`,
-          `雲機：${boundPad.padName}`,
+          `智能體手機：${boundPad.padName}`,
           "",
           "目前可保存 Telegram 登入資料、檢測 Telegram App 狀態，或清除 Telegram 會話。",
-          "如果需要登入，請先在 VMOS 雲機內手動完成 Telegram 登入，之後再使用檢測/發布功能。",
+          "如果需要登入，請先在 VMOS 智能體手機內手動完成 Telegram 登入，之後再使用檢測/發布功能。",
         ].join("\n"), {
           reply_markup: { inline_keyboard: rows },
         });
@@ -18229,7 +18340,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             "⏳ 正在執行 Telegram 自動登入...",
             "",
             `人設：${archive.name}`,
-            `雲機：${boundPad.padName}`,
+            `智能體手機：${boundPad.padName}`,
             `手機：${maskAccountSecret(telegram.phone)}`,
             `Email：${telegram.email ? maskAccountSecret(telegram.email) : "未設定，若遇到 Email 頁會要求人工介入"}`,
             "",
@@ -18263,7 +18374,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             `${result.ok ? "✅" : "📲"} Telegram 登入流程已返回狀態`,
             "",
             `人設：${archive.name}`,
-            `雲機：${boundPad.padName}`,
+            `智能體手機：${boundPad.padName}`,
             `手機：${maskAccountSecret(telegram.phone)}`,
             `Email：${telegram.email ? maskAccountSecret(telegram.email) : "未設定"}`,
             "",
@@ -18295,7 +18406,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回平台設定", callback_data: `acctplatform_${platform}_${id}` }]] },
         });
       } else {
-        await safeEditOrSend(bot, chatId, msgId, `⏳ 正在執行 ${opLabel}...\n\n人設：${archive.name}\n雲機：${boundPad.padName}`, {
+        await safeEditOrSend(bot, chatId, msgId, `⏳ 正在執行 ${opLabel}...\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}`, {
           reply_markup: { inline_keyboard: rows },
         });
       }
@@ -18357,7 +18468,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             const result = await clearThreadsAccountSession(creds, boundPad.padCode);
             stopTyping();
             await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, result.ok ? "📸 Threads 登出后确认画面" : "📸 Threads 登出失败画面");
-            await bot.sendMessage(chatId, `Threads 登出/清理\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.ok ? "已二次確認登出" : "未能確認登出"}\n${result.message}`, {
+            await bot.sendMessage(chatId, `Threads 登出/清理\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n\n${result.ok ? "已二次確認登出" : "未能確認登出"}\n${result.message}`, {
               reply_markup: { inline_keyboard: rows },
             }).catch((error: any) => {
               console.warn(`[telegram][threads_logout_message_failed] chat=${chatId} error=${error?.message || error}`);
@@ -18379,7 +18490,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               "🔄 *臨時登入 Threads*",
               "",
               `人設：${archive.name}`,
-              `雲機：${boundPad.padName}`,
+              `智能體手機：${boundPad.padName}`,
               "",
               "步驟 1/2：請輸入 Threads / Instagram 使用者名、信箱或手機號。",
               "",
@@ -18400,7 +18511,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               "🔐 Threads 登入",
               "",
               `人設：${archive.name}`,
-              `雲機：${boundPad.padName}`,
+              `智能體手機：${boundPad.padName}`,
               "",
               "步驟 1/2：請發送 Threads / Instagram 登入帳號。",
             ].join("\n"), {
@@ -18412,7 +18523,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           stopTyping();
           if (result.ok) {
             await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 登入成功確認畫面");
-            await bot.sendMessage(chatId, `✅ Threads 登入成功並已確認\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}`, {
+            await bot.sendMessage(chatId, `✅ Threads 登入成功並已確認\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n帳號：${maskAccountSecret(threads.handle)}\n\n${result.message}`, {
               reply_markup: { inline_keyboard: [[{ text: "🔍 檢測 Threads 狀態", callback_data: `acctquery_threads_${id}` }], ...rows] },
             }).catch((error: any) => {
               console.warn(`[telegram][threads_login_message_failed] chat=${chatId} error=${error?.message || error}`);
@@ -18429,7 +18540,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               password: threads.password,
               returnCallback: `acctplatform_threads_${id}`,
             });
-            await bot.sendMessage(chatId, `📱 *Threads 需要驗證碼*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}\n\n請直接回覆 6 位驗證碼，系統會繼續提交。`, {
+            await bot.sendMessage(chatId, `📱 *Threads 需要驗證碼*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n\n${result.message}\n\n請直接回覆 6 位驗證碼，系統會繼續提交。`, {
               parse_mode: "Markdown",
               reply_markup: { inline_keyboard: [[{ text: "❌ 取消登入", callback_data: `acctplatform_threads_${id}` }]] },
             });
@@ -18437,14 +18548,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
             return;
           }
           if (result.state === "challenge_manual") {
-            await bot.sendMessage(chatId, `🧩 *Threads 需要人工處理*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}\n\n請依截圖完成平台要求，完成後再點擊檢測登入狀態。`, {
+            await bot.sendMessage(chatId, `🧩 *Threads 需要人工處理*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n\n${result.message}\n\n請依截圖完成平台要求，完成後再點擊檢測登入狀態。`, {
               parse_mode: "Markdown",
               reply_markup: { inline_keyboard: [[{ text: "🔍 檢測 Threads 狀態", callback_data: `acctquery_threads_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: `acctplatform_threads_${id}` }]] },
             });
             await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, result.screenshotUrl, "📸 Threads 人工處理畫面");
             return;
           }
-          await bot.sendMessage(chatId, `❌ *Threads 登入未完成*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${result.message}`, {
+          await bot.sendMessage(chatId, `❌ *Threads 登入未完成*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n\n${result.message}`, {
             parse_mode: "Markdown",
             reply_markup: { inline_keyboard: [[{ text: "🔄 重試登入", callback_data: `acctlogin_threads_${id}` }], ...rows] },
           });
@@ -18478,14 +18589,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const verifiedLogout = !verifyResult.ok && (verifyResult.state === "logged_out" || verifyResult.state === "not_installed");
         stopTyping();
         await sendAccountActionScreenshot(bot, chatId, boundPad.padCode, verifyResult.screenshotUrl || result.screenshotUrl, verifiedLogout ? "📸 Telegram 登出后确认画面" : "📸 Telegram 登出未确认画面");
-        await bot.sendMessage(chatId, `🚪 *Telegram 登出/清会话*\n\n人設：${archive.name}\n雲機：${boundPad.padName}\n\n${verifiedLogout ? "✅ 已二次确认登出" : "❌ 未能确认登出"}\n${result.message}\n\n二次检测：${verifyResult.message}`, {
+        await bot.sendMessage(chatId, `🚪 *Telegram 登出/清会话*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n\n${verifiedLogout ? "✅ 已二次确认登出" : "❌ 未能确认登出"}\n${result.message}\n\n二次检测：${verifyResult.message}`, {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: rows },
         });
       } catch (error: any) {
         stopTyping();
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止 ${opLabel}\n\n雲機：${boundPad.padName}`);
+          await bot.sendMessage(chatId, `🛑 已中止 ${opLabel}\n\n智能體手機：${boundPad.padName}`);
           return;
         }
         await bot.sendMessage(chatId, `❌ ${opLabel}失败：${formatUserFacingError(error, "流程执行失败，请稍后重试。")}`, {
@@ -20374,7 +20485,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("pubpad_toggle_") || data === "pubpad_confirm" || data === "pubpad_back") {
       const state = pendingPublishPadSelections.get(chatId);
       if (!state) {
-        await safeEditOrSend(bot, chatId, msgId, "发布云机选择已过期，请重新进入发布流程。", {
+        await safeEditOrSend(bot, chatId, msgId, "发布智能體手機选择已过期，请重新进入发布流程。", {
           reply_markup: { inline_keyboard: [[{ text: "🏠 主菜单", callback_data: "fresh_main_menu" }]] },
         });
         return;
@@ -20401,7 +20512,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
         const nextState = { ...state, selectedPadCodes: [...selectedPads] };
         pendingPublishPadSelections.set(chatId, nextState);
-        await safeEditOrSend(bot, chatId, msgId, "请选择要同时发布的云机：", {
+        await safeEditOrSend(bot, chatId, msgId, "请选择要同时发布的智能體手機：", {
           reply_markup: {
             inline_keyboard: buildPublishPadSelectionRows({
               pads: visiblePads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
@@ -20414,7 +20525,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } else if (data === "pubpad_confirm") {
         const selectedPadCodes = uniquePadCodes([...selectedPads]);
         if (!selectedPadCodes.length) {
-          await safeEditOrSend(bot, chatId, msgId, "请至少选择一台云机。", {
+          await safeEditOrSend(bot, chatId, msgId, "请至少选择一台智能體手機。", {
             reply_markup: {
               inline_keyboard: buildPublishPadSelectionRows({
                 pads: visiblePads.map((pad) => ({ padCode: pad.padCode, padName: padDisplayName(pad) })),
@@ -20453,11 +20564,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
           pendingPublishPadSelections.delete(chatId);
           const nextState = pendingCustomPublishes.get(chatId)!;
           if (hasReadyCustomContent) {
-            await safeEditOrSend(bot, chatId, msgId, `🚀 已选择 ${selectedPadCodes.length} 台云机，开始发布...\n${customPublishContentSummary(nextState)}`);
+            await safeEditOrSend(bot, chatId, msgId, `🚀 已选择 ${selectedPadCodes.length} 台智能體手機，开始发布...\n${customPublishContentSummary(nextState)}`);
             await executeCustomPublish(chatId, nextState);
             return;
           }
-          await safeEditOrSend(bot, chatId, msgId, `${state.mode === "custom_with_image" ? "🖼" : "✅"} 已确认发布云机：${selectedPadCodes.join(", ")}\n${customPublishContentSummary(nextState)}\n\n请继续发送要发布的内容。`, {
+          await safeEditOrSend(bot, chatId, msgId, `${state.mode === "custom_with_image" ? "🖼" : "✅"} 已确认发布智能體手機：${selectedPadCodes.join(", ")}\n${customPublishContentSummary(nextState)}\n\n请继续发送要发布的内容。`, {
             reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
           });
           return;
@@ -20505,7 +20616,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           await showScheduledTimePicker(chatId, msgId, pendingScheduledPublishes.get(chatId)!);
           return;
         }
-        await safeEditOrSend(bot, chatId, msgId, `🚀 正在发布到 ${selectedPadCodes.length} 台云机...\n\n云机：${selectedPadCodes.join(", ")}\n推文：${posts.length} 篇`, {
+        await safeEditOrSend(bot, chatId, msgId, `🚀 正在发布到 ${selectedPadCodes.length} 台智能體手機...\n\n智能體手機：${selectedPadCodes.join(", ")}\n推文：${posts.length} 篇`, {
           reply_markup: { inline_keyboard: [[{ text: "🏠 主菜单", callback_data: "fresh_main_menu" }]] },
         });
         const stopTyping = startTelegramTyping(bot, chatId);
@@ -20568,7 +20679,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           pendingPublishPadSelections.delete(chatId);
           pendingBulkPostActions.delete(chatId);
           pendingManualPublishes.delete(chatId);
-          await bot.sendMessage(chatId, `✅ 发布完成\n\n平台：${state.platform}\n云机：${selectedPadCodes.join(", ")}\n推文：${posts.length} 篇`, {
+          await bot.sendMessage(chatId, `✅ 发布完成\n\n平台：${state.platform}\n智能體手機：${selectedPadCodes.join(", ")}\n推文：${posts.length} 篇`, {
             reply_markup: { inline_keyboard: [[{ text: "📝 查看剩余推文", callback_data: buildPostSourcePageCallback(archive.id, state.source, state.page || 0, state.groupContentType) }]] },
           });
           return;
@@ -20582,7 +20693,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           availablePadCodes: state.availablePadCodes,
           createdAt: Date.now(),
         });
-        await bot.sendMessage(chatId, `⚠️ 部分内容未发布完成\n\n已完成推文：${fullyPublishedPosts.length}/${posts.length} 篇\n待重试推文：${retryPostIds.length} 篇\n待重试云机：${Object.keys(retryPostIdsByPad).join(", ")}\n\n失败：${failures.map((item) => `${item.padCode}：${item.error}`).join("\n") || "-"}`, {
+        await bot.sendMessage(chatId, `⚠️ 部分内容未发布完成\n\n已完成推文：${fullyPublishedPosts.length}/${posts.length} 篇\n待重试推文：${retryPostIds.length} 篇\n待重试智能體手機：${Object.keys(retryPostIdsByPad).join(", ")}\n\n失败：${failures.map((item) => `${item.padCode}：${item.error}`).join("\n") || "-"}`, {
           reply_markup: {
             inline_keyboard: [
               [{ text: "🔄 只重试失败/未完成项", callback_data: "pubpad_confirm" }],
@@ -20720,14 +20831,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return `【第${displayIndex}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`;
         }).join("\n\n");
         const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, selectedPosts[0], state.groupContentType);
-        await safeEditOrSend(bot, chatId, msgId, `👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n云机：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
+        await safeEditOrSend(bot, chatId, msgId, `👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n智能體手機：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
               ...(getSelectableLinkEndingPresets(archive.setup as any).length ? [[{ text: "🔗 选择链接模板", callback_data: "bulk_link_templates" }]] : []),
               ...(state.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "bulk_link_clear" }]] : []),
-              [{ text: `✅ 发布到绑定云机 ${selectedPosts.length} 篇`, callback_data: "bpublish_confirm" }],
-              [{ text: "📱 选择多云机发布", callback_data: "bmulti_confirm" }],
+              [{ text: `✅ 发布到绑定智能體手機 ${selectedPosts.length} 篇`, callback_data: "bpublish_confirm" }],
+              [{ text: "📱 选择多智能體手機发布", callback_data: "bmulti_confirm" }],
               [{ text: "◀️ 返回选平台", callback_data: "bconfirm" }],
             ],
           },
@@ -20809,13 +20920,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return `【第${displayIndex}篇】(${describePostMedia(post)}) ${post.content.slice(0, 60)}${post.content.length > 60 ? "..." : ""}`;
         }).join("\n\n");
         const targetGroupLine = buildTelegramPublishPreviewTargetLine(nextState.platform, archive, selectedPosts[0], nextState.groupContentType);
-        await safeEditOrSend(bot, chatId, msgId, `↩️ 已撤回链接模板\n\n👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${nextState.platform}${targetGroupLine}\n云机：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
+        await safeEditOrSend(bot, chatId, msgId, `↩️ 已撤回链接模板\n\n👀 *批量发布前确认*\n\n人設：${archive.name}\n平台：${nextState.platform}${targetGroupLine}\n智能體手機：${archive.boundPadCode || defaultPadCode}\n发布數量：${selectedPosts.length} 篇\n\n${preview}`, {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
               ...(getSelectableLinkEndingPresets(archive.setup as any).length ? [[{ text: "🔗 选择链接模板", callback_data: "bulk_link_templates" }]] : []),
-              [{ text: `✅ 发布到绑定云机 ${selectedPosts.length} 篇`, callback_data: "bpublish_confirm" }],
-              [{ text: "📱 选择多云机发布", callback_data: "bmulti_confirm" }],
+              [{ text: `✅ 发布到绑定智能體手機 ${selectedPosts.length} 篇`, callback_data: "bpublish_confirm" }],
+              [{ text: "📱 选择多智能體手機发布", callback_data: "bmulti_confirm" }],
               [{ text: "◀️ 返回选平台", callback_data: "bconfirm" }],
             ],
           },
@@ -20840,7 +20951,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           linkEndingPresetApplied: state.linkEndingPresetApplied,
           contentOverrides: state.contentOverrides,
           selectedPadCodes: state.padCodes || [archive.boundPadCode || defaultPadCode],
-        }, `🚀 *多云机批量发布*\n\n人设：${archive.name}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, selectedPosts[0], state.groupContentType)}\n发布数量：${selectedPosts.length} 篇\n\n请选择要同时发布的云机：`, "bconfirm");
+        }, `🚀 *多智能體手機批量发布*\n\n人设：${archive.name}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, selectedPosts[0], state.groupContentType)}\n发布数量：${selectedPosts.length} 篇\n\n请选择要同时发布的智能體手機：`, "bconfirm");
         return;
       }
       if (data === "bdelete_confirm") {
@@ -20949,7 +21060,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           await markArchiveEpisodesPublished(state.archiveId, publishedIds, publishedOriginals, publishMeta).catch(() => null);
           pendingBulkPostActions.delete(chatId);
           invalidatePersonaListCache();
-          await bot.sendMessage(chatId, `✅ 批量发布完成\n\n平台：${platform}\n云机：${padCode}\n已发布：${publishedIds.length}/${selectedPosts.length} 篇`, {
+          await bot.sendMessage(chatId, `✅ 批量发布完成\n\n平台：${platform}\n智能體手機：${padCode}\n已发布：${publishedIds.length}/${selectedPosts.length} 篇`, {
             reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildStoredPostsPageCallback(state.archiveId, visiblePage, state.groupContentType) }]] },
           });
         } catch (error: any) {
@@ -20959,7 +21070,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             invalidatePersonaListCache();
           }
           if (isTelegramTaskCancelledError(error)) {
-            await bot.sendMessage(chatId, `🛑 已中止批量发布\n\n人設：${archive.name}\n平台：${platform}\n云机：${padCode}\n已发布：${publishedIds.length}/${selectedPosts.length} 篇`);
+            await bot.sendMessage(chatId, `🛑 已中止批量发布\n\n人設：${archive.name}\n平台：${platform}\n智能體手機：${padCode}\n已发布：${publishedIds.length}/${selectedPosts.length} 篇`);
             return;
           }
           await sendManualInterventionFailure(bot, chatId, error, {
@@ -22705,7 +22816,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         "",
         `目前：${current}`,
         "",
-        "保存後會用綁定雲機的 Telegram 帳號搜尋該群並發送；請確認該雲機帳號已加入該群組。",
+        "保存後會用綁定智能體手機的 Telegram 帳號搜尋該群並發送；請確認該智能體手機帳號已加入該群組。",
       ].join("\n"), {
         reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `settings_${id}` }]] },
       });
@@ -22736,12 +22847,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           })),
           2,
         );
-        await safeEditOrSend(bot, chatId, msgId, `📱 *选择要绑定的云机*\n\n当前绑定：${currentPadName}\n運行中：${runningPads.length} 台 / 共 ${pads.length} 台\n\n请选择云机，或手动输入 padCode：`, {
+        await safeEditOrSend(bot, chatId, msgId, `📱 *选择要绑定的智能體手機*\n\n当前绑定：${currentPadName}\n運行中：${runningPads.length} 台 / 共 ${pads.length} 台\n\n请选择智能體手機，或手动输入 padCode：`, {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
               ...padRows,
-              [{ text: "🔍 查询各云机账号", callback_data: `queryaccounts_${id}` }],
+              [{ text: "🔍 查询各智能體手機账号", callback_data: `queryaccounts_${id}` }],
               [{ text: "✍️ 手动输入 padCode", callback_data: `bindpad_manual_${id}` }],
               [{ text: "❌ 取消", callback_data: `settings_${id}` }],
             ],
@@ -22749,7 +22860,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
       } else {
         pendingActions.set(chatId, { type: "bind-pad", archiveId: id });
-        await safeEditOrSend(bot, chatId, msgId, `📱 未能获取云机列表\n\n⭐ 请手动输入 padCode ⭐\n当前：${currentPad}`, {
+        await safeEditOrSend(bot, chatId, msgId, `📱 未能获取智能體手機列表\n\n⭐ 请手动输入 padCode ⭐\n当前：${currentPad}`, {
           reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `settings_${id}` }]] },
         });
       }
@@ -22763,7 +22874,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const pad = pads.find((p) => p.padCode === padCode);
       if (!pad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${archiveId}` }]] },
         });
         return;
@@ -22778,7 +22889,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const padName = padDisplayName(pad);
       await updatePersonaArchivePadBinding(archiveId, { padCode, padName }).catch(() => {});
       const archive = await loadPersonaForThisBot(archiveId).catch(() => null);
-      await safeEditOrSend(bot, chatId, msgId, `✅ 已绑定云机：${archive?.boundPadName || padName}`, {
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已绑定智能體手機：${archive?.boundPadName || padName}`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${archiveId}` }]] },
       });
       return;
@@ -22797,12 +22908,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const runningPads = pads.filter((p) => p.padStatus === 10);
       const targets = runningPads.length > 0 ? runningPads : pads.slice(0, 8);
       if (!targets.length) {
-        await safeEditOrSend(bot, chatId, msgId, "当前没有可查询的云机。", {
+        await safeEditOrSend(bot, chatId, msgId, "当前没有可查询的智能體手機。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `bindpad_${archiveId}` }]] },
         });
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, `🔍 *查询云机账号*\n\n请选择要查询的云机（運行中 ${targets.length} 台）：`, {
+      await safeEditOrSend(bot, chatId, msgId, `🔍 *查询智能體手機账号*\n\n请选择要查询的智能體手機（運行中 ${targets.length} 台）：`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
@@ -22810,7 +22921,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               text: padDisplayName(p),
               callback_data: `queryaccount_${archiveId}_${p.padCode}`,
             })), 2),
-            [{ text: "🔍 查询全部運行中云机", callback_data: `queryaccountall_${archiveId}` }],
+            [{ text: "🔍 查询全部運行中智能體手機", callback_data: `queryaccountall_${archiveId}` }],
             [{ text: "◀️ 返回", callback_data: `bindpad_${archiveId}` }],
           ],
         },
@@ -22830,12 +22941,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const targets = pads.filter((p) => p.padStatus === 10).slice(0, 8);
       if (!targets.length) {
-        await safeEditOrSend(bot, chatId, msgId, "当前没有運行中的云机。", {
+        await safeEditOrSend(bot, chatId, msgId, "当前没有運行中的智能體手機。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `queryaccounts_${archiveId}` }]] },
         });
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, `🔍 正在查询 ${targets.length} 台云机的 Threads 账号，請稍候...`, {
+      await safeEditOrSend(bot, chatId, msgId, `🔍 正在查询 ${targets.length} 台智能體手機的 Threads 账号，請稍候...`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `queryaccounts_${archiveId}` }]] },
       });
       const creds = resolveVmosCredentials();
@@ -22860,7 +22971,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
         return `📱 ${padName}\n└ ✅ ${r.username ? `@${r.username}` : ""}${r.email ? ` (${r.email})` : ""} [${r.method}]`;
       });
-      await bot.sendMessage(chatId, `🔍 *云机账号查询结果*\n\n${lines.join("\n\n")}`, {
+      await bot.sendMessage(chatId, `🔍 *智能體手機账号查询结果*\n\n${lines.join("\n\n")}`, {
         parse_mode: "Markdown",
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `queryaccounts_${archiveId}` }]] },
       });
@@ -22883,13 +22994,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const pad = pads.find((p) => p.padCode === padCode);
       if (!pad) {
-        await safeEditOrSend(bot, chatId, msgId, "❌ 這台雲機不屬於目前 Bot 的 VMOS 帳號範圍。", {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 這台智能體手機不屬於目前 Bot 的 VMOS 帳號範圍。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `queryaccounts_${archiveId}` }]] },
         });
         return;
       }
       const padName = padDisplayName(pad);
-      await safeEditOrSend(bot, chatId, msgId, `🔍 正在查询云机「${padName}」的 Threads 账号...`, {
+      await safeEditOrSend(bot, chatId, msgId, `🔍 正在查询智能體手機「${padName}」的 Threads 账号...`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: `queryaccounts_${archiveId}` }]] },
       });
       const creds = resolveVmosCredentials();
@@ -22907,16 +23018,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (!result.loggedIn && (result.method === "failed" || (!result.username && !result.email))) {
         const accountState = formatCloudAccountStateNotice(result.error || "", { action: "帳號查詢", padName, padCode });
         msg = accountState
-          ? `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n⚠️ ${accountState.status}\n\n請先進入雲機處理帳號狀態，再回來重試查詢或操作。`
-          : `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n❌ 未識別到帳號${result.error ? `\n原因：${formatUserFacingError(result.error, "目前頁面沒有識別到 Threads 帳號資訊。")}` : ""}`;
+          ? `🔍 *智能體手機帳號查詢*\n\n智能體手機：${padName}\n平台：Threads\n\n⚠️ ${accountState.status}\n\n請先進入智能體手機處理帳號狀態，再回來重試查詢或操作。`
+          : `🔍 *智能體手機帳號查詢*\n\n智能體手機：${padName}\n平台：Threads\n\n❌ 未識別到帳號${result.error ? `\n原因：${formatUserFacingError(result.error, "目前頁面沒有識別到 Threads 帳號資訊。")}` : ""}`;
       } else {
-        msg = `🔍 *雲機帳號查詢*\n\n雲機：${padName}\n平台：Threads\n\n✅ 已登入帳號：\n${result.username ? `使用者名：@${result.username}\n` : ""}${result.email ? `信箱：${result.email}\n` : ""}識別方式：${result.method === "adb" ? "ADB 直讀" : "截圖識別"}`;
+        msg = `🔍 *智能體手機帳號查詢*\n\n智能體手機：${padName}\n平台：Threads\n\n✅ 已登入帳號：\n${result.username ? `使用者名：@${result.username}\n` : ""}${result.email ? `信箱：${result.email}\n` : ""}識別方式：${result.method === "adb" ? "ADB 直讀" : "截圖識別"}`;
       }
       await bot.sendMessage(chatId, msg, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "📱 綁定這台雲機", callback_data: `selectpad_${archiveId}_${padCode}` }],
+            [{ text: "📱 綁定這台智能體手機", callback_data: `selectpad_${archiveId}_${padCode}` }],
             [{ text: "◀️ 返回", callback_data: `queryaccounts_${archiveId}` }],
           ],
         },
@@ -22927,7 +23038,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("bindpad_manual_")) {
       const id = data.slice("bindpad_manual_".length);
       pendingActions.set(chatId, { type: "bind-pad", archiveId: id });
-      await safeEditOrSend(bot, chatId, msgId, "⭐ 请输入要绑定的云机 padCode ⭐\n\n例如：ACP250801768QX47", {
+      await safeEditOrSend(bot, chatId, msgId, "⭐ 请输入要绑定的智能體手機 padCode ⭐\n\n例如：ACP250801768QX47", {
         reply_markup: { inline_keyboard: [[{ text: "❌ 取消", callback_data: `settings_${id}` }]] },
       });
       return;
@@ -22959,12 +23070,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         stage: "choose_platform",
         groupContentType: parsedPublish?.groupContentType,
       });
-      await safeEditOrSend(bot, chatId, msgId, `🚀 *发布推文*\n\n人設：${archive.name}\n${branchTitle ? `內容類型：${branchTitle}\n` : ""}待发布推文：${scopedPosts.length} 篇\n\n请选择发布方式：\n- 自定义发布：先生成或发送内容，最终确认页再选择绑定云机或多云机发布。\n- 存储推文发布：选择已有推文后再选择发布云机。`, {
+      await safeEditOrSend(bot, chatId, msgId, `🚀 *发布推文*\n\n人設：${archive.name}\n${branchTitle ? `內容類型：${branchTitle}\n` : ""}待发布推文：${scopedPosts.length} 篇\n\n请选择发布方式：\n- 自定义发布：先生成或发送内容，最终确认页再选择绑定智能體手機或多智能體手機发布。\n- 存储推文发布：选择已有推文后再选择发布智能體手機。`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🖼 自定义发布（可多云机）", callback_data: `custom_publish_persona_${id}` }],
-            [{ text: "📚 从存储推文选择发布（可多云机）", callback_data: "sp" }],
+            [{ text: "🖼 自定义发布（可多智能體手機）", callback_data: `custom_publish_persona_${id}` }],
+            [{ text: "📚 从存储推文选择发布（可多智能體手機）", callback_data: "sp" }],
             [{ text: "◀️ 返回", callback_data: parsedPublish?.groupContentType ? `pub_branch_${id}` : `pd_${id}` }],
           ],
         },
@@ -23301,7 +23412,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           linkEndingPresetApplied: prevManual?.linkEndingPresetApplied,
           contentOverrides: prevManual?.contentOverrides,
           selectedPadCodes: [archive.boundPadCode || defaultPadCode],
-        }, `🚀 *多云机人工发布*\n\n人设：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布数量：${manualPosts.length} 篇\n\n请选择要同时发布的云机：`, `mpage_${Math.floor(startIndex / 8)}`);
+        }, `🚀 *多智能體手機人工发布*\n\n人设：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布数量：${manualPosts.length} 篇\n\n请选择要同时发布的智能體手機：`, `mpage_${Math.floor(startIndex / 8)}`);
         return;
       }
       if (!credentials.ak || !credentials.sk) {
@@ -23397,13 +23508,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
           ? `⚠️ 已提交 ${publishedIds.length} 篇推文，待人工确认`
           : `✅ 已按顺序人工发布 ${publishedIds.length} 篇推文`;
         const warningText = publishWarnings.length ? `\n\n待确认项：\n${publishWarnings.slice(-3).join("\n")}` : "";
-        await bot.sendMessage(chatId, `${finalTitle}\n\n人設：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n云机：${padCode}\n\n${selection.hint}${warningText}`, {
+        await bot.sendMessage(chatId, `${finalTitle}\n\n人設：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n智能體手機：${padCode}\n\n${selection.hint}${warningText}`, {
           reply_markup: { inline_keyboard: [[{ text: "📝 查看剩余推文", callback_data: buildStoredPostsPageCallback(archiveId, 0, groupContentType) }], [{ text: "◀️ 返回發佈方式", callback_data: buildPersonaPublishCallback(archiveId, groupContentType) }]] },
         });
       } catch (error: any) {
         stopTyping();
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止人工发布任务\n\n人設：${archive.name}\n平台：${platform}\n云机：${padCode}`);
+          await bot.sendMessage(chatId, `🛑 已中止人工发布任务\n\n人設：${archive.name}\n平台：${platform}\n智能體手機：${padCode}`);
           return;
         }
         const retryCallback = buildManualConfirmCallback(archiveId, platform, startIndex, posts.length || count);
@@ -23520,7 +23631,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } catch (error: any) {
         stopTyping();
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止发布任务\n\n人設：${archive.name}\n平台：${platform}\n云机：${padCode}`);
+          await bot.sendMessage(chatId, `🛑 已中止发布任务\n\n人設：${archive.name}\n平台：${platform}\n智能體手機：${padCode}`);
           return;
         }
         if (await sendCloudAccountStateNotice(
@@ -23722,12 +23833,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const telegramTargetLine = telegramTarget
         ? `\n目標群：${telegramTarget.groupName || "未識別群名"}${telegramTarget.chatId ? `（ID：${telegramTarget.chatId}）` : ""}`
         : "";
-      await safeEditOrSend(bot, chatId, msgId, `🛰 已选择平台：${platform}\n\n请确认发布云机：${nextState.padCode || defaultPadCode}${telegramTargetLine}`, {
+      await safeEditOrSend(bot, chatId, msgId, `🛰 已选择平台：${platform}\n\n请确认发布智能體手機：${nextState.padCode || defaultPadCode}${telegramTargetLine}`, {
         reply_markup: {
           inline_keyboard: [
             [{ text: "✅ 图/视频/文字推文直发", callback_data: "custom_publish_confirm_pad" }],
             [{ text: "🖼 根据文字内容生成图片再发布", callback_data: "custom_publish_confirm_pad_with_image" }],
-            [{ text: "📱 修改云机", callback_data: `bindpad_${nextState.archiveId}` }],
+            [{ text: "📱 修改智能體手機", callback_data: `bindpad_${nextState.archiveId}` }],
             [{ text: "◀️ 返回选平台", callback_data: `custom_publish_persona_${nextState.archiveId}` }],
           ],
         },
@@ -23743,7 +23854,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: false, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
       pendingCustomPublishes.set(chatId, nextState);
-      await safeEditOrSend(bot, chatId, msgId, `✅ 已確認直發模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送內容\n\n請發送其中一種：\n1) 純文字推文\n2) 圖片/視頻 + caption\n3) 先發圖片/視頻，下一步再補文字\n4) 先發文字，下一步再補圖片/視頻\n\n收到完整內容後會先讓你確認，最終確認頁再選擇綁定雲機或多雲機發布。`, {
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已確認直發模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送內容\n\n請發送其中一種：\n1) 純文字推文\n2) 圖片/視頻 + caption\n3) 先發圖片/視頻，下一步再補文字\n4) 先發文字，下一步再補圖片/視頻\n\n收到完整內容後會先讓你確認，最終確認頁再選擇綁定智能體手機或多智能體手機發布。`, {
         reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
       });
       return;
@@ -23757,7 +23868,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: false, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
       pendingCustomPublishes.set(chatId, nextState);
-      await safeEditOrSend(bot, chatId, msgId, `✅ 已確認直發模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送內容\n\n請發送其中一種：\n1) 純文字推文\n2) 圖片/視頻 + caption\n3) 先發圖片/視頻，下一步再補文字\n4) 先發文字，下一步再補圖片/視頻\n\n收到完整內容後，我會在最終確認頁讓你選擇綁定雲機或多雲機發布。`, {
+      await safeEditOrSend(bot, chatId, msgId, `✅ 已確認直發模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送內容\n\n請發送其中一種：\n1) 純文字推文\n2) 圖片/視頻 + caption\n3) 先發圖片/視頻，下一步再補文字\n4) 先發文字，下一步再補圖片/視頻\n\n收到完整內容後，我會在最終確認頁讓你選擇綁定智能體手機或多智能體手機發布。`, {
         reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
       });
       return;
@@ -23771,7 +23882,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: true, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
       pendingCustomPublishes.set(chatId, nextState);
-      await safeEditOrSend(bot, chatId, msgId, `🖼 已確認配圖發布模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送文字文案\n\n請只發送純文字推文內容。我會根據文字生成配圖，下一步再讓你確認發布。\n最終確認頁再選擇綁定雲機或多雲機發布；如果此時發圖片或視頻，會被攔截，不會誤發布。`, {
+      await safeEditOrSend(bot, chatId, msgId, `🖼 已確認配圖發布模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送文字文案\n\n請只發送純文字推文內容。我會根據文字生成配圖，下一步再讓你確認發布。\n最終確認頁再選擇綁定智能體手機或多智能體手機發布；如果此時發圖片或視頻，會被攔截，不會誤發布。`, {
         reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
       });
       return;
@@ -23785,7 +23896,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const nextState = { ...prev, stage: "ready_to_publish" as const, publishWithGeneratedImage: true, text: undefined, fileId: undefined, fileKind: undefined, mimeType: undefined };
       pendingCustomPublishes.set(chatId, nextState);
-      await safeEditOrSend(bot, chatId, msgId, `🖼 已確認配圖發布模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送文字文案\n\n請只發送純文字推文內容。我會根據文字生成配圖，下一步再讓你確認發布。\n收到完整內容後，我會在最終確認頁讓你選擇綁定雲機或多雲機發布。`, {
+      await safeEditOrSend(bot, chatId, msgId, `🖼 已確認配圖發布模式\n${customPublishContentSummary(nextState)}\n\n目前步驟：1/2 發送文字文案\n\n請只發送純文字推文內容。我會根據文字生成配圖，下一步再讓你確認發布。\n收到完整內容後，我會在最終確認頁讓你選擇綁定智能體手機或多智能體手機發布。`, {
         reply_markup: { inline_keyboard: [[customPublishBackToMethodButton(nextState)]] },
       });
       return;
@@ -23831,7 +23942,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         platform: prev.platform || effectiveDefaultPublishPlatform,
         groupContentType: prev.groupContentType,
         selectedPadCodes: prev.padCodes || [prev.padCode || defaultPadCode],
-      }, "请选择要同时发布的云机：", "custom_publish_publish_options");
+      }, "请选择要同时发布的智能體手機：", "custom_publish_publish_options");
       return;
     }
 
@@ -24092,7 +24203,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         linkEndingPresetApplied: action.linkEndingPresetApplied,
         contentOverrides: action.contentOverride ? { [postId]: action.contentOverride } : undefined,
         selectedPadCodes: [archive.boundPadCode || defaultPadCode],
-      }, `🚀 *多云机发布*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n请选择要同时发布的云机：`, "post_action");
+      }, `🚀 *多智能體手機发布*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n请选择要同时发布的智能體手機：`, "post_action");
       return;
     }
 
@@ -24131,7 +24242,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           linkEndingPresetApplied: action?.linkEndingPresetApplied,
           contentOverrides: action?.contentOverride ? { [postId]: action.contentOverride } : undefined,
           selectedPadCodes: [archive.boundPadCode || defaultPadCode],
-        }, `⏰ *多云机定时发布*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action?.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "post_action");
+        }, `⏰ *多智能體手機定时发布*\n\n人設：${archive.name || archiveId}\n平台：${platform}${buildTelegramPublishPreviewTargetLine(platform, archive, post, action?.groupContentType)}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的智能體手機：`, "post_action");
         return;
       }
       const nextState = {
@@ -24199,7 +24310,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inline_keyboard: [
             ...buildAllowedPublishPlatformRows("sched_platform_"),
             ...allowedPublishPlatforms.map((platform) => ([{
-              text: `📱 多云机定时发 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
+              text: `📱 多智能體手機定时发 ${platformButtons[platform].text.replace(/^.+?\s/, "")}`,
               callback_data: `sched_multi_platform_${platform}`,
             }])),
             [{ text: "◀️ 返回", callback_data: "schedule_publish" }],
@@ -24233,7 +24344,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           postId: prev.postId,
           platform,
           selectedPadCodes: prev.padCodes || [prev.padCode || archive.boundPadCode || defaultPadCode],
-        }, `⏰ *多云机定时发布*\n\n人設：${archive.name}\n平台：${platform}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的雲機：`, "schedule_publish");
+        }, `⏰ *多智能體手機定时发布*\n\n人設：${archive.name}\n平台：${platform}\n推文：${post.content.slice(0, 100)}${post.content.length > 100 ? "..." : ""}\n\n請選擇到時間後要發佈的智能體手機：`, "schedule_publish");
         return;
       }
       const nextState = { ...prev, stage: "choose_time" as const, platform };
@@ -24412,7 +24523,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } catch (error: any) {
         stopTyping();
         if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止發佈任務\n\n人設：${archive.name}\n平台：${platform}\n雲機：${padCode}`);
+          await bot.sendMessage(chatId, `🛑 已中止發佈任務\n\n人設：${archive.name}\n平台：${platform}\n智能體手機：${padCode}`);
           return;
         }
         const retryCallback = shortPlatform ? data : (platform === "threads" || platform === "telegram" ? `dop_${platform}` : data);
@@ -24654,7 +24765,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "只有已發布推文瀏覽量大於等於這個值時才會自動評論。",
           "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。",
         ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }]] },
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "✏️ 重新編輯文案", callback_data: `ownreply_text_${pendingOwnPostReplyInput.archiveId}` }],
+              [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }],
+            ],
+          },
         });
         return;
       }
@@ -24679,7 +24795,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "請輸入查看天數，規則和自動回覆評論一致。",
           "可輸入：1-7，例如：2。",
         ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }]] },
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "👁 重新設定瀏覽量", callback_data: `ownreply_views_${pendingOwnPostReplyInput.archiveId}` }],
+              [{ text: "✏️ 上一步：編輯文案", callback_data: `ownreply_text_${pendingOwnPostReplyInput.archiveId}` }],
+              [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }],
+            ],
+          },
         });
         return;
       }
@@ -25250,14 +25372,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
 
-      const statusMsg = await bot.sendMessage(chatId, `🖼 正在修改 Threads 頭像\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n⏳ 正在準備頭像圖片...`, {
+      const statusMsg = await bot.sendMessage(chatId, `🖼 正在修改 Threads 頭像\n\n智能體手機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n⏳ 正在準備頭像圖片...`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
       });
       const stopTyping = startTelegramTyping(bot, chatId);
       const progress = (p: PublishProgress) => {
         console.log(`[telegram][threads_avatar_progress] chat=${chatId} pad=${pendingThreadsProfile.padCode} done=${Boolean(p.done)} step=${p.step}`);
         bot.editMessageText(
-          `🖼 正在修改 Threads 頭像\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
+          `🖼 正在修改 Threads 頭像\n\n智能體手機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
           {
             chat_id: chatId,
             message_id: statusMsg.message_id,
@@ -25274,7 +25396,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         console.log(`[telegram][threads_avatar_done] chat=${chatId} pad=${pendingThreadsProfile.padCode}`);
         assertPadOperationNotCancelled(opKey);
         stopTyping();
-        await bot.sendMessage(chatId, `✅ Threads 頭像已提交\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n${result.detail}`, {
+        await bot.sendMessage(chatId, `✅ Threads 頭像已提交\n\n智能體手機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n${result.detail}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
         if (result.screenshotUrl) {
@@ -25291,7 +25413,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         const message = notice
           ? notice.text
-          : `❌ Threads 頭像修改失敗\n\n雲機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n原因：${formatUserFacingError(error, "頭像修改失敗，請稍後重試。")}`;
+          : `❌ Threads 頭像修改失敗\n\n智能體手機：${pendingThreadsProfile.padName || pendingThreadsProfile.padCode}\n原因：${formatUserFacingError(error, "頭像修改失敗，請稍後重試。")}`;
         await bot.sendMessage(chatId, message, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
@@ -25524,7 +25646,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
       const statusMsg = await bot.sendMessage(
         chatId,
-        `${operation.progressTitle}\n\n雲機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n⏳ 正在開啟 Threads...`,
+        `${operation.progressTitle}\n\n智能體手機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n⏳ 正在開啟 Threads...`,
         {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         },
@@ -25533,7 +25655,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const progress = (p: PublishProgress) => {
         console.log(`[telegram][threads_profile_progress] chat=${chatId} pad=${profileState.padCode} stage=${profileState.stage} done=${Boolean(p.done)} step=${p.step}`);
         bot.editMessageText(
-          `${operation.progressTitle}\n\n雲機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
+          `${operation.progressTitle}\n\n智能體手機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n\n${p.done ? "✅" : "⏳"} ${p.step}`,
           {
             chat_id: chatId,
             message_id: statusMsg.message_id,
@@ -25551,7 +25673,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         assertPadOperationNotCancelled(opKey);
         stopTyping();
         const title = result.state === "verified" ? operation.successVerified : operation.successSubmitted;
-        await bot.sendMessage(chatId, `${title}\n\n雲機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n${result.detail}`, {
+        await bot.sendMessage(chatId, `${title}\n\n智能體手機：${profileState.padName || profileState.padCode}\n${operation.valueLabel}：${operation.input}\n${result.detail}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
         if (result.screenshotUrl) {
@@ -25588,7 +25710,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           await bot.editMessageText([
             "⚠️ Threads 未登入，目前動作已停止",
             "",
-            `雲機：${profileState.padName || profileState.padCode}`,
+            `智能體手機：${profileState.padName || profileState.padCode}`,
             `操作：${operation.action}`,
             `${operation.valueLabel}：${operation.input}`,
             "",
@@ -25602,7 +25724,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
         const message = notice
           ? notice.text
-          : `${operation.failureTitle}\n\n雲機：${profileState.padName || profileState.padCode}\n原因：${formatUserFacingError(error, `${operation.title}失敗，請稍後重試。`)}`;
+          : `${operation.failureTitle}\n\n智能體手機：${profileState.padName || profileState.padCode}\n原因：${formatUserFacingError(error, `${operation.title}失敗，請稍後重試。`)}`;
         await bot.sendMessage(chatId, message, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: profileReturnCallback }]] },
         });
@@ -25693,7 +25815,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (loginState.stage === "await_password") {
         const password = text.trim();
         pendingLoginActions.set(chatId, { ...loginState, stage: "await_password", password });
-        await telegramBestEffort("threadsLogin.confirmPrompt", bot.sendMessage(chatId, `✅ 已收到密碼\n\n雲機：${loginState.padName || loginState.padCode}\n帳號：${loginState.username}\n\n確認開始登入？`, {
+        await telegramBestEffort("threadsLogin.confirmPrompt", bot.sendMessage(chatId, `✅ 已收到密碼\n\n智能體手機：${loginState.padName || loginState.padCode}\n帳號：${loginState.username}\n\n確認開始登入？`, {
           reply_markup: {
             inline_keyboard: [
               [{ text: "✅ 確認登入", callback_data: `pad_login_confirm_${loginState.padCode}` }],
@@ -26252,7 +26374,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const pads = await listPadsForThisBot();
       const pad = pads.find((p) => p.padCode === text.trim());
       if (!pad) {
-        await bot.sendMessage(chatId, "❌ 这台云机不属于当前 Bot 的 VMOS 账号范围，请只绑定当前 Bot 可见的云机。", {
+        await bot.sendMessage(chatId, "❌ 这台智能體手機不属于当前 Bot 的 VMOS 账号范围，请只绑定当前 Bot 可见的智能體手機。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${pending.archiveId}` }]] },
         });
         return;
@@ -26267,7 +26389,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const padName = padDisplayName(pad);
       await updatePersonaArchivePadBinding(pending.archiveId, { padCode: text.trim(), padName }).catch(() => {});
       const archive = await loadPersonaForThisBot(pending.archiveId).catch(() => null);
-      bot.sendMessage(chatId, `✅ 已绑定云机：${archive?.boundPadName || padName}`, {
+      bot.sendMessage(chatId, `✅ 已绑定智能體手機：${archive?.boundPadName || padName}`, {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${pending.archiveId}` }]] },
       });
       return;

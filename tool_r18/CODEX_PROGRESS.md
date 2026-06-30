@@ -23,11 +23,11 @@
 - 2026-06-02 工作流人设中远景生活照排查与 ECS 部署：用户反馈生活照总偏特写近景。实测小mii中远景咖啡店样本在修复前仍被拉回近景，根因不是单纯动态提示词，而是原工作流 CLIP 节点含固定“偏近景/上半身/身体前倾/歪头/双手举到脸旁/托脸+比心/圣诞围巾”等视觉锚点。已在 `src/runtime/node/comfyui-workflow-client.ts` 扩展固定近景/托脸锚点过滤、加强负向手贴脸与近景抑制，并在明确“中远景/路人视角/3-5 米/街拍/full body”等请求时动态降低人设 LoRA 到 0.65、身体滑块到 0.2；`src/lib/persona-image-production.ts` 新增中远景优先构图分支，要求七分身/全身、环境占比高、双手低位远离脸。验证：本地与 ECS `npx tsc --noEmit` passed；本地与 ECS `npx vitest run src/test/comfyui-workflow-client.test.ts src/test/persona-image-production.test.ts src/test/workflow-persona-seeds.test.ts --testTimeout=20000` passed（31 tests）；ECS `auto-tweet.service` active/running。真实样本：`.runtime/generated-preview/workflow-mid-distance-test-v4.png`、`.runtime/generated-preview/workflow-mid-distance-standing-v2.png` 均 `ok=true mode=workflow provider=comfyui-workflow`，构图已从大头/近景改善为七分身中景和更多环境，但小mii仍稳定出现托脸动作；metadata 确认 LoRA 降强已生效，残余属于该人设 LoRA/工作流姿势先验，若要彻底消除托脸需改远端工作流姿势/参考节点或重训/替换该 LoRA。
 - 2026-06-02 工作流人设配图“不露脸/内容跑偏”修复并部署 ECS：根因分三类修复。其一，普通咖啡/甜点/餐厅生活内容之前会被误判为 POV/空镜，且用户视觉提示“不要只拍物件”会被 `只拍` 误触发为无人物；现改为工作流人设默认本人入镜，只有明确第一人称/只露手/无人物/空镜才跳出人像工作流，并把 Telegram 生成推文时用户输入的视觉提示一并传给配图路由。其二，普通“咖啡”曾误命中饮料打翻事故提示，导致湿衣服/拉衣服/透衣服跑偏；现只有明确“打翻/泼到/弄湿/湿透”等事故词才触发。其三，ComfyUI 原工作流固定视觉锚点里包含裁脸/托脸/圣诞围巾等固定姿势场景，现增加固定手势过滤、完整脸/道具不遮脸/服装正常/手部低位约束和负面提示。验证：本地 `npx tsc --noEmit` passed；本地 `npx vitest run src/test/persona-image-production.test.ts src/test/workflow-persona-seeds.test.ts src/test/comfyui-workflow-client.test.ts --testTimeout=20000` passed（29 tests）。ECS 同步 `src/lib/persona-image-search.ts`、`src/lib/persona-image-production.ts`、`src/lib/workflow-personas.ts`、`src/runtime/node/comfyui-workflow-client.ts`、`src/telegram-bot.ts` 及测试后远端同样 29 tests passed，`auto-tweet.service` active/running。真实远端样本：8 个工作流人设均 `ok=true mode=workflow provider=comfyui-workflow`，样本拉回 `.runtime/generated-preview/workflow-persona-visible-face-fix-v5/`，目检均为本人入镜、脸可识别、非纯场景；Telegram 入口瑜伽老师日志也确认 `mode=workflow provider=comfyui-workflow` 且图片写入归档。残余：瑜伽老师 LoRA/原工作流仍有轻微手靠脸姿势偏置，已不再挡书/纯场景/湿衣服跑偏；若要彻底去掉，需要重调该人设参考/LoRA 或姿势节点。
 - 2026-06-01 全部工作流人设切远端 ComfyUI 并完成样图：`workflowSetup()` 默认 `executionProvider="comfyui"`，所有 `WORKFLOW_PERSONA_SEEDS` 都会通过远端 ComfyUI 执行；当 ECS 没有原始 workflow 文件时，才 fallback 读取 `output/runninghub-workflows` 的映射版 visual workflow 并提交到远端 ComfyUI。为兼容远端环境，`RHLoraLoader` 自动转为标准 `LoraLoader`，并使用 `.runtime/automatic-script/runninghub-lora-map.json` 把 RunningHub 的 `api-lora-cn/*.safetensors` 反向映射为远端 ComfyUI 的 LoRA 路径；其中日系可愛、瑜伽老師、50歲阿姨按远端 `/object_info` 可用列表走无 `人设\` 前缀的 LoRA 名称。验证：本地 `npx tsc --noEmit` passed；本地 `npx vitest run src/test/workflow-persona-seeds.test.ts src/test/persona-image-production.test.ts src/test/comfyui-workflow-client.test.ts --testTimeout=20000` passed（25 tests）；ECS 同步 `src/lib/workflow-personas.ts`、`src/runtime/node/comfyui-workflow-client.ts`、`src/test/workflow-persona-seeds.test.ts` 和 `runninghub-lora-map.json` 后远端相关测试 passed。远端真实生成 8/8 成功，均为 `provider=comfyui-workflow`，样本已拉回本地 `.runtime/generated-preview/workflow-persona-comfyui-all-final/`：金君雅、向婉婉、小mii、F1、日系可愛、瑜伽老師、Jason、50歲阿姨。`auto-tweet.service` 已重启 active，PID `343981`，heartbeat `telegramBot=configured:1`。
-- 2026-06-01 TG Bot 响应慢排查与 ECS 热修：ECS `auto-tweet.service` 本身 active，内存/磁盘正常，heartbeat `telegramBot=configured:1`，Telegram `getMe` 当前 179-660ms；慢的根因是云机菜单链路同步等待 VMOS，日志显示 `pad_mgmt_refresh` 46.1s，实测 `listPads()` 33.4s 后返回坏 JSON/空响应。已把强制刷新云机列表加 8 秒上限，超时先显示最近缓存并提示“VMOS 云机列表刷新暂时超时，已先显示最近缓存”，后台刷新继续跑；VMOS 非 JSON/空响应错误也改为明确可读文案。验证：本地 `npx tsc --noEmit` passed；本地 `npx vitest run src/test/vmos-client.test.ts src/test/telegram-persona-derive.test.ts --testTimeout=20000` passed（34 tests）；ECS 同步 `src/telegram-bot.ts`、`src/lib/vmos-client.ts` 后远端同样 34 tests passed，`auto-tweet.service` 已重启 active，PID `340014`。
+- 2026-06-01 TG Bot 响应慢排查与 ECS 热修：ECS `auto-tweet.service` 本身 active，内存/磁盘正常，heartbeat `telegramBot=configured:1`，Telegram `getMe` 当前 179-660ms；慢的根因是智能體手機菜单链路同步等待 VMOS，日志显示 `pad_mgmt_refresh` 46.1s，实测 `listPads()` 33.4s 后返回坏 JSON/空响应。已把强制刷新智能體手機列表加 8 秒上限，超时先显示最近缓存并提示“VMOS 智能體手機列表刷新暂时超时，已先显示最近缓存”，后台刷新继续跑；VMOS 非 JSON/空响应错误也改为明确可读文案。验证：本地 `npx tsc --noEmit` passed；本地 `npx vitest run src/test/vmos-client.test.ts src/test/telegram-persona-derive.test.ts --testTimeout=20000` passed（34 tests）；ECS 同步 `src/telegram-bot.ts`、`src/lib/vmos-client.ts` 后远端同样 34 tests passed，`auto-tweet.service` 已重启 active，PID `340014`。
 - 2026-06-01 工作流人设生活照/无人物图生成继续收紧并部署 ECS：默认兔耳/闪光已保持为可选风格，且“不要兔耳/不要闪光”不会误触发；显式“不要出现人物/只拍物件/no person”等请求现在优先分类为 `closed-scene`，并剥离人物、人设主题、手机屏人脸等污染词，提示词强约束为物件/环境图。工作流本人图增加故障兜底：ComfyUI 404 时先切同 workflowId 的 RunningHub workflow，仍失败时再降级 RunningHub AI App 闭源人像图，避免整条链路直接失败。验证：本地 `npx tsc --noEmit` passed；本地相关 67 tests passed；ECS 已同步 `src/lib/persona-image-production.ts`、`src/lib/persona-image-search.ts`、`src/test/persona-image-production.test.ts`，远端 `tsc` passed，相关测试 passed，`auto-tweet.service` 已重启 active。ECS 真实生成：自拍生活照 `ok=true mode=workflow provider=comfyui-workflow`，样本 `.runtime/generated-preview/workflow-selfie-life-online-ecs.png`；无人物生活图 `ok=true mode=closed-scene provider=runninghub-ai-app`，最终样本 `.runtime/generated-preview/workflow-scene-no-person-online-v2-ecs.png` 目检无人物/无屏幕人脸。
 - 2026-05-31 金君雅切换远端 ComfyUI 执行：用户确认 RunningHub 版仍不像，要求接入远端电脑用 ComfyUI 跑原工作流。已新增 `imageWorkflow.executionProvider = "runninghub" | "comfyui"`，金君雅 seed 固定为 `executionProvider: "comfyui"`；当该字段为 `comfyui` 时，即使存在 `workflowId` 和 RunningHub key，也会跳过 RunningHub，直接走远端 ComfyUI。运行时新增从 `api_config.json` 读取 `personaWorkflowJupyterBase/personaWorkflowComfyBase/personaWorkflowToken/personaWorkflowLocalDir`（兼容 `comfyWorkflow*`）的能力，并避免 ComfyUI 直连 fallback 时误读 `output/runninghub-workflows` 的映射版工作流；ComfyUI 网络失败会提示具体 URL。随后确认远端电脑通过 SSH 反向端口连接 ECS，R18 容器配置为 `remote_comfy_gateway_url=http://172.17.0.1:19000` + `remote_comfy_gateway_token`；该 gateway 路由是 `/api/queue`、`/api/prompt`、`/api/history/{id}`、`/api/view`，鉴权方式是 `Authorization: Bearer <token>`。Automatic-script ECS 已配置 `personaWorkflowComfyBase=http://172.17.0.1:19000/api`、复用 R18 gateway token，并上传原始 `人设1 金君雅.json` 到 `/opt/Automatic-script/workflows`。修复两处兼容问题：模型选择器路径把 `/` 标准化为 Windows `\`，避免 LoRA 校验找不到 `人设\人设1捞女1金君雅.safetensors`；读取 `/api/view` 图片时携带 gateway 鉴权。验证：本地与 ECS `npx tsc --noEmit` passed；本地/ECS 相关 14 tests passed。ECS 真实调用成功：`ok=true mode=workflow provider=comfyui-workflow elapsedMs≈27189`，图片保存到 `.runtime/generated-preview/jinjunya-comfyui-gateway-test.png` 并已拉回本地。
 - 2026-05-31 金君雅旧归档兼容修复：用户刚刚在 Telegram 搜图后日志显示 `provider=runninghub-workflow`，原因是已保存的人设归档仍是旧 `imageWorkflow`，没有新的 `executionProvider=comfyui` 字段。已在运行时增加金君雅兜底：当 `personaKey/workflowFile` 命中 `jinjunya/金君雅` 时，即使旧归档没有 executionProvider，也强制走 ComfyUI；同时 direct ComfyUI 成功/失败结果现在都会写入 `timings.provider=comfyui-workflow`，避免外层脚本误标为 RunningHub。ECS 已部署并重启 `auto-tweet.service`；旧归档等价输入实测 `ok=true mode=workflow provider=comfyui-workflow elapsedMs≈16711 hasUrl=true`。
-- 2026-05-31 金君雅归档旧工作流配置覆盖修复：用户指出 Telegram 21:48 生成图与手动返回样本仍不一致。日志确认 21:48 已是 `provider=comfyui-workflow`，但归档缓存里的金君雅 `imageWorkflow` 仍是旧配置：`workflowGroup=批量文生圖`、旧 promptSuffix，因此远端 ComfyUI 跑的是旧分支/旧提示词。修复 `normalizeWorkflowSeedSetup()`：工作流人设加载归档时，`imageWorkflow` 永远以当前 seed 为准，保留帖子/发布历史/绑定云机等业务数据。新增回归测试确保旧归档的 stale workflow 字段不会覆盖 seed。ECS 部署并重启后，`loadPersonaArchive('workflow-persona-jinjunya')` 已返回 `executionProvider=comfyui`、`workflowGroup=线上反推洗图`、`originalPromptMode=filtered-original`、`visualAnchorNodeId=181`。用 Telegram 同类提示“自拍在咖啡廳喝咖啡並在悠閒的午後下午茶”实测 `ok=true provider=comfyui-workflow elapsedMs≈22144`，样本已拉回 `.runtime/generated-preview/jinjunya-cafe-archive-normalized.png`。
+- 2026-05-31 金君雅归档旧工作流配置覆盖修复：用户指出 Telegram 21:48 生成图与手动返回样本仍不一致。日志确认 21:48 已是 `provider=comfyui-workflow`，但归档缓存里的金君雅 `imageWorkflow` 仍是旧配置：`workflowGroup=批量文生圖`、旧 promptSuffix，因此远端 ComfyUI 跑的是旧分支/旧提示词。修复 `normalizeWorkflowSeedSetup()`：工作流人设加载归档时，`imageWorkflow` 永远以当前 seed 为准，保留帖子/发布历史/绑定智能體手機等业务数据。新增回归测试确保旧归档的 stale workflow 字段不会覆盖 seed。ECS 部署并重启后，`loadPersonaArchive('workflow-persona-jinjunya')` 已返回 `executionProvider=comfyui`、`workflowGroup=线上反推洗图`、`originalPromptMode=filtered-original`、`visualAnchorNodeId=181`。用 Telegram 同类提示“自拍在咖啡廳喝咖啡並在悠閒的午後下午茶”实测 `ok=true provider=comfyui-workflow elapsedMs≈22144`，样本已拉回 `.runtime/generated-preview/jinjunya-cafe-archive-normalized.png`。
 - 2026-05-31 自定义推文图片生成继续修复并完成 ECS 实测：保留“工作流人设本人图走工作流、场景/POV 图优先走闭源模型”的既有规则；闭源图片模型超时/可重试失败时，工作流人设会 fallback 到人设工作流。ECS 已补齐本地 `runningHubKey/runningHubEndpoint`，并上传仓库内 RunningHub 版金君雅工作流文件到 `/opt/Automatic-script/output/runninghub-workflows/人设1 金君雅.json`；修复本地 workflow 任务创建时继续带 `workflowId`，同时避免有 RunningHub key 时落到已不可用的 ComfyUI 直连。真实调用 `workflow-persona-jinjunya` 内容“自拍喝咖啡在咖啡廳”已返回图片 URL，`ok=true mode=workflow provider=runninghub-workflow workflowSource=local waitOutputsMs≈47507 elapsedMs≈47829`。验证：本地 `npx tsc --noEmit` passed；`npx vitest run src/test/persona-image-production.test.ts src/test/telegram-persona-derive.test.ts src/test/workflow-persona-routing.test.ts` passed（36 tests）；ECS `npx tsc --noEmit` passed。
 - 2026-05-31 全面检查图像生成状态：ECS 已同步 `output/runninghub-workflows` 下全部 RunningHub 版工作流文件；8 个工作流人设导出校验均通过（每个 `imageOutputCount=1`、`promptInputCount=2`、`malformedCount=0`），金君雅在 daemon 日志中连续多次 `ok=true mode=workflow provider=runninghub-workflow`。本地图片路由/Telegram 展示/Instagram 文字卡测试通过：`npx vitest run src/test/persona-image-production.test.ts src/test/telegram-persona-derive.test.ts src/test/workflow-persona-routing.test.ts src/test/vmos-publisher-instagram.test.ts` passed（52 tests）。但闭源图片 API 不能标记为正常：ECS 实测非工作流场景图 `gpt-image-2` 返回 429 上游饱和，fallback `gemini-3-pro-image-preview` 90 秒超时；因此当前稳定的是工作流图与本地文字卡，纯闭源场景/非工作流人设参考图仍依赖上游恢复或更换可用闭源图片模型。
 - 2026-05-31 闭源图片模型已替换为 RunningHub AI App：按用户要求不再让原闭源图像路径依赖 `gpt-image-2/Gemini`，新增 RunningHub AI 应用调用 `/api/webapp/apiCallDemo` + `/task/openapi/ai-app/run`，默认 webappId `2034899011521482754`（Z-Image-瑶光版-超真实细节增强），并写入 ECS `api_config.json.runningHubImageWebappId`。`generate-persona-images.ts` 的非 workflowImage 路径现在统一调用 `provider=runninghub-ai-app`；工作流人设本人图仍走各自 RunningHub workflow。ECS 实测：非工作流场景图 `ok=true mode=closed-scene provider=runninghub-ai-app webappId=2034899011521482754 elapsedMs≈36971`；非工作流人设参考图 `ok=true mode=closed-person provider=runninghub-ai-app elapsedMs≈26628`。验证：本地/ECS `npx tsc --noEmit` passed；相关 52 tests passed。
@@ -43,25 +43,25 @@
 - 2026-05-31 金君雅 filtered-original 严格还原模式：为尽可能还原原工作流，新增 `imageWorkflow.originalPromptMode = "filtered-original"`。金君雅开启该模式后，运行时不再把完整动态人设外观 prompt 拼进正向节点，而是用过滤固定场景后的原 `CLIPTextEncode` 作为主体，只追加极短“本次只轻微替换固定场景为...”提示。新增测试覆盖：原提示词必须以 `ohwx` 开头、圣诞/红围巾被剔除、动态大段模板不进入 prompt。ECS 实测 `ok=true mode=workflow provider=runninghub-workflow workflowSource=local elapsedMs≈21200`，样本已下载到 `.runtime/generated-preview/jinjunya-filtered-original-test.png`；本地与 ECS `tsc` passed，相关 12 tests passed，daemon 已重启且 `active`。
 - 2026-05-31 金君雅改用原工作流视频发文视觉锚点：用户指出本地原工作流图是兔耳发箍、披散长发、室内直闪自拍，并非 `线上反推洗图` 的托脸/圣诞提示。检查原 workflow 后确认 `视频发文` 分支节点 `181 easy showAnything` 的反推文本最接近：`ohmx, A young woman with long, dark, wavy hair... light-colored top with delicate straps... plain softly lit wall... harsh flash... Raw photo`。新增 `imageWorkflow.visualAnchorNodeId` 和 `visualAnchorAddendum`，金君雅配置为 `visualAnchorNodeId=181`，并补充 VQA 漏掉的兔耳发箍、微张水润唇、室内帘子/墙面、直闪自拍。运行时会把 `showAnything` JSON 数组文本标准化，并用正向节点原 trigger 统一为 `ohwx`。本地与 ECS `tsc` passed，相关 13 tests passed；ECS 实测 `ok=true mode=workflow provider=runninghub-workflow workflowSource=local elapsedMs≈21459`，样本已下载到 `.runtime/generated-preview/jinjunya-node181-bunny-test.png`，daemon 已重启且 `active`。
 - 2026-05-31 自定义推文图片生成超时根因并已部署 ECS：Telegram “单独生成图片/重新生成图片”走 `generatePersonaImageForArchive()` -> `scripts/skills/generate-persona-images.ts` -> 闭源图片模型；默认 `PERSONA_IMAGE_CLOSED_TIMEOUT_MS=60_000`，上游 60 秒未返回就报“图片 API 请求超时（60 秒）”。ECS 日志确认本次失败为 `provider=gemini-image model=gemini-3-pro-image-preview childMs=61599 fallbacks=2`，即闭源模型链路可达但 60 秒内未返回图。已把默认闭源图片等待时间调到 180 秒，保留脚本子进程 600 秒总上限，并同步到 `47.250.188.76:/opt/Automatic-script`；远端 `npx tsc --noEmit` passed，`npx vitest run src/test/telegram-persona-derive.test.ts src/test/persona-image-production.test.ts --testTimeout=20000` passed（33 tests）；`auto-tweet.service` 已重启，`active/enabled`，PID `228287`，`127.0.0.1:8788` 监听，heartbeat `telegramBot=configured:1`。
-- 2026-05-31 云机管理新增 Threads 简介链接入口：云机详情页新增“Threads 简介新增链接”按钮，点击后要求用户输入链接；系统会校验/补全 `https://`，加云机互斥锁后自动打开对应云机 Threads 个人主页，进入编辑个人资料，点击“新增链接”，填写 URL 并保存，最终回传执行结果和截图。新增 `updateThreadsProfileLink()` 复用现有 Threads 个人页识别、UI XML 定位、视觉兜底和 ADB 输入链路；Telegram 层补充等待状态与账号阻断提示。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts src/test/vmos-publisher-threads.test.ts src/test/vmos-client.test.ts` passed（3 files，107 tests）。
+- 2026-05-31 智能體手機管理新增 Threads 简介链接入口：智能體手機详情页新增“Threads 简介新增链接”按钮，点击后要求用户输入链接；系统会校验/补全 `https://`，加智能體手機互斥锁后自动打开对应智能體手機 Threads 个人主页，进入编辑个人资料，点击“新增链接”，填写 URL 并保存，最终回传执行结果和截图。新增 `updateThreadsProfileLink()` 复用现有 Threads 个人页识别、UI XML 定位、视觉兜底和 ADB 输入链路；Telegram 层补充等待状态与账号阻断提示。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts src/test/vmos-publisher-threads.test.ts src/test/vmos-client.test.ts` passed（3 files，107 tests）。
 - 2026-05-31 TikTok/TK 发布与养号闭环推进：新增 `scripts/skills/tiktok-prepublish-selftest.ts` 的真实发布确认闸门，`stopBeforePost=false` 必须显式 `confirmPublish=true`；点发布后会进入个人页轮询 UI 上传百分比，仍出现 `60%/96%` 等进度时返回 `submitted_but_uploading`，不再把“仍在编辑页/仍在上传中”误报为 `posted_profile_checked`。实机 `ACP64G6PQMBV7UBO` 已成功进入个人页并出现测试视频卡「Healthy Workflow Tip」，但 TikTok 上传任务长时间停在 `60%`，当前不能判定真实发布完成，证据 `.runtime-tiktok-profile-upload-current-after-timeout.jpg`。互动养号链路已修复启动回 Home/For You、点赞/评论坐标和发送按钮坐标；实机低频验收 `mode=both,browseCount=2,maxLikes=1,maxComments=1` 通过，证据 `.runtime/automatic-script/tiktok-warmup-real-5/tiktok-warmup-like-1-1780158862700.jpg` 显示红心点赞，`.runtime/automatic-script/tiktok-warmup-real-5/tiktok-warmup-comment-1-1780158880893.jpg` 显示账号 `Chen Ricky` 评论 `Useful reminder` 已出现在评论区。验证：`npx tsc --noEmit` passed。下一步：需要继续处理 TikTok 上传卡 60% 的设备/网络/应用状态，未完成前不能宣称 TK 发布闭环通过。
-- 2026-05-31 TikTok/TK 发布阻断根因确认：`ACP64G6PQMBV7UBO` 与同 secondary 账号的 `ACP65M786YA3ML9J` 都能 ping 通 `8.8.8.8`，但 `www.google.com` / `www.tiktok.com` 均 `unknown host`；logcat 同时出现 Google、小红书、`api.vsphone.com` 的 `ERR_NAME_NOT_RESOLVED`，说明是 VMOS 底层 DNS 注入故障，不是 TikTok 坐标或视频编码问题。尝试修改 `/data/misc/ethernet/ipconfig.txt`、重启 system-server/云机后仍被 `ro.boot.redroid_net_dns1=192.168.11.10` 恢复；临时 ECS HTTP CONNECT 代理能让 Chrome 不再显示 DNS 错误，但 TikTok 上传链路仍返回 `Something went wrong / Try again later / Retry`，说明 TikTok 上传没有完整走系统代理。已清理云机代理配置并关闭 ECS 临时代理。`tiktok-prepublish-selftest` 新增上传前 DNS 预检、最终页 `Next` 等待加长、`Something went wrong/Retry` 失败页识别、非 TikTok 页面/草稿页防误报；当前 DNS 坏时会在发布前直接返回“TikTok 上传前网络预检失败：当前云机 DNS 无法解析 www.tiktok.com”，避免继续制造草稿。验证：`npx tsc --noEmit` passed；实机预检失败按预期拦截。结论：TK 互动养号闭环已通过；TK 真实发布闭环被 VMOS secondary 账号组 DNS 故障阻断，需要先从 VMOS 控制台/供应商侧修复云机 DNS 或更换网络正常的 TK 云机后再验收发布。
-- 2026-05-29 VMOS 多账号接入：`resolveVmosCredentials()` 现在支持 `vmosAccounts` / `electron/vmos-credentials.local.json.accounts`，`listPads()` 会合并多账号云机列表并缓存 `padCode -> VMOS 账号`，后续 ADB/截图/发布/养号以及 task 查询会按云机或 taskId 自动复用对应凭据；Telegram、队列 runner、publish/warmup skill 均改为传递完整多账号 config。已把本机 `electron/vmos-credentials.local.json` 改为双账号格式并保留旧 `ak/sk` 兼容。用户提供可复制文本版新账号 AK/SK 后，真实 `listPads()` 已通过第二账号签名并合并返回 7 台云机，其中 `secondary` 账号返回 `ACP64G6PQMBV7UBO`、`ACP65M786YA3ML9J` 两台。验证：`npx vitest run src/test/vmos-client.test.ts` passed（7 tests）；`npx tsc --noEmit` passed；当前本地未发现 Automatic-script daemon 进程在运行，下次 `npm start` 会直接加载新配置。
-- 2026-05-29 小红书（RedNote）发布与养号接入：新增 `rednote` 平台，包名 `com.xingin.xhs`，通过标准分享入口 `com.xingin.xhs/.routers.RouterPageActivity` 发布；纯文字会自动生成小红书风格 AI 工作流卡片再发布。新增 `npm run skill:rednote-warmup`，并在 Telegram 云机详情、人工/定时/自定义发布平台选择中加入小红书。实机 `ACP65M786YA3ML9J` 已完成一条正常 AI 工作流内容发布，当前小红书笔记详情可见卡片标题「AI 工作流观察」和正文开头「最近看到不少关于 AI Agent 的讨论」。养号实机验证：`mode=browse,browseCount=3` 完成浏览 3；`mode=like,browseCount=3,maxLikes=1` 完成浏览 3、点赞 1。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-client.test.ts src/test/telegram-persona-derive.test.ts` passed（24 tests）。
+- 2026-05-31 TikTok/TK 发布阻断根因确认：`ACP64G6PQMBV7UBO` 与同 secondary 账号的 `ACP65M786YA3ML9J` 都能 ping 通 `8.8.8.8`，但 `www.google.com` / `www.tiktok.com` 均 `unknown host`；logcat 同时出现 Google、小红书、`api.vsphone.com` 的 `ERR_NAME_NOT_RESOLVED`，说明是 VMOS 底层 DNS 注入故障，不是 TikTok 坐标或视频编码问题。尝试修改 `/data/misc/ethernet/ipconfig.txt`、重启 system-server/智能體手機后仍被 `ro.boot.redroid_net_dns1=192.168.11.10` 恢复；临时 ECS HTTP CONNECT 代理能让 Chrome 不再显示 DNS 错误，但 TikTok 上传链路仍返回 `Something went wrong / Try again later / Retry`，说明 TikTok 上传没有完整走系统代理。已清理智能體手機代理配置并关闭 ECS 临时代理。`tiktok-prepublish-selftest` 新增上传前 DNS 预检、最终页 `Next` 等待加长、`Something went wrong/Retry` 失败页识别、非 TikTok 页面/草稿页防误报；当前 DNS 坏时会在发布前直接返回“TikTok 上传前网络预检失败：当前智能體手機 DNS 无法解析 www.tiktok.com”，避免继续制造草稿。验证：`npx tsc --noEmit` passed；实机预检失败按预期拦截。结论：TK 互动养号闭环已通过；TK 真实发布闭环被 VMOS secondary 账号组 DNS 故障阻断，需要先从 VMOS 控制台/供应商侧修复智能體手機 DNS 或更换网络正常的 TK 智能體手機后再验收发布。
+- 2026-05-29 VMOS 多账号接入：`resolveVmosCredentials()` 现在支持 `vmosAccounts` / `electron/vmos-credentials.local.json.accounts`，`listPads()` 会合并多账号智能體手機列表并缓存 `padCode -> VMOS 账号`，后续 ADB/截图/发布/养号以及 task 查询会按智能體手機或 taskId 自动复用对应凭据；Telegram、队列 runner、publish/warmup skill 均改为传递完整多账号 config。已把本机 `electron/vmos-credentials.local.json` 改为双账号格式并保留旧 `ak/sk` 兼容。用户提供可复制文本版新账号 AK/SK 后，真实 `listPads()` 已通过第二账号签名并合并返回 7 台智能體手機，其中 `secondary` 账号返回 `ACP64G6PQMBV7UBO`、`ACP65M786YA3ML9J` 两台。验证：`npx vitest run src/test/vmos-client.test.ts` passed（7 tests）；`npx tsc --noEmit` passed；当前本地未发现 Automatic-script daemon 进程在运行，下次 `npm start` 会直接加载新配置。
+- 2026-05-29 小红书（RedNote）发布与养号接入：新增 `rednote` 平台，包名 `com.xingin.xhs`，通过标准分享入口 `com.xingin.xhs/.routers.RouterPageActivity` 发布；纯文字会自动生成小红书风格 AI 工作流卡片再发布。新增 `npm run skill:rednote-warmup`，并在 Telegram 智能體手機详情、人工/定时/自定义发布平台选择中加入小红书。实机 `ACP65M786YA3ML9J` 已完成一条正常 AI 工作流内容发布，当前小红书笔记详情可见卡片标题「AI 工作流观察」和正文开头「最近看到不少关于 AI Agent 的讨论」。养号实机验证：`mode=browse,browseCount=3` 完成浏览 3；`mode=like,browseCount=3,maxLikes=1` 完成浏览 3、点赞 1。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-client.test.ts src/test/telegram-persona-derive.test.ts` passed（24 tests）。
 - 2026-05-29 小红书（RedNote）全链路验收推进完成：`publishRednote()` 已按媒体类型区分图片/视频 MIME 和 MediaStore 查询，视频发布走 `video/mp4` 分享入口；短轮次养号最后两条会强制补齐未完成的点赞/评论目标，避免风险托管概率压低导致验收随机跳过。实机 `ACP65M786YA3ML9J` 验收：图片推文发布返回 `ok=true,state=warning` 后，个人页笔记详情截图 `.runtime-rednote-open-tile-260-850.jpg` 可见本轮图片素材「AI 工作流观察 / 先整理资料 / 再交给工具 / 最后人工判断」；视频推文发布返回 `ok=true,state=warning` 后，个人页笔记详情截图 `.runtime-rednote-open-tile-800-850.jpg` 可见本轮视频首帧「AI 工作流笔记 / 把重复步骤交给工具 / 把判断留给自己」；评论养号实机 `mode=comment,browseCount=3,maxComments=1,strictCompletion=true,riskManaged=false` 返回浏览 3、评论 1，评论内容「这种方法挺有参考价值」。当前小红书文字、图片、视频发布以及 browse/like/comment 养号均已达到实机验收通过；VMOS 截图接口在小红书个人页/React 页面仍会出现下半屏灰块，但可通过点开笔记详情取得上半屏有效证据。验证：`npx tsc --noEmit` passed。
 - 2026-05-29 小红书长压测暂停：按“不污染账号”的要求新增 `scripts/skills/rednote-stress-test.ts` 与 `npm run skill:rednote-stress-test`，支持 `@payload.json`、按 `modes` 选择 text/image/video、发布后打开详情并尝试 Delete/Confirm 清理。实际在 `ACP65M786YA3ML9J` 上做多轮 text-only 清理闸门验证：文字发布均能提交并打开详情，但自动删除阶段多次未能稳定定位 Delete，因此未放开图片/视频/多轮长压测。为避免污染账号，已停止长跑，并手动删除本轮和前面验证产生的 4 条空标题 AI 工作流测试卡；最终个人页 UI XML 可见笔记均为有标题正式内容（如《山海浮界传奇》、跨越山海、康康我的小红书新头像等），未再看到 `笔记,,来自浮界浪王` 空标题测试卡。验证：`npx tsc --noEmit` passed。结论：发布/养号功能通过；“自动发布后自动删除再长时间压测”未通过，不能无人值守长跑。
-- 2026-05-28 金君雅 2.0 Threads 图文发布重新验收：用户指出前一次“主页 diff=24.0”不等于真实发布证据。确认 `ATP64K6RON7LCGMR` 当前 Threads 账号为金君雅 `gy.zzzzz`，并用本地程序发出唯一测试图 `JINJUNYA 20260528031628 Threads verify`；当前云机个人主页截图 `.runtime/automatic-script/manual-evidence/threads-atp-after-timeout-1779938746573.jpg` 明确显示该图片位于金君雅主页顶部，说明动作真实发布成功。同步收紧 Threads 校验：主页 diff/影音页 diff/文字快验 diff 不再返回 `verified`，只作为过程信号；图片发布在主页深度复查中优先用本地参考图匹配命中，避免等 AI 或把普通页面刷新误报成功。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（75 tests）。本轮仍未部署/未触碰 ECS。
+- 2026-05-28 金君雅 2.0 Threads 图文发布重新验收：用户指出前一次“主页 diff=24.0”不等于真实发布证据。确认 `ATP64K6RON7LCGMR` 当前 Threads 账号为金君雅 `gy.zzzzz`，并用本地程序发出唯一测试图 `JINJUNYA 20260528031628 Threads verify`；当前智能體手機个人主页截图 `.runtime/automatic-script/manual-evidence/threads-atp-after-timeout-1779938746573.jpg` 明确显示该图片位于金君雅主页顶部，说明动作真实发布成功。同步收紧 Threads 校验：主页 diff/影音页 diff/文字快验 diff 不再返回 `verified`，只作为过程信号；图片发布在主页深度复查中优先用本地参考图匹配命中，避免等 AI 或把普通页面刷新误报成功。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（75 tests）。本轮仍未部署/未触碰 ECS。
 - 2026-05-28 ECS 已部署金君雅/Threads 严格验收修复：同步 `src/lib/vmos-publisher.ts`、`scripts/skills/instagram-publish-selftest.ts`、`src/test/vmos-publisher-instagram.test.ts` 到 `47.250.188.76:/opt/Automatic-script`，未上传本地截图和 `.runtime`，未覆盖远端 `.env`/队列数据库。远端 `npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts --testTimeout=20000` passed（75 tests）；Instagram 测试在合并跑中 passed（11 tests）。已重启 `auto-tweet.service`，服务 `enabled/active`，PID `106572`，`127.0.0.1:8788` 监听，Telegram `Polling started`，webhook POST `/telegram/webhook/auto-script-webhook-secret` 返回 `200 ok`。
 - 2026-05-28 OP-TEST1 Instagram 验收进度：ECS 上 `ACP250322677KIRJ` 纯文字卡片发布通过，返回 `verified`（最新贴文详情图片匹配 `diff=0.0`）；图片发布通过，返回 `verified`（最新贴文详情图片匹配 `diff=0.0`）。视频发布未验收通过：首次卡在他人主页，修复 `ensureInstagramHomeForPublish()`；随后发现 Reel 相机最近相册入口坐标错误，改为 `76,1430`；随后发现音乐抽屉被误判为已发布 Reel，已排除音乐抽屉；随后发现草稿弹窗反复点到“继续编辑”，改为点底部“开始建立新影片”。远端 `npx tsc --noEmit` 和 `src/test/vmos-publisher-instagram.test.ts` 通过，daemon 已重启到 PID `111796`，webhook 返回 `200 ok`。但最后一次 OP-TEST1 小视频实测仍偏到 Reels 留言输入框，已停止进程并退出输入框；video 不能标记通过，后续需继续修 OP-TEST1 Reel 分享/详情验收路径。
 - 2026-05-27 Instagram OP-TEST2 严格验收通过：修复 Reel 详情/流程本地检测在 Node `browser-shim` canvas 下读像素全零的问题，改用项目已有 `getImagePixelData()`/sharp 原始像素采样；ACP 视频发布不再把 Reels 网格/数量变化直接作为 `verified`，只把它当同步等待，最终必须打开已发布 Reel 详情页并命中本地详情页检测才算成功。实机 `ACP250430WZA6JZL` 复测：视频发布 `verified`（`已打開已發布 Reel 詳情頁`），反馈截图 `.runtime-instagram-video-verified-detail.jpg` 显示 `Your reels` 详情页、账号 `gazelle.8317431`、右侧互动列、视频画面和文案 `Instagram 自动化中文验收 video ...`；文字发布 `verified`（最新贴文详情图片匹配 `diff=0.0`）；图片发布 `verified`（最新贴文详情图片匹配 `diff=0.0`）。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-instagram.test.ts` passed（11 tests）。
 - 2026-05-27 ECS 已部署严格 Instagram 验收修复：同步 `src/lib/vmos-publisher.ts`、`scripts/skills/instagram-publish-selftest.ts`、`src/test/vmos-publisher-instagram.test.ts` 到 `/opt/Automatic-script`，保留 `.runtime`/`.env`/队列数据库；远端 `npx tsc --noEmit` passed，`npx vitest run src/test/vmos-publisher-instagram.test.ts` passed（11 tests）；`systemctl restart auto-tweet.service` 后服务 `enabled/active`，`127.0.0.1:8788` 监听，heartbeat `pid=6481,state=running,telegramBot=configured`。
-- 2026-05-27 Instagram 视频验收进一步收紧：去掉“首页视频形态本地判定”这条弱通过路径，视频发布在 Reels 变更校验失败后，会强制多轮重试打开“已发布 Reel 详情页”并仅在详情页命中时返回 verified；否则继续 warning，不再把 Home/Location/Suggested 这类截图当成功证据。新增 `captureInstagramLatestReelDetailScreenshotWithRetries()` 并接入 `verifyInstagramPublish()`。本地验证：`npx tsc --noEmit` passed，`npx vitest run src/test/vmos-publisher-instagram.test.ts` passed（11 tests）。ECS 同步代码并重启服务后，`instagram-publish-selftest` 首轮已确认 text 模式真实通过（最新贴文 diff=0.0）；后续 image/video 复测阶段遇到 SSH 连接超时/重置（`Connection timed out during banner exchange`），当前阻塞在云机连通性而非代码执行逻辑。
+- 2026-05-27 Instagram 视频验收进一步收紧：去掉“首页视频形态本地判定”这条弱通过路径，视频发布在 Reels 变更校验失败后，会强制多轮重试打开“已发布 Reel 详情页”并仅在详情页命中时返回 verified；否则继续 warning，不再把 Home/Location/Suggested 这类截图当成功证据。新增 `captureInstagramLatestReelDetailScreenshotWithRetries()` 并接入 `verifyInstagramPublish()`。本地验证：`npx tsc --noEmit` passed，`npx vitest run src/test/vmos-publisher-instagram.test.ts` passed（11 tests）。ECS 同步代码并重启服务后，`instagram-publish-selftest` 首轮已确认 text 模式真实通过（最新贴文 diff=0.0）；后续 image/video 复测阶段遇到 SSH 连接超时/重置（`Connection timed out during banner exchange`），当前阻塞在智能體手機连通性而非代码执行逻辑。
 - 2026-05-27 Instagram OP-TEST2 视频验收纠偏：用户指出此前“成功截图”实际是 Location/Home/Suggested/Drafts 等非真实贴文内容，确认原校验存在误判。已收紧 Instagram 视频发布验收：Reels/主页 diff、首页截图、成功横幅、AI 泛化判断均不能作为视频 verified；视频必须拿到已发布 Reel/视频详情截图，否则返回失败/待人工确认。同步修复 ACP 个人页/Reels 导航坐标使用 ADB override 坐标、英文 Reels 草稿弹窗 Start new video、Reel 相机最近视频入口、选片后 unknown 只补一次 Next，以及 Reels 分享页 caption/share 的 OP-TEST2 override 坐标。ECS 已部署并重启到 PID 188551；`npx tsc --noEmit` 与 `npx vitest run src/test/vmos-publisher-instagram.test.ts` 本地/ECS通过。真实视频联机仍未验收通过：最近一次 `instagram-video-real-evidence-9` 只能证明进入提交流程后主頁变化，Reels 本机校验三轮均未命中（gridDiff≈0.4/3.7, countDiff=0），因此已切断该主页变化兜底，不再把它报成功。
 - 2026-05-27 Threads 视频发布校验收敛：`verifyThreadsPublish()` 在“影音页本地 diff 未命中”时，新增“主页面本地 diff”兜底复查（仍不启用 Gemini 兜底），降低视频实发成功却落 `warning` 的概率。实机 OP-TEST1 / `ACP250322677KIRJ` 直测通过：文字发布 `verified`（主頁已出現目標線索）；图片发布 `verified`（主頁 diff=67.7）；视频发布 `verified`（影音頁 diff=109.7）。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（75 tests）。
 - 2026-05-27 自定义发布入口重构：平台确认后的第一个按钮改为“图/视频/文字推文直发”，支持纯文字、图片+文字、视频+文字，并支持先发文字再补图/视频或先发媒体再补文字；纯文字先输入后会出现“直接发布文字”确认按钮，避免误阻断用户补媒体。第二个按钮改为“根据文字内容生成图片再发布”，只接收纯文字内容，并把用户文字传入 `generatePersonaImageForArchive()` 作为本次配图 prompt，同时继续沿用人设自身的 workflow/闭源模型生图路由。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts src/test/persona-archives.test.ts` passed（36 tests）；`npm test` passed（22 files，194 tests）；daemon 已重启到 PID 30240。
-- 2026-05-27 金君雅 2.0 Threads 图文发布失败根因确认：`ATP64K6RON7LCGMR` 不在原 ACP 媒体系统分享白名单，仍走应用内图库入口；样本 `threads-image-open-gallery-unexpected-1779836030591` 显示停在键盘打开的 `compose_editor`，未进入 `gallery_picker`。已将 Threads 图片/视频发布改为所有云机统一走 Android 系统分享入口，保留 `isAcpPad()` 仅用于 ACP 专用坐标/养号逻辑，并补测试覆盖 ACP/ATP/APP/未知 pad 的图片与视频路由。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（75 tests）；`npm test` passed（22 files，194 tests）；daemon 已重启到 PID 69320。
+- 2026-05-27 金君雅 2.0 Threads 图文发布失败根因确认：`ATP64K6RON7LCGMR` 不在原 ACP 媒体系统分享白名单，仍走应用内图库入口；样本 `threads-image-open-gallery-unexpected-1779836030591` 显示停在键盘打开的 `compose_editor`，未进入 `gallery_picker`。已将 Threads 图片/视频发布改为所有智能體手機统一走 Android 系统分享入口，保留 `isAcpPad()` 仅用于 ACP 专用坐标/养号逻辑，并补测试覆盖 ACP/ATP/APP/未知 pad 的图片与视频路由。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（75 tests）；`npm test` passed（22 files，194 tests）；daemon 已重启到 PID 69320。
 - 2026-05-27 新增 Instagram 自动养号主链路：`src/lib/vmos-publisher.ts` 增加 `warmupInstagramAccount()`，复用现有风险托管/时长驱动参数，落地 Instagram 点赞与留言执行（本地 UI XML 定位 like/comment/input/send、生成留言、证据截图回传），并保持失败跳过与连续失败阈值中止。
-- 2026-05-27 Telegram 云机养号入口升级为双平台：云机详情新增 `Threads 养号` / `INS 养号` 按钮，`warmup_start / warmup_engage / warmup_run` 回调统一携带平台字段，执行阶段按平台分派到 `warmupThreadsAccount` 或 `warmupInstagramAccount`，完成消息与进度展示同步带平台标签。
+- 2026-05-27 Telegram 智能體手機养号入口升级为双平台：智能體手機详情新增 `Threads 养号` / `INS 养号` 按钮，`warmup_start / warmup_engage / warmup_run` 回调统一携带平台字段，执行阶段按平台分派到 `warmupThreadsAccount` 或 `warmupInstagramAccount`，完成消息与进度展示同步带平台标签。
 - 2026-05-27 回归验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-instagram.test.ts src/test/vmos-publisher-threads.test.ts` passed（2 files, 82 tests）。
 - 2026-05-27 Instagram 发布链路收敛：ACP 纯文字发布不再走不稳定 Story 文字入口，自动渲染为文字卡后经 Android 系统分享进入 Instagram Feed；图文和视频也统一优先走 MediaStore `content://` + 系统分享 Feed，避免 Instagram 记忆上次创建模式导致误入 Live/Reels/Story。实机 `ACP250430WZA6JZL` 验收：纯文字文字卡发布通过（首页同图命中）；图文发布通过（最新贴文详情图片匹配 `diff=0.0`）；视频发布通过（个人 Reels/视频页变化 `gridDiff=53.8,countDiff=38.2`）。
 - 2026-05-27 Instagram 养号复测通过：`npm run skill:instagram-warmup -- mode=both browseCount=3 maxLikes=1 maxComments=1` 实机返回浏览 3、点赞 1、留言 1；留言使用干净短句 `这个细节挺自然`，没有大段代码式输出。
@@ -70,7 +70,7 @@
 
 - 2026-05-26 Test2 官方模板实测：`/infos` 里的 `id` 不是官方模板需要的设备编号，真实 `equipmentId` 必须从 `/vcpcloud/api/padApi/userPadList` 读取。Test2 `ACP250430WZA6JZL` 的官方 `equipmentId=4143397`，官方任务能创建但长时间停在待执行/执行中，截图仍在桌面，暂不能视为真实有效发布路径。
 - 2026-05-26 已按要求移除 VMOS 官方模板接入代码：不再调用 `addAutoTask`、`autoTaskList`、`cancelAutoTask`、`userPadList`，Threads 发布直接走内建发布流程，避免官方模板任务卡住或引入不确定分支。
-- Test2 发布链路修复：该云机截图为 720x1600，但 ADB 输入坐标系实际是 `Override size: 720x1280`。已改为优先解析 `wm size` 的 Override 坐标，截图坐标映射到真实 ADB 坐标后再点击；个人页、Post 按钮等底部点位不再按 1600 高度裸点。
+- Test2 发布链路修复：该智能體手機截图为 720x1600，但 ADB 输入坐标系实际是 `Override size: 720x1280`。已改为优先解析 `wm size` 的 Override 坐标，截图坐标映射到真实 ADB 坐标后再点击；个人页、Post 按钮等底部点位不再按 1600 高度裸点。
 - Test2 图文发布实跑通过：修复 ADB Override 坐标后，内建系统分享发布最终返回 `state=verified`，证据为 `Threads 主頁內容已變化，diff=24.9`。
 - 2026-05-26 Test2（新 OP-TEST2 `ACP250430WZA6JZL`，720x1600/360dpi）实测结论：当前还不能判定“发布推文和养号足够稳定”。旧 OP-TEST2 `ACP250801768QX47` 已在 VMOS API 返回 `Instance not found`，新编号通过 `getPadInfo` 确认为 OP-TEST2。
 - 已修复 Test2 启动 Threads 停在 launcher 的根因：Test2 桌面 Threads 图标在 `(276,348)` 附近，旧兜底点优先 `(444,348)` 容易点错；现在 launcher 图标会先基于截图黑色 Threads 图标做本地检测，再退回固定候选点。验证：Test2 Telegram 文字发布通过，`posts 1->0`、`history 0->1`，耗时约 130 秒。
@@ -82,15 +82,15 @@
 - 2026-05-25 继续修复 Threads 发布搜索弹层复现：新样本 `threads-image-composer-controls-missing-1779698626581` 已能识别为 `LOCAL_THREADS_SEARCH_OVERLAY`，但发布前控件确认阶段未执行恢复而直接失败。现在 `assertThreadsComposerReadyForPublish()` 遇到搜索弹层会先尝试返回/清空/返回恢复到新串文编辑页后再继续确认；`recoverThreadsSearchOverlayAfterCaptionInput()` 复用同一恢复逻辑。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（68 tests）。
 - 2026-05-25 修复 Threads 图文发布文案误入搜索框后报“未找到新串文输入/发布控件”：样本 `threads-image-composer-controls-missing-1779697460562` 实际是 Threads 顶部搜索弹层，旧 UI 规则把搜索框当成发帖正文输入框。现在 `findThreadsComposerInputTarget()` 排除搜索框/顶部搜索输入，截图分类新增 `LOCAL_THREADS_SEARCH_OVERLAY`，并在输入文案后若检测到搜索弹层会返回编辑页重新输入文案；该 720x1600 样本已晋升到 `src/test/fixtures/threads-publish-samples`。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（68 tests）。
 - 2026-05-25 收紧人工发布推文选择菜单：当待发布推文只有 1 篇时，不再显示“批量发布”说明和“从第1篇开始批量发布”按钮，只保留“发布推文”单按钮；多篇时仍保留单篇/从第1篇批量发布逻辑。验证：`npx tsc --noEmit` passed。
-- 2026-05-25 Telegram 云机流程失败反馈统一收敛：发布、人工发布、自定义发布、养号、候选点赞/留言在非账号状态类失败时会提示“需要人工介入”，停止继续点击，并优先发送错误 sample/debug 中的截图；若错误没有截图路径，则现场抓取当前云机截图回传，避免只给文字错误。账号验证码/登录/风控提示也会在无 debug 截图时补抓当前云机截图。
+- 2026-05-25 Telegram 智能體手機流程失败反馈统一收敛：发布、人工发布、自定义发布、养号、候选点赞/留言在非账号状态类失败时会提示“需要人工介入”，停止继续点击，并优先发送错误 sample/debug 中的截图；若错误没有截图路径，则现场抓取当前智能體手機截图回传，避免只给文字错误。账号验证码/登录/风控提示也会在无 debug 截图时补抓当前智能體手機截图。
 - 2026-05-24 借鉴 `vmos-edge-skills` 的可靠性策略并落地到 Threads 发布链路：新增 `ThreadsPageSnapshot`、稳定页面等待 `waitForThreadsPageSettled()`、以及 `runThreadsObservedStep()`，把焦点、页面分类、截图和可选 UI XML 作为同一份页面事实使用。
 - `tapAndVerifyThreadsPage()`、`waitForThreadsExpectedPage()`、`tapThreadsComposerPublishButtonUntilSubmitted()` 现在会先等连续稳定快照，再做页面后置条件判断；遇到登录/验证码/风控/系统弹窗这类终止页会立即走账号状态阻断提示，不再把瞬时页面当作普通失败。
 - `confirmThreadsGallerySelection()` 的完成键点击改成“点击动作 + 稳定后置验证”，降低图库页/相机页/媒体查看器之间跳转尚未稳定时误判的概率；发布失败样本 JSON 增加 `snapshot`/`observedStateKey`，方便后续把异常页面沉淀成回归样本。
 - 2026-05-24 修复人工发布失败后的“重试”按钮：确认发布和失败重试现在优先携带 archive/platform/start/count 的自解释 callback；UUID 人设 ID 会压缩成 Telegram 64 字节以内的紧凑格式，避免 daemon 重启或临时状态丢失后误回“当前没有可人工发布的推文”。
 - 旧的 `mconfirm` 短回调如果状态已经丢失，会提示“这条重试按钮的临时发布状态已失效，请从推文列表重新选择要发布的编号”，不再误导为推文库为空。
-- 2026-05-24 优化 Threads 带图/视频发布耗时：媒体写入云机现在进入发布流程后立即后台启动，同时前台继续启动 Threads、获取发布前基线并打开新串文；只有到打开图库/分享前才等待媒体写入完成，减少“写入图片到云机”阶段的纯等待时间。
+- 2026-05-24 优化 Threads 带图/视频发布耗时：媒体写入智能體手機现在进入发布流程后立即后台启动，同时前台继续启动 Threads、获取发布前基线并打开新串文；只有到打开图库/分享前才等待媒体写入完成，减少“写入图片到智能體手機”阶段的纯等待时间。
 - 后台媒体写入使用受控 promise 包装，提前失败不会产生未捕获异常，会在真正需要选图/分享时统一抛出并走原有发布失败样本链路。
-- 2026-05-24 固定控制面板底部新增 `🛑 强制中止当前任务`；点击后会清理当前 chat 的发布/云机操作锁，标记运行中的 pad operation 为取消，释放 pad lock，并尝试在云机上 force-stop Threads/Instagram/Twitter 后返回桌面。
+- 2026-05-24 固定控制面板底部新增 `🛑 强制中止当前任务`；点击后会清理当前 chat 的发布/智能體手機操作锁，标记运行中的 pad operation 为取消，释放 pad lock，并尝试在智能體手機上 force-stop Threads/Instagram/Twitter 后返回桌面。
 - 发布、人工发布、自定义发布、养号、候选互动、登录流程在关键进度点会检查取消标记；用户中止后不再继续回成功消息，而是返回“已中止”提示。队列中 `publishing` 且属于当前 chat 的任务会标记为 failed，原因记录为“用户强制中止当前任务”。
 - 2026-05-24 修复固定面板未显示强制中止按钮：Telegram reply keyboard 不能通过 `editMessageText` 刷新，`sendMainMenu()` 现在改为发送一条新的带 keyboard 消息并更新控制面板消息缓存。
 - 2026-05-24 再次修复固定面板刷新：强制中止按钮保持独立第三行；`/start`、`/menu`、`主菜单` 文本现在会在通用消息处理里直接重新下发固定键盘，并打印 `[telegram][main_menu_send]` 日志用于确认。
@@ -104,8 +104,8 @@
 - 2026-05-24 APP6476L6A25SQ4W 四次实跑已完成选图并回到新串文页，但 `confirmThreadsGallerySelection()` 先找图库蓝点，误把已插入图片内的蓝色元素当作仍在图库，继续点右上角导致保存草稿弹窗；已改为点完成后先分类页面，若已是 `compose_editor` 立即返回。
 - 2026-05-24 APP6476L6A25SQ4W 五次实跑已到文案输入和发布前，失败因发布按钮兜底坐标仍按 720x1280 旧屏幕点 `(634,1120)`，实际 720x1600 按钮在右下约 `(640,1535)`；已改为按当前屏幕宽高比例点击右下角发布按钮。
 - 2026-05-24 APP6476L6A25SQ4W 实跑确认图片推文实际已发布到个人主页，但发布后验证把个人主页的“回复”标签误判成 `LOCAL_REPLY_COMPOSER`；已收紧个人主页/回复页本地检测，并在发布按钮重试结束前做最终重查，避免“成功后误报失败”。
-- 2026-05-24 APP6476L6A25SQ4W 复测第二次在点击发布后进入 Threads `ChallengeActivity` 真人/账号诚信验证页；已把该焦点提前归类为 `LOCAL_THREADS_CHALLENGE_ACTIVITY`，不再误报成手机号验证。当前云机需要人工处理账号验证后才能继续完整复测。
-- 2026-05-24 收紧 Threads 按键分辨率适配：新增 `scalePointFromReferenceScreen()` 和 ADB 基准点点击 helper，图文发布路径里的图库入口、图库缩略图兜底、完成键、输入框、发布按钮、养号返回首页兜底不再直接使用 720x1600 固定点，而是按当前云机 `wm size`/截图尺寸缩放。视觉定位返回的截图坐标也改为通过截图尺寸映射到屏幕后点击。
+- 2026-05-24 APP6476L6A25SQ4W 复测第二次在点击发布后进入 Threads `ChallengeActivity` 真人/账号诚信验证页；已把该焦点提前归类为 `LOCAL_THREADS_CHALLENGE_ACTIVITY`，不再误报成手机号验证。当前智能體手機需要人工处理账号验证后才能继续完整复测。
+- 2026-05-24 收紧 Threads 按键分辨率适配：新增 `scalePointFromReferenceScreen()` 和 ADB 基准点点击 helper，图文发布路径里的图库入口、图库缩略图兜底、完成键、输入框、发布按钮、养号返回首页兜底不再直接使用 720x1600 固定点，而是按当前智能體手機 `wm size`/截图尺寸缩放。视觉定位返回的截图坐标也改为通过截图尺寸映射到屏幕后点击。
 - 2026-05-24 修复 Threads 图文发布成功后误报失败：样本 `threads-image-publish-button-no-effect-1779629829269` 中诊断截图已在个人主页看到新帖，但状态记录仍是编辑页；根因是 Threads 发布落地慢于最后 1.6 秒重查。发布按钮重试结束后现在最多额外轮询 18 秒，离开编辑页或出现成功提示即进入正常发布结果校验。
 - 2026-05-24 再次修复发布成功后误报失败：样本 `threads-image-publish-top-level-failure-1779631911794` 的顶层失败截图已在个人主页，但 `verifyThreadsPublish()` catch 层把旧的 `__THREADS_STILL_COMPOSING__` 直接转成失败。现在该 catch 层会重新读取当前页面；如果已离开编辑页且仍在 Threads，会返回发布完成，并优先尝试主页深度复查。
 - 2026-05-24 审查发布后校验兜底：如果只是确认“已离开编辑页/仍在 Threads”，但主页深度复查没有命中目标内容，现在返回 `warning/待人工确认`，不再报红叉失败，也不再虚标“已校验成功”。只有成功 toast、主页内容/图片命中等强证据才返回 `verified`。
@@ -122,18 +122,18 @@
 - 2026-05-25 修复 Threads 图库多选残留导致人设推文一次选中多张图：`clearThreadsGallerySelection()` 现在使用截图坐标映射清理蓝色选中标记，并在 badge 点击无效时点击缩略图主体；清理后若仍有旧选取会直接停止并保存样本，不再继续选择/确认。图文路径确认前强制要求图库选中数为 1，否则清理重选，仍不为 1 则报明确错误。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（56 tests）。
 - 2026-05-25 修复 Threads 图库完成键阶段卡住：`confirmThreadsGallerySelection()` 现在给完成键点击和页面稳定验证加 9 秒硬超时；仍停在图库且没有有效选中标记时不再当作成功继续，而是有限重试后保存 `gallery-confirm-stuck` 样本并失败返回。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（56 tests）。
 - 2026-05-25 修复发布后个人主页校验误报：样本 `threads-debug-1-1779644347174.jpg` 实际是已进入 Threads 空个人主页，但本地 profile 识别漏掉“你尚未发布任何串文”的空主页形态，导致误报“未能进入 Threads 个人主页”。已补充空个人主页像素规则，并用回归测试防止把全屏回复编辑页误判为主页。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（57 tests）。
-- 2026-05-25 优化媒体写入复用：Threads/Instagram/Twitter 媒体 staging 不再使用 `Date.now()` 生成一次性文件名，改为基于媒体内容 hash 的稳定路径；`stageMediaOnDevice()` 写入成功后记录 `.runtime/automatic-script/device-media-staging-cache.json`，重试同一媒体时先检查云机文件和 MediaStore 索引，命中则直接复用并跳过重复写入/分段上传。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（57 tests）。
-- 2026-05-25 继续修复媒体复用未命中：如果上一次上传发生在缓存写入前失败，`.runtime/.../device-media-staging-cache.json` 不存在会导致仍重复上传。现在 `stageMediaOnDevice()` 即使没有 cache，也会检查本次媒体 hash 对应的稳定云机路径是否已存在且已被 MediaStore 索引，存在就补写 cache 并复用。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（57 tests）。
-- 2026-05-25 修正媒体上传与云机操作并发落点：图文/视频发布不再在“打开图库”前等待后台媒体写入完成；云机会先进入 Threads 发帖页并打开图库，清理旧选取后停留在图库内等待媒体写入/索引完成，再选择本次媒体，避免大图上传时云机停在首页空等。
+- 2026-05-25 优化媒体写入复用：Threads/Instagram/Twitter 媒体 staging 不再使用 `Date.now()` 生成一次性文件名，改为基于媒体内容 hash 的稳定路径；`stageMediaOnDevice()` 写入成功后记录 `.runtime/automatic-script/device-media-staging-cache.json`，重试同一媒体时先检查智能體手機文件和 MediaStore 索引，命中则直接复用并跳过重复写入/分段上传。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（57 tests）。
+- 2026-05-25 继续修复媒体复用未命中：如果上一次上传发生在缓存写入前失败，`.runtime/.../device-media-staging-cache.json` 不存在会导致仍重复上传。现在 `stageMediaOnDevice()` 即使没有 cache，也会检查本次媒体 hash 对应的稳定智能體手機路径是否已存在且已被 MediaStore 索引，存在就补写 cache 并复用。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（57 tests）。
+- 2026-05-25 修正媒体上传与智能體手機操作并发落点：图文/视频发布不再在“打开图库”前等待后台媒体写入完成；智能體手機会先进入 Threads 发帖页并打开图库，清理旧选取后停留在图库内等待媒体写入/索引完成，再选择本次媒体，避免大图上传时智能體手機停在首页空等。
 - 2026-05-25 优化发布执行速度：VMOS `waitTask()` 不再先固定睡一轮才查询任务结果，短 ADB 命令可立即返回；媒体 data URL 写入默认快速块从容易触发失败的约 48KB 命令改为更稳的 10KB 图片块/16KB 视频块，并收紧轮询间隔，避免大多数图片落入 50+ 次小块 fallback。
 - 2026-05-25 修复发布停在“切回首页准备发布”无反馈：图文/视频发布的回首页恢复现在走 `ensureThreadsHomeFeedForPublishBounded()`，35 秒未确认首页会输出一次“仍在等待”的进度，并保存 `home-feed-restore-timeout` 样本后明确失败，不再让 Telegram 状态长期停在同一步。
-- 2026-05-25 修复强制中止后的旧发布流程继续碰云机：`publishPost()`/Threads 发布路径新增协作式取消 token，回首页 bounded 恢复不再用 `Promise.race` 遗留后台操作；daemon 队列发布会在进度点检查 DB 任务状态，Telegram 强制中止将任务置为 failed 后由执行器退出并释放锁，避免旧流程释放锁后与新任务并发操作同一台云机。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/telegram-persona-derive.test.ts src/test/publish-scheduler-recovery.test.ts` passed（76 tests）。
+- 2026-05-25 修复强制中止后的旧发布流程继续碰智能體手機：`publishPost()`/Threads 发布路径新增协作式取消 token，回首页 bounded 恢复不再用 `Promise.race` 遗留后台操作；daemon 队列发布会在进度点检查 DB 任务状态，Telegram 强制中止将任务置为 failed 后由执行器退出并释放锁，避免旧流程释放锁后与新任务并发操作同一台智能體手機。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/telegram-persona-derive.test.ts src/test/publish-scheduler-recovery.test.ts` passed（76 tests）。
 - 2026-05-24 移除养号每日预算硬阻断：预算用完不再返回 `allowed:false` 或“已暂停该账号自动操作”，改为提示“不建议继续频繁操作”，但用户手动发起时仍按低风险配置继续执行。
 - 2026-05-24 补充 Threads 账号申诉/审查页快速识别：`已提出申诉`、`资料审查`、`账号不会对其他 Threads 用户显示`、`无法使用该账号`、`社群守则` 等会被本地 UI/XML 和发布视觉解析判定为账号阻断，不再当 unknown 页反复返回/重启。
-- 带图/视频发布在开始后台上传媒体前会先做一次当前画面阻断预检；如果云机已经停在申诉/审查/验证码/登录页，会直接返回账号状态提示，不再先上传图片或操作半天。
-- 2026-05-24 修复云机账号状态提示：Telegram 层新增统一 `formatCloudAccountStateNotice()`/发送逻辑，能把 Threads 手机号验证、真人验证码/安全验证、未登录/需重新登录从普通任务失败中分离出来。
-- 养号、养号候选点赞/留言、人工发布、存储推文发布、自定义发布、云机账号查询现在遇到上述状态时会提示“账号状态需要处理”，并尽量附带当前状态截图；不再直接回“养号失败/发布失败/未识别到账号”误导用户。
-- 云机账号批量查询中，相关云机会显示 `需要手机号验证`、`验证码/真人验证页`、`未登录/需重新登录` 等短状态，避免把验证码页当作识别失败。
+- 带图/视频发布在开始后台上传媒体前会先做一次当前画面阻断预检；如果智能體手機已经停在申诉/审查/验证码/登录页，会直接返回账号状态提示，不再先上传图片或操作半天。
+- 2026-05-24 修复智能體手機账号状态提示：Telegram 层新增统一 `formatCloudAccountStateNotice()`/发送逻辑，能把 Threads 手机号验证、真人验证码/安全验证、未登录/需重新登录从普通任务失败中分离出来。
+- 养号、养号候选点赞/留言、人工发布、存储推文发布、自定义发布、智能體手機账号查询现在遇到上述状态时会提示“账号状态需要处理”，并尽量附带当前状态截图；不再直接回“养号失败/发布失败/未识别到账号”误导用户。
+- 智能體手機账号批量查询中，相关智能體手機会显示 `需要手机号验证`、`验证码/真人验证页`、`未登录/需重新登录` 等短状态，避免把验证码页当作识别失败。
 - 2026-05-24 修复 Threads 发布尾段误报：图文、纯文字、分享入口三条路径不再“点一次发布后仍在编辑页就失败”，统一改为最多 4 轮重新定位发布按钮并等待离开编辑页/出现成功提示；最终失败也只返回 sample/debug 路径，不再把超长 screenshot data URL 拼到 Telegram 错误里。
 
 - 2026-05-24 新增“人设详情 -> 新建推文 -> 自定义新建（文字/图片/视频）”：用户可发送纯文字，或发送图片/视频后补文案，系统会写入该人设 `archive.posts`，媒体 URL 复用现有 `imageUrl` 字段以兼容发布链路。
@@ -147,8 +147,8 @@
 - 最新证据文件：点赞 `.runtime/automatic-script/warmup-evidence/1779603766772-ACP250322677KIRJ-like-1.jpg`；留言 `.runtime/automatic-script/warmup-evidence/1779603769215-ACP250322677KIRJ-comment-1.jpg`，留言图可见已发布回复和发送前草稿。
 
 - 2026-05-22 修复闭源图片 data URL 过大问题：确认正式发布层虽调用 `compressImage()`，但 `src/lib/image-compress.ts` 仍是 Node stub，导致闭源 `data:image/png` 原样进入 VMOS 分段上传。
-- 已把 `compressImage()` 改为基于 `sharp` 的 Node 真实压缩，发布层统一把图片 data URL 压到约 96KB 目标、最大边 960，再写入云机，避免 2MB+ data URL 被拆成上千段。
-- 继续扩展到工作流大图：RunningHub/ComfyUI 工作流通常返回远程 URL，正式发布层现在会对远程图片先探测 `Content-Length`，超过 256KB 时下载并压缩成约 96KB JPEG 再写入云机；小图、视频和探测失败的 URL 保持原直传路径。
+- 已把 `compressImage()` 改为基于 `sharp` 的 Node 真实压缩，发布层统一把图片 data URL 压到约 96KB 目标、最大边 960，再写入智能體手機，避免 2MB+ data URL 被拆成上千段。
+- 继续扩展到工作流大图：RunningHub/ComfyUI 工作流通常返回远程 URL，正式发布层现在会对远程图片先探测 `Content-Length`，超过 256KB 时下载并压缩成约 96KB JPEG 再写入智能體手機；小图、视频和探测失败的 URL 保持原直传路径。
 - 用上一轮实际闭源场景图验证：原始 1,953,612 bytes / data URL 2,604,838 chars，压缩后 JPEG 91,820 bytes / data URL 122,451 chars，预计 VMOS 写入批次从上千级降到约 20 次。
 - 2026-05-22 复测 `gemini-3.1-pro-preview`：裸 API 最小请求 `maxOutputTokens=128/512` 均成功；`maxOutputTokens=32` 会被 thinking token 吃满并返回 `MAX_TOKENS` 空正文。项目正式推文生成使用 `Math.max(4096, count * 1200)`，不受该问题影响。
 - 已为文本理解模型调用增加统一回撤路径：`gemini-3.1-pro-preview` -> `gemini-3-pro-preview` -> `gemini-3-flash-preview`。当前接入推文生成和人设记忆摘要；429/503/上游饱和/模型无渠道/空正文/MAX_TOKENS 都会尝试下一档。
@@ -201,7 +201,7 @@
 - `persona-memory.ts` 兼容模块已恢复，按 `persona_memory_<personaId>` 存储，保证记忆写入失败时不会提前移除待发布推文。
 - 工作流人设配图恢复 `shouldUseWorkflowPersonaImage` 路由判断，不再无条件覆盖场景/POV 图片路径。
 - 新增 `scripts/install-systemd-service.sh`，在 Linux 服务器上安装并启用 `auto-tweet.service`，服务使用 `Restart=always`，开机后随 `multi-user.target` 自动启动。
-- daemon 启动时会恢复发布队列：中断在 `publishing` 的任务会释放云机锁并重新排入 `pending`；达到最大尝试次数的任务会转为 `failed`；过期 `paused` 任务会重新入队或失败。
+- daemon 启动时会恢复发布队列：中断在 `publishing` 的任务会释放智能體手機锁并重新排入 `pending`；达到最大尝试次数的任务会转为 `failed`；过期 `paused` 任务会重新入队或失败。
 - 发布队列仓库新增 `releaseAllPadLocks()`，避免服务器重启后旧 `pad_locks` 阻塞新任务。
 - Node 后端人设记忆改为持久化到 `.runtime/automatic-script/persona_memory.json`，不再只依赖进程内 Map。
 - 生成推文时会为每篇推文生成 `memorySummary` 并随 archive post 保存，摘要优先走 `gemini-3.1-pro-preview`，失败时退回本地概要，避免生成流程中断。
@@ -392,7 +392,7 @@
 - OP-TEST1 / `ACP250322677KIRJ` Telegram 按键图文发布自测通过：`telegram-image-selftest-optest1-20260521-030012.out.log`，`image ok elapsed=451s posts=1->0 history=0->1`。
 - OP-TEST1 / `ACP250322677KIRJ` Telegram 按键视频发布自测通过：`telegram-video-selftest-optest1-20260521-030838.out.log`，`video ok elapsed=517s posts=1->0 history=0->1`。
 - 已修复两类 OP-TEST1 图文发布误判样本：`threads-image-publish-button-no-effect-1779302956131` 是发布成功 toast 被误判为编辑器；`threads-image-publish-top-level-failure-1779303399916` 是发布后个人主页被误判为仍在编辑器。
-- `node --import tsx` 云机锁检查通过：`ACP250322677KIRJ false`、`ACP250801768QX47 false`。
+- `node --import tsx` 智能體手機锁检查通过：`ACP250322677KIRJ false`、`ACP250801768QX47 false`。
 - 加强发布后校验后，OP-TEST1 / `ACP250322677KIRJ` 图文 TG 按键自测通过：`telegram-image-selftest-optest1-20260521-033342.out.log`，`image ok elapsed=261s posts=1->0 history=0->1`；daemon 最终 step 为 `發布完成 ✓（已校驗：檢測到 Threads 成功提示）`。
 - 加强发布后校验后，OP-TEST1 / `ACP250322677KIRJ` 视频 TG 按键自测通过：`telegram-video-selftest-optest1-20260521-033820.out.log`，`video ok elapsed=241s posts=1->0 history=0->1`；daemon 最终 step 为 `發布完成 ✓（已校驗：檢測到 Threads 成功提示）`。
 - 养号自动留言已统一去除标点符号：AI 回复、截图回复、模板和兜底文案都会经过 `sanitizeWarmupComment()`，只保留文字、数字和空格。
@@ -444,7 +444,7 @@
 - 最新养号修复包括：ACP 动态消息/侧栏硬阻断、宽侧栏检测、ACP 回复证据组合图（发送前回复文本 + 发送后状态）、推荐流兜底评论列修正、回复执行快速路径和 OP-TEST1 发送后证据落盘。
 - 验证通过：`npx tsc --noEmit`、`npx vitest run src/test/vmos-publisher-threads.test.ts`（24 tests）、`git diff --check`（仅既有 CRLF warning）、daemon heartbeat `telegramBot=configured`。
 - 2026-05-22 继续复核：重新运行 `npx tsc --noEmit`、`npx vitest run src/test/vmos-publisher-threads.test.ts`（24 tests）和 `git diff --check` 均通过；本地打开 `.runtime/automatic-script/direct-both-wideguard-comment.jpg` 确认回复证据图同时包含发送前输入和发送后可见回复，打开 `.runtime/automatic-script/direct-both-wideguard-like.jpg` 确认点赞证据图可读。
-- 2026-05-23 Telegram 菜单慢响应排查与修复：确认之前只优化了人设列表，云机/养号入口仍会在 callback 内同步拉 VMOS 云机列表和完整人设档案。新增云机列表持久缓存 `.runtime/automatic-script/pad-list-cache.json`、daemon 启动后台预热云机列表和人设摘要，养号留言人设改为读轻量摘要缓存，避免点击“养号”时扫完整人设 JSON。
+- 2026-05-23 Telegram 菜单慢响应排查与修复：确认之前只优化了人设列表，智能體手機/养号入口仍会在 callback 内同步拉 VMOS 智能體手機列表和完整人设档案。新增智能體手機列表持久缓存 `.runtime/automatic-script/pad-list-cache.json`、daemon 启动后台预热智能體手機列表和人设摘要，养号留言人设改为读轻量摘要缓存，避免点击“养号”时扫完整人设 JSON。
 - Telegram 菜单响应新增耗时日志：`menu_edit_slow`、`menu_send_slow`、`status_edit_slow`、`callback_ack_deferred`；发布/养号进度更新加 1.4s 节流，避免大量 editMessageText 堆积影响菜单按钮。
 - 实测 webhook callback：`pad_mgmt` 本地 webhook 约 99-108ms，`pad_detail`/`warmup_start`/`warmup_count` 约 8-9ms；处理侧 `warmup_start` 从之前 10.7s 降到约 2s 级别，剩余主要是 Telegram API/proxy 的 `editMessageText` 延迟（日志中常见 1.4-1.8s，偶发更高）。
 - 2026-05-23 人设生图慢排查：闭源图片路径默认 `gpt-image-2`，代理 `/v1/models` 只暴露 `gpt-image-2` 一个图片模型；闭源场景图实测单次跑满 120s 后超时，之前代码实际给闭源图 300s 超时并继承 `retryCount=2`，最多三次等待，是六七分钟体感的主要来源。已将图片闭源默认改为 120s、1 次尝试，并加 `PERSONA_IMAGE_CLOSED_TIMEOUT_MS` / `PERSONA_IMAGE_MAX_ATTEMPTS` 可配置。
@@ -453,7 +453,7 @@
 - 2026-05-23 生图模型 fallback：确认 `.runtime/automatic-script/api_config.json` 的 `geminiKey` 等于用户提供的 `sk-...YI3g2S`，Gemini 图片调用确实使用这把 key。新增闭源图片 fallback 顺序 `gpt-image-2 -> gemini-3.1-flash-image-preview -> gemini-3-pro-image-preview`，可用 `PERSONA_IMAGE_FALLBACK_MODELS` 覆盖；默认单模型超时收紧到 60s。短超时实测 fallback 三模型顺序正确。去掉 Gemini 请求里的非法 `imageSize` 后，`gemini-3.1-flash-image-preview` 返回 caller does not have permission，`gemini-3-pro-image-preview` 30s 内超时。
 - 因 `gemini-3.1-flash-image-preview` 明确无权限，默认生图 fallback 已移除该模型，当前默认顺序为 `gpt-image-2 -> gemini-3-pro-image-preview`。
 - 2026-05-23 养号低风险提速：未提高互动密度和每日预算，只优化可加速项。新增 `warmupDwellLikeHuman()` 与比例化 ADB swipe：每条帖子停留期间会随机短上滑/短下滑回看，最后再自然推进，避免长期单向滑动。互动识别统一走快速入口，ACP 当前屏默认 9s、普通首页默认 16s，识别超时即跳过本屏继续；留言截图和评论生成等待也收紧，减少无效卡顿。验证：`npx tsc --noEmit` passed，`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（25 tests）。
-- 2026-05-23 修复养号退回云机桌面循环：根因是互动识别超时/点赞恢复/留言失败恢复里直接发 `KEYCODE_BACK`，如果当时已在 Threads 首页根层，Android 会退回 launcher；随后流程又检测 `LOCAL_ANDROID_LAUNCHER` 并重启 Threads，形成“回手机主界面后反复刷”的循环。新增 `warmupSafeBackOrRelaunchThreads()`，恢复前先分类当前页：首页不按返回、桌面直接重启、其他页只按一次返回并再次检查。验证：`npx tsc --noEmit` passed，`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（25 tests）。
+- 2026-05-23 修复养号退回智能體手機桌面循环：根因是互动识别超时/点赞恢复/留言失败恢复里直接发 `KEYCODE_BACK`，如果当时已在 Threads 首页根层，Android 会退回 launcher；随后流程又检测 `LOCAL_ANDROID_LAUNCHER` 并重启 Threads，形成“回手机主界面后反复刷”的循环。新增 `warmupSafeBackOrRelaunchThreads()`，恢复前先分类当前页：首页不按返回、桌面直接重启、其他页只按一次返回并再次检查。验证：`npx tsc --noEmit` passed，`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（25 tests）。
 - 2026-05-23 OP-TEST2 / `ACP250801768QX47` 养号实测：新增 ACP 侧栏分层恢复 `warmupDismissAcpSideDrawerAndCapture()`（点外侧、Back、重拉 Threads）并将 ACP 互动识别超时放宽到 12s；连续两次 ACP 互动按钮定位失败后停止本轮互动尝试，仅继续浏览，避免反复等待超时。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（25 tests）。
 - OP-TEST2 后端实测：点赞链路通过，约 44s 完成 `browsed=2 liked=1 commented=0 done=1`，无桌面循环/侧栏硬卡；留言-only 首轮 8 条约 226s 无留言，原因是首条正文不可读、后续连续定位超时；加连续失败绕过后复测 8 条约 99s 完成 `browsed=8 commented=0 done=1`，不会死等。
 - OP-TEST2 Telegram 按键实测：daemon 重启后 heartbeat `pid=22740`、`telegramBot=configured`；`telegram-warmup-button-selftest --mode=both --count=8` 实际完成浏览 8 条、点赞 1 个、留言 0 个，elapsed≈136s，无桌面循环或侧栏硬阻断。`--mode=comment --count=12` 被风险托管降频为浏览 3 条且留言预算 0，因此不能验证留言发布。
@@ -461,28 +461,28 @@
 - 2026-05-23 继续修复 OP-TEST2 留言：确认根因链路为“进入详情后底部回复框聚焦不稳 -> 完整回复编辑器被误判为侧栏/个人页 -> 发送兜底点落到 ADB Keyboard 图标 -> 私密主页限制弹层被误报为输入失败 -> 已发布 toast/回复正文可见时仍先被 profile 检测拦截”。已改为：ACP 回复框强制视觉聚焦并重输、完整回复编辑器使用正确发布按钮 y=0.845、私密主页弹层用 UI+像素识别取消跳过、发送后先确认已发布/回复正文再做异常页拦截、上半屏推荐流兜底评论入口恢复尝试且评论 x 调整为 0.36。真实 OP-TEST2 测试已实际发布回复，截图 `.runtime/automatic-script/debug-shots/threads-warmup-acp-comment-postsend-profile-1779514290545.jpg` 和 `.runtime/automatic-script/debug-shots/current-after-final-timeout.jpg` 均可见 `ricky54088twtw3` 的繁中回复正文及 `已发布` 状态；外层验证命令因超时未拿到函数返回，已清理残留测试进程。
 - 2026-05-23 人设推文生成前舆情接入：确认原后端/Telegram 生成路径没有实际网络搜索，只是 `buildSocialPostsPrompt()` 支持 `todayNews` 参数且浏览器侧有未接入的 `news-fetcher`。新增 Node 端 `persona-trend-intel-node.ts`，生成推文前按人设主题、类型和地区抓取 Google News RSS，并把“新闻趋势 / 社媒讨论 / 地区热梗”注入推文 prompt；同日同人设会写入 `.runtime/automatic-script/persona-trend-intel-cache.json` 缓存，避免每次重复慢搜。
 - Node 原生 `fetch/https` 不会自动使用本机 `HTTP_PROXY/HTTPS_PROXY`，真实 smoke 初次只走到本地兜底；已补 HTTP CONNECT 代理抓取路径，Windows 本机 9974 代理可被 daemon 直接使用。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/persona-trend-intel-node.test.ts src/test/drama-prompts.test.ts src/test/persona-generation-memory.test.ts` passed（13 tests）；真实 Node smoke 已抓到台湾超商甜点/美食相关新闻和社媒讨论条目。
-- 2026-05-23 Telegram 主菜单改为输入框旁常驻 Reply Keyboard：`/start` 和返回主菜单现在发送 `reply_markup.keyboard`，包含“我的人设 / 排程状态 / 定时任务 / 云机管理 / 自定义发布 / 主菜单”。这些键盘文本会在消息入口映射回原 callback 流程；二级动态列表继续保留 inline keyboard，因为 Reply Keyboard 只能发送文本，不能携带隐藏 `callback_data`。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；真实本地 webhook `/start` 和“👤 我的人设”文本按钮请求均返回 200。
-- 2026-05-23 Telegram 常驻菜单支持切换页面：主菜单入口不再直接打开消息内 inline 子菜单，而是切换输入框旁 Reply Keyboard 页面。当前支持“我的人设”页（新建/刷新/前 8 个人设/主菜单）、“云机管理”页（刷新/前 10 台云机/主菜单）、“排程状态”页（待发布/失败/定时/重试/主菜单）、“定时任务”页（前 8 个人设/主菜单）。每个 chat 在内存中维护当前键盘文字到 callback 的映射，动态对象仍复用原 callback 业务逻辑。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 👤 我的人设 -> 🏠 主菜单` 均返回 200。
-- 2026-05-23 Telegram 常驻菜单切换去消息化：Telegram Reply Keyboard 没有“静默改键盘”API，按键本身一定会先发一条文本消息；已改为收到切换类按键后立即删除用户按键消息，再发送携带新键盘的临时消息并在 1.2s 后自动删除，最终聊天窗口不保留“云机管理/已切换”痕迹。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 📱 云机管理 -> 🏠 主菜单` 均返回 200。
-- 2026-05-23 修复常驻菜单消失：上一版删除了承载新 Reply Keyboard 的 bot 临时消息，部分 Telegram 客户端会因此同步移除键盘。已改为只删除用户点击产生的文本消息，当前菜单承载消息保留；切换下一页时再删除上一条承载消息，避免聊天记录堆积且保证键盘不消失。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 📱 云机管理 -> 🏠 主菜单` 均返回 200。
-- 2026-05-23 Telegram 菜单策略回调：按用户要求，常驻菜单只保留主入口；点击入口后不撤回用户消息，也不把子菜单切到固定键盘，而是恢复为原来的消息内 inline 子菜单。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 📱 云机管理 -> 👤 我的人设` 均返回 200。
-- 2026-05-23 Telegram 子菜单加速：常驻菜单入口点击后不再把用户文本消息当作可编辑 bot 消息，避免先 `editMessageText` 失败再 `sendMessage` 的额外 Telegram API 往返；人设列表和云机管理子菜单新增 60 秒预渲染 payload 缓存，复用已缓存的人设摘要/云机列表。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 👤 我的人设 -> 👤 我的人设 -> 📱 云机管理 -> 📱 云机管理` 处理耗时约 2-4ms。
+- 2026-05-23 Telegram 主菜单改为输入框旁常驻 Reply Keyboard：`/start` 和返回主菜单现在发送 `reply_markup.keyboard`，包含“我的人设 / 排程状态 / 定时任务 / 智能體手機管理 / 自定义发布 / 主菜单”。这些键盘文本会在消息入口映射回原 callback 流程；二级动态列表继续保留 inline keyboard，因为 Reply Keyboard 只能发送文本，不能携带隐藏 `callback_data`。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；真实本地 webhook `/start` 和“👤 我的人设”文本按钮请求均返回 200。
+- 2026-05-23 Telegram 常驻菜单支持切换页面：主菜单入口不再直接打开消息内 inline 子菜单，而是切换输入框旁 Reply Keyboard 页面。当前支持“我的人设”页（新建/刷新/前 8 个人设/主菜单）、“智能體手機管理”页（刷新/前 10 台智能體手機/主菜单）、“排程状态”页（待发布/失败/定时/重试/主菜单）、“定时任务”页（前 8 个人设/主菜单）。每个 chat 在内存中维护当前键盘文字到 callback 的映射，动态对象仍复用原 callback 业务逻辑。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 👤 我的人设 -> 🏠 主菜单` 均返回 200。
+- 2026-05-23 Telegram 常驻菜单切换去消息化：Telegram Reply Keyboard 没有“静默改键盘”API，按键本身一定会先发一条文本消息；已改为收到切换类按键后立即删除用户按键消息，再发送携带新键盘的临时消息并在 1.2s 后自动删除，最终聊天窗口不保留“智能體手機管理/已切换”痕迹。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 📱 智能體手機管理 -> 🏠 主菜单` 均返回 200。
+- 2026-05-23 修复常驻菜单消失：上一版删除了承载新 Reply Keyboard 的 bot 临时消息，部分 Telegram 客户端会因此同步移除键盘。已改为只删除用户点击产生的文本消息，当前菜单承载消息保留；切换下一页时再删除上一条承载消息，避免聊天记录堆积且保证键盘不消失。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 📱 智能體手機管理 -> 🏠 主菜单` 均返回 200。
+- 2026-05-23 Telegram 菜单策略回调：按用户要求，常驻菜单只保留主入口；点击入口后不撤回用户消息，也不把子菜单切到固定键盘，而是恢复为原来的消息内 inline 子菜单。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 📱 智能體手機管理 -> 👤 我的人设` 均返回 200。
+- 2026-05-23 Telegram 子菜单加速：常驻菜单入口点击后不再把用户文本消息当作可编辑 bot 消息，避免先 `editMessageText` 失败再 `sendMessage` 的额外 Telegram API 往返；人设列表和智能體手機管理子菜单新增 60 秒预渲染 payload 缓存，复用已缓存的人设摘要/智能體手機列表。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；`npx vitest run src/test/persona-generation-memory.test.ts` passed；本地 webhook `/start -> 👤 我的人设 -> 👤 我的人设 -> 📱 智能體手機管理 -> 📱 智能體手機管理` 处理耗时约 2-4ms。
 - 2026-05-23 养号封控软化：按用户要求，历史高风险/手机号验证状态不再写入或执行 `blockedUntil` 硬阻断；已有 `blockedUntil` 只作为提示，不会让 `planRiskManagedWarmupConfig()` 返回 `allowed=false`。ACP 启动后若识别到 `login_required/challenge/system_dialog`，只上报“当前不适合养号但继续尝试”，不再立刻 throw，也不再写入 12 小时暂停。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（26 tests）；`node --import tsx -e "await import('./src/lib/vmos-publisher.ts')"` passed；daemon 已重启。
 - 2026-05-24 继续收紧养号留言：OP-TEST2 当前未出现在 VMOS 实时列表，旧 padCode 返回不可用；改用 OP-TEST1 实机排查。根因集中在 ACP 快速截图识别会把全屏媒体/外链页/过低 action row 当作留言入口，且 `tapScreenshotPointViaAdb()` 30s ADB 等待导致单次失败拖慢。已提前媒体覆盖层识别、增加 Threads 外链 WebView 本地识别、发送成功 toast 本地短路、ACP 留言打开阶段改 quick tap、低位评论点剥离、ACP 留言失败阈值收紧为 2 次、补留言只重试 1 次。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（30 tests）。OP-TEST1 当前推荐流多次落到媒体/外链页，实机未发布留言，但已正确跳过并不再误算成功；仍需在出现普通可回复帖时复测成功发布证据。
 - 2026-05-24 真实留言验证完成：在 OP-TEST1 / `ACP250322677KIRJ` 上直接点普通文字帖评论按钮，输入并发布繁中回复 `這個經驗很有共鳴`，截图证据保存为 `.runtime/automatic-script/debug-shots/manual-reply-after-send-optest1.jpg`，画面显示 `rick_y54088 現在` 的回复已出现在串文热门回复区。基于这次实操，将 ACP 快速 action row 的留言入口改为优先直接点评论图标，不再先点正文，避免正文点击误入媒体/外链。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（30 tests）。
 - 2026-05-24 修复 Test 1 带图推文发布失败：根因不是图片写入失败，而是 Threads 残留新串文/草稿页时，首页恢复逻辑用 Back 退出，导致 App 被退到 Android 桌面，后续误报“未能确认首页推荐流”。新增 `closeThreadsComposerLayer()`，发文页改为点左上关闭并确认丢弃草稿，`ensureThreadsHomeFeed()` 遇到 compose_editor 不再盲按 Back。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（30 tests）；Test 1 / `ACP250322677KIRJ` 真实带图发布脚本 `node --import tsx .runtime\automatic-script\tmp-image-publish-test1.mjs` 返回 `ok: true`，发布完成校验为“檢測到 Threads 成功提示”。
 - 2026-05-24 修复养号留言重复句：`sanitizeWarmupComment()` 现在会折叠连续重复片段，例如 `這個角度很自然` 重复多遍会先压成单句；`finalizeWarmupComment()` 若压缩后仍是泛化句会改用兜底贴合回复。AI 留言 prompt 同步加入“不得重复同一句/同词”的硬约束。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（30 tests），新增覆盖图中重复留言场景。
-- 2026-05-24 Telegram 一级子菜单去返回键：因主菜单已经固定在输入框旁，`我的人设`、`云机管理`、`排程状态`、`定时任务` 这些从固定主菜单直接进入的一级 inline 子菜单不再显示“返回/返回主菜单”按钮；人设详情、云机详情、筛选页等更深层页面仍保留返回上一层。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；daemon 已重启清掉旧菜单缓存。
+- 2026-05-24 Telegram 一级子菜单去返回键：因主菜单已经固定在输入框旁，`我的人设`、`智能體手機管理`、`排程状态`、`定时任务` 这些从固定主菜单直接进入的一级 inline 子菜单不再显示“返回/返回主菜单”按钮；人设详情、智能體手機详情、筛选页等更深层页面仍保留返回上一层。验证：`npx tsc --noEmit` passed；`node --import tsx -e "await import('./src/telegram-bot.ts')"` passed；daemon 已重启清掉旧菜单缓存。
 - 2026-05-24 提高养号回复质量：新增 `isThinWarmupComment()`，拒绝 `這個角度很自然`、`這段分享蠻有共鳴`、`這點我也有感` 这类空泛模板；AI prompt 要求带出原帖具体名词、场景、风险、情绪或判断。兜底回复改为按股票/朋友获利/生活/职场等上下文生成更具体短句，例如 `朋友都賺反而要控部位`、`量能續不續才是重點`。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（30 tests）。
-- 2026-05-24 发布/养号并发能力调整：发布队列 scheduler 改为一次轮询最多并发 3 个不同云机任务，同一 `padCode` 仍通过 `pad_locks` 严格互斥；runner 异常会转为任务失败处理并释放云机锁。Telegram 发布命令锁从“同一 chat 全局互斥”收窄为“同一 chat + 同一云机互斥”，因此 1 号云机养号和 2 号云机发布可并行，不同云机发布也不会被聊天级锁误挡。
+- 2026-05-24 发布/养号并发能力调整：发布队列 scheduler 改为一次轮询最多并发 3 个不同智能體手機任务，同一 `padCode` 仍通过 `pad_locks` 严格互斥；runner 异常会转为任务失败处理并释放智能體手機锁。Telegram 发布命令锁从“同一 chat 全局互斥”收窄为“同一 chat + 同一智能體手機互斥”，因此 1 号智能體手機养号和 2 号智能體手機发布可并行，不同智能體手機发布也不会被聊天级锁误挡。
 - 2026-05-24 审查后修复并发/缓存/误判问题：发布 scheduler 从“批处理并发”改为真正的持续并发槽，`pollOnce()` 只负责启动任务，长任务运行期间下一轮仍可补位和处理 stuck；`waitForIdle()` 仅用于测试/诊断脚本。舆情缓存 `updatedAt` 改为本地日期键，避免 Asia/Shanghai 早晨写入后被 UTC 日期清理；相关单测 mock 舆情抓取，恢复纯本地生成测试。Threads 发布 toast 本地识别改为要求单个居中的深色 toast 条，不再把键盘按键区误判为“已发布”。养号风险状态测试改用 `WARMUP_RISK_STATE_FILE` 临时文件，不再写真实 `.runtime` 风险状态。
 - 2026-05-24 养号真人化滑动/兴趣搜索：养号滑动改为快慢混合、短滑/长滑混合，并在停留期间加入连续小幅上下回看；滑动后会尝试把当前屏对齐到可读的帖子互动栏区域，避免停在两篇推文衔接处。点赞点击改为带小幅随机偏移，且等待滚动 settle 后再点。新增低概率兴趣搜索阅读：从人设描述/兴趣构建关键词，浏览数>=5 时默认 16% 概率先搜索相关内容阅读，再回推荐流继续；搜索 tab/搜索框优先用 UIAutomator XML 定位，固定比例只作兜底。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（42 tests）；Test1 Telegram 自测 `--mode=like --count=5` 通过，约 133s，`browsed=4 liked=1 commented=0`；后端强制 `searchChance=100` 在 Test1 搜索“台股”后完成浏览 5 条，约 171s，无卡死。
 - 2026-05-24 短帖留言放宽：当原帖本身是低信息量短句（清洗后 <=12 字，且不含股票/量能/职场/新闻等信息关键词）时，留言允许 2-8 字自然语气反应，例如 `真的欸`、`哈哈真的`、`也太懂`，不再强制最少 6 字；长帖和信息量高的短帖仍沿用有内容量回复规则。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（43 tests）。
 - 2026-05-24 人设人工发布编号选择：从存储推文发布时，选择平台后不再默认从第 1 篇顺序发布，而是进入编号选择页；每行提供“发第 N 篇”单篇发布和“从 N 起批量”两种入口，超过 8 篇分页显示，发布预览页可返回重新选编号。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts src/test/persona-archives.test.ts` passed（25 tests）；daemon 已重启为 PID 80164。
-- 2026-05-24 图片/视频写入云机加速：data URL 媒体写入改为快速大分片优先，图片默认约 48KB/次、视频默认约 48KB/次，失败自动回退原小分片；写入进度改为首段/尾段/约每 10% 汇报，减少 Telegram 进度刷屏。截图中图片 42 段的场景预期会降到约 6 段。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/image-compress.test.ts` passed（45 tests）；daemon 已重启为 PID 78244。
+- 2026-05-24 图片/视频写入智能體手機加速：data URL 媒体写入改为快速大分片优先，图片默认约 48KB/次、视频默认约 48KB/次，失败自动回退原小分片；写入进度改为首段/尾段/约每 10% 汇报，减少 Telegram 进度刷屏。截图中图片 42 段的场景预期会降到约 6 段。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/image-compress.test.ts` passed（45 tests）；daemon 已重启为 PID 78244。
 - 2026-05-24 修复带图发布页误判失败：失败样本 `threads-image-composer-controls-missing-1779608263418` 实际已在 Threads `新串文` 编辑页且右下角有 `發布`，但本地分类先命中 `LOCAL_THREADS_POST_ACTION_SHEET`，导致确认选图后直接报“未找到新串文输入/发布控件”。已把 composer 本地检测提前到 post action sheet 前，并让 post action sheet 检测遇到顶部新串文 + 右下发布按钮结构时排除。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（44 tests，新增该失败样本回归）；daemon 已重启为 PID 57064。
 - 2026-05-24 Telegram 固定面板响应优化：根因日志显示 webhook 本地处理仅 5-50ms，慢点主要是 Telegram API 的 `sendMessage/editMessageText` 约 1.3-2.5s。已将 callback ack 改为后台发送，不再阻塞业务处理；固定 Reply Keyboard 的一级入口优先编辑上一条控制面板消息，不再每次新发；控制面板 message_id 持久化到 `.runtime/automatic-script/telegram-control-panel-message-cache.json`，daemon 重启后也能编辑旧面板；Telegram request 连接池从 1 放宽到 8，避免 ack/edit/send 串行抢连接。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts src/test/persona-archives.test.ts` passed（25 tests）；本地 webhook 入口返回 5-50ms，实际 Telegram edit 仍受网络/API 影响约 1.3-2.1s；daemon 已重启为 PID 73548。
-- 2026-05-24 Telegram 报错文案收敛：新增 `formatUserFacingError()`，Telegram 用户可见错误会隐藏 `data:image...base64`、本地 sample/debug/screenshot 路径和 `LOCAL_*` 内部页面码，改成“发布按钮未生效 / 未识别到输入框或发布按钮 / 云机页面超时 / 上游服务异常”等直观描述，并保留短文件名级别的诊断提示。已覆盖发布、人设图、定时入队、自定义发布、验证码提交、账号查询和失败队列展示。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts src/test/vmos-publisher-threads.test.ts` passed（55 tests）；`git diff --check` passed（仅既有 CRLF warning）；daemon 已重启为 PID 79668。
+- 2026-05-24 Telegram 报错文案收敛：新增 `formatUserFacingError()`，Telegram 用户可见错误会隐藏 `data:image...base64`、本地 sample/debug/screenshot 路径和 `LOCAL_*` 内部页面码，改成“发布按钮未生效 / 未识别到输入框或发布按钮 / 智能體手機页面超时 / 上游服务异常”等直观描述，并保留短文件名级别的诊断提示。已覆盖发布、人设图、定时入队、自定义发布、验证码提交、账号查询和失败队列展示。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts src/test/vmos-publisher-threads.test.ts` passed（55 tests）；`git diff --check` passed（仅既有 CRLF warning）；daemon 已重启为 PID 79668。
 - 2026-05-24 流程稳健性复查：继续收紧发布链路里“一次点击失败直接判定”的激进点。`confirmThreadsGallerySelection()` 遇到误入图片查看器会返回并换完成键重试；`assertThreadsComposerReadyForPublish()` 改为最多三轮复查/恢复，不再单次控件缺失就报错；`tapAndVerifyThreadsPage()` 增加有限点击重试和中间页恢复，真正登录/验证码/风控页才即时上报；图片/视频图库兜底选择误入图片查看器时会返回并换候选点继续。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/telegram-persona-derive.test.ts src/test/publish-scheduler-recovery.test.ts` passed（59 tests）；`git diff --check` passed（仅既有 CRLF warning）；daemon 已重启为 PID 77272。
 - 2026-05-24 提交前审查：全量复核当前工作区改动，发现并修复发布队列并发任务在外部取消/改状态后可能不释放 pad lock 的边缘问题；新增回归测试覆盖。验证：`npx tsc --noEmit` passed；`npm test` passed（22 files，152 tests）；`git diff --check` passed（仅既有 CRLF warning）；密钥扫描未命中；daemon 已重启为 PID 75560。
 - 2026-05-25 修复 Threads 带图发布误报“未识别到输入框或发布按钮”：最新失败样本实际已在键盘打开的 `新串文` 编辑页，UI XML 不可读时本地图像分类把该状态误判为首页/图库。已调整分类顺序为图库/编辑器优先于首页，图库检测排除键盘打开的大白色区域，编辑器检测支持键盘打开时的发布按钮和工具栏区域；同时修正样本库中把首页/编辑器旧样本误标为图库的断言。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/telegram-persona-derive.test.ts` passed（75 tests）；`git diff --check` passed（仅既有 CRLF warning）；daemon 已重启为 PID 71512。
@@ -496,7 +496,7 @@
 - 2026-05-25 优化图文/视频发布“准备发布”耗时：日志显示图文链路在 `回到首頁準備發布` 后又进入 `切回首頁準備發布`，打开图库每次重试还会重复跑 35 秒首页恢复，导致页面已经在首页/编辑器/图库时仍长时间等待。已移除图文主路径的重复首页恢复，并让 `openThreadsMediaGallery()` 先动态识别当前页；已在首页直接点新建，已在编辑器直接开图库，已在图库直接继续，只有异常页才做 20 秒 bounded 恢复。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（63 tests）。
 - 2026-05-25 修复养号回复重复拼接：根因在 ACP 回复输入确认链路，首次中文输入可能已经生效但截图/XML 尚未确认，后续重输没有清空输入框，导致 `這種小細節才真實這種小細節才真實` 这类重复草稿被发送。现改为中文暖号留言优先走单一路径 ADB 广播输入，避免 VMOS `inputText` 超时后 fallback 双通道同时生效；所有重输前先清空当前输入框；发送前发现 `comment + comment` 重复草稿会取消发送，避免机器感回复。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（64 tests）。
 - 2026-05-25 修复键盘打开的新串文页误判个人主页：失败样本 `threads-image-composer-controls-missing-1779654989981` 实际已在 `新串文` 编辑页，文案、图片、右下角发布按钮均可见，但本地 profile 检测被大图/键盘工具栏/深色发布按钮误触发，导致发布前误报“未识别到输入框或发布按钮”。已在 `detectThreadsProfilePageLocally()` 增加键盘打开的 composer 排除条件，并晋升该样本进入回归集。验证：本地 smoke 显示该截图 `profile=false, composer=LOCAL_COMPOSER`；`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/telegram-persona-derive.test.ts` passed（80 tests）。
-- 2026-05-25 统一云机固定坐标基准：用户确认所有云机已锁定 `720x1600 / 360dpi`。已将 VMOS 底层 `simulateClick`/`simulateSwipe` 默认尺寸从 `720x1280` 改为 `720x1600`，`vmos-publisher` 的 `BASE_SCREEN` 统一到固定 720x1600，`scalePoint()` 不再使用旧 1280 底部锚点换算。Threads/Twitter/Instagram 中仍残留旧 1280 语义的底部导航、发布、滑动、图库兜底坐标已换算到 1600 基准；养号滑动 fallback 显式传入 720x1600 尺寸，登录视觉找按钮也按 720x1600 坐标点击。验证：`rg` 未再命中 `720x1280`/旧底部坐标；`npx tsc --noEmit` passed；`npm test` passed（22 files，178 tests）。
+- 2026-05-25 统一智能體手機固定坐标基准：用户确认所有智能體手機已锁定 `720x1600 / 360dpi`。已将 VMOS 底层 `simulateClick`/`simulateSwipe` 默认尺寸从 `720x1280` 改为 `720x1600`，`vmos-publisher` 的 `BASE_SCREEN` 统一到固定 720x1600，`scalePoint()` 不再使用旧 1280 底部锚点换算。Threads/Twitter/Instagram 中仍残留旧 1280 语义的底部导航、发布、滑动、图库兜底坐标已换算到 1600 基准；养号滑动 fallback 显式传入 720x1600 尺寸，登录视觉找按钮也按 720x1600 坐标点击。验证：`rg` 未再命中 `720x1280`/旧底部坐标；`npx tsc --noEmit` passed；`npm test` passed（22 files，178 tests）。
 - 2026-05-25 收敛 Threads 样本和坐标闭环：明确本地规则为快速路径、Gemini 3 Flash 只在本地/XML 分类未知或视觉按钮定位需要时兜底；样本晋升脚本、库函数和回归测试新增 720x1600 截图门禁与 `screenshotSize` 记录，非 720x1600 样本不会再进入 manifest。已清理 fixture 中 6 组 720x1280 旧截图/XML 残留，manifest 当前 75 条均为 720x1600 且文件存在。截图坐标点击入口在截图尺寸不可用时改为按 720x1600 基准缩放，不再直接把旧截图坐标当屏幕坐标。验证：样本尺寸扫描 invalid=0；`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（65 tests）。
 - 2026-05-25 Test1 重新采集 720x1600 样本：在 Test1 / `ACP250322677KIRJ` 拉起 Threads 后采集当前截图与 UI XML，样本 `threads-manual-recapture-test1-1779691218268` 识别为 `profile_page / LOCAL_PROFILE_PAGE`，截图尺寸 `720x1600`。已晋升到 `src/test/fixtures/threads-publish-samples/manifest.json`，manifest 当前 76 条；回归验证 `npx vitest run src/test/vmos-publisher-threads.test.ts` passed（65 tests）。
 - 2026-05-25 按“本地规则快路径 + Gemini 错误前复判”结构落地：新增 `recheckThreadsPageWithGemini()` / `recheckExpectedThreadsPageBeforeFailure()`，正常路径仍先走本地规则和 UI XML；只有准备抛出页面跳转不符、点击前页面不符、发文控件缺失、发布按钮无效、图库完成键卡住这类错误前才调用 Gemini 3 Flash 复判。若 Gemini 判定已到目标页则继续流程；若复判为登录/验证码/封控页则转账号状态阻断提示；仍不符合才保存样本并报人工介入。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（65 tests）。
@@ -507,7 +507,7 @@
 - 2026-05-26 按用户要求将养号单次时长调整为 7-10 分钟，日内 session 预算调整为 2 次；日内预算同步设为浏览 100、点赞 16、留言 8，以匹配每天两次总时长约 14-20 分钟。Telegram 设置/确认/执行中文案已同步更新。
 - 2026-05-26 修复图文发布卡在 Threads 全屏图片查看器：失败样本 `threads-image-gallery-fallback-opened-media-viewer-1779726857521` 显示流程把全屏图片查看器误判为图库页后执行兜底选图。已让全屏 media viewer 优先于图库识别，并在图库选择中把参考图/兜底点从缩图中心改为右上选择圈，误入查看器时关闭后重试；同时修正两条误标为图库页的 promoted 样本。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/telegram-persona-derive.test.ts` passed（88 tests）。
 - 2026-05-26 Test1 发布/养号端到端复验：后端直控文字发布通过（约 198s，`state=verified`，Threads 主頁 diff=24.2）；后端直控图文发布通过（约 257s，`state=verified`，diff=77.4）；Telegram 视频发布使用用户提供的 `C:/Users/14471/Downloads/5月15日.mp4` 跑通（约 748s，`posts 1->0 history 0->1`）；Telegram 养号按键快速自测通过（约 225s，浏览 4 条、点赞 1 个、留言 1 个）。
-- 2026-05-26 修复 Telegram 自测无声超时：发布进度新增 `.runtime/automatic-script/publish-progress.log` 落盘，`telegram-publish-button-matrix-selftest` 会读取发布进度并等待归档落库，避免发布完成后脚本提前清理临时人设；养号在云机锁失败/启动前失败时也写入 `warmup-progress.log`，避免自测一直等不到结果；`telegram-warmup-button-selftest` 默认走快速计数配置，不再误用 7-10 分钟真实养号时长。复验：Telegram 图文发布约 274s 通过（`posts 1->0 history 0->1`），Telegram 文字发布约 223s 通过（`posts 1->0 history 0->1`）。
+- 2026-05-26 修复 Telegram 自测无声超时：发布进度新增 `.runtime/automatic-script/publish-progress.log` 落盘，`telegram-publish-button-matrix-selftest` 会读取发布进度并等待归档落库，避免发布完成后脚本提前清理临时人设；养号在智能體手機锁失败/启动前失败时也写入 `warmup-progress.log`，避免自测一直等不到结果；`telegram-warmup-button-selftest` 默认走快速计数配置，不再误用 7-10 分钟真实养号时长。复验：Telegram 图文发布约 274s 通过（`posts 1->0 history 0->1`），Telegram 文字发布约 223s 通过（`posts 1->0 history 0->1`）。
 - 2026-05-26 样本库补强：运行 `npm run skill:promote-threads-samples -- --include-promoted --limit 80`，当前 manifest 晋升 80 条 720x1600 断言样本；复验 `npx tsc --noEmit` passed，`npx vitest run src/test/vmos-publisher-threads.test.ts src/test/telegram-persona-derive.test.ts` passed（89 tests），`git diff --check` passed（仅既有 CRLF warning）。
 - 2026-05-26 Test2 固定验收推进：文字发布、图片发布、养号点赞已通过；视频发布此前在 `等待影片準備完成` 阶段因 VMOS ADB 单条 8KB `printf` 任务超时失败。实测 Test2 上 4KB `printf` 可约 3s 完成，5KB+ 会 45-60s 超时；已将默认视频转码降为 540p/320k/48k，并把视频写入分片收紧为 4KB 单命令，复测可完整写入 241/241、进入 Threads 媒体编辑页、输入文案并点击发布，但最终仍为 `待人工確認`（离开编辑页回到内容页，影音页 diff=0），还不能计为自动验收通过。养号留言仍不稳定，主要失败在 `geometry_action_row_detected` / `acp_common_action_row_fallback` 选到不可靠评论点后进入媒体页或私密主页弹层；已修正私密主页弹层取消点、媒体覆盖层评论入口和 ACP 留言单次超时 45s，但 Test2 评论仍未通过。
 - 2026-05-26 继续收紧 Test2 ACP 留言：新增 `Unfollow` 弹层识别并在主页/当前屏/弹窗关闭路径拦截，避免公开主页被当成 feed；本地 action row 检测改为跳过点赞数文本、要求至少 3 个动作图标，修掉 `target=250,505` 命中正文的误判；Gboard 录音权限英文 `DON'T ALLOW` 可识别，键盘打开时发送兜底从 `0.605h` 上移到 `0.505h`，避免点到麦克风；ACP fallback 行改到真实列中心并补 `0.68h`，但真实自测仍未通过，最新失败包括媒体覆盖层/外部 WebView 被 fallback 打开，以及 geometry-only fast path 仍绕过视觉兜底。已把 geometry-only fast path 改为不直接接受，等待下一轮真实验证。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts` passed（73 tests）。
@@ -525,7 +525,7 @@
 - 2026-05-28 导出开源工作流人设精简可跑通版：新增 `scripts/skills/export-clean-persona-workflows.ts`，按当前运行时逻辑从 `output/runninghub-workflows` 的 8 个 workflow 人设中只保留连接到图片输出节点的必要祖先节点，并同步生成 RunningHub 最小 API prompt。已输出到 `C:\Users\14471\Desktop\开源工作流人设-精简可跑通版`，并压缩为 `C:\Users\14471\Desktop\开源工作流人设-精简可跑通版.zip`；8 个工作流从 689 个节点精简到 116 个节点，每个 API prompt 均校验有图片输出、提示词输入且无缺失 `class_type`。验证：`node --import tsx scripts/skills/export-clean-persona-workflows.ts` passed；`npx tsc --noEmit` passed。
 - 2026-05-28 Test1 本地 Instagram 验收推进：修复 ACP 视频直发两个关键误判：发布后仍在 `新 Reel/分享/编辑` 流程时不再允许用个人页 diff 误判成功；视频编辑页进入下一步的 ACP 兜底坐标从过低的 `620,1530` 改为 `600,1444`，Reel 分享补点同步使用该坐标。最新 Test1 / `ACP250322677KIRJ` 本地真实验收：文字发布 `ok=true`，最新贴文详情图片 diff=0.0；图片发布 `ok=true`，最新贴文详情图片 diff=0.0；视频发布 `ok=true`，本机校验主頁变化 `countDiff=85.9, gridDiff=14.1`，返回截图 `.runtime-ig-test1-video-nextfix-result.jpg` 可见真实视频贴文详情、账号 `rick_y54088`、互动栏和时间。验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-instagram.test.ts` passed（16 tests）。
 - 2026-05-28 Instagram Test1 修复已部署到 ECS `47.250.188.76:/opt/Automatic-script`：仅同步 `src/lib/vmos-publisher.ts`、`src/test/vmos-publisher-instagram.test.ts`、`scripts/skills/instagram-publish-selftest.ts` 和 `src/test/fixtures/instagram-reel-flow-samples/*`，未覆盖 ECS `.runtime`、`.env`、队列数据库或账号数据。ECS 验证：`npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-instagram.test.ts --testTimeout=20000` passed（16 tests）；`auto-tweet.service` 已重启，`active/enabled`，PID `122227`，`127.0.0.1:8788` 监听，webhook POST 返回 `ok HTTP:200`，日志显示 `Telegram Bot 已启动`、`Polling started`、`Webhook server listening`。
-- 2026-05-29 Telegram 失败提示清洗：`formatUserFacingError()` 新增 VMOS `2020 / Instance not found` 规则，用户侧不再展示 `VMOSCloud API 錯誤 [2020]: Instance not found`，统一提示“当前人设绑定的云机不存在，请进入人设设置重新绑定可用云机。”；新增回归测试覆盖。已同步 `src/telegram-bot.ts` 和 `src/test/telegram-persona-derive.test.ts` 到 ECS，远端 `npx tsc --noEmit` passed，`npx vitest run src/test/telegram-persona-derive.test.ts --testTimeout=20000` passed（17 tests）；`auto-tweet.service` 已重启，`active/enabled`，PID `136037`，webhook POST 返回 `ok HTTP:200`。
+- 2026-05-29 Telegram 失败提示清洗：`formatUserFacingError()` 新增 VMOS `2020 / Instance not found` 规则，用户侧不再展示 `VMOSCloud API 錯誤 [2020]: Instance not found`，统一提示“当前人设绑定的智能體手機不存在，请进入人设设置重新绑定可用智能體手機。”；新增回归测试覆盖。已同步 `src/telegram-bot.ts` 和 `src/test/telegram-persona-derive.test.ts` 到 ECS，远端 `npx tsc --noEmit` passed，`npx vitest run src/test/telegram-persona-derive.test.ts --testTimeout=20000` passed（17 tests）；`auto-tweet.service` 已重启，`active/enabled`，PID `136037`，webhook POST 返回 `ok HTTP:200`。
 - 2026-05-30 存储推文列表翻页：修复 Telegram “待发布推文列表”只展示前 5 篇的问题，新增 `posts_<archiveId>_p<page>` 分页回调和 `buildStoredPostsListView()`，每页 5 篇，显示总数/页码，按钮使用真实全局篇号（第 6 篇等），查看/发布/删除继续通过当前页 `pendingPostSelections` 映射到正确 postId。验证：本地 `npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts` passed（20 tests）。已同步 `src/telegram-bot.ts`、`src/lib/vmos-publisher.ts`、`src/test/telegram-persona-derive.test.ts` 到 ECS；远端 `npx tsc --noEmit` passed，Telegram 菜单测试 20 tests passed；`auto-tweet.service` 重启后 `active/enabled`，PID `165387`，`127.0.0.1:8788` 监听，webhook POST 返回 `ok HTTP:200`。
 
 # Latest update - 2026-05-29 VMOS missing instance recovery
@@ -535,16 +535,16 @@
 
 ## Root Cause
 - 远端 `auto-tweet.service` 正常运行，Telegram callback 正常进入。
-- 金君雅 GY 人设在远端 `persona_archives` 中没有 `boundPadCode`，发布流程回退到旧默认云机 `ACP250801768QX47`。
-- 当前 VMOS 云机列表里已经没有 `ACP250801768QX47`，因此 VMOS 返回 `Instance not found`。
-- 当前可用且名称匹配的云机是 `ATP64K6RON7LCGMR / 金君雅1.0`。
+- 金君雅 GY 人设在远端 `persona_archives` 中没有 `boundPadCode`，发布流程回退到旧默认智能體手機 `ACP250801768QX47`。
+- 当前 VMOS 智能體手機列表里已经没有 `ACP250801768QX47`，因此 VMOS 返回 `Instance not found`。
+- 当前可用且名称匹配的智能體手機是 `ATP64K6RON7LCGMR / 金君雅1.0`。
 
 ## Change
 - 远端运行时已将 `workflow-persona-jinjunya` 绑定到 `ATP64K6RON7LCGMR / 金君雅1.0`。
 - `src/telegram-bot.ts`
-  - 新增发布前云机绑定解析：优先使用显式选择，其次使用人设绑定；如果绑定云机不在 VMOS 列表中，会按人设名称匹配当前运行中云机并自动修复绑定。
-  - 如果无法匹配可用云机，会直接提示用户重新绑定，不再继续调用不存在的默认实例。
-  - 自定义发布结果和失败提示显示解析后的云机名称。
+  - 新增发布前智能體手機绑定解析：优先使用显式选择，其次使用人设绑定；如果绑定智能體手機不在 VMOS 列表中，会按人设名称匹配当前运行中智能體手機并自动修复绑定。
+  - 如果无法匹配可用智能體手機，会直接提示用户重新绑定，不再继续调用不存在的默认实例。
+  - 自定义发布结果和失败提示显示解析后的智能體手機名称。
 
 ## Verification
 - 远端 `systemctl is-active auto-tweet.service` 为 `active`。
@@ -558,7 +558,7 @@
 - 用户要求小红书长时间压力测试，并明确“不用管删除”，因此本轮保留压测发出的内容。
 
 ## Run
-- 云机：`ACP65M786YA3ML9J`
+- 智能體手機：`ACP65M786YA3ML9J`
 - 命令：`node --import tsx scripts/skills/rednote-stress-test.ts @.runtime/automatic-script/stress/rednote-long-stress-20260529-175532.payload.json`
 - 配置：`cycles=2`，每轮执行文字、图片、视频发布各 1 次，随后执行一次养号；`deleteAfterPublish=false`。
 - 日志：`.runtime/automatic-script/stress/rednote-long-stress-20260529-175532.out.log`
@@ -581,14 +581,14 @@
   - daemon 会逐个停止旧 polling、启动多个 Telegram bot，并在 heartbeat 中写入 `configured:<count>`。
 - `src/telegram-bot.ts`
   - `startTelegramBot()` 新增实例选项：`name`、`defaultPadCode`、`defaultPublishPlatform`、`defaultWarmupPlatform`。
-  - 发布/定时/自定义发布等无显式云机时使用当前 bot 的默认云机。
+  - 发布/定时/自定义发布等无显式智能體手機时使用当前 bot 的默认智能體手機。
   - 自然语言稳定命令无显式平台时使用当前 bot 的默认发布平台。
   - 避免多 bot 启动时重复监听同一个本地 webhook 端口；polling 模式下两个 bot 可并行运行。
 
 ## Local Runtime Config
 - 已写入 `.runtime/automatic-script/telegram_bots.local.json`（被 `.gitignore` 忽略，不提交 token）：
-  - `primary`: 默认云机 `ACP250801768QX47`，默认平台 `threads`。
-  - `rednote`: 默认云机 `ACP65M786YA3ML9J`，默认发布/养号平台 `rednote`。
+  - `primary`: 默认智能體手機 `ACP250801768QX47`，默认平台 `threads`。
+  - `rednote`: 默认智能體手機 `ACP65M786YA3ML9J`，默认发布/养号平台 `rednote`。
 
 ## Verification
 - `npx tsc --noEmit` passed。
@@ -603,7 +603,7 @@
 - 用户反馈新 bot 上没有出现固定控制台。
 - 已通过 RedNote bot 直接向常用 chat `6470391105` 下发固定键盘控制台，Telegram 返回 `ok=true`，messageId `467`。
 - `src/telegram-bot.ts` 将 reply keyboard 改为 `is_persistent=true`，后续 `/start` / 主菜单刷新会持续显示固定控制台。
-- RedNote bot 的主菜单文案现在显示默认云机 `ACP65M786YA3ML9J` 和默认平台“小红书”。
+- RedNote bot 的主菜单文案现在显示默认智能體手機 `ACP65M786YA3ML9J` 和默认平台“小红书”。
 - 验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts` passed（17 tests）。
 - 已重启本地 daemon，新 Node daemon PID `12140`，heartbeat 仍为 `telegramBot=configured:2`，错误日志为空。
 
@@ -615,7 +615,7 @@
 - `src/telegram-bot.ts`
   - `startTelegramBot()` 支持 `allowedPublishPlatforms` / `allowedWarmupPlatforms`。
   - 人设列表、详情、推文列表、人工发布、定时发布、自定义发布入口按当前 bot 过滤人设。
-  - 新建人设会写入当前 bot 的 `ownerBotName`，并默认绑定当前 bot 的默认云机。
+  - 新建人设会写入当前 bot 的 `ownerBotName`，并默认绑定当前 bot 的默认智能體手機。
   - 发布平台按钮按当前 bot 白名单生成；旧缓存按钮触发未授权平台会被拒绝。
 - `.runtime/automatic-script/telegram_bots.local.json`
   - `primary`: 允许 `threads`、`instagram`。
@@ -624,18 +624,18 @@
 - 已重启本地 daemon，新 Node daemon PID `6460`，heartbeat `telegramBot=configured:2`，日志显示 `primary allowed=threads,instagram`、`rednote allowed=rednote,instagram,threads,twitter`，错误日志为空。
 
 ## Follow-up - 2026-05-29 Bot-scoped VMOS cloud isolation
-- 用户反馈新 Bot 的“云机管理”仍能看到全部 7 台云机，确认根因是云机菜单、账号查询、绑定云机和手动 padCode 绑定仍有部分入口直接读取全量 `listPadsCached()`。
+- 用户反馈新 Bot 的“智能體手機管理”仍能看到全部 7 台智能體手機，确认根因是智能體手機菜单、账号查询、绑定智能體手機和手动 padCode 绑定仍有部分入口直接读取全量 `listPadsCached()`。
 - `src/telegram-bot.ts`
   - `startTelegramBot()` 新增 `allowedVmosAccountNames` / `allowedPadCodes`，并统一提供 `listPadsForThisBot()`。
-  - 云机管理、刷新列表、云机详情、账号查询、切换登录账号、养号入口、人设绑定云机、手动绑定 padCode、自定义发布前云机解析全部按当前 Bot 的 VMOS 账号范围过滤。
-  - 旧缓存 callback 或手动输入跨账号 padCode 时直接拒绝，提示“这台云机不属于当前 Bot 的 VMOS 账号范围”。
+  - 智能體手機管理、刷新列表、智能體手機详情、账号查询、切换登录账号、养号入口、人设绑定智能體手機、手动绑定 padCode、自定义发布前智能體手機解析全部按当前 Bot 的 VMOS 账号范围过滤。
+  - 旧缓存 callback 或手动输入跨账号 padCode 时直接拒绝，提示“这台智能體手機不属于当前 Bot 的 VMOS 账号范围”。
 - `src/daemon.ts`
   - 多 Bot 配置读取并传递 `allowedVmosAccountNames` / `allowedPadCodes`。
 - `.runtime/automatic-script/telegram_bots.local.json`
   - `primary` 限定 `allowedVmosAccountNames=["runtime-primary"]`，当前可见 5 台：OP-TEST1、OP-TEST2、小咪 2.0、金君雅1.0、F1 1.0。
   - `rednote` 限定 `allowedVmosAccountNames=["secondary"]`，当前可见 2 台：Samsung Galaxy S23、Samsung Galaxy S23-login。
 - 验证：`npx tsc --noEmit` passed；`npx vitest run src/test/telegram-persona-derive.test.ts src/test/persona-archives.test.ts` passed（37 tests）。
-- 已重启本地 daemon，新 Node daemon PID `21540`，heartbeat `telegramBot=configured:2`，日志显示 `primary ... vmosAccounts=runtime-primary` 与 `rednote ... vmosAccounts=secondary`，错误日志为空。已向 rednote Bot 的 chat `6470391105` 发送新的云机管理菜单，messageId `477`，只包含 `ACP64G6PQMBV7UBO` 和 `ACP65M786YA3ML9J`。
+- 已重启本地 daemon，新 Node daemon PID `21540`，heartbeat `telegramBot=configured:2`，日志显示 `primary ... vmosAccounts=runtime-primary` 与 `rednote ... vmosAccounts=secondary`，错误日志为空。已向 rednote Bot 的 chat `6470391105` 发送新的智能體手機管理菜单，messageId `477`，只包含 `ACP64G6PQMBV7UBO` 和 `ACP65M786YA3ML9J`。
 
 ## Follow-up - 2026-05-29 RedNote error recovery hardening
 - 用户询问小红书自动化是否包含遇错处理，并要求提高成功率。
@@ -649,15 +649,15 @@
 # Latest update - 2026-05-30 TikTok pre-publish and warmup preflight
 
 ## Request
-- 用户要求使用 `pingatou@gmail.com` 账号所在云机 `ACP64G6PQMBV7UBO` 测试 TikTok 自动发视频和自动养号；在发布确认前必须闭环，但不得真正发布视频污染账号。
+- 用户要求使用 `pingatou@gmail.com` 账号所在智能體手機 `ACP64G6PQMBV7UBO` 测试 TikTok 自动发视频和自动养号；在发布确认前必须闭环，但不得真正发布视频污染账号。
 
 ## Findings
-- VMOS 云机 `ACP64G6PQMBV7UBO` 存在于 `secondary` 账号，名称 `Samsung Galaxy S23  TK`，安装应用包含 `TikTok`，TikTok 包名为 `com.ss.android.ugc.trill`。
+- VMOS 智能體手機 `ACP64G6PQMBV7UBO` 存在于 `secondary` 账号，名称 `Samsung Galaxy S23  TK`，安装应用包含 `TikTok`，TikTok 包名为 `com.ss.android.ugc.trill`。
 - ADB 账号信息可见 `Account {name=pingatou@gmail.com, type=com.google}`。
 - TikTok 支持 Android 系统分享入口 `com.ss.android.ugc.trill/com.ss.android.ugc.aweme.share.SystemShareActivity`，可用 `content://media/external/video/media/<id>` 直接进入视频编辑页。
 
 ## Change
-- 新增 `scripts/skills/tiktok-prepublish-selftest.ts` 与 `npm run skill:tiktok-prepublish-selftest`：本地视频写入云机 MediaStore 后通过 TikTok 分享入口打开，自动到最终发布确认页、填入 caption、保存截图；脚本强制停在 `Post` 前，不会点击发布。
+- 新增 `scripts/skills/tiktok-prepublish-selftest.ts` 与 `npm run skill:tiktok-prepublish-selftest`：本地视频写入智能體手機 MediaStore 后通过 TikTok 分享入口打开，自动到最终发布确认页、填入 caption、保存截图；脚本强制停在 `Post` 前，不会点击发布。
 - 新增 `scripts/skills/tiktok-warmup-once.ts` 与 `npm run skill:tiktok-warmup`：当前只验收 browse 模式；点赞/评论必须显式传 `allowEngagement=true`，默认拒绝，避免污染账号；启动时会取消前一次预发布留下的未发布视频提示。
 
 ## Verification
@@ -794,7 +794,7 @@
 # Latest update - 2026-06-05 Full program QA pass
 
 ## Request
-- 用户要求全面测试程序功能和 Telegram 每个页面互动；需要云机时使用 Test2。
+- 用户要求全面测试程序功能和 Telegram 每个页面互动；需要智能體手機时使用 Test2。
 
 ## Findings
 - 本地全量 `npm test` 首轮失败 6 项，集中在工作流人设图片主体路由和人设记忆摘要。
@@ -834,15 +834,15 @@
 ## Follow-up - 2026-06-06 Test2 default binding and Threads publish closure
 - 根因拆成两层：ECS 只加载 1 组 VMOS 凭据，旧默认 Test2 `ACP250801768QX47` 已不在当前 VMOS 列表；同步本地 2 组 VMOS 凭据后，服务器可见的新 OP-TEST2 是 `ACP250430WZA6JZL`。同时 Test2 启动 Threads 时会偶发 `AutoTakeoff keeps stopping` 系统崩溃弹窗，必须在启动/前置页阶段自动关闭。
 - `src/lib/vmos-client.ts`
-  - 带 `padCode/padCodes` 的 VMOS 请求遇到 2020 `Instance not found` 时，会自动尝试其它 VMOS 账号；所有账号都不可见时抛出干净提示“当前人设绑定的云机不存在，请进入人设设置重新绑定可用云机”。
+  - 带 `padCode/padCodes` 的 VMOS 请求遇到 2020 `Instance not found` 时，会自动尝试其它 VMOS 账号；所有账号都不可见时抛出干净提示“当前人设绑定的智能體手機不存在，请进入人设设置重新绑定可用智能體手機”。
 - `src/telegram-bot.ts` / `src/core/persona/persona-workflow-service.ts` / `scripts/skills/*`
-  - 默认 Test2 从旧 `ACP250801768QX47` 切到当前可用 `ACP250430WZA6JZL`，避免自测和兜底发布再打到不存在的云机。
+  - 默认 Test2 从旧 `ACP250801768QX47` 切到当前可用 `ACP250430WZA6JZL`，避免自测和兜底发布再打到不存在的智能體手機。
 - `src/lib/vmos-publisher.ts`
   - `AutoTakeoff keeps stopping` 弹窗关闭改为先按 UI XML 文本 bounds 点击 `Close app`，再走右侧按钮区域兜底。
   - Test2 纯文字发帖底部加号 fallback 点从 `0.945h` 上移到 `0.922h`，并增加点击尝试次数；实测 `360,1180` 能稳定打开 `New thread`。
   - 带图/视频主页复查允许使用 XML 文案线索命中判定 verified，不再只依赖参考图/AI；解决真实图文已发布但返回 warning 的问题。
 - 测试新增/更新：
-  - `src/test/vmos-client.test.ts` 新增多账号 2020 fallback 与干净缺失云机提示回归。
+  - `src/test/vmos-client.test.ts` 新增多账号 2020 fallback 与干净缺失智能體手機提示回归。
 - 验证：
   - 本地 `npm test` passed（24 files / 258 tests）。
   - ECS `npx vitest run --testTimeout=20000` passed（24 files / 258 tests）；`auto-tweet.service` active，日志显示 `VMOS 凭据已加载（2 组）`、默认 `pad=ACP250430WZA6JZL`、`Polling started`。
@@ -853,17 +853,17 @@
 # Latest update - 2026-06-06 Threads account profile settings
 
 ## Request
-- 用户要求在 Threads 云机账号设置里新增修改账号简介、修改名称、修改头像功能。
+- 用户要求在 Threads 智能體手機账号设置里新增修改账号简介、修改名称、修改头像功能。
 
 ## In progress
 - `src/telegram-bot.ts`
-  - 云机详情页新增 `修改 Threads 简介`、`修改 Threads 名称`、`修改 Threads 头像` 三个按钮。
+  - 智能體手機详情页新增 `修改 Threads 简介`、`修改 Threads 名称`、`修改 Threads 头像` 三个按钮。
   - 账号资料 pending 状态从单一“简介新增链接”扩展为链接/简介/名称/头像。
   - 简介和名称走文字输入；头像走 Telegram 图片上传并调用 VMOS 自动化。
 - `src/lib/vmos-publisher.ts`
   - 新增 Threads 编辑个人资料字段定位与修改函数。
   - 简介/名称使用 `inputText`，失败再走 `ADB_INPUT_B64`，避免中文输入乱码。
-  - 头像链路先把图片写入云机图库，再尝试进入头像设置、选择图片、确认裁剪/保存。
+  - 头像链路先把图片写入智能體手機图库，再尝试进入头像设置、选择图片、确认裁剪/保存。
 - `src/test/vmos-publisher-threads.test.ts`
   - 新增繁中 Threads 编辑个人资料页姓名/简介字段 XML 定位回归。
 
@@ -894,7 +894,7 @@
   - Test2 的 Threads 编辑资料页有时截图正常显示 `Edit profile / Name / Bio / Links`，但 UIAutomator XML 为空或无可见文本；已增加截图/前台焦点兜底，避免误判“未进入编辑资料页”。
   - 字段 fallback 坐标按当前新版编辑页调整：名称约 `286,360`，简介约 `286,913`。
 - 验证：本地 `npx tsc --noEmit` passed；`npx vitest run src/test/vmos-publisher-threads.test.ts --testTimeout=30000` passed（82 tests）。
-- 当前阻断：Test2 云机 ADB 执行通道连续 5 分钟返回 `VMOSCloud API 錯誤 [110031]: 当前实例状态未就绪,请检查实例状态后执行`；`getPadInfo` 仍能读到 OP-TEST2，但 `execAdb` 无法执行，因此无法继续真实闭环。`.runtime/threads-profile-settings-e2e.ts` 已加 5 分钟 ADB readiness 等待。
+- 当前阻断：Test2 智能體手機 ADB 执行通道连续 5 分钟返回 `VMOSCloud API 錯誤 [110031]: 当前实例状态未就绪,请检查实例状态后执行`；`getPadInfo` 仍能读到 OP-TEST2，但 `execAdb` 无法执行，因此无法继续真实闭环。`.runtime/threads-profile-settings-e2e.ts` 已加 5 分钟 ADB readiness 等待。
 
 ## Test1 continuation - 2026-06-06
 - 按用户要求切到 Test1 `ACP250322677KIRJ` 验证 Threads 账号资料设置链路。
@@ -947,11 +947,11 @@
   - 图文：使用本地图片 `.runtime/automatic-script/instagram-text-card-cjk-fixed.png` 返回 `state=verified`。
 
 ## Notes
-- 这条链路是“Telegram Bot 直接发到当前群组/会话”，不需要也不会打开 Test1 云机；Test1 作为任务绑定 padCode 写入，便于和现有发布流程兼容。
+- 这条链路是“Telegram Bot 直接发到当前群组/会话”，不需要也不会打开 Test1 智能體手機；Test1 作为任务绑定 padCode 写入，便于和现有发布流程兼容。
 - 当前真实验证使用历史自测 chatId `6470391105`；如果要发到指定群组，需要在群组里触发 Bot 或配置该群组 chatId。
 
 ## Correction - 2026-06-06 VMOS Test1 Telegram group publishing
-- 用户明确指出 Telegram 群组发布验收必须发生在 VMOS Test1 云机里的 Telegram 群组页面，不是 Bot API 直发到 chatId；上面的 Bot API 记录仅作为被纠正的旧尝试保留，不再视为有效验收路径。
+- 用户明确指出 Telegram 群组发布验收必须发生在 VMOS Test1 智能體手機里的 Telegram 群组页面，不是 Bot API 直发到 chatId；上面的 Bot API 记录仅作为被纠正的旧尝试保留，不再视为有效验收路径。
 - `src/lib/telegram-group-publisher.ts` 已切换为 VMOS Telegram App 自动化：启动/聚焦 `org.telegram.messenger`，在当前打开的群组页面点击输入框、清空残留草稿、写入文本、点击键盘打开时的发送按钮。
 - 当前 VMOS Telegram 群组发布仅验收纯文字；图片/视频媒体上传尚未接入，遇到 `mediaUrl` 会明确阻断提示。
 - `src/lib/vmos-publisher.ts` 的 `platform=telegram` 现在走 VMOS App 自动化；`telegramChatId` 只保留为旧队列字段兼容，不再参与 VMOS 群组发布。
@@ -992,7 +992,7 @@
   - 本地 daemon 已重启，heartbeat PID `3376`，`telegramBot=configured:2`。
 
 ## Follow-up - 2026-06-07 Telegram publish platforms vs VMOS account isolation
-- 用户确认：发布平台不再按 Bot 分开，两个 Bot 都应可选择 Threads / Instagram / Twitter / 小红书 / Telegram；但 VMOS 云机账号池必须按 Bot 隔离，不能混用。
+- 用户确认：发布平台不再按 Bot 分开，两个 Bot 都应可选择 Threads / Instagram / Twitter / 小红书 / Telegram；但 VMOS 智能體手機账号池必须按 Bot 隔离，不能混用。
 - 本地 `.runtime/automatic-script/telegram_bots.local.json` 已调整：
   - `primary` Bot：`allowedPublishPlatforms=threads,instagram,twitter,rednote,telegram`，`allowedVmosAccountNames=primary`。
   - `rednote` Bot：`allowedPublishPlatforms=rednote,instagram,threads,twitter,telegram`，`allowedVmosAccountNames=secondary`。
@@ -1004,15 +1004,15 @@
   - ECS `auto-tweet.service` 已重启，heartbeat PID `622774`，`telegramBot=configured:2`。
   - ECS 日志确认：`primary` allowed 包含 `telegram` 且 `vmosAccounts=primary`；`rednote` allowed 包含 `telegram` 且 `vmosAccounts=secondary`。
   - 本地 daemon 已重启，heartbeat PID `35920`，日志同样确认两个 Bot allowed 均包含 `telegram`，账号池分别为 `primary` / `secondary`。
-  - 2026-06-07 追加修复：ECS 凭据文件中的真实账号名会因来源不同解析成 `local-primary` / `primary` / `env` 同一主账号别名，社媒账号为 `secondary`。主 Bot 曾因账号名不匹配把云机列表过滤为空；已修正为允许 `local-primary,primary,env`，社 Bot 仍只允许 `secondary`。已同步 ECS、清理旧 `pad-list-cache.json`、重启服务。实际过滤验证确认主 Bot 5 台、社 Bot 2 台。
+  - 2026-06-07 追加修复：ECS 凭据文件中的真实账号名会因来源不同解析成 `local-primary` / `primary` / `env` 同一主账号别名，社媒账号为 `secondary`。主 Bot 曾因账号名不匹配把智能體手機列表过滤为空；已修正为允许 `local-primary,primary,env`，社 Bot 仍只允许 `secondary`。已同步 ECS、清理旧 `pad-list-cache.json`、重启服务。实际过滤验证确认主 Bot 5 台、社 Bot 2 台。
 
 ## Follow-up - 2026-06-07 User-facing failure notices cleanup
-- 用户要求所有失败通知改成最直观、最容易理解的版本，例如“该人设绑定的云机上未检测到 Telegram 应用”。
+- 用户要求所有失败通知改成最直观、最容易理解的版本，例如“该人设绑定的智能體手機上未检测到 Telegram 应用”。
 - `src/telegram-bot.ts`
-  - 扩展 `formatUserFacingError()`：将 Telegram / Instagram / Threads / 小红书未安装或启动失败、Telegram 分享页未选中群组、媒体未写入云机、截图失败、VMOS 2020 等底层错误转成用户可操作的中文提示。
+  - 扩展 `formatUserFacingError()`：将 Telegram / Instagram / Threads / 小红书未安装或启动失败、Telegram 分享页未选中群组、媒体未写入智能體手機、截图失败、VMOS 2020 等底层错误转成用户可操作的中文提示。
   - 避免在 Bot 通知里直接暴露 `VMOSCloud API`、`Instance not found`、包名、Activity class、contentUri 等底层细节。
 - `src/lib/telegram-group-publisher.ts`
-  - Telegram App 启动失败、分享入口失败、未选中目标群组、媒体未写入云机时，直接抛出面向用户的简洁中文原因。
+  - Telegram App 启动失败、分享入口失败、未选中目标群组、媒体未写入智能體手機时，直接抛出面向用户的简洁中文原因。
 - 测试：
   - 本地 `npx tsc --noEmit` passed。
   - 本地 `npx vitest run src/test/telegram-persona-derive.test.ts src/test/telegram-group-publisher.test.ts --testTimeout=30000` passed（40 tests）。

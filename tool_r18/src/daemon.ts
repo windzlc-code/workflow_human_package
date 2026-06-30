@@ -144,11 +144,11 @@ async function notifyPublishManualIntervention(task: any, error: unknown, eviden
     "",
     `任务：${task.id}`,
     `平台：${task.platform || "-"}`,
-    `云机：${task.pad_code || "-"}`,
+    `智能體手機：${task.pad_code || "-"}`,
     `失败步骤：${evidence.failureStep || "自动化执行异常"}`,
     `失败原因：${reason}`,
     "",
-    "系统已停止继续误操作，并已保存失败截图/证据。请人工检查当前云机界面后再重试。",
+    "系统已停止继续误操作，并已保存失败截图/证据。请人工检查当前智能體手機界面后再重试。",
   ];
   await bot.sendMessage(chatId, lines.join("\n")).catch(() => undefined);
 
@@ -157,7 +157,7 @@ async function notifyPublishManualIntervention(task: any, error: unknown, eviden
   if (photoInput) {
     await bot.sendPhoto(chatId, photoInput, { caption: "📸 自动化失败截图" }).catch(() => undefined);
   } else {
-    await bot.sendMessage(chatId, "⚠️ 未能取得当前云机截图，请直接进入云机查看失败停留页面。").catch(() => undefined);
+    await bot.sendMessage(chatId, "⚠️ 未能取得当前智能體手機截图，请直接进入智能體手機查看失败停留页面。").catch(() => undefined);
   }
 }
 const TELEGRAM_LOCK_FILE = resolveRuntimeFile("telegram_bot.lock");
@@ -338,7 +338,7 @@ async function applyTelegramBotRuntimeConfig(configs: TelegramBotRuntimeConfig[]
       allowedPadCodes: botConfig.allowedPadCodes,
     });
     activeTelegramBots.push({ config: botConfig, bot });
-    log(`✓ Telegram Bot 已启动: ${botConfig.name || "unnamed"}${botConfig.defaultPadCode ? ` / 默认云机 ${botConfig.defaultPadCode}` : ""}${reason ? `（${reason}）` : ""}`);
+    log(`✓ Telegram Bot 已启动: ${botConfig.name || "unnamed"}${botConfig.defaultPadCode ? ` / 默认智能體手機 ${botConfig.defaultPadCode}` : ""}${reason ? `（${reason}）` : ""}`);
   }
 }
 

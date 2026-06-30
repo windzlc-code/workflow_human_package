@@ -236,7 +236,7 @@ describe("VMOS Telegram group publisher", () => {
         telegramGroupContentType: "free",
       },
       () => undefined,
-    )).rejects.toThrow("图片或视频没有成功写入云机");
+    )).rejects.toThrow("图片或视频没有成功写入智能體手機");
   });
 
   it("falls back to Telegram LaunchActivity when package launcher intent is not resolvable", async () => {

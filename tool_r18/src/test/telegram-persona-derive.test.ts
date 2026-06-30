@@ -974,7 +974,7 @@ describe("formatUserFacingError", () => {
       "发布失败，请稍后重试。",
     );
 
-    expect(message).toBe("当前人设绑定的云机不存在，请进入人设设置重新绑定可用云机。");
+    expect(message).toBe("当前人设绑定的智能體手機不存在，请进入人设设置重新绑定可用智能體手機。");
     expect(message).not.toContain("VMOSCloud API");
     expect(message).not.toContain("Instance not found");
   });
@@ -995,7 +995,7 @@ describe("formatUserFacingError", () => {
       "发布失败，请稍后重试。",
     );
 
-    expect(message).toBe("该人设绑定的云机上未检测到 Telegram 应用，请先在这台云机安装并登录 Telegram。");
+    expect(message).toBe("该人设绑定的智能體手機上未检测到 Telegram 应用，请先在这台智能體手機安装并登录 Telegram。");
     expect(message).not.toContain("Activity class");
     expect(message).not.toContain("org.telegram");
   });
@@ -1006,7 +1006,7 @@ describe("formatUserFacingError", () => {
       "发布失败，请稍后重试。",
     );
 
-    expect(message).toBe("Telegram 分享页没有选中目标群组，请先在云机 Telegram 里打开目标群组后重试。");
+    expect(message).toBe("Telegram 分享页没有选中目标群组，请先在智能體手機 Telegram 里打开目标群组后重试。");
   });
 
   it("formats missing media staging as an upload issue", () => {
@@ -1015,7 +1015,7 @@ describe("formatUserFacingError", () => {
       "发布失败，请稍后重试。",
     );
 
-    expect(message).toBe("图片或视频没有成功写入云机，请重新上传媒体后再发布。");
+    expect(message).toBe("图片或视频没有成功写入智能體手機，请重新上传媒体后再发布。");
   });
 });
 

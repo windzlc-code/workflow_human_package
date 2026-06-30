@@ -1382,7 +1382,7 @@
       "scenario": "publish-top-level-failure",
       "mediaKind": "image",
       "page": "profile_page",
-      "reason": "Threads 個人頁目前停在阻斷頁：檢測到 Threads 阻斷頁，疑似真人驗證或安全驗證，請先在雲機完成設定或驗證後再重試",
+      "reason": "Threads 個人頁目前停在阻斷頁：檢測到 Threads 阻斷頁，疑似真人驗證或安全驗證，請先在智能體手機完成設定或驗證後再重試",
       "sourceJsonPath": ".runtime/automatic-script/publish-samples/threads/threads-image-publish-top-level-failure/threads-image-publish-top-level-failure-1779645955155.json",
       "assertions": [
         {

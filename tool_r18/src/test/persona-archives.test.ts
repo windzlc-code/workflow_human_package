@@ -677,7 +677,7 @@ describe("persona archives migration", () => {
   it("stores and clears the default VMOS pad binding per persona archive", async () => {
     const archive = await createPersonaArchive({
       id: "pad-binding-persona",
-      name: "雲機綁定測試",
+      name: "智能體手機綁定測試",
       content: "測試人設",
     });
 

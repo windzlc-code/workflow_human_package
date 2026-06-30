@@ -123,7 +123,7 @@ async function assertTikTokDnsResolvable(config: VmosConfig, padCode: string) {
     30_000,
   );
   if (!/\bok\b/.test(output)) {
-    throw new Error("TikTok 上传前网络预检失败：当前云机 DNS 无法解析 www.tiktok.com，请先修复 VMOS 云机网络/DNS 后再发布。");
+    throw new Error("TikTok 上传前网络预检失败：当前智能體手機 DNS 无法解析 www.tiktok.com，请先修复 VMOS 智能體手機网络/DNS 后再发布。");
   }
 }
 
@@ -341,7 +341,7 @@ async function main() {
 
   const pads = await listPads(config);
   const pad = pads.find((item) => item.padCode === input.padCode);
-  if (!pad) throw new Error("当前人设绑定的云机不存在，请进入人设设置重新绑定可用云机。");
+  if (!pad) throw new Error("当前人设绑定的智能體手機不存在，请进入人设设置重新绑定可用智能體手機。");
   const padInfo = await getPadInfo(config, input.padCode).catch(() => undefined);
   const packageName = await detectTikTokPackage(config, input.padCode);
   if (input.skipNetworkPreflight !== true) {

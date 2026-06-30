@@ -1,5 +1,5 @@
 /**
- * 调试脚本：直接在云机上跑各种 ADB 命令，打印原始输出
+ * 调试脚本：直接在智能體手機上跑各种 ADB 命令，打印原始输出
  * 用法：npm run skill:query-pad-account-debug -- '{"padCode":"ACP250430WZA6JZL"}'
  */
 import { execAdb, waitTask, screenshot } from "@/lib/vmos-client";
@@ -38,7 +38,7 @@ async function runAdb(label: string, cmd: string, timeoutMs = 20000) {
 }
 
 async function main() {
-  console.log(`\n云机账号调试 padCode=${padCode}`);
+  console.log(`\n智能體手機账号调试 padCode=${padCode}`);
   console.log(`凭据 ak=${creds.ak ? creds.ak.slice(0, 8) + "..." : "MISSING"}`);
 
   // 1. AccountManager（不需要 root）

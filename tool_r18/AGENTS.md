@@ -105,12 +105,12 @@ npm run skill:verify-path -- '<JSON>'
 
 ## 配置
 
-### VMOS 云机凭据
+### VMOS 智能體手機凭据
 
 设置方式（任选一种）：
 - 环境变量：`VMOS_AK` / `VMOS_SK`
 - 文件：`electron/vmos-credentials.local.json`（格式：`{"ak":"...","sk":"..."}`）
-- 多账号文件：`electron/vmos-credentials.local.json` 可使用 `{"accounts":[{"name":"primary","ak":"...","sk":"..."},{"name":"secondary","ak":"...","sk":"..."}]}`，程序会合并云机列表并按 `padCode` 自动选择对应账号。
+- 多账号文件：`electron/vmos-credentials.local.json` 可使用 `{"accounts":[{"name":"primary","ak":"...","sk":"..."},{"name":"secondary","ak":"...","sk":"..."}]}`，程序会合并智能體手機列表并按 `padCode` 自动选择对应账号。
 
 ### ComfyUI 工作流
 

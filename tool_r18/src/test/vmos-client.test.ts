@@ -239,7 +239,7 @@ describe("listPads", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(execAdb(multiConfig, "PAD_MISSING", "echo ok")).rejects.toThrow("当前人设绑定的云机不存在");
+    await expect(execAdb(multiConfig, "PAD_MISSING", "echo ok")).rejects.toThrow("当前人设绑定的智能體手機不存在");
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });

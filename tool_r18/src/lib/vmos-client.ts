@@ -177,7 +177,7 @@ async function vmosRequestEnvelope<T extends Record<string, unknown> = Record<st
   }
 
   if (isVmosInstanceNotFoundError(lastError)) {
-    throw new Error("当前人设绑定的云机不存在，请进入人设设置重新绑定可用云机。");
+    throw new Error("当前人设绑定的智能體手機不存在，请进入人设设置重新绑定可用智能體手機。");
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -362,7 +362,7 @@ export interface PadInfo {
   [key: string]: unknown;
 }
 
-/** 取得雲機列表（分頁） */
+/** 取得智能體手機列表（分頁） */
 export async function listPads(config: VmosConfig = {}): Promise<PadInfo[]> {
   const ipc = vmosAPI();
   if (ipc?.listPads) {
@@ -384,7 +384,7 @@ export async function listPads(config: VmosConfig = {}): Promise<PadInfo[]> {
       }
     }
     if (byPadCode.size === 0 && errors.length > 0) {
-      throw new Error(`VMOS 多账号云机列表读取失败：${errors.join("；")}`);
+      throw new Error(`VMOS 多账号智能體手機列表读取失败：${errors.join("；")}`);
     }
     return Array.from(byPadCode.values());
   }
@@ -548,12 +548,12 @@ export async function inputText(
   return String(taskId);
 }
 
-/** 透過 URL 上傳檔案到雲機指定路徑 */
+/** 透過 URL 上傳檔案到智能體手機指定路徑 */
 export async function uploadFileByUrl(
   config: VmosConfig,
   padCode: string,
   fileUrl: string,
-  /** 雲機內目標路徑，如 /sdcard/DCIM/post_image.jpg */
+  /** 智能體手機內目標路徑，如 /sdcard/DCIM/post_image.jpg */
   targetPath: string
 ): Promise<string> {
   const ipc = vmosAPI();
@@ -657,7 +657,7 @@ export async function execAdb(
 }
 
 /** 查詢任務執行結果（taskIds 為陣列） */
-/** 重啟雲機實例，用於 asyncCmd 任務卡死或系統無響應恢復。 */
+/** 重啟智能體手機實例，用於 asyncCmd 任務卡死或系統無響應恢復。 */
 export async function restartPad(
   config: VmosConfig,
   padCode: string
@@ -724,7 +724,7 @@ export async function screenshot(
   return (data as Array<{ accessUrl: string }>)[0].accessUrl;
 }
 
-/** 查詢雲機資訊 */
+/** 查詢智能體手機資訊 */
 export async function getPadInfo(
   config: VmosConfig,
   padCode: string

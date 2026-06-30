@@ -110,11 +110,11 @@ async function ensureTelegramForeground(config: VmosConfig, padCode: string) {
       if (focus.includes(TELEGRAM_PACKAGE)) break;
     }
     if (!focus.includes(TELEGRAM_PACKAGE) && (primaryLaunchFailed || /not found|does not exist|No activities found|unable to resolve|not installed|Unknown package|Error type 3/i.test(lastActivityOutput))) {
-      throw new Error("该人设绑定的云机上未检测到 Telegram 应用，请先在这台云机安装并登录 Telegram。");
+      throw new Error("该人设绑定的智能體手機上未检测到 Telegram 应用，请先在这台智能體手機安装并登录 Telegram。");
     }
   }
   if (!focus.includes(TELEGRAM_PACKAGE)) {
-    throw new Error("没有进入 Telegram，请先确认这台云机已安装并登录 Telegram。");
+    throw new Error("没有进入 Telegram，请先确认这台智能體手機已安装并登录 Telegram。");
   }
 }
 
@@ -239,7 +239,7 @@ export async function identifyTelegramGroupById(
   ].filter(Boolean);
 
   await runAdb(config, task.padCode, `am force-stop ${TELEGRAM_PACKAGE}; sleep 0.8`, 12_000).catch(() => undefined);
-  onProgress({ step: `使用雲機 Telegram 帳號識別群 ID：${chatId}`, done: false });
+  onProgress({ step: `使用智能體手機 Telegram 帳號識別群 ID：${chatId}`, done: false });
 
   for (const link of links) {
     await runAdb(
@@ -251,17 +251,17 @@ export async function identifyTelegramGroupById(
     const uiXml = await dumpTelegramUiXml(config, task.padCode);
     const groupName = extractTelegramChatTitleFromUiXml(uiXml);
     if (groupName) {
-      onProgress({ step: `已從雲機 Telegram 識別群名：${groupName}`, done: true });
+      onProgress({ step: `已從智能體手機 Telegram 識別群名：${groupName}`, done: true });
       return { chatId, groupName, source: "ui" };
     }
     const visionResult = await identifyCurrentTelegramGroupByVision(config, task.padCode, onProgress).catch(() => null);
     if (visionResult?.groupName) {
-      onProgress({ step: `已從雲機 Telegram 視覺識別群名：${visionResult.groupName}`, done: true });
+      onProgress({ step: `已從智能體手機 Telegram 視覺識別群名：${visionResult.groupName}`, done: true });
       return { ...visionResult, chatId };
     }
   }
 
-  throw new Error(`雲機 Telegram 無法用群 ID 打開或識別群組：${chatId}。請確認人設綁定的雲機帳號已加入該群，且 Telegram 能用該 ID 打開群組。`);
+  throw new Error(`智能體手機 Telegram 無法用群 ID 打開或識別群組：${chatId}。請確認人設綁定的智能體手機帳號已加入該群，且 Telegram 能用該 ID 打開群組。`);
 }
 
 async function ensureTelegramTargetGroupOpen(
@@ -342,7 +342,7 @@ async function ensureTelegramTargetGroupOpen(
   const uiXml = await dumpTelegramUiXml(config, task.padCode);
   const targetConfirmedByVision = await isCurrentTelegramTargetGroupByVision(config, task.padCode, groupName, onProgress).catch(() => false);
   if (!looksLikeTelegramGroupChat(uiXml) && !targetConfirmedByVision) {
-    throw new Error(`未能进入 Telegram 目标群「${groupName}」，请确认云机 Telegram 能搜索到该群组。`);
+    throw new Error(`未能进入 Telegram 目标群「${groupName}」，请确认智能體手機 Telegram 能搜索到该群组。`);
   }
   if (uiXml.trim() && !telegramUiContainsTargetGroup(uiXml, groupName) && !targetConfirmedByVision) {
     throw new Error(`Telegram 已進入聊天頁，但未確認目前群組是「${groupName}」。為避免發錯群組已停止發布。`);
@@ -771,7 +771,7 @@ async function launchTelegramShareIntent(
   caption: string,
   onProgress: (p: TelegramGroupPublishProgress) => void,
 ) {
-  if (!task.mediaContentUri) throw new Error("图片或视频没有成功写入云机，请重新上传媒体后再发布。");
+  if (!task.mediaContentUri) throw new Error("图片或视频没有成功写入智能體手機，请重新上传媒体后再发布。");
   const mimeType = task.mediaMimeType || "image/jpeg";
   onProgress({ step: mimeType.startsWith("video/") ? "打开 Telegram 视频分享页..." : "打开 Telegram 图片分享页...", done: false });
   await runAdb(config, task.padCode, `am force-stop ${TELEGRAM_PACKAGE}; sleep 1`, 12_000).catch(() => undefined);
@@ -783,15 +783,15 @@ async function launchTelegramShareIntent(
   );
   if (/Exception|Error|Unknown option|Permission Denial/i.test(output)) {
     if (/not found|does not exist|No activities found|unable to resolve|not installed|Unknown package|Error type 3/i.test(output)) {
-      throw new Error("该人设绑定的云机上未检测到 Telegram 应用，请先在这台云机安装并登录 Telegram。");
+      throw new Error("该人设绑定的智能體手機上未检测到 Telegram 应用，请先在这台智能體手機安装并登录 Telegram。");
     }
-    throw new Error("Telegram 分享入口启动失败，请确认这台云机已安装并登录 Telegram。");
+    throw new Error("Telegram 分享入口启动失败，请确认这台智能體手機已安装并登录 Telegram。");
   }
   await delay(3000);
 
   const focus = await getCurrentFocus(config, task.padCode);
   if (focus && !focus.includes(TELEGRAM_PACKAGE)) {
-    throw new Error("没有进入 Telegram 分享页面，请先确认这台云机已安装并登录 Telegram。");
+    throw new Error("没有进入 Telegram 分享页面，请先确认这台智能體手機已安装并登录 Telegram。");
   }
 }
 
@@ -923,7 +923,7 @@ export async function publishTelegramGroupPost(
 ): Promise<TelegramGroupPublishResult> {
   const caption = String(task.caption || "").trim();
   if (!caption && !task.mediaUrl) throw new Error("Telegram 群组发布内容不能为空");
-  if (task.mediaUrl && !task.mediaContentUri) throw new Error("图片或视频没有成功写入云机，请重新上传媒体后再发布。");
+  if (task.mediaUrl && !task.mediaContentUri) throw new Error("图片或视频没有成功写入智能體手機，请重新上传媒体后再发布。");
   await ensureTelegramTargetGroupOpen(config, task, onProgress);
   if (task.mediaUrl) {
     await launchTelegramShareIntent(config, task, caption, onProgress);
