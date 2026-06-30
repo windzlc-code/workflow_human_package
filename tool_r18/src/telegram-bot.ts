@@ -617,6 +617,7 @@ const pendingThreadsAutoReplyDaysInputs = new Map<number, {
 const pendingThreadsOwnPostReplyInputs = new Map<number, {
   archiveId: string;
   stage: "await_reply_text" | "await_min_views" | "await_days";
+  replyMode?: "manual" | "ai";
   replyText?: string;
   minViews?: number;
   createdAt: number;
@@ -624,7 +625,8 @@ const pendingThreadsOwnPostReplyInputs = new Map<number, {
 
 const pendingThreadsOwnPostReplyRuns = new Map<number, {
   archiveId: string;
-  replyText: string;
+  replyMode: "manual" | "ai";
+  replyText?: string;
   minViews: number;
   maxAgeDays: number;
   createdAt: number;
@@ -3745,31 +3747,38 @@ function buildPersonaAutoReplyModeRows(archiveId: string): Array<Array<{ text: s
   ];
 }
 
-function buildPersonaOwnPostAutoReplyPlatformText(archive: PersonaArchive, run: { replyText: string; minViews: number; maxAgeDays: number }) {
+function buildPersonaOwnPostAutoReplyPlatformText(archive: PersonaArchive, run: { replyMode?: "manual" | "ai"; replyText?: string; minViews: number; maxAgeDays: number }) {
+  const replyMode = run.replyMode === "manual" ? "manual" : "ai";
   return [
     "🔥 自動回覆熱點推文",
     "",
     `人設：${archive.name}`,
-    `回覆內容：${run.replyText}`,
-    `瀏覽量條件：大於等於 ${formatCompactCount(run.minViews)}`,
+    `回复模式：${replyMode === "manual" ? "使用自定义内容" : "AI 根据人设和推文自动回复"}`,
+    replyMode === "manual" ? `回覆內容：${run.replyText || ""}` : "",
+    `瀏覽量門檻：大於等於 ${formatCompactCount(run.minViews)}`,
     `查看天數：${run.maxAgeDays} 天內`,
     "",
-    "條件：只回覆自己已發布、有真實 Threads 發布連結、符合瀏覽量和天數、且未回覆過的推文。",
+    "條件：只回覆自己已發布、有真實 Threads 發布連結、符合瀏覽量和天數、且未回覆過的主推文。",
     "請選擇平台後開始執行。",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
-function buildPersonaOwnPostAutoReplyPlatformRows(archiveId: string): Array<Array<{ text: string; callback_data: string }>> {
-  return [
+function buildPersonaOwnPostAutoReplyPlatformRows(archiveId: string, replyMode: "manual" | "ai" = "ai"): Array<Array<{ text: string; callback_data: string }>> {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [
     [{ text: "💬 Threads 內部評論", callback_data: `acctautoreplyhot_threads_${archiveId}` }],
-    [{ text: "✏️ 修改回覆內容", callback_data: `ownreply_text_${archiveId}` }],
+  ];
+  if (replyMode === "manual") {
+    rows.push([{ text: "✏️ 修改回覆內容", callback_data: `ownreply_text_${archiveId}` }]);
+  }
+  rows.push(
     [
       { text: "👁 修改瀏覽量", callback_data: `ownreply_views_${archiveId}` },
       { text: "📅 修改天數", callback_data: `ownreply_days_${archiveId}` },
     ],
     [{ text: "✍️ 重新設定條件", callback_data: `persona_autoreply_hot_${archiveId}` }],
     [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${archiveId}` }],
-  ];
+  );
+  return rows;
 }
 
 function normalizeThreadsOwnPostReplyHistoryUrl(raw: unknown): string {
@@ -3833,6 +3842,51 @@ function collectPublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): Th
   return targets;
 }
 
+async function resolvePublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): Promise<{
+  archive: PersonaArchive;
+  targets: ThreadsOwnPostReplyTarget[];
+  recovered: number;
+}> {
+  const initialTargets = collectPublishedThreadsOwnPostReplyTargets(archive);
+  if (initialTargets.length) return { archive, targets: initialTargets, recovered: 0 };
+
+  const publishHistory = Array.isArray(archive.publishHistory) ? archive.publishHistory : [];
+  const candidateIndexes = publishHistory
+    .map((record, index) => ({ record, index }))
+    .filter(({ record }) => (
+      String(record.platform || "").toLowerCase() === "threads"
+      && !hasPublishHistorySourceUrl(record)
+      && hasPublishHistoryPadLookup(record)
+      && String(record.content || "").trim()
+    ))
+    .slice(-15);
+  if (!candidateIndexes.length) return { archive, targets: initialTargets, recovered: 0 };
+
+  const nextHistory = [...publishHistory];
+  let recovered = 0;
+  for (const { record, index } of candidateIndexes) {
+    const nextRecord = await attachMissingPublishHistoryThreadsUrls(record).catch((error) => {
+      console.warn(`[telegram][own-post-auto-reply][url-recover-failed] record=${record.id || index} ${error instanceof Error ? error.message : String(error)}`.slice(0, 220));
+      return record;
+    });
+    if (hasPublishHistorySourceUrl(nextRecord) && !hasPublishHistorySourceUrl(record)) recovered += 1;
+    nextHistory[index] = nextRecord;
+  }
+  if (!recovered) return { archive, targets: initialTargets, recovered: 0 };
+
+  const nextArchive = {
+    ...archive,
+    updatedAt: new Date().toISOString(),
+    publishHistory: nextHistory,
+  };
+  await savePersonaArchive(nextArchive);
+  return {
+    archive: nextArchive,
+    targets: collectPublishedThreadsOwnPostReplyTargets(nextArchive),
+    recovered,
+  };
+}
+
 function getThreadsOwnPostReplyHistory(archive: PersonaArchive): Array<{ url: string; replyText?: string; repliedAt?: string }> {
   const raw = (archive.setup as any)?.threadsOwnPostAutoReply?.repliedPosts;
   return Array.isArray(raw)
@@ -3864,6 +3918,43 @@ function filterUnrepliedThreadsOwnPostTargets(
     }
     return true;
   });
+}
+
+async function refreshThreadsOwnPostReplyTargetViewCounts(
+  targets: ThreadsOwnPostReplyTarget[],
+  options: { enabled?: boolean; limit?: number } = {},
+): Promise<ThreadsOwnPostReplyTarget[]> {
+  if (!options.enabled || !targets.length) return targets;
+  const limit = Math.max(1, Math.min(10, Math.floor(options.limit || 5)));
+  const out = [...targets];
+  for (let index = 0; index < Math.min(out.length, limit); index += 1) {
+    const target = out[index];
+    const url = normalizeThreadsOwnPostReplyHistoryUrl(target.url);
+    if (!url) continue;
+    try {
+      const refreshed = await refreshSentimentSourceMetrics({
+        platform: "threads",
+        sourceUrl: url,
+        existingEngagement: typeof target.viewCount === "number" ? { viewCount: target.viewCount } : undefined,
+      });
+      const viewCount = numberFromMetric(
+        refreshed.engagement?.viewCount
+          ?? refreshed.metrics?.view_count
+          ?? refreshed.metrics?.views
+          ?? refreshed.metrics?.play_count
+          ?? refreshed.metrics?.plays,
+      );
+      if (refreshed.ok && typeof viewCount === "number") {
+        out[index] = { ...target, viewCount };
+        console.log(`[telegram][own-post-auto-reply][view-count] url=${url} views=${viewCount}`);
+      } else {
+        console.warn(`[telegram][own-post-auto-reply][view-count-missing] url=${url} message=${String(refreshed.message || "")}`.slice(0, 220));
+      }
+    } catch (error) {
+      console.warn(`[telegram][own-post-auto-reply][view-count-failed] url=${url} ${error instanceof Error ? error.message : String(error)}`.slice(0, 220));
+    }
+  }
+  return out;
 }
 
 function formatThreadsOwnPostReplyProgressLines(
@@ -3921,7 +4012,7 @@ function parseThreadsAutoReplyDaysInput(text: string): number | null {
   const match = normalized.match(/\d+/);
   if (!match) return null;
   const days = Number(match[0]);
-  if (!Number.isInteger(days) || days < 1 || days > 7) return null;
+  if (!Number.isInteger(days) || days < 1 || days > 15) return null;
   return days;
 }
 
@@ -17679,22 +17770,68 @@ function sendMainMenu(chatId: number, msgId?: number) {
       pendingPersonaAccountActions.delete(chatId);
       pendingThreadsProfileActions.delete(chatId);
       pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
       pendingThreadsOwnPostReplyRuns.delete(chatId);
       const id = data.slice("persona_autoreply_hot_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const targets = filterUnrepliedThreadsOwnPostTargets(archive, collectPublishedThreadsOwnPostReplyTargets(archive));
-      pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_reply_text", createdAt: Date.now() });
       await safeEditOrSend(bot, chatId, msgId, [
         "🔥 自動回覆熱點推文",
         "",
         `人設：${archive.name}`,
         `可回覆推文：${targets.length} 篇`,
         "",
-        "請直接輸入要回覆到自己已發布推文內的內容。",
-        "下一步會設定瀏覽量門檻和查看天數。",
+        "請選擇回覆分支：",
+        "1. 自定义内容回复：找到符合條件的自己主推文後，直接發送你輸入的內容。",
+        "2. AI 自动回复：根據當前人設和推文內容自動生成自然回覆。",
       ].join("\n"), {
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }]] },
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "✍️ 使用自定义内容回复", callback_data: `ownreply_mode_manual_${id}` }],
+            [{ text: "🤖 AI 根据人设自动回复", callback_data: `ownreply_mode_ai_${id}` }],
+            [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith("ownreply_mode_manual_") || data.startsWith("ownreply_mode_ai_")) {
+      pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      pendingThreadsOwnPostReplyRuns.delete(chatId);
+      const replyMode: "manual" | "ai" = data.startsWith("ownreply_mode_manual_") ? "manual" : "ai";
+      const id = data.slice((replyMode === "manual" ? "ownreply_mode_manual_" : "ownreply_mode_ai_").length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      if (replyMode === "manual") {
+        pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_reply_text", replyMode, createdAt: Date.now() });
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🔥 自動回覆熱點推文",
+          "",
+          `人設：${archive.name}`,
+          "回复模式：使用自定义内容",
+          "",
+          "請直接輸入要回覆到自己已發布主推文內的內容。",
+          "後續會根據瀏覽量和天數條件找目標，命中後直接發送這段內容。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回分支選擇", callback_data: `persona_autoreply_hot_${id}` }]] },
+        });
+        return;
+      }
+      pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_min_views", replyMode, createdAt: Date.now() });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔥 自動回覆熱點推文",
+        "",
+        `人設：${archive.name}`,
+        "回复模式：AI 根据人设和推文自动回复",
+        "",
+        "請輸入瀏覽量門檻。",
+        "只有已發布推文瀏覽量大於等於這個值時才會自動評論。",
+        "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。",
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回分支選擇", callback_data: `persona_autoreply_hot_${id}` }]] },
       });
       return;
     }
@@ -17881,10 +18018,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const inputState = pendingThreadsOwnPostReplyInputs.get(chatId);
       const runState = pendingThreadsOwnPostReplyRuns.get(chatId);
+      const replyMode: "manual" | "ai" = inputState?.replyMode || runState?.replyMode || "manual";
       const replyText = String(inputState?.replyText || runState?.replyText || "").trim();
       const minViews = Number(inputState?.minViews ?? runState?.minViews ?? 0);
-      if (mode !== "text" && !replyText) {
-        pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_reply_text", createdAt: Date.now() });
+      if (mode !== "text" && replyMode === "manual" && !replyText) {
+        pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_reply_text", replyMode: "manual", createdAt: Date.now() });
         await safeEditOrSend(bot, chatId, msgId, [
           "🔥 自動回覆熱點推文",
           "",
@@ -17900,6 +18038,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         pendingThreadsOwnPostReplyInputs.set(chatId, {
           archiveId: id,
           stage: "await_reply_text",
+          replyMode: "manual",
           minViews: Number.isFinite(minViews) ? Math.max(0, Math.floor(minViews)) : undefined,
           createdAt: Date.now(),
         });
@@ -17919,6 +18058,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         pendingThreadsOwnPostReplyInputs.set(chatId, {
           archiveId: id,
           stage: "await_min_views",
+          replyMode,
           replyText,
           minViews: Number.isFinite(minViews) ? Math.max(0, Math.floor(minViews)) : undefined,
           createdAt: Date.now(),
@@ -17927,14 +18067,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "🔥 自動回覆熱點推文",
           "",
           `人設：${archive.name}`,
-          `回覆內容：${replyText}`,
+          `回复模式：${replyMode === "manual" ? "使用自定义内容" : "AI 根据人设和推文自动回复"}`,
+          replyMode === "manual" ? `回覆內容：${replyText}` : "",
           "",
           "請重新輸入瀏覽量門檻。",
           "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。",
-        ].join("\n"), {
+        ].filter(Boolean).join("\n"), {
           reply_markup: {
             inline_keyboard: [
-              [{ text: "✏️ 上一步：編輯文案", callback_data: `ownreply_text_${id}` }],
+              ...(replyMode === "manual" ? [[{ text: "✏️ 上一步：編輯文案", callback_data: `ownreply_text_${id}` }]] : []),
               [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }],
             ],
           },
@@ -17945,6 +18086,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       pendingThreadsOwnPostReplyInputs.set(chatId, {
         archiveId: id,
         stage: "await_days",
+        replyMode,
         replyText,
         minViews: safeMinViews,
         createdAt: Date.now(),
@@ -17953,16 +18095,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
         "🔥 自動回覆熱點推文",
         "",
         `人設：${archive.name}`,
-        `回覆內容：${replyText}`,
+        `回复模式：${replyMode === "manual" ? "使用自定义内容" : "AI 根据人设和推文自动回复"}`,
+        replyMode === "manual" ? `回覆內容：${replyText}` : "",
         `瀏覽量條件：大於等於 ${formatCompactCount(safeMinViews)}`,
         "",
         "請重新輸入查看天數，規則和自動回覆評論一致。",
         "可輸入：1-7，例如：2。",
-      ].join("\n"), {
+      ].filter(Boolean).join("\n"), {
         reply_markup: {
           inline_keyboard: [
             [{ text: "👁 上一步：修改瀏覽量", callback_data: `ownreply_views_${id}` }],
-            [{ text: "✏️ 編輯文案", callback_data: `ownreply_text_${id}` }],
+            ...(replyMode === "manual" ? [[{ text: "✏️ 編輯文案", callback_data: `ownreply_text_${id}` }]] : []),
             [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }],
           ],
         },
@@ -17993,11 +18136,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const allTargets = collectPublishedThreadsOwnPostReplyTargets(archive);
-      const targets = filterUnrepliedThreadsOwnPostTargets(archive, allTargets, {
+      const creds = resolveVmosCredentials();
+      const resolvedTargets = await resolvePublishedThreadsOwnPostReplyTargets(archive);
+      let allTargets = resolvedTargets.targets;
+      const effectiveArchive = resolvedTargets.archive;
+      if (resolvedTargets.recovered > 0) {
+        console.log(`[telegram][own-post-auto-reply][url-recovered] archive=${id} recovered=${resolvedTargets.recovered} targets=${allTargets.length}`);
+      }
+      allTargets = await refreshThreadsOwnPostReplyTargetViewCounts(allTargets, {
+        enabled: runState.minViews > 0,
+        limit: 5,
+      });
+      const targets = filterUnrepliedThreadsOwnPostTargets(effectiveArchive, allTargets, {
         minViews: runState.minViews,
         maxAgeDays: runState.maxAgeDays,
-      }).slice(0, 3);
+      }).slice(0, 5);
       if (!targets.length) {
         await safeEditOrSend(bot, chatId, msgId, [
           "ℹ️ 沒有符合條件的已發布 Threads 推文。",
@@ -18017,7 +18170,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, padOperationKey, "Threads自動回覆熱點推文"))) return;
       const stopTyping = startTelegramTyping(bot, chatId);
       try {
-        const creds = resolveVmosCredentials();
         let lastProgress: ThreadsOwnPostReplyProgress | null = null;
         await safeEditOrSend(bot, chatId, msgId, [
           "🔥 Threads 自動回覆熱點推文執行中...",
@@ -18035,7 +18187,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const result = await replyOwnPublishedThreadsPosts(
           creds,
           boundPad.padCode,
-          { targets, replyText: runState.replyText, maxReplies: 3 },
+          {
+            targets,
+            replyMode: runState.replyMode,
+            replyText: runState.replyText || "",
+            maxPosts: 5,
+            maxReplies: 3,
+            commentPersona: buildWarmupCommentPersonaFromArchive(effectiveArchive),
+          },
           (p) => {
             assertPadOperationNotCancelled(padOperationKey);
             lastProgress = p;
@@ -18052,10 +18211,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
           const existing = getThreadsOwnPostReplyHistory(latestArchive);
           const existingUrls = new Set(existing.map((item) => item.url));
           const nowIso = new Date().toISOString();
+          const commentsByUrl = new Map((result.repliedComments || []).map((item) => [
+            normalizeThreadsOwnPostReplyHistoryUrl(item.url),
+            item.comment,
+          ]));
           const appended = result.repliedUrls
             .map((url) => ({
               url: normalizeThreadsOwnPostReplyHistoryUrl(url),
-              replyText: runState.replyText,
+              replyText: commentsByUrl.get(normalizeThreadsOwnPostReplyHistoryUrl(url)) || runState.replyText || "",
               repliedAt: nowIso,
             }))
             .filter((item) => item.url && !existingUrls.has(item.url));
@@ -24752,6 +24915,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         pendingThreadsOwnPostReplyInputs.set(chatId, {
           ...pendingOwnPostReplyInput,
           stage: "await_min_views",
+          replyMode: "manual",
           replyText,
           createdAt: Date.now(),
         });
@@ -24790,15 +24954,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "🔥 自動回覆熱點推文",
           "",
           `人設：${archive.name}`,
+          `回复模式：${pendingOwnPostReplyInput.replyMode === "manual" ? "使用自定义内容" : "AI 根据人设和推文自动回复"}`,
           `瀏覽量條件：大於等於 ${formatCompactCount(minViews)}`,
           "",
           "請輸入查看天數，規則和自動回覆評論一致。",
           "可輸入：1-7，例如：2。",
-        ].join("\n"), {
+        ].filter(Boolean).join("\n"), {
           reply_markup: {
             inline_keyboard: [
               [{ text: "👁 重新設定瀏覽量", callback_data: `ownreply_views_${pendingOwnPostReplyInput.archiveId}` }],
-              [{ text: "✏️ 上一步：編輯文案", callback_data: `ownreply_text_${pendingOwnPostReplyInput.archiveId}` }],
+              ...(pendingOwnPostReplyInput.replyMode === "manual" ? [[{ text: "✏️ 上一步：編輯文案", callback_data: `ownreply_text_${pendingOwnPostReplyInput.archiveId}` }]] : []),
               [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }],
             ],
           },
@@ -24812,12 +24977,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const runState = {
         archiveId: pendingOwnPostReplyInput.archiveId,
+        replyMode: pendingOwnPostReplyInput.replyMode === "manual" ? "manual" as const : "ai" as const,
         replyText: pendingOwnPostReplyInput.replyText || "",
         minViews: Math.max(0, Math.floor(pendingOwnPostReplyInput.minViews || 0)),
         maxAgeDays: days,
         createdAt: Date.now(),
       };
-      if (!runState.replyText) {
+      if (runState.replyMode === "manual" && !runState.replyText) {
         pendingThreadsOwnPostReplyInputs.delete(chatId);
         await bot.sendMessage(chatId, "❌ 回覆內容已失效，請重新進入自動回覆熱點推文。");
         return;
@@ -24825,7 +24991,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       pendingThreadsOwnPostReplyInputs.delete(chatId);
       pendingThreadsOwnPostReplyRuns.set(chatId, runState);
       await bot.sendMessage(chatId, buildPersonaOwnPostAutoReplyPlatformText(archive, runState), {
-        reply_markup: { inline_keyboard: buildPersonaOwnPostAutoReplyPlatformRows(pendingOwnPostReplyInput.archiveId) },
+        reply_markup: { inline_keyboard: buildPersonaOwnPostAutoReplyPlatformRows(pendingOwnPostReplyInput.archiveId, runState.replyMode) },
       });
       return;
     }

@@ -19683,6 +19683,10 @@ async function openThreadsProfileForAccountQuery(
     if (looksLikeThreadsProfileUiXml(profileUiXml)) {
       return { ok: true, profileLikely: true, screenshotUrl: profileShotUrl };
     }
+    const profileTexts = await dumpUiTextAttributes(config, padCode).catch(() => []);
+    if (profileTexts.length && hasThreadsProfileTextCue(profileTexts)) {
+      return { ok: true, profileLikely: true, screenshotUrl: profileShotUrl };
+    }
     return {
       ok: false,
       error: "ACP 点击底部个人页后未能确认进入 Threads 个人主页，已停止以避免在首页误操作",
@@ -22032,8 +22036,10 @@ export interface ThreadsOwnPostReplyProgress {
   scannedPosts: number;
   replied: number;
   skipped: number;
+  targetReplies?: number;
   replyScreenshots?: string[];
   repliedUrls?: string[];
+  repliedComments?: Array<{ url: string; comment: string }>;
   done: boolean;
   error?: string;
 }
@@ -24969,6 +24975,7 @@ async function buildWarmupSearchKeywords(
   explicitKeywords: string[] = [],
 ): Promise<string[]> {
   const fallback = buildWarmupSearchKeywordCandidates(persona, explicitKeywords);
+  if (fallback.length >= 2) return fallback;
   const personaText = warmupCommentPersonaText(persona);
   if (!personaText || !getGeminiEndpoint().apiKey) return fallback;
   const request = createTimeoutSignal(6_500);
@@ -25600,8 +25607,10 @@ async function warmupEnsureRelevantSurface(
   if (options.allowSearch === false) return { ok: false, preview: "", reason: "probe-unmatched" };
 
   const searchAttempts = Math.max(1, Math.min(5, Math.floor(cfg.relevanceSearchAttempts || 3)));
+  report("正在整理中文人设搜索关键词...");
   const rawSearchKeywords = await buildWarmupSearchKeywords(cfg.commentPersona, cfg.keywords || []);
   const searchKeywords = shuffleWarmupList(rawSearchKeywords).slice(0, Math.max(searchAttempts, 3));
+  report(`已整理中文人设搜索关键词：${searchKeywords.slice(0, Math.min(3, searchKeywords.length)).join("、") || "无"}`);
   for (let attempt = 0; attempt < Math.min(searchAttempts, searchKeywords.length); attempt += 1) {
     const keyword = searchKeywords[attempt];
     if (!keyword) continue;
@@ -25798,19 +25807,39 @@ function finalizeGeneratedWarmupCommentOnly(
   postPreview: string,
   persona?: WarmupCommentPersona,
 ): string {
-  void persona;
+  const validation = validateGeneratedWarmupCommentCandidate(text, postPreview, persona);
+  return validation.ok ? validation.comment : "";
+}
+
+type WarmupGeneratedCommentValidation =
+  | { ok: true; comment: string }
+  | { ok: false; candidate: string; reason: string };
+
+function validateGeneratedWarmupCommentCandidate(
+  text: string,
+  postPreview: string,
+  persona?: WarmupCommentPersona,
+): WarmupGeneratedCommentValidation {
   const comment = sanitizeWarmupComment(text);
   const previewReadable = warmupCommentContentLength(postPreview) >= 6;
-  if (
-    previewReadable
-    && comment
-    && isCompleteGeneratedWarmupComment(comment, postPreview)
-    && !isGenericWarmupComment(comment)
-    && !isLongUnpunctuatedWarmupComment(comment)
-  ) {
-    return comment;
+  if (!previewReadable) return { ok: false, candidate: comment, reason: "没有读到足够完整的推文内容" };
+  if (!comment) return { ok: false, candidate: comment, reason: "模型没有输出评论正文" };
+  if (!isCompleteGeneratedWarmupComment(comment, postPreview)) {
+    return { ok: false, candidate: comment, reason: "评论不是完整自然的一句话，像半句或语义没收住" };
   }
-  return "";
+  if (/逼(?!真)/.test(comment)) {
+    return { ok: false, candidate: comment, reason: "评论出现不自然或疑似截断的词" };
+  }
+  if (isGenericWarmupComment(comment)) {
+    return { ok: false, candidate: comment, reason: "评论太泛，缺少和当前推文的具体关联" };
+  }
+  if (isLongUnpunctuatedWarmupComment(comment)) {
+    return { ok: false, candidate: comment, reason: "评论较长但没有自然停顿或标点" };
+  }
+  if (!isWarmupCommentGroundedInPostAndPersona(comment, postPreview, persona)) {
+    return { ok: false, candidate: comment, reason: "评论没有贴住当前推文里的具体内容" };
+  }
+  return { ok: true, comment };
 }
 
 function finalizeThreadsAutoReplyModelReply(
@@ -25864,14 +25893,30 @@ function isLongUnpunctuatedWarmupComment(comment: string): boolean {
   return length >= 16 && !hasWarmupCommentNaturalPause(comment);
 }
 
+function isSemanticallyIncompleteWarmupComment(comment: string): boolean {
+  const normalized = sanitizeWarmupComment(comment);
+  if (!normalized) return true;
+  if (/[，、,]$/.test(normalized)) return true;
+  if (/(看起來|看起来|聽起來|听起来|感覺|感觉|讓人|让人|有點|有点|有些|比較|比起來|比起来|很|蠻|蛮|挺|更加|更像|像是|不像|不是|可以|應該|应该|值得|適合|适合|想到)$/.test(normalized)) return true;
+  if (/(很|挺|蠻|蛮|更|比較|比较)逼$/.test(normalized)) return true;
+  if (/^(看著|看着|望著|望着|盯著|盯着)[^，。！？!?]{2,16}$/.test(normalized)) return true;
+  if (/在[^，。！？!?]{1,16}(下|裡|里|中)?(看起來|看起来|顯得|显得)?$/.test(normalized)) return true;
+  return false;
+}
+
 function isCompleteGeneratedWarmupComment(comment: string, postPreview: string): boolean {
   const normalized = sanitizeWarmupComment(comment);
   const length = warmupCommentContentLength(normalized);
   if (!normalized || !isUsableWarmupComment(normalized)) return false;
   if (/^(comment|comments|reply|replies|text|preview|summary)$/i.test(normalized)) return false;
   if (!/\p{Script=Han}/u.test(normalized)) return false;
+  if (/^[，。、,.!?！？；;]/.test(normalized)) return false;
   if (/[，、,]$/.test(normalized)) return false;
-  if (/[的之和與与跟及在把對对給给為为是了着著]$/.test(normalized)) return false;
+  const trailingAfterPause = normalized.match(/[。！？!?]\s*([^。！？!?，、,.；;]{1,3})$/u)?.[1]?.trim() || "";
+  if (trailingAfterPause && /\p{Script=Han}/u.test(trailingAfterPause)) return false;
+  if (/(不會|不会|不能|可以|應該|应该|如果|因為|因为|所以|而且|但是|只是|也不)$/.test(normalized)) return false;
+  if (/[的之和與与跟及在把對对給给為为是了着著會会能要想讓让我你妳他她它們们咱誰谁這这那有沒没還还很]$/.test(normalized)) return false;
+  if (isSemanticallyIncompleteWarmupComment(normalized)) return false;
   if (/^(勇敢踏出第一步|加油|支持|不错|不錯|认同|認同)[，。,.!?！？]?$/.test(normalized)) return false;
   if (isShortLowInfoWarmupPost(postPreview)) return isUsableShortWarmupReaction(normalized) || length >= 8;
   if (length < 10) return false;
@@ -32162,9 +32207,11 @@ async function buildWarmupCommentEvidenceScreenshot(
     if (!beforeInline || !afterInline) return beforeSendUrl;
     const sharp = (await import("sharp")).default;
     const width = 720;
-    const panelHeight = 720;
+    const afterPanelHeight = 720;
+    const beforePanelHeight = 960;
     const headerHeight = 48;
     const cropPanel = async (inline: { data: string }, focus: "after" | "before") => {
+      const panelHeight = focus === "before" ? beforePanelHeight : afterPanelHeight;
       const resized = await sharp(Buffer.from(inline.data, "base64"))
         .resize({ width })
         .jpeg({ quality: 90 })
@@ -32194,25 +32241,27 @@ async function buildWarmupCommentEvidenceScreenshot(
     const beforePanel = await cropPanel(beforeInline, "before");
     const afterPanel = await cropPanel(afterInline, "after");
     const safeComment = escapeXmlText(comment ? ` ${comment.slice(0, 32)}` : "");
+    const outputHeight = afterPanelHeight + beforePanelHeight + headerHeight * 2;
+    const beforeHeaderTop = afterPanelHeight + headerHeight;
     const overlay = Buffer.from(`
-      <svg width="${width}" height="${(panelHeight + headerHeight) * 2}" xmlns="http://www.w3.org/2000/svg">
+      <svg width="${width}" height="${outputHeight}" xmlns="http://www.w3.org/2000/svg">
         <rect x="0" y="0" width="${width}" height="${headerHeight}" fill="#111111"/>
         <text x="24" y="32" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#ffffff">AFTER SEND: posted reply visible${safeComment}</text>
-        <rect x="0" y="${panelHeight + headerHeight}" width="${width}" height="${headerHeight}" fill="#111111"/>
-        <text x="24" y="${panelHeight + headerHeight + 32}" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#ffffff">BEFORE SEND: typed reply visible</text>
+        <rect x="0" y="${beforeHeaderTop}" width="${width}" height="${headerHeight}" fill="#111111"/>
+        <text x="24" y="${beforeHeaderTop + 32}" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#ffffff">BEFORE SEND: typed reply visible</text>
       </svg>
     `);
     const output = await sharp({
       create: {
         width,
-        height: (panelHeight + headerHeight) * 2,
+        height: outputHeight,
         channels: 3,
         background: "#ffffff",
       },
     })
       .composite([
         { input: afterPanel, top: headerHeight, left: 0 },
-        { input: beforePanel, top: panelHeight + headerHeight * 2, left: 0 },
+        { input: beforePanel, top: afterPanelHeight + headerHeight * 2, left: 0 },
         { input: overlay, top: 0, left: 0 },
       ])
       .jpeg({ quality: 88 })
@@ -34652,7 +34701,10 @@ async function verifyThreadsOwnPostReplyTargetOnScreen(
   if (!expectedTokens.length) return { ok: true };
   const uiXml = await dumpUiXmlQuick(config, padCode, 2500).catch(() => "");
   const preview = extractWarmupPostPreviewFromUiXml(uiXml);
-  if (!preview) return { ok: false, reason: "無法讀取當前推文內容，未確認目標帖" };
+  if (!preview) {
+    console.warn(`[threads][own-post-reply][target-check] ui preview empty; trusting opened target url=${target.url}`.slice(0, 220));
+    return { ok: true };
+  }
   const normalizedPreview = normalizeSingleLine(preview).toLowerCase();
   const matched = expectedTokens.filter((token) => normalizedPreview.includes(token.toLowerCase()));
   const required = expectedTokens.length >= 4 ? 2 : 1;
@@ -34665,34 +34717,142 @@ export async function replyOwnPublishedThreadsPosts(
   padCode: string,
   cfg: {
     targets: ThreadsOwnPostReplyTarget[];
-    replyText: string;
+    replyMode?: "manual" | "ai";
+    replyText?: string;
+    maxPosts?: number;
     maxReplies?: number;
+    commentPersona?: WarmupCommentPersona;
   },
   onProgress?: (progress: ThreadsOwnPostReplyProgress) => void,
 ): Promise<ThreadsOwnPostReplyProgress> {
-  const replyText = normalizeSingleLine(cfg.replyText);
-  if (!replyText) throw new Error("自動回覆熱點推文內容不能為空");
+  const replyMode = cfg.replyMode === "manual" ? "manual" : "ai";
+  const manualReplyText = normalizeSingleLine(cfg.replyText || "");
+  if (replyMode === "manual" && !manualReplyText) throw new Error("自定义回覆內容不能為空");
   const targets = Array.from(new Map(
     (cfg.targets || [])
       .map((target) => ({ ...target, url: normalizeThreadsOwnPostReplyUrl(target.url) }))
       .filter((target) => target.url)
       .map((target) => [target.url, target]),
   ).values());
-  const maxReplies = Math.max(1, Math.min(10, Math.floor(cfg.maxReplies || 3)));
+  const maxPosts = Math.max(3, Math.min(5, Math.floor(cfg.maxPosts || 5)));
+  const maxReplies = Math.max(1, Math.min(5, Math.floor(cfg.maxReplies || 3)));
+  const targetReplyUpper = Math.min(3, maxReplies);
+  const targetReplies = targetReplyUpper >= 2
+    ? 2 + Math.floor(Math.random() * (targetReplyUpper - 1))
+    : 1;
+  const executionTargets = targets.slice(0, maxPosts);
   let scannedPosts = 0;
   let replied = 0;
   let skipped = 0;
   const replyScreenshots: string[] = [];
   const repliedUrls: string[] = [];
+  const repliedComments: Array<{ url: string; comment: string }> = [];
   const errors: string[] = [];
+  const generateOwnPostComment = async (postPreview: string, detailShotUrl?: string): Promise<string> => {
+    const preview = normalizeSingleLine(postPreview).slice(0, 240);
+    if (!preview) return "";
+    const unreadablePreview = preview.length >= 12 && (preview.match(/\?/g)?.length || 0) / preview.length >= 0.35;
+    if (unreadablePreview && detailShotUrl) {
+      const visual = await warmupGenerateCommentFromScreenshot(detailShotUrl, [], cfg.commentPersona, preview).catch(() => null);
+      if (visual?.comment) {
+        const validation = validateGeneratedWarmupCommentCandidate(visual.comment, preview, cfg.commentPersona);
+        if (validation.ok) return validation.comment;
+      }
+    }
+    const personaHint = warmupCommentPersonaText(cfg.commentPersona) || "未指定，使用台灣 Threads 自然口語";
+    const parseComment = (raw: unknown): WarmupGeneratedCommentValidation => {
+      const text = warmupModelText(raw)
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/```\s*$/i, "");
+      const candidates: string[] = [];
+      const jsonText = text.match(/\{[\s\S]*?\}/)?.[0] || "";
+      if (jsonText) {
+        try {
+          const parsed = JSON.parse(jsonText);
+          candidates.push(String(parsed?.comment || parsed?.reply || parsed?.text || ""));
+        } catch {
+          // Fall through to plain text candidates.
+        }
+      }
+      candidates.push(...text.split(/[|｜\n]/).filter(Boolean), text);
+      let lastRejected: WarmupGeneratedCommentValidation = { ok: false, candidate: "", reason: "模型输出里没有可用评论候选" };
+      for (const candidate of candidates) {
+        const validation = validateGeneratedWarmupCommentCandidate(candidate, preview, cfg.commentPersona);
+        if (validation.ok) return validation;
+        if (validation.candidate) lastRejected = validation;
+      }
+      return lastRejected;
+    };
+    const rejectionNotes: string[] = [];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const request = createTimeoutSignal(15_000);
+      let rejected = "";
+      try {
+        let selected = "";
+        const retryHint = rejectionNotes.length
+          ? `\n\n上一轮不可用输出与原因：\n${rejectionNotes.slice(-2).map((item, index) => `${index + 1}. ${item}`).join("\n")}\n请根据原因重写，不要重复上一轮。`
+          : "";
+        const data = await callThreadsAutoReplyTextModelWithFallback(
+          [{
+            role: "user",
+            parts: [{ text: `根据下面这条“自己已经发布的 Threads 主推文”，写一句自然的补充回复。只输出 JSON：{"comment":"..."}，不要解释。
+要求：
+- 必须贴合主推文具体内容，不能泛泛回复。
+- 语气符合当前人设：${personaHint}。
+- 使用中文自然口语，10 到 30 个有效字；超过 15 个有效字要有自然停顿或标点。
+- 必须是一句语义完整的话，不能只输出名词短语、半句、或没说完的描述。
+- 禁止输出类似“看著這顆紅蘋果”“這顆蘋果在陽光下看起來”这种没有完整判断或补充的半句。
+- 不要 hashtag、@、链接、表情符号，不要广告话术，不要提到 AI 或自动化。
+
+主推文：${preview}${retryHint}` }],
+          }],
+          { maxOutputTokens: 90, temperature: 0.75 },
+          request.signal,
+          (data) => {
+            const validation = parseComment(data);
+            if (validation.ok) {
+              selected = validation.comment;
+              return true;
+            }
+            rejected = validation.candidate
+              ? `「${validation.candidate}」：${validation.reason}`
+              : validation.reason;
+            return Boolean(selected);
+          },
+        );
+        const validation = selected ? { ok: true as const, comment: selected } : parseComment(data);
+        if (validation.ok) return validation.comment;
+        const note = validation.candidate
+          ? `「${validation.candidate}」：${validation.reason}`
+          : (rejected || validation.reason);
+        rejectionNotes.push(note);
+        console.warn(`[threads][own-post-reply][comment-model] attempt=${attempt + 1} rejected: ${note}`.slice(0, 240));
+      } catch (error) {
+        if (rejected) rejectionNotes.push(rejected);
+        console.warn(`[threads][own-post-reply][comment-model] attempt=${attempt + 1} unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 220));
+      } finally {
+        request.cleanup();
+      }
+    }
+    if (unreadablePreview && detailShotUrl) {
+      const visual = await warmupGenerateCommentFromScreenshot(detailShotUrl, [], cfg.commentPersona, preview).catch(() => null);
+      if (visual?.comment) {
+        const validation = validateGeneratedWarmupCommentCandidate(visual.comment, preview, cfg.commentPersona);
+        if (validation.ok) return validation.comment;
+      }
+    }
+    return "";
+  };
   const report = (progress: Partial<ThreadsOwnPostReplyProgress>) => {
     onProgress?.({
       step: progress.step || "Threads 自動回覆熱點推文進行中",
       scannedPosts: progress.scannedPosts ?? scannedPosts,
       replied: progress.replied ?? replied,
       skipped: progress.skipped ?? skipped,
+      targetReplies: progress.targetReplies ?? targetReplies,
       replyScreenshots,
       repliedUrls,
+      repliedComments,
       done: progress.done ?? false,
       error: progress.error,
     });
@@ -34704,8 +34864,10 @@ export async function replyOwnPublishedThreadsPosts(
       scannedPosts,
       replied,
       skipped,
+      targetReplies,
       replyScreenshots,
       repliedUrls,
+      repliedComments,
       done: true,
       error: "沒有找到未回覆且有真實發布連結的 Threads 推文",
     };
@@ -34713,10 +34875,10 @@ export async function replyOwnPublishedThreadsPosts(
     return result;
   }
 
-  for (const target of targets) {
-    if (replied >= maxReplies) break;
+  for (const target of executionTargets) {
+    if (replied >= targetReplies) break;
     scannedPosts += 1;
-    report({ step: `正在打開已發布推文 ${scannedPosts}/${targets.length}` });
+    report({ step: `正在打開已發布推文 ${scannedPosts}/${executionTargets.length}` });
     try {
       await execAdbForText(
         config,
@@ -34734,20 +34896,33 @@ export async function replyOwnPublishedThreadsPosts(
         await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
         continue;
       }
-      const commentBtn = await warmupFindCommentButton(config, padCode);
-      if (!commentBtn) {
-        skipped += 1;
-        errors.push(`${target.label || target.url}: 找不到可靠評論入口`);
-        report({ step: "找不到可靠評論入口，已跳過" });
-        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
-        continue;
-      }
-      const result = await warmupExecuteCommentAtPoint(config, padCode, commentBtn, replyText, {
-        sourceScreenshotUrl: commentBtn.screenshotUrl,
-        debugReason: [commentBtn.debugReason, "auto_reply_own_published_post"].filter(Boolean).join(" | "),
+      const detailShotUrl = await screenshot(config, padCode)
+        .then((url) => freezeScreenshotUrl(url))
+        .catch(() => undefined);
+      const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+      const bottomReplyPoint = {
+        x: Math.round((screen.width || BASE_SCREEN.width) * 0.44),
+        y: Math.round((screen.height || BASE_SCREEN.height) * 0.955),
+      };
+      const result = await warmupExecuteCommentAtPoint(config, padCode, bottomReplyPoint, async () => {
+        const postPreview = normalizeSingleLine(target.expectedText || target.label || "");
+        const comment = replyMode === "manual"
+          ? manualReplyText
+          : await generateOwnPostComment(postPreview, detailShotUrl);
+        if (!comment) {
+          throw new Error(replyMode === "manual" ? "自定义回覆內容不能為空" : "模型未能基於已發布主推文生成合格留言");
+        }
+        return comment;
+      }, {
+        sourceScreenshotUrl: detailShotUrl,
+        openViaCommentFirst: true,
+        alreadyInReplyComposer: true,
+        preferBottomReplyInput: true,
+        debugReason: "acp_search_reply_composer_comment_allowed | auto_reply_own_published_post",
       });
       replied += 1;
       repliedUrls.push(target.url);
+      repliedComments.push({ url: target.url, comment: result.comment });
       if (result.screenshotUrl) replyScreenshots.push(result.screenshotUrl);
       report({ step: "已完成一篇已發布推文回覆" });
     } catch (error) {
@@ -34765,8 +34940,10 @@ export async function replyOwnPublishedThreadsPosts(
     scannedPosts,
     replied,
     skipped,
+    targetReplies,
     replyScreenshots,
     repliedUrls,
+    repliedComments,
     done: true,
     error: finalError,
   };
