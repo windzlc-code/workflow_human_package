@@ -2517,6 +2517,43 @@ type ThreadsGraphqlProfilePostAggregate = {
   viewCount?: number;
 };
 
+function normalizeThreadsProfileUsername(value: unknown): string {
+  return String(value || "").replace(/^@+/, "").trim().toLowerCase();
+}
+
+function resolveThreadsGraphqlPostOwnerUsername(post: any): string {
+  const candidates = [
+    post?.user?.username,
+    post?.owner?.username,
+    post?.caption?.user?.username,
+    post?.caption?.owner?.username,
+    post?.text_post_app_info?.user?.username,
+    post?.text_post_app_info?.owner?.username,
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeThreadsProfileUsername(candidate);
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function isThreadsGraphqlProfileOwnedPost(username: string, post: any): boolean {
+  const target = normalizeThreadsProfileUsername(username);
+  const owner = resolveThreadsGraphqlPostOwnerUsername(post);
+  return !target || !owner || owner === target;
+}
+
+function isSuspiciousThreadsProfileMetricMix(post: Partial<ThreadsGraphqlProfilePostAggregate>): boolean {
+  if (typeof post.viewCount !== "number" || post.viewCount <= 0) return false;
+  const strongestInteraction = Math.max(
+    Number(post.likeCount || 0),
+    Number(post.commentCount || 0),
+    Number(post.repostCount || 0),
+    Number(post.shareCount || 0),
+  );
+  return strongestInteraction >= 1000 && strongestInteraction > post.viewCount * 20;
+}
+
 type ThreadsGraphqlProfilePageResult = {
   posts: ThreadsGraphqlProfilePostAggregate[];
   endCursor?: string;
@@ -2562,6 +2599,7 @@ export function parseThreadsGraphqlProfilePagePayload(args: {
   const posts: ThreadsGraphqlProfilePostAggregate[] = [];
   for (const edge of edges) {
     const post = edge?.node?.thread_items?.[0]?.post;
+    if (!isThreadsGraphqlProfileOwnedPost(args.username, post)) continue;
     const pk = cleanText(post?.pk);
     const sourceUrl = buildThreadsGraphqlProfileSourceUrl(args.username, post);
     const content = cleanText(post?.caption?.text || post?.text_post_app_info?.share_text || post?.text_post_app_info?.text || "");
@@ -3252,19 +3290,21 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             posts: allPosts,
           }).catch(() => ({ totalViews: 0, resolvedPosts: 0 }));
           const viewsByUrl = (views as any).viewsByUrl || {};
-          const postMetrics = allPosts.map((post) => ({
-            pk: post.pk,
-            code: post.code,
-            sourceUrl: post.sourceUrl,
-            ...(post.content ? { content: post.content } : {}),
-            ...(post.publishedAt ? { publishedAt: post.publishedAt } : {}),
-            likeCount: post.likeCount,
-            commentCount: post.commentCount,
-            repostCount: post.repostCount,
-            shareCount: post.shareCount,
-            viewCount: typeof viewsByUrl[post.sourceUrl] === "number" ? viewsByUrl[post.sourceUrl] : post.viewCount,
-            capturedAt: refreshedAt,
-          }));
+          const postMetrics = allPosts
+            .map((post) => ({
+              pk: post.pk,
+              code: post.code,
+              sourceUrl: post.sourceUrl,
+              ...(post.content ? { content: post.content } : {}),
+              ...(post.publishedAt ? { publishedAt: post.publishedAt } : {}),
+              likeCount: post.likeCount,
+              commentCount: post.commentCount,
+              repostCount: post.repostCount,
+              shareCount: post.shareCount,
+              viewCount: typeof viewsByUrl[post.sourceUrl] === "number" ? viewsByUrl[post.sourceUrl] : post.viewCount,
+              capturedAt: refreshedAt,
+            }))
+            .filter((post) => !isSuspiciousThreadsProfileMetricMix(post));
           const resolvedViewPosts = postMetrics.filter((post) => typeof post.viewCount === "number").length;
           const totalResolvedViews = postMetrics.reduce((sum, post) => sum + (typeof post.viewCount === "number" ? post.viewCount : 0), 0);
           const visiblePostTotal = Number(visible.parsed.posts);
@@ -3273,15 +3313,15 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             && allPosts.length >= visiblePostTotal;
           parsed = {
             ...visible.parsed,
-            posts: Math.max(Number(visible.parsed.posts || 0), allPosts.length),
-            scannedPosts: allPosts.length,
-            likes: allPosts.reduce((sum, post) => sum + (post.likeCount || 0), 0),
-            comments: allPosts.reduce((sum, post) => sum + (post.commentCount || 0), 0),
-            reposts: allPosts.reduce((sum, post) => sum + (post.repostCount || 0), 0),
-            shares: allPosts.reduce((sum, post) => sum + (post.shareCount || 0), 0),
+            posts: Math.max(Number(visible.parsed.posts || 0), postMetrics.length),
+            scannedPosts: postMetrics.length,
+            likes: postMetrics.reduce((sum, post) => sum + (post.likeCount || 0), 0),
+            comments: postMetrics.reduce((sum, post) => sum + (post.commentCount || 0), 0),
+            reposts: postMetrics.reduce((sum, post) => sum + (post.repostCount || 0), 0),
+            shares: postMetrics.reduce((sum, post) => sum + (post.shareCount || 0), 0),
             ...(resolvedViewPosts > 0 ? { views: totalResolvedViews } : {}),
             viewResolvedPosts: resolvedViewPosts,
-            viewMissingPosts: Math.max(0, allPosts.length - resolvedViewPosts),
+            viewMissingPosts: Math.max(0, postMetrics.length - resolvedViewPosts),
             postMetrics,
           };
           (parsed as any).profileReachedEnd = capturedReachedEnd

@@ -922,6 +922,45 @@ Instagram
     expect(parsed.hasNextPage).toBe(true);
   });
 
+  it("skips Threads GraphQL profile posts owned by another author", () => {
+    const parsed = parseThreadsGraphqlProfilePagePayload({
+      username: "stevie875443",
+      payload: {
+        data: {
+          mediaData: {
+            edges: [
+              {
+                node: {
+                  thread_items: [{
+                    post: {
+                      pk: "foreign-post",
+                      code: "DaKf3wEkuYz",
+                      canonical_url: "https://www.threads.com/@stevie875443/post/DaKf3wEkuYz",
+                      user: { username: "shaopon" },
+                      like_count: 200000,
+                      text_post_app_info: {
+                        direct_reply_count: 2386,
+                        repost_count: 4954,
+                        reshare_count: 49000,
+                      },
+                    },
+                  }],
+                },
+              },
+            ],
+            page_info: {
+              end_cursor: "",
+              has_next_page: false,
+            },
+          },
+        },
+      },
+    });
+
+    expect(parsed.posts).toEqual([]);
+    expect(parsed.hasNextPage).toBe(false);
+  });
+
   it("normalizes relative Threads profile post times for fresh posts", () => {
     const now = Date.UTC(2026, 5, 29, 16, 0, 0);
 
