@@ -1341,6 +1341,7 @@ type PendingSentimentHotImportState = {
   archiveName: string;
   contentBranch?: GeneratePostContentBranch;
   candidates: SentimentHotCandidate[];
+  selectedIndexes?: number[];
   keywords: string[];
   cookieStatuses: SentimentCookieStatus[];
   warnings: string[];
@@ -5465,6 +5466,34 @@ function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index
   ].join("\n");
 }
 
+function getSentimentHotSelectedIndexes(pending: PendingSentimentHotImportState): number[] {
+  const max = pending.candidates.length;
+  return [...new Set(pending.selectedIndexes || [])]
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < max)
+    .sort((a, b) => a - b);
+}
+
+function buildSentimentHotCandidateRows(pending: PendingSentimentHotImportState, actionKey: string): Array<Array<{ text: string; callback_data: string }>> {
+  const selected = new Set(getSentimentHotSelectedIndexes(pending));
+  return pending.candidates.map((_, index) => ([
+    { text: `${selected.has(index) ? "☑️" : "⬜️"} ${index + 1}`, callback_data: `shsel_${actionKey}_${index}` },
+    { text: `查看第 ${index + 1} 篇`, callback_data: `shdet_${actionKey}_${index}` },
+    { text: `使用第 ${index + 1} 篇`, callback_data: `shuse_${actionKey}_${index}` },
+  ]));
+}
+
+function buildSentimentHotBulkRows(pending: PendingSentimentHotImportState, actionKey: string): Array<Array<{ text: string; callback_data: string }>> {
+  const selectedCount = getSentimentHotSelectedIndexes(pending).length;
+  if (!pending.candidates.length) return [];
+  return [
+    [
+      { text: "全选", callback_data: `shselall_${actionKey}` },
+      { text: "清空选择", callback_data: `shselclear_${actionKey}` },
+    ],
+    [{ text: selectedCount ? `保存已选 ${selectedCount} 篇` : "保存已选（先勾选）", callback_data: `shsave_${actionKey}` }],
+  ];
+}
+
 function formatSentimentCookieLine(status: SentimentCookieStatus) {
   const icon = status.health === "healthy" ? "OK" : status.health === "watch" ? "WARN" : status.health === "expired" || status.health === "missing" ? "MISS" : "INFO";
   return `${icon} ${status.label}: ${status.message}`;
@@ -5516,21 +5545,15 @@ async function sendSentimentHotCandidatePicker(args: {
       archiveName: archive.name,
       contentBranch: args.contentBranch,
       candidates: result.candidates,
+      selectedIndexes: [],
       keywords: result.keywords,
       cookieStatuses: result.cookieStatuses,
       warnings: result.warnings,
     });
     const actionKey = rememberSentimentHotAction(args.chatId, archive.id);
-    const candidateRows = result.candidates.map((candidate, index) => ([
-      {
-        text: `查看第 ${index + 1} 篇`,
-        callback_data: `shdet_${actionKey}_${index}`,
-      },
-      {
-        text: `使用第 ${index + 1} 篇`,
-        callback_data: `shuse_${actionKey}_${index}`,
-      },
-    ]));
+    const pendingForRows = pendingSentimentHotImports.get(args.chatId);
+    const candidateRows = pendingForRows ? buildSentimentHotCandidateRows(pendingForRows, actionKey) : [];
+    const bulkRows = pendingForRows ? buildSentimentHotBulkRows(pendingForRows, actionKey) : [];
     const text = [
       "🔥 热点抓取",
       "",
@@ -5543,6 +5566,7 @@ async function sendSentimentHotCandidatePicker(args: {
       ...(result.warnings.length ? ["", "提示:", ...result.warnings.map((item) => `- ${item}`)] : []),
       "",
       result.candidates.length ? "候选热点:" : "暂时没有抓到可用热点，请刷新或检查 Cookie。",
+      ...(result.candidates.length ? [`已选: 0/${result.candidates.length} 篇，可多选后一次保存。`] : []),
       ...result.candidates.map(formatSentimentHotCandidateLine),
     ].join("\n");
     const resultMessage = await safeEditOrSend(args.bot, args.chatId, resultMessageId, text, {
@@ -5550,6 +5574,7 @@ async function sendSentimentHotCandidatePicker(args: {
       reply_markup: {
         inline_keyboard: [
           ...candidateRows,
+          ...bulkRows,
           [{ text: "刷新抓取", callback_data: `shrf_${actionKey}` }],
           [{ text: "返回新建推文", callback_data: `genpost_branch_${archive.id}` }],
         ],
@@ -5674,6 +5699,7 @@ async function showSentimentHotCandidateDetail(args: {
     });
     return;
   }
+  const selected = new Set(getSentimentHotSelectedIndexes(pending));
   await sendSentimentCandidateMediaPanel({
     bot: args.bot,
     chatId: args.chatId,
@@ -5681,8 +5707,10 @@ async function showSentimentHotCandidateDetail(args: {
     text: buildSentimentHotCandidateDetailText({ pending, candidate, index: args.index }),
     media: candidate.media,
     keyboard: [
+      [{ text: selected.has(args.index) ? "☑️ 已加入多选" : "⬜️ 加入多选", callback_data: `shsel_${args.actionKey}_${args.index}` }],
       [{ text: `✅ 使用第 ${args.index + 1} 篇`, callback_data: `shuse_${args.actionKey}_${args.index}` }],
       [{ text: "✏️ 编辑后使用", callback_data: `shedit_${args.actionKey}_${args.index}` }],
+      ...buildSentimentHotBulkRows(pending, args.actionKey),
       [{ text: "返回候选列表", callback_data: `shlist_${args.actionKey}` }],
       [{ text: "刷新抓取", callback_data: `shrf_${args.actionKey}` }],
       [{ text: "返回新建推文", callback_data: `genpost_branch_${pending.archiveId}` }],
@@ -5706,10 +5734,9 @@ async function showSentimentHotPendingList(args: {
     });
     return;
   }
-  const candidateRows = pending.candidates.map((candidate, index) => ([
-    { text: `查看第 ${index + 1} 篇`, callback_data: `shdet_${args.actionKey}_${index}` },
-    { text: `使用第 ${index + 1} 篇`, callback_data: `shuse_${args.actionKey}_${index}` },
-  ]));
+  const selectedCount = getSentimentHotSelectedIndexes(pending).length;
+  const candidateRows = buildSentimentHotCandidateRows(pending, args.actionKey);
+  const bulkRows = buildSentimentHotBulkRows(pending, args.actionKey);
   const text = [
     "🔥 热点抓取",
     "",
@@ -5722,6 +5749,7 @@ async function showSentimentHotPendingList(args: {
     ...(pending.warnings.length ? ["", "提示:", ...pending.warnings.map((item) => `- ${item}`)] : []),
     "",
     pending.candidates.length ? "候选热点:" : "暂时没有抓到可用热点，请刷新或检查 Cookie。",
+    ...(pending.candidates.length ? [`已选: ${selectedCount}/${pending.candidates.length} 篇，可多选后一次保存。`] : []),
     ...pending.candidates.map(formatSentimentHotCandidateLine),
   ].join("\n");
   await safeEditOrSend(args.bot, args.chatId, args.messageId, text, {
@@ -5729,6 +5757,7 @@ async function showSentimentHotPendingList(args: {
     reply_markup: {
       inline_keyboard: [
         ...candidateRows,
+        ...bulkRows,
         [{ text: "刷新抓取", callback_data: `shrf_${args.actionKey}` }],
         [{ text: "返回新建推文", callback_data: `genpost_branch_${pending.archiveId}` }],
       ],
@@ -5819,6 +5848,62 @@ async function renderSentimentHotEditPanel(bot: TelegramBot, chatId: number, mes
   return;
 }
 
+async function appendSentimentHotCandidatePost(args: {
+  pending: PendingSentimentHotImportState;
+  candidate: SentimentHotCandidate;
+  index: number;
+  overrideContent?: string;
+  overrideMediaUrl?: string;
+  overrideMediaType?: "image" | "video" | "unknown";
+  overrideMediaItems?: SentimentHotCandidate["media"];
+  edited?: boolean;
+}) {
+  const sourceCandidate = args.overrideMediaItems !== undefined ? { ...args.candidate, media: args.overrideMediaItems } : args.candidate;
+  const downloadedMedia = args.overrideMediaUrl
+    ? [{ type: args.overrideMediaType || "unknown", url: args.overrideMediaUrl }]
+    : await downloadCandidateMedia(sourceCandidate).catch(() => sourceCandidate.media || []);
+  const mediaItems = downloadedMedia
+    .map((item) => ({
+      url: item.localPath || item.url,
+      type: item.type || "unknown",
+      localPath: item.localPath,
+      warning: item.warning,
+    }))
+    .filter((item) => item.url);
+  const primaryMedia = mediaItems[0];
+  const mediaUrl = primaryMedia?.url || "";
+  const mediaType = args.overrideMediaType || primaryMedia?.type || (mediaUrl ? "unknown" : undefined);
+  const finalContent = cleanSentimentCandidateContent(args.overrideContent || args.candidate.content);
+  await appendCustomPersonaArchivePost({
+    archiveId: args.pending.archiveId,
+    title: `热点 #${args.index + 1}`,
+    content: finalContent,
+    mediaUrl: mediaUrl || undefined,
+    mediaType,
+    mediaItems,
+    telegramGroupContentType: args.pending.contentBranch === "r18" ? "paid" : args.pending.contentBranch === "nonr18" ? "free" : undefined,
+    sourceMeta: {
+      source: "sentiment_hot_import",
+      platform: args.candidate.platform,
+      sourceUrl: args.candidate.sourceUrl,
+      hotScore: args.candidate.hotScore,
+      metrics: args.candidate.metrics,
+      engagement: args.candidate.engagement,
+      capturedAt: args.candidate.capturedAt,
+      originalContent: cleanSentimentCandidateContent(args.candidate.content),
+      originalMediaUrl: args.candidate.media[0]?.localPath || args.candidate.media[0]?.url,
+      originalMediaUrls: args.candidate.media.map((item) => item.localPath || item.url).filter(Boolean),
+      mediaItems,
+      edited: args.edited === true,
+      warnings: [
+        ...(args.candidate.warnings || []),
+        ...mediaItems.map((item) => item.warning).filter((item): item is string => Boolean(item)),
+      ],
+    },
+  });
+  return { mediaItems, mediaUrl, mediaType, finalContent };
+}
+
 async function importSentimentHotCandidate(args: {
   bot: TelegramBot;
   chatId: number;
@@ -5843,63 +5928,94 @@ async function importSentimentHotCandidate(args: {
   }
 
   rememberSentimentHotSelected(pending.archiveId, candidate.id);
-  const sourceCandidate = args.overrideMediaItems !== undefined ? { ...candidate, media: args.overrideMediaItems } : candidate;
-  const downloadedMedia = args.overrideMediaUrl
-    ? [{ type: args.overrideMediaType || "unknown", url: args.overrideMediaUrl }]
-    : await downloadCandidateMedia(sourceCandidate).catch(() => sourceCandidate.media || []);
-  const mediaItems = downloadedMedia
-    .map((item) => ({
-      url: item.localPath || item.url,
-      type: item.type || "unknown",
-      localPath: item.localPath,
-      warning: item.warning,
-    }))
-    .filter((item) => item.url);
-  const primaryMedia = mediaItems[0];
-  const mediaUrl = primaryMedia?.url || "";
-  const mediaType = args.overrideMediaType || primaryMedia?.type || (mediaUrl ? "unknown" : undefined);
-  const finalContent = cleanSentimentCandidateContent(args.overrideContent || candidate.content);
-  await appendCustomPersonaArchivePost({
-    archiveId: pending.archiveId,
-    title: `热点 #${args.index + 1}`,
-    content: finalContent,
-    mediaUrl: mediaUrl || undefined,
-    mediaType,
-    mediaItems,
-    telegramGroupContentType: pending.contentBranch === "r18" ? "paid" : pending.contentBranch === "nonr18" ? "free" : undefined,
-    sourceMeta: {
-      source: "sentiment_hot_import",
-      platform: candidate.platform,
-      sourceUrl: candidate.sourceUrl,
-      hotScore: candidate.hotScore,
-      metrics: candidate.metrics,
-      engagement: candidate.engagement,
-      capturedAt: candidate.capturedAt,
-      originalContent: cleanSentimentCandidateContent(candidate.content),
-      originalMediaUrl: candidate.media[0]?.localPath || candidate.media[0]?.url,
-      originalMediaUrls: candidate.media.map((item) => item.localPath || item.url).filter(Boolean),
-      mediaItems,
-      edited: args.edited === true,
-      warnings: [
-        ...(candidate.warnings || []),
-        ...mediaItems.map((item) => item.warning).filter((item): item is string => Boolean(item)),
-      ],
-    },
+  const previousSelectedIndexes = getSentimentHotSelectedIndexes(pending);
+  const saved = await appendSentimentHotCandidatePost({
+    pending,
+    candidate,
+    index: args.index,
+    overrideContent: args.overrideContent,
+    overrideMediaUrl: args.overrideMediaUrl,
+    overrideMediaType: args.overrideMediaType,
+    overrideMediaItems: args.overrideMediaItems,
+    edited: args.edited,
   });
   rememberSentimentHotImported(pending.archiveId, candidate.id);
   pending.candidates.splice(args.index, 1);
+  pending.selectedIndexes = previousSelectedIndexes
+    .filter((index) => index !== args.index)
+    .map((index) => index > args.index ? index - 1 : index);
   pendingSentimentHotImports.set(args.chatId, pending);
   await safeEditOrSend(args.bot, args.chatId, args.messageId, [
     args.edited ? "✅ 已导入编辑后的热点推文" : "✅ 已导入热点推文",
     `人设: ${pending.archiveName}`,
     `来源: ${candidate.platform}`,
     `数据: ${formatSentimentMetricLine(candidate)}`,
-    mediaUrl ? `媒体: ${mediaType || "unknown"}` : "媒体: 无",
+    saved.mediaUrl ? `媒体: ${saved.mediaType || "unknown"}` : "媒体: 无",
     "已加入待发布推文，发布成功后才会写入人设记忆。",
   ].join("\n"), {
     reply_markup: {
       inline_keyboard: [
         [{ text: "查看推文列表", callback_data: `posts_${pending.archiveId}` }],
+        [{ text: "继续刷新抓取", callback_data: `shrf_${args.actionKey}` }],
+        [{ text: "返回人设详情", callback_data: `pd_${pending.archiveId}` }],
+      ],
+    },
+  });
+}
+
+async function importSelectedSentimentHotCandidates(args: {
+  bot: TelegramBot;
+  chatId: number;
+  messageId?: number;
+  actionKey: string;
+}) {
+  await deletePendingSentimentHotMediaPanel(args.bot, args.chatId);
+  const action = sentimentHotActionKeys.get(args.actionKey);
+  const pending = pendingSentimentHotImports.get(args.chatId);
+  if (!action || !pending || action.chatId !== args.chatId || action.archiveId !== pending.archiveId) {
+    await safeEditOrSend(args.bot, args.chatId, args.messageId, "热点候选已过期，请重新刷新抓取。", {
+      reply_markup: { inline_keyboard: [[{ text: "返回新建推文", callback_data: pending ? `genpost_branch_${pending.archiveId}` : "list_personas" }]] },
+    });
+    return;
+  }
+  const selectedIndexes = getSentimentHotSelectedIndexes(pending);
+  if (!selectedIndexes.length) {
+    await safeEditOrSend(args.bot, args.chatId, args.messageId, "请先勾选要保存的热点推文。", {
+      reply_markup: { inline_keyboard: [[{ text: "返回候选列表", callback_data: `shlist_${args.actionKey}` }]] },
+    });
+    return;
+  }
+
+  const importedIndexes: number[] = [];
+  const failedLabels: string[] = [];
+  for (const index of selectedIndexes) {
+    const candidate = pending.candidates[index];
+    if (!candidate) continue;
+    try {
+      rememberSentimentHotSelected(pending.archiveId, candidate.id);
+      await appendSentimentHotCandidatePost({ pending, candidate, index });
+      rememberSentimentHotImported(pending.archiveId, candidate.id);
+      importedIndexes.push(index);
+    } catch (error: any) {
+      failedLabels.push(`第 ${index + 1} 篇：${formatUserFacingError(error, "保存失败")}`);
+    }
+  }
+
+  const importedSet = new Set(importedIndexes);
+  pending.candidates = pending.candidates.filter((_, index) => !importedSet.has(index));
+  pending.selectedIndexes = [];
+  pendingSentimentHotImports.set(args.chatId, pending);
+
+  await safeEditOrSend(args.bot, args.chatId, args.messageId, [
+    importedIndexes.length ? `✅ 已批量导入 ${importedIndexes.length} 篇热点推文` : "⚠️ 本次没有成功导入热点推文",
+    `人设: ${pending.archiveName}`,
+    "已加入待发布推文，发布成功后才会写入人设记忆。",
+    ...(failedLabels.length ? ["", "失败:", ...failedLabels.slice(0, 5)] : []),
+  ].join("\n"), {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "查看推文列表", callback_data: `posts_${pending.archiveId}` }],
+        ...(pending.candidates.length ? [[{ text: `返回候选列表（剩余 ${pending.candidates.length} 篇）`, callback_data: `shlist_${args.actionKey}` }]] : []),
         [{ text: "继续刷新抓取", callback_data: `shrf_${args.actionKey}` }],
         [{ text: "返回人设详情", callback_data: `pd_${pending.archiveId}` }],
       ],
@@ -19733,6 +19849,59 @@ function sendMainMenu(chatId: number, msgId?: number) {
     if (data.startsWith("shlist_")) {
       const actionKey = data.slice("shlist_".length);
       await showSentimentHotPendingList({
+        bot,
+        chatId,
+        messageId: msgId,
+        actionKey,
+      });
+      return;
+    }
+
+    if (data.startsWith("shsel_")) {
+      const match = data.match(/^shsel_([a-f0-9]+)_(\d+)$/);
+      if (!match) {
+        await safeEditOrSend(bot, chatId, msgId, "热点候选参数无效，请重新刷新抓取。");
+        return;
+      }
+      const actionKey = match[1];
+      const index = Number(match[2]);
+      const action = sentimentHotActionKeys.get(actionKey);
+      const pending = pendingSentimentHotImports.get(chatId);
+      if (!action || !pending || action.chatId !== chatId || action.archiveId !== pending.archiveId || !pending.candidates[index]) {
+        await safeEditOrSend(bot, chatId, msgId, "热点候选已过期，请重新刷新抓取。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回新建推文", callback_data: pending ? `genpost_branch_${pending.archiveId}` : "list_personas" }]] },
+        });
+        return;
+      }
+      const selected = getSentimentHotSelectedIndexes(pending);
+      pending.selectedIndexes = selected.includes(index)
+        ? selected.filter((item) => item !== index)
+        : [...selected, index].sort((a, b) => a - b);
+      pendingSentimentHotImports.set(chatId, pending);
+      await showSentimentHotPendingList({ bot, chatId, messageId: msgId, actionKey });
+      return;
+    }
+
+    if (data.startsWith("shselall_") || data.startsWith("shselclear_")) {
+      const selectAll = data.startsWith("shselall_");
+      const actionKey = data.slice(selectAll ? "shselall_".length : "shselclear_".length);
+      const action = sentimentHotActionKeys.get(actionKey);
+      const pending = pendingSentimentHotImports.get(chatId);
+      if (!action || !pending || action.chatId !== chatId || action.archiveId !== pending.archiveId) {
+        await safeEditOrSend(bot, chatId, msgId, "热点候选已过期，请重新刷新抓取。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回新建推文", callback_data: pending ? `genpost_branch_${pending.archiveId}` : "list_personas" }]] },
+        });
+        return;
+      }
+      pending.selectedIndexes = selectAll ? pending.candidates.map((_, index) => index) : [];
+      pendingSentimentHotImports.set(chatId, pending);
+      await showSentimentHotPendingList({ bot, chatId, messageId: msgId, actionKey });
+      return;
+    }
+
+    if (data.startsWith("shsave_")) {
+      const actionKey = data.slice("shsave_".length);
+      await importSelectedSentimentHotCandidates({
         bot,
         chatId,
         messageId: msgId,
