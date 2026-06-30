@@ -36,6 +36,7 @@ const appState = {
   personaDashboardSelectedId: "__overview__",
   personaDashboardPostPage: 1,
   personaDashboardPageSize: Number(localStorage.getItem("personaDashboardPageSize") || 10) || 10,
+  personaDashboardAccountPlatform: localStorage.getItem("personaDashboardAccountPlatform") || "threads",
 };
 const APP_PAGES = new Set(["generate", "tasks", "persona-dashboard", "account"]);
 const APP_PAGE_LABELS = {
@@ -1213,12 +1214,14 @@ function renderPersonaCard(persona) {
   `).join("");
   const postRows = rows.slice(start, start + pageSize).map((row) => `
     <tr>
-      <td>${escapeHtml(row.platform || "-")}</td>
-      <td>${escapeHtml(String(row.content || row.source_url || "-").slice(0, 80))}</td>
-      <td>${escapeHtml(formatDashboardNumber(row.like_count))}</td>
-      <td>${escapeHtml(formatDashboardNumber(row.comment_count))}</td>
-      <td>${escapeHtml(formatDashboardNumber(row.share_count || row.repost_count))}</td>
-      <td>${escapeHtml(formatDashboardNumber(row.view_count))}</td>
+      <td class="persona-post-platform">${escapeHtml(row.platform || "-")}</td>
+      <td class="persona-post-source">
+        <div>${escapeHtml(String(row.content || row.source_url || "-").slice(0, 120))}</div>
+      </td>
+      <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.like_count))}</td>
+      <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.comment_count))}</td>
+      <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.share_count || row.repost_count))}</td>
+      <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.view_count))}</td>
     </tr>
   `).join("");
   return `
@@ -1245,12 +1248,12 @@ function renderPersonaCard(persona) {
       <div class="persona-platform-list">${platforms || `<div class="small">暂无平台热点指标</div>`}</div>
       <div class="persona-table-wrap">
         <div class="persona-table-toolbar">
-          <strong>逐帖指标</strong>
+          <strong>发送推文指标</strong>
           <span>第 ${escapeHtml(String(appState.personaDashboardPostPage))} / ${escapeHtml(String(pageCount))} 页 · 共 ${escapeHtml(String(rows.length))} 条</span>
         </div>
         <table class="persona-post-table">
-          <thead><tr><th>平台</th><th>帖子/来源</th><th>赞</th><th>评</th><th>转/分享</th><th>浏览</th></tr></thead>
-          <tbody>${postRows || `<tr><td colspan="6">暂无逐帖指标</td></tr>`}</tbody>
+          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th></tr></thead>
+          <tbody>${postRows || `<tr><td colspan="6">暂无发送推文指标</td></tr>`}</tbody>
         </table>
       </div>
       <div class="persona-pager">
@@ -1275,11 +1278,14 @@ function renderPersonaTabs(visiblePersonas, selectedPersona) {
       <span>${escapeHtml(String(visiblePersonas.length))} 人设</span>
     </div>
     <div class="persona-tab-list">
+      <div class="persona-tab-section persona-tab-section-system">
       <button class="persona-tab ${appState.personaDashboardSelectedId === "__overview__" ? "is-active" : ""}" type="button" data-persona-id="__overview__" aria-current="${appState.personaDashboardSelectedId === "__overview__" ? "true" : "false"}">
         <span class="persona-tab-index">总</span>
         <span class="persona-tab-main"><strong>总览首页</strong><span>全部图表与指标</span></span>
         <span class="persona-tab-metrics"><b>${escapeHtml(formatDashboardNumber((appState.personaDashboard.summary || {}).persona_count))}</b><span>人设</span></span>
       </button>
+      </div>
+      <div class="persona-tab-section persona-tab-section-personas">
       ${visiblePersonas.map((persona, index) => {
         const hot = persona.hot || {};
         const counts = persona.counts || {};
@@ -1299,11 +1305,14 @@ function renderPersonaTabs(visiblePersonas, selectedPersona) {
           </button>
         `;
       }).join("")}
+      </div>
+      <div class="persona-tab-section persona-tab-section-system persona-tab-section-bottom">
       <button class="persona-tab persona-tab-settings ${appState.personaDashboardSelectedId === "__settings__" ? "is-active" : ""}" type="button" data-persona-id="__settings__" aria-current="${appState.personaDashboardSelectedId === "__settings__" ? "true" : "false"}">
         <span class="persona-tab-index">设</span>
         <span class="persona-tab-main"><strong>设置</strong><span>分页与显示数量</span></span>
         <span class="persona-tab-metrics"><b>${escapeHtml(String(appState.personaDashboardPageSize))}</b><span>每页</span></span>
       </button>
+      </div>
     </div>
   `;
   tabs.querySelectorAll("[data-persona-id]").forEach((node) => {
@@ -1701,6 +1710,8 @@ function renderPersonaCard(persona) {
   appState.personaDashboardPostPage = Math.max(1, Math.min(pageCount, Number(appState.personaDashboardPostPage || 1)));
   const start = (appState.personaDashboardPostPage - 1) * pageSize;
   const threads = persona.threads_account || {};
+  const accountPlatform = String(appState.personaDashboardAccountPlatform || "threads").toLowerCase();
+  const isThreadsPlatform = accountPlatform === "threads";
   const warnings = (persona.warnings || []).map((item) => `<div class="persona-warning-item">${escapeHtml(item)}</div>`).join("");
   const platforms = (persona.hot_platforms || []).map((item) => `
     <div class="persona-platform-row">
@@ -1714,12 +1725,14 @@ function renderPersonaCard(persona) {
   `).join("");
   const postRows = rows.slice(start, start + pageSize).map((row) => `
     <tr>
-      <td>${escapeHtml(row.platform || "-")}</td>
-      <td>${escapeHtml(String(row.content || row.source_url || "-").slice(0, 100))}</td>
-      <td>${escapeHtml(formatDashboardNumber(row.like_count))}</td>
-      <td>${escapeHtml(formatDashboardNumber(row.comment_count))}</td>
-      <td>${escapeHtml(formatDashboardNumber(row.share_count || row.repost_count))}</td>
-      <td>${escapeHtml(formatDashboardNumber(row.view_count))}</td>
+      <td class="persona-post-platform">${escapeHtml(row.platform || "-")}</td>
+      <td class="persona-post-source">
+        <div>${escapeHtml(String(row.content || row.source_url || "-").slice(0, 120))}</div>
+      </td>
+      <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.like_count))}</td>
+      <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.comment_count))}</td>
+      <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.share_count || row.repost_count))}</td>
+      <td class="persona-post-number">${escapeHtml(formatDashboardNumber(row.view_count))}</td>
     </tr>
   `).join("");
   return `
@@ -1730,11 +1743,22 @@ function renderPersonaCard(persona) {
           <div class="small">智能体手机：${escapeHtml(persona.bound_pad_name || persona.bound_pad_code || "未绑定")} · 机器人：${escapeHtml(persona.owner_bot_name || "-")}</div>
         </div>
         <div class="persona-account-compact">
-          <label for="personaThreadsInput">Threads 用户名</label>
-          <div class="persona-account-row">
-            <input id="personaThreadsInput" type="text" value="${escapeHtml(threads.handle || "")}" placeholder="username" />
-            <button class="ghost" type="button" id="personaBindThreadsBtn">保存</button>
-            <button class="ghost persona-unbind-btn" type="button" id="personaUnbindThreadsBtn" ${threads.handle ? "" : "disabled"}>解绑</button>
+          <div class="persona-account-title">
+            <label for="personaAccountPlatform">账号平台</label>
+            <span>${isThreadsPlatform ? "绑定后可刷新该账号热点" : "当前仅展示平台切换"}</span>
+          </div>
+          <div class="persona-account-grid">
+            <select id="personaAccountPlatform">
+              <option value="threads" ${isThreadsPlatform ? "selected" : ""}>Threads</option>
+              <option value="telegram" ${accountPlatform === "telegram" ? "selected" : ""}>Telegram</option>
+            </select>
+            <input id="personaThreadsInput" type="text" value="${isThreadsPlatform ? escapeHtml(threads.handle || "") : ""}" placeholder="${isThreadsPlatform ? "username" : "暂未接入 Telegram 绑定"}" ${isThreadsPlatform ? "" : "disabled"} />
+          </div>
+          <div class="persona-account-actions">
+            <button class="ghost" type="button" id="personaBindThreadsBtn" ${isThreadsPlatform ? "" : "disabled"}>保存</button>
+            <button class="ghost persona-unbind-btn" type="button" id="personaUnbindThreadsBtn" ${isThreadsPlatform && threads.handle ? "" : "disabled"}>解绑</button>
+            <button class="primary" type="button" id="personaRefreshCurrentBtn">刷新当前人设</button>
+            <button class="primary persona-hot-refresh-btn" type="button" id="personaRefreshBoundHotBtn" ${isThreadsPlatform && threads.handle ? "" : "disabled"}>刷新绑定账号热点</button>
           </div>
         </div>
         <div class="persona-score">
@@ -1745,8 +1769,7 @@ function renderPersonaCard(persona) {
       </div>
       ${warnings ? `<div class="persona-warning-list">${warnings}</div>` : ""}
       <div class="persona-bind-hint">
-        <span>没有绑定时无法抓取该人设账号热点；刷新会使用服务器端已保存的浏览器授权。</span>
-        <button class="primary" type="button" id="personaRefreshCurrentBtn">刷新当前人设</button>
+        <span>${isThreadsPlatform ? "没有绑定时无法抓取该人设账号热点；刷新会使用服务器端已保存的浏览器授权。" : "Telegram 账号绑定和热点抓取暂未接入；切回 Threads 可保存、解绑和刷新热点。"}</span>
       </div>
       <div class="persona-detail-grid">
         <div><span>帖子</span><strong>${escapeHtml(formatDashboardNumber(counts.posts))}</strong></div>
@@ -1760,12 +1783,12 @@ function renderPersonaCard(persona) {
       <div class="persona-platform-list">${platforms || `<div class="small">暂无平台热点指标</div>`}</div>
       <div class="persona-table-wrap">
         <div class="persona-table-toolbar">
-          <strong>逐帖指标</strong>
+          <strong>发送推文指标</strong>
           <span>第 ${escapeHtml(String(appState.personaDashboardPostPage))} / ${escapeHtml(String(pageCount))} 页 · 共 ${escapeHtml(String(rows.length))} 条</span>
         </div>
         <table class="persona-post-table">
-          <thead><tr><th>平台</th><th>帖子/来源</th><th>赞</th><th>评</th><th>转/分享</th><th>浏览</th></tr></thead>
-          <tbody>${postRows || `<tr><td colspan="6">暂无逐帖指标</td></tr>`}</tbody>
+          <thead><tr><th>平台</th><th>推文内容 / 来源</th><th>点赞</th><th>评论</th><th>转发/分享</th><th>逐帖浏览</th></tr></thead>
+          <tbody>${postRows || `<tr><td colspan="6">暂无发送推文指标</td></tr>`}</tbody>
         </table>
       </div>
       <div class="persona-pager">
@@ -1848,12 +1871,22 @@ function renderPersonaDashboard() {
   const next = el("personaPostNext");
   const bind = el("personaBindThreadsBtn");
   const unbind = el("personaUnbindThreadsBtn");
+  const accountPlatform = el("personaAccountPlatform");
   const refreshCurrent = el("personaRefreshCurrentBtn");
+  const refreshBoundHot = el("personaRefreshBoundHotBtn");
   if (prev) prev.addEventListener("click", () => { appState.personaDashboardPostPage -= 1; renderPersonaDashboard(); });
   if (next) next.addEventListener("click", () => { appState.personaDashboardPostPage += 1; renderPersonaDashboard(); });
   if (bind && selected) bind.addEventListener("click", () => bindPersonaDashboardThreads(selected));
   if (unbind && selected) unbind.addEventListener("click", () => unbindPersonaDashboardThreads(selected));
-  if (refreshCurrent && selected) refreshCurrent.addEventListener("click", () => startPersonaDashboardRefresh(selected.id));
+  if (accountPlatform) {
+    accountPlatform.addEventListener("change", () => {
+      appState.personaDashboardAccountPlatform = String(accountPlatform.value || "threads");
+      localStorage.setItem("personaDashboardAccountPlatform", appState.personaDashboardAccountPlatform);
+      renderPersonaDashboard();
+    });
+  }
+  if (refreshCurrent && selected) refreshCurrent.addEventListener("click", () => startPersonaDashboardRefresh(selected.id, "已请求刷新当前人设..."));
+  if (refreshBoundHot && selected) refreshBoundHot.addEventListener("click", () => startPersonaDashboardRefresh(selected.id, "已请求刷新该绑定账号的全量热点信息..."));
 }
 
 function syncPersonaPadFilter(data) {
@@ -1918,9 +1951,9 @@ async function unbindPersonaDashboardThreads(persona) {
   }
 }
 
-async function startPersonaDashboardRefresh(archiveId) {
+async function startPersonaDashboardRefresh(archiveId, message) {
   try {
-    setPersonaDashboardMessage(archiveId ? "已请求刷新当前人设..." : "已请求全量刷新...", true);
+    setPersonaDashboardMessage(message || (archiveId ? "已请求刷新当前人设..." : "已请求全量刷新..."), true);
     const task = await api("/api/persona_dashboard/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

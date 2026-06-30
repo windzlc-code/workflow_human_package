@@ -5460,6 +5460,25 @@ body.page-admin {
   gap: 8px;
 }
 
+.persona-tab-section {
+  display: grid;
+  gap: 8px;
+}
+
+.persona-tab-section + .persona-tab-section {
+  padding-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.32);
+}
+
+.persona-tab-section-system .persona-tab {
+  background: #fff;
+  border-color: rgba(15, 23, 42, 0.14);
+}
+
+.persona-tab-section-bottom {
+  margin-top: 8px;
+}
+
 .persona-tab {
   display: grid;
   grid-template-columns: 26px minmax(0, 1fr) auto;
@@ -5564,7 +5583,7 @@ body.page-admin {
 
 .persona-detail-head {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(260px, 420px) minmax(110px, auto);
+  grid-template-columns: minmax(260px, 1fr) minmax(520px, 0.95fr) minmax(120px, auto);
   gap: 12px;
   align-items: start;
 }
@@ -5595,8 +5614,25 @@ body.page-admin {
 
 .persona-account-compact {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   align-self: start;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.82);
+}
+
+.persona-account-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.persona-account-title span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .persona-account-compact label {
@@ -5605,21 +5641,35 @@ body.page-admin {
   font-weight: 900;
 }
 
-.persona-account-row {
+.persona-account-grid {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) auto auto;
+  grid-template-columns: 132px minmax(160px, 1fr);
   gap: 8px;
   align-items: center;
 }
 
-.persona-account-row input {
+.persona-account-grid input,
+.persona-account-grid select {
   min-width: 0;
   height: 40px;
 }
 
-.persona-account-row button {
+.persona-account-actions {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(170px, auto);
+  gap: 8px;
+  align-items: center;
+}
+
+.persona-account-actions button {
   min-height: 40px;
   padding-inline: 12px;
+  white-space: nowrap;
+}
+
+.persona-account-actions button[disabled] {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .persona-unbind-btn[disabled] {
@@ -5732,8 +5782,10 @@ body.page-admin {
 
 .persona-table-wrap {
   overflow-x: auto;
-  border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .persona-table-toolbar,
@@ -5751,8 +5803,9 @@ body.page-admin {
 }
 
 .persona-table-toolbar {
-  padding: 10px 12px;
-  background: rgba(241, 245, 249, 0.92);
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.9));
   color: #334155;
 }
 
@@ -5774,13 +5827,14 @@ body.page-admin {
 
 .persona-post-table {
   width: 100%;
-  min-width: 980px;
+  min-width: 1040px;
   border-collapse: collapse;
+  table-layout: fixed;
 }
 
 .persona-post-table th,
 .persona-post-table td {
-  padding: 10px;
+  padding: 12px 10px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
   text-align: left;
   vertical-align: top;
@@ -5790,6 +5844,40 @@ body.page-admin {
   background: rgba(241, 245, 249, 0.9);
   color: #475569;
   font-size: 12px;
+}
+
+.persona-post-table th:nth-child(1),
+.persona-post-table td:nth-child(1) {
+  width: 92px;
+}
+
+.persona-post-table th:nth-child(3),
+.persona-post-table th:nth-child(4),
+.persona-post-table th:nth-child(5),
+.persona-post-table th:nth-child(6),
+.persona-post-table td:nth-child(3),
+.persona-post-table td:nth-child(4),
+.persona-post-table td:nth-child(5),
+.persona-post-table td:nth-child(6) {
+  width: 96px;
+  text-align: right;
+}
+
+.persona-post-source div {
+  max-width: 100%;
+  color: #334155;
+  line-height: 1.55;
+}
+
+.persona-post-platform {
+  color: #0f172a;
+  font-weight: 800;
+}
+
+.persona-post-number {
+  color: #0f172a;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
 }
 
 .persona-settings-pane {
@@ -5835,6 +5923,11 @@ body.page-admin {
   }
 
   .persona-detail-head {
+    grid-template-columns: 1fr;
+  }
+
+  .persona-account-grid,
+  .persona-account-actions {
     grid-template-columns: 1fr;
   }
 
