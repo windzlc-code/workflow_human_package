@@ -11136,6 +11136,68 @@ async function rewriteSentimentHotImportedPostContent(args: {
   return rewritten;
 }
 
+async function rewriteNormalArchivePostContent(args: {
+  archive: PersonaArchive;
+  post: PersonaArchive["posts"][number];
+  attempt: number;
+}) {
+  const timeoutMs = 75_000;
+  const startedAt = Date.now();
+  const setup: any = args.archive.setup || {};
+  const activeLinkEndingPreset = getActiveLinkEndingPreset(setup) || buildLegacyLinkEndingPreset(setup);
+  const personaCoreLines = [
+    `Persona name: ${args.archive.name}`,
+    args.archive.content ? `Persona profile: ${args.archive.content}` : "",
+    setup.personaDescription ? `Persona description: ${setup.personaDescription}` : "",
+    setup.contentTheme ? `Content theme: ${setup.contentTheme}` : "",
+    setup.customTopic ? `Long-term topic: ${setup.customTopic}` : "",
+    setup.personaPersonality ? `Personality: ${setup.personaPersonality}` : "",
+    setup.personaStyle ? `Writing style: ${setup.personaStyle}` : "",
+    Array.isArray(setup.genres) && setup.genres.length ? `Genres: ${setup.genres.join(", ")}` : "",
+    activeLinkEndingPreset ? `Link ending preset: ${[
+      activeLinkEndingPreset.endingText ? `endingText=${activeLinkEndingPreset.endingText}` : "",
+      activeLinkEndingPreset.linkUrl ? `linkUrl=${activeLinkEndingPreset.linkUrl}` : "",
+    ].filter(Boolean).join("; ")}` : "",
+  ].filter(Boolean).join("\n");
+  const prompt = [
+    "Rewrite exactly one existing Threads post for the current persona.",
+    "Output only the final post body. Do not output analysis, title, numbering, markdown fence, or explanations.",
+    "Do not create multiple posts. Do not use --- separators.",
+    "The rewritten post must replace the original post, so keep the same broad topic while changing wording, angle, and expression.",
+    activeLinkEndingPreset ? "If a link ending preset is provided, include it exactly once at the end." : "",
+    "",
+    "Persona context:",
+    personaCoreLines,
+    "",
+    "Rewrite instruction:",
+    buildRegeneratePostInstruction(args.post.content, args.attempt),
+  ].filter(Boolean).join("\n");
+  const { data, model } = await callTextUnderstandingModelWithFallback(
+    resolveTelegramTextModelPreference(args.post.telegramGroupContentType === "paid" ? "paid" : "free"),
+    [{ role: "user", parts: [{ text: prompt }] }],
+    { temperature: args.attempt > 1 ? 0.82 : 0.68, maxOutputTokens: 1000 },
+    AbortSignal.timeout(timeoutMs),
+    {
+      isUsableResponse: (data) => Boolean(extractText(data).trim()),
+      isRetryableError: isTextModelFallbackError,
+      onFallback: (event) => {
+        console.warn("[telegram][normal_post_rewrite_fallback]", `${event.from}->${event.to}: ${event.error}`);
+      },
+    },
+  );
+  let rewritten = extractText(data)
+    .replace(/^```(?:text|markdown)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  if (activeLinkEndingPreset) {
+    rewritten = applyLinkEndingPresetToText(rewritten, activeLinkEndingPreset);
+  }
+  console.info(
+    `[telegram][normal_post_rewrite_success] model=${model} attempt=${args.attempt} durationMs=${Date.now() - startedAt} inputChars=${args.post.content.length} outputChars=${rewritten.length} similarity=${calculateRegeneratedPostSimilarity(args.post.content, rewritten).toFixed(3)}`,
+  );
+  return rewritten;
+}
+
 async function regenerateArchivePostContent(args: {
   archiveId: string;
   postId: string;
@@ -11151,7 +11213,6 @@ async function regenerateArchivePostContent(args: {
 
   let generated: any = null;
   let generatedContent = "";
-  const generatedPostIds = new Set<string>();
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     if (isSentimentHotImportedPost(original)) {
       generated = {};
@@ -11162,17 +11223,12 @@ async function regenerateArchivePostContent(args: {
         mode: args.rewriteMode || "persona_style",
       });
     } else {
-      const result = await runPersonaWorkflow({
-        action: "generate-posts",
-        archiveId: args.archiveId,
-        count: 1,
-        textModelBranch: original.telegramGroupContentType === "paid" ? "paid" : "free",
-        customInstruction: buildRegeneratePostInstruction(original.content, attempt),
-      } as any);
-      generated = ((result as any)?.posts || [])[0];
-      const generatedPostId = String(generated?.id || generated?.archivePostId || "");
-      if (generatedPostId) generatedPostIds.add(generatedPostId);
-      generatedContent = String(generated?.content || "").trim();
+      generated = {};
+      generatedContent = await rewriteNormalArchivePostContent({
+        archive,
+        post: original,
+        attempt,
+      });
     }
     if (!generatedContent) throw new Error("AI 未返回新推文內容");
     const sentimentRewriteMode = args.rewriteMode || "persona_style";
@@ -11226,10 +11282,8 @@ async function regenerateArchivePostContent(args: {
         }
       : post;
   const nextPosts = latestArchive.posts
-    .filter((post) => !generatedPostIds.has(post.id))
     .map((post) => args.source === "favorites" ? post : patchPost(post));
   const nextFavorites = (latestArchive.favoritePosts || [])
-    .filter((post) => !generatedPostIds.has(post.id))
     .map((post) => args.source === "favorites" ? patchPost(post) : post);
   const saved = await savePersonaArchive({ ...latestArchive, posts: nextPosts, favoritePosts: nextFavorites });
   invalidatePersonaListCache();
@@ -22254,14 +22308,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
         { reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] } },
       );
       const stopTyping = startTelegramTyping(bot, chatId);
+      let didRegeneratePostContent = false;
+      let regeneratedSuccessText = "";
       try {
           const updated = await regenerateArchivePostContent({ ...action, rewriteMode });
+          didRegeneratePostContent = true;
           stopTyping();
-          const updatedSourcePosts = resolveArchivePostCollection(archive, action.source);
+          const displayArchive = await loadPersonaArchive(action.archiveId).catch(() => null) || archive;
+          const updatedSourcePosts = resolveArchivePostCollection(displayArchive, action.source);
           const updatedSourceIndex = updatedSourcePosts.findIndex((item) => item.id === updated.id);
           const updatedDisplayIndex = (updated.orderIndex ?? updatedSourceIndex) + 1;
+          regeneratedSuccessText = `✅ 推文已重新生成${rewriteModeLabel}\n\n${buildPostDetailTextWithArchive(updatedDisplayIndex, updated.content, String(updated.imageUrl || ""), displayArchive, updated.sourceMeta)}`;
           pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: updated.id, source: action.source, groupContentType: action.groupContentType });
-          await bot.sendMessage(chatId, `✅ 推文已重新生成${rewriteModeLabel}\n\n${buildPostDetailTextWithArchive(updatedDisplayIndex, updated.content, String(updated.imageUrl || ""), archive, updated.sourceMeta)}`, {
+          await bot.sendMessage(chatId, regeneratedSuccessText, {
             parse_mode: "HTML",
             ...buildPostImagePreviewOptions(String(updated.imageUrl || "")),
             reply_markup: {
@@ -22270,12 +22329,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 publishCallback: "post_action",
                 deleteCallback: "post_delete_action",
                 archiveId: action.archiveId,
-                postIndex: action.source === "favorites" ? undefined : archive.posts.findIndex((item) => item.id === updated.id),
+                postIndex: action.source === "favorites" ? undefined : displayArchive.posts.findIndex((item) => item.id === updated.id),
                 groupContentType: action.groupContentType,
                 canRefreshMetrics: action.source === "favorites" ? false : canRefreshSentimentPostMetrics(updated),
                 allowSentimentEditControls: action.source === "favorites" || isSentimentHotImportedPost(updated),
                 favoriteCallback: action.source === "favorites" ? undefined : "post_favorite_action",
-                favoriteAdded: action.source !== "favorites" && isArchivePostFavorited(archive, updated),
+                favoriteAdded: action.source !== "favorites" && isArchivePostFavorited(displayArchive, updated),
                 backCallback: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType),
                 backText: action.source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
               }),
@@ -22283,6 +22342,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
           });
       } catch (error) {
         stopTyping();
+        if (didRegeneratePostContent) {
+          await safeEditOrSend(
+            bot,
+            chatId,
+            msgId,
+            regeneratedSuccessText || "✅ 推文已重新生成。",
+            {
+              parse_mode: "HTML",
+              reply_markup: { inline_keyboard: [[{ text: "返回推文列表", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] },
+            },
+          );
+          return;
+        }
         await bot.sendMessage(chatId, `❌ ${isImageOnly ? "图片生成失败" : "重新生成推文失败"}：${formatUserFacingError(error, isImageOnly ? "图片生成失败，请稍后重试。" : "推文生成失敗，請稍後重試。")}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType) }]] },
         });

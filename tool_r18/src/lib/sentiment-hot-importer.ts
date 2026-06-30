@@ -8,6 +8,7 @@ import {
   buildSentimentCandidateId,
   getSentimentHotExcludedIds,
   getSentimentHotRefreshExcludedIds,
+  getSentimentHotShownAtMap,
   getSentimentHotShownIds,
   rememberSentimentHotShown,
   type SentimentHotCandidate,
@@ -37,6 +38,7 @@ const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 12_000;
 const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 75_000;
 const SENTIMENT_HOT_FAST_RETURN_COUNT = 5;
 const SENTIMENT_HOT_SUPPLEMENT_MIN_REMAINING_MS = 15_000;
+const SENTIMENT_HOT_ARCHIVE_BACKFILL_MAX_AGE_MS = 72 * 60 * 60 * 1000;
 const THREADS_BROWSER_EMPTY_SHELL_LIMIT = 1;
 const SENTIMENT_HOT_TIMEOUT_WARNING = "\u71b1\u9ede\u6293\u53d6\u5df2\u8d85\u6642\uff0c\u5df2\u505c\u6b62\u5f8c\u7e8c\u8017\u6642\u6b65\u9a5f\uff1b\u8acb\u7a0d\u5f8c\u5237\u65b0\u6216\u6aa2\u67e5 Cookie / sessionid\u3002";
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
@@ -1314,9 +1316,16 @@ export async function fetchSentimentHotCandidates(args: {
       undefined,
     ),
   );
-  const keywords = keywordResult || [];
+  let keywords = keywordResult || [];
   if (!keywordResult) {
     warnings.push("模型生成热点关键词超时，已停止本次抓取；不会使用规则关键词兜底。");
+  }
+  if (keywords.length === 0) {
+    const cachedKeywords = readArchiveScopedThreadsSearchKeywords(archiveId, 10);
+    if (cachedKeywords.length > 0) {
+      keywords = cachedKeywords;
+      warnings.push("模型关键词不可用，已改用同一人设历史真实抓取关键词继续刷新。");
+    }
   }
   const limit = args.limit || 10;
   const poolLimit = Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
@@ -1518,7 +1527,7 @@ export async function fetchSentimentHotCandidates(args: {
       refresh: args.refresh === true,
       warnings,
     });
-    candidates = sortRelevantHotCandidates(candidates, keywords, Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET));
+    candidates = sortSentimentHotCandidatePool(candidates, keywords, Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET));
   }
   if (runtime.ok && usableSources.length > 0) {
     void syncSentimentKeywords(keywords).catch(() => undefined);
@@ -1573,7 +1582,7 @@ async function fillSentimentHotCandidatesToLimit(args: {
     if (!content || isLowQualitySentimentContent(content) || !isChineseSentimentCandidate(content)) return;
     const normalized = { ...candidate, content };
     if (!isUsefulHotCandidate(normalized)) return;
-    if (!candidateTouchesCurrentKeywords(normalized, args.keywords)) return;
+    if (!isArchiveScopedFallbackCandidate(normalized) && !candidateTouchesCurrentKeywords(normalized, args.keywords)) return;
     seen.add(candidate.id);
     seenDedupeKeys.add(dedupeKey);
     out.push(normalized);
@@ -1596,10 +1605,33 @@ async function fillSentimentHotCandidatesToLimit(args: {
     if (out.length >= args.limit) break;
   }
 
+  if (out.length < args.limit) {
+    const beforeArchiveBackfillCount = out.length;
+    const archiveBackfillCandidates = readArchiveScopedThreadsCandidateBackfill(
+      args.archiveId,
+      args.keywords,
+      Math.max(args.limit * 30, SENTIMENT_HOT_CANDIDATE_POOL_TARGET),
+      args.refresh === true,
+    );
+    for (const candidate of archiveBackfillCandidates) {
+      add(candidate);
+      if (out.length >= args.limit) break;
+    }
+    if (out.length > beforeArchiveBackfillCount) {
+      args.warnings.push(`即時新候選不足，已用同一人設歷史關鍵詞候選回補到 ${out.length}/${args.limit} 篇。`);
+    }
+  }
+
   if (args.refresh === true && out.length < args.limit) {
     const beforeSoftBackfillCount = out.length;
     const softBackfillCandidates = [
       ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, Math.max(args.limit * 30, SENTIMENT_HOT_CANDIDATE_POOL_TARGET), false),
+      ...readArchiveScopedThreadsCandidateBackfill(
+        args.archiveId,
+        args.keywords,
+        Math.max(args.limit * 30, SENTIMENT_HOT_CANDIDATE_POOL_TARGET),
+        false,
+      ),
       ...(await readCandidatesFromDatabase({
         archiveId: args.archiveId,
         keywords: args.keywords,
@@ -1609,7 +1641,6 @@ async function fillSentimentHotCandidatesToLimit(args: {
     ];
     for (const candidate of softBackfillCandidates) {
       add(candidate);
-      if (out.length >= args.limit) break;
     }
     if (out.length > beforeSoftBackfillCount) {
       args.warnings.push("\u672a\u5c55\u793a\u5019\u9078\u4e0d\u8db3\uff0c\u5df2\u4f7f\u7528\u8fd1\u671f\u5c55\u793a\u904e\u4f46\u672a\u767c\u4f48/\u672a\u5c0e\u5165\u7684\u5019\u9078\u4f4e\u512a\u5148\u7d1a\u56de\u88dc\u3002");
@@ -1622,7 +1653,7 @@ async function fillSentimentHotCandidatesToLimit(args: {
     } else {
       args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u7528\u540c\u4eba\u8a2d\u95dc\u9375\u8a5e\u7684\u9ad8\u71b1\u5ea6\u6b77\u53f2\u5019\u9078\u88dc\u9f4a\u3002");
     }
-    return out.slice(0, args.limit);
+    return out;
   }
 
   return out;
@@ -1858,14 +1889,20 @@ export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHo
   const out: SentimentHotCandidate[] = [];
   const seenKeys = new Set<string>();
   const shownIds = options?.archiveId ? getSentimentHotShownIds(options.archiveId) : new Set<string>();
+  const shownAtMap = options?.archiveId ? getSentimentHotShownAtMap(options.archiveId) : new Map<string, number>();
   const keywords = options?.keywords || [];
   const sorted = candidates
     .filter((candidate) => isUsefulHotCandidate(candidate) && hasMinimumSentimentHotContentLength(candidate))
-    .filter((candidate) => keywords.length === 0 || candidateMatchesCurrentKeywords(candidate, keywords))
+    .filter((candidate) => keywords.length === 0 || candidateMatchesCurrentKeywords(candidate, keywords) || isArchiveScopedFallbackCandidate(candidate))
     .sort((a, b) => {
       const aShown = shownIds.has(a.id) ? 1 : 0;
       const bShown = shownIds.has(b.id) ? 1 : 0;
       if (aShown !== bShown) return aShown - bShown;
+      if (aShown && bShown) {
+        const aShownAt = shownAtMap.get(a.id) || 0;
+        const bShownAt = shownAtMap.get(b.id) || 0;
+        if (aShownAt !== bShownAt) return aShownAt - bShownAt;
+      }
       if (keywords.length > 0) {
         const aLow = isObviouslyLowQualitySentimentHotCandidate(a, keywords) ? 1 : 0;
         const bLow = isObviouslyLowQualitySentimentHotCandidate(b, keywords) ? 1 : 0;
@@ -1929,9 +1966,10 @@ async function fetchThreadsSearchPageCandidates(args: {
   refresh?: boolean;
 }): Promise<SentimentHotCandidate[]> {
   const baseQueries = buildThreadsSearchQueries(args.keywords);
-  const selectedOrImportedIds = getSentimentHotExcludedIds(args.archiveId);
   const shownIds = getSentimentHotShownIds(args.archiveId);
-  const primaryExcluded = selectedOrImportedIds;
+  const primaryExcluded = args.refresh
+    ? getSentimentHotRefreshExcludedIds(args.archiveId)
+    : getSentimentHotExcludedIds(args.archiveId);
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
   const fastReturnTarget = args.refresh ? Math.min(args.limit, 30) : Math.min(args.limit, 2);
   const results: SentimentHotCandidate[] = [];
@@ -4272,6 +4310,83 @@ function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], 
       };
       byId.set(candidate.id, normalized);
     }
+  }
+  return sortSentimentHotCandidatePool([...byId.values()], keywords, limit);
+}
+
+function isArchiveScopedFallbackCandidate(candidate: SentimentHotCandidate): boolean {
+  return Boolean((candidate.metrics as any)?.archiveScopedFallback);
+}
+
+function readArchiveScopedThreadsSearchKeywords(archiveId: string, limit: number): string[] {
+  const state = readThreadsSearchCacheState();
+  const scopedPrefix = `${cleanText(archiveId) || "default"}::`;
+  const maxAgeMs = SENTIMENT_HOT_ARCHIVE_BACKFILL_MAX_AGE_MS;
+  const keywords: string[] = [];
+  const seen = new Set<string>();
+  const archiveKeys = Object.keys(state)
+    .filter((key) => key.startsWith(scopedPrefix))
+    .sort((a, b) => new Date(state[b]?.at || 0).getTime() - new Date(state[a]?.at || 0).getTime());
+  for (const key of archiveKeys) {
+    const row = state[key];
+    if (row?.version !== THREADS_SEARCH_CACHE_VERSION) continue;
+    if (!row || Date.now() - new Date(row.at).getTime() > maxAgeMs) continue;
+    const keyword = cleanText(key.slice(scopedPrefix.length));
+    if (!keyword || seen.has(keyword)) continue;
+    const hasUsefulCandidate = (row.candidates || []).some((candidate) => {
+      const content = cleanThreadsReaderContent(candidate?.content || "");
+      return Boolean(
+        candidate?.id
+        && content
+        && isChineseSentimentCandidate(content)
+        && isUsefulHotCandidate(candidate)
+        && hasMinimumSentimentHotContentLength({ ...candidate, content }),
+      );
+    });
+    if (!hasUsefulCandidate) continue;
+    seen.add(keyword);
+    keywords.push(keyword);
+    if (keywords.length >= limit) break;
+  }
+  return keywords;
+}
+
+function readArchiveScopedThreadsCandidateBackfill(archiveId: string, keywords: string[], limit: number, excludeShown = false): SentimentHotCandidate[] {
+  const state = readThreadsSearchCacheState();
+  const excluded = excludeShown ? getSentimentHotRefreshExcludedIds(archiveId) : getSentimentHotExcludedIds(archiveId);
+  const byId = new Map<string, SentimentHotCandidate>();
+  const maxAgeMs = SENTIMENT_HOT_ARCHIVE_BACKFILL_MAX_AGE_MS;
+  const scopedPrefix = `${cleanText(archiveId) || "default"}::`;
+  const archiveKeys = Object.keys(state)
+    .filter((key) => key.startsWith(scopedPrefix))
+    .sort((a, b) => new Date(state[b]?.at || 0).getTime() - new Date(state[a]?.at || 0).getTime());
+  for (const key of archiveKeys) {
+    const row = state[key];
+    if (row?.version !== THREADS_SEARCH_CACHE_VERSION) continue;
+    if (!row || Date.now() - new Date(row.at).getTime() > maxAgeMs) continue;
+    const storedKeyword = cleanText(key.slice(scopedPrefix.length));
+    if (!storedKeyword) continue;
+    for (const candidate of row.candidates || []) {
+      if (!candidate?.id || excluded.has(candidate.id) || byId.has(candidate.id)) continue;
+      const content = cleanThreadsReaderContent(candidate.content || "");
+      if (!content || isLowQualitySentimentContent(content) || !isChineseSentimentCandidate(content)) continue;
+      if (!isUsefulHotCandidate(candidate) || !hasMinimumSentimentHotContentLength({ ...candidate, content })) continue;
+      byId.set(candidate.id, {
+        ...candidate,
+        content,
+        metrics: {
+          ...(candidate.metrics || {}),
+          archiveScopedFallback: true,
+          archiveScopedKeyword: storedKeyword,
+        },
+        warnings: uniqueSentimentWarnings([
+          ...(candidate.warnings || []),
+          "即時新候選不足，已使用同一人設歷史關鍵詞候選回補。",
+        ]),
+      });
+      if (byId.size >= limit) break;
+    }
+    if (byId.size >= limit) break;
   }
   return sortSentimentHotCandidatePool([...byId.values()], keywords, limit);
 }

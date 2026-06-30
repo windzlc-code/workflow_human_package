@@ -97,6 +97,19 @@ export function getSentimentHotShownIds(archiveId: string): Set<string> {
   return new Set((state.shown[archiveId] || []).map(shownEntryId).filter(Boolean));
 }
 
+export function getSentimentHotShownAtMap(archiveId: string): Map<string, number> {
+  const state = readState();
+  const result = new Map<string, number>();
+  for (const entry of state.shown[archiveId] || []) {
+    const id = shownEntryId(entry);
+    if (!id) continue;
+    const at = typeof entry === "string" ? "" : String(entry.at || "");
+    const time = Date.parse(at);
+    result.set(id, Number.isFinite(time) ? time : 0);
+  }
+  return result;
+}
+
 export function rememberSentimentHotShown(archiveId: string, candidates: SentimentHotCandidate[]) {
   const state = readState();
   const now = new Date().toISOString();

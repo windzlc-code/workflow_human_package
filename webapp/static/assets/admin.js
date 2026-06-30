@@ -2423,16 +2423,42 @@ function formatAdminDate(value) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+const SENTIMENT_COOKIE_PROFILE_PRIORITY = ["threads", "instagram", "xiaohongshusearch", "facebooksearch", "xsearch"];
+const SENTIMENT_COOKIE_PROFILE_ALIASES = {
+  threads: "threads",
+  instagram: "instagram",
+  x: "xsearch",
+  xsearch: "xsearch",
+  twitter: "xsearch",
+  facebook: "facebooksearch",
+  facebooksearch: "facebooksearch",
+  fb: "facebooksearch",
+  xiaohongshu: "xiaohongshusearch",
+  xiaohongshusearch: "xiaohongshusearch",
+  rednote: "xiaohongshusearch",
+  xhs: "xiaohongshusearch",
+};
+
+function sentimentCookieProfileCanonicalKey(profile) {
+  for (const field of ["key", "platform", "sourceKey"]) {
+    const raw = String(profile?.[field] || "").trim();
+    if (!raw) continue;
+    const compact = raw.replace(/[\s_-]+/g, "").toLowerCase();
+    const key = SENTIMENT_COOKIE_PROFILE_ALIASES[raw.toLowerCase()] || SENTIMENT_COOKIE_PROFILE_ALIASES[compact] || compact;
+    if (SENTIMENT_COOKIE_PROFILE_PRIORITY.includes(key)) return key;
+  }
+  return "";
+}
+
 function preferredSentimentCookieProfiles(profiles) {
-  const priority = ["threads", "instagram", "xSearch", "dcard"];
   const rows = Array.isArray(profiles) ? profiles : [];
   return rows
-    .slice()
+    .filter((profile) => SENTIMENT_COOKIE_PROFILE_PRIORITY.includes(sentimentCookieProfileCanonicalKey(profile)))
     .sort((a, b) => {
-      const ak = String(a.key || a.platform || "");
-      const bk = String(b.key || b.platform || "");
-      const ai = priority.includes(ak) ? priority.indexOf(ak) : 99;
-      const bi = priority.includes(bk) ? priority.indexOf(bk) : 99;
+      const ak = sentimentCookieProfileCanonicalKey(a);
+      const bk = sentimentCookieProfileCanonicalKey(b);
+      const ai = SENTIMENT_COOKIE_PROFILE_PRIORITY.includes(ak) ? SENTIMENT_COOKIE_PROFILE_PRIORITY.indexOf(ak) : 99;
+      const bi = SENTIMENT_COOKIE_PROFILE_PRIORITY.includes(bk) ? SENTIMENT_COOKIE_PROFILE_PRIORITY.indexOf(bk) : 99;
       if (ai !== bi) return ai - bi;
       return ak.localeCompare(bk);
     });
