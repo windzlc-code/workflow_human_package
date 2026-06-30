@@ -53,70 +53,52 @@
       </div>
 
       <div id="personaDashboardMsg" class="msg"></div>
-      <div id="personaDashboardSummary" class="persona-kpi-grid"></div>
-
-      <div class="persona-chart-grid">
-        <div class="persona-chart-panel persona-chart-panel-wide">
-          <div class="persona-chart-head">
-            <h3>人设热度排行</h3>
-            <span class="small">按帖子浏览、点赞、评论、分享、转发合计</span>
-          </div>
-          <div id="personaHotRankChart" class="persona-chart"></div>
-        </div>
-        <div class="persona-chart-panel">
-          <div class="persona-chart-head">
-            <h3>平台分布</h3>
-            <span class="small">发布与热点平台占比</span>
-          </div>
-          <div id="personaPlatformChart" class="persona-chart"></div>
-        </div>
-        <div class="persona-chart-panel">
-          <div class="persona-chart-head">
-            <h3>热点覆盖</h3>
-            <span class="small">完整、部分、暂无数据</span>
-          </div>
-          <div id="personaCoverageChart" class="persona-chart"></div>
-        </div>
-        <div class="persona-chart-panel persona-chart-panel-wide">
-          <div class="persona-chart-head">
-            <h3>流量走势</h3>
-            <span class="small">发布、互动、逐帖浏览按日期聚合</span>
-          </div>
-          <div id="personaTrendChart" class="persona-chart persona-chart-tall"></div>
-        </div>
-        <div class="persona-chart-panel">
-          <div class="persona-chart-head">
-            <h3>互动构成</h3>
-            <span class="small">不含浏览量</span>
-          </div>
-          <div id="personaEngagementChart" class="persona-chart"></div>
-        </div>
-        <div class="persona-chart-panel">
-          <div class="persona-chart-head">
-            <h3>任务状态</h3>
-            <span class="small">发布队列缓存</span>
-          </div>
-          <div id="personaTaskStatusChart" class="persona-chart"></div>
-        </div>
-      </div>
-
-      <div class="persona-dashboard-note">
-        <strong>指标说明：</strong>主页浏览 recentViews 是账号主页级数据；帖子浏览 views/viewCount 是逐帖数据，两者分开展示，不合并。
-      </div>
-
-      <div class="persona-list-head">
-        <div>
-          <h3>单个人设统计</h3>
-          <div class="small" id="personaDashboardMeta">正在加载人设明细...</div>
-        </div>
-      </div>
-      <div id="personaDashboardEmpty" class="task-empty" style="display:none">
-        <div class="task-empty-title">暂无人设数据</div>
-        <div class="small">当前缓存里没有可展示的人设归档。</div>
-      </div>
       <div class="persona-person-layout">
         <aside id="personaDashboardTabs" class="persona-tab-rail" aria-label="人设分栏"></aside>
-        <div id="personaDashboardList" class="persona-dashboard-list"></div>
+        <div class="persona-workbench-panel">
+          <div id="personaOverviewPane" class="persona-overview-pane">
+            <div class="persona-list-head">
+              <div>
+                <h3>总览首页</h3>
+                <div class="small" id="personaDashboardMeta">正在加载人设明细...</div>
+              </div>
+            </div>
+            <div id="personaDashboardSummary" class="persona-kpi-grid"></div>
+            <div class="persona-chart-grid">
+              <div class="persona-chart-panel persona-chart-panel-wide">
+                <div class="persona-chart-head"><h3>人设热度排行</h3><span class="small">按帖子浏览、点赞、评论、分享、转发合计</span></div>
+                <div id="personaHotRankChart" class="persona-chart"></div>
+              </div>
+              <div class="persona-chart-panel">
+                <div class="persona-chart-head"><h3>平台分布</h3><span class="small">发布与热点平台占比</span></div>
+                <div id="personaPlatformChart" class="persona-chart"></div>
+              </div>
+              <div class="persona-chart-panel">
+                <div class="persona-chart-head"><h3>热点覆盖</h3><span class="small">完整、部分、暂无数据</span></div>
+                <div id="personaCoverageChart" class="persona-chart"></div>
+              </div>
+              <div class="persona-chart-panel persona-chart-panel-wide">
+                <div class="persona-chart-head"><h3>流量走势</h3><span class="small">发布、互动、逐帖浏览按日期聚合</span></div>
+                <div id="personaTrendChart" class="persona-chart persona-chart-tall"></div>
+              </div>
+              <div class="persona-chart-panel">
+                <div class="persona-chart-head"><h3>互动构成</h3><span class="small">不含浏览量</span></div>
+                <div id="personaEngagementChart" class="persona-chart"></div>
+              </div>
+              <div class="persona-chart-panel">
+                <div class="persona-chart-head"><h3>任务状态</h3><span class="small">发布队列缓存</span></div>
+                <div id="personaTaskStatusChart" class="persona-chart"></div>
+              </div>
+            </div>
+            <div class="persona-dashboard-note"><strong>指标说明：</strong>主页浏览 recentViews 是账号主页级数据；帖子浏览 views/viewCount 是逐帖数据，两者分开展示，不合并。</div>
+          </div>
+          <div id="personaDashboardEmpty" class="task-empty" style="display:none">
+            <div class="task-empty-title">暂无人设数据</div>
+            <div class="small">当前缓存里没有可展示的人设归档。</div>
+          </div>
+          <div id="personaDashboardList" class="persona-dashboard-list"></div>
+          <div id="personaDashboardSettings" class="persona-settings-pane" style="display:none"></div>
+        </div>
       </div>
     </section>
   </main>

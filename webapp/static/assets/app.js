@@ -33,7 +33,9 @@ const appState = {
   generatedSceneImagePath: "",
   recentRailOpen: false,
   personaDashboard: null,
-  personaDashboardSelectedId: "",
+  personaDashboardSelectedId: "__overview__",
+  personaDashboardPostPage: 1,
+  personaDashboardPageSize: Number(localStorage.getItem("personaDashboardPageSize") || 10) || 10,
 };
 const APP_PAGES = new Set(["generate", "tasks", "persona-dashboard", "account"]);
 const APP_PAGE_LABELS = {
@@ -1194,6 +1196,11 @@ function renderPersonaDashboardSummary(data, visiblePersonas) {
 function renderPersonaCard(persona) {
   const hot = persona.hot || {};
   const counts = persona.counts || {};
+  const rows = persona.post_metrics || [];
+  const pageSize = Math.max(5, Math.min(100, Number(appState.personaDashboardPageSize || 10)));
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  appState.personaDashboardPostPage = Math.max(1, Math.min(pageCount, Number(appState.personaDashboardPostPage || 1)));
+  const start = (appState.personaDashboardPostPage - 1) * pageSize;
   const platforms = (persona.hot_platforms || []).map((item) => `
     <div class="persona-platform-row">
       <strong>${escapeHtml(item.platform || "-")}</strong>
@@ -1204,7 +1211,7 @@ function renderPersonaCard(persona) {
       <span>${item.complete ? "完整" : "部分/未知"}</span>
     </div>
   `).join("");
-  const postRows = (persona.post_metrics || []).slice(0, 8).map((row) => `
+  const postRows = rows.slice(start, start + pageSize).map((row) => `
     <tr>
       <td>${escapeHtml(row.platform || "-")}</td>
       <td>${escapeHtml(String(row.content || row.source_url || "-").slice(0, 80))}</td>
@@ -1237,10 +1244,19 @@ function renderPersonaCard(persona) {
       <div class="persona-content-preview">${escapeHtml(persona.content || "暂无人设描述")}</div>
       <div class="persona-platform-list">${platforms || `<div class="small">暂无平台热点指标</div>`}</div>
       <div class="persona-table-wrap">
+        <div class="persona-table-toolbar">
+          <strong>逐帖指标</strong>
+          <span>第 ${escapeHtml(String(appState.personaDashboardPostPage))} / ${escapeHtml(String(pageCount))} 页 · 共 ${escapeHtml(String(rows.length))} 条</span>
+        </div>
         <table class="persona-post-table">
           <thead><tr><th>平台</th><th>帖子/来源</th><th>赞</th><th>评</th><th>转/分享</th><th>浏览</th></tr></thead>
           <tbody>${postRows || `<tr><td colspan="6">暂无逐帖指标</td></tr>`}</tbody>
         </table>
+      </div>
+      <div class="persona-pager">
+        <button class="ghost" type="button" id="personaPostPrev" ${appState.personaDashboardPostPage <= 1 ? "disabled" : ""}>上一页</button>
+        <span>每页 ${escapeHtml(String(pageSize))} 条</span>
+        <button class="ghost" type="button" id="personaPostNext" ${appState.personaDashboardPostPage >= pageCount ? "disabled" : ""}>下一页</button>
       </div>
     </article>
   `;
@@ -1253,16 +1269,17 @@ function personaDashboardKey(persona, index = 0) {
 function renderPersonaTabs(visiblePersonas, selectedPersona) {
   const tabs = el("personaDashboardTabs");
   if (!tabs) return;
-  if (!visiblePersonas.length) {
-    tabs.innerHTML = "";
-    return;
-  }
   tabs.innerHTML = `
     <div class="persona-tab-rail-head">
-      <strong>人设分栏</strong>
-      <span>${escapeHtml(String(visiblePersonas.length))} 个</span>
+      <strong>分栏</strong>
+      <span>${escapeHtml(String(visiblePersonas.length))} 人设</span>
     </div>
     <div class="persona-tab-list">
+      <button class="persona-tab ${appState.personaDashboardSelectedId === "__overview__" ? "is-active" : ""}" type="button" data-persona-id="__overview__" aria-current="${appState.personaDashboardSelectedId === "__overview__" ? "true" : "false"}">
+        <span class="persona-tab-index">总</span>
+        <span class="persona-tab-main"><strong>总览首页</strong><span>全部图表与指标</span></span>
+        <span class="persona-tab-metrics"><b>${escapeHtml(formatDashboardNumber((appState.personaDashboard.summary || {}).persona_count))}</b><span>人设</span></span>
+      </button>
       ${visiblePersonas.map((persona, index) => {
         const hot = persona.hot || {};
         const counts = persona.counts || {};
@@ -1282,14 +1299,50 @@ function renderPersonaTabs(visiblePersonas, selectedPersona) {
           </button>
         `;
       }).join("")}
+      <button class="persona-tab persona-tab-settings ${appState.personaDashboardSelectedId === "__settings__" ? "is-active" : ""}" type="button" data-persona-id="__settings__" aria-current="${appState.personaDashboardSelectedId === "__settings__" ? "true" : "false"}">
+        <span class="persona-tab-index">设</span>
+        <span class="persona-tab-main"><strong>设置</strong><span>分页与显示数量</span></span>
+        <span class="persona-tab-metrics"><b>${escapeHtml(String(appState.personaDashboardPageSize))}</b><span>每页</span></span>
+      </button>
     </div>
   `;
   tabs.querySelectorAll("[data-persona-id]").forEach((node) => {
     node.addEventListener("click", () => {
       appState.personaDashboardSelectedId = String(node.getAttribute("data-persona-id") || "");
+      appState.personaDashboardPostPage = 1;
       renderPersonaDashboard();
     });
   });
+}
+
+function renderPersonaSettings() {
+  const settings = el("personaDashboardSettings");
+  if (!settings) return;
+  settings.innerHTML = `
+    <div class="persona-settings-card">
+      <div>
+        <h3>设置</h3>
+        <div class="small">调整单个人设推文表的分页数量。</div>
+      </div>
+      <label for="personaPageSizeInput">每页推文数量</label>
+      <div class="persona-settings-row">
+        <input id="personaPageSizeInput" type="number" min="5" max="100" step="5" value="${escapeHtml(String(appState.personaDashboardPageSize))}" />
+        <button class="primary" type="button" id="personaPageSizeApply">应用</button>
+      </div>
+      <div class="small">可设置 5 到 100 条。数值越大，单页表格越长。</div>
+    </div>
+  `;
+  const apply = el("personaPageSizeApply");
+  if (apply) {
+    apply.addEventListener("click", () => {
+      const input = el("personaPageSizeInput");
+      const next = Math.max(5, Math.min(100, Number(input && input.value) || 10));
+      appState.personaDashboardPageSize = next;
+      appState.personaDashboardPostPage = 1;
+      localStorage.setItem("personaDashboardPageSize", String(next));
+      renderPersonaDashboard();
+    });
+  }
 }
 
 function renderPersonaDashboard() {
@@ -1297,10 +1350,12 @@ function renderPersonaDashboard() {
   const list = el("personaDashboardList");
   const empty = el("personaDashboardEmpty");
   const meta = el("personaDashboardMeta");
+  const overview = el("personaOverviewPane");
+  const settings = el("personaDashboardSettings");
   if (!data || !list || !empty) return;
   const visible = (data.personas || []).filter(personaMatchesFilters);
   let selected = visible.find((persona, index) => personaDashboardKey(persona, index) === String(appState.personaDashboardSelectedId || ""));
-  if (!selected && visible.length) {
+  if (!["__overview__", "__settings__"].includes(appState.personaDashboardSelectedId) && !selected && visible.length) {
     selected = visible[0];
     appState.personaDashboardSelectedId = personaDashboardKey(selected, 0);
   }
@@ -1312,9 +1367,18 @@ function renderPersonaDashboard() {
   renderDonutChart("personaEngagementChart", data.charts && data.charts.engagement_mix);
   renderDonutChart("personaTaskStatusChart", data.charts && data.charts.task_status_distribution);
   renderPersonaTabs(visible, selected);
+  renderPersonaSettings();
+  const mode = appState.personaDashboardSelectedId;
+  if (overview) overview.style.display = mode === "__overview__" ? "grid" : "none";
+  if (settings) settings.style.display = mode === "__settings__" ? "grid" : "none";
+  list.style.display = selected && mode !== "__overview__" && mode !== "__settings__" ? "grid" : "none";
   if (meta) meta.textContent = selected ? `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设 · 已选：${selected.name || "未命名人设"}` : `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设`;
   empty.style.display = visible.length ? "none" : "block";
   list.innerHTML = selected ? renderPersonaCard(selected) : "";
+  const prev = el("personaPostPrev");
+  const next = el("personaPostNext");
+  if (prev) prev.addEventListener("click", () => { appState.personaDashboardPostPage -= 1; renderPersonaDashboard(); });
+  if (next) next.addEventListener("click", () => { appState.personaDashboardPostPage += 1; renderPersonaDashboard(); });
 }
 
 function syncPersonaPadFilter(data) {

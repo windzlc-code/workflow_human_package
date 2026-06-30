@@ -26,7 +26,9 @@ function pdEscape(value) {
 }
 
 let personaDashboardData = null;
-let personaDashboardSelectedId = "";
+let personaDashboardSelectedId = "__overview__";
+let personaDashboardPostPage = 1;
+let personaDashboardPageSize = Number(localStorage.getItem("personaDashboardPageSize") || 10) || 10;
 
 function pdNumber(value) {
   const n = Number(value || 0);
@@ -236,6 +238,11 @@ function pdRenderSummary(data, visiblePersonas) {
 function pdRenderPersonaCard(persona) {
   const hot = persona.hot || {};
   const counts = persona.counts || {};
+  const rows = persona.post_metrics || [];
+  const pageSize = Math.max(5, Math.min(100, Number(personaDashboardPageSize || 10)));
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  personaDashboardPostPage = Math.max(1, Math.min(pageCount, Number(personaDashboardPostPage || 1)));
+  const start = (personaDashboardPostPage - 1) * pageSize;
   const platforms = (persona.hot_platforms || []).map((item) => `
     <div class="persona-platform-row">
       <strong>${pdEscape(item.platform || "-")}</strong>
@@ -246,7 +253,7 @@ function pdRenderPersonaCard(persona) {
       <span>${item.complete ? "完整" : "部分/未知"}</span>
     </div>
   `).join("");
-  const postRows = (persona.post_metrics || []).slice(0, 8).map((row) => `
+  const postRows = rows.slice(start, start + pageSize).map((row) => `
     <tr>
       <td>${pdEscape(row.platform || "-")}</td>
       <td>${pdEscape(String(row.content || row.source_url || "-").slice(0, 80))}</td>
@@ -279,10 +286,19 @@ function pdRenderPersonaCard(persona) {
       <div class="persona-content-preview">${pdEscape(persona.content || "暂无人设描述")}</div>
       <div class="persona-platform-list">${platforms || `<div class="small">暂无平台热点指标</div>`}</div>
       <div class="persona-table-wrap">
+        <div class="persona-table-toolbar">
+          <strong>逐帖指标</strong>
+          <span>第 ${pdEscape(String(personaDashboardPostPage))} / ${pdEscape(String(pageCount))} 页 · 共 ${pdEscape(String(rows.length))} 条</span>
+        </div>
         <table class="persona-post-table">
           <thead><tr><th>平台</th><th>帖子/来源</th><th>赞</th><th>评</th><th>转/分享</th><th>浏览</th></tr></thead>
           <tbody>${postRows || `<tr><td colspan="6">暂无逐帖指标</td></tr>`}</tbody>
         </table>
+      </div>
+      <div class="persona-pager">
+        <button class="ghost" type="button" id="personaPostPrev" ${personaDashboardPostPage <= 1 ? "disabled" : ""}>上一页</button>
+        <span>每页 ${pdEscape(String(pageSize))} 条</span>
+        <button class="ghost" type="button" id="personaPostNext" ${personaDashboardPostPage >= pageCount ? "disabled" : ""}>下一页</button>
       </div>
     </article>
   `;
@@ -295,16 +311,17 @@ function pdPersonaKey(persona, index = 0) {
 function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
   const tabs = pdEl("personaDashboardTabs");
   if (!tabs) return;
-  if (!visiblePersonas.length) {
-    tabs.innerHTML = "";
-    return;
-  }
   tabs.innerHTML = `
     <div class="persona-tab-rail-head">
-      <strong>人设分栏</strong>
-      <span>${pdEscape(String(visiblePersonas.length))} 个</span>
+      <strong>分栏</strong>
+      <span>${pdEscape(String(visiblePersonas.length))} 人设</span>
     </div>
     <div class="persona-tab-list">
+      <button class="persona-tab ${personaDashboardSelectedId === "__overview__" ? "is-active" : ""}" type="button" data-persona-id="__overview__" aria-current="${personaDashboardSelectedId === "__overview__" ? "true" : "false"}">
+        <span class="persona-tab-index">总</span>
+        <span class="persona-tab-main"><strong>总览首页</strong><span>全部图表与指标</span></span>
+        <span class="persona-tab-metrics"><b>${pdEscape(pdNumber((personaDashboardData.summary || {}).persona_count))}</b><span>人设</span></span>
+      </button>
       ${visiblePersonas.map((persona, index) => {
         const hot = persona.hot || {};
         const counts = persona.counts || {};
@@ -324,14 +341,50 @@ function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
           </button>
         `;
       }).join("")}
+      <button class="persona-tab persona-tab-settings ${personaDashboardSelectedId === "__settings__" ? "is-active" : ""}" type="button" data-persona-id="__settings__" aria-current="${personaDashboardSelectedId === "__settings__" ? "true" : "false"}">
+        <span class="persona-tab-index">设</span>
+        <span class="persona-tab-main"><strong>设置</strong><span>分页与显示数量</span></span>
+        <span class="persona-tab-metrics"><b>${pdEscape(String(personaDashboardPageSize))}</b><span>每页</span></span>
+      </button>
     </div>
   `;
   tabs.querySelectorAll("[data-persona-id]").forEach((node) => {
     node.addEventListener("click", () => {
       personaDashboardSelectedId = String(node.getAttribute("data-persona-id") || "");
+      personaDashboardPostPage = 1;
       pdRenderDashboard();
     });
   });
+}
+
+function pdRenderSettings() {
+  const settings = pdEl("personaDashboardSettings");
+  if (!settings) return;
+  settings.innerHTML = `
+    <div class="persona-settings-card">
+      <div>
+        <h3>设置</h3>
+        <div class="small">调整单个人设推文表的分页数量。</div>
+      </div>
+      <label for="personaPageSizeInput">每页推文数量</label>
+      <div class="persona-settings-row">
+        <input id="personaPageSizeInput" type="number" min="5" max="100" step="5" value="${pdEscape(String(personaDashboardPageSize))}" />
+        <button class="primary" type="button" id="personaPageSizeApply">应用</button>
+      </div>
+      <div class="small">可设置 5 到 100 条。数值越大，单页表格越长。</div>
+    </div>
+  `;
+  const apply = pdEl("personaPageSizeApply");
+  if (apply) {
+    apply.addEventListener("click", () => {
+      const input = pdEl("personaPageSizeInput");
+      const next = Math.max(5, Math.min(100, Number(input && input.value) || 10));
+      personaDashboardPageSize = next;
+      personaDashboardPostPage = 1;
+      localStorage.setItem("personaDashboardPageSize", String(next));
+      pdRenderDashboard();
+    });
+  }
 }
 
 function pdRenderDashboard() {
@@ -339,10 +392,12 @@ function pdRenderDashboard() {
   const list = pdEl("personaDashboardList");
   const empty = pdEl("personaDashboardEmpty");
   const meta = pdEl("personaDashboardMeta");
+  const overview = pdEl("personaOverviewPane");
+  const settings = pdEl("personaDashboardSettings");
   if (!data || !list || !empty) return;
   const visible = (data.personas || []).filter(pdMatches);
   let selected = visible.find((persona, index) => pdPersonaKey(persona, index) === String(personaDashboardSelectedId || ""));
-  if (!selected && visible.length) {
+  if (!["__overview__", "__settings__"].includes(personaDashboardSelectedId) && !selected && visible.length) {
     selected = visible[0];
     personaDashboardSelectedId = pdPersonaKey(selected, 0);
   }
@@ -354,9 +409,18 @@ function pdRenderDashboard() {
   pdRenderDonutChart("personaEngagementChart", data.charts && data.charts.engagement_mix);
   pdRenderDonutChart("personaTaskStatusChart", data.charts && data.charts.task_status_distribution);
   pdRenderPersonaTabs(visible, selected);
+  pdRenderSettings();
+  const mode = personaDashboardSelectedId;
+  if (overview) overview.style.display = mode === "__overview__" ? "grid" : "none";
+  if (settings) settings.style.display = mode === "__settings__" ? "grid" : "none";
+  list.style.display = selected && mode !== "__overview__" && mode !== "__settings__" ? "grid" : "none";
   if (meta) meta.textContent = selected ? `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设 · 已选：${selected.name || "未命名人设"}` : `当前显示 ${visible.length} / ${(data.personas || []).length} 个人设`;
   empty.style.display = visible.length ? "none" : "block";
   list.innerHTML = selected ? pdRenderPersonaCard(selected) : "";
+  const prev = pdEl("personaPostPrev");
+  const next = pdEl("personaPostNext");
+  if (prev) prev.addEventListener("click", () => { personaDashboardPostPage -= 1; pdRenderDashboard(); });
+  if (next) next.addEventListener("click", () => { personaDashboardPostPage += 1; pdRenderDashboard(); });
 }
 
 function pdSyncPadFilter(data) {
