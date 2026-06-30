@@ -39,6 +39,7 @@ let personaDashboardRefreshTask = "";
 let personaDashboardAccountPlatform = localStorage.getItem("personaDashboardAccountPlatform") || "threads";
 let personaDashboardTabPage = 1;
 let personaDashboardPostModalKey = "";
+let personaDashboardGalleryIndex = -1;
 
 const PD_LABELS = {
   likes: "点赞",
@@ -464,8 +465,12 @@ function pdMediaType(item) {
   return "link";
 }
 
+function pdPostMediaItems(row) {
+  return Array.isArray(row.media_items) ? row.media_items.filter((item) => item && item.url) : [];
+}
+
 function pdPostComposition(row) {
-  const media = Array.isArray(row.media_items) ? row.media_items.filter((item) => item && item.url) : [];
+  const media = pdPostMediaItems(row);
   const imageCount = media.filter((item) => pdMediaType(item) === "image").length;
   const videoCount = media.filter((item) => pdMediaType(item) === "video").length;
   const otherCount = Math.max(0, media.length - imageCount - videoCount);
@@ -484,7 +489,7 @@ function pdRenderTelegramContentBadges(row) {
 }
 
 function pdRenderPostMedia(row) {
-  const items = Array.isArray(row.media_items) ? row.media_items.filter((item) => item && item.url) : [];
+  const items = pdPostMediaItems(row);
   if (!items.length) {
     return `<div class="persona-post-media-empty">暂无媒体文件</div>`;
   }
@@ -495,13 +500,52 @@ function pdRenderPostMedia(row) {
         const type = pdMediaType(item);
         const label = item.label || `媒体 ${index + 1}`;
         if (type === "image") {
-          return `<a class="persona-post-media-item" href="${pdEscape(url)}" target="_blank" rel="noreferrer"><img src="${pdEscape(url)}" alt="${pdEscape(label)}" loading="lazy" /></a>`;
+          return `<button class="persona-post-media-item" type="button" data-post-media-index="${index}" aria-label="站内查看${pdEscape(label)}"><img src="${pdEscape(url)}" alt="${pdEscape(label)}" loading="lazy" /></button>`;
         }
         if (type === "video") {
-          return `<div class="persona-post-media-item persona-post-media-video"><video src="${pdEscape(url)}" controls preload="metadata"></video><a href="${pdEscape(url)}" target="_blank" rel="noreferrer">打开视频</a></div>`;
+          return `<button class="persona-post-media-item persona-post-media-video" type="button" data-post-media-index="${index}" aria-label="站内查看${pdEscape(label)}"><video src="${pdEscape(url)}" preload="metadata" muted playsinline></video><span>站内查看视频</span></button>`;
         }
-        return `<a class="persona-post-media-link" href="${pdEscape(url)}" target="_blank" rel="noreferrer">${pdEscape(label || url)}</a>`;
+        return `<button class="persona-post-media-link" type="button" data-post-media-index="${index}" aria-label="站内查看${pdEscape(label)}">${pdEscape(label || url)}</button>`;
       }).join("")}
+    </div>
+  `;
+}
+
+function pdRenderPostGallery(row) {
+  const items = pdPostMediaItems(row);
+  if (!items.length || personaDashboardGalleryIndex < 0) return "";
+  const index = Math.max(0, Math.min(items.length - 1, Number(personaDashboardGalleryIndex) || 0));
+  const item = items[index] || {};
+  const url = String(item.url || "");
+  const type = pdMediaType(item);
+  const label = item.label || `媒体 ${index + 1}`;
+  let body = `<div class="persona-post-gallery-fallback">${pdEscape(url || "暂无媒体地址")}</div>`;
+  if (type === "image") {
+    body = `<img src="${pdEscape(url)}" alt="${pdEscape(label)}" />`;
+  } else if (type === "video") {
+    body = `<video src="${pdEscape(url)}" controls autoplay playsinline preload="metadata"></video>`;
+  }
+  return `
+    <div class="persona-post-gallery" role="dialog" aria-modal="true" aria-label="站内媒体相册">
+      <div class="persona-post-gallery-card">
+        <div class="persona-post-gallery-head">
+          <div>
+            <strong>媒体相册</strong>
+            <span>${pdEscape(label)} · 第 ${pdEscape(String(index + 1))} / ${pdEscape(String(items.length))} 个</span>
+          </div>
+          <button class="ghost" type="button" id="personaPostGalleryClose">关闭相册</button>
+        </div>
+        <div class="persona-post-gallery-stage">
+          ${body}
+        </div>
+        <div class="persona-post-gallery-actions">
+          <button class="ghost" type="button" id="personaPostGalleryPrev" ${index <= 0 ? "disabled" : ""}>上一张</button>
+          <div class="persona-post-gallery-dots">
+            ${items.map((media, dotIndex) => `<button type="button" class="${dotIndex === index ? "is-active" : ""}" data-post-gallery-index="${dotIndex}" aria-label="查看第 ${dotIndex + 1} 个媒体">${dotIndex + 1}</button>`).join("")}
+          </div>
+          <button class="ghost" type="button" id="personaPostGalleryNext" ${index >= items.length - 1 ? "disabled" : ""}>下一张</button>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -561,6 +605,7 @@ function pdRenderPostModal(persona) {
           <h4>相关信息</h4>
           ${pdRenderPostInfo(row)}
         </section>
+        ${pdRenderPostGallery(row)}
       </div>
     </div>
   `;
@@ -726,10 +771,33 @@ function pdRenderDashboard() {
   }
   if (refreshCurrent && selected) refreshCurrent.addEventListener("click", () => pdStartRefresh(selected.id, "已请求刷新当前人设..."));
   if (refreshBoundHot && selected) refreshBoundHot.addEventListener("click", () => pdStartRefresh(selected.id, "已请求刷新该绑定账号的全量热点信息..."));
-  if (modalClose) modalClose.addEventListener("click", () => { personaDashboardPostModalKey = ""; pdRenderDashboard(); });
+  if (modalClose) modalClose.addEventListener("click", () => {
+    personaDashboardPostModalKey = "";
+    personaDashboardGalleryIndex = -1;
+    pdRenderDashboard();
+  });
   list.querySelectorAll("[data-post-view]").forEach((node) => {
     node.addEventListener("click", () => {
       personaDashboardPostModalKey = String(node.getAttribute("data-post-view") || "");
+      personaDashboardGalleryIndex = -1;
+      pdRenderDashboard();
+    });
+  });
+  list.querySelectorAll("[data-post-media-index]").forEach((node) => {
+    node.addEventListener("click", () => {
+      personaDashboardGalleryIndex = Number(node.getAttribute("data-post-media-index") || 0);
+      pdRenderDashboard();
+    });
+  });
+  const galleryClose = pdEl("personaPostGalleryClose");
+  const galleryPrev = pdEl("personaPostGalleryPrev");
+  const galleryNext = pdEl("personaPostGalleryNext");
+  if (galleryClose) galleryClose.addEventListener("click", () => { personaDashboardGalleryIndex = -1; pdRenderDashboard(); });
+  if (galleryPrev) galleryPrev.addEventListener("click", () => { personaDashboardGalleryIndex -= 1; pdRenderDashboard(); });
+  if (galleryNext) galleryNext.addEventListener("click", () => { personaDashboardGalleryIndex += 1; pdRenderDashboard(); });
+  list.querySelectorAll("[data-post-gallery-index]").forEach((node) => {
+    node.addEventListener("click", () => {
+      personaDashboardGalleryIndex = Number(node.getAttribute("data-post-gallery-index") || 0);
       pdRenderDashboard();
     });
   });
