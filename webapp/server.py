@@ -16473,7 +16473,70 @@ def _sanitize_dashboard_value(value: Any, key: str = "") -> Any:
         return {str(k): _sanitize_dashboard_value(v, str(k)) for k, v in value.items()}
     if isinstance(value, list):
         return [_sanitize_dashboard_value(item, key) for item in value[:80]]
+    if isinstance(value, str):
+        return value[:800]
     return value
+
+
+def _compact_dashboard_setup(setup: dict[str, Any]) -> dict[str, Any]:
+    skip_keys = {"hotMetrics", "postMetrics", "logs", "history", "raw", "cookies"}
+    compact: dict[str, Any] = {}
+    configured: dict[str, bool] = {}
+    for raw_key, raw_value in setup.items():
+        key = str(raw_key)
+        if key in skip_keys:
+            continue
+        if _is_secret_key(key):
+            configured[key] = bool(str(raw_value or "").strip())
+            continue
+        if isinstance(raw_value, (str, int, float, bool)) or raw_value is None:
+            compact[key] = _sanitize_dashboard_value(raw_value, key)
+        elif isinstance(raw_value, list):
+            compact[key] = {
+                "count": len(raw_value),
+                "sample": [_sanitize_dashboard_value(item, key) for item in raw_value[:3]],
+            }
+        elif isinstance(raw_value, dict):
+            nested: dict[str, Any] = {}
+            nested_configured: dict[str, bool] = {}
+            for nested_key, nested_value in list(raw_value.items())[:40]:
+                nested_key_text = str(nested_key)
+                if nested_key_text in skip_keys:
+                    continue
+                if _is_secret_key(nested_key_text):
+                    nested_configured[nested_key_text] = bool(str(nested_value or "").strip())
+                elif isinstance(nested_value, (str, int, float, bool)) or nested_value is None:
+                    nested[nested_key_text] = _sanitize_dashboard_value(nested_value, nested_key_text)
+                elif isinstance(nested_value, (list, dict)):
+                    nested[nested_key_text] = {
+                        "type": "list" if isinstance(nested_value, list) else "object",
+                        "count": len(nested_value),
+                    }
+            if nested_configured:
+                nested["configured_secrets"] = nested_configured
+            compact[key] = nested
+    if configured:
+        compact["configured_secrets"] = configured
+    return compact
+
+
+def _compact_publish_record(record: dict[str, Any]) -> dict[str, Any]:
+    published_meta = record.get("publishedMeta") if isinstance(record.get("publishedMeta"), dict) else {}
+    return {
+        "id": record.get("id"),
+        "archive_post_id": record.get("archivePostId") or record.get("archive_post_id"),
+        "platform": record.get("platform"),
+        "title": str(record.get("title") or "")[:120],
+        "content": str(record.get("content") or "")[:220],
+        "published_at": record.get("publishedAt") or record.get("published_at"),
+        "status": record.get("status"),
+        "source_url": published_meta.get("sourceUrl") or published_meta.get("source_url"),
+        "captured_at": published_meta.get("capturedAt") or published_meta.get("captured_at"),
+        "likes": _source_metric(published_meta, "likeCount", "like_count"),
+        "comments": _source_metric(published_meta, "commentCount", "comment_count"),
+        "shares": _source_metric(published_meta, "shareCount", "share_count", "send_count"),
+        "views": _source_metric(published_meta, "viewCount", "view_count"),
+    }
 
 
 def _metric_value(metrics: dict[str, Any], *keys: str) -> int:
@@ -16686,7 +16749,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
                 "free_group": archive.get("boundTelegramFreeGroupName") or archive.get("boundTelegramFreeGroupId"),
                 "paid_group": archive.get("boundTelegramPaidGroupName") or archive.get("boundTelegramPaidGroupId"),
             },
-            "setup": _sanitize_dashboard_value(setup),
+            "setup": _compact_dashboard_setup(setup),
             "counts": {
                 "posts": post_count,
                 "published": published_count,
@@ -16696,7 +16759,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
             "hot": persona_hot,
             "hot_platforms": hot_platforms,
             "post_metrics": post_metric_rows[:80],
-            "publish_history": [_sanitize_dashboard_value(item) for item in publish_history[:50] if isinstance(item, dict)],
+            "publish_history": [_compact_publish_record(item) for item in publish_history[:20] if isinstance(item, dict)],
             "queue": queue_for_archive,
         })
 
