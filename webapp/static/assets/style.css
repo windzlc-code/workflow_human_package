@@ -5732,48 +5732,6 @@ body.page-admin {
   font-size: 18px;
 }
 
-.persona-interaction-breakdown {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 5px;
-  margin-top: 6px;
-}
-
-.persona-interaction-breakdown span {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-  padding: 5px 6px;
-  border-radius: 7px;
-  background: rgba(226, 232, 240, 0.72);
-}
-
-.persona-interaction-breakdown em {
-  color: #64748b;
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 800;
-  line-height: 1.1;
-}
-
-.persona-interaction-breakdown b {
-  overflow: hidden;
-  color: #0f172a;
-  font-size: 12px;
-  font-weight: 900;
-  line-height: 1.15;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.persona-detail-interactions {
-  grid-column: span 2;
-}
-
-.persona-detail-interactions .persona-interaction-breakdown {
-  grid-template-columns: repeat(4, minmax(52px, 1fr));
-}
-
 .persona-content-preview {
   color: #334155;
   line-height: 1.65;

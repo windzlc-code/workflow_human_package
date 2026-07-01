@@ -216,27 +216,6 @@ function pdPersonaHot(persona) {
   }, { likes: 0, comments: 0, shares: 0, reposts: 0, recent_views: 0, post_views: 0, hot_score: 0 });
 }
 
-function pdInteractionTotal(value) {
-  return Number(value && value.likes || 0)
-    + Number(value && value.comments || 0)
-    + Number(value && value.shares || 0)
-    + Number(value && value.reposts || 0);
-}
-
-function pdInteractionBreakdownHtml(value) {
-  const items = [
-    ["点赞", value && value.likes],
-    ["评论", value && value.comments],
-    ["分享", value && value.shares],
-    ["转发", value && value.reposts],
-  ];
-  return `
-    <div class="persona-interaction-breakdown">
-      ${items.map(([label, count]) => `<span><em>${pdEscape(label)}</em><b>${pdEscape(pdNumber(count))}</b></span>`).join("")}
-    </div>
-  `;
-}
-
 function pdVisibleSummary(visiblePersonas) {
   const padSet = new Set();
   const summary = {
@@ -246,10 +225,6 @@ function pdVisibleSummary(visiblePersonas) {
     image_count: 0,
     bound_pad_count: 0,
     total_interactions: 0,
-    likes: 0,
-    comments: 0,
-    shares: 0,
-    reposts: 0,
     recent_views: 0,
     post_views: 0,
     hot_score: 0,
@@ -262,11 +237,7 @@ function pdVisibleSummary(visiblePersonas) {
     summary.recent_views += Number(hot.recent_views || 0);
     summary.post_views += Number(hot.post_views || 0);
     summary.hot_score += Number(hot.hot_score || 0);
-    summary.likes += Number(hot.likes || 0);
-    summary.comments += Number(hot.comments || 0);
-    summary.shares += Number(hot.shares || 0);
-    summary.reposts += Number(hot.reposts || 0);
-    summary.total_interactions += pdInteractionTotal(hot);
+    summary.total_interactions += Number(hot.likes || 0) + Number(hot.comments || 0) + Number(hot.shares || 0) + Number(hot.reposts || 0);
     if (persona.bound_pad_code) padSet.add(String(persona.bound_pad_code));
   });
   summary.bound_pad_count = padSet.size;
@@ -420,7 +391,7 @@ function pdRenderSummary(data, visiblePersonas) {
     { label: "已生成帖子", value: summary.post_count, hint: "当前筛选归档帖子" },
     { label: "已发布", value: summary.published_count, hint: "当前筛选发布记录" },
     { label: "绑定智能体手机", value: summary.bound_pad_count, hint: "当前筛选设备数" },
-    { label: "总互动量", value: summary.total_interactions, hint: "当前筛选互动明细", breakdown: summary },
+    { label: "总互动量", value: summary.total_interactions, hint: "点赞、评论、转发、分享" },
     { label: "账号主页浏览", value: summary.recent_views, hint: "账号主页级浏览" },
     { label: "逐帖浏览合计", value: summary.post_views, hint: "逐帖浏览，不与主页浏览合并" },
     { label: "筛选热度", value: summary.hot_score, hint: "逐帖浏览 + 点赞 + 评论 + 分享 + 转发" },
@@ -430,7 +401,6 @@ function pdRenderSummary(data, visiblePersonas) {
       <div class="label">${pdEscape(card.label)}</div>
       <div class="num">${pdEscape(pdNumber(card.value))}</div>
       <div class="small">${pdEscape(card.hint)}</div>
-      ${card.breakdown ? pdInteractionBreakdownHtml(card.breakdown) : ""}
     </div>
   `).join("");
 }
@@ -463,8 +433,6 @@ function pdRenderPersonaCard(persona) {
       <span>逐帖浏览 ${pdEscape(pdNumber(item.post_views))}</span>
       <span>赞 ${pdEscape(pdNumber(item.likes))}</span>
       <span>评 ${pdEscape(pdNumber(item.comments))}</span>
-      <span>分享 ${pdEscape(pdNumber(item.shares))}</span>
-      <span>转发 ${pdEscape(pdNumber(item.reposts))}</span>
       <span>${item.complete ? "完整" : "部分/未知"}</span>
     </div>
   `).join("");
@@ -525,7 +493,7 @@ function pdRenderPersonaCard(persona) {
       <div class="persona-detail-grid">
         <div><span>帖子</span><strong>${pdEscape(pdNumber(counts.posts))}</strong></div>
         <div><span>发布</span><strong>${pdEscape(pdNumber(counts.published))}</strong></div>
-        <div class="persona-detail-interactions"><span>互动</span><strong>${pdEscape(pdNumber(pdInteractionTotal(hot)))}</strong>${pdInteractionBreakdownHtml(hot)}</div>
+        <div><span>互动</span><strong>${pdEscape(pdNumber(Number(hot.likes || 0) + Number(hot.comments || 0) + Number(hot.shares || 0) + Number(hot.reposts || 0)))}</strong></div>
         <div><span>账号主页浏览</span><strong>${pdEscape(pdNumber(hot.recent_views))}</strong></div>
         <div><span>逐帖浏览</span><strong>${pdEscape(pdNumber(hot.post_views))}</strong></div>
       </div>
