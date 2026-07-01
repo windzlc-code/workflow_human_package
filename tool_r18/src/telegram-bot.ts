@@ -741,6 +741,7 @@ const pendingManualPublishes = new Map<number, {
   groupContentType?: TelegramGroupContentType;
   linkEndingPresetApplied?: boolean;
   contentOverrides?: Record<string, string>;
+  origin?: "post_detail";
   stage: "choose_platform" | "choose_post" | "choose_count" | "preview_confirm";
 }>();
 
@@ -16390,14 +16391,22 @@ function buildManualPostChoicePreview(posts: Array<{ content: string; imageUrl?:
     .join("\n\n");
 }
 
-function buildManualPreviewRows(archiveId: string, platform: TelegramPublishPlatform, startIndex: number, count: number, options: { hasLinkTemplates?: boolean; linkEndingPresetApplied?: boolean } = {}) {
+function buildManualPreviewRows(archiveId: string, platform: TelegramPublishPlatform, startIndex: number, count: number, options: { hasLinkTemplates?: boolean; linkEndingPresetApplied?: boolean; origin?: "post_detail" } = {}) {
+  const backRows = options.origin === "post_detail"
+    ? [
+      [{ text: "◀️ 返回选择平台", callback_data: "post_action_clear" }],
+      [{ text: "◀️ 返回查看推文", callback_data: "post_action_view" }],
+    ]
+    : [
+      [{ text: "◀️ 返回改數量", callback_data: `ms_${startIndex + 1}` }],
+      [{ text: "🔢 重新选編號", callback_data: `mpage_${Math.floor(startIndex / 8)}` }],
+    ];
   return [
     ...(options.hasLinkTemplates ? [[{ text: "🔗 选择链接模板", callback_data: "manual_link_templates" }]] : []),
     ...(options.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "manual_link_clear" }]] : []),
     [{ text: "✅ 确认发布到绑定智能體手機", callback_data: buildManualConfirmCallback(archiveId, platform, startIndex, count) }],
     [{ text: "📱 选择多智能體手機发布", callback_data: "mconfirm_multi" }],
-    [{ text: "◀️ 返回改數量", callback_data: `ms_${startIndex + 1}` }],
-    [{ text: "🔢 重新选編號", callback_data: `mpage_${Math.floor(startIndex / 8)}` }],
+    ...backRows,
   ];
 }
 
@@ -22716,6 +22725,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             page: Math.floor(startIndex / 8),
             groupContentType,
             stage: "preview_confirm",
+            origin: "post_detail",
             linkEndingPresetApplied: action?.linkEndingPresetApplied,
             contentOverrides,
           });
@@ -22724,6 +22734,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
               inline_keyboard: buildManualPreviewRows(archiveId, publishPlatform, startIndex, 1, {
                 hasLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
                 linkEndingPresetApplied: action?.linkEndingPresetApplied,
+                origin: "post_detail",
               }),
             },
           });
@@ -23931,6 +23942,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             inline_keyboard: buildManualPreviewRows(state.archiveId, state.platform, state.startIndex, previewPosts.length, {
               hasLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
               linkEndingPresetApplied: true,
+              origin: state.origin,
             }),
           },
         });
@@ -23946,6 +23958,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inline_keyboard: buildManualPreviewRows(state.archiveId, state.platform, state.startIndex, posts.length, {
             hasLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
             linkEndingPresetApplied: !isClear && state.linkEndingPresetApplied,
+            origin: state.origin,
           }),
         },
       });
@@ -23986,7 +23999,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           linkEndingPresetApplied: prevManual?.linkEndingPresetApplied,
           contentOverrides: prevManual?.contentOverrides,
           selectedPadCodes: [archive.boundPadCode || defaultPadCode],
-        }, `🚀 *多智能體手機人工发布*\n\n人设：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布数量：${manualPosts.length} 篇\n\n请选择要同时发布的智能體手機：`, `mpage_${Math.floor(startIndex / 8)}`);
+        }, `🚀 *多智能體手機人工发布*\n\n人设：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n发布数量：${manualPosts.length} 篇\n\n请选择要同时发布的智能體手機：`, prevManual?.origin === "post_detail" ? "post_action_view" : `mpage_${Math.floor(startIndex / 8)}`);
         return;
       }
       if (!credentials.ak || !credentials.sk) {
