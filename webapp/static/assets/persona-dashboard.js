@@ -234,7 +234,6 @@ function pdVisibleSummary(visiblePersonas) {
     const hot = pdPersonaHot(persona);
     summary.post_count += Number(counts.posts || 0);
     summary.published_count += Number(counts.published || 0);
-    summary.image_count += Number(counts.images || 0);
     summary.recent_views += Number(hot.recent_views || 0);
     summary.post_views += Number(hot.post_views || 0);
     summary.hot_score += Number(hot.hot_score || 0);
@@ -391,7 +390,6 @@ function pdRenderSummary(data, visiblePersonas) {
     { label: "人设总数", value: summary.persona_count, hint: `全部 ${globalSummary.persona_count || 0}` },
     { label: "已生成帖子", value: summary.post_count, hint: "当前筛选归档帖子" },
     { label: "已发布", value: summary.published_count, hint: "当前筛选发布记录" },
-    { label: "素材库图片", value: summary.image_count, hint: "当前筛选图片素材" },
     { label: "绑定智能体手机", value: summary.bound_pad_count, hint: "当前筛选设备数" },
     { label: "总互动量", value: summary.total_interactions, hint: "点赞、评论、转发、分享" },
     { label: "账号主页浏览", value: summary.recent_views, hint: "账号主页级浏览" },
@@ -495,7 +493,6 @@ function pdRenderPersonaCard(persona) {
       <div class="persona-detail-grid">
         <div><span>帖子</span><strong>${pdEscape(pdNumber(counts.posts))}</strong></div>
         <div><span>发布</span><strong>${pdEscape(pdNumber(counts.published))}</strong></div>
-        <div><span>素材</span><strong>${pdEscape(pdNumber(counts.images))}</strong></div>
         <div><span>互动</span><strong>${pdEscape(pdNumber(Number(hot.likes || 0) + Number(hot.comments || 0) + Number(hot.shares || 0) + Number(hot.reposts || 0)))}</strong></div>
         <div><span>账号主页浏览</span><strong>${pdEscape(pdNumber(hot.recent_views))}</strong></div>
         <div><span>逐帖浏览</span><strong>${pdEscape(pdNumber(hot.post_views))}</strong></div>
