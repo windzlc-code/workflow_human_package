@@ -13353,9 +13353,7 @@ export function buildStoredPostPublishConfirmRows(args: {
     if (platform === "telegram") return "📣 Telegram 群组";
     return platform;
   };
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [
-    ...(args.hasSelectableLinkTemplates ? [[{ text: "🔗 选择链接模板", callback_data: "post_link_templates" }]] : []),
-  ];
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   const selectedPlatform = args.selectedPlatform && platforms.includes(args.selectedPlatform)
     ? args.selectedPlatform
     : undefined;
@@ -13365,6 +13363,9 @@ export function buildStoredPostPublishConfirmRows(args: {
       callback_data: `post_action_${platform}`,
     }])));
   } else {
+    if (args.hasSelectableLinkTemplates) {
+      rows.push([{ text: "🔗 选择链接模板", callback_data: "post_link_templates" }]);
+    }
     const label = platformText(selectedPlatform).replace(/^.+?\s/, "");
     rows.push(
       [{

@@ -824,14 +824,27 @@ describe("buildStoredPostPublishConfirmRows", () => {
     expect(callbacks).not.toContain("dop_threads");
   });
 
-  it("shows link template selection when selectable presets exist", () => {
+  it("does not show link template selection before choosing a publish platform", () => {
     const rows = buildStoredPostPublishConfirmRows({
       archiveId: "archive-1",
       hasSelectableLinkTemplates: true,
     });
     const callbacks = flattenButtonCallbacks(rows);
 
+    expect(callbacks).toContain("post_action_threads");
+    expect(callbacks).not.toContain("post_link_templates");
+  });
+
+  it("shows link template selection after a publish platform is selected", () => {
+    const rows = buildStoredPostPublishConfirmRows({
+      archiveId: "archive-1",
+      hasSelectableLinkTemplates: true,
+      selectedPlatform: "threads" as any,
+    });
+    const callbacks = flattenButtonCallbacks(rows);
+
     expect(callbacks).toContain("post_link_templates");
+    expect(callbacks).toContain("dop_threads");
   });
 
   it("asks for a publish platform before showing direct publish options", () => {
