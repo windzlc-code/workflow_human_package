@@ -13358,10 +13358,10 @@ export function buildStoredPostPublishConfirmRows(args: {
     ? args.selectedPlatform
     : undefined;
   if (!selectedPlatform) {
-    rows.push(...platforms.map((platform) => ([{
-      text: `选择发布平台 ${platformText(platform).replace(/^.+?\s/, "")}`,
+    rows.push(...chunk(platforms.map((platform) => ({
+      text: platformText(platform),
       callback_data: `post_action_${platform}`,
-    }])));
+    })), 2));
   } else {
     if (args.hasSelectableLinkTemplates) {
       rows.push([{ text: "🔗 选择链接模板", callback_data: "post_link_templates" }]);
