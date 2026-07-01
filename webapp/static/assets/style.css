@@ -5816,10 +5816,45 @@ body.page-admin {
 }
 
 .persona-table-toolbar {
+  flex-wrap: wrap;
   padding: 12px 14px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.22);
   background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.9));
   color: #334155;
+}
+
+.persona-table-title {
+  display: grid;
+  gap: 4px;
+  min-width: 240px;
+}
+
+.persona-post-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.persona-post-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.persona-post-controls select {
+  min-height: 34px;
+  min-width: 126px;
+  padding: 6px 30px 6px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.36);
+  border-radius: 8px;
+  background: #fff;
+  color: #0f172a;
+  font-weight: 800;
 }
 
 .persona-table-toolbar span,

@@ -41,6 +41,8 @@ let personaDashboardTabPage = 1;
 let personaDashboardPostModalKey = "";
 let personaDashboardGalleryIndex = -1;
 let personaDashboardAutoPollTimer = 0;
+let personaDashboardPostSort = localStorage.getItem("personaDashboardPostSort") || "hot_desc";
+let personaDashboardPostTypeFilter = localStorage.getItem("personaDashboardPostTypeFilter") || "all";
 
 const PD_LABELS = {
   likes: "点赞",
@@ -106,15 +108,85 @@ function pdPlatformFilter() {
   return String((pdEl("personaDashboardPlatform") && pdEl("personaDashboardPlatform").value) || "").trim().toLowerCase();
 }
 
+function pdPostHeat(row) {
+  return Number(row.view_count || 0)
+    + Number(row.like_count || 0)
+    + Number(row.comment_count || 0)
+    + Number(row.share_count || 0)
+    + Number(row.repost_count || 0);
+}
+
+function pdPostTime(row) {
+  const ts = new Date(row.published_at || row.captured_at || 0).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function pdPostSortNumber(row, sort) {
+  if (sort.startsWith("time_")) return pdPostTime(row);
+  if (sort.startsWith("likes_")) return Number(row.like_count || 0);
+  if (sort.startsWith("comments_")) return Number(row.comment_count || 0);
+  if (sort.startsWith("shares_")) return Number(row.share_count || row.repost_count || 0);
+  if (sort.startsWith("views_")) return Number(row.view_count || 0);
+  return pdPostHeat(row);
+}
+
+function pdPostMatchesType(row) {
+  const type = String(personaDashboardPostTypeFilter || "all");
+  if (type === "all") return true;
+  const parts = pdPostComposition(row);
+  if (type === "text") return parts.hasText;
+  if (type === "image") return parts.imageCount > 0;
+  if (type === "video") return parts.videoCount > 0;
+  if (type === "media") return parts.totalMedia > 0;
+  return true;
+}
+
+function pdPostSortLabel(value) {
+  return ({
+    hot_desc: "热度最高",
+    hot_asc: "热度最低",
+    time_desc: "发布时间最新",
+    time_asc: "发布时间最早",
+    likes_desc: "点赞最多",
+    comments_desc: "评论最多",
+    shares_desc: "转发/分享最多",
+    views_desc: "逐帖浏览最多",
+  }[String(value || "")] || "热度最高");
+}
+
+function pdPostTypeLabel(value) {
+  return ({
+    all: "全部内容",
+    text: "有文字",
+    image: "有图片",
+    video: "有视频",
+    media: "有媒体",
+  }[String(value || "")] || "全部内容");
+}
+
+function pdCurrentPostFilterText() {
+  const platform = pdPlatformFilter();
+  const range = String((pdEl("personaDashboardRange") && pdEl("personaDashboardRange").value) || "all");
+  const rangeLabel = range === "all" || !range ? "全部时间" : `最近 ${range} 天`;
+  return `平台：${platform || "全部"} · 时间：${rangeLabel} · 内容：${pdPostTypeLabel(personaDashboardPostTypeFilter)} · 排序：${pdPostSortLabel(personaDashboardPostSort)}`;
+}
+
 function pdFilterTrend(rows) {
   return (rows || []).filter((row) => pdDateInRange(row.date));
 }
 
 function pdFilteredPostRows(persona) {
   const platform = pdPlatformFilter();
+  const sort = String(personaDashboardPostSort || "hot_desc");
+  const dir = sort.endsWith("_asc") ? 1 : -1;
   return (persona.post_metrics || []).filter((row) => {
     if (platform && String(row.platform || "").toLowerCase() !== platform) return false;
-    return pdDateInRange(row.published_at || row.captured_at);
+    if (!pdDateInRange(row.published_at || row.captured_at)) return false;
+    return pdPostMatchesType(row);
+  }).sort((a, b) => {
+    const diff = pdPostSortNumber(a, sort) - pdPostSortNumber(b, sort);
+    if (diff !== 0) return diff * dir;
+    return (pdPostTime(a) - pdPostTime(b)) * -1;
   });
 }
 
@@ -432,7 +504,35 @@ function pdRenderPersonaCard(persona) {
       <div class="persona-platform-list">${platforms || `<div class="small">暂无平台热点指标</div>`}</div>
       <div class="persona-table-wrap">
         <div class="persona-table-toolbar">
-          <strong>发送推文指标</strong>
+          <div class="persona-table-title">
+            <strong>发送推文指标</strong>
+            <span>${pdEscape(pdCurrentPostFilterText())}</span>
+          </div>
+          <div class="persona-post-controls">
+            <label>
+              <span>内容</span>
+              <select id="personaPostTypeFilter">
+                <option value="all" ${personaDashboardPostTypeFilter === "all" ? "selected" : ""}>全部内容</option>
+                <option value="text" ${personaDashboardPostTypeFilter === "text" ? "selected" : ""}>有文字</option>
+                <option value="image" ${personaDashboardPostTypeFilter === "image" ? "selected" : ""}>有图片</option>
+                <option value="video" ${personaDashboardPostTypeFilter === "video" ? "selected" : ""}>有视频</option>
+                <option value="media" ${personaDashboardPostTypeFilter === "media" ? "selected" : ""}>有媒体</option>
+              </select>
+            </label>
+            <label>
+              <span>排序</span>
+              <select id="personaPostSort">
+                <option value="hot_desc" ${personaDashboardPostSort === "hot_desc" ? "selected" : ""}>热度最高</option>
+                <option value="hot_asc" ${personaDashboardPostSort === "hot_asc" ? "selected" : ""}>热度最低</option>
+                <option value="time_desc" ${personaDashboardPostSort === "time_desc" ? "selected" : ""}>发布时间最新</option>
+                <option value="time_asc" ${personaDashboardPostSort === "time_asc" ? "selected" : ""}>发布时间最早</option>
+                <option value="likes_desc" ${personaDashboardPostSort === "likes_desc" ? "selected" : ""}>点赞最多</option>
+                <option value="comments_desc" ${personaDashboardPostSort === "comments_desc" ? "selected" : ""}>评论最多</option>
+                <option value="shares_desc" ${personaDashboardPostSort === "shares_desc" ? "selected" : ""}>转发/分享最多</option>
+                <option value="views_desc" ${personaDashboardPostSort === "views_desc" ? "selected" : ""}>逐帖浏览最多</option>
+              </select>
+            </label>
+          </div>
           <span>第 ${pdEscape(String(personaDashboardPostPage))} / ${pdEscape(String(pageCount))} 页 · 共 ${pdEscape(String(rows.length))} 条</span>
         </div>
         <table class="persona-post-table">
@@ -759,6 +859,8 @@ function pdRenderDashboard() {
   const refreshCurrent = pdEl("personaRefreshCurrentBtn");
   const refreshBoundHot = pdEl("personaRefreshBoundHotBtn");
   const modalClose = pdEl("personaPostModalClose");
+  const postSort = pdEl("personaPostSort");
+  const postTypeFilter = pdEl("personaPostTypeFilter");
   if (prev) prev.addEventListener("click", () => { personaDashboardPostPage -= 1; pdRenderDashboard(); });
   if (next) next.addEventListener("click", () => { personaDashboardPostPage += 1; pdRenderDashboard(); });
   if (bind && selected) bind.addEventListener("click", () => pdBindThreads(selected));
@@ -772,6 +874,22 @@ function pdRenderDashboard() {
   }
   if (refreshCurrent && selected) refreshCurrent.addEventListener("click", () => pdStartRefresh(selected.id, "已请求刷新当前人设..."));
   if (refreshBoundHot && selected) refreshBoundHot.addEventListener("click", () => pdStartRefresh(selected.id, "已请求刷新该绑定账号的全量热点信息..."));
+  if (postSort) {
+    postSort.addEventListener("change", () => {
+      personaDashboardPostSort = String(postSort.value || "hot_desc");
+      localStorage.setItem("personaDashboardPostSort", personaDashboardPostSort);
+      personaDashboardPostPage = 1;
+      pdRenderDashboard();
+    });
+  }
+  if (postTypeFilter) {
+    postTypeFilter.addEventListener("change", () => {
+      personaDashboardPostTypeFilter = String(postTypeFilter.value || "all");
+      localStorage.setItem("personaDashboardPostTypeFilter", personaDashboardPostTypeFilter);
+      personaDashboardPostPage = 1;
+      pdRenderDashboard();
+    });
+  }
   if (modalClose) modalClose.addEventListener("click", () => {
     personaDashboardPostModalKey = "";
     personaDashboardGalleryIndex = -1;
