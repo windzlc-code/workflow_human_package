@@ -22929,11 +22929,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("delpost_") || data.startsWith("dp_") || data === "post_delete_action") {
+    if (data.startsWith("delpost_") || data.startsWith("dp_") || data === "post_delete_action" || data.startsWith("confirm_delpost_") || data.startsWith("confirm_dp_") || data === "post_delete_confirm") {
       await deletePendingStoredPostMediaMessages(bot, chatId);
-      const selected = data.startsWith("dp_") ? resolvePendingPostSelection(chatId, data, "dp_") : null;
-      const action = data === "post_delete_action" ? pendingPostActions.get(chatId) : null;
-      const [, legacyArchiveId, legacyPostId] = data.startsWith("delpost_") ? data.split("_") : [];
+      const isConfirmedDelete = data.startsWith("confirm_delpost_") || data.startsWith("confirm_dp_") || data === "post_delete_confirm";
+      const rawDeleteData = data.startsWith("confirm_") ? data.slice("confirm_".length) : (data === "post_delete_confirm" ? "post_delete_action" : data);
+      const selected = rawDeleteData.startsWith("dp_") ? resolvePendingPostSelection(chatId, rawDeleteData, "dp_") : null;
+      const action = rawDeleteData === "post_delete_action" ? pendingPostActions.get(chatId) : null;
+      const [, legacyArchiveId, legacyPostId] = rawDeleteData.startsWith("delpost_") ? rawDeleteData.split("_") : [];
       const archiveId = selected?.archiveId || action?.archiveId || legacyArchiveId;
       const postId = selected?.postId || action?.postId || legacyPostId;
       const source = selected?.source || action?.source || "posts";
@@ -22945,6 +22947,23 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const backCallback = buildPostSourcePageCallback(archiveId, source, 0, groupContentType);
+      if (!isConfirmedDelete) {
+        const confirmCallback = rawDeleteData === "post_delete_action" ? "post_delete_confirm" : `confirm_${rawDeleteData}`;
+        await safeEditOrSend(bot, chatId, msgId, [
+          source === "favorites" ? "🗑 确认删除收藏推文" : "🗑 确认删除推文",
+          "",
+          "删除后无法恢复，请确认是否继续。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: source === "favorites" ? "✅ 确认删除收藏推文" : "✅ 确认删除这篇推文", callback_data: confirmCallback }],
+              [{ text: "取消，返回查看推文", callback_data: "post_action_view" }],
+              [{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: backCallback }],
+            ],
+          },
+        });
+        return;
+      }
       await safeEditOrSend(bot, chatId, msgId, source === "favorites" ? "🗑 正在刪除收藏推文..." : "🗑 正在刪除推文...", {
         reply_markup: { inline_keyboard: [[{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: backCallback }]] },
       });
