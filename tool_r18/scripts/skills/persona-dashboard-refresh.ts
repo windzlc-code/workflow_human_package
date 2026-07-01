@@ -91,6 +91,40 @@ function extractRssHubItems(xml: string, username: string, capturedAt: string): 
   }).filter((item) => item.sourceUrl || item.content);
 }
 
+function normalizePostMergeKey(post: any): string {
+  const sourceUrl = String(post?.sourceUrl || post?.source_url || "").trim().toLowerCase();
+  if (sourceUrl) return sourceUrl.replace(/[?#].*$/, "");
+  const code = String(post?.code || "").trim().toLowerCase();
+  if (code) return `code:${code}`;
+  const id = String(post?.id || post?.pk || "").trim().toLowerCase();
+  if (id) return `id:${id}`;
+  const content = String(post?.content || post?.originalContent || post?.text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return content ? `content:${content.slice(0, 180)}` : "";
+}
+
+function postSortTime(post: any): number {
+  const raw = post?.publishedAt || post?.published_at || post?.capturedAt || post?.captured_at || "";
+  const time = Date.parse(String(raw || ""));
+  return Number.isFinite(time) ? time : 0;
+}
+
+function mergePostMetrics(previous: any, next: any[]): any[] {
+  const previousRows = Array.isArray(previous?.postMetrics) ? previous.postMetrics : [];
+  const merged = new Map<string, any>();
+  for (const row of previousRows) {
+    const key = normalizePostMergeKey(row);
+    if (key) merged.set(key, row);
+  }
+  for (const row of next) {
+    const key = normalizePostMergeKey(row);
+    if (!key) continue;
+    merged.set(key, { ...(merged.get(key) || {}), ...row });
+  }
+  return [...merged.values()]
+    .sort((a, b) => postSortTime(b) - postSortTime(a))
+    .slice(0, Number(process.env.PERSONA_DASHBOARD_MAX_POST_METRICS || 500));
+}
+
 async function fetchThreadsProfileHotMetricsViaRssHub(usernameInput: string): Promise<any> {
   const username = normalizeThreadsUsername(usernameInput);
   const refreshedAt = new Date().toISOString();
@@ -211,6 +245,9 @@ async function main() {
       const previousMetrics = existingHotMetrics[key] || {};
       const usable = hasUsableMetrics(metrics);
       const complete = useRssHub ? metrics.complete === true : isCompleteMetrics(metrics);
+      const mergedPostMetrics = Array.isArray(metrics.postMetrics)
+        ? mergePostMetrics(previousMetrics, metrics.postMetrics)
+        : previousMetrics.postMetrics;
       const nextMetric = complete
         ? {
             ...previousMetrics,
@@ -221,7 +258,7 @@ async function main() {
             followers: metrics.followers,
             following: metrics.following,
             recentViews: metrics.recentViews,
-            posts: metrics.posts,
+            posts: useRssHub ? mergedPostMetrics.length : metrics.posts,
             likes: metrics.likes,
             comments: metrics.comments,
             reposts: metrics.reposts,
@@ -229,8 +266,8 @@ async function main() {
             views: metrics.views,
             viewResolvedPosts: metrics.viewResolvedPosts,
             viewMissingPosts: metrics.viewMissingPosts,
-            scannedPosts: metrics.scannedPosts,
-            postMetrics: Array.isArray(metrics.postMetrics) ? metrics.postMetrics : previousMetrics.postMetrics,
+            scannedPosts: useRssHub ? mergedPostMetrics.length : metrics.scannedPosts,
+            postMetrics: mergedPostMetrics,
             complete: true,
             scope: useRssHub ? "rsshub_feed_monitor" : "authenticated_full_profile",
             refreshedAt: metrics.refreshedAt,
