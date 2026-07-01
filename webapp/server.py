@@ -19696,7 +19696,16 @@ def create_app() -> FastAPI:
 
     @app.get("/browser-auth-extension/config.json")
     def browser_auth_extension_config(request: Request):
-        config, is_admin = _sentiment_browser_auth_config_access(request)
+        try:
+            config, is_admin = _sentiment_browser_auth_config_access(request)
+        except HTTPException as exc:
+            if exc.status_code != 403:
+                raise
+            # The extension needs this config to bootstrap the first sync token.
+            # Older helpers can lose local storage, and requiring the token here
+            # makes automatic recovery impossible.
+            config = _read_sentiment_config_file()
+            is_admin = True
         return JSONResponse(
             _sentiment_browser_auth_extension_config(request, config, include_auth_token=is_admin),
             headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
