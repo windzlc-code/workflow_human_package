@@ -94,21 +94,59 @@ function extractRssHubItems(xml: string, username: string, capturedAt: string): 
 async function fetchThreadsProfileHotMetricsViaRssHub(usernameInput: string): Promise<any> {
   const username = normalizeThreadsUsername(usernameInput);
   const refreshedAt = new Date().toISOString();
-  const base = String(process.env.RSSHUB_BASE_URL || process.env.PERSONA_DASHBOARD_RSSHUB_BASE_URL || "https://rsshub.app").replace(/\/+$/, "");
+  const configuredBases = String(
+    process.env.PERSONA_DASHBOARD_RSSHUB_BASE_URLS
+    || process.env.RSSHUB_BASE_URL
+    || process.env.PERSONA_DASHBOARD_RSSHUB_BASE_URL
+    || "https://rsshub.rssforever.com,https://rsshub.app",
+  );
+  const bases = configuredBases.split(",").map((item) => item.trim().replace(/\/+$/, "")).filter(Boolean);
   const routeTemplate = String(process.env.PERSONA_DASHBOARD_RSSHUB_THREADS_ROUTE || "/threads/{username}");
   const route = routeTemplate.replace("{username}", encodeURIComponent(username));
-  const url = `${base}${route.startsWith("/") ? route : `/${route}`}`;
-  const response = await fetch(url, {
-    headers: {
-      "user-agent": "Mozilla/5.0",
-      accept: "application/rss+xml, application/xml, text/xml, */*",
-      "cache-control": "no-cache",
-      pragma: "no-cache",
-    },
-    signal: AbortSignal.timeout(Number(process.env.PERSONA_DASHBOARD_RSSHUB_TIMEOUT_MS || 20000)),
-  });
-  const text = await response.text();
-  if (!response.ok) {
+  const errors: string[] = [];
+  for (const base of bases.length ? bases : ["https://rsshub.rssforever.com"]) {
+    const url = `${base}${route.startsWith("/") ? route : `/${route}`}`;
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "user-agent": "Mozilla/5.0",
+          accept: "application/rss+xml, application/xml, text/xml, */*",
+          "cache-control": "no-cache",
+          pragma: "no-cache",
+        },
+        signal: AbortSignal.timeout(Number(process.env.PERSONA_DASHBOARD_RSSHUB_TIMEOUT_MS || 20000)),
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        errors.push(`${url} -> ${response.status}: ${text.slice(0, 160)}`);
+        continue;
+      }
+      const postMetrics = extractRssHubItems(text, username, refreshedAt);
+      return {
+        platform: "threads",
+        username,
+        posts: postMetrics.length,
+        scannedPosts: postMetrics.length,
+        postMetrics,
+        likes: 0,
+        comments: 0,
+        reposts: 0,
+        shares: 0,
+        views: 0,
+        viewResolvedPosts: 0,
+        viewMissingPosts: postMetrics.length,
+        complete: postMetrics.length > 0,
+        scope: "rsshub_feed_monitor",
+        method: "rsshub",
+        feedUrl: url,
+        refreshedAt,
+        error: postMetrics.length ? undefined : "RSSHub 暂未返回该账号的帖子。",
+      };
+    } catch (error: any) {
+      errors.push(`${url} -> ${error instanceof Error ? error.message : String(error || "unknown")}`);
+    }
+  }
+  {
     return {
       platform: "threads",
       username,
@@ -116,30 +154,9 @@ async function fetchThreadsProfileHotMetricsViaRssHub(usernameInput: string): Pr
       method: "rsshub",
       complete: false,
       scope: "rsshub_failed",
-      error: `RSSHub 返回 ${response.status}: ${text.slice(0, 300)}`,
+      error: `RSSHub 全部实例不可用：${errors.join(" | ").slice(0, 800)}`,
     };
   }
-  const postMetrics = extractRssHubItems(text, username, refreshedAt);
-  return {
-    platform: "threads",
-    username,
-    posts: postMetrics.length,
-    scannedPosts: postMetrics.length,
-    postMetrics,
-    likes: 0,
-    comments: 0,
-    reposts: 0,
-    shares: 0,
-    views: 0,
-    viewResolvedPosts: 0,
-    viewMissingPosts: postMetrics.length,
-    complete: postMetrics.length > 0,
-    scope: "rsshub_feed_monitor",
-    method: "rsshub",
-    feedUrl: url,
-    refreshedAt,
-    error: postMetrics.length ? undefined : "RSSHub 暂未返回该账号的帖子。",
-  };
 }
 
 function hasUsableMetrics(metrics: any): boolean {
