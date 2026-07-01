@@ -24738,6 +24738,29 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      if (action.publishPlatform !== platform) {
+        const postForPreview = buildPostWithPublishContentOverride(post, action.contentOverride);
+        pendingPostActions.set(chatId, { ...action, publishPlatform: undefined });
+        await safeEditOrSend(bot, chatId, msgId, `🚀 *確認發布推文*
+
+"${postForPreview.content.slice(0, 80)}..."`, {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              ...buildStoredPostPublishConfirmRows({
+                archiveId,
+                source: action.source,
+                groupContentType: action.groupContentType,
+                isSentimentImported: isSentimentHotImportedPost(postForPreview),
+                platforms: allowedPublishPlatforms,
+                hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+              }),
+              ...(action.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }]] : []),
+            ],
+          },
+        });
+        return;
+      }
       await showPublishPadSelection(chatId, msgId, {
         mode: "single_post",
         archiveId,
@@ -24992,7 +25015,37 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const postForPublish = buildPostWithPublishContentOverride(post, action?.contentOverride);
-      pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType, linkEndingPresetApplied: action?.linkEndingPresetApplied, contentOverride: action?.contentOverride });
+      if (shortPlatform && action?.publishPlatform !== platform) {
+        pendingPostActions.set(chatId, {
+          archiveId,
+          postId,
+          source,
+          groupContentType,
+          linkEndingPresetApplied: action?.linkEndingPresetApplied,
+          contentOverride: action?.contentOverride,
+          publishPlatform: undefined,
+        });
+        await safeEditOrSend(bot, chatId, msgId, `🚀 *確認發布推文*
+
+"${postForPublish.content.slice(0, 80)}..."`, {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              ...buildStoredPostPublishConfirmRows({
+                archiveId,
+                source,
+                groupContentType,
+                isSentimentImported: isSentimentHotImportedPost(postForPublish),
+                platforms: allowedPublishPlatforms,
+                hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive?.setup as any).length > 0,
+              }),
+              ...(action?.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }]] : []),
+            ],
+          },
+        });
+        return;
+      }
+      pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType, linkEndingPresetApplied: action?.linkEndingPresetApplied, contentOverride: action?.contentOverride, publishPlatform: action?.publishPlatform });
       if (!credentials.ak || !credentials.sk) {
         bot.editMessageText("❌ VMOS 凭据未配置", { chat_id: chatId, message_id: msgId });
         return;
