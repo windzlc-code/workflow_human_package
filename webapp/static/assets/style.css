@@ -5270,13 +5270,14 @@ body.page-admin {
 
 .persona-bar-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(130px, 2fr) 74px;
+  grid-template-columns: minmax(220px, 1.15fr) minmax(180px, 2fr) 82px;
   gap: 10px;
   align-items: center;
 }
 
 .persona-bar-label {
-  display: flex;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -5289,12 +5290,16 @@ body.page-admin {
 .persona-bar-label span {
   display: inline-grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  flex: 0 0 24px;
   border-radius: 6px;
   background: #111827;
   color: #fff;
   font-size: 12px;
+  line-height: 1;
 }
 
 .persona-bar-track {
@@ -6434,11 +6439,13 @@ body.page-admin {
   }
 
   .persona-bar-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(168px, 1.1fr) minmax(90px, 1.4fr) 64px;
+    gap: 8px;
   }
 
   .persona-bar-value {
-    text-align: left;
+    text-align: right;
+    font-size: 12px;
   }
 
   .persona-donut-wrap {
