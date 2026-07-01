@@ -22270,7 +22270,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_regen_ai" || data === "post_regen_ai_source" || data === "post_regen_ai_persona" || data === "post_img_regen" || data.startsWith("post_img_regen_")) {
+    if (data === "post_regen_ai" || data === "post_regen_ai_source" || data === "post_regen_ai_persona" || data === "post_img_regen" || data.startsWith("post_img_regen_") || data === "post_img_regen_ai" || data === "post_img_upload_replace") {
       let action = pendingPostActions.get(chatId);
       let explicitPostIndex: number | null = null;
       if (data.startsWith("post_img_regen_")) {
@@ -22298,7 +22298,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       if (!action.postId) action.postId = post.id;
-      const isImageOnly = data === "post_img_regen" || data.startsWith("post_img_regen_");
+      const isImageEntry = data === "post_img_regen" || data.startsWith("post_img_regen_");
+      const isImageOnly = isImageEntry || data === "post_img_regen_ai" || data === "post_img_upload_replace";
       const rewriteMode: SentimentHotRewriteMode | undefined = data === "post_regen_ai_source"
         ? "source_structure"
         : data === "post_regen_ai_persona"
@@ -22341,6 +22342,54 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (isImageOnly && action.source === "favorites") {
         await safeEditOrSend(bot, chatId, msgId, "收藏推文請先進入「媒體管理」上傳或替換媒體。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+        });
+        return;
+      }
+      if (isImageEntry) {
+        const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+        await safeEditOrSend(bot, chatId, msgId, [
+          "🖼 重新生成图片",
+          "",
+          `人设：${archive.name}`,
+          `推文：第 ${displayIndex} 篇`,
+          "",
+          "请选择图片处理方式：",
+          "1. AI 重新生成：根据当前推文内容生成新配图。",
+          "2. 上传自定义图片：你直接发送图片替换当前推文媒体。",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🤖 AI 重新生成图片", callback_data: "post_img_regen_ai" }],
+              [{ text: "📤 上传自定义图片替换", callback_data: "post_img_upload_replace" }],
+              [{ text: "返回查看推文", callback_data: "post_action_view" }],
+            ],
+          },
+        });
+        return;
+      }
+      if (data === "post_img_upload_replace") {
+        const sourcePosts = resolveArchivePostCollection(archive, action.source);
+        const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
+        const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
+        const mediaItems = getStoredPostMediaItems(post);
+        pendingStoredPostEdits.set(chatId, {
+          archiveId: action.archiveId,
+          postId: post.id,
+          source: action.source,
+          groupContentType: action.groupContentType,
+          displayIndex,
+          currentContent: post.content,
+          replaceMediaIndexes: mediaItems.length ? mediaItems.map((_, index) => index) : undefined,
+        });
+        await safeEditOrSend(bot, chatId, msgId, [
+          "📤 上传自定义图片替换",
+          "",
+          `推文：第 ${displayIndex} 篇`,
+          mediaItems.length ? `当前媒体：${mediaItems.length} 个，上传后会替换为你发送的新图片。` : "当前没有媒体，上传后会作为这篇推文的配图。",
+          "",
+          "请直接发送一张图片。图片 caption 如有文字，会同时作为新文案；不写 caption 则保留原文案。",
+        ].join("\n"), {
           reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
         });
         return;
