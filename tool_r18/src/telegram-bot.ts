@@ -21622,7 +21622,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType: selected?.groupContentType });
       const detailRows = buildPostDetailActionRows({
         hasImage: mediaItems.length > 0 || Boolean(postImageUrl),
-        publishCallback: selected ? `pp_${selected.index}` : `pubpost_${archiveId}_${postId}`,
+        publishCallback: "post_action",
         deleteCallback: selected ? `dp_${selected.index}` : `delpost_${archiveId}_${postId}`,
         archiveId,
         postIndex: isFavoriteSource ? undefined : archiveIndex,
@@ -22664,21 +22664,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("pubpost_") || data.startsWith("pp_") || data === "post_action" || data.startsWith("post_action_")) {
+    if (data === "post_action" || data.startsWith("post_action_")) {
       await deletePendingStoredPostMediaMessages(bot, chatId);
-      const selected = data.startsWith("pp_") ? resolvePendingPostSelection(chatId, data, "pp_") : null;
-      const action = data === "post_action" || data.startsWith("post_action_") ? pendingPostActions.get(chatId) : null;
+      const action = pendingPostActions.get(chatId);
       const requestedPlatform = data.startsWith("post_action_") ? data.slice("post_action_".length) : "";
       const publishPlatform = requestedPlatform === "clear"
         ? undefined
         : requestedPlatform
           ? parseShortPostPlatform(data, "post_action_") || undefined
           : action?.publishPlatform;
-      const [, legacyArchiveId, legacyPostId] = data.startsWith("pubpost_") ? data.split("_") : [];
-      const archiveId = selected?.archiveId || action?.archiveId || legacyArchiveId;
-      const postId = selected?.postId || action?.postId || legacyPostId;
-      const source = selected?.source || action?.source || "posts";
-      const groupContentType = selected?.groupContentType || action?.groupContentType;
+      const archiveId = action?.archiveId;
+      const postId = action?.postId;
+      const source = action?.source || "posts";
+      const groupContentType = action?.groupContentType;
       if (requestedPlatform && requestedPlatform !== "clear" && !publishPlatform) {
         await safeEditOrSend(bot, chatId, msgId, "发布平台已失效，请重新选择。", {
           reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action" }]] },
@@ -24738,29 +24736,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      if (action.publishPlatform !== platform) {
-        const postForPreview = buildPostWithPublishContentOverride(post, action.contentOverride);
-        pendingPostActions.set(chatId, { ...action, publishPlatform: undefined });
-        await safeEditOrSend(bot, chatId, msgId, `🚀 *確認發布推文*
-
-"${postForPreview.content.slice(0, 80)}..."`, {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              ...buildStoredPostPublishConfirmRows({
-                archiveId,
-                source: action.source,
-                groupContentType: action.groupContentType,
-                isSentimentImported: isSentimentHotImportedPost(postForPreview),
-                platforms: allowedPublishPlatforms,
-                hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
-              }),
-              ...(action.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }]] : []),
-            ],
-          },
-        });
-        return;
-      }
       await showPublishPadSelection(chatId, msgId, {
         mode: "single_post",
         archiveId,
@@ -24990,13 +24965,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("dopubpost_") || data.startsWith("dop_")) {
+    if (data.startsWith("dop_")) {
       const shortPlatform = parseShortPostPlatform(data, "dop_");
       const action = shortPlatform ? pendingPostActions.get(chatId) : null;
-      const parts = data.startsWith("dopubpost_") ? data.slice(10).split("_") : [];
-      const archiveId = action?.archiveId || parts[0];
-      const postId = action?.postId || parts[1];
-      const platform = (shortPlatform || parts.slice(2).join("_")) as TelegramPublishPlatform;
+      const archiveId = action?.archiveId;
+      const postId = action?.postId;
+      const platform = shortPlatform;
       const source = action?.source || "posts";
       const groupContentType = action?.groupContentType;
       if (!archiveId || !postId || !platform) {
@@ -25015,36 +24989,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const postForPublish = buildPostWithPublishContentOverride(post, action?.contentOverride);
-      if (shortPlatform && action?.publishPlatform !== platform) {
-        pendingPostActions.set(chatId, {
-          archiveId,
-          postId,
-          source,
-          groupContentType,
-          linkEndingPresetApplied: action?.linkEndingPresetApplied,
-          contentOverride: action?.contentOverride,
-          publishPlatform: undefined,
-        });
-        await safeEditOrSend(bot, chatId, msgId, `🚀 *確認發布推文*
-
-"${postForPublish.content.slice(0, 80)}..."`, {
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              ...buildStoredPostPublishConfirmRows({
-                archiveId,
-                source,
-                groupContentType,
-                isSentimentImported: isSentimentHotImportedPost(postForPublish),
-                platforms: allowedPublishPlatforms,
-                hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive?.setup as any).length > 0,
-              }),
-              ...(action?.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }]] : []),
-            ],
-          },
-        });
-        return;
-      }
       pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType, linkEndingPresetApplied: action?.linkEndingPresetApplied, contentOverride: action?.contentOverride, publishPlatform: action?.publishPlatform });
       if (!credentials.ak || !credentials.sk) {
         bot.editMessageText("❌ VMOS 凭据未配置", { chat_id: chatId, message_id: msgId });
