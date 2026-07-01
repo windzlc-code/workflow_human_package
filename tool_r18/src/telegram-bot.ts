@@ -22699,6 +22699,37 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const postForPreview = buildPostWithPublishContentOverride(post, action?.contentOverride);
+      if (publishPlatform && source === "posts") {
+        const scopedPosts = filterByTelegramGroupContentType(archive.posts || [], groupContentType);
+        const startIndex = scopedPosts.findIndex((item) => item.id === post.id);
+        if (startIndex >= 0) {
+          const contentOverrides = action?.contentOverride ? { [post.id]: action.contentOverride } : undefined;
+          const previewPosts = applyPublishContentOverrides(scopedPosts, contentOverrides);
+          const selection = summarizeManualPublishSelection(previewPosts, startIndex, 1);
+          const targetGroupLine = buildTelegramPublishPreviewTargetLine(publishPlatform, archive, postForPreview, groupContentType);
+          pendingManualPublishes.set(chatId, {
+            archiveId,
+            archiveName: archive.name,
+            platform: publishPlatform,
+            startIndex,
+            count: 1,
+            page: Math.floor(startIndex / 8),
+            groupContentType,
+            stage: "preview_confirm",
+            linkEndingPresetApplied: action?.linkEndingPresetApplied,
+            contentOverrides,
+          });
+          await safeEditOrSend(bot, chatId, msgId, `👀 发布前预览\n\n人設：${archive.name}\n平台：${publishPlatform}${targetGroupLine}\n选择编号：第 ${startIndex + 1} 篇\n发布數量：1 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}`, {
+            reply_markup: {
+              inline_keyboard: buildManualPreviewRows(archiveId, publishPlatform, startIndex, 1, {
+                hasLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
+                linkEndingPresetApplied: action?.linkEndingPresetApplied,
+              }),
+            },
+          });
+          return;
+        }
+      }
       pendingPostActions.set(chatId, {
         archiveId,
         postId,
