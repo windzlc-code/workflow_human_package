@@ -179,6 +179,15 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertEqual(data["summary"]["post_count"], 1)
         self.assertEqual(data["summary"]["published_count"], 1)
         self.assertEqual(data["summary"]["task_count"], 2)
+        self.assertEqual(data["summary"]["total_interactions"], 17)
+        self.assertEqual(data["summary"]["likes"], 10)
+        self.assertEqual(data["summary"]["comments"], 5)
+        self.assertEqual(data["summary"]["shares"], 2)
+        self.assertEqual(data["summary"]["reposts"], 0)
+        self.assertEqual(data["charts"]["engagement_mix"]["likes"], 10)
+        self.assertEqual(data["charts"]["engagement_mix"]["comments"], 5)
+        self.assertEqual(data["charts"]["engagement_mix"]["shares"], 2)
+        self.assertEqual(data["charts"]["engagement_mix"]["reposts"], 0)
         self.assertEqual(data["charts"]["task_status_distribution"]["done"], 1)
         self.assertEqual(data["data_sources"]["sentiment_hot_candidates"]["shown_count"], 1)
         data_sources = json.dumps(data["data_sources"], ensure_ascii=False)
@@ -186,6 +195,10 @@ class PersonaDashboardApiTests(unittest.TestCase):
         persona = data["personas"][0]
         self.assertIn("threads_account", persona)
         self.assertFalse(persona["threads_account"]["bound"])
+        self.assertEqual(persona["hot"]["likes"], 10)
+        self.assertEqual(persona["hot"]["comments"], 5)
+        self.assertEqual(persona["hot"]["shares"], 2)
+        self.assertEqual(persona["hot"]["reposts"], 0)
         self.assertTrue(any("Threads" in item for item in persona["warnings"]))
 
     def test_recent_views_and_post_views_are_separate(self):
