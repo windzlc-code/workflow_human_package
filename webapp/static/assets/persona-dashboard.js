@@ -40,6 +40,7 @@ let personaDashboardAccountPlatform = localStorage.getItem("personaDashboardAcco
 let personaDashboardTabPage = 1;
 let personaDashboardPostModalKey = "";
 let personaDashboardGalleryIndex = -1;
+let personaDashboardAutoPollTimer = 0;
 
 const PD_LABELS = {
   likes: "点赞",
@@ -825,8 +826,9 @@ function pdSetMsg(text, type = "ok") {
   msg.className = text ? `msg ${type}` : "msg";
 }
 
-async function pdLoadDashboard() {
-  pdSetMsg("正在加载人设数据...", "ok");
+async function pdLoadDashboard(options = {}) {
+  const silent = Boolean(options && options.silent);
+  if (!silent) pdSetMsg("正在加载人设数据...", "ok");
   try {
     const data = await pdApi("/api/persona_dashboard/overview");
     personaDashboardData = data;
@@ -836,11 +838,19 @@ async function pdLoadDashboard() {
       const latest = data.summary && data.summary.latest_data_at;
       updated.textContent = `缓存读取：${pdDate(data.updated_at)} · 最近数据：${pdDate(latest)}`;
     }
-    pdSetMsg("");
+    if (!silent) pdSetMsg("");
     pdRenderDashboard();
   } catch (err) {
-    pdSetMsg(String((err && (err.detail || err.message)) || err || "加载失败"), "err");
+    if (!silent) pdSetMsg(String((err && (err.detail || err.message)) || err || "加载失败"), "err");
   }
+}
+
+function pdStartAutoPoll() {
+  if (personaDashboardAutoPollTimer) window.clearInterval(personaDashboardAutoPollTimer);
+  personaDashboardAutoPollTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    pdLoadDashboard({ silent: true });
+  }, 60000);
 }
 
 async function pdBindThreads(persona) {
@@ -943,4 +953,5 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   });
   pdLoadDashboard();
+  pdStartAutoPoll();
 });

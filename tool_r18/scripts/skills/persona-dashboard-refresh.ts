@@ -14,6 +14,134 @@ function hotMetricKey(username: string): string {
   return `threads:${normalizeThreadsUsername(username).toLowerCase()}`;
 }
 
+function argValue(name: string): string {
+  const prefix = `--${name}=`;
+  return process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length) || "";
+}
+
+function decodeXml(value: string): string {
+  return String(value || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&apos;/g, "'");
+}
+
+function stripHtml(value: string): string {
+  return decodeXml(value)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function firstXml(block: string, tag: string): string {
+  const match = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  return match ? decodeXml(match[1] || "").trim() : "";
+}
+
+function xmlAttr(tag: string, attr: string): string {
+  const match = tag.match(new RegExp(`${attr}=["']([^"']+)["']`, "i"));
+  return match ? decodeXml(match[1] || "").trim() : "";
+}
+
+function mediaTypeFromUrl(url: string, fallback = ""): string {
+  const text = `${url} ${fallback}`.toLowerCase();
+  if (/(video|mp4|mov|m4v|webm)/.test(text)) return "video";
+  if (/(image|photo|png|jpe?g|webp|gif)/.test(text)) return "image";
+  return "unknown";
+}
+
+function extractRssHubItems(xml: string, username: string, capturedAt: string): any[] {
+  const blocks = Array.from(String(xml || "").matchAll(/<item\b[\s\S]*?<\/item>/gi)).map((match) => match[0]);
+  return blocks.map((block, index) => {
+    const title = stripHtml(firstXml(block, "title"));
+    const description = stripHtml(firstXml(block, "description") || firstXml(block, "content:encoded"));
+    const link = firstXml(block, "link") || firstXml(block, "guid");
+    const publishedRaw = firstXml(block, "pubDate") || firstXml(block, "dc:date") || firstXml(block, "updated");
+    const publishedAt = publishedRaw && !Number.isNaN(Date.parse(publishedRaw)) ? new Date(publishedRaw).toISOString() : undefined;
+    const mediaItems: any[] = [];
+    for (const mediaMatch of block.matchAll(/<(?:enclosure|media:content|media:thumbnail)\b[^>]*>/gi)) {
+      const tag = mediaMatch[0] || "";
+      const url = xmlAttr(tag, "url");
+      if (!url) continue;
+      const type = xmlAttr(tag, "type") || mediaTypeFromUrl(url);
+      mediaItems.push({ url, type, label: `RSSHub 媒体 ${mediaItems.length + 1}` });
+    }
+    for (const imgMatch of block.matchAll(/<img\b[^>]*src=["']([^"']+)["'][^>]*>/gi)) {
+      const url = decodeXml(imgMatch[1] || "").trim();
+      if (url && !mediaItems.some((item) => item.url === url)) {
+        mediaItems.push({ url, type: mediaTypeFromUrl(url, "image"), label: `RSSHub 图片 ${mediaItems.length + 1}` });
+      }
+    }
+    return {
+      id: firstXml(block, "guid") || link || `rsshub:${username}:${index}`,
+      code: String(link || "").split("/post/")[1]?.split(/[?#/]/)[0],
+      sourceUrl: link,
+      content: description || title,
+      originalContent: description || title,
+      publishedAt,
+      capturedAt,
+      mediaItems,
+      method: "rsshub",
+    };
+  }).filter((item) => item.sourceUrl || item.content);
+}
+
+async function fetchThreadsProfileHotMetricsViaRssHub(usernameInput: string): Promise<any> {
+  const username = normalizeThreadsUsername(usernameInput);
+  const refreshedAt = new Date().toISOString();
+  const base = String(process.env.RSSHUB_BASE_URL || process.env.PERSONA_DASHBOARD_RSSHUB_BASE_URL || "https://rsshub.app").replace(/\/+$/, "");
+  const routeTemplate = String(process.env.PERSONA_DASHBOARD_RSSHUB_THREADS_ROUTE || "/threads/{username}");
+  const route = routeTemplate.replace("{username}", encodeURIComponent(username));
+  const url = `${base}${route.startsWith("/") ? route : `/${route}`}`;
+  const response = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "application/rss+xml, application/xml, text/xml, */*",
+      "cache-control": "no-cache",
+      pragma: "no-cache",
+    },
+    signal: AbortSignal.timeout(Number(process.env.PERSONA_DASHBOARD_RSSHUB_TIMEOUT_MS || 20000)),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    return {
+      platform: "threads",
+      username,
+      refreshedAt,
+      method: "rsshub",
+      complete: false,
+      scope: "rsshub_failed",
+      error: `RSSHub 返回 ${response.status}: ${text.slice(0, 300)}`,
+    };
+  }
+  const postMetrics = extractRssHubItems(text, username, refreshedAt);
+  return {
+    platform: "threads",
+    username,
+    posts: postMetrics.length,
+    scannedPosts: postMetrics.length,
+    postMetrics,
+    likes: 0,
+    comments: 0,
+    reposts: 0,
+    shares: 0,
+    views: 0,
+    viewResolvedPosts: 0,
+    viewMissingPosts: postMetrics.length,
+    complete: postMetrics.length > 0,
+    scope: "rsshub_feed_monitor",
+    method: "rsshub",
+    feedUrl: url,
+    refreshedAt,
+    error: postMetrics.length ? undefined : "RSSHub 暂未返回该账号的帖子。",
+  };
+}
+
 function hasUsableMetrics(metrics: any): boolean {
   const scannedPosts = Number(metrics?.scannedPosts || 0);
   return scannedPosts > 0 || ["followers", "following", "recentViews", "posts", "likes", "comments", "reposts", "shares", "views"]
@@ -30,14 +158,16 @@ function isCompleteMetrics(metrics: any): boolean {
 }
 
 async function main() {
-  const targetId = process.argv.find((arg) => arg.startsWith("--archive-id="))?.slice("--archive-id=".length) || "";
+  const targetId = argValue("archive-id");
+  const source = (argValue("source") || process.env.PERSONA_DASHBOARD_REFRESH_SOURCE || "rsshub").toLowerCase();
   const archives = await listPersonaArchives();
   const targets = targetId ? archives.filter((archive) => archive.id === targetId) : archives;
-  const refreshAuth = await refreshSentimentBrowserCookiesForPlatform("threads").catch((error: any) => ({
+  const useRssHub = source === "rsshub";
+  const refreshAuth = useRssHub ? { ok: true, message: "RSSHub 模式不需要浏览器 Cookie" } : await refreshSentimentBrowserCookiesForPlatform("threads").catch((error: any) => ({
     ok: false,
     message: error instanceof Error ? error.message : String(error || "unknown"),
   }));
-  const auth = await getLiveSentimentBrowserAuthProfileBinding("threads").catch((error: any) => ({
+  const auth = useRssHub ? { ok: true, message: "RSSHub 模式不需要浏览器 Cookie", profileKey: "rsshub" } : await getLiveSentimentBrowserAuthProfileBinding("threads").catch((error: any) => ({
     ok: false,
     message: error instanceof Error ? error.message : String(error || "unknown"),
   } as any));
@@ -56,17 +186,21 @@ async function main() {
       continue;
     }
     try {
-      const metrics: any = await fetchThreadsProfileHotMetrics(username);
+      const metrics: any = useRssHub
+        ? await fetchThreadsProfileHotMetricsViaRssHub(username)
+        : await fetchThreadsProfileHotMetrics(username);
       const key = hotMetricKey(username);
       const existingHotMetrics = setup.hotMetrics || {};
       const previousMetrics = existingHotMetrics[key] || {};
       const usable = hasUsableMetrics(metrics);
-      const complete = isCompleteMetrics(metrics);
+      const complete = useRssHub ? metrics.complete === true : isCompleteMetrics(metrics);
       const nextMetric = complete
         ? {
             ...previousMetrics,
             platform: "threads",
             username: metrics.username || username,
+            method: metrics.method,
+            feedUrl: metrics.feedUrl,
             followers: metrics.followers,
             following: metrics.following,
             recentViews: metrics.recentViews,
@@ -81,7 +215,7 @@ async function main() {
             scannedPosts: metrics.scannedPosts,
             postMetrics: Array.isArray(metrics.postMetrics) ? metrics.postMetrics : previousMetrics.postMetrics,
             complete: true,
-            scope: "authenticated_full_profile",
+            scope: useRssHub ? "rsshub_feed_monitor" : "authenticated_full_profile",
             refreshedAt: metrics.refreshedAt,
             error: undefined,
           }
@@ -89,6 +223,8 @@ async function main() {
             ...previousMetrics,
             platform: "threads",
             username: metrics.username || username,
+            method: metrics.method,
+            feedUrl: metrics.feedUrl,
             complete: false,
             scope: metrics.scope,
             refreshedAt: metrics.refreshedAt,

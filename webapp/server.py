@@ -16440,6 +16440,18 @@ def _extract_persona_archive_list(raw: Any) -> list[dict[str, Any]]:
 PERSONA_DASHBOARD_REFRESH_TASKS: dict[str, dict[str, Any]] = {}
 PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
+PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
+PERSONA_DASHBOARD_MONITOR_STARTED = False
+PERSONA_DASHBOARD_MONITOR_STATE: dict[str, Any] = {
+    "enabled": False,
+    "source": "rsshub",
+    "status": "idle",
+    "last_task_id": "",
+    "last_started_at": "",
+    "last_finished_at": "",
+    "last_message": "",
+    "interval_seconds": 0,
+}
 
 
 @contextlib.contextmanager
@@ -17083,6 +17095,7 @@ def _persona_dashboard_warnings(setup: dict[str, Any], hot_platforms: list[dict[
 
 
 def _persona_dashboard_refresh_worker(task_id: str, archive_id: str = "") -> None:
+    refresh_source = (os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
     with PERSONA_DASHBOARD_REFRESH_LOCK:
         PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
             "status": "running",
@@ -17090,7 +17103,7 @@ def _persona_dashboard_refresh_worker(task_id: str, archive_id: str = "") -> Non
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
     script = ROOT_DIR / "tool_r18" / "scripts" / "skills" / "persona-dashboard-refresh.ts"
-    args = ["node", "--import", "tsx", str(script)]
+    args = ["node", "--import", "tsx", str(script), f"--source={refresh_source}"]
     if archive_id:
         args.append(f"--archive-id={archive_id}")
     env = os.environ.copy()
@@ -17133,12 +17146,15 @@ def _persona_dashboard_refresh_worker(task_id: str, archive_id: str = "") -> Non
             })
 
 
-def _start_persona_dashboard_refresh(archive_id: str = "") -> dict[str, Any]:
+def _start_persona_dashboard_refresh(archive_id: str = "", source: str = "", trigger: str = "manual") -> dict[str, Any]:
     task_id = f"pdr_{uuid.uuid4().hex[:12]}"
+    refresh_source = (source or os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
     with PERSONA_DASHBOARD_REFRESH_LOCK:
         PERSONA_DASHBOARD_REFRESH_TASKS[task_id] = {
             "id": task_id,
             "archive_id": str(archive_id or "").strip(),
+            "source": refresh_source,
+            "trigger": str(trigger or "manual"),
             "status": "queued",
             "step": "排队中",
             "progress": 0,
@@ -17146,7 +17162,7 @@ def _start_persona_dashboard_refresh(archive_id: str = "") -> dict[str, Any]:
             "message": "已加入刷新队列。",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-    thread = threading.Thread(target=_persona_dashboard_refresh_worker_v2, args=(task_id, str(archive_id or "").strip()), daemon=True)
+    thread = threading.Thread(target=_persona_dashboard_refresh_worker_v2, args=(task_id, str(archive_id or "").strip(), refresh_source), daemon=True)
     thread.start()
     return PERSONA_DASHBOARD_REFRESH_TASKS[task_id]
 
@@ -17159,8 +17175,9 @@ def _read_text_tail(path: Path, max_chars: int = 1200) -> str:
     return text[-max_chars:]
 
 
-def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "") -> None:
+def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "", source: str = "") -> None:
     started = time.time()
+    refresh_source = (source or os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
     scope = "单个人设" if archive_id else "全部已绑定人设"
     with PERSONA_DASHBOARD_REFRESH_LOCK:
         PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
@@ -17172,7 +17189,7 @@ def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "") -> 
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
     script = ROOT_DIR / "tool_r18" / "scripts" / "skills" / "persona-dashboard-refresh.ts"
-    args = ["node", "--import", "tsx", str(script)]
+    args = ["node", "--import", "tsx", str(script), f"--source={refresh_source}"]
     if archive_id:
         args.append(f"--archive-id={archive_id}")
     env = os.environ.copy()
@@ -17261,6 +17278,101 @@ def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "") -> 
                 "elapsed_seconds": int(time.time() - started),
                 "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             })
+
+
+def _persona_dashboard_refresh_is_running() -> bool:
+    with PERSONA_DASHBOARD_REFRESH_LOCK:
+        return any(str(task.get("status") or "") in {"queued", "running"} for task in PERSONA_DASHBOARD_REFRESH_TASKS.values())
+
+
+def _persona_dashboard_monitor_interval_seconds() -> int:
+    raw = os.getenv("PERSONA_DASHBOARD_RSSHUB_POLL_SECONDS") or os.getenv("PERSONA_DASHBOARD_AUTO_REFRESH_SECONDS") or "300"
+    try:
+        return max(60, int(float(raw)))
+    except Exception:
+        return 300
+
+
+def _persona_dashboard_monitor_enabled() -> bool:
+    return str(os.getenv("PERSONA_DASHBOARD_AUTO_REFRESH_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _persona_dashboard_monitor_loop() -> None:
+    interval = _persona_dashboard_monitor_interval_seconds()
+    source = (os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
+    while True:
+        if not _persona_dashboard_monitor_enabled():
+            with PERSONA_DASHBOARD_MONITOR_LOCK:
+                PERSONA_DASHBOARD_MONITOR_STATE.update({
+                    "enabled": False,
+                    "source": source,
+                    "status": "disabled",
+                    "interval_seconds": interval,
+                    "last_message": "后台自动监控已关闭。",
+                })
+            time.sleep(interval)
+            continue
+        try:
+            if not _persona_dashboard_refresh_is_running():
+                task = _start_persona_dashboard_refresh("", source=source, trigger="auto_monitor")
+                with PERSONA_DASHBOARD_MONITOR_LOCK:
+                    PERSONA_DASHBOARD_MONITOR_STATE.update({
+                        "enabled": True,
+                        "source": source,
+                        "status": "running",
+                        "last_task_id": task.get("id", ""),
+                        "last_started_at": task.get("created_at", ""),
+                        "interval_seconds": interval,
+                        "last_message": f"后台自动监控已触发 {source.upper()} 全量抓取。",
+                    })
+                while True:
+                    with PERSONA_DASHBOARD_REFRESH_LOCK:
+                        current = dict(PERSONA_DASHBOARD_REFRESH_TASKS.get(str(task.get("id") or ""), {}))
+                    if str(current.get("status") or "") not in {"queued", "running"}:
+                        with PERSONA_DASHBOARD_MONITOR_LOCK:
+                            PERSONA_DASHBOARD_MONITOR_STATE.update({
+                                "status": str(current.get("status") or "idle"),
+                                "last_finished_at": current.get("finished_at", ""),
+                                "last_message": current.get("message", ""),
+                            })
+                        break
+                    time.sleep(5)
+            else:
+                with PERSONA_DASHBOARD_MONITOR_LOCK:
+                    PERSONA_DASHBOARD_MONITOR_STATE.update({
+                        "enabled": True,
+                        "source": source,
+                        "status": "waiting",
+                        "interval_seconds": interval,
+                        "last_message": "已有刷新任务运行中，本轮自动监控跳过。",
+                    })
+        except Exception as exc:
+            with PERSONA_DASHBOARD_MONITOR_LOCK:
+                PERSONA_DASHBOARD_MONITOR_STATE.update({
+                    "enabled": True,
+                    "source": source,
+                    "status": "failed",
+                    "interval_seconds": interval,
+                    "last_message": str(exc),
+                })
+        time.sleep(interval)
+
+
+def _ensure_persona_dashboard_monitor_started() -> None:
+    global PERSONA_DASHBOARD_MONITOR_STARTED
+    with PERSONA_DASHBOARD_MONITOR_LOCK:
+        if PERSONA_DASHBOARD_MONITOR_STARTED:
+            return
+        PERSONA_DASHBOARD_MONITOR_STARTED = True
+        PERSONA_DASHBOARD_MONITOR_STATE.update({
+            "enabled": _persona_dashboard_monitor_enabled(),
+            "source": (os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub",
+            "status": "starting",
+            "interval_seconds": _persona_dashboard_monitor_interval_seconds(),
+            "last_message": "后台自动监控启动中。",
+        })
+    thread = threading.Thread(target=_persona_dashboard_monitor_loop, name="persona-dashboard-rsshub-monitor", daemon=True)
+    thread.start()
 
 
 def _build_persona_dashboard_overview() -> dict[str, Any]:
@@ -17547,6 +17659,7 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
             "archives": archives_source,
             "publish_queue": {k: v for k, v in queue_stats.items() if k != "rows"},
             "sentiment_hot_candidates": sentiment_stats,
+            "persona_dashboard_monitor": dict(PERSONA_DASHBOARD_MONITOR_STATE),
         },
     }
 
@@ -17568,6 +17681,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def start_tool_r18_stop_responder() -> None:
         _ensure_tool_r18_stop_responder_started()
+        _ensure_persona_dashboard_monitor_started()
 
     @app.get("/", include_in_schema=False)
     def root(request: Request) -> RedirectResponse:
@@ -18078,6 +18192,10 @@ def create_app() -> FastAPI:
     @app.get("/api/persona_dashboard/overview")
     def api_persona_dashboard_overview():
         return _build_persona_dashboard_overview()
+
+    @app.get("/api/persona_dashboard/monitor")
+    def api_persona_dashboard_monitor():
+        return dict(PERSONA_DASHBOARD_MONITOR_STATE)
 
     @app.post("/api/persona_dashboard/personas/{archive_id}/threads_binding")
     def api_persona_dashboard_bind_threads(archive_id: str, payload: PersonaDashboardThreadsBindingPayload):
