@@ -100,6 +100,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "telegram_bot_enabled": True,
     "telegram_bots": [],
     "telegram_persona_data_scope": "shared",
+    "telegram_primary_allowed_pad_codes": [],
     "remote_comfy_gateway_url": "",
     "remote_comfy_gateway_token": "",
     "remote_comfy_workflow_mappings": {"face_swap": "__converted__/flux_人物换脸工作流.api.json"},
@@ -729,6 +730,7 @@ def _load_tg_settings_payload() -> dict[str, Any]:
         "bot_token_file": str(_tool_r18_bot_token_file()),
         "allowed_chat_ids_env": _tg_seed_chat_ids(env_values),
         "trusted_users": members,
+        "process": _tool_r18_process_snapshot(),
     }
 
 
@@ -2545,6 +2547,10 @@ def _tool_r18_bots_file() -> Path:
     return Path(os.getenv("TOOL_R18_TELEGRAM_BOTS_FILE", str(_tool_r18_runtime_dir() / "telegram_bots.local.json"))).resolve()
 
 
+def _tool_r18_primary_bot_file() -> Path:
+    return Path(os.getenv("TOOL_R18_TELEGRAM_PRIMARY_BOT_FILE", str(_tool_r18_runtime_dir() / "telegram_primary.local.json"))).resolve()
+
+
 def _tool_r18_api_config_file() -> Path:
     return Path(os.getenv("AUTO_TWEET_API_CONFIG_PATH", str(_tool_r18_runtime_dir() / "api_config.json"))).resolve()
 
@@ -3619,6 +3625,14 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     scope = str(merged.get("telegram_persona_data_scope") or "shared").strip().lower()
     merged["telegram_persona_data_scope"] = "isolated" if scope == "isolated" else "shared"
     merged["telegram_bots"] = _normalize_telegram_bots_config(merged.get("telegram_bots"))
+    primary_pad_codes = merged.get("telegram_primary_allowed_pad_codes")
+    if isinstance(primary_pad_codes, str):
+        primary_items = [part.strip() for part in re.split(r"[,，\n]+", primary_pad_codes) if part.strip()]
+    elif isinstance(primary_pad_codes, list):
+        primary_items = [str(part).strip() for part in primary_pad_codes if str(part).strip()]
+    else:
+        primary_items = []
+    merged["telegram_primary_allowed_pad_codes"] = list(dict.fromkeys(primary_items))
     merged["create_video_app_id"] = str(merged.get("create_video_app_id") or merged.get("video_app_id") or "").strip()
     merged["video_app_id"] = str(merged.get("video_app_id") or merged.get("create_video_app_id") or "").strip()
     merged["create_audio_app_id"] = str(merged.get("create_audio_app_id") or "").strip()
@@ -3924,6 +3938,49 @@ def _write_tool_r18_bots_file(bots: Any, persona_data_scope: str = "shared") -> 
     bots_file.write_text(json.dumps({"bots": normalized}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _write_tool_r18_primary_bot_file(runtime_config: dict[str, Any]) -> None:
+    scope = "isolated" if str(runtime_config.get("telegram_persona_data_scope") or "").strip().lower() == "isolated" else "shared"
+    raw_pad_codes = runtime_config.get("telegram_primary_allowed_pad_codes") or []
+    if isinstance(raw_pad_codes, str):
+        allowed_pad_codes = [part.strip() for part in re.split(r"[,，\n]+", raw_pad_codes) if part.strip()]
+    elif isinstance(raw_pad_codes, list):
+        allowed_pad_codes = [str(part).strip() for part in raw_pad_codes if str(part).strip()]
+    else:
+        allowed_pad_codes = []
+    allowed_pad_codes = list(dict.fromkeys(allowed_pad_codes))
+    primary_file = _tool_r18_primary_bot_file()
+    primary_file.parent.mkdir(parents=True, exist_ok=True)
+    primary_file.write_text(
+        json.dumps(
+            {
+                "name": "primary",
+                "personaDataScope": scope,
+                "allowedPadCodes": allowed_pad_codes,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _sync_tool_r18_telegram_runtime_files(runtime_config: dict[str, Any] | None = None) -> None:
+    try:
+        if runtime_config is None:
+            with db() as conn:
+                runtime_config = _get_runtime_config(conn)
+        if not isinstance(runtime_config, dict):
+            runtime_config = {}
+        _write_tool_r18_primary_bot_file(runtime_config)
+        _write_tool_r18_bots_file(
+            runtime_config.get("telegram_bots") or [],
+            runtime_config.get("telegram_persona_data_scope") or "shared",
+        )
+    except Exception as exc:
+        logger.warning("Failed to sync Tool_R18 Telegram runtime files: %s", exc)
+
+
 def _clear_tool_r18_bot_token_files() -> None:
     token_file = _tool_r18_bot_token_file()
     try:
@@ -4142,6 +4199,35 @@ def _write_small_json_file(path: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp_path, path)
 
 
+def _process_pid_exists(pid: Any) -> bool:
+    pid_text = str(pid or "").strip()
+    if not pid_text.isdigit():
+        return False
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid_text}", "/FO", "CSV", "/NH"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            return f'"{pid_text}"' in result.stdout or f",{pid_text}," in result.stdout
+        except Exception:
+            return False
+    try:
+        os.kill(int(pid_text), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
 def _tool_r18_process_snapshot() -> dict[str, Any]:
     control = _read_small_json_file(_tool_r18_process_control_file())
     status = _read_small_json_file(_tool_r18_process_status_file())
@@ -4149,23 +4235,34 @@ def _tool_r18_process_snapshot() -> dict[str, Any]:
     desired = str(control.get("desired") or "running").strip().lower()
     if desired not in {"running", "stopped"}:
         desired = "running"
+    pid = status.get("pid")
+    pid_alive = _process_pid_exists(pid)
     heartbeat_age_seconds: float | None = None
     running = False
     if heartbeat_path.exists():
         try:
+            heartbeat = _read_small_json_file(heartbeat_path)
+            heartbeat_telegram_bot = str(heartbeat.get("telegramBot") or heartbeat.get("telegram_bot") or "").strip()
             heartbeat_age_seconds = max(time.time() - heartbeat_path.stat().st_mtime, 0.0)
             running = heartbeat_age_seconds <= 30
         except Exception:
             running = False
+            heartbeat_telegram_bot = ""
+    else:
+        heartbeat_telegram_bot = ""
+    if pid:
+        running = running and pid_alive
     if desired == "stopped":
         running = False
     return {
         "desired": desired,
         "running": running,
         "status": str(status.get("state") or ("running" if running else "stopped")),
-        "pid": status.get("pid"),
+        "pid": pid,
+        "pid_alive": pid_alive,
         "updated_at": status.get("updated_at") or status.get("updatedAt") or "",
         "heartbeat_age_seconds": heartbeat_age_seconds,
+        "telegram_bot": heartbeat_telegram_bot,
     }
 
 
@@ -4198,15 +4295,19 @@ def _terminate_tool_r18_daemon_processes() -> None:
         status = _read_small_json_file(_tool_r18_process_status_file())
         pid = str(status.get("pid") or "").strip()
         if pid.isdigit():
-            os.kill(int(pid), signal.SIGTERM)
-            time.sleep(1)
             if os.name == "nt":
                 subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elif hasattr(signal, "SIGKILL"):
+            else:
                 try:
-                    os.kill(int(pid), signal.SIGKILL)
+                    os.kill(int(pid), signal.SIGTERM)
                 except ProcessLookupError:
-                    pass
+                    pid = ""
+                time.sleep(1)
+                if pid and hasattr(signal, "SIGKILL"):
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
     except Exception as exc:
         logger.warning("Failed to stop Tool_R18 daemon by status pid: %s", exc)
     if os.name == "nt":
@@ -4243,6 +4344,7 @@ def _tool_r18_external_supervisor_available() -> bool:
 def _start_tool_r18_daemon_process() -> None:
     if _tool_r18_external_supervisor_available():
         return
+    _sync_tool_r18_telegram_runtime_files()
     snapshot = _tool_r18_process_snapshot()
     if snapshot.get("running"):
         return
@@ -4255,6 +4357,7 @@ def _start_tool_r18_daemon_process() -> None:
         raise RuntimeError(f"找不到 Tool_R18 daemon：{daemon_path}")
     env = os.environ.copy()
     local_env_path = _tool_r18_local_bot_env_path()
+    local_env_keys: set[str] = set()
     if local_env_path.exists():
         try:
             for line in local_env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -4264,8 +4367,9 @@ def _start_tool_r18_daemon_process() -> None:
                 key, value = stripped.split("=", 1)
                 key = key.strip()
                 value = value.strip().strip("\"'")
-                if key and value and not env.get(key):
+                if key and value:
                     env[key] = value
+                    local_env_keys.add(key)
         except Exception as exc:
             logger.warning("Failed to load Tool_R18 local env for daemon: %s", exc)
     env.setdefault("TOOL_R18_RUNTIME_DIR", str(_tool_r18_runtime_dir()))
@@ -4273,12 +4377,16 @@ def _start_tool_r18_daemon_process() -> None:
     env.setdefault("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", str(_tool_r18_bot_token_file()))
     env.setdefault("TOOL_R18_TELEGRAM_BOT_DISABLED_FILE", str(_tool_r18_bot_token_disabled_file()))
     env.setdefault("TOOL_R18_TELEGRAM_BOTS_FILE", str(_tool_r18_bots_file()))
+    env.setdefault("TOOL_R18_TELEGRAM_PRIMARY_BOT_FILE", str(_tool_r18_primary_bot_file()))
     env.setdefault("TOOL_R18_LOCAL_BOT_ENV_PATH", str(local_env_path))
     try:
         with db() as conn:
             runtime_config = _get_runtime_config(conn)
         persona_scope = str(runtime_config.get("telegram_persona_data_scope") or "shared").strip().lower()
         env["TELEGRAM_PERSONA_DATA_SCOPE"] = "isolated" if persona_scope == "isolated" else "shared"
+        primary_allowed_pads = runtime_config.get("telegram_primary_allowed_pad_codes") or []
+        if isinstance(primary_allowed_pads, list):
+            env["TELEGRAM_PRIMARY_ALLOWED_PAD_CODES"] = ",".join(str(item).strip() for item in primary_allowed_pads if str(item).strip())
     except Exception:
         env.setdefault("TELEGRAM_PERSONA_DATA_SCOPE", "shared")
     env.setdefault("TOOL_R18_INTERNAL_WEBAPP_BASE_URL", "http://127.0.0.1:8098")
@@ -4286,7 +4394,8 @@ def _start_tool_r18_daemon_process() -> None:
     env.setdefault("VMOS_MEDIA_STAGING_DIR", str(TOOL_R18_UPLOAD_ROOT))
     env.setdefault("TOOL_R18_PUBLIC_URL", "http://43.167.237.120")
     env.setdefault("VMOS_MEDIA_STAGING_PUBLIC_BASE_URL", "http://43.167.237.120:19198")
-    env.setdefault("TELEGRAM_PROXY_URL", "direct")
+    if "TELEGRAM_PROXY_URL" not in local_env_keys:
+        env["TELEGRAM_PROXY_URL"] = "direct"
     legacy_token = _legacy_tg_bot_token()
     if legacy_token:
         env["TELEGRAM_BOT_TOKEN"] = legacy_token
@@ -4318,9 +4427,12 @@ def _start_tool_r18_daemon_process() -> None:
 
 def _restart_tool_r18_daemon_if_token_available() -> None:
     _write_tool_r18_process_desired("running")
+    _sync_tool_r18_telegram_runtime_files()
     if _tool_r18_external_supervisor_available():
         return
-    _terminate_tool_r18_daemon_processes()
+    snapshot = _tool_r18_process_snapshot()
+    if snapshot.get("running"):
+        return
     if _tg_bot_token():
         _start_tool_r18_daemon_process()
 
@@ -16641,6 +16753,7 @@ class RuntimeConfigPayload(BaseModel):
     telegram_bot_token: str = ""
     telegram_bots: list[Any] = Field(default_factory=list)
     telegram_persona_data_scope: str = "shared"
+    telegram_primary_allowed_pad_codes: list[Any] = Field(default_factory=list)
     comfy_workflow_source: str = "remote"
     remote_comfy_gateway_url: str = ""
     remote_comfy_gateway_token: str = ""
@@ -18710,7 +18823,7 @@ def create_app() -> FastAPI:
                 _write_runtime_config_file(merged)
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return {"ok": True, "runtime_config": merged}
+        return {"ok": True, "runtime_config": merged, "process": _tool_r18_process_snapshot()}
 
     @app.post("/api/internal/tg/prompt_preview")
     def api_internal_tg_prompt_preview(payload: InternalTgPromptPreviewPayload, request: Request):
@@ -20111,10 +20224,13 @@ def create_app() -> FastAPI:
             if new_telegram_bot_token:
                 _write_tool_r18_bot_token_files(new_telegram_bot_token)
             bots_scope_changed = "telegram_persona_data_scope" in explicit_data
+            primary_pads_changed = "telegram_primary_allowed_pad_codes" in explicit_data
+            if primary_pads_changed or bots_scope_changed or new_telegram_bot_token:
+                _write_tool_r18_primary_bot_file(merged)
             if "telegram_bots" in explicit_data or bots_scope_changed:
                 _write_tool_r18_bots_file(merged.get("telegram_bots") or [], merged.get("telegram_persona_data_scope") or "shared")
             _sync_tool_r18_api_config_from_runtime(merged, explicit_data)
-            if new_telegram_bot_token or "telegram_bots" in explicit_data or bots_scope_changed:
+            if new_telegram_bot_token or "telegram_bots" in explicit_data or bots_scope_changed or primary_pads_changed:
                 _restart_tool_r18_daemon_if_token_available()
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -20509,7 +20625,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return {"ok": True, "tg_settings": _load_tg_settings_payload()}
+        return {"ok": True, "tg_settings": _load_tg_settings_payload(), "process": _tool_r18_process_snapshot()}
 
     @app.get("/api/admin/vmos_pads")
     def api_admin_vmos_pads(user: dict[str, Any] = Depends(require_admin)):

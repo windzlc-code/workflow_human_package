@@ -15004,6 +15004,7 @@ function parseManualConfirmCallback(data: string, prevManual?: { archiveId?: str
 
 export type TelegramBotInstanceOptions = {
   name?: string;
+  enableWebhookServer?: boolean;
   personaDataScope?: "shared" | "isolated";
   defaultPadCode?: string;
   defaultPublishPlatform?: TelegramPublishPlatform;
@@ -15183,8 +15184,8 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   const repo = createNodePublishQueueRepository();
   const credentials = resolveVmosCredentials();
 
-  const webhookServer = sharedWebhookServerStarted ? null : startTelegramWebhookServer(bot);
-  sharedWebhookServerStarted = true;
+  const webhookServer = options.enableWebhookServer === false || sharedWebhookServerStarted ? null : startTelegramWebhookServer(bot);
+  if (options.enableWebhookServer !== false) sharedWebhookServerStarted = true;
   void listPersonasCached({ force: true }).catch((error) => {
     console.warn("[telegram][persona_summary_warm_error]", error?.message || error);
   });
@@ -15994,7 +15995,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   bot.on("polling_error", async (error: any) => {
     const code = error?.code || "unknown";
     const message = error?.message || String(error);
-    if (String(code).toUpperCase() === "EFATAL" && (/AggregateError/i.test(message) || /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|ECONNREFUSED/i.test(message))) {
+    if (String(code).toUpperCase() === "EFATAL" && (/AggregateError/i.test(message) || /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|socket hang up|network socket disconnected|secure TLS connection|TLS connection/i.test(message))) {
       console.warn("[telegram][polling_warning]", code, message);
       return;
     }

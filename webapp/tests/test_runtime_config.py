@@ -284,6 +284,60 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(saved["bots"][0]["personaDataScope"], "isolated")
         self.assertEqual(saved["bots"][1]["personaDataScope"], "isolated")
 
+    def test_runtime_config_primary_bot_pads_write_hot_reload_file(self):
+        put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
+        primary_file = Path(self._tmpdir.name) / "bot-runtime" / "telegram_primary.local.json"
+        old_primary_file = os.environ.get("TOOL_R18_TELEGRAM_PRIMARY_BOT_FILE")
+        os.environ["TOOL_R18_TELEGRAM_PRIMARY_BOT_FILE"] = str(primary_file)
+        try:
+            with patch.object(server, "_restart_tool_r18_daemon_if_token_available") as restart:
+                resp = put_runtime_config(
+                    server.RuntimeConfigPayload(
+                        telegram_persona_data_scope="isolated",
+                        telegram_primary_allowed_pad_codes=["APP001", "APP002", "APP001"],
+                    ),
+                    self.admin_user,
+                )
+                restart.assert_called_once()
+        finally:
+            if old_primary_file is None:
+                os.environ.pop("TOOL_R18_TELEGRAM_PRIMARY_BOT_FILE", None)
+            else:
+                os.environ["TOOL_R18_TELEGRAM_PRIMARY_BOT_FILE"] = old_primary_file
+
+        self.assertEqual(resp["runtime_config"]["telegram_primary_allowed_pad_codes"], ["APP001", "APP002"])
+        saved = json.loads(primary_file.read_text(encoding="utf-8"))
+        self.assertEqual(saved["name"], "primary")
+        self.assertEqual(saved["personaDataScope"], "isolated")
+        self.assertEqual(saved["allowedPadCodes"], ["APP001", "APP002"])
+
+    def test_runtime_config_bot_update_does_not_restart_running_daemon(self):
+        put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
+        bots_file = Path(self._tmpdir.name) / "bot-runtime" / "telegram_bots.local.json"
+        old_bots_file = os.environ.get("TOOL_R18_TELEGRAM_BOTS_FILE")
+        os.environ["TOOL_R18_TELEGRAM_BOTS_FILE"] = str(bots_file)
+        try:
+            with (
+                patch.object(server, "_tool_r18_process_snapshot", return_value={"running": True}) as snapshot,
+                patch.object(server, "_terminate_tool_r18_daemon_processes") as terminate,
+                patch.object(server, "_start_tool_r18_daemon_process") as start,
+            ):
+                put_runtime_config(
+                    server.RuntimeConfigPayload(
+                        telegram_bots=[{"name": "main", "token": "111:aaa", "allowedPadCodes": ["APP001"]}],
+                    ),
+                    self.admin_user,
+                )
+        finally:
+            if old_bots_file is None:
+                os.environ.pop("TOOL_R18_TELEGRAM_BOTS_FILE", None)
+            else:
+                os.environ["TOOL_R18_TELEGRAM_BOTS_FILE"] = old_bots_file
+
+        snapshot.assert_called()
+        terminate.assert_not_called()
+        start.assert_not_called()
+
     def test_tg_settings_file_token_not_shadowed_by_multi_bot_token(self):
         token_file = Path(self._tmpdir.name) / "bot-runtime" / "telegram_bot_token.txt"
         token_file.parent.mkdir(parents=True, exist_ok=True)

@@ -11,6 +11,8 @@ import { screenshot as captureVmosScreenshot } from "@/lib/vmos-client";
 import { refreshSentimentSourceMetrics } from "@/lib/sentiment-hot-importer";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import fs from "node:fs";
+import crypto from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 
 const LOG_PREFIX = "[daemon]";
@@ -18,6 +20,7 @@ const TELEGRAM_BOT_DISABLED = process.env.TELEGRAM_BOT_DISABLED === "1";
 const TELEGRAM_TOKEN_FILE = resolveRuntimeFile("telegram_bot_token.txt");
 const TELEGRAM_TOKEN_DISABLED_FILE = process.env.TOOL_R18_TELEGRAM_BOT_DISABLED_FILE || resolveRuntimeFile("telegram_bot_token.disabled");
 const TELEGRAM_BOTS_FILE = process.env.TOOL_R18_TELEGRAM_BOTS_FILE || resolveRuntimeFile("telegram_bots.local.json");
+const TELEGRAM_PRIMARY_BOT_FILE = process.env.TOOL_R18_TELEGRAM_PRIMARY_BOT_FILE || resolveRuntimeFile("telegram_primary.local.json");
 function readLocalTelegramBotToken(): string {
   try {
     if (fs.existsSync(TELEGRAM_TOKEN_DISABLED_FILE)) return "";
@@ -31,6 +34,13 @@ type TelegramBotRuntimeConfig = TelegramBotInstanceOptions & { token: string };
 
 function normalizePersonaDataScope(value: any): "shared" | "isolated" {
   return String(value || "").trim().toLowerCase() === "isolated" ? "isolated" : "shared";
+}
+
+function parseRuntimeList(value: any): string[] {
+  return String(value || "")
+    .split(/[,，\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function normalizeTelegramBotConfig(value: any, fallbackName: string): TelegramBotRuntimeConfig | null {
@@ -59,6 +69,23 @@ function readTelegramBotConfigsFromJson(raw: string): TelegramBotRuntimeConfig[]
     .filter((item: TelegramBotRuntimeConfig | null): item is TelegramBotRuntimeConfig => Boolean(item?.token));
 }
 
+function readLocalPrimaryBotConfig(): Partial<TelegramBotRuntimeConfig> {
+  try {
+    if (!fs.existsSync(TELEGRAM_PRIMARY_BOT_FILE)) return {};
+    const parsed = JSON.parse(fs.readFileSync(TELEGRAM_PRIMARY_BOT_FILE, "utf-8"));
+    return {
+      name: String(parsed?.name || "primary").trim() || "primary",
+      allowedPadCodes: Array.isArray(parsed?.allowedPadCodes)
+        ? parsed.allowedPadCodes.map((code: any) => String(code || "").trim()).filter(Boolean)
+        : parseRuntimeList(parsed?.allowedPadCodes),
+      personaDataScope: normalizePersonaDataScope(parsed?.personaDataScope),
+    };
+  } catch (error: any) {
+    log(`⚠️  Telegram primary Bot 配置读取失败: ${error?.message || String(error)}`);
+    return {};
+  }
+}
+
 function readLocalTelegramBotConfigs(): TelegramBotRuntimeConfig[] {
   if (TELEGRAM_BOT_DISABLED) return [];
 
@@ -72,7 +99,15 @@ function readLocalTelegramBotConfigs(): TelegramBotRuntimeConfig[] {
   };
 
   const legacyToken = (readLocalTelegramBotToken() || process.env.TELEGRAM_BOT_TOKEN || "").trim();
-  if (legacyToken) appendConfig({ token: legacyToken, name: "primary", personaDataScope: normalizePersonaDataScope(process.env.TELEGRAM_PERSONA_DATA_SCOPE) });
+  if (legacyToken) {
+    const primaryConfig = readLocalPrimaryBotConfig();
+    appendConfig({
+      token: legacyToken,
+      name: primaryConfig.name || "primary",
+      allowedPadCodes: primaryConfig.allowedPadCodes || parseRuntimeList(process.env.TELEGRAM_PRIMARY_ALLOWED_PAD_CODES),
+      personaDataScope: primaryConfig.personaDataScope || normalizePersonaDataScope(process.env.TELEGRAM_PERSONA_DATA_SCOPE),
+    });
+  }
 
   const envConfigs = String(process.env.TELEGRAM_BOTS_JSON || "").trim();
   if (envConfigs) {
@@ -100,6 +135,9 @@ function readLocalTelegramBotConfigs(): TelegramBotRuntimeConfig[] {
 let activeTelegramBots: Array<{ config: TelegramBotRuntimeConfig; bot: ReturnType<typeof startTelegramBot> }> = [];
 let activeTelegramBotSignature = "";
 let telegramBotLockClaimed = false;
+let telegramBotConfigApplyInFlight = false;
+let pendingTelegramBotConfigApply: { configs: TelegramBotRuntimeConfig[]; reason: string } | null = null;
+const activeTelegramBotWorkers = new Map<string, { config: TelegramBotRuntimeConfig; signature: string; child: ChildProcess }>();
 const manualInterventionNotifiedTaskIds = new Set<string>();
 
 interface PublishFailureEvidence {
@@ -184,7 +222,7 @@ const TELEGRAM_LOCK_FILE = resolveRuntimeFile("telegram_bot.lock");
 const DAEMON_HEARTBEAT_FILE = resolveRuntimeFile("daemon.heartbeat.json");
 const PROCESS_STATUS_FILE = resolveRuntimeFile("process-status.json");
 const DAEMON_HEARTBEAT_STALE_MS = 90_000;
-const TELEGRAM_BOT_CONFIG_RELOAD_MS = Math.max(Number(process.env.TELEGRAM_BOT_CONFIG_RELOAD_MS || 5000), 2000);
+const TELEGRAM_BOT_CONFIG_RELOAD_MS = Math.max(Number(process.env.TELEGRAM_BOT_CONFIG_RELOAD_MS || 2000), 2000);
 
 function isAllowedScheduledPublishPlatform(platform: unknown): platform is "threads" | "telegram" {
   return platform === "threads" || platform === "telegram";
@@ -309,6 +347,77 @@ function telegramBotConfigSignature(configs: TelegramBotRuntimeConfig[]): string
   })));
 }
 
+function telegramBotWorkerKey(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex").slice(0, 16);
+}
+
+function telegramBotWorkerConfigSignature(config: TelegramBotRuntimeConfig): string {
+  return telegramBotConfigSignature([config]);
+}
+
+function stopTelegramBotWorker(key: string) {
+  const worker = activeTelegramBotWorkers.get(key);
+  if (!worker) return;
+  activeTelegramBotWorkers.delete(key);
+  try {
+    worker.child.kill("SIGTERM");
+  } catch {}
+  writeTelegramBotRuntimeHeartbeat();
+}
+
+function stopAllTelegramBotWorkers() {
+  for (const key of Array.from(activeTelegramBotWorkers.keys())) {
+    stopTelegramBotWorker(key);
+  }
+}
+
+function startTelegramBotWorker(config: TelegramBotRuntimeConfig, reason: string) {
+  const key = telegramBotWorkerKey(config.token);
+  const signature = telegramBotWorkerConfigSignature(config);
+  const existing = activeTelegramBotWorkers.get(key);
+  if (existing?.signature === signature && !existing.child.killed) return;
+  if (existing) stopTelegramBotWorker(key);
+
+  const workerConfig = { ...config, enableWebhookServer: false };
+  const logSafeName = String(config.name || key).replace(/[^\w.-]+/g, "_").slice(0, 80) || key;
+  const stdoutPath = resolveRuntimeFile(`telegram-bot-worker-${logSafeName}-${key}.stdout.log`);
+  const stderrPath = resolveRuntimeFile(`telegram-bot-worker-${logSafeName}-${key}.stderr.log`);
+  fs.mkdirSync(resolveRuntimeFile("."), { recursive: true });
+  const stdout = fs.openSync(stdoutPath, "a");
+  const stderr = fs.openSync(stderrPath, "a");
+  const child = spawn(process.execPath, ["--import", "tsx", "src/telegram-bot-worker.ts"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      TELEGRAM_BOT_WORKER_CONFIG: JSON.stringify(workerConfig),
+    },
+    stdio: ["ignore", stdout, stderr],
+    detached: false,
+  });
+  activeTelegramBotWorkers.set(key, { config, signature, child });
+  child.on("exit", (code, signal) => {
+    const current = activeTelegramBotWorkers.get(key);
+    if (current?.child === child) activeTelegramBotWorkers.delete(key);
+    log(`Telegram Bot worker exited ${config.name || key} code=${code ?? "-"} signal=${signal ?? "-"} reason=${reason}`);
+    writeTelegramBotRuntimeHeartbeat();
+  });
+  log(`Telegram Bot worker started ${config.name || key}${reason ? ` (${reason})` : ""}`);
+  writeTelegramBotRuntimeHeartbeat();
+}
+
+function syncTelegramBotWorkers(configs: TelegramBotRuntimeConfig[], reason: string) {
+  const desired = new Set<string>();
+  for (const config of configs) {
+    const key = telegramBotWorkerKey(config.token);
+    desired.add(key);
+    startTelegramBotWorker(config, reason);
+  }
+  for (const key of Array.from(activeTelegramBotWorkers.keys())) {
+    if (!desired.has(key)) stopTelegramBotWorker(key);
+  }
+  writeTelegramBotRuntimeHeartbeat();
+}
+
 async function stopActiveTelegramBots(): Promise<void> {
   const current = activeTelegramBots;
   activeTelegramBots = [];
@@ -321,10 +430,13 @@ async function stopActiveTelegramBots(): Promise<void> {
 }
 
 async function applyTelegramBotRuntimeConfig(configs: TelegramBotRuntimeConfig[], reason: string): Promise<void> {
-  const signature = telegramBotConfigSignature(configs);
+  const mainConfigs = configs.slice(0, 1);
+  const workerConfigs = configs.slice(1);
+  syncTelegramBotWorkers(workerConfigs, reason);
+  const signature = telegramBotConfigSignature(mainConfigs);
   if (signature === activeTelegramBotSignature) return;
 
-  if (!configs.length) {
+  if (!mainConfigs.length) {
     await stopActiveTelegramBots();
     activeTelegramBotSignature = signature;
     if (telegramBotLockClaimed) {
@@ -332,6 +444,7 @@ async function applyTelegramBotRuntimeConfig(configs: TelegramBotRuntimeConfig[]
       telegramBotLockClaimed = false;
     }
     log("⚠️  未配置 TELEGRAM_BOT_TOKEN，Bot 未启动");
+    writeTelegramBotRuntimeHeartbeat();
     return;
   }
 
@@ -346,7 +459,7 @@ async function applyTelegramBotRuntimeConfig(configs: TelegramBotRuntimeConfig[]
 
   await stopActiveTelegramBots();
   activeTelegramBotSignature = signature;
-  for (const botConfig of configs) {
+  for (const botConfig of mainConfigs) {
     await stopTelegramPolling(botConfig.token).catch(() => undefined);
     const bot = startTelegramBot(botConfig.token, {
       name: botConfig.name,
@@ -362,11 +475,35 @@ async function applyTelegramBotRuntimeConfig(configs: TelegramBotRuntimeConfig[]
     activeTelegramBots.push({ config: botConfig, bot });
     log(`✓ Telegram Bot 已启动: ${botConfig.name || "unnamed"}${botConfig.defaultPadCode ? ` / 默认智能體手機 ${botConfig.defaultPadCode}` : ""}${reason ? `（${reason}）` : ""}`);
   }
+  writeTelegramBotRuntimeHeartbeat();
+}
+
+async function queueTelegramBotRuntimeConfigApply(configs: TelegramBotRuntimeConfig[], reason: string): Promise<void> {
+  pendingTelegramBotConfigApply = { configs, reason };
+  if (telegramBotConfigApplyInFlight) return;
+  telegramBotConfigApplyInFlight = true;
+  try {
+    while (pendingTelegramBotConfigApply) {
+      const next = pendingTelegramBotConfigApply;
+      pendingTelegramBotConfigApply = null;
+      await applyTelegramBotRuntimeConfig(next.configs, next.reason);
+    }
+  } finally {
+    telegramBotConfigApplyInFlight = false;
+  }
 }
 
 function log(msg: string) {
   const ts = new Date().toISOString().slice(0, 19).replace("T", " ");
   console.log(`${ts} ${LOG_PREFIX} ${msg}`);
+}
+
+function activeTelegramBotCount() {
+  return activeTelegramBots.length + activeTelegramBotWorkers.size;
+}
+
+function writeTelegramBotRuntimeHeartbeat() {
+  writeDaemonHeartbeat({ state: "running", telegramBot: activeTelegramBotCount() > 0 ? `configured:${activeTelegramBotCount()}` : "missing-token" });
 }
 
 async function main() {
@@ -545,20 +682,21 @@ async function main() {
 
   // Start Telegram bot and keep token reloadable from runtime files.
   try {
-    await applyTelegramBotRuntimeConfig(readLocalTelegramBotConfigs(), "初始配置");
+    await queueTelegramBotRuntimeConfigApply(readLocalTelegramBotConfigs(), "初始配置");
   } catch (error: any) {
     log(`⚠️  Telegram Bot 启动失败: ${error?.message || String(error)}`);
   }
 
   log("");
   log("后台服务运行中。按 Ctrl+C 退出。");
-  writeDaemonHeartbeat({ state: "running", telegramBot: activeTelegramBots.length > 0 ? `configured:${activeTelegramBots.length}` : "missing-token" });
+  writeDaemonHeartbeat({ state: "running", telegramBot: activeTelegramBotCount() > 0 ? `configured:${activeTelegramBotCount()}` : "missing-token" });
 
   const shutdown = () => {
     log("\n正在关闭...");
     scheduler.stop();
     stopSentimentRuntime();
     void stopActiveTelegramBots().catch(() => undefined);
+    stopAllTelegramBotWorkers();
     releaseTelegramBotLock();
     removeDaemonHeartbeat();
     log("✓ 排程器已停止");
@@ -570,11 +708,11 @@ async function main() {
 
   // Keep alive
   setInterval(() => {
-    writeDaemonHeartbeat({ state: "running", telegramBot: activeTelegramBots.length > 0 ? `configured:${activeTelegramBots.length}` : "missing-token" });
+    writeDaemonHeartbeat({ state: "running", telegramBot: activeTelegramBotCount() > 0 ? `configured:${activeTelegramBotCount()}` : "missing-token" });
   }, 30_000);
 
   setInterval(() => {
-    applyTelegramBotRuntimeConfig(readLocalTelegramBotConfigs(), "配置热更新").catch((error: any) => {
+    queueTelegramBotRuntimeConfigApply(readLocalTelegramBotConfigs(), "配置热更新").catch((error: any) => {
       log(`⚠️  Telegram Bot 配置热更新失败: ${error?.message || String(error)}`);
     });
   }, TELEGRAM_BOT_CONFIG_RELOAD_MS);

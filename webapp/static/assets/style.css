@@ -4413,6 +4413,51 @@ body.page-admin {
   overflow-wrap: anywhere;
 }
 
+.page-admin .tg-bot-pad-manager {
+  display: grid;
+  gap: 7px;
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.page-admin .tg-bot-bound-pads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.page-admin .tg-bot-all-pads {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid #cde9df;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.page-admin .tg-bot-pad-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) auto;
+  gap: 8px;
+  align-items: center;
+  max-width: 520px;
+  min-width: 0;
+}
+
+.page-admin .tg-bot-pad-controls select {
+  width: 100%;
+  min-width: 0;
+}
+
+.page-admin .tg-bot-pad-controls button {
+  white-space: nowrap;
+}
+
 .page-admin .tg-bot-name {
   font-weight: 700;
   color: #0f172a;
@@ -5492,6 +5537,11 @@ body.page-admin {
 
   .page-admin .tg-bot-actions {
     justify-content: flex-start;
+  }
+
+  .page-admin .tg-bot-pad-controls {
+    grid-template-columns: 1fr;
+    max-width: 100%;
   }
 
   .page-admin .tg-manager-tab {
