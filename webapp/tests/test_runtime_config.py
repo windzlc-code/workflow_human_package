@@ -238,6 +238,109 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(token_file.read_text(encoding="utf-8").strip(), "new-token-456")
         self.assertIn("TELEGRAM_BOT_TOKEN=new-token-456", local_env.read_text(encoding="utf-8"))
 
+    def test_runtime_config_multi_bot_save_writes_local_bots_file(self):
+        put_runtime_config = self._route_endpoint("/api/admin/runtime_config", "PUT")
+        bots_file = Path(self._tmpdir.name) / "bot-runtime" / "telegram_bots.local.json"
+        old_bots_file = os.environ.get("TOOL_R18_TELEGRAM_BOTS_FILE")
+        os.environ["TOOL_R18_TELEGRAM_BOTS_FILE"] = str(bots_file)
+        try:
+            with patch.object(server, "_restart_tool_r18_daemon_if_token_available") as restart:
+                resp = put_runtime_config(
+                    server.RuntimeConfigPayload(
+                        telegram_persona_data_scope="isolated",
+                        telegram_bots=[
+                            {
+                                "name": "main",
+                                "token": "111:aaa",
+                                "enabled": False,
+                                "defaultPadCode": "APP001",
+                                "allowedVmosAccountNames": ["account-a"],
+                                "allowedPadCodes": ["APP001", "APP002"],
+                            },
+                            {"name": "backup", "token": "222:bbb"},
+                            {"name": "empty", "token": ""},
+                        ],
+                    ),
+                    self.admin_user,
+                )
+                restart.assert_called_once()
+        finally:
+            if old_bots_file is None:
+                os.environ.pop("TOOL_R18_TELEGRAM_BOTS_FILE", None)
+            else:
+                os.environ["TOOL_R18_TELEGRAM_BOTS_FILE"] = old_bots_file
+
+        self.assertEqual(len(resp["runtime_config"]["telegram_bots"]), 2)
+        self.assertEqual(resp["runtime_config"]["telegram_bots"][0]["name"], "main")
+        self.assertFalse(resp["runtime_config"]["telegram_bots"][0]["enabled"])
+        self.assertEqual(resp["runtime_config"]["telegram_bots"][0]["defaultPadCode"], "APP001")
+        self.assertEqual(resp["runtime_config"]["telegram_bots"][0]["allowedVmosAccountNames"], ["account-a"])
+        self.assertEqual(resp["runtime_config"]["telegram_bots"][0]["allowedPadCodes"], ["APP001", "APP002"])
+        saved = json.loads(bots_file.read_text(encoding="utf-8"))
+        self.assertEqual([item["token"] for item in saved["bots"]], ["111:aaa", "222:bbb"])
+        self.assertFalse(saved["bots"][0]["enabled"])
+        self.assertEqual(saved["bots"][0]["allowedVmosAccountNames"], ["account-a"])
+        self.assertEqual(saved["bots"][0]["allowedPadCodes"], ["APP001", "APP002"])
+        self.assertEqual(saved["bots"][0]["personaDataScope"], "isolated")
+        self.assertEqual(saved["bots"][1]["personaDataScope"], "isolated")
+
+    def test_tg_settings_file_token_not_shadowed_by_multi_bot_token(self):
+        token_file = Path(self._tmpdir.name) / "bot-runtime" / "telegram_bot_token.txt"
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text("8072722933:old-file-token", encoding="utf-8")
+        old_token_file = os.environ.get("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE")
+        os.environ["TOOL_R18_TELEGRAM_BOT_TOKEN_FILE"] = str(token_file)
+        try:
+            server._write_runtime_config_file(
+                {
+                    "telegram_bot_token": "",
+                    "telegram_bots": [
+                        {"name": "Bot 8788972086", "token": "8788972086:new-multi-token", "enabled": True},
+                    ],
+                }
+            )
+
+            payload = server._load_tg_settings_payload()
+        finally:
+            if old_token_file is None:
+                os.environ.pop("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", None)
+            else:
+                os.environ["TOOL_R18_TELEGRAM_BOT_TOKEN_FILE"] = old_token_file
+
+        self.assertEqual(server._runtime_config_tg_bot_token(), "")
+        self.assertEqual(payload["bot_token_source"], "file")
+        self.assertIn("807272", payload["bot_token_masked"])
+        self.assertNotIn("878897", payload["bot_token_masked"])
+
+    def test_tg_legacy_bot_token_toggle_persists_disabled_marker(self):
+        toggle = self._route_endpoint("/api/admin/tg_legacy_bot_token/toggle", "POST")
+        token_file = Path(self._tmpdir.name) / "bot-runtime" / "telegram_bot_token.txt"
+        disabled_file = Path(self._tmpdir.name) / "bot-runtime" / "telegram_bot_token.disabled"
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text("8072722933:old-file-token", encoding="utf-8")
+        old_token_file = os.environ.get("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE")
+        old_disabled_file = os.environ.get("TOOL_R18_TELEGRAM_BOT_DISABLED_FILE")
+        os.environ["TOOL_R18_TELEGRAM_BOT_TOKEN_FILE"] = str(token_file)
+        os.environ["TOOL_R18_TELEGRAM_BOT_DISABLED_FILE"] = str(disabled_file)
+        try:
+            with patch.object(server, "_restart_tool_r18_daemon_if_token_available") as restart:
+                resp = toggle(server.TelegramLegacyBotTogglePayload(enabled=False), self.admin_user)
+                restart.assert_called_once()
+            payload = resp["tg_settings"]
+        finally:
+            if old_token_file is None:
+                os.environ.pop("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", None)
+            else:
+                os.environ["TOOL_R18_TELEGRAM_BOT_TOKEN_FILE"] = old_token_file
+            if old_disabled_file is None:
+                os.environ.pop("TOOL_R18_TELEGRAM_BOT_DISABLED_FILE", None)
+            else:
+                os.environ["TOOL_R18_TELEGRAM_BOT_DISABLED_FILE"] = old_disabled_file
+
+        self.assertTrue(disabled_file.exists())
+        self.assertFalse(payload["bot_token_enabled"])
+        self.assertEqual(payload["bot_token_source"], "file")
+
     def test_runtime_defaults_prefer_local_file_and_keep_explicit_app_id(self):
         with db_module.db() as conn:
             db_module.set_admin_config(

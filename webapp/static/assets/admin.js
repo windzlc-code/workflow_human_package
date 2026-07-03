@@ -122,6 +122,434 @@ function stringifyModelList(items) {
     .join(", ");
 }
 
+function parseTelegramBotsInput(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      const parts = line.split("|").map((part) => part.trim());
+      if (parts.length === 1) return { name: `bot-${index + 1}`, token: parts[0] };
+      const item = { name: parts[0] || `bot-${index + 1}`, token: parts[1] || "" };
+      if (parts[2]) item.defaultPadCode = parts[2];
+      if (parts[3]) item.allowedVmosAccountNames = splitTelegramConfigList(parts[3]);
+      if (parts[4]) item.allowedPadCodes = splitTelegramConfigList(parts[4]);
+      if (parts[5]) item.enabled = !["0", "false", "停用", "disabled"].includes(parts[5].toLowerCase());
+      return item;
+    })
+    .filter((item) => item.token);
+}
+
+function splitTelegramConfigList(value) {
+  return String(value || "")
+    .split(/[\n,，;；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function uniqueTelegramConfigList(items) {
+  const seen = new Set();
+  const result = [];
+  (Array.isArray(items) ? items : splitTelegramConfigList(items)).forEach((item) => {
+    const value = String(item || "").trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    result.push(value);
+  });
+  return result;
+}
+
+function deriveTelegramBotName(token, fallbackIndex = 1) {
+  const raw = String(token || "").trim();
+  const tokenId = raw.includes(":") ? raw.split(":")[0].trim() : "";
+  if (tokenId && /^\d{5,}$/.test(tokenId)) return `Bot ${tokenId}`;
+  const maskedPrefix = raw.match(/^(\d{5,})/);
+  if (maskedPrefix) return `Bot ${maskedPrefix[1]}`;
+  return `Bot ${fallbackIndex}`;
+}
+
+function formatTelegramBotsInput(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => {
+      const name = String(item?.name || `bot-${index + 1}`).trim();
+      const token = String(item?.token || "").trim();
+      const pad = String(item?.defaultPadCode || "").trim();
+      const accounts = uniqueTelegramConfigList(item?.allowedVmosAccountNames || []).join(",");
+      const pads = uniqueTelegramConfigList(item?.allowedPadCodes || []).join(",");
+      const enabled = item?.enabled === false ? "0" : "1";
+      if (!token) return name ? `${name}|` : "";
+      return `${name}|${token}${pad || accounts || pads || enabled === "0" ? `|${pad}|${accounts}|${pads}|${enabled}` : ""}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function normalizeTelegramBotItems(items) {
+  const seen = new Set();
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => {
+      const token = String(item?.token || "").trim();
+      const name = String(item?.name || deriveTelegramBotName(token, index + 1)).trim();
+      const defaultPadCode = String(item?.defaultPadCode || "").trim();
+      const allowedVmosAccountNames = uniqueTelegramConfigList(item?.allowedVmosAccountNames || []);
+      const allowedPadCodes = uniqueTelegramConfigList(item?.allowedPadCodes || []);
+      const next = { name, token, enabled: item?.enabled !== false };
+      if (defaultPadCode) next.defaultPadCode = defaultPadCode;
+      if (allowedVmosAccountNames.length) next.allowedVmosAccountNames = allowedVmosAccountNames;
+      if (allowedPadCodes.length) next.allowedPadCodes = allowedPadCodes;
+      return next;
+    })
+    .filter((item) => {
+      if (!item.token || seen.has(item.token)) return false;
+      seen.add(item.token);
+      return true;
+    });
+}
+
+function maskTelegramToken(token) {
+  const raw = String(token || "").trim();
+  if (!raw) return "-";
+  if (raw.length <= 12) return `${raw.slice(0, 3)}••••${raw.slice(-2)}`;
+  return `${raw.slice(0, 7)}••••••••${raw.slice(-6)}`;
+}
+
+function syncTelegramBotsHiddenInput() {
+  const node = el("rtTelegramBots");
+  if (!node) return;
+  node.value = formatTelegramBotsInput(adminState.telegramBots || []);
+}
+
+function collectTelegramBotKnownValues() {
+  const pads = new Set();
+  const accounts = new Set();
+  (Array.isArray(adminState.vmosPads) ? adminState.vmosPads : []).forEach((pad) => {
+    if (pad?.padCode) pads.add(String(pad.padCode).trim());
+    if (pad?.vmosAccountName) accounts.add(String(pad.vmosAccountName).trim());
+  });
+  normalizeTelegramBotItems(adminState.telegramBots || []).forEach((item) => {
+    if (item.defaultPadCode) pads.add(item.defaultPadCode);
+    uniqueTelegramConfigList(item.allowedPadCodes || []).forEach((value) => pads.add(value));
+    uniqueTelegramConfigList(item.allowedVmosAccountNames || []).forEach((value) => accounts.add(value));
+  });
+  return {
+    pads: Array.from(pads).sort(),
+    accounts: Array.from(accounts).sort(),
+  };
+}
+
+function buildPadOptionLabel(pad) {
+  const code = String(pad?.padCode || "").trim();
+  const name = String(pad?.padName || "").trim();
+  return `${code}${name && name !== code ? ` / ${name}` : ""}`;
+}
+
+function renderVmosPadSelectOptions() {
+  const pads = Array.isArray(adminState.vmosPads) ? adminState.vmosPads : [];
+  const select = el("tgBotDraftPadSelect");
+  if (select) {
+    select.innerHTML = [
+      `<option value="">选择云机 ID / 云机名称</option>`,
+      ...pads.map((pad) => `<option value="${escapeHtml(String(pad.padCode || ""))}">${escapeHtml(buildPadOptionLabel(pad))}</option>`),
+    ].join("");
+  }
+  renderTelegramBotDatalists();
+}
+
+function renderTelegramBotDatalists() {
+  const values = collectTelegramBotKnownValues();
+  const padList = el("tgBotPadOptions");
+  if (padList) {
+    padList.innerHTML = values.pads.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  }
+  const accountList = el("tgBotAccountOptions");
+  if (accountList) {
+    accountList.innerHTML = values.accounts.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  }
+}
+
+function renderSelectedBotPadChips() {
+  const wrap = el("tgBotSelectedPads");
+  if (!wrap) return;
+  const selected = uniqueTelegramConfigList(adminState.tgBotDraftAllowedPads || []);
+  const hidden = el("tgBotDraftAllowedPads");
+  if (hidden) hidden.value = selected.join(",");
+  if (!selected.length) {
+    wrap.innerHTML = `<span class="small">默认全部云机；添加后该 Bot 只显示所选云机。</span>`;
+    return;
+  }
+  wrap.innerHTML = selected.map((padCode) => {
+    const pad = (adminState.vmosPads || []).find((item) => String(item?.padCode || "") === padCode);
+    const label = pad ? buildPadOptionLabel(pad) : padCode;
+    return `
+      <span class="tg-selected-pad-chip" title="${escapeHtml(label)}">
+        ${escapeHtml(label)}
+        <button type="button" data-act="tg_bot_pad_remove" data-id="${escapeHtml(padCode)}" aria-label="移除 ${escapeHtml(padCode)}">×</button>
+      </span>
+    `;
+  }).join("");
+}
+
+function addSelectedBotPad(padCode) {
+  const code = String(padCode || "").trim();
+  if (!code) return;
+  adminState.tgBotDraftAllowedPads = uniqueTelegramConfigList([...(adminState.tgBotDraftAllowedPads || []), code]);
+  renderSelectedBotPadChips();
+}
+
+async function loadVmosPads() {
+  try {
+    const data = await api("/api/admin/vmos_pads");
+    adminState.vmosPads = Array.isArray(data.items) ? data.items : [];
+    renderVmosPadSelectOptions();
+    renderSelectedBotPadChips();
+    return adminState.vmosPads;
+  } catch (err) {
+    adminState.vmosPads = [];
+    renderVmosPadSelectOptions();
+    const select = el("tgBotDraftPadSelect");
+    if (select) select.innerHTML = `<option value="">云机列表读取失败，可先手动保存已有配置</option>`;
+    setMsg("tgSettingsMsg", getErrorMessage(err), false);
+    return [];
+  }
+}
+
+function renderTelegramBotList() {
+  const list = el("tgBotList");
+  if (!list) return;
+  const rows = normalizeTelegramBotItems(adminState.telegramBots || []);
+  const tgSettings = adminState.tgSettings || {};
+  const hasSharedToken = Boolean(tgSettings.bot_token_configured);
+  const sharedEnabled = tgSettings.bot_token_enabled !== false;
+  const sharedMaskedToken = String(tgSettings.bot_token_masked || "已配置").trim();
+  const sharedBotName = deriveTelegramBotName(sharedMaskedToken.replace(/•+/g, ":"), rows.length + 1);
+  adminState.telegramBots = rows;
+  syncTelegramBotsHiddenInput();
+  renderTelegramBotDatalists();
+  const totalCount = rows.length + (hasSharedToken ? 1 : 0);
+  setText("tgBotConfigCount", totalCount);
+  const toggle = el("tgBotListToggle");
+  if (toggle) toggle.textContent = adminState.tgBotListCollapsed ? "展开" : "收起";
+  const summary = el("tgBotListSummary");
+  if (summary) {
+    summary.hidden = !adminState.tgBotListCollapsed;
+    summary.innerHTML = buildTelegramBotSummaryHtml();
+  }
+  list.hidden = Boolean(adminState.tgBotListCollapsed);
+  renderTrustedUserRows();
+  if (!rows.length && !hasSharedToken) {
+    list.innerHTML = `<div class="small tg-bot-empty">暂无 Bot Token；添加后保存运行配置即可生效。</div>`;
+    return;
+  }
+  const sharedRow = hasSharedToken ? `
+    <div class="tg-bot-row${sharedEnabled ? "" : " is-disabled"}">
+      <div class="tg-bot-meta">
+        <div class="tg-bot-name">${escapeHtml(sharedBotName)} ${sharedEnabled ? '<span class="pill success">启用</span>' : '<span class="pill failed">停用</span>'}</div>
+        <div class="small">Token：${escapeHtml(sharedMaskedToken)}</div>
+        <div class="small">绑定云机：全部云机</div>
+      </div>
+      <div class="tg-bot-actions">
+        <button class="ghost" type="button" data-act="tg_shared_token_edit" data-id="shared">编辑</button>
+        <button class="ghost" type="button" data-act="tg_shared_token_toggle" data-id="shared" data-enabled="${sharedEnabled ? 1 : 0}">${sharedEnabled ? "停用" : "启用"}</button>
+        <button class="ghost" type="button" data-act="tg_shared_token_delete" data-id="shared">删除</button>
+      </div>
+    </div>
+  ` : "";
+  const botRows = rows.map((item, index) => `
+    <div class="tg-bot-row${item.enabled === false ? " is-disabled" : ""}">
+      <div class="tg-bot-meta">
+        <div class="tg-bot-name">${escapeHtml(item.name || `bot-${index + 1}`)} ${item.enabled === false ? '<span class="pill failed">停用</span>' : '<span class="pill success">启用</span>'}</div>
+        <div class="small">Token：${escapeHtml(maskTelegramToken(item.token))}</div>
+        <div class="small">绑定云机：${escapeHtml(formatBoundPadCodesForDisplay(item.allowedPadCodes || []))}</div>
+      </div>
+      <div class="tg-bot-actions">
+        <button class="ghost" type="button" data-act="tg_bot_edit" data-id="${index}" data-index="${index}">编辑</button>
+        <button class="ghost" type="button" data-act="tg_bot_toggle" data-id="${index}" data-index="${index}" data-enabled="${item.enabled === false ? 0 : 1}">${item.enabled === false ? "启用" : "停用"}</button>
+        <button class="ghost" type="button" data-act="tg_bot_delete" data-id="${index}" data-index="${index}">删除</button>
+      </div>
+    </div>
+  `).join("");
+  list.innerHTML = sharedRow + botRows;
+}
+
+function getAvailableTelegramBotLabels() {
+  const labels = [];
+  const tgSettings = adminState.tgSettings || {};
+  if (tgSettings.bot_token_configured && tgSettings.bot_token_enabled !== false) {
+    const token = String(tgSettings.bot_token_masked || "已配置").trim();
+    labels.push({
+      name: deriveTelegramBotName(token.replace(/•+/g, ":"), 1),
+      token,
+      enabled: true,
+    });
+  }
+  normalizeTelegramBotItems(adminState.telegramBots || []).forEach((item) => {
+    if (item.enabled === false) return;
+    labels.push({
+      name: item.name || deriveTelegramBotName(item.token, labels.length + 1),
+      token: maskTelegramToken(item.token),
+      enabled: true,
+    });
+  });
+  return labels;
+}
+
+function buildTelegramBotSummaryHtml() {
+  const labels = getAvailableTelegramBotLabels();
+  if (!labels.length) return `<span class="small">暂无启用 Bot Token</span>`;
+  return labels.map((item) => `
+    <span class="tg-bot-token-chip" title="${escapeHtml(`${item.name}：${item.token}`)}">
+      ${escapeHtml(item.name)} · ${escapeHtml(item.token)}
+    </span>
+  `).join("");
+}
+
+function formatBoundPadCodesForDisplay(codes) {
+  const values = uniqueTelegramConfigList(codes || []);
+  if (!values.length) return "全部云机";
+  return values.map((padCode) => {
+    const pad = (adminState.vmosPads || []).find((item) => String(item?.padCode || "") === padCode);
+    return pad ? buildPadOptionLabel(pad) : padCode;
+  }).join("、");
+}
+
+function addTelegramBotDraft() {
+  const tokenNode = el("tgBotDraftToken");
+  const token = String(tokenNode?.value || "").trim();
+  if (!token) {
+    throw new Error("请填写 Telegram Bot Token");
+  }
+  const next = normalizeTelegramBotItems(adminState.telegramBots || []);
+  const existingIndex = next.findIndex((item) => item.token === token);
+  const name = existingIndex >= 0
+    ? String(next[existingIndex].name || deriveTelegramBotName(token, existingIndex + 1)).trim()
+    : deriveTelegramBotName(token, next.length + 1);
+  const allowedPadCodes = uniqueTelegramConfigList(adminState.tgBotDraftAllowedPads || []);
+  const enabled = existingIndex >= 0 ? next[existingIndex].enabled !== false : true;
+  const item = { name, token, enabled };
+  if (allowedPadCodes.length) item.allowedPadCodes = allowedPadCodes;
+  if (existingIndex >= 0) next[existingIndex] = item;
+  else next.push(item);
+  adminState.telegramBots = next;
+  adminState.tgBotListCollapsed = false;
+  if (tokenNode) tokenNode.value = "";
+  adminState.tgBotDraftAllowedPads = [];
+  renderSelectedBotPadChips();
+  renderTelegramBotList();
+}
+
+function editTelegramBotDraft(index) {
+  const item = normalizeTelegramBotItems(adminState.telegramBots || [])[index];
+  if (!item) return;
+  if (el("tgBotDraftToken")) el("tgBotDraftToken").value = item.token || "";
+  adminState.tgBotDraftAllowedPads = uniqueTelegramConfigList(item.allowedPadCodes || []);
+  renderSelectedBotPadChips();
+  setTgManagerTab("bots");
+  el("tgBotDraftToken")?.focus();
+}
+
+function setTgManagerTab(tab) {
+  const next = tab === "trusted" ? "trusted" : "bots";
+  document.querySelectorAll("[data-tg-manager-tab]").forEach((node) => {
+    const active = String(node.dataset.tgManagerTab || "") === next;
+    node.classList.toggle("is-active", active);
+    node.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-tg-manager-panel]").forEach((node) => {
+    const active = String(node.dataset.tgManagerPanel || "") === next;
+    node.classList.toggle("is-active", active);
+    node.hidden = !active;
+  });
+}
+
+function ensureTgManagementTabs() {
+  if (el("tgManagerTabs")) return;
+  const tableShell = document.querySelector(".tg-member-shell");
+  if (!tableShell || !tableShell.parentNode) return;
+  const wrapper = document.createElement("div");
+  wrapper.id = "tgManagerTabs";
+  wrapper.className = "tg-manager-tabs";
+  wrapper.innerHTML = `
+    <div class="tg-manager-tabbar" role="tablist" aria-label="TG Bot 管理">
+      <button class="tg-manager-tab is-active" type="button" role="tab" aria-selected="true" data-tg-manager-tab="bots">Bot 列表 <span id="tgBotConfigCount">0</span></button>
+      <button class="tg-manager-tab" type="button" role="tab" aria-selected="false" data-tg-manager-tab="trusted">信任用户 <span id="tgTrustedUserCountMirror">0</span></button>
+    </div>
+    <div class="tg-manager-panel is-active" data-tg-manager-panel="bots">
+      <div class="tg-manager-panel-head">
+        <div class="tg-manager-panel-title">Bot Token 列表</div>
+        <button class="ghost compact" type="button" id="tgBotListToggle" data-act="tg_bot_list_toggle" data-id="bot-list">收起</button>
+      </div>
+      <div class="tg-bot-summary" id="tgBotListSummary" hidden></div>
+      <div class="tg-bot-list" id="tgBotList"></div>
+    </div>
+    <div class="tg-manager-panel" data-tg-manager-panel="trusted" hidden>
+      <div class="tg-manager-panel-title">信任用户列表</div>
+    </div>
+  `;
+  tableShell.parentNode.insertBefore(wrapper, tableShell);
+  const trustedPanel = wrapper.querySelector('[data-tg-manager-panel="trusted"]');
+  trustedPanel.appendChild(tableShell);
+  setTgManagerTab("bots");
+}
+
+function ensureTelegramBotBuilder() {
+  const raw = el("rtTelegramBots");
+  ensureTgManagementTabs();
+  if (!raw || el("tgBotBuilder")) {
+    renderTelegramBotDatalists();
+    return;
+  }
+  raw.style.display = "none";
+  const label = raw.previousElementSibling;
+  if (label && String(label.tagName || "").toLowerCase() === "label") label.style.display = "none";
+  const oldSource = el("tgBotsSource");
+  if (oldSource) oldSource.style.display = "none";
+  const legacyToken = el("rtTelegramBotToken");
+  if (legacyToken) {
+    legacyToken.style.display = "none";
+    const legacyLabel = legacyToken.previousElementSibling;
+    if (legacyLabel && String(legacyLabel.tagName || "").toLowerCase() === "label") legacyLabel.style.display = "none";
+  }
+  const legacySource = el("tgBotTokenSource");
+  if (legacySource) legacySource.style.display = "none";
+  const builder = document.createElement("div");
+  builder.id = "tgBotBuilder";
+  builder.className = "tg-bot-builder";
+  builder.innerHTML = `
+    <div class="tg-bot-builder-head">
+      <label>Bot Token 运行账号</label>
+      <div class="small">填写 Token 后自动识别名称；不选择云机时默认绑定全部云机。</div>
+    </div>
+    <div class="tg-persona-scope-row">
+      <div>
+        <strong>人设数据</strong>
+        <span class="small">共享：所有 Bot 共用同一批人设；独立：按 Bot 隔离。</span>
+      </div>
+      <select id="tgPersonaDataScope">
+        <option value="shared">共享</option>
+        <option value="isolated">独立</option>
+      </select>
+    </div>
+    <div class="tg-bot-form">
+      <input id="tgBotDraftToken" type="password" placeholder="Telegram Bot Token">
+      <div class="tg-pad-picker">
+        <select id="tgBotDraftPadSelect"></select>
+        <button class="ghost" type="button" data-act="tg_bot_pad_add" data-id="selected">添加云机</button>
+      </div>
+      <input id="tgBotDraftAllowedPads" type="hidden">
+      <div class="tg-selected-pad-list" id="tgBotSelectedPads"></div>
+      <button id="btnAddTgBotToken" class="ghost" type="button">添加 / 更新</button>
+      <datalist id="tgBotPadOptions"></datalist>
+      <datalist id="tgBotAccountOptions"></datalist>
+    </div>
+  `;
+  raw.parentNode.insertBefore(builder, raw);
+  ensureTgManagementTabs();
+  if (el("tgPersonaDataScope")) el("tgPersonaDataScope").value = adminState.telegramPersonaDataScope === "isolated" ? "isolated" : "shared";
+  renderVmosPadSelectOptions();
+  renderSelectedBotPadChips();
+  renderTelegramBotList();
+}
+
 const RUNTIME_MODEL_DRAFT_KEY = "runtime_model_candidates_draft_v1";
 const NEW_PERSONA_RUNNINGHUB_API_PRESETS = {
   "2046514150500524033": {
@@ -1078,6 +1506,12 @@ const adminState = {
   localComfyWorkflowMappings: {},
   localComfyWorkflows: [],
   tgTrustedUsers: [],
+  telegramBots: [],
+  telegramPersonaDataScope: "shared",
+  tgSettings: {},
+  tgBotListCollapsed: false,
+  tgBotDraftAllowedPads: [],
+  vmosPads: [],
   sentimentCookieProfiles: [],
 };
 const REMOTE_COMFY_TASKS = [
@@ -2196,6 +2630,8 @@ function runtimeFormToPayload() {
   const imagePriorityModels = stringifyModelList(adminState.imagePriorityModels);
   return {
     telegram_bot_token: el("rtTelegramBotToken") ? el("rtTelegramBotToken").value.trim() : "",
+    telegram_bots: normalizeTelegramBotItems(adminState.telegramBots || parseTelegramBotsInput(el("rtTelegramBots")?.value || "")),
+    telegram_persona_data_scope: el("tgPersonaDataScope") ? el("tgPersonaDataScope").value : (adminState.telegramPersonaDataScope || "shared"),
     comfy_workflow_source: el("rtComfyWorkflowSource").value || "remote",
     remote_comfy_gateway_url: el("rtRemoteComfyGatewayUrl").value.trim(),
     remote_comfy_gateway_token: el("rtRemoteComfyGatewayToken").value.trim(),
@@ -2256,6 +2692,12 @@ function fillRuntimeForm(data) {
   const v = data || {};
   const hasRuntimeField = (key) => Object.prototype.hasOwnProperty.call(v, key);
   if (el("rtTelegramBotToken")) el("rtTelegramBotToken").value = "";
+  adminState.telegramPersonaDataScope = v.telegram_persona_data_scope === "isolated" ? "isolated" : "shared";
+  adminState.telegramBots = normalizeTelegramBotItems(v.telegram_bots || []);
+  if (el("rtTelegramBots")) el("rtTelegramBots").value = formatTelegramBotsInput(adminState.telegramBots);
+  ensureTelegramBotBuilder();
+  if (el("tgPersonaDataScope")) el("tgPersonaDataScope").value = adminState.telegramPersonaDataScope;
+  renderTelegramBotList();
   el("rtRemoteComfyGatewayUrl").value = v.remote_comfy_gateway_url || "";
   el("rtRemoteComfyGatewayToken").value = v.remote_comfy_gateway_token || "";
   el("rtComfyGpuQueueEnabled").checked = Boolean(v.comfy_gpu_queue_enabled);
@@ -2705,7 +3147,9 @@ async function savePricing() {
 }
 
 function renderTgSettings(data) {
+  ensureTgManagementTabs();
   const settings = data || {};
+  adminState.tgSettings = settings;
   const rows = Array.isArray(settings.trusted_users) ? settings.trusted_users : [];
   adminState.tgTrustedUsers = rows;
   setText("tgBotTokenStatus", settings.bot_token_configured ? (settings.bot_token_masked || "已配置") : "未配置");
@@ -2714,19 +3158,48 @@ function renderTgSettings(data) {
     ? `当前来源：${sourceMap[settings.bot_token_source] || settings.bot_token_source || "已配置"}；输入新 Token 并保存运行配置后会立即生效。`
     : "当前未配置；输入 Bot Token 并保存运行配置后会立即生效。");
   setText("tgTrustedUserCount", rows.length);
+  setText("tgTrustedUserCountMirror", rows.length);
   setText("tgBotDbPath", settings.db_path || "-");
   const envIds = Array.isArray(settings.allowed_chat_ids_env) ? settings.allowed_chat_ids_env : [];
   setText("tgBotAllowedIds", envIds.length ? envIds.join(", ") : "-");
+  renderTelegramBotList();
+  renderTrustedUserRows();
+}
 
+function ensureTrustedUserBotColumn() {
+  const table = document.querySelector(".tg-member-table");
+  if (!table || table.dataset.botColumnReady === "1") return;
+  const headRow = table.querySelector("thead tr");
+  if (headRow) {
+    const th = document.createElement("th");
+    th.textContent = "可用 Bot Token";
+    const actionTh = headRow.lastElementChild;
+    headRow.insertBefore(th, actionTh || null);
+  }
+  table.dataset.botColumnReady = "1";
+}
+
+function buildTrustedUserBotCellHtml() {
+  const labels = getAvailableTelegramBotLabels();
+  if (!labels.length) return `<span class="small">暂无启用 Token</span>`;
+  return `<div class="tg-user-token-list">${labels.map((item) => `
+    <span class="tg-bot-token-chip" title="${escapeHtml(`${item.name}：${item.token}`)}">${escapeHtml(item.name)} · ${escapeHtml(item.token)}</span>
+  `).join("")}</div>`;
+}
+
+function renderTrustedUserRows() {
+  ensureTrustedUserBotColumn();
   const body = el("tgTrustedUserBody");
   if (!body) return;
+  const rows = Array.isArray(adminState.tgTrustedUsers) ? adminState.tgTrustedUsers : [];
   body.innerHTML = "";
   if (!rows.length) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="6" class="small">暂无信任用户 ID</td>`;
+    tr.innerHTML = `<td colspan="7" class="small">暂无信任用户 ID</td>`;
     body.appendChild(tr);
     return;
   }
+  const botCellHtml = buildTrustedUserBotCellHtml();
   rows.forEach((item) => {
     const chatId = String(item.chat_id || "");
     const tr = document.createElement("tr");
@@ -2736,6 +3209,7 @@ function renderTgSettings(data) {
       <td>${item.enabled ? '<span class="pill success">启用</span>' : '<span class="pill failed">停用</span>'}</td>
       <td>${item.notify_busy ? "开启" : "关闭"}</td>
       <td>${item.notify_available ? "开启" : "关闭"}</td>
+      <td>${botCellHtml}</td>
       <td>
         <button class="ghost" data-act="tg_toggle" data-id="${escapeHtml(chatId)}" data-enabled="${item.enabled ? 1 : 0}">${item.enabled ? "停用" : "启用"}</button>
         <button class="ghost" data-act="tg_delete" data-id="${escapeHtml(chatId)}">删除</button>
@@ -2748,6 +3222,7 @@ function renderTgSettings(data) {
 async function loadTgSettings() {
   const data = await api("/api/admin/tg_settings");
   renderTgSettings(data);
+  await loadVmosPads();
   return data;
 }
 
@@ -3457,6 +3932,13 @@ function bindActions() {
   document.addEventListener("change", (e) => {
     const target = e.target;
     if (!(target instanceof HTMLElement)) return;
+    if (target.id === "tgPersonaDataScope") {
+      adminState.telegramPersonaDataScope = target.value === "isolated" ? "isolated" : "shared";
+      saveRuntime()
+        .then(() => setMsg("runtimeMsg", `人设数据已切换为${adminState.telegramPersonaDataScope === "isolated" ? "独立" : "共享"}，Bot 配置已实时刷新。`, true))
+        .catch((err) => setMsg("runtimeMsg", formatRuntimeConfigError("保存人设数据模式", err), false));
+      return;
+    }
     const chainKey = target.dataset ? String(target.dataset.chainType || "") : "";
     if (chainKey && WORKFLOW_CHAIN_CONTAINER_IDS[chainKey]) {
       syncWorkflowChainFromDom(chainKey);
@@ -3480,6 +3962,20 @@ function bindActions() {
     const sensitiveToggle = target.closest(".sensitive-toggle-btn");
     if (sensitiveToggle instanceof HTMLElement) {
       toggleSensitiveInput(sensitiveToggle);
+      return;
+    }
+    if (target.id === "btnAddTgBotToken") {
+      try {
+        addTelegramBotDraft();
+        setMsg("runtimeMsg", "Bot Token 已加入列表，保存运行配置后生效。", true);
+      } catch (err) {
+        setMsg("runtimeMsg", getErrorMessage(err), false);
+      }
+      return;
+    }
+    const tgTab = target.closest("[data-tg-manager-tab]");
+    if (tgTab instanceof HTMLElement) {
+      setTgManagerTab(String(tgTab.dataset.tgManagerTab || "bots"));
       return;
     }
     const btn = target;
@@ -3569,6 +4065,74 @@ function bindActions() {
       await api(`/api/admin/users/${id}`, { method: "DELETE" });
       await loadUsers();
       await loadTasks();
+      return;
+    }
+    if (act === "tg_shared_token_edit") {
+      const token = prompt("请输入新的 Telegram Bot Token；确认后点击页面底部“保存运行配置”生效。");
+      if (token && token.trim()) {
+        if (el("rtTelegramBotToken")) el("rtTelegramBotToken").value = token.trim();
+        setMsg("runtimeMsg", "新的 Bot Token 已暂存，点击保存运行配置后生效。", true);
+      }
+      return;
+    }
+    if (act === "tg_shared_token_toggle") {
+      const enabled = String(btn.dataset.enabled || "0") === "1";
+      await api("/api/admin/tg_legacy_bot_token/toggle", {
+        method: "POST",
+        body: JSON.stringify({ enabled: !enabled }),
+      });
+      await loadTgSettings();
+      await loadRuntime();
+      setMsg("runtimeMsg", enabled ? "Bot Token 已停用。" : "Bot Token 已启用。", true);
+      return;
+    }
+    if (act === "tg_shared_token_delete") {
+      if (!confirm("确认删除该 Bot Token 吗？已配置的其他 Bot Token 不受影响。")) return;
+      await api("/api/quick_setup/telegram_bot_token", { method: "DELETE" });
+      if (el("rtTelegramBotToken")) el("rtTelegramBotToken").value = "";
+      await loadTgSettings();
+      await loadRuntime();
+      setMsg("runtimeMsg", "Bot Token 已删除。", true);
+      return;
+    }
+    if (act === "tg_bot_list_toggle") {
+      adminState.tgBotListCollapsed = !adminState.tgBotListCollapsed;
+      renderTelegramBotList();
+      return;
+    }
+    if (act === "tg_bot_pad_add") {
+      const select = el("tgBotDraftPadSelect");
+      addSelectedBotPad(select?.value || "");
+      if (select) select.value = "";
+      return;
+    }
+    if (act === "tg_bot_pad_remove") {
+      adminState.tgBotDraftAllowedPads = uniqueTelegramConfigList(adminState.tgBotDraftAllowedPads || []).filter((code) => code !== id);
+      renderSelectedBotPadChips();
+      return;
+    }
+    if (act === "tg_bot_delete") {
+      const idx = Number(btn.dataset.index || -1);
+      if (idx >= 0 && Array.isArray(adminState.telegramBots)) {
+        adminState.telegramBots.splice(idx, 1);
+        renderTelegramBotList();
+        setMsg("runtimeMsg", "Bot Token 已从列表移除，保存运行配置后生效。", true);
+      }
+      return;
+    }
+    if (act === "tg_bot_toggle") {
+      const idx = Number(btn.dataset.index || -1);
+      if (idx >= 0 && Array.isArray(adminState.telegramBots) && adminState.telegramBots[idx]) {
+        const current = normalizeTelegramBotItems(adminState.telegramBots)[idx];
+        adminState.telegramBots[idx] = { ...current, enabled: current.enabled === false };
+        renderTelegramBotList();
+        setMsg("runtimeMsg", `${current.enabled === false ? "Bot Token 已启用" : "Bot Token 已停用"}，保存运行配置后生效。`, true);
+      }
+      return;
+    }
+    if (act === "tg_bot_edit") {
+      const idx = Number(btn.dataset.index || -1);
+      if (idx >= 0) editTelegramBotDraft(idx);
       return;
     }
     if (act === "tg_toggle") {

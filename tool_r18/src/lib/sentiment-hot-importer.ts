@@ -1877,10 +1877,14 @@ function sortSentimentHotCandidatePool(candidates: SentimentHotCandidate[], keyw
   return candidates
     .filter((candidate) => isUsefulHotCandidate(candidate) && hasMinimumSentimentHotContentLength(candidate))
     .sort((a, b) => {
-      const aLow = isObviouslyLowQualitySentimentHotCandidate(a, keywords) ? 1 : 0;
-      const bLow = isObviouslyLowQualitySentimentHotCandidate(b, keywords) ? 1 : 0;
-      if (aLow !== bLow) return aLow - bLow;
-      return Number(b.hotScore || 0) - Number(a.hotScore || 0);
+      const heatDelta = Number(b.hotScore || 0) - Number(a.hotScore || 0);
+      if (heatDelta !== 0) return heatDelta;
+      if (keywords.length > 0) {
+        const aLow = isObviouslyLowQualitySentimentHotCandidate(a, keywords) ? 1 : 0;
+        const bLow = isObviouslyLowQualitySentimentHotCandidate(b, keywords) ? 1 : 0;
+        if (aLow !== bLow) return aLow - bLow;
+      }
+      return sentimentHotHanCount(b.content) - sentimentHotHanCount(a.content);
     })
     .slice(0, limit);
 }
@@ -1895,6 +1899,8 @@ export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHo
     .filter((candidate) => isUsefulHotCandidate(candidate) && hasMinimumSentimentHotContentLength(candidate))
     .filter((candidate) => keywords.length === 0 || candidateMatchesCurrentKeywords(candidate, keywords) || isArchiveScopedFallbackCandidate(candidate))
     .sort((a, b) => {
+      const heatDelta = Number(b.hotScore || 0) - Number(a.hotScore || 0);
+      if (heatDelta !== 0) return heatDelta;
       const aShown = shownIds.has(a.id) ? 1 : 0;
       const bShown = shownIds.has(b.id) ? 1 : 0;
       if (aShown !== bShown) return aShown - bShown;
@@ -1908,8 +1914,6 @@ export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHo
         const bLow = isObviouslyLowQualitySentimentHotCandidate(b, keywords) ? 1 : 0;
         if (aLow !== bLow) return aLow - bLow;
       }
-      const heatDelta = Number(b.hotScore || 0) - Number(a.hotScore || 0);
-      if (heatDelta !== 0) return heatDelta;
       return sentimentHotHanCount(b.content) - sentimentHotHanCount(a.content);
     });
   for (const candidate of sorted) {

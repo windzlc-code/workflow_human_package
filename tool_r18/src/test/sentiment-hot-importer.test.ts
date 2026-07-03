@@ -323,7 +323,7 @@ describe("sentiment hot importer", () => {
     expect(candidates.map((candidate) => candidate.hotScore)).toEqual([30000, 18000, 5000]);
   });
 
-  it("keeps already shown hot candidates as low-priority refresh backfill", () => {
+  it("keeps already shown hot candidates ordered by heat in display", () => {
     const archiveId = `test-refresh-exclude-shown-${Date.now()}`;
     const base = {
       platform: "threads",
@@ -354,13 +354,14 @@ describe("sentiment hot importer", () => {
       excludeShown: true,
     });
 
-    expect(candidates.map((candidate) => candidate.id)).toEqual(["fresh-hot", "shown-hot"]);
+    expect(candidates.map((candidate) => candidate.id)).toEqual(["shown-hot", "fresh-hot"]);
+    expect(candidates.map((candidate) => candidate.hotScore)).toEqual([90000, 30000]);
     const limitedCandidates = finalizeSentimentHotCandidatesForDisplay([shown, fresh] as any, 1, {
       archiveId,
       keywords: ["海外信貸", "銀行貸款", "信用卡"],
       excludeShown: true,
     });
-    expect(limitedCandidates.map((candidate) => candidate.id)).toEqual(["fresh-hot"]);
+    expect(limitedCandidates.map((candidate) => candidate.id)).toEqual(["shown-hot"]);
   });
 
   it("does not display hot candidates shorter than 60 Chinese characters", () => {

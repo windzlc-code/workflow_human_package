@@ -97,6 +97,9 @@ DEFAULT_PRICING: dict[str, Any] = {
 
 DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "telegram_bot_token": "",
+    "telegram_bot_enabled": True,
+    "telegram_bots": [],
+    "telegram_persona_data_scope": "shared",
     "remote_comfy_gateway_url": "",
     "remote_comfy_gateway_token": "",
     "remote_comfy_workflow_mappings": {"face_swap": "__converted__/flux_人物换脸工作流.api.json"},
@@ -702,6 +705,7 @@ def _load_tg_settings_payload() -> dict[str, Any]:
     file_token = _read_secret_text_file(str(_tool_r18_bot_token_file()))
     env_token = str(env_values.get("TG_BOT_TOKEN") or "").strip()
     token = str(runtime_token or file_token or env_token or "").strip()
+    legacy_enabled = _legacy_tg_bot_enabled()
     members: list[dict[str, Any]] = []
     conn = _connect_tg_workbench_db()
     try:
@@ -720,11 +724,271 @@ def _load_tg_settings_payload() -> dict[str, Any]:
         "db_exists": TG_WORKBENCH_DB_PATH.exists(),
         "bot_token_configured": bool(token),
         "bot_token_masked": _mask_secret(token) if token else "",
+        "bot_token_enabled": legacy_enabled,
         "bot_token_source": "runtime" if runtime_token else ("file" if file_token else ("env" if env_token else "")),
         "bot_token_file": str(_tool_r18_bot_token_file()),
         "allowed_chat_ids_env": _tg_seed_chat_ids(env_values),
         "trusted_users": members,
     }
+
+
+def _normalize_vmos_credential(value: Any, fallback_name: str = "") -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    ak = str(value.get("ak") or value.get("accessKeyId") or value.get("accessKeyID") or "").strip()
+    sk = str(value.get("sk") or value.get("secretAccessKey") or value.get("secretKey") or "").strip()
+    if not ak or not sk:
+        return None
+    name = str(value.get("name") or value.get("label") or fallback_name or "").strip()
+    return {"name": name or "vmos", "ak": ak, "sk": sk}
+
+
+def _load_tool_r18_api_config() -> dict[str, Any]:
+    for path in (_tool_r18_api_config_file(), RUNTIME_CONFIG_PATH):
+        try:
+            if path.exists() and path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8", errors="ignore") or "{}")
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            continue
+    return {}
+
+
+def _load_vmos_credentials_for_admin() -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    env_ak = str(os.getenv("VMOS_AK") or os.getenv("AUTO_TWEET_VMOS_AK") or "").strip()
+    env_sk = str(os.getenv("VMOS_SK") or os.getenv("AUTO_TWEET_VMOS_SK") or "").strip()
+    if env_ak and env_sk:
+        result.append({"name": str(os.getenv("VMOS_ACCOUNT_NAME") or "env"), "ak": env_ak, "sk": env_sk})
+    config = _load_tool_r18_api_config()
+    primary = _normalize_vmos_credential({"name": "runtime-primary", "ak": config.get("vmosAk"), "sk": config.get("vmosSk")})
+    if primary:
+        result.append(primary)
+    if isinstance(config.get("vmosAccounts"), list):
+        for index, item in enumerate(config.get("vmosAccounts") or [], start=1):
+            credential = _normalize_vmos_credential(item, f"vmos-{index}")
+            if credential:
+                result.append(credential)
+    try:
+        local_path = _tool_r18_project_dir() / "electron" / "vmos-credentials.local.json"
+        if local_path.exists():
+            parsed = json.loads(local_path.read_text(encoding="utf-8", errors="ignore") or "{}")
+            local_primary = _normalize_vmos_credential(parsed, "local-primary")
+            if local_primary:
+                result.append(local_primary)
+            if isinstance(parsed.get("accounts"), list):
+                for index, item in enumerate(parsed.get("accounts") or [], start=1):
+                    credential = _normalize_vmos_credential(item, f"local-{index}")
+                    if credential:
+                        result.append(credential)
+    except Exception:
+        pass
+    seen: set[str] = set()
+    deduped: list[dict[str, str]] = []
+    for item in result:
+        key = f"{item.get('ak')}\n{item.get('sk')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _vmos_utc_timestamp() -> str:
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+
+def _vmos_auth_headers(ak: str, sk: str, body: str, x_date: str) -> dict[str, str]:
+    api_host = "api.vmoscloud.com"
+    service = "armcloud-paas"
+    content_type = "application/json;charset=UTF-8"
+    signed_headers = "content-type;host;x-content-sha256;x-date"
+    x_content_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    short_date = x_date[:8]
+    canonical = "\n".join([
+        f"host:{api_host}",
+        f"x-date:{x_date}",
+        f"content-type:{content_type}",
+        f"signedHeaders:{signed_headers}",
+        f"x-content-sha256:{x_content_sha256}",
+    ])
+    canonical_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    scope = f"{short_date}/{service}/request"
+    string_to_sign = f"HMAC-SHA256\n{x_date}\n{scope}\n{canonical_hash}"
+    k1 = hmac.new(sk.encode("utf-8"), short_date.encode("utf-8"), hashlib.sha256).digest()
+    k2 = hmac.new(k1, service.encode("utf-8"), hashlib.sha256).digest()
+    signing_key = hmac.new(k2, b"request", hashlib.sha256).digest()
+    signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {
+        "Content-Type": content_type,
+        "x-date": x_date,
+        "x-host": api_host,
+        "x-content-sha256": x_content_sha256,
+        "authorization": f"HMAC-SHA256 Credential={ak}, SignedHeaders={signed_headers}, Signature={signature}",
+    }
+
+
+def _vmos_request_infos(credential: dict[str, str], page_num: int) -> dict[str, Any]:
+    body = json.dumps({"pageNum": page_num, "pageSize": 100}, ensure_ascii=False, separators=(",", ":"))
+    x_date = _vmos_utc_timestamp()
+    resp = requests.post(
+        "https://api.vmoscloud.com/vcpcloud/api/padApi/infos",
+        data=body.encode("utf-8"),
+        headers=_vmos_auth_headers(credential["ak"], credential["sk"], body, x_date),
+        timeout=30,
+    )
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"VMOS 返回非 JSON 响应 HTTP {resp.status_code}") from exc
+    if resp.status_code >= 400:
+        raise RuntimeError(f"VMOS HTTP {resp.status_code}")
+    if payload.get("code") not in (0, 200):
+        raise RuntimeError(f"VMOS API 错误 [{payload.get('code')}]: {payload.get('msg') or payload.get('message') or 'unknown'}")
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _vmos_request_pad_info(credential: dict[str, str], pad_code: str) -> dict[str, Any]:
+    body = json.dumps({"padCode": pad_code}, ensure_ascii=False, separators=(",", ":"))
+    x_date = _vmos_utc_timestamp()
+    resp = requests.post(
+        "https://api.vmoscloud.com/vcpcloud/api/padApi/padInfo",
+        data=body.encode("utf-8"),
+        headers=_vmos_auth_headers(credential["ak"], credential["sk"], body, x_date),
+        timeout=20,
+    )
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"VMOS padInfo returned non-JSON HTTP {resp.status_code}") from exc
+    if resp.status_code >= 400:
+        raise RuntimeError(f"VMOS padInfo HTTP {resp.status_code}")
+    if payload.get("code") not in (0, 200):
+        raise RuntimeError(f"VMOS padInfo error [{payload.get('code')}]: {payload.get('msg') or payload.get('message') or 'unknown'}")
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _vmos_first_text(value: Any, keys: tuple[str, ...]) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for key in keys:
+        text = str(value.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _vmos_pad_name_from_payload(pad: dict[str, Any]) -> str:
+    return _vmos_first_text(
+        pad,
+        (
+            "padName",
+            "name",
+            "deviceName",
+            "displayName",
+            "nickName",
+            "nickname",
+            "alias",
+            "remark",
+            "remarks",
+            "memo",
+        ),
+    )
+
+
+def _load_vmos_pad_name_cache() -> dict[str, str]:
+    result: dict[str, str] = {}
+    for path in (
+        _tool_r18_runtime_dir() / "pad-name-map.json",
+        _tool_r18_runtime_dir() / "pad-list-cache.json",
+    ):
+        try:
+            if not path.exists():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore") or "{}")
+            if path.name == "pad-name-map.json" and isinstance(data, dict):
+                for code, name in data.items():
+                    code_text = str(code or "").strip()
+                    name_text = str(name or "").strip()
+                    if code_text and name_text and name_text != code_text:
+                        result[code_text] = name_text
+            elif path.name == "pad-list-cache.json" and isinstance(data, dict) and isinstance(data.get("pads"), list):
+                for item in data.get("pads") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    code_text = str(item.get("padCode") or "").strip()
+                    name_text = _vmos_pad_name_from_payload(item)
+                    if code_text and name_text and name_text != code_text:
+                        result.setdefault(code_text, name_text)
+        except Exception:
+            continue
+    return result
+
+
+def _vmos_fallback_pad_name(pad_code: str, pad_grade: Any = None) -> str:
+    grade = str(pad_grade or "").strip()
+    suffix = re.sub(r"^(AC|AP|AT)", "", pad_code).strip()[-4:]
+    if grade and suffix:
+        return f"{grade}-{suffix}"
+    return pad_code
+
+
+def _load_admin_vmos_pads() -> list[dict[str, Any]]:
+    credentials = _load_vmos_credentials_for_admin()
+    if not credentials:
+        return []
+    by_pad: dict[str, dict[str, Any]] = {}
+    pad_credentials: dict[str, dict[str, str]] = {}
+    name_cache = _load_vmos_pad_name_cache()
+    errors: list[str] = []
+    for credential in credentials:
+        try:
+            page_num = 1
+            total_page = 1
+            while page_num <= total_page:
+                data = _vmos_request_infos(credential, page_num)
+                for pad in data.get("pageData") or []:
+                    if not isinstance(pad, dict):
+                        continue
+                    pad_code = str(pad.get("padCode") or "").strip()
+                    if not pad_code or pad_code in by_pad:
+                        continue
+                    pad_name = _vmos_pad_name_from_payload(pad) or name_cache.get(pad_code, "")
+                    by_pad[pad_code] = {
+                        "padCode": pad_code,
+                        "padName": pad_name,
+                        "padStatus": pad.get("padStatus"),
+                        "padGrade": pad.get("padGrade"),
+                        "padType": pad.get("padType"),
+                        "screenLayoutCode": pad.get("screenLayoutCode"),
+                        "vmosAccountName": credential.get("name") or "",
+                    }
+                    pad_credentials[pad_code] = credential
+                total_page = int(data.get("totalPage") or page_num)
+                page_num += 1
+        except Exception as exc:
+            errors.append(f"{credential.get('name') or 'vmos'}: {exc}")
+    if not by_pad and errors:
+        raise RuntimeError("；".join(errors))
+    for pad_code, item in by_pad.items():
+        current_name = str(item.get("padName") or "").strip()
+        if current_name and current_name != pad_code:
+            continue
+        credential = pad_credentials.get(pad_code)
+        if credential:
+            try:
+                detail = _vmos_request_pad_info(credential, pad_code)
+                detail_name = _vmos_pad_name_from_payload(detail)
+                if detail_name and detail_name != pad_code:
+                    item["padName"] = detail_name
+                    continue
+            except Exception:
+                pass
+        item["padName"] = _vmos_fallback_pad_name(pad_code, item.get("padGrade"))
+    return sorted(by_pad.values(), key=lambda item: (str(item.get("vmosAccountName") or ""), str(item.get("padCode") or "")))
 
 
 def _sanitize_payload(value: Any) -> Any:
@@ -2273,6 +2537,14 @@ def _tool_r18_bot_token_file() -> Path:
     return Path(os.getenv("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", str(_tool_r18_runtime_dir() / "telegram_bot_token.txt"))).resolve()
 
 
+def _tool_r18_bot_token_disabled_file() -> Path:
+    return Path(os.getenv("TOOL_R18_TELEGRAM_BOT_DISABLED_FILE", str(_tool_r18_runtime_dir() / "telegram_bot_token.disabled"))).resolve()
+
+
+def _tool_r18_bots_file() -> Path:
+    return Path(os.getenv("TOOL_R18_TELEGRAM_BOTS_FILE", str(_tool_r18_runtime_dir() / "telegram_bots.local.json"))).resolve()
+
+
 def _tool_r18_api_config_file() -> Path:
     return Path(os.getenv("AUTO_TWEET_API_CONFIG_PATH", str(_tool_r18_runtime_dir() / "api_config.json"))).resolve()
 
@@ -2306,12 +2578,53 @@ def _runtime_config_tg_bot_token() -> str:
         return ""
 
 
-def _tg_bot_token() -> str:
+def _legacy_tg_bot_enabled() -> bool:
+    try:
+        disabled_file = _tool_r18_bot_token_disabled_file()
+        if disabled_file.exists():
+            return False
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+        return _to_bool(runtime.get("telegram_bot_enabled"), True)
+    except Exception:
+        return not _tool_r18_bot_token_disabled_file().exists()
+
+
+def _legacy_tg_bot_token() -> str:
+    if not _legacy_tg_bot_enabled():
+        return ""
     return str(
         _runtime_config_tg_bot_token()
         or _read_secret_text_file(str(_tool_r18_bot_token_file()))
         or os.getenv("TG_BOT_TOKEN")
         or _read_dotenv_values().get("TG_BOT_TOKEN")
+        or ""
+    ).strip()
+
+
+def _runtime_config_first_telegram_bot_token() -> str:
+    try:
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+        bots = runtime.get("telegram_bots")
+        if isinstance(bots, list):
+            for bot in bots:
+                if not isinstance(bot, dict):
+                    continue
+                if bot.get("enabled") is False:
+                    continue
+                token = str(bot.get("token") or bot.get("botToken") or "").strip()
+                if token:
+                    return token
+        return ""
+    except Exception:
+        return ""
+
+
+def _tg_bot_token() -> str:
+    return str(
+        _legacy_tg_bot_token()
+        or _runtime_config_first_telegram_bot_token()
         or ""
     ).strip()
 
@@ -3302,6 +3615,10 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         if k in current:
             merged[k] = current.get(k)
     merged["telegram_bot_token"] = str(merged.get("telegram_bot_token") or "").strip()
+    merged["telegram_bot_enabled"] = _to_bool(merged.get("telegram_bot_enabled"), True)
+    scope = str(merged.get("telegram_persona_data_scope") or "shared").strip().lower()
+    merged["telegram_persona_data_scope"] = "isolated" if scope == "isolated" else "shared"
+    merged["telegram_bots"] = _normalize_telegram_bots_config(merged.get("telegram_bots"))
     merged["create_video_app_id"] = str(merged.get("create_video_app_id") or merged.get("video_app_id") or "").strip()
     merged["video_app_id"] = str(merged.get("video_app_id") or merged.get("create_video_app_id") or "").strip()
     merged["create_audio_app_id"] = str(merged.get("create_audio_app_id") or "").strip()
@@ -3503,10 +3820,63 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
+def _normalize_telegram_bots_config(value: Any) -> list[dict[str, Any]]:
+    raw_items = value
+    if isinstance(raw_items, dict) and isinstance(raw_items.get("bots"), list):
+        raw_items = raw_items.get("bots")
+    if not isinstance(raw_items, list):
+        return []
+    result: list[dict[str, Any]] = []
+    seen_tokens: set[str] = set()
+    for index, item in enumerate(raw_items, start=1):
+        if isinstance(item, str):
+            token = item.strip()
+            source: dict[str, Any] = {}
+        elif isinstance(item, dict):
+            source = item
+            token = str(source.get("token") or source.get("botToken") or "").strip()
+        else:
+            continue
+        if not token or token in seen_tokens:
+            continue
+        seen_tokens.add(token)
+        name = str(source.get("name") or f"bot-{len(result) + 1}").strip() or f"bot-{len(result) + 1}"
+        config: dict[str, Any] = {"name": name, "token": token, "enabled": _to_bool(source.get("enabled"), True)}
+        for key in (
+            "defaultPadCode",
+            "defaultPublishPlatform",
+            "defaultWarmupPlatform",
+        ):
+            value_text = str(source.get(key) or "").strip()
+            if value_text:
+                config[key] = value_text
+        for key in (
+            "allowedPublishPlatforms",
+            "allowedWarmupPlatforms",
+            "allowedVmosAccountNames",
+            "allowedPadCodes",
+        ):
+            raw_list = source.get(key)
+            if isinstance(raw_list, str):
+                items = [part.strip() for part in re.split(r"[,，\n]+", raw_list) if part.strip()]
+            elif isinstance(raw_list, list):
+                items = [str(part).strip() for part in raw_list if str(part).strip()]
+            else:
+                items = []
+            if items:
+                config[key] = items
+        scope = str(source.get("personaDataScope") or source.get("persona_data_scope") or "").strip().lower()
+        if scope in {"shared", "isolated"}:
+            config["personaDataScope"] = scope
+        result.append(config)
+    return result
+
+
 def _write_tool_r18_bot_token_files(token: str) -> None:
     value = str(token or "").strip()
     if not value:
         return
+    _set_tool_r18_bot_token_enabled(True)
     token_file = _tool_r18_bot_token_file()
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(value + "\n", encoding="utf-8")
@@ -3531,6 +3901,29 @@ def _write_tool_r18_bot_token_files(token: str) -> None:
         logger.warning("Failed to update local bot env token file: %s", exc)
 
 
+def _set_tool_r18_bot_token_enabled(enabled: bool) -> None:
+    marker = _tool_r18_bot_token_disabled_file()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    if enabled:
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning("Failed to remove Telegram bot disabled marker: %s", exc)
+        return
+    marker.write_text(json.dumps({"disabled": True, "updated_at": time.time()}, ensure_ascii=False), encoding="utf-8")
+
+
+def _write_tool_r18_bots_file(bots: Any, persona_data_scope: str = "shared") -> None:
+    normalized = _normalize_telegram_bots_config(bots)
+    scope = "isolated" if str(persona_data_scope or "").strip().lower() == "isolated" else "shared"
+    normalized = [{**item, "personaDataScope": scope} for item in normalized]
+    bots_file = _tool_r18_bots_file()
+    bots_file.parent.mkdir(parents=True, exist_ok=True)
+    bots_file.write_text(json.dumps({"bots": normalized}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def _clear_tool_r18_bot_token_files() -> None:
     token_file = _tool_r18_bot_token_file()
     try:
@@ -3546,6 +3939,12 @@ def _clear_tool_r18_bot_token_files() -> None:
             local_env.write_text("\n".join(next_lines).rstrip() + ("\n" if next_lines else ""), encoding="utf-8")
     except Exception as exc:
         logger.warning("Failed to clear local bot env token: %s", exc)
+    try:
+        marker = _tool_r18_bot_token_disabled_file()
+        if marker.exists():
+            marker.unlink()
+    except Exception as exc:
+        logger.warning("Failed to clear Telegram bot disabled marker: %s", exc)
 
 
 def _read_tool_r18_api_config() -> dict[str, Any]:
@@ -3801,10 +4200,13 @@ def _terminate_tool_r18_daemon_processes() -> None:
         if pid.isdigit():
             os.kill(int(pid), signal.SIGTERM)
             time.sleep(1)
-            try:
-                os.kill(int(pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif hasattr(signal, "SIGKILL"):
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
     except Exception as exc:
         logger.warning("Failed to stop Tool_R18 daemon by status pid: %s", exc)
     if os.name == "nt":
@@ -3869,14 +4271,27 @@ def _start_tool_r18_daemon_process() -> None:
     env.setdefault("TOOL_R18_RUNTIME_DIR", str(_tool_r18_runtime_dir()))
     env.setdefault("AUTO_TWEET_RUNTIME_DIR", str(_tool_r18_runtime_dir()))
     env.setdefault("TOOL_R18_TELEGRAM_BOT_TOKEN_FILE", str(_tool_r18_bot_token_file()))
+    env.setdefault("TOOL_R18_TELEGRAM_BOT_DISABLED_FILE", str(_tool_r18_bot_token_disabled_file()))
+    env.setdefault("TOOL_R18_TELEGRAM_BOTS_FILE", str(_tool_r18_bots_file()))
     env.setdefault("TOOL_R18_LOCAL_BOT_ENV_PATH", str(local_env_path))
+    try:
+        with db() as conn:
+            runtime_config = _get_runtime_config(conn)
+        persona_scope = str(runtime_config.get("telegram_persona_data_scope") or "shared").strip().lower()
+        env["TELEGRAM_PERSONA_DATA_SCOPE"] = "isolated" if persona_scope == "isolated" else "shared"
+    except Exception:
+        env.setdefault("TELEGRAM_PERSONA_DATA_SCOPE", "shared")
     env.setdefault("TOOL_R18_INTERNAL_WEBAPP_BASE_URL", "http://127.0.0.1:8098")
     env.setdefault("TOOL_R18_UPLOAD_HOST_DIR", str(TOOL_R18_UPLOAD_ROOT))
     env.setdefault("VMOS_MEDIA_STAGING_DIR", str(TOOL_R18_UPLOAD_ROOT))
     env.setdefault("TOOL_R18_PUBLIC_URL", "http://43.167.237.120")
     env.setdefault("VMOS_MEDIA_STAGING_PUBLIC_BASE_URL", "http://43.167.237.120:19198")
     env.setdefault("TELEGRAM_PROXY_URL", "direct")
-    env["TELEGRAM_BOT_TOKEN"] = token
+    legacy_token = _legacy_tg_bot_token()
+    if legacy_token:
+        env["TELEGRAM_BOT_TOKEN"] = legacy_token
+    else:
+        env.pop("TELEGRAM_BOT_TOKEN", None)
     _terminate_tool_r18_daemon_processes()
     stdout_path = _tool_r18_runtime_dir() / "daemon.stdout.log"
     stderr_path = _tool_r18_runtime_dir() / "daemon.stderr.log"
@@ -3899,6 +4314,15 @@ def _start_tool_r18_daemon_process() -> None:
         _tool_r18_process_status_file(),
         {"state": "running", "pid": str(process.pid), "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")},
     )
+
+
+def _restart_tool_r18_daemon_if_token_available() -> None:
+    _write_tool_r18_process_desired("running")
+    if _tool_r18_external_supervisor_available():
+        return
+    _terminate_tool_r18_daemon_processes()
+    if _tg_bot_token():
+        _start_tool_r18_daemon_process()
 
 
 _TOOL_R18_STOP_RESPONDER_STARTED = False
@@ -16215,6 +16639,8 @@ class PricingPayload(BaseModel):
 
 class RuntimeConfigPayload(BaseModel):
     telegram_bot_token: str = ""
+    telegram_bots: list[Any] = Field(default_factory=list)
+    telegram_persona_data_scope: str = "shared"
     comfy_workflow_source: str = "remote"
     remote_comfy_gateway_url: str = ""
     remote_comfy_gateway_token: str = ""
@@ -16352,6 +16778,10 @@ class TgTrustedUserPayload(BaseModel):
 
 
 class TgTrustedUserTogglePayload(BaseModel):
+    enabled: bool
+
+
+class TelegramLegacyBotTogglePayload(BaseModel):
     enabled: bool
 
 
@@ -17883,6 +18313,8 @@ def create_app() -> FastAPI:
             with _RUNTIME_CONFIG_LOCK:
                 _write_runtime_config_file(merged)
             _clear_tool_r18_bot_token_files()
+            if _runtime_config_first_telegram_bot_token():
+                _restart_tool_r18_daemon_if_token_available()
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except Exception as exc:
@@ -19643,6 +20075,7 @@ def create_app() -> FastAPI:
         new_telegram_bot_token = str(explicit_data.get("telegram_bot_token") or "").strip()
         if "telegram_bot_token" in explicit_data and not new_telegram_bot_token:
             explicit_data.pop("telegram_bot_token", None)
+        old_process_snapshot = _tool_r18_process_snapshot()
         merged = dict(DEFAULT_RUNTIME_CONFIG)
         if isinstance(current_runtime, dict):
             merged.update(current_runtime)
@@ -19677,7 +20110,12 @@ def create_app() -> FastAPI:
                 _write_runtime_config_file(merged)
             if new_telegram_bot_token:
                 _write_tool_r18_bot_token_files(new_telegram_bot_token)
+            bots_scope_changed = "telegram_persona_data_scope" in explicit_data
+            if "telegram_bots" in explicit_data or bots_scope_changed:
+                _write_tool_r18_bots_file(merged.get("telegram_bots") or [], merged.get("telegram_persona_data_scope") or "shared")
             _sync_tool_r18_api_config_from_runtime(merged, explicit_data)
+            if new_telegram_bot_token or "telegram_bots" in explicit_data or bots_scope_changed:
+                _restart_tool_r18_daemon_if_token_available()
         except RuntimeConfigFileError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"ok": True, "runtime_config": merged}
@@ -20048,6 +20486,38 @@ def create_app() -> FastAPI:
     @app.get("/api/admin/tg_settings")
     def api_admin_tg_settings(user: dict[str, Any] = Depends(require_admin)):
         return _load_tg_settings_payload()
+
+    @app.post("/api/admin/tg_legacy_bot_token/toggle")
+    def api_admin_toggle_tg_legacy_bot_token(payload: TelegramLegacyBotTogglePayload, user: dict[str, Any] = Depends(require_admin)):
+        enabled = bool(payload.enabled)
+        try:
+            with db() as conn:
+                current_runtime = _get_runtime_config(conn)
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        merged = dict(DEFAULT_RUNTIME_CONFIG)
+        if isinstance(current_runtime, dict):
+            merged.update(current_runtime)
+        merged["telegram_bot_enabled"] = enabled
+        try:
+            merged = _normalize_runtime_config(merged)
+            with _RUNTIME_CONFIG_LOCK:
+                _write_runtime_config_file(merged)
+            _set_tool_r18_bot_token_enabled(enabled)
+            _restart_tool_r18_daemon_if_token_available()
+        except RuntimeConfigFileError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"ok": True, "tg_settings": _load_tg_settings_payload()}
+
+    @app.get("/api/admin/vmos_pads")
+    def api_admin_vmos_pads(user: dict[str, Any] = Depends(require_admin)):
+        try:
+            pads = _load_admin_vmos_pads()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"读取 VMOS 云机列表失败：{exc}") from exc
+        return {"items": pads, "count": len(pads)}
 
     @app.post("/api/admin/tg_trusted_users")
     def api_admin_upsert_tg_trusted_user(payload: TgTrustedUserPayload, user: dict[str, Any] = Depends(require_admin)):

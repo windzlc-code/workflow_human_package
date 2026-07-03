@@ -16,9 +16,11 @@ import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 const LOG_PREFIX = "[daemon]";
 const TELEGRAM_BOT_DISABLED = process.env.TELEGRAM_BOT_DISABLED === "1";
 const TELEGRAM_TOKEN_FILE = resolveRuntimeFile("telegram_bot_token.txt");
-const TELEGRAM_BOTS_FILE = resolveRuntimeFile("telegram_bots.local.json");
+const TELEGRAM_TOKEN_DISABLED_FILE = process.env.TOOL_R18_TELEGRAM_BOT_DISABLED_FILE || resolveRuntimeFile("telegram_bot_token.disabled");
+const TELEGRAM_BOTS_FILE = process.env.TOOL_R18_TELEGRAM_BOTS_FILE || resolveRuntimeFile("telegram_bots.local.json");
 function readLocalTelegramBotToken(): string {
   try {
+    if (fs.existsSync(TELEGRAM_TOKEN_DISABLED_FILE)) return "";
     if (!fs.existsSync(TELEGRAM_TOKEN_FILE)) return "";
     return fs.readFileSync(TELEGRAM_TOKEN_FILE, "utf-8").trim();
   } catch {
@@ -27,9 +29,14 @@ function readLocalTelegramBotToken(): string {
 }
 type TelegramBotRuntimeConfig = TelegramBotInstanceOptions & { token: string };
 
+function normalizePersonaDataScope(value: any): "shared" | "isolated" {
+  return String(value || "").trim().toLowerCase() === "isolated" ? "isolated" : "shared";
+}
+
 function normalizeTelegramBotConfig(value: any, fallbackName: string): TelegramBotRuntimeConfig | null {
   const token = String(value?.token || value?.botToken || "").trim();
   if (!token) return null;
+  if (value?.enabled === false) return null;
   return {
     token,
     name: String(value?.name || fallbackName).trim() || fallbackName,
@@ -40,6 +47,7 @@ function normalizeTelegramBotConfig(value: any, fallbackName: string): TelegramB
     allowedWarmupPlatforms: Array.isArray(value?.allowedWarmupPlatforms) ? value.allowedWarmupPlatforms : undefined,
     allowedVmosAccountNames: Array.isArray(value?.allowedVmosAccountNames) ? value.allowedVmosAccountNames : undefined,
     allowedPadCodes: Array.isArray(value?.allowedPadCodes) ? value.allowedPadCodes : undefined,
+    personaDataScope: normalizePersonaDataScope(value?.personaDataScope || process.env.TELEGRAM_PERSONA_DATA_SCOPE),
   };
 }
 
@@ -54,11 +62,24 @@ function readTelegramBotConfigsFromJson(raw: string): TelegramBotRuntimeConfig[]
 function readLocalTelegramBotConfigs(): TelegramBotRuntimeConfig[] {
   if (TELEGRAM_BOT_DISABLED) return [];
 
+  const configs: TelegramBotRuntimeConfig[] = [];
+  const seenTokens = new Set<string>();
+  const appendConfig = (config: TelegramBotRuntimeConfig | null) => {
+    const token = String(config?.token || "").trim();
+    if (!config || !token || seenTokens.has(token)) return;
+    seenTokens.add(token);
+    configs.push(config);
+  };
+
+  const legacyToken = (readLocalTelegramBotToken() || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+  if (legacyToken) appendConfig({ token: legacyToken, name: "primary", personaDataScope: normalizePersonaDataScope(process.env.TELEGRAM_PERSONA_DATA_SCOPE) });
+
   const envConfigs = String(process.env.TELEGRAM_BOTS_JSON || "").trim();
   if (envConfigs) {
     try {
       const parsed = readTelegramBotConfigsFromJson(envConfigs);
-      if (parsed.length) return parsed;
+      parsed.forEach(appendConfig);
+      return configs;
     } catch (error: any) {
       log(`⚠️  TELEGRAM_BOTS_JSON 解析失败: ${error?.message || String(error)}`);
     }
@@ -67,14 +88,13 @@ function readLocalTelegramBotConfigs(): TelegramBotRuntimeConfig[] {
   try {
     if (fs.existsSync(TELEGRAM_BOTS_FILE)) {
       const parsed = readTelegramBotConfigsFromJson(fs.readFileSync(TELEGRAM_BOTS_FILE, "utf-8"));
-      if (parsed.length) return parsed;
+      parsed.forEach(appendConfig);
     }
   } catch (error: any) {
     log(`⚠️  Telegram 多 Bot 配置读取失败: ${error?.message || String(error)}`);
   }
 
-  const token = (readLocalTelegramBotToken() || process.env.TELEGRAM_BOT_TOKEN || "").trim();
-  return token ? [{ token, name: "primary" }] : [];
+  return configs;
 }
 
 let activeTelegramBots: Array<{ config: TelegramBotRuntimeConfig; bot: ReturnType<typeof startTelegramBot> }> = [];
@@ -285,6 +305,7 @@ function telegramBotConfigSignature(configs: TelegramBotRuntimeConfig[]): string
     allowedWarmupPlatforms: config.allowedWarmupPlatforms || [],
     allowedVmosAccountNames: config.allowedVmosAccountNames || [],
     allowedPadCodes: config.allowedPadCodes || [],
+    personaDataScope: config.personaDataScope || "shared",
   })));
 }
 
@@ -336,6 +357,7 @@ async function applyTelegramBotRuntimeConfig(configs: TelegramBotRuntimeConfig[]
       allowedWarmupPlatforms: botConfig.allowedWarmupPlatforms,
       allowedVmosAccountNames: botConfig.allowedVmosAccountNames,
       allowedPadCodes: botConfig.allowedPadCodes,
+      personaDataScope: botConfig.personaDataScope,
     });
     activeTelegramBots.push({ config: botConfig, bot });
     log(`✓ Telegram Bot 已启动: ${botConfig.name || "unnamed"}${botConfig.defaultPadCode ? ` / 默认智能體手機 ${botConfig.defaultPadCode}` : ""}${reason ? `（${reason}）` : ""}`);

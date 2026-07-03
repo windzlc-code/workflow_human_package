@@ -15004,6 +15004,7 @@ function parseManualConfirmCallback(data: string, prevManual?: { archiveId?: str
 
 export type TelegramBotInstanceOptions = {
   name?: string;
+  personaDataScope?: "shared" | "isolated";
   defaultPadCode?: string;
   defaultPublishPlatform?: TelegramPublishPlatform;
   defaultWarmupPlatform?: TelegramWarmupPlatform;
@@ -15023,6 +15024,7 @@ function normalizeAllowedPublishPlatforms(input?: TelegramPublishPlatform[]): Te
 
 export function startTelegramBot(token: string, options: TelegramBotInstanceOptions = {}): TelegramBot {
   const instanceName = (options.name || "primary").trim() || "primary";
+  const personaDataScope = options.personaDataScope === "isolated" ? "isolated" : "shared";
   const defaultPadCode = (options.defaultPadCode || DEFAULT_PAD_CODE).trim() || DEFAULT_PAD_CODE;
   const defaultPublishPlatform = options.defaultPublishPlatform || DEFAULT_PUBLISH_PLATFORM;
   const defaultWarmupPlatform = options.defaultWarmupPlatform || DEFAULT_WARMUP_PLATFORM;
@@ -15061,6 +15063,7 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     threads: { text: "🌱 Threads 养号", callbackValue: "threads" },
   };
   const isArchiveOwnedByThisBot = (archive: { ownerBotName?: string } | null | undefined) => {
+    if (personaDataScope === "shared") return true;
     const owner = String(archive?.ownerBotName || "").trim();
     return owner ? owner === instanceName : instanceName === "primary";
   };
@@ -16468,13 +16471,42 @@ function paginateTasks<T>(tasks: T[], page: number, pageSize = 5) {
   };
 }
 
-function buildQueueViewCallback(args: { status: "pending" | "failed"; archiveId?: string; scheduledOnly?: boolean; platform?: TelegramPublishPlatform; page?: number }) {
+type QueueViewCallbackArgs = { status: "pending" | "failed"; archiveId?: string; scheduledOnly?: boolean; platform?: TelegramPublishPlatform; page?: number };
+
+const queueViewCallbackActions = new Map<string, QueueViewCallbackArgs & { createdAt: number }>();
+let queueViewCallbackSeq = 0;
+
+function rememberQueueViewCallback(args: QueueViewCallbackArgs) {
+  const key = (++queueViewCallbackSeq).toString(36);
+  queueViewCallbackActions.set(key, { ...args, createdAt: Date.now() });
+  if (queueViewCallbackActions.size > 500) {
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const [entryKey, action] of queueViewCallbackActions) {
+      if (action.createdAt < cutoff) queueViewCallbackActions.delete(entryKey);
+    }
+    while (queueViewCallbackActions.size > 500) {
+      const firstKey = queueViewCallbackActions.keys().next().value;
+      if (!firstKey) break;
+      queueViewCallbackActions.delete(firstKey);
+    }
+  }
+  return `qv_${key}`;
+}
+
+function buildQueueViewCallback(args: QueueViewCallbackArgs) {
   // 固定末尾 3 个字段：scheduledOnly, platform, page；archiveId 放中间，允许含 -
   const tail = [args.scheduledOnly ? "scheduled" : "all", args.platform || "all", String(args.page || 0)];
-  return ["queueview", args.status, args.archiveId || "all", ...tail].join("_");
+  const callback = ["queueview", args.status, args.archiveId || "all", ...tail].join("_");
+  return callback.length > 60 ? rememberQueueViewCallback(args) : callback;
 }
 
 function parseQueueViewCallback(data: string) {
+  if (data.startsWith("qv_")) {
+    const action = queueViewCallbackActions.get(data.slice(3));
+    if (!action) return null;
+    const { createdAt: _createdAt, ...args } = action;
+    return { ...args, page: Math.max(0, Math.floor(args.page || 0)) } as const;
+  }
   if (!data.startsWith("queueview_")) return null;
   const rest = data.slice("queueview_".length);
   // 末尾固定 3 段：scheduledOnly_platform_page
