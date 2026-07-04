@@ -812,12 +812,12 @@ function pdRenderSettings() {
         <input id="personaPageSizeInput" type="number" min="5" max="100" step="5" value="${pdEscape(String(personaDashboardPageSize))}" />
         <button class="primary" type="button" id="personaPageSizeApply">应用</button>
       </div>
-      <label for="personaRefreshIntervalInput">鍚庡彴鑷姩鍒锋柊闂撮殧锛堢锛?/label>
+      <label for="personaRefreshIntervalInput">后台自动刷新间隔（秒）</label>
       <div class="persona-settings-row">
         <input id="personaRefreshIntervalInput" type="number" min="60" max="86400" step="60" value="${pdEscape(String(refreshIntervalSeconds))}" />
-        <button class="primary" type="button" id="personaRefreshIntervalApply">淇濆瓨</button>
+        <button class="primary" type="button" id="personaRefreshIntervalApply">保存</button>
       </div>
-      <div class="small">褰撳墠鍚庡彴鑷姩鐩戞帶闂撮殧锛?${pdEscape(String(refreshIntervalSeconds))} 绉掞紝淇濆瓨鍚庣珛鍗崇敓鏁堛€?/div>
+      <div class="small">当前后台自动监控间隔：${pdEscape(String(refreshIntervalSeconds))} 秒，保存后立即生效。</div>
       <div class="persona-settings-row persona-settings-row-left">
         <button class="primary" type="button" id="personaRefreshAllBtn">全量刷新全部已绑定人设</button>
         <span class="small">会逐个读取已绑定 Threads 用户名的人设；无绑定的人设会跳过并提示。</span>
@@ -842,7 +842,7 @@ function pdRenderSettings() {
       const input = pdEl("personaRefreshIntervalInput");
       const next = Math.max(60, Math.min(86400, Number(input && input.value) || 300));
       try {
-        pdSetMsg("姝ｅ湪淇濆瓨鍚庡彴鑷姩鍒锋柊闂撮殧...", "ok");
+        pdSetMsg("正在保存后台自动刷新间隔...", "ok");
         const resp = await pdApi("/api/persona_dashboard/settings", {
           method: "PUT",
           body: { refresh_interval_seconds: next },
@@ -852,10 +852,10 @@ function pdRenderSettings() {
         if (personaDashboardData.data_sources && personaDashboardData.data_sources.persona_dashboard_monitor) {
           personaDashboardData.data_sources.persona_dashboard_monitor.interval_seconds = personaDashboardData.settings.refresh_interval_seconds;
         }
-        pdSetMsg(`鍚庡彴鑷姩鍒锋柊闂撮殧宸叉洿鏂颁负 ${personaDashboardData.settings.refresh_interval_seconds} 绉掋€?`, "ok");
+        pdSetMsg(`后台自动刷新间隔已更新为 ${personaDashboardData.settings.refresh_interval_seconds} 秒`, "ok");
         pdRenderDashboard();
       } catch (err) {
-        pdSetMsg(String((err && (err.detail || err.message)) || err || "淇濆瓨鍒锋柊闂撮殧澶辫触"), "err");
+        pdSetMsg(String((err && (err.detail || err.message)) || err || "保存失败"), "err");
       }
     });
   }

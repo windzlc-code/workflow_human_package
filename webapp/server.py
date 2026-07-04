@@ -17071,6 +17071,17 @@ def _add_persona_dashboard_deleted_post_unlocked(archive_id: str, post_key: str)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _persona_dashboard_deleted_posts_version() -> str:
+    path = TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_posts.json"
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
+    return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+
+
 def _normalize_threads_username(value: Any) -> str:
     text = str(value or "").strip()
     text = re.sub(r"^https?://(?:www\.)?threads\.(?:net|com)/", "", text, flags=re.I)
@@ -17739,7 +17750,18 @@ def _persona_dashboard_refresh_worker(task_id: str, archive_id: str = "") -> Non
 
 def _start_persona_dashboard_refresh(archive_id: str = "", source: str = "", trigger: str = "manual") -> dict[str, Any]:
     task_id = f"pdr_{uuid.uuid4().hex[:12]}"
-    refresh_source = (source or os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
+    requested_source = str(source or "").strip().lower()
+    trigger_text = str(trigger or "manual").strip().lower()
+    if trigger_text in {"manual", "page_view"}:
+        refresh_source = "full"
+    elif trigger_text == "auto_monitor":
+        refresh_source = "rsshub"
+    else:
+        refresh_source = requested_source or str(os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "").strip().lower() or "full"
+    if refresh_source in {"browser", "authenticated_full_profile"}:
+        refresh_source = "full"
+    elif refresh_source != "rsshub":
+        refresh_source = "full"
     with PERSONA_DASHBOARD_REFRESH_LOCK:
         PERSONA_DASHBOARD_REFRESH_TASKS[task_id] = {
             "id": task_id,
@@ -17768,7 +17790,11 @@ def _read_text_tail(path: Path, max_chars: int = 1200) -> str:
 
 def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "", source: str = "") -> None:
     started = time.time()
-    refresh_source = (source or os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
+    refresh_source = str(source or "").strip().lower() or "full"
+    if refresh_source in {"browser", "authenticated_full_profile"}:
+        refresh_source = "full"
+    elif refresh_source != "rsshub":
+        refresh_source = "full"
     scope = "单个人设" if archive_id else "全部已绑定人设"
     with PERSONA_DASHBOARD_REFRESH_LOCK:
         PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
@@ -17987,7 +18013,7 @@ def _maybe_schedule_persona_dashboard_page_view_refresh() -> None:
 
 
 def _persona_dashboard_monitor_loop() -> None:
-    source = (os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
+    source = "rsshub"
     while True:
         interval = _persona_dashboard_monitor_interval_seconds()
         if not _persona_dashboard_monitor_enabled():
@@ -18056,7 +18082,7 @@ def _ensure_persona_dashboard_monitor_started() -> None:
         PERSONA_DASHBOARD_MONITOR_STARTED = True
         PERSONA_DASHBOARD_MONITOR_STATE.update({
             "enabled": _persona_dashboard_monitor_enabled(),
-            "source": (os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub",
+            "source": "rsshub",
             "status": "starting",
             "interval_seconds": _persona_dashboard_monitor_interval_seconds(),
             "last_message": "后台自动监控启动中。",
@@ -18204,6 +18230,8 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
 
         for platform, metric_value in hot_metrics_raw.items():
             if not isinstance(metric_value, dict):
+                continue
+            if str(metric_value.get("scope") or "").strip().lower() == "rsshub_feed_monitor":
                 continue
             platform_name = str(metric_value.get("platform") or platform or "unknown").strip() or "unknown"
             platform_counts[platform_name] = platform_counts.get(platform_name, 0) + 1
@@ -18459,6 +18487,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
     return {
         "ok": True,
         "schema_version": PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION,
+        "deleted_posts_version": _persona_dashboard_deleted_posts_version(),
         "updated_at": now,
         "summary": {
             "persona_count": len(personas),
@@ -18521,6 +18550,8 @@ def _persona_dashboard_overview_needs_refresh(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return True
     if payload.get("schema_version") != PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION:
+        return True
+    if str(payload.get("deleted_posts_version") or "") != _persona_dashboard_deleted_posts_version():
         return True
     if not isinstance(payload.get("vmos_accounts"), list):
         return True
@@ -19132,7 +19163,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/persona_dashboard/refresh")
     def api_persona_dashboard_refresh(payload: PersonaDashboardRefreshPayload):
-        return _start_persona_dashboard_refresh(payload.archive_id)
+        return _start_persona_dashboard_refresh(payload.archive_id, source="full", trigger="manual")
 
     @app.get("/api/persona_dashboard/refresh/{task_id}")
     def api_persona_dashboard_refresh_status(task_id: str):
