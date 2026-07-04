@@ -16986,7 +16986,7 @@ PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
-PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 5
+PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 6
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_STARTED = False
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE: dict[str, Any] = {
@@ -18237,6 +18237,60 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
                     "details": _sanitize_dashboard_value({"post": post, meta_key: source}, "post"),
                 }
                 post_metric_rows.append(metric_row)
+
+        if post_metric_rows:
+            row_likes = sum(_number(row.get("like_count"), 0) for row in post_metric_rows if isinstance(row, dict))
+            row_comments = sum(_number(row.get("comment_count"), 0) for row in post_metric_rows if isinstance(row, dict))
+            row_shares = sum(_number(row.get("share_count"), 0) for row in post_metric_rows if isinstance(row, dict))
+            row_reposts = sum(_number(row.get("repost_count"), 0) for row in post_metric_rows if isinstance(row, dict))
+            row_post_views = sum(_number(row.get("view_count"), 0) for row in post_metric_rows if isinstance(row, dict))
+            persona_hot["likes"] = max(_number(persona_hot.get("likes"), 0), row_likes)
+            persona_hot["comments"] = max(_number(persona_hot.get("comments"), 0), row_comments)
+            persona_hot["shares"] = max(_number(persona_hot.get("shares"), 0), row_shares)
+            persona_hot["reposts"] = max(_number(persona_hot.get("reposts"), 0), row_reposts)
+            persona_hot["post_views"] = max(_number(persona_hot.get("post_views"), 0), row_post_views)
+            persona_hot["hot_score"] = _sum_numbers(
+                persona_hot["likes"],
+                persona_hot["comments"],
+                persona_hot["shares"],
+                persona_hot["reposts"],
+                persona_hot["post_views"],
+            )
+            rows_by_platform: dict[str, dict[str, int]] = {}
+            for row in post_metric_rows:
+                if not isinstance(row, dict):
+                    continue
+                row_platform = str(row.get("platform") or "unknown").strip() or "unknown"
+                bucket = rows_by_platform.setdefault(row_platform, {"likes": 0, "comments": 0, "shares": 0, "reposts": 0, "post_views": 0})
+                bucket["likes"] += _number(row.get("like_count"), 0)
+                bucket["comments"] += _number(row.get("comment_count"), 0)
+                bucket["shares"] += _number(row.get("share_count"), 0)
+                bucket["reposts"] += _number(row.get("repost_count"), 0)
+                bucket["post_views"] += _number(row.get("view_count"), 0)
+            platform_index = {
+                str(item.get("platform") or "unknown").strip() or "unknown": item
+                for item in hot_platforms
+                if isinstance(item, dict)
+            }
+            for row_platform, row_totals in rows_by_platform.items():
+                item = platform_index.get(row_platform)
+                if not item:
+                    item = {
+                        "platform": row_platform,
+                        "username": None,
+                        "followers": 0,
+                        "following": 0,
+                        "recent_views": 0,
+                        "posts": 0,
+                        "scanned_posts": 0,
+                        "complete": False,
+                        "refreshed_at": None,
+                        "error": None,
+                    }
+                    hot_platforms.append(item)
+                    platform_index[row_platform] = item
+                for key in ("likes", "comments", "shares", "reposts", "post_views"):
+                    item[key] = max(_number(item.get(key), 0), row_totals.get(key, 0))
 
         queue_for_archive = (queue_stats.get("by_archive") or {}).get(archive_id, {})
         account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
