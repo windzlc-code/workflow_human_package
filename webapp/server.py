@@ -16986,7 +16986,7 @@ PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
-PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 4
+PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 5
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_STARTED = False
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE: dict[str, Any] = {
@@ -18113,6 +18113,10 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             platform_reposts = _number(metric_value.get("reposts"), 0)
             platform_recent_views = _number(metric_value.get("recentViews"), 0)
             platform_post_views = _number(metric_value.get("views"), 0)
+            active_metric_rows = [
+                row for row in post_metrics
+                if isinstance(row, dict) and _persona_dashboard_post_key(archive_id, row) not in deleted_post_keys
+            ]
             deleted_metric_rows = [
                 row for row in post_metrics
                 if isinstance(row, dict) and _persona_dashboard_post_key(archive_id, row) in deleted_post_keys
@@ -18123,11 +18127,18 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
                 platform_shares = max(0, platform_shares - sum(_metric_value(row, "shareCount", "share_count", "send_count") for row in deleted_metric_rows))
                 platform_reposts = max(0, platform_reposts - sum(_metric_value(row, "repostCount", "repost_count") for row in deleted_metric_rows))
                 platform_post_views = max(0, platform_post_views - sum(_metric_value(row, "viewCount", "view_count") for row in deleted_metric_rows))
+            if not platform_likes:
+                platform_likes = sum(_metric_value(row, "likeCount", "like_count") for row in active_metric_rows)
+            if not platform_comments:
+                platform_comments = sum(_metric_value(row, "commentCount", "comment_count") for row in active_metric_rows)
+            if not platform_shares:
+                platform_shares = sum(_metric_value(row, "shareCount", "share_count", "send_count") for row in active_metric_rows)
+            if not platform_reposts:
+                platform_reposts = sum(_metric_value(row, "repostCount", "repost_count") for row in active_metric_rows)
             if not platform_post_views:
                 platform_post_views = sum(
                     _metric_value(row, "viewCount", "view_count")
-                    for row in post_metrics
-                    if isinstance(row, dict) and _persona_dashboard_post_key(archive_id, row) not in deleted_post_keys
+                    for row in active_metric_rows
                 )
             platform_hot_score = _sum_numbers(platform_likes, platform_comments, platform_shares, platform_reposts, platform_post_views)
             persona_hot["likes"] += platform_likes
