@@ -43,6 +43,7 @@ let personaDashboardGalleryIndex = -1;
 let personaDashboardAutoPollTimer = 0;
 let personaDashboardPostSort = localStorage.getItem("personaDashboardPostSort") || "hot_desc";
 let personaDashboardPostTypeFilter = localStorage.getItem("personaDashboardPostTypeFilter") || "all";
+let personaDashboardVmosAccount = localStorage.getItem("personaDashboardVmosAccount") || "";
 
 const PD_LABELS = {
   likes: "点赞",
@@ -106,6 +107,15 @@ function pdDateInRange(value) {
 
 function pdPlatformFilter() {
   return String((pdEl("personaDashboardPlatform") && pdEl("personaDashboardPlatform").value) || "").trim().toLowerCase();
+}
+
+function pdVmosAccountFilter() {
+  return String((pdEl("personaDashboardVmosAccount") && pdEl("personaDashboardVmosAccount").value) || personaDashboardVmosAccount || "").trim();
+}
+
+function pdVmosAccountLabel(value) {
+  const text = String(value || "").trim();
+  return text || "未识别 VMOS 账号";
 }
 
 function pdPostHeat(row) {
@@ -218,12 +228,14 @@ function pdPersonaHot(persona) {
 
 function pdVisibleSummary(visiblePersonas) {
   const padSet = new Set();
+  const vmosSet = new Set();
   const summary = {
     persona_count: visiblePersonas.length,
     post_count: 0,
     published_count: 0,
     image_count: 0,
     bound_pad_count: 0,
+    vmos_account_count: 0,
     total_interactions: 0,
     recent_views: 0,
     post_views: 0,
@@ -239,8 +251,10 @@ function pdVisibleSummary(visiblePersonas) {
     summary.hot_score += Number(hot.hot_score || 0);
     summary.total_interactions += Number(hot.likes || 0) + Number(hot.comments || 0) + Number(hot.shares || 0) + Number(hot.reposts || 0);
     if (persona.bound_pad_code) padSet.add(String(persona.bound_pad_code));
+    if (persona.bound_vmos_account_name) vmosSet.add(String(persona.bound_vmos_account_name));
   });
   summary.bound_pad_count = padSet.size;
+  summary.vmos_account_count = vmosSet.size;
   return summary;
 }
 
@@ -370,9 +384,19 @@ function pdMatches(persona) {
   const search = String((pdEl("personaDashboardSearch") && pdEl("personaDashboardSearch").value) || "").trim().toLowerCase();
   const platform = pdPlatformFilter();
   const pad = String((pdEl("personaDashboardPad") && pdEl("personaDashboardPad").value) || "").trim();
-  const haystack = [persona.name, persona.content, persona.bound_pad_code, persona.bound_pad_name, persona.owner_bot_name, persona.threads_account && persona.threads_account.handle].join(" ").toLowerCase();
+  const vmosAccount = pdVmosAccountFilter();
+  const haystack = [
+    persona.name,
+    persona.content,
+    persona.bound_pad_code,
+    persona.bound_pad_name,
+    persona.bound_vmos_account_name,
+    persona.owner_bot_name,
+    persona.threads_account && persona.threads_account.handle,
+  ].join(" ").toLowerCase();
   if (search && !haystack.includes(search)) return false;
   if (pad && String(persona.bound_pad_code || "") !== pad) return false;
+  if (vmosAccount && String(persona.bound_vmos_account_name || "").trim() !== vmosAccount) return false;
   if (platform) {
     const platforms = (persona.hot_platforms || []).map((item) => String(item.platform || "").toLowerCase());
     const platformPosts = Object.keys((persona.counts && persona.counts.platform_posts) || {}).map((item) => item.toLowerCase());
