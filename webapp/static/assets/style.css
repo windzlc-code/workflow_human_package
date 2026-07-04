@@ -5813,6 +5813,35 @@ body.page-admin {
   border-radius: 999px;
 }
 
+.persona-trend-values {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.persona-trend-value-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.95);
+  color: #334155;
+}
+
+.persona-trend-value-row strong {
+  color: #0f172a;
+  min-width: 48px;
+}
+
+.persona-trend-value-row span {
+  font-size: 13px;
+  font-weight: 700;
+  color: #475569;
+}
+
 .persona-dashboard-note {
   padding: 12px 14px;
   border-radius: 12px;

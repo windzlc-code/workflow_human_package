@@ -457,6 +457,19 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertEqual(persona["publish_history"][0]["likes"], 2)
         self.assertEqual(persona["publish_history"][0]["views"], 25)
 
+    def test_trend_uses_live_post_metrics_totals(self):
+        self._write_archives()
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        trend_row = next((row for row in overview["charts"]["trend"] if row["date"] == "2026-06-30"), None)
+        self.assertIsNotNone(trend_row)
+        self.assertEqual(trend_row["published"], 1)
+        self.assertEqual(trend_row["likes"], 10)
+        self.assertEqual(trend_row["comments"], 5)
+        self.assertEqual(trend_row["shares"], 2)
+        self.assertEqual(trend_row["reposts"], 0)
+        self.assertEqual(trend_row["post_views"], 300)
+        self.assertEqual(trend_row["hot_score"], 317)
+
 
 if __name__ == "__main__":
     unittest.main()

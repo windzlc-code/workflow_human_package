@@ -179,6 +179,48 @@ function pdFilterTrend(rows) {
   return (rows || []).filter((row) => pdDateInRange(row.date));
 }
 
+function pdTrendBucket(map, day) {
+  if (!day) return null;
+  if (!map[day]) {
+    map[day] = { date: day, published: 0, likes: 0, comments: 0, shares: 0, reposts: 0, post_views: 0, hot_score: 0 };
+  }
+  return map[day];
+}
+
+function pdBuildTrendFromPersonas(personas) {
+  const platform = pdPlatformFilter();
+  const buckets = {};
+  (personas || []).forEach((persona) => {
+    const publishedByDay = {};
+    (persona.post_metrics || []).forEach((row) => {
+      if (platform && String(row.platform || "").toLowerCase() !== platform) return;
+      if (!pdDateInRange(row.published_at || row.captured_at)) return;
+      if (!pdPostMatchesType(row)) return;
+      const rawDay = String(row.published_at || row.captured_at || "").trim();
+      const day = rawDay ? rawDay.slice(0, 10) : "";
+      const bucket = pdTrendBucket(buckets, day);
+      if (!bucket) return;
+      bucket.likes += Number(row.like_count || 0);
+      bucket.comments += Number(row.comment_count || 0);
+      bucket.shares += Number(row.share_count || 0);
+      bucket.reposts += Number(row.repost_count || 0);
+      bucket.post_views += Number(row.view_count || 0);
+      publishedByDay[day] = (publishedByDay[day] || 0) + 1;
+    });
+    Object.entries(publishedByDay).forEach(([day, count]) => {
+      const bucket = pdTrendBucket(buckets, day);
+      if (!bucket) return;
+      bucket.published += Number(count || 0);
+    });
+  });
+  return Object.values(buckets)
+    .map((row) => ({
+      ...row,
+      hot_score: Number(row.likes || 0) + Number(row.comments || 0) + Number(row.shares || 0) + Number(row.reposts || 0) + Number(row.post_views || 0),
+    }))
+    .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+}
+
 function pdFilteredPostRows(persona) {
   const platform = pdPlatformFilter();
   const sort = String(personaDashboardPostSort || "hot_desc");
@@ -283,7 +325,7 @@ function pdBuildFilteredCharts(visiblePersonas, data) {
     engagement_mix: engagement,
     task_status_distribution: taskStatus,
     hot_coverage: coverage,
-    trend: pdFilterTrend(data.charts && data.charts.trend),
+    trend: pdBuildTrendFromPersonas(visiblePersonas),
   };
 }
 
@@ -363,14 +405,38 @@ function pdRenderTrendChart(hostId, rows) {
   const x = (index) => pad + (items.length === 1 ? 0 : (index / (items.length - 1)) * (width - pad * 2));
   const y = (value) => height - pad - (Number(value || 0) / max) * (height - pad * 2);
   const pathFor = (key) => items.map((row, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(row[key]).toFixed(1)}`).join(" ");
+  const detailRows = items
+    .filter((row) => Number(row.published || 0) || Number(row.post_views || 0) || Number(row.likes || 0) || Number(row.comments || 0) || Number(row.shares || 0) || Number(row.reposts || 0))
+    .slice(-7)
+    .reverse();
   host.innerHTML = `
     <svg class="persona-line-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="流量走势图">
       <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" class="persona-axis" />
       <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" class="persona-axis" />
       ${series.map((s) => `<path d="${pathFor(s.key)}" fill="none" stroke="${s.color}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />`).join("")}
+      ${series.map((s) => items.map((row, index) => `
+        <circle cx="${x(index).toFixed(1)}" cy="${y(row[s.key]).toFixed(1)}" r="3.5" fill="${s.color}">
+          <title>${s.label} ${row.date || "-"}: ${pdNumber(row[s.key])}</title>
+        </circle>
+      `).join("")).join("")}
       ${items.map((row, index) => `<text x="${x(index)}" y="${height - 6}" text-anchor="middle">${pdEscape(String(row.date || "").slice(5))}</text>`).join("")}
     </svg>
     <div class="persona-line-legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${s.label}</span>`).join("")}</div>
+    ${detailRows.length ? `
+      <div class="persona-trend-values">
+        ${detailRows.map((row) => `
+          <div class="persona-trend-value-row">
+            <strong>${pdEscape(String(row.date || "").slice(5) || "-")}</strong>
+            <span>发布 ${pdEscape(pdNumber(row.published))}</span>
+            <span>浏览 ${pdEscape(pdNumber(row.post_views))}</span>
+            <span>赞 ${pdEscape(pdNumber(row.likes))}</span>
+            <span>评 ${pdEscape(pdNumber(row.comments))}</span>
+            <span>转/分享 ${pdEscape(pdNumber(Number(row.shares || 0) + Number(row.reposts || 0)))}</span>
+            <span>热度 ${pdEscape(pdNumber(row.hot_score))}</span>
+          </div>
+        `).join("")}
+      </div>
+    ` : ""}
   `;
 }
 

@@ -16998,7 +16998,7 @@ PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_WAKE_EVENT = threading.Event()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
-PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 6
+PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 7
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_STARTED = False
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE: dict[str, Any] = {
@@ -17778,6 +17778,50 @@ def _compact_hot_post(raw: Any, archive_id: str = "") -> dict[str, Any]:
     }
 
 
+def _persona_dashboard_metric_row_timestamp(row: Any) -> float:
+    if not isinstance(row, dict):
+        return 0.0
+    for key in ("captured_at", "capturedAt", "published_at", "publishedAt"):
+        value = str(row.get(key) or "").strip()
+        if not value:
+            continue
+        try:
+            return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+    return 0.0
+
+
+def _persona_dashboard_metric_row_score(row: Any) -> int:
+    if not isinstance(row, dict):
+        return 0
+    return _sum_numbers(
+        row.get("like_count"),
+        row.get("comment_count"),
+        row.get("share_count"),
+        row.get("repost_count"),
+        row.get("view_count"),
+    )
+
+
+def _persona_dashboard_pick_better_metric_row(current: Any, candidate: Any) -> Any:
+    if not isinstance(current, dict):
+        return candidate
+    if not isinstance(candidate, dict):
+        return current
+    current_ts = _persona_dashboard_metric_row_timestamp(current)
+    candidate_ts = _persona_dashboard_metric_row_timestamp(candidate)
+    if candidate_ts > current_ts:
+        return candidate
+    if candidate_ts < current_ts:
+        return current
+    current_score = _persona_dashboard_metric_row_score(current)
+    candidate_score = _persona_dashboard_metric_row_score(candidate)
+    if candidate_score > current_score:
+        return candidate
+    return current
+
+
 def _persona_dashboard_warnings(setup: dict[str, Any], hot_platforms: list[dict[str, Any]], post_metric_rows: list[dict[str, Any]]) -> list[str]:
     account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
     threads = account_management.get("threads") if isinstance(account_management.get("threads"), dict) else {}
@@ -18419,6 +18463,10 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
                 "refreshed_at": metric_value.get("refreshedAt") or metric_value.get("lightRefreshedAt"),
                 "error": metric_value.get("error"),
             })
+            latest_update = max(
+                latest_update,
+                str(metric_value.get("refreshedAt") or metric_value.get("lightRefreshedAt") or ""),
+            )
 
         for record in publish_history:
             if not isinstance(record, dict):
@@ -18427,7 +18475,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             platform_counts[platform] = platform_counts.get(platform, 0) + 1
             day = _date_key(record.get("publishedAt"))
             if day:
-                bucket = daily.setdefault(day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "post_views": 0})
+                bucket = daily.setdefault(day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "reposts": 0, "post_views": 0, "hot_score": 0})
                 bucket["published"] += 1
             sources: list[dict[str, Any]] = []
             if platform.lower() == "threads":
@@ -18449,11 +18497,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
                     continue
                 day = _date_key(source.get("capturedAt") or record.get("publishedAt"))
                 if day:
-                    bucket = daily.setdefault(day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "post_views": 0})
-                    bucket["likes"] += _source_metric(source, "likeCount", "like_count")
-                    bucket["comments"] += _source_metric(source, "commentCount", "comment_count")
-                    bucket["shares"] += _source_metric(source, "shareCount", "share_count", "send_count")
-                    bucket["post_views"] += _source_metric(source, "viewCount", "view_count")
+                    bucket = daily.setdefault(day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "reposts": 0, "post_views": 0, "hot_score": 0})
                 metric_row = {
                     "post_key": _persona_dashboard_post_key(archive_id, {
                         **source,
@@ -18516,22 +18560,48 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
 
         if post_metric_rows:
             deduped_post_metric_rows: list[dict[str, Any]] = []
-            seen_post_metric_keys: set[str] = set()
+            deduped_post_metric_map: dict[str, dict[str, Any]] = {}
             for row in post_metric_rows:
                 if not isinstance(row, dict):
                     continue
                 row_key = str(row.get("post_key") or "").strip()
-                if row_key and row_key in seen_post_metric_keys:
-                    continue
                 if row_key:
-                    seen_post_metric_keys.add(row_key)
+                    existing = deduped_post_metric_map.get(row_key)
+                    deduped_post_metric_map[row_key] = _persona_dashboard_pick_better_metric_row(existing, row)
+                    continue
                 deduped_post_metric_rows.append(row)
+            deduped_post_metric_rows.extend(deduped_post_metric_map.values())
             post_metric_rows = deduped_post_metric_rows
             row_likes = sum(_number(row.get("like_count"), 0) for row in post_metric_rows if isinstance(row, dict))
             row_comments = sum(_number(row.get("comment_count"), 0) for row in post_metric_rows if isinstance(row, dict))
             row_shares = sum(_number(row.get("share_count"), 0) for row in post_metric_rows if isinstance(row, dict))
             row_reposts = sum(_number(row.get("repost_count"), 0) for row in post_metric_rows if isinstance(row, dict))
             row_post_views = sum(_number(row.get("view_count"), 0) for row in post_metric_rows if isinstance(row, dict))
+            daily_metric_post_counts: dict[str, int] = {}
+            for row in post_metric_rows:
+                if not isinstance(row, dict):
+                    continue
+                metric_day = _date_key(row.get("published_at") or row.get("captured_at"))
+                latest_update = max(latest_update, str(row.get("captured_at") or row.get("published_at") or ""))
+                if not metric_day:
+                    continue
+                bucket = daily.setdefault(metric_day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "reposts": 0, "post_views": 0, "hot_score": 0})
+                bucket["likes"] += _number(row.get("like_count"), 0)
+                bucket["comments"] += _number(row.get("comment_count"), 0)
+                bucket["shares"] += _number(row.get("share_count"), 0)
+                bucket["reposts"] += _number(row.get("repost_count"), 0)
+                bucket["post_views"] += _number(row.get("view_count"), 0)
+                daily_metric_post_counts[metric_day] = daily_metric_post_counts.get(metric_day, 0) + 1
+            for metric_day, metric_post_count in daily_metric_post_counts.items():
+                bucket = daily.setdefault(metric_day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "reposts": 0, "post_views": 0, "hot_score": 0})
+                bucket["published"] = max(_number(bucket.get("published"), 0), metric_post_count)
+                bucket["hot_score"] = _sum_numbers(
+                    bucket.get("likes"),
+                    bucket.get("comments"),
+                    bucket.get("shares"),
+                    bucket.get("reposts"),
+                    bucket.get("post_views"),
+                )
             persona_hot["likes"] = max(_number(persona_hot.get("likes"), 0), row_likes)
             persona_hot["comments"] = max(_number(persona_hot.get("comments"), 0), row_comments)
             persona_hot["shares"] = max(_number(persona_hot.get("shares"), 0), row_shares)
@@ -18627,6 +18697,16 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
         })
 
     personas.sort(key=lambda item: _number(item.get("hot", {}).get("hot_score"), 0), reverse=True)
+    for bucket in daily.values():
+        if not isinstance(bucket, dict):
+            continue
+        bucket["hot_score"] = _sum_numbers(
+            bucket.get("likes"),
+            bucket.get("comments"),
+            bucket.get("shares"),
+            bucket.get("reposts"),
+            bucket.get("post_views"),
+        )
     trend = [{"date": day, **values} for day, values in sorted(daily.items())]
     vmos_accounts = sorted(
         (
