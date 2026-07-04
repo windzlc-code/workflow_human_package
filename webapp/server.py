@@ -18001,6 +18001,27 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
     queue_stats = _read_tool_r18_publish_queue_stats()
     sentiment_stats = _read_tool_r18_sentiment_hot_stats()
     deleted_posts = _read_persona_dashboard_deleted_posts()
+    try:
+        admin_pads = _load_admin_vmos_pads()
+    except Exception:
+        admin_pads = []
+    pad_vmos_account_map: dict[str, str] = {}
+    vmos_account_summary: dict[str, dict[str, Any]] = {}
+    for pad in admin_pads:
+        if not isinstance(pad, dict):
+            continue
+        pad_code = str(pad.get("padCode") or "").strip()
+        account_name = str(pad.get("vmosAccountName") or "").strip()
+        if pad_code and account_name:
+            pad_vmos_account_map[pad_code] = account_name
+        if not account_name:
+            continue
+        bucket = vmos_account_summary.setdefault(account_name, {
+            "name": account_name,
+            "pad_count": 0,
+            "persona_count": 0,
+        })
+        bucket["pad_count"] += 1
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     platform_counts: dict[str, int] = {}
     pad_counts: dict[str, int] = {}
@@ -18033,8 +18054,16 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
         hot_metrics_raw = setup.get("hotMetrics") if isinstance(setup.get("hotMetrics"), dict) else {}
         deleted_post_keys = deleted_posts.get(archive_id, set())
         pad_code = str(archive.get("boundPadCode") or "").strip()
+        bound_vmos_account_name = pad_vmos_account_map.get(pad_code, "")
         if pad_code:
             pad_counts[pad_code] = pad_counts.get(pad_code, 0) + 1
+        if bound_vmos_account_name:
+            vmos_bucket = vmos_account_summary.setdefault(bound_vmos_account_name, {
+                "name": bound_vmos_account_name,
+                "pad_count": 0,
+                "persona_count": 0,
+            })
+            vmos_bucket["persona_count"] += 1
         latest_update = max(latest_update, str(archive.get("updatedAt") or archive.get("createdAt") or ""))
 
         persona_hot = {
@@ -18198,6 +18227,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "updated_at": archive.get("updatedAt"),
             "bound_pad_code": archive.get("boundPadCode"),
             "bound_pad_name": archive.get("boundPadName"),
+            "bound_vmos_account_name": bound_vmos_account_name,
             "owner_bot_name": archive.get("ownerBotName"),
             "telegram": {
                 "chat_id": archive.get("boundTelegramChatId"),
@@ -18228,6 +18258,18 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
 
     personas.sort(key=lambda item: _number(item.get("hot", {}).get("hot_score"), 0), reverse=True)
     trend = [{"date": day, **values} for day, values in sorted(daily.items())]
+    vmos_accounts = sorted(
+        (
+            {
+                "name": str(item.get("name") or "").strip(),
+                "pad_count": _number(item.get("pad_count"), 0),
+                "persona_count": _number(item.get("persona_count"), 0),
+            }
+            for item in vmos_account_summary.values()
+            if str(item.get("name") or "").strip()
+        ),
+        key=lambda item: (-_number(item.get("persona_count"), 0), -_number(item.get("pad_count"), 0), str(item.get("name") or "")),
+    )
     return {
         "ok": True,
         "updated_at": now,
@@ -18247,6 +18289,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "post_views": totals["post_views"],
             "hot_score": totals["hot_score"],
             "latest_data_at": latest_update,
+            "vmos_account_count": len(vmos_accounts),
             "cached_hot_candidates": sentiment_stats.get("cache_count", 0),
             "shown_hot_candidates": sentiment_stats.get("shown_count", 0),
         },
@@ -18275,6 +18318,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "trend": trend[-90:],
             "pad_distribution": pad_counts,
         },
+        "vmos_accounts": vmos_accounts,
         "personas": personas,
         "data_sources": {
             "archives": archives_source,
@@ -18285,10 +18329,21 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
     }
 
 
+def _persona_dashboard_overview_needs_refresh(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    if not isinstance(payload.get("vmos_accounts"), list):
+        return True
+    personas = payload.get("personas")
+    if not isinstance(personas, list):
+        return True
+    return any(isinstance(persona, dict) and "bound_vmos_account_name" not in persona for persona in personas)
+
+
 def _build_persona_dashboard_overview(force_refresh: bool = False, allow_background_refresh: bool = False) -> dict[str, Any]:
     if not force_refresh:
         cached = _read_persona_dashboard_overview_cache()
-        if cached:
+        if cached and not _persona_dashboard_overview_needs_refresh(cached):
             if allow_background_refresh:
                 _maybe_schedule_persona_dashboard_page_view_refresh()
             return cached

@@ -12,11 +12,16 @@
       <div>
         <div class="section-kicker">人设运营数据中心</div>
         <h2>人设数据看板</h2>
-        <div class="meta">免登录查看所有人设的设定、素材、发布、热点和流量趋势；也可以手动刷新已绑定账号的全量数据。</div>
+        <div class="meta">免登录查看所有人设的设定、素材、发布、热点和流量趋势，也可以手动刷新已绑定账号的全量数据。</div>
       </div>
       <div class="persona-dashboard-actions">
         <div class="small" id="personaDashboardUpdated">尚未加载</div>
-        <button class="ghost" id="btnPersonaDashboardRefresh" type="button">刷新看板</button>
+        <div class="persona-dashboard-action-row">
+          <select id="personaDashboardVmosAccount" aria-label="VMOS 账号分组">
+            <option value="">全部 VMOS 账号</option>
+          </select>
+          <button class="ghost" id="btnPersonaDashboardRefresh" type="button">刷新看板</button>
+        </div>
         <button class="primary" id="btnPersonaDashboardRefreshAll" type="button">全量刷新</button>
         <a class="btn ghost" href="/quick-setup.html">快速配置</a>
       </div>
