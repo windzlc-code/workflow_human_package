@@ -219,9 +219,17 @@ async function main() {
     message: error instanceof Error ? error.message : String(error || "unknown"),
   }));
   const auth = await getLiveSentimentBrowserAuthProfileBinding("threads").catch((error: any) => ({
-    ok: false,
+    health: "degraded",
+    authorizationNeedsRefresh: true,
+    hasRequiredSessionCookie: false,
     message: error instanceof Error ? error.message : String(error || "unknown"),
   } as any));
+  const authUsable = Boolean(
+    auth
+    && auth.authorizationNeedsRefresh !== true
+    && auth.hasRequiredSessionCookie !== false
+    && !["missing", "expired", "degraded"].includes(String(auth.health || "").toLowerCase()),
+  );
   const results: any[] = [];
 
   for (const archive of targets) {
@@ -232,7 +240,7 @@ async function main() {
       results.push({ archiveId: archive.id, name: archive.name, ok: false, skipped: true, message: "未绑定 Threads 用户名" });
       continue;
     }
-    if (!auth.ok) {
+    if (!authUsable) {
       results.push({
         archiveId: archive.id,
         name: archive.name,
@@ -349,7 +357,7 @@ async function main() {
     partial: results.filter((item) => item.partial).length,
     skipped: results.filter((item) => item.skipped).length,
     total: results.length,
-    auth: { ok: Boolean(auth.ok), message: auth.message || refreshAuth.message || "" },
+    auth: { ok: authUsable, message: auth.message || refreshAuth.message || "" },
     results,
   }, null, 2));
 }
