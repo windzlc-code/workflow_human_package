@@ -16986,6 +16986,7 @@ PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
+PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 4
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_STARTED = False
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE: dict[str, Any] = {
@@ -17272,16 +17273,34 @@ def _delete_persona_dashboard_post(archive_id: str, post_key: str) -> dict[str, 
 def _read_tool_r18_persona_archives() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     primary = TOOL_R18_RUNTIME_DIR / "persona_archives.json"
     fallback = TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json"
+    candidates: list[tuple[Path, Any, list[dict[str, Any]], float]] = []
     for path in (primary, fallback):
         raw = _read_json_file(path)
         archives = _extract_persona_archive_list(raw)
         if archives:
-            return archives, {
-                "path": path.name,
-                "exists": True,
-                "count": len(archives),
-                "fallback": path == fallback,
-            }
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            candidates.append((path, raw, archives, mtime))
+    if candidates:
+        path, _raw, archives, mtime = max(candidates, key=lambda item: item[3])
+        return archives, {
+            "path": path.name,
+            "exists": True,
+            "count": len(archives),
+            "fallback": path == fallback,
+            "mtime": mtime,
+            "candidates": [
+                {
+                    "path": item_path.name,
+                    "count": len(item_archives),
+                    "mtime": item_mtime,
+                    "selected": item_path == path,
+                }
+                for item_path, _item_raw, item_archives, item_mtime in candidates
+            ],
+        }
     return [], {
         "path": primary.name,
         "exists": primary.exists() or fallback.exists(),
@@ -18273,6 +18292,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
     )
     return {
         "ok": True,
+        "schema_version": PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION,
         "updated_at": now,
         "summary": {
             "persona_count": len(personas),
@@ -18332,6 +18352,8 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
 
 def _persona_dashboard_overview_needs_refresh(payload: Any) -> bool:
     if not isinstance(payload, dict):
+        return True
+    if payload.get("schema_version") != PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION:
         return True
     if not isinstance(payload.get("vmos_accounts"), list):
         return True
