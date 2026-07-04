@@ -17485,8 +17485,8 @@ def _compact_dashboard_setup(setup: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _compact_publish_record(record: dict[str, Any]) -> dict[str, Any]:
-    published_meta = record.get("publishedMeta") if isinstance(record.get("publishedMeta"), dict) else {}
+def _compact_publish_record(record: dict[str, Any], bound_threads_handle: str = "") -> dict[str, Any]:
+    published_meta = _aggregate_publish_history_targets(record, bound_threads_handle) or {}
     return {
         "id": record.get("id"),
         "archive_post_id": record.get("archivePostId") or record.get("archive_post_id"),
@@ -17522,6 +17522,108 @@ def _source_metric(source: Any, *keys: str) -> int:
         if key in metrics:
             return _number(metrics.get(key), 0)
     return _number(source.get(keys[0]), 0) if keys else 0
+
+
+def _is_sentiment_import_meta(source: Any) -> bool:
+    return isinstance(source, dict) and str(source.get("source") or "").strip().lower() == "sentiment_hot_import"
+
+
+def _threads_row_matches_bound_handle(bound_handle: Any, row: Any) -> bool:
+    normalized_handle = _normalize_threads_username(bound_handle)
+    if not normalized_handle:
+        return False
+    if isinstance(row, dict):
+        candidates = [
+            row.get("username"),
+            row.get("handle"),
+            row.get("sourceUrl"),
+            row.get("source_url"),
+            row.get("publishedUrl"),
+            row.get("published_url"),
+        ]
+    else:
+        candidates = [row]
+    for candidate in candidates:
+        if _normalize_threads_username(candidate).lower() == normalized_handle.lower():
+            return True
+    return False
+
+
+def _is_publish_history_original_source_url(record: Any, url: Any) -> bool:
+    candidate = _normalize_threads_username(url)
+    if not candidate:
+        return False
+    source_meta = record.get("sourceMeta") if isinstance(record, dict) and isinstance(record.get("sourceMeta"), dict) else {}
+    if not _is_sentiment_import_meta(source_meta):
+        return False
+    source_candidate = _normalize_threads_username(source_meta.get("sourceUrl"))
+    return bool(source_candidate and candidate == source_candidate)
+
+
+def _get_publish_history_valid_published_meta(record: Any, published_meta: Any, bound_threads_handle: str = "") -> dict[str, Any] | None:
+    if not isinstance(published_meta, dict):
+        return None
+    if _is_sentiment_import_meta(published_meta):
+        return None
+    platform = str(published_meta.get("platform") or record.get("platform") or "").strip().lower()
+    source_url = published_meta.get("sourceUrl") or published_meta.get("source_url")
+    if not platform and re.search(r"threads\.(?:net|com)/@?[^/\s]+/post/", str(source_url or ""), re.I):
+        platform = "threads"
+    if platform == "threads":
+        if _is_publish_history_original_source_url(record, source_url):
+            return None
+        if bound_threads_handle and not _threads_row_matches_bound_handle(bound_threads_handle, published_meta):
+            return None
+    return published_meta
+
+
+def _aggregate_publish_history_targets(record: Any, bound_threads_handle: str = "") -> dict[str, Any] | None:
+    if not isinstance(record, dict):
+        return None
+    targets = [
+        target for target in (record.get("publishedTargets") if isinstance(record.get("publishedTargets"), list) else [])
+        if isinstance(target, dict) and _get_publish_history_valid_published_meta(record, target.get("publishedMeta"), bound_threads_handle)
+    ]
+    if not targets:
+        return _get_publish_history_valid_published_meta(record, record.get("publishedMeta"), bound_threads_handle)
+    engagement: dict[str, int] = {}
+    metrics: dict[str, int] = {}
+    for target in targets:
+        meta = _get_publish_history_valid_published_meta(record, target.get("publishedMeta"), bound_threads_handle) or {}
+        source_engagement = meta.get("engagement") if isinstance(meta.get("engagement"), dict) else {}
+        source_metrics = meta.get("metrics") if isinstance(meta.get("metrics"), dict) else {}
+        for key in ("likeCount", "commentCount", "viewCount", "shareCount"):
+            value = _number(source_engagement.get(key), 0)
+            if value:
+                engagement[key] = engagement.get(key, 0) + value
+        for key in ("like_count", "comment_count", "view_count", "share_count"):
+            value = _number(source_metrics.get(key), 0)
+            if value:
+                metrics[key] = metrics.get(key, 0) + value
+    first_target_meta = next(
+        (
+            _get_publish_history_valid_published_meta(record, target.get("publishedMeta"), bound_threads_handle)
+            for target in targets
+            if _get_publish_history_valid_published_meta(record, target.get("publishedMeta"), bound_threads_handle)
+        ),
+        None,
+    )
+    if not first_target_meta:
+        return None
+    hot_score = max(
+        *[int(_number((_get_publish_history_valid_published_meta(record, target.get("publishedMeta"), bound_threads_handle) or {}).get("hotScore"), 0)) for target in targets],
+        int(_number(engagement.get("viewCount"), 0)),
+        int(_number(engagement.get("likeCount"), 0)),
+    )
+    return {
+        **first_target_meta,
+        "source": "published_post_aggregate",
+        "platform": record.get("platform"),
+        "hotScore": hot_score,
+        "metrics": {**metrics, "target_count": len(targets)},
+        "engagement": engagement,
+        "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
 
 def _looks_like_media_url(value: Any) -> bool:
@@ -18199,6 +18301,9 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
         publish_history = archive.get("publishHistory") if isinstance(archive.get("publishHistory"), list) else []
         image_library = archive.get("personaImageLibrary") if isinstance(archive.get("personaImageLibrary"), list) else []
         hot_metrics_raw = setup.get("hotMetrics") if isinstance(setup.get("hotMetrics"), dict) else {}
+        account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
+        threads_account = account_management.get("threads") if isinstance(account_management.get("threads"), dict) else {}
+        threads_handle = _normalize_threads_username(threads_account.get("handle"))
         deleted_post_keys = deleted_posts.get(archive_id, set())
         pad_code = str(archive.get("boundPadCode") or "").strip()
         bound_vmos_account_name = pad_vmos_account_map.get(pad_code, "")
@@ -18234,6 +18339,11 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             if str(metric_value.get("scope") or "").strip().lower() == "rsshub_feed_monitor":
                 continue
             platform_name = str(metric_value.get("platform") or platform or "unknown").strip() or "unknown"
+            if platform_name.lower() == "threads":
+                if not threads_handle:
+                    continue
+                if not _threads_row_matches_bound_handle(threads_handle, metric_value):
+                    continue
             platform_counts[platform_name] = platform_counts.get(platform_name, 0) + 1
             post_metrics = metric_value.get("postMetrics") if isinstance(metric_value.get("postMetrics"), list) else []
             platform_likes = _number(metric_value.get("likes"), 0)
@@ -18319,9 +18429,21 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             if day:
                 bucket = daily.setdefault(day, {"published": 0, "likes": 0, "comments": 0, "shares": 0, "post_views": 0})
                 bucket["published"] += 1
-            published_meta = record.get("publishedMeta") if isinstance(record.get("publishedMeta"), dict) else {}
-            targets = record.get("publishedTargets") if isinstance(record.get("publishedTargets"), list) else []
-            sources = [published_meta] + [target.get("publishedMeta") for target in targets if isinstance(target, dict)]
+            sources: list[dict[str, Any]] = []
+            if platform.lower() == "threads":
+                aggregate_meta = _aggregate_publish_history_targets(record, threads_handle)
+                if aggregate_meta:
+                    sources.append(aggregate_meta)
+            else:
+                published_meta = record.get("publishedMeta") if isinstance(record.get("publishedMeta"), dict) else {}
+                if published_meta:
+                    sources.append(published_meta)
+                targets = record.get("publishedTargets") if isinstance(record.get("publishedTargets"), list) else []
+                sources.extend(
+                    target.get("publishedMeta")
+                    for target in targets
+                    if isinstance(target, dict) and isinstance(target.get("publishedMeta"), dict)
+                )
             for source in sources:
                 if not isinstance(source, dict):
                     continue
@@ -18332,6 +18454,28 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
                     bucket["comments"] += _source_metric(source, "commentCount", "comment_count")
                     bucket["shares"] += _source_metric(source, "shareCount", "share_count", "send_count")
                     bucket["post_views"] += _source_metric(source, "viewCount", "view_count")
+                metric_row = {
+                    "post_key": _persona_dashboard_post_key(archive_id, {
+                        **source,
+                        "id": record.get("archivePostId") or record.get("id"),
+                        "content": record.get("content") or record.get("title"),
+                    }),
+                    "id": record.get("archivePostId") or record.get("id"),
+                    "platform": source.get("platform") or record.get("platform"),
+                    "source_url": source.get("sourceUrl") or source.get("source_url") or record.get("publishedUrl"),
+                    "content": str(record.get("content") or record.get("title") or "")[:220],
+                    "full_content": str(record.get("content") or record.get("title") or "")[:5000],
+                    "published_at": source.get("publishedAt") or record.get("publishedAt"),
+                    "captured_at": source.get("capturedAt"),
+                    "like_count": _source_metric(source, "likeCount", "like_count"),
+                    "comment_count": _source_metric(source, "commentCount", "comment_count"),
+                    "share_count": _source_metric(source, "shareCount", "share_count", "send_count"),
+                    "view_count": _source_metric(source, "viewCount", "view_count"),
+                    "media_items": _compact_dashboard_media_items(record, source),
+                    "details": _sanitize_dashboard_value({"publishHistory": record, "publishedMeta": source}, "post"),
+                }
+                if metric_row["post_key"] not in deleted_post_keys:
+                    post_metric_rows.append(metric_row)
             latest_update = max(latest_update, str(record.get("publishedAt") or ""))
 
         for post in posts:
@@ -18339,35 +18483,50 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
                 continue
             if _persona_dashboard_post_key(archive_id, post) in deleted_post_keys:
                 continue
-            for meta_key in ("sourceMeta", "publishedMeta"):
-                source = post.get(meta_key) if isinstance(post.get(meta_key), dict) else {}
-                if not source:
-                    continue
-                if _persona_dashboard_post_key(archive_id, {**source, "id": post.get("id"), "content": post.get("content")}) in deleted_post_keys:
-                    continue
-                metric_row = {
-                    "post_key": _persona_dashboard_post_key(archive_id, {
-                        **source,
-                        "id": post.get("id"),
-                        "content": post.get("content"),
-                    }),
+            source = _get_publish_history_valid_published_meta(
+                {"platform": post.get("platform"), "sourceMeta": post.get("sourceMeta")},
+                post.get("publishedMeta"),
+                threads_handle,
+            )
+            if not source:
+                continue
+            if _persona_dashboard_post_key(archive_id, {**source, "id": post.get("id"), "content": post.get("content")}) in deleted_post_keys:
+                continue
+            metric_row = {
+                "post_key": _persona_dashboard_post_key(archive_id, {
+                    **source,
                     "id": post.get("id"),
-                    "platform": source.get("platform"),
-                    "source_url": source.get("sourceUrl"),
-                    "content": str(source.get("originalContent") or post.get("content") or "")[:220],
-                    "full_content": str(source.get("originalContent") or post.get("content") or "")[:5000],
-                    "published_at": source.get("publishedAt") or post.get("publishedAt"),
-                    "captured_at": source.get("capturedAt"),
-                    "like_count": _source_metric(source, "likeCount", "like_count"),
-                    "comment_count": _source_metric(source, "commentCount", "comment_count"),
-                    "share_count": _source_metric(source, "shareCount", "share_count", "send_count"),
-                    "view_count": _source_metric(source, "viewCount", "view_count"),
-                    "media_items": _compact_dashboard_media_items(post, source),
-                    "details": _sanitize_dashboard_value({"post": post, meta_key: source}, "post"),
-                }
-                post_metric_rows.append(metric_row)
+                    "content": post.get("content"),
+                }),
+                "id": post.get("id"),
+                "platform": source.get("platform"),
+                "source_url": source.get("sourceUrl"),
+                "content": str(source.get("originalContent") or post.get("content") or "")[:220],
+                "full_content": str(source.get("originalContent") or post.get("content") or "")[:5000],
+                "published_at": source.get("publishedAt") or post.get("publishedAt"),
+                "captured_at": source.get("capturedAt"),
+                "like_count": _source_metric(source, "likeCount", "like_count"),
+                "comment_count": _source_metric(source, "commentCount", "comment_count"),
+                "share_count": _source_metric(source, "shareCount", "share_count", "send_count"),
+                "view_count": _source_metric(source, "viewCount", "view_count"),
+                "media_items": _compact_dashboard_media_items(post, source),
+                "details": _sanitize_dashboard_value({"post": post, "publishedMeta": source}, "post"),
+            }
+            post_metric_rows.append(metric_row)
 
         if post_metric_rows:
+            deduped_post_metric_rows: list[dict[str, Any]] = []
+            seen_post_metric_keys: set[str] = set()
+            for row in post_metric_rows:
+                if not isinstance(row, dict):
+                    continue
+                row_key = str(row.get("post_key") or "").strip()
+                if row_key and row_key in seen_post_metric_keys:
+                    continue
+                if row_key:
+                    seen_post_metric_keys.add(row_key)
+                deduped_post_metric_rows.append(row)
+            post_metric_rows = deduped_post_metric_rows
             row_likes = sum(_number(row.get("like_count"), 0) for row in post_metric_rows if isinstance(row, dict))
             row_comments = sum(_number(row.get("comment_count"), 0) for row in post_metric_rows if isinstance(row, dict))
             row_shares = sum(_number(row.get("share_count"), 0) for row in post_metric_rows if isinstance(row, dict))
@@ -18422,9 +18581,6 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
                     item[key] = max(_number(item.get(key), 0), row_totals.get(key, 0))
 
         queue_for_archive = (queue_stats.get("by_archive") or {}).get(archive_id, {})
-        account_management = setup.get("accountManagement") if isinstance(setup.get("accountManagement"), dict) else {}
-        threads_account = account_management.get("threads") if isinstance(account_management.get("threads"), dict) else {}
-        threads_handle = _normalize_threads_username(threads_account.get("handle"))
         post_count = len(posts)
         published_count = len(publish_history)
         image_count = len(image_library)
@@ -18465,7 +18621,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "hot_score_formula": "热度 = 逐帖浏览合计 + 点赞 + 评论 + 分享 + 转发；不包含账号主页浏览。",
             "hot_platforms": hot_platforms,
             "post_metrics": post_metric_rows[:80],
-            "publish_history": [_compact_publish_record(item) for item in publish_history[:20] if isinstance(item, dict)],
+            "publish_history": [_compact_publish_record(item, threads_handle) for item in publish_history[:20] if isinstance(item, dict)],
             "queue": queue_for_archive,
             "warnings": _persona_dashboard_warnings(setup, hot_platforms, post_metric_rows),
         })

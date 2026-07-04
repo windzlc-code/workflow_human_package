@@ -66,7 +66,7 @@ class PersonaDashboardApiTests(unittest.TestCase):
                 "setup": {
                     "personaName": "历史老师",
                     "api_token": "super-secret-token",
-                    "accountManagement": {"threads": {"password": "super-secret-password"}},
+                    "accountManagement": {"threads": {"handle": "history", "password": "super-secret-password"}},
                     "hotMetrics": {
                         "threads": {
                             "platform": "threads",
@@ -116,6 +116,9 @@ class PersonaDashboardApiTests(unittest.TestCase):
                 "personaImageLibrary": [{"id": "img-1", "imageUrl": "/x.jpg", "createdAt": "2026-06-29T00:00:00Z"}],
             }
         ]
+        (self.tool_runtime_dir / "persona_archives.json").write_text(json.dumps(archives), encoding="utf-8")
+
+    def _write_archives_payload(self, archives):
         (self.tool_runtime_dir / "persona_archives.json").write_text(json.dumps(archives), encoding="utf-8")
 
     def _write_queue(self):
@@ -185,8 +188,7 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertNotIn(str(self.tool_runtime_dir), data_sources)
         persona = data["personas"][0]
         self.assertIn("threads_account", persona)
-        self.assertFalse(persona["threads_account"]["bound"])
-        self.assertTrue(any("Threads" in item for item in persona["warnings"]))
+        self.assertTrue(persona["threads_account"]["bound"])
 
     def test_recent_views_and_post_views_are_separate(self):
         self._write_archives()
@@ -283,6 +285,177 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertEqual(next_persona["post_metrics"], [])
         self.assertEqual(next_persona["hot"]["likes"], 0)
         self.assertEqual(next_persona["hot"]["post_views"], 0)
+
+    def test_unbound_threads_persona_ignores_stale_hot_metrics(self):
+        self._write_archives_payload([
+            {
+                "id": "persona-1",
+                "name": "未绑定账号",
+                "content": "test",
+                "createdAt": "2026-06-20T00:00:00Z",
+                "updatedAt": "2026-06-30T00:00:00Z",
+                "setup": {
+                    "hotMetrics": {
+                        "threads:someone": {
+                            "platform": "threads",
+                            "username": "someone",
+                            "likes": 99,
+                            "comments": 12,
+                            "shares": 3,
+                            "views": 4567,
+                            "complete": True,
+                            "postMetrics": [
+                                {
+                                    "sourceUrl": "https://www.threads.net/@someone/post/abc",
+                                    "content": "stale metrics",
+                                    "likeCount": 99,
+                                    "commentCount": 12,
+                                    "shareCount": 3,
+                                    "viewCount": 4567,
+                                }
+                            ],
+                        }
+                    }
+                },
+                "posts": [],
+                "platformPosts": {},
+                "publishHistory": [],
+                "personaImageLibrary": [],
+            }
+        ])
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        self.assertFalse(persona["threads_account"]["bound"])
+        self.assertEqual(persona["hot_platforms"], [])
+        self.assertEqual(persona["post_metrics"], [])
+        self.assertEqual(persona["hot"]["likes"], 0)
+        self.assertEqual(persona["hot"]["post_views"], 0)
+
+    def test_imported_source_metrics_do_not_pollute_threads_dashboard_totals(self):
+        source_url = "https://www.threads.net/@source/post/original"
+        self._write_archives_payload([
+            {
+                "id": "persona-1",
+                "name": "绑定账号",
+                "content": "test",
+                "createdAt": "2026-06-20T00:00:00Z",
+                "updatedAt": "2026-06-30T00:00:00Z",
+                "setup": {
+                    "accountManagement": {
+                        "threads": {"handle": "mine"}
+                    }
+                },
+                "posts": [
+                    {
+                        "id": "post-1",
+                        "title": "A",
+                        "content": "imported",
+                        "createdAt": "2026-06-29T00:00:00Z",
+                        "updatedAt": "2026-06-29T00:00:00Z",
+                        "sourceMeta": {
+                            "source": "sentiment_hot_import",
+                            "platform": "threads",
+                            "sourceUrl": source_url,
+                            "engagement": {"likeCount": 1000, "commentCount": 100, "viewCount": 50000},
+                        },
+                        "publishedMeta": {
+                            "source": "published_post",
+                            "platform": "threads",
+                            "sourceUrl": source_url,
+                            "engagement": {"likeCount": 1000, "commentCount": 100, "viewCount": 50000},
+                        },
+                    }
+                ],
+                "platformPosts": {"threads": [{"id": "post-1"}]},
+                "publishHistory": [
+                    {
+                        "id": "pub-1",
+                        "archivePostId": "post-1",
+                        "title": "A",
+                        "content": "imported",
+                        "publishedAt": "2026-06-30T02:00:00Z",
+                        "platform": "threads",
+                        "sourceMeta": {
+                            "source": "sentiment_hot_import",
+                            "platform": "threads",
+                            "sourceUrl": source_url,
+                        },
+                        "publishedMeta": {
+                            "source": "published_post",
+                            "platform": "threads",
+                            "sourceUrl": source_url,
+                            "engagement": {"likeCount": 1000, "commentCount": 100, "viewCount": 50000},
+                        },
+                    }
+                ],
+                "personaImageLibrary": [],
+            }
+        ])
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        self.assertEqual(persona["post_metrics"], [])
+        self.assertEqual(persona["hot"]["likes"], 0)
+        self.assertEqual(persona["hot"]["post_views"], 0)
+        self.assertEqual(persona["publish_history"][0]["likes"], 0)
+        self.assertEqual(persona["publish_history"][0]["views"], 0)
+
+    def test_valid_published_target_metrics_are_kept_for_bound_threads_account(self):
+        source_url = "https://www.threads.net/@source/post/original"
+        own_url = "https://www.threads.net/@mine/post/repost"
+        self._write_archives_payload([
+            {
+                "id": "persona-1",
+                "name": "绑定账号",
+                "content": "test",
+                "createdAt": "2026-06-20T00:00:00Z",
+                "updatedAt": "2026-06-30T00:00:00Z",
+                "setup": {
+                    "accountManagement": {
+                        "threads": {"handle": "mine"}
+                    }
+                },
+                "posts": [],
+                "platformPosts": {"threads": []},
+                "publishHistory": [
+                    {
+                        "id": "pub-1",
+                        "archivePostId": "post-1",
+                        "title": "A",
+                        "content": "imported",
+                        "publishedAt": "2026-06-30T02:00:00Z",
+                        "platform": "threads",
+                        "sourceMeta": {
+                            "source": "sentiment_hot_import",
+                            "platform": "threads",
+                            "sourceUrl": source_url,
+                        },
+                        "publishedTargets": [
+                            {
+                                "platform": "threads",
+                                "padCode": "PAD-1",
+                                "publishedUrl": own_url,
+                                "publishedMeta": {
+                                    "source": "published_post",
+                                    "platform": "threads",
+                                    "sourceUrl": own_url,
+                                    "engagement": {"likeCount": 2, "commentCount": 1, "viewCount": 25},
+                                    "metrics": {"like_count": 2, "comment_count": 1, "view_count": 25},
+                                },
+                            }
+                        ],
+                    }
+                ],
+                "personaImageLibrary": [],
+            }
+        ])
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        self.assertEqual(persona["hot"]["likes"], 2)
+        self.assertEqual(persona["hot"]["comments"], 1)
+        self.assertEqual(persona["hot"]["post_views"], 25)
+        self.assertEqual(persona["publish_history"][0]["source_url"], own_url)
+        self.assertEqual(persona["publish_history"][0]["likes"], 2)
+        self.assertEqual(persona["publish_history"][0]["views"], 25)
 
 
 if __name__ == "__main__":
