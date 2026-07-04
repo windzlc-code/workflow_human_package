@@ -67,6 +67,10 @@ function pdLabel(value) {
   return PD_LABELS[key] || key || "-";
 }
 
+function pdRefreshIntervalSeconds() {
+  return Math.max(60, Number(personaDashboardData && personaDashboardData.settings && personaDashboardData.settings.refresh_interval_seconds) || 300);
+}
+
 function pdNumber(value) {
   const n = Number(value || 0);
   if (!Number.isFinite(n)) return "0";
@@ -796,6 +800,7 @@ function pdRenderPersonaTabs(visiblePersonas, selectedPersona) {
 function pdRenderSettings() {
   const settings = pdEl("personaDashboardSettings");
   if (!settings) return;
+  const refreshIntervalSeconds = pdRefreshIntervalSeconds();
   settings.innerHTML = `
     <div class="persona-settings-card">
       <div>
@@ -807,6 +812,12 @@ function pdRenderSettings() {
         <input id="personaPageSizeInput" type="number" min="5" max="100" step="5" value="${pdEscape(String(personaDashboardPageSize))}" />
         <button class="primary" type="button" id="personaPageSizeApply">应用</button>
       </div>
+      <label for="personaRefreshIntervalInput">鍚庡彴鑷姩鍒锋柊闂撮殧锛堢锛?/label>
+      <div class="persona-settings-row">
+        <input id="personaRefreshIntervalInput" type="number" min="60" max="86400" step="60" value="${pdEscape(String(refreshIntervalSeconds))}" />
+        <button class="primary" type="button" id="personaRefreshIntervalApply">淇濆瓨</button>
+      </div>
+      <div class="small">褰撳墠鍚庡彴鑷姩鐩戞帶闂撮殧锛?${pdEscape(String(refreshIntervalSeconds))} 绉掞紝淇濆瓨鍚庣珛鍗崇敓鏁堛€?/div>
       <div class="persona-settings-row persona-settings-row-left">
         <button class="primary" type="button" id="personaRefreshAllBtn">全量刷新全部已绑定人设</button>
         <span class="small">会逐个读取已绑定 Threads 用户名的人设；无绑定的人设会跳过并提示。</span>
@@ -823,6 +834,29 @@ function pdRenderSettings() {
       personaDashboardPostPage = 1;
       localStorage.setItem("personaDashboardPageSize", String(next));
       pdRenderDashboard();
+    });
+  }
+  const applyRefreshInterval = pdEl("personaRefreshIntervalApply");
+  if (applyRefreshInterval) {
+    applyRefreshInterval.addEventListener("click", async () => {
+      const input = pdEl("personaRefreshIntervalInput");
+      const next = Math.max(60, Math.min(86400, Number(input && input.value) || 300));
+      try {
+        pdSetMsg("姝ｅ湪淇濆瓨鍚庡彴鑷姩鍒锋柊闂撮殧...", "ok");
+        const resp = await pdApi("/api/persona_dashboard/settings", {
+          method: "PUT",
+          body: { refresh_interval_seconds: next },
+        });
+        personaDashboardData = personaDashboardData || {};
+        personaDashboardData.settings = (resp && resp.settings) || { refresh_interval_seconds: next };
+        if (personaDashboardData.data_sources && personaDashboardData.data_sources.persona_dashboard_monitor) {
+          personaDashboardData.data_sources.persona_dashboard_monitor.interval_seconds = personaDashboardData.settings.refresh_interval_seconds;
+        }
+        pdSetMsg(`鍚庡彴鑷姩鍒锋柊闂撮殧宸叉洿鏂颁负 ${personaDashboardData.settings.refresh_interval_seconds} 绉掋€?`, "ok");
+        pdRenderDashboard();
+      } catch (err) {
+        pdSetMsg(String((err && (err.detail || err.message)) || err || "淇濆瓨鍒锋柊闂撮殧澶辫触"), "err");
+      }
     });
   }
   const refreshAll = pdEl("personaRefreshAllBtn");

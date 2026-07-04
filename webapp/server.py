@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import copy
+import datetime
 import hashlib
 import hmac
 import json
@@ -102,6 +103,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "telegram_bots": [],
     "telegram_persona_data_scope": "shared",
     "telegram_primary_allowed_pad_codes": [],
+    "persona_dashboard_refresh_interval_seconds": 300,
     "remote_comfy_gateway_url": "",
     "remote_comfy_gateway_token": "",
     "remote_comfy_workflow_mappings": {"face_swap": "__converted__/flux_人物换脸工作流.api.json"},
@@ -3626,6 +3628,10 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     scope = str(merged.get("telegram_persona_data_scope") or "shared").strip().lower()
     merged["telegram_persona_data_scope"] = "isolated" if scope == "isolated" else "shared"
     merged["telegram_bots"] = _normalize_telegram_bots_config(merged.get("telegram_bots"))
+    merged["persona_dashboard_refresh_interval_seconds"] = min(
+        max(_to_int(merged.get("persona_dashboard_refresh_interval_seconds"), 300), 60),
+        86400,
+    )
     primary_pad_codes = merged.get("telegram_primary_allowed_pad_codes")
     if isinstance(primary_pad_codes, str):
         primary_items = [part.strip() for part in re.split(r"[,，\n]+", primary_pad_codes) if part.strip()]
@@ -16755,6 +16761,7 @@ class RuntimeConfigPayload(BaseModel):
     telegram_bots: list[Any] = Field(default_factory=list)
     telegram_persona_data_scope: str = "shared"
     telegram_primary_allowed_pad_codes: list[Any] = Field(default_factory=list)
+    persona_dashboard_refresh_interval_seconds: int = 300
     comfy_workflow_source: str = "remote"
     remote_comfy_gateway_url: str = ""
     remote_comfy_gateway_token: str = ""
@@ -16919,6 +16926,10 @@ class PersonaDashboardRefreshPayload(BaseModel):
     archive_id: str = ""
 
 
+class PersonaDashboardSettingsPayload(BaseModel):
+    refresh_interval_seconds: int = 300
+
+
 class InternalTgSubmitPayload(BaseModel):
     task_type: str
     tg_chat_id: int
@@ -16985,6 +16996,7 @@ PERSONA_DASHBOARD_REFRESH_TASKS: dict[str, dict[str, Any]] = {}
 PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
+PERSONA_DASHBOARD_MONITOR_WAKE_EVENT = threading.Event()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 6
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
@@ -17004,6 +17016,7 @@ PERSONA_DASHBOARD_MONITOR_STATE: dict[str, Any] = {
     "last_message": "",
     "interval_seconds": 0,
 }
+PERSONA_DASHBOARD_OVERVIEW_CACHE_MAX_AGE_SECONDS = 300
 
 
 @contextlib.contextmanager
@@ -17700,6 +17713,11 @@ def _persona_dashboard_refresh_worker(task_id: str, archive_id: str = "") -> Non
             except Exception:
                 parsed = {"raw": stdout[-4000:]}
         status = "success" if proc.returncode == 0 and isinstance(parsed, dict) and parsed.get("ok") else "failed"
+        if status == "success":
+            try:
+                _write_persona_dashboard_overview_cache(_compute_persona_dashboard_overview())
+            except Exception:
+                pass
         message = "刷新完成" if status == "success" else "刷新未完成，请查看结果提示。"
         with PERSONA_DASHBOARD_REFRESH_LOCK:
             PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
@@ -17863,8 +17881,39 @@ def _persona_dashboard_refresh_is_running() -> bool:
         return any(str(task.get("status") or "") in {"queued", "running"} for task in PERSONA_DASHBOARD_REFRESH_TASKS.values())
 
 
+def _persona_dashboard_runtime_settings() -> dict[str, Any]:
+    try:
+        with db() as conn:
+            runtime = _get_runtime_config(conn)
+    except Exception:
+        runtime = {}
+    merged = dict(DEFAULT_RUNTIME_CONFIG)
+    if isinstance(runtime, dict):
+        merged.update(runtime)
+    return _normalize_runtime_config(merged)
+
+
+def _load_persona_dashboard_settings_payload() -> dict[str, Any]:
+    runtime = _persona_dashboard_runtime_settings()
+    return {
+        "refresh_interval_seconds": int(runtime.get("persona_dashboard_refresh_interval_seconds") or 300),
+        "cache_max_age_seconds": PERSONA_DASHBOARD_OVERVIEW_CACHE_MAX_AGE_SECONDS,
+    }
+
+
+def _wait_persona_dashboard_monitor(timeout_seconds: int) -> None:
+    PERSONA_DASHBOARD_MONITOR_WAKE_EVENT.wait(max(1, int(timeout_seconds or 1)))
+    PERSONA_DASHBOARD_MONITOR_WAKE_EVENT.clear()
+
+
 def _persona_dashboard_monitor_interval_seconds() -> int:
-    raw = os.getenv("PERSONA_DASHBOARD_RSSHUB_POLL_SECONDS") or os.getenv("PERSONA_DASHBOARD_AUTO_REFRESH_SECONDS") or "300"
+    runtime = _persona_dashboard_runtime_settings()
+    raw = (
+        runtime.get("persona_dashboard_refresh_interval_seconds")
+        or os.getenv("PERSONA_DASHBOARD_RSSHUB_POLL_SECONDS")
+        or os.getenv("PERSONA_DASHBOARD_AUTO_REFRESH_SECONDS")
+        or "300"
+    )
     try:
         return max(60, int(float(raw)))
     except Exception:
@@ -17938,10 +17987,9 @@ def _maybe_schedule_persona_dashboard_page_view_refresh() -> None:
 
 
 def _persona_dashboard_monitor_loop() -> None:
-    interval = _persona_dashboard_monitor_interval_seconds()
     source = (os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
-    time.sleep(interval)
     while True:
+        interval = _persona_dashboard_monitor_interval_seconds()
         if not _persona_dashboard_monitor_enabled():
             with PERSONA_DASHBOARD_MONITOR_LOCK:
                 PERSONA_DASHBOARD_MONITOR_STATE.update({
@@ -17951,7 +17999,7 @@ def _persona_dashboard_monitor_loop() -> None:
                     "interval_seconds": interval,
                     "last_message": "后台自动监控已关闭。",
                 })
-            time.sleep(interval)
+            _wait_persona_dashboard_monitor(interval)
             continue
         try:
             if not _persona_dashboard_refresh_is_running():
@@ -17975,6 +18023,7 @@ def _persona_dashboard_monitor_loop() -> None:
                                 "status": str(current.get("status") or "idle"),
                                 "last_finished_at": current.get("finished_at", ""),
                                 "last_message": current.get("message", ""),
+                                "interval_seconds": interval,
                             })
                         break
                     time.sleep(5)
@@ -17996,7 +18045,7 @@ def _persona_dashboard_monitor_loop() -> None:
                     "interval_seconds": interval,
                     "last_message": str(exc),
                 })
-        time.sleep(interval)
+        _wait_persona_dashboard_monitor(interval)
 
 
 def _ensure_persona_dashboard_monitor_started() -> None:
@@ -18015,7 +18064,59 @@ def _ensure_persona_dashboard_monitor_started() -> None:
     thread = threading.Thread(target=_persona_dashboard_monitor_loop, name="persona-dashboard-rsshub-monitor", daemon=True)
     thread.start()
 
+def _persona_dashboard_overview_cache_file() -> Path:
+    return TOOL_R18_RUNTIME_DIR / "persona_dashboard_overview_cache.json"
 
+
+def _read_persona_dashboard_overview_cache() -> dict[str, Any] | None:
+    path = _persona_dashboard_overview_cache_file()
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8", errors="ignore") or "{}")
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) and parsed.get("ok") else None
+
+
+def _write_persona_dashboard_overview_cache(payload: dict[str, Any]) -> None:
+    path = _persona_dashboard_overview_cache_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK:
+        temp_path = path.with_suffix(f"{path.suffix}.tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temp_path.replace(path)
+
+
+def _invalidate_persona_dashboard_overview_cache() -> None:
+    path = _persona_dashboard_overview_cache_file()
+    with PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            return
+
+
+def _persona_dashboard_overview_cache_is_fresh(payload: Any) -> bool:
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return False
+    updated_at = str(payload.get("updated_at") or "").strip()
+    if not updated_at:
+        return False
+    try:
+        updated_ts = datetime.datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return False
+    return (time.time() - updated_ts) <= PERSONA_DASHBOARD_OVERVIEW_CACHE_MAX_AGE_SECONDS
+
+
+def _persona_dashboard_attach_live_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    next_payload = dict(payload if isinstance(payload, dict) else {})
+    next_payload["settings"] = _load_persona_dashboard_settings_payload()
+    data_sources = dict(next_payload.get("data_sources") or {})
+    data_sources["persona_dashboard_monitor"] = dict(PERSONA_DASHBOARD_MONITOR_STATE)
+    next_payload["data_sources"] = data_sources
+    return next_payload
 def _compute_persona_dashboard_overview() -> dict[str, Any]:
     archives, archives_source = _read_tool_r18_persona_archives()
     queue_stats = _read_tool_r18_publish_queue_stats()
@@ -18412,6 +18513,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "sentiment_hot_candidates": sentiment_stats,
             "persona_dashboard_monitor": dict(PERSONA_DASHBOARD_MONITOR_STATE),
         },
+        "settings": _load_persona_dashboard_settings_payload(),
     }
 
 
@@ -18432,12 +18534,44 @@ def _build_persona_dashboard_overview(force_refresh: bool = False, allow_backgro
     if not force_refresh:
         cached = _read_persona_dashboard_overview_cache()
         if cached and not _persona_dashboard_overview_needs_refresh(cached):
+            attached = _persona_dashboard_attach_live_settings(cached)
+            if _persona_dashboard_overview_cache_is_fresh(attached):
+                return attached
             if allow_background_refresh:
                 _maybe_schedule_persona_dashboard_page_view_refresh()
-            return cached
+            elif not _persona_dashboard_refresh_is_running():
+                try:
+                    _start_persona_dashboard_refresh("", trigger="page_view")
+                except Exception:
+                    pass
+            return attached
     payload = _compute_persona_dashboard_overview()
     _write_persona_dashboard_overview_cache(payload)
-    return payload
+    return _persona_dashboard_attach_live_settings(payload)
+
+
+def _save_persona_dashboard_settings(refresh_interval_seconds: int) -> dict[str, Any]:
+    next_interval = min(max(int(refresh_interval_seconds or 300), 60), 86400)
+    try:
+        with db() as conn:
+            current_runtime = _get_runtime_config(conn)
+    except RuntimeConfigFileError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    merged = dict(DEFAULT_RUNTIME_CONFIG)
+    if isinstance(current_runtime, dict):
+        merged.update(current_runtime)
+    merged["persona_dashboard_refresh_interval_seconds"] = next_interval
+    try:
+        merged = _normalize_runtime_config(merged)
+        with _RUNTIME_CONFIG_LOCK:
+            _write_runtime_config_file(merged)
+    except RuntimeConfigFileError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    settings = _load_persona_dashboard_settings_payload()
+    with PERSONA_DASHBOARD_MONITOR_LOCK:
+        PERSONA_DASHBOARD_MONITOR_STATE["interval_seconds"] = settings["refresh_interval_seconds"]
+    PERSONA_DASHBOARD_MONITOR_WAKE_EVENT.set()
+    return settings
 
 
 def create_app() -> FastAPI:
@@ -18971,6 +19105,14 @@ def create_app() -> FastAPI:
     @app.get("/api/persona_dashboard/overview")
     def api_persona_dashboard_overview():
         return _build_persona_dashboard_overview(allow_background_refresh=True)
+
+    @app.get("/api/persona_dashboard/settings")
+    def api_persona_dashboard_settings():
+        return {"ok": True, "settings": _load_persona_dashboard_settings_payload()}
+
+    @app.put("/api/persona_dashboard/settings")
+    def api_persona_dashboard_set_settings(payload: PersonaDashboardSettingsPayload):
+        return {"ok": True, "settings": _save_persona_dashboard_settings(payload.refresh_interval_seconds)}
 
     @app.get("/api/persona_dashboard/monitor")
     def api_persona_dashboard_monitor():
