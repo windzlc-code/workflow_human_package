@@ -1481,6 +1481,7 @@ async function loadPersonaDashboard() {
 }
 
 let personaDashboardRefreshTaskId = "";
+let personaDashboardAutoPollTimer = 0;
 
 const PERSONA_DASHBOARD_LABELS = {
   likes: "点赞",
@@ -1981,8 +1982,9 @@ function setPersonaDashboardMessage(text, ok = true) {
   msg.className = text ? `msg ${ok ? "ok" : "err"}` : "msg";
 }
 
-async function loadPersonaDashboard() {
-  setPersonaDashboardMessage("正在加载人设数据...", true);
+async function loadPersonaDashboard(options = {}) {
+  const silent = Boolean(options && options.silent);
+  if (!silent) setPersonaDashboardMessage("正在加载人设数据...", true);
   try {
     const data = await api("/api/persona_dashboard/overview");
     appState.personaDashboard = data;
@@ -1991,11 +1993,21 @@ async function loadPersonaDashboard() {
       const latest = data.summary && data.summary.latest_data_at;
       el("personaDashboardUpdated").textContent = `缓存读取：${formatDashboardDate(data.updated_at)} · 最近数据：${formatDashboardDate(latest)}`;
     }
-    setPersonaDashboardMessage("", true);
+    if (!silent) setPersonaDashboardMessage("", true);
     renderPersonaDashboard();
   } catch (err) {
-    setPersonaDashboardMessage(publicMessage(err.detail || err.message || String(err)), false);
+    if (!silent) setPersonaDashboardMessage(publicMessage(err.detail || err.message || String(err)), false);
   }
+}
+
+function startPersonaDashboardAutoPoll() {
+  if (personaDashboardAutoPollTimer) window.clearInterval(personaDashboardAutoPollTimer);
+  personaDashboardAutoPollTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    if (appState.activePage !== "persona-dashboard") return;
+    if (personaDashboardRefreshTaskId) return;
+    loadPersonaDashboard({ silent: true });
+  }, 60000);
 }
 
 async function bindPersonaDashboardThreads(persona) {
@@ -3640,11 +3652,11 @@ window.addEventListener("DOMContentLoaded", async () => {
       await loadTasks();
       await loadMe();
       await loadLedger();
-      if (appState.activePage === "persona-dashboard") await loadPersonaDashboard();
     } catch {
       // ignore polling failures
     }
   }, 8000);
+  startPersonaDashboardAutoPoll();
 });
 
 window.addEventListener("hashchange", () => {

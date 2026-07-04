@@ -16984,7 +16984,14 @@ PERSONA_DASHBOARD_REFRESH_TASKS: dict[str, dict[str, Any]] = {}
 PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
+PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
+PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_STARTED = False
+PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE: dict[str, Any] = {
+    "last_requested_at": 0.0,
+    "last_task_id": "",
+    "last_message": "",
+}
 PERSONA_DASHBOARD_MONITOR_STATE: dict[str, Any] = {
     "enabled": False,
     "source": "rsshub",
@@ -17129,6 +17136,7 @@ def _bind_persona_threads_username(archive_id: str, username: str) -> dict[str, 
     if not changed:
         raise HTTPException(status_code=404, detail="人设不存在。")
     _write_persona_archives_preserving_shape(path, raw, archives)
+    _invalidate_persona_dashboard_overview_cache()
     return {"ok": True, "archive_id": clean_id, "username": clean_username, "path": path.name}
 
 
@@ -17169,6 +17177,7 @@ def _unbind_persona_threads_username(archive_id: str) -> dict[str, Any]:
     if not changed:
         raise HTTPException(status_code=404, detail="人设不存在。")
     _write_persona_archives_preserving_shape(path, raw, archives)
+    _invalidate_persona_dashboard_overview_cache()
     return {"ok": True, "archive_id": clean_id, "path": path.name}
 
 
@@ -17255,6 +17264,7 @@ def _delete_persona_dashboard_post(archive_id: str, post_key: str) -> dict[str, 
         raise HTTPException(status_code=404, detail="帖子不存在或已经删除。")
     _add_persona_dashboard_deleted_post(clean_id, clean_key)
     _write_persona_archives_preserving_shape(path, raw, archives)
+    _invalidate_persona_dashboard_overview_cache()
     return {"ok": True, "archive_id": clean_id, "post_key": clean_key, "deleted": deleted, "path": path.name}
 
 
@@ -17799,6 +17809,11 @@ def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "", sou
             except Exception:
                 parsed = {"raw": stdout[-4000:]}
         status = "success" if proc.returncode == 0 and isinstance(parsed, dict) and parsed.get("ok") else "failed"
+        if status == "success":
+            try:
+                _build_persona_dashboard_overview(force_refresh=True)
+            except Exception:
+                _invalidate_persona_dashboard_overview_cache()
         with PERSONA_DASHBOARD_REFRESH_LOCK:
             PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
                 "status": status,
@@ -17840,9 +17855,72 @@ def _persona_dashboard_monitor_enabled() -> bool:
     return str(os.getenv("PERSONA_DASHBOARD_AUTO_REFRESH_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _persona_dashboard_page_view_refresh_interval_seconds() -> int:
+    raw = os.getenv("PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_SECONDS") or "300"
+    try:
+        return max(60, int(float(raw)))
+    except Exception:
+        return 300
+
+
+def _persona_dashboard_overview_cache_file() -> Path:
+    return TOOL_R18_RUNTIME_DIR / "persona_dashboard_overview_cache.json"
+
+
+def _read_persona_dashboard_overview_cache() -> dict[str, Any] | None:
+    path = _persona_dashboard_overview_cache_file()
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8", errors="ignore") or "{}")
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) and parsed.get("ok") else None
+
+
+def _write_persona_dashboard_overview_cache(payload: dict[str, Any]) -> None:
+    path = _persona_dashboard_overview_cache_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK:
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _invalidate_persona_dashboard_overview_cache() -> None:
+    path = _persona_dashboard_overview_cache_file()
+    with PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            return
+
+
+def _maybe_schedule_persona_dashboard_page_view_refresh() -> None:
+    if not _persona_dashboard_monitor_enabled():
+        return
+    if _persona_dashboard_refresh_is_running():
+        return
+    now_ts = time.time()
+    with PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK:
+        last_requested_at = float(PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE.get("last_requested_at") or 0.0)
+        if now_ts - last_requested_at < _persona_dashboard_page_view_refresh_interval_seconds():
+            return
+        PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE["last_requested_at"] = now_ts
+    try:
+        task = _start_persona_dashboard_refresh("", trigger="page_view")
+        with PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK:
+            PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE.update({
+                "last_task_id": str(task.get("id") or ""),
+                "last_message": "页面已读取缓存，后台开始异步刷新热点数据。",
+            })
+    except Exception as exc:
+        with PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK:
+            PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE["last_message"] = str(exc)
+
+
 def _persona_dashboard_monitor_loop() -> None:
     interval = _persona_dashboard_monitor_interval_seconds()
     source = (os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "rsshub").strip().lower() or "rsshub"
+    time.sleep(interval)
     while True:
         if not _persona_dashboard_monitor_enabled():
             with PERSONA_DASHBOARD_MONITOR_LOCK:
@@ -17918,7 +17996,7 @@ def _ensure_persona_dashboard_monitor_started() -> None:
     thread.start()
 
 
-def _build_persona_dashboard_overview() -> dict[str, Any]:
+def _compute_persona_dashboard_overview() -> dict[str, Any]:
     archives, archives_source = _read_tool_r18_persona_archives()
     queue_stats = _read_tool_r18_publish_queue_stats()
     sentiment_stats = _read_tool_r18_sentiment_hot_stats()
@@ -18205,6 +18283,18 @@ def _build_persona_dashboard_overview() -> dict[str, Any]:
             "persona_dashboard_monitor": dict(PERSONA_DASHBOARD_MONITOR_STATE),
         },
     }
+
+
+def _build_persona_dashboard_overview(force_refresh: bool = False, allow_background_refresh: bool = False) -> dict[str, Any]:
+    if not force_refresh:
+        cached = _read_persona_dashboard_overview_cache()
+        if cached:
+            if allow_background_refresh:
+                _maybe_schedule_persona_dashboard_page_view_refresh()
+            return cached
+    payload = _compute_persona_dashboard_overview()
+    _write_persona_dashboard_overview_cache(payload)
+    return payload
 
 
 def create_app() -> FastAPI:
@@ -18736,7 +18826,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/persona_dashboard/overview")
     def api_persona_dashboard_overview():
-        return _build_persona_dashboard_overview()
+        return _build_persona_dashboard_overview(allow_background_refresh=True)
 
     @app.get("/api/persona_dashboard/monitor")
     def api_persona_dashboard_monitor():
