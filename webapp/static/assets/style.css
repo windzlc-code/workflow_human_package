@@ -5592,19 +5592,6 @@ body.page-admin {
   min-width: 190px;
 }
 
-.persona-dashboard-action-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  width: 100%;
-  align-items: center;
-}
-
-.persona-dashboard-action-row select {
-  min-width: 220px;
-  width: 100%;
-}
-
 .persona-dashboard-filters {
   display: grid;
   grid-template-columns: minmax(220px, 1.5fr) repeat(3, minmax(140px, 1fr));
@@ -6822,10 +6809,6 @@ body.page-admin {
   .persona-dashboard-actions,
   .persona-score {
     justify-items: start;
-  }
-
-  .persona-dashboard-action-row {
-    grid-template-columns: 1fr;
   }
 
   .persona-score small {
