@@ -355,11 +355,17 @@ async function main() {
     }
   }
 
+  const refreshedCount = results.filter((item) => item.ok).length;
+  const partialCount = results.filter((item) => item.partial).length;
+  const skippedCount = results.filter((item) => item.skipped).length;
+  const hardFailureCount = results.filter((item) => !item.ok && !item.partial && !item.skipped).length;
+  const hasUsableRun = refreshedCount > 0 || partialCount > 0 || skippedCount === results.length;
   console.log(JSON.stringify({
-    ok: results.some((item) => item.ok),
-    refreshed: results.filter((item) => item.ok).length,
-    partial: results.filter((item) => item.partial).length,
-    skipped: results.filter((item) => item.skipped).length,
+    ok: hasUsableRun && hardFailureCount === 0,
+    refreshed: refreshedCount,
+    partial: partialCount,
+    skipped: skippedCount,
+    failed: hardFailureCount,
     total: results.length,
     auth: { ok: authUsable, message: auth.message || refreshAuth.message || "" },
     results,
