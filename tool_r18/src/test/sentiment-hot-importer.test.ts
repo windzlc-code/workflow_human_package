@@ -8,6 +8,7 @@ import {
   finalizeSentimentHotCandidatesForDisplay,
   isObviouslyLowQualitySentimentHotCandidate,
   isChineseSentimentCandidate,
+  isSuspiciousThreadsProfileMetricMix,
   parseInstagramReaderSearchMarkdownCandidates,
   matchThreadsBrowserProfilePublishedPost,
   parseThreadsBrowserPostDetailMetrics,
@@ -888,6 +889,7 @@ Instagram
                       pk: "3925594288747063183",
                       code: "DZ1ABCxyz",
                       canonical_url: "https://www.threads.com/@stevie875443/post/DZ1ABCxyz",
+                      user: { username: "stevie875443" },
                       taken_at: 1782075045,
                       like_count: 954,
                       text_post_app_info: {
@@ -960,6 +962,62 @@ Instagram
 
     expect(parsed.posts).toEqual([]);
     expect(parsed.hasNextPage).toBe(false);
+  });
+
+  it("skips Threads GraphQL profile posts when owner is missing even if canonical url matches current handle", () => {
+    const parsed = parseThreadsGraphqlProfilePagePayload({
+      username: "stevie875443",
+      payload: {
+        data: {
+          mediaData: {
+            edges: [
+              {
+                node: {
+                  thread_items: [{
+                    post: {
+                      pk: "owner-missing-post",
+                      code: "DaKf3wEkuYz",
+                      canonical_url: "https://www.threads.com/@stevie875443/post/DaKf3wEkuYz",
+                      like_count: 210000,
+                      text_post_app_info: {
+                        direct_reply_count: 2862,
+                        repost_count: 5232,
+                        reshare_count: 54000,
+                      },
+                    },
+                  }],
+                },
+              },
+            ],
+            page_info: {
+              end_cursor: "",
+              has_next_page: false,
+            },
+          },
+        },
+      },
+    });
+
+    expect(parsed.posts).toEqual([]);
+    expect(parsed.hasNextPage).toBe(false);
+  });
+
+  it("treats huge interaction rows without resolved views as suspicious profile metric mixes", () => {
+    expect(isSuspiciousThreadsProfileMetricMix({
+      sourceUrl: "https://www.threads.com/@stevie875443/post/DaKf3wEkuYz",
+      likeCount: 210000,
+      commentCount: 2862,
+      shareCount: 54000,
+      repostCount: 5232,
+    })).toBe(true);
+
+    expect(isSuspiciousThreadsProfileMetricMix({
+      sourceUrl: "https://www.threads.com/@stevie875443/post/DZ6gGNAEqjT",
+      likeCount: 334,
+      commentCount: 77,
+      shareCount: 14,
+      repostCount: 1,
+    })).toBe(false);
   });
 
   it("normalizes relative Threads profile post times for fresh posts", () => {

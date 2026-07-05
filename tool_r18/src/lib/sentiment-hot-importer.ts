@@ -2544,17 +2544,21 @@ function resolveThreadsGraphqlPostOwnerUsername(post: any): string {
 function isThreadsGraphqlProfileOwnedPost(username: string, post: any): boolean {
   const target = normalizeThreadsProfileUsername(username);
   const owner = resolveThreadsGraphqlPostOwnerUsername(post);
-  return !target || !owner || owner === target;
+  if (!target) return true;
+  return Boolean(owner) && owner === target;
 }
 
-function isSuspiciousThreadsProfileMetricMix(post: Partial<ThreadsGraphqlProfilePostAggregate>): boolean {
-  if (typeof post.viewCount !== "number" || post.viewCount <= 0) return false;
+export function isSuspiciousThreadsProfileMetricMix(post: Partial<ThreadsGraphqlProfilePostAggregate>): boolean {
   const strongestInteraction = Math.max(
     Number(post.likeCount || 0),
     Number(post.commentCount || 0),
     Number(post.repostCount || 0),
     Number(post.shareCount || 0),
   );
+  if ((typeof post.viewCount !== "number" || post.viewCount <= 0) && strongestInteraction >= 5000) {
+    return true;
+  }
+  if (typeof post.viewCount !== "number" || post.viewCount <= 0) return false;
   return strongestInteraction >= 1000 && strongestInteraction > post.viewCount * 20;
 }
 
@@ -2702,7 +2706,10 @@ async function collectThreadsGraphqlProfilePosts(args: {
       payload,
     });
     if (current.posts.length === 0 && !current.endCursor) {
-      return { posts: [...byPk.values()], reachedEnd: pages >= 2 || byPk.size >= 20 };
+      return {
+        posts: [...byPk.values()],
+        reachedEnd: current.pageInfoResolved && current.hasNextPage !== true,
+      };
     }
     const beforeSize = byPk.size;
     for (const post of current.posts) byPk.set(post.pk, post);
@@ -2745,7 +2752,38 @@ async function scrollThreadsProfileUntilGraphqlEnd(args: {
       if (key) seenVisiblePostKeys.add(key);
     }
     await args.afterScroll?.().catch(() => undefined);
+    await args.page.evaluate(() => {
+      const candidates = [
+        document.scrollingElement,
+        document.documentElement,
+        document.body,
+        ...Array.from(document.querySelectorAll("main, section, div")),
+      ].filter(Boolean) as any[];
+      let target: any = document.scrollingElement || document.documentElement || document.body;
+      let bestDepth = Math.max(
+        0,
+        Number(target?.scrollHeight || 0) - Number(target?.clientHeight || 0),
+      );
+      for (const candidate of candidates) {
+        const scrollHeight = Number(candidate?.scrollHeight || 0);
+        const clientHeight = Number(candidate?.clientHeight || 0);
+        const depth = scrollHeight - clientHeight;
+        if (depth > bestDepth + 200) {
+          bestDepth = depth;
+          target = candidate;
+        }
+      }
+      const step = Math.max(Number(target?.clientHeight || window.innerHeight || 900), 1400);
+      const currentTop = Number(target?.scrollTop || window.scrollY || 0);
+      const nextTop = currentTop + step;
+      if (target && typeof target.scrollTo === "function") target.scrollTo(0, nextTop);
+      else if (target) target.scrollTop = nextTop;
+      window.scrollTo(0, Math.max(window.scrollY || 0, nextTop));
+    }).catch(() => undefined);
     await args.page.mouse.wheel(0, 1800).catch(() => undefined);
+    if ((scroll + 1) % 6 === 0) {
+      await args.page.keyboard.press("End").catch(() => undefined);
+    }
     await args.page.waitForTimeout(1200);
     const nextGraphqlCount = args.capturedGraphqlPages.size;
     const scrollY = await args.page.evaluate(() => Math.round(window.scrollY || document.documentElement?.scrollTop || 0)).catch(() => -1);
@@ -3311,10 +3349,6 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             .filter((post) => !isSuspiciousThreadsProfileMetricMix(post));
           const resolvedViewPosts = postMetrics.filter((post) => typeof post.viewCount === "number").length;
           const totalResolvedViews = postMetrics.reduce((sum, post) => sum + (typeof post.viewCount === "number" ? post.viewCount : 0), 0);
-          const visiblePostTotal = Number(visible.parsed.posts);
-          const reachedEndByVisibleTotal = Number.isFinite(visiblePostTotal)
-            && visiblePostTotal > 0
-            && allPosts.length >= visiblePostTotal;
           parsed = {
             ...visible.parsed,
             posts: Math.max(Number(visible.parsed.posts || 0), postMetrics.length),
@@ -3329,8 +3363,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
             postMetrics,
           };
           (parsed as any).profileReachedEnd = capturedReachedEnd
-            || collection.reachedEnd
-            || reachedEndByVisibleTotal;
+            || collection.reachedEnd;
         }
       } else {
         parsed = {
@@ -3351,6 +3384,7 @@ export async function fetchThreadsProfileHotMetrics(usernameInput: string): Prom
         && parsed.scannedPosts > 0
         && Array.isArray((parsed as any).postMetrics)
         && (parsed as any).postMetrics.length >= parsed.scannedPosts
+        && Number((parsed as any).viewResolvedPosts || 0) > 0
         && (parsed as any).profileReachedEnd === true;
       const visibleProfileComplete = !hasLoginSessionCookie
         && !attemptCookies.length

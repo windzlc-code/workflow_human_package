@@ -199,6 +199,45 @@ function hasUsableMetrics(metrics: any): boolean {
     .some((field) => typeof metrics?.[field] === "number");
 }
 
+function metricRowKey(row: any): string {
+  return String(row?.sourceUrl || row?.source_url || row?.code || row?.pk || row?.id || "").trim().toLowerCase();
+}
+
+function mergeCurrentPostMetricsWithPreviousViews(currentRows: any[], previousRows: any[]): any[] {
+  const previousByKey = new Map<string, any>();
+  for (const row of Array.isArray(previousRows) ? previousRows : []) {
+    const key = metricRowKey(row);
+    if (!key) continue;
+    previousByKey.set(key, row);
+  }
+  return (Array.isArray(currentRows) ? currentRows : []).map((row: any) => {
+    const key = metricRowKey(row);
+    const previous = key ? previousByKey.get(key) : undefined;
+    if (typeof row?.viewCount === "number") return row;
+    if (typeof previous?.viewCount !== "number") return row;
+    return {
+      ...row,
+      viewCount: previous.viewCount,
+    };
+  });
+}
+
+function summarizePostMetricViews(rows: any[]): { views: number; resolvedPosts: number; missingPosts: number } {
+  let views = 0;
+  let resolvedPosts = 0;
+  const safeRows = Array.isArray(rows) ? rows : [];
+  for (const row of safeRows) {
+    if (typeof row?.viewCount !== "number") continue;
+    views += row.viewCount;
+    resolvedPosts += 1;
+  }
+  return {
+    views,
+    resolvedPosts,
+    missingPosts: Math.max(0, safeRows.length - resolvedPosts),
+  };
+}
+
 function isCompleteMetrics(metrics: any): boolean {
   const scannedPosts = Number(metrics?.scannedPosts || 0);
   const hasResolvedViews = typeof metrics?.views === "number"
@@ -271,35 +310,55 @@ async function main() {
       const existingHotMetrics = setup.hotMetrics || {};
       const previousMetrics = existingHotMetrics[key] || {};
       const usable = hasUsableMetrics(metrics);
-      const complete = isCompleteMetrics(metrics);
-      const nextPostMetrics = Array.isArray(metrics.postMetrics)
+      const rawNextPostMetrics = Array.isArray(metrics.postMetrics)
         ? metrics.postMetrics
         : Array.isArray(previousMetrics.postMetrics)
           ? previousMetrics.postMetrics
           : [];
+      const mergedPostMetrics = mergeCurrentPostMetricsWithPreviousViews(
+        rawNextPostMetrics,
+        Array.isArray(previousMetrics.postMetrics) ? previousMetrics.postMetrics : [],
+      );
+      const mergedViews = summarizePostMetricViews(mergedPostMetrics);
+      const canPromoteMergedMetrics = metrics?.complete === true
+        && metrics?.scope === "authenticated_full_profile"
+        && Number(metrics?.scannedPosts || 0) > 0
+        && Array.isArray(metrics?.postMetrics)
+        && metrics.postMetrics.length >= Number(metrics?.scannedPosts || 0)
+        && mergedViews.resolvedPosts > 0;
+      const effectiveMetrics = canPromoteMergedMetrics
+        ? {
+            ...metrics,
+            postMetrics: mergedPostMetrics,
+            views: mergedViews.views,
+            viewResolvedPosts: mergedViews.resolvedPosts,
+            viewMissingPosts: mergedViews.missingPosts,
+          }
+        : metrics;
+      const complete = isCompleteMetrics(effectiveMetrics);
       const nextMetric = complete
         ? {
             ...previousMetrics,
             platform: "threads",
-            username: metrics.username || username,
-            method: metrics.method,
-            feedUrl: metrics.feedUrl,
-            followers: metrics.followers,
-            following: metrics.following,
-            recentViews: metrics.recentViews,
-            posts: metrics.posts,
-            likes: metrics.likes,
-            comments: metrics.comments,
-            reposts: metrics.reposts,
-            shares: metrics.shares,
-            views: metrics.views,
-            viewResolvedPosts: metrics.viewResolvedPosts,
-            viewMissingPosts: metrics.viewMissingPosts,
-            scannedPosts: metrics.scannedPosts,
-            postMetrics: nextPostMetrics,
+            username: effectiveMetrics.username || username,
+            method: effectiveMetrics.method,
+            feedUrl: effectiveMetrics.feedUrl,
+            followers: effectiveMetrics.followers,
+            following: effectiveMetrics.following,
+            recentViews: effectiveMetrics.recentViews,
+            posts: effectiveMetrics.posts,
+            likes: effectiveMetrics.likes,
+            comments: effectiveMetrics.comments,
+            reposts: effectiveMetrics.reposts,
+            shares: effectiveMetrics.shares,
+            views: effectiveMetrics.views,
+            viewResolvedPosts: effectiveMetrics.viewResolvedPosts,
+            viewMissingPosts: effectiveMetrics.viewMissingPosts,
+            scannedPosts: effectiveMetrics.scannedPosts,
+            postMetrics: effectiveMetrics.postMetrics,
             complete: true,
             scope: "authenticated_full_profile",
-            refreshedAt: metrics.refreshedAt,
+            refreshedAt: effectiveMetrics.refreshedAt,
             error: undefined,
           }
         : {

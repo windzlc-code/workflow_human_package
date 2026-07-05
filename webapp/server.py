@@ -17009,9 +17009,9 @@ def _persona_archive_timestamp(value: Any) -> float:
 def _persona_archive_metric_row_key(row: Any) -> str:
     if not isinstance(row, dict):
         return ""
-    source_url = str(row.get("sourceUrl") or row.get("source_url") or "").strip().lower()
+    source_url = _normalize_dashboard_post_url(row.get("sourceUrl") or row.get("source_url"))
     if source_url:
-        return re.sub(r"[?#].*$", "", source_url)
+        return source_url
     code = str(row.get("code") or "").strip().lower()
     if code:
         return f"code:{code}"
@@ -17036,17 +17036,28 @@ def _persona_archive_metric_has_resolved_views(metric: Any) -> bool:
     )
 
 
-def _persona_archive_merge_metric_rows(preferred_rows: Any, fallback_rows: Any) -> list[dict[str, Any]]:
+def _persona_archive_merge_metric_rows(preferred_rows: Any, fallback_rows: Any, keep_preferred_only: bool = True) -> list[dict[str, Any]]:
     preferred = [copy.deepcopy(row) for row in preferred_rows if isinstance(row, dict)] if isinstance(preferred_rows, list) else []
     fallback = [copy.deepcopy(row) for row in fallback_rows if isinstance(row, dict)] if isinstance(fallback_rows, list) else []
     if not preferred:
         return fallback
     if not fallback:
         return preferred
+    fallback_keys = {
+        _persona_archive_metric_row_key(row)
+        for row in fallback
+        if _persona_archive_metric_row_key(row)
+    }
     merged: dict[str, dict[str, Any]] = {}
     ordered: list[str] = []
     for row in preferred:
         key = _persona_archive_metric_row_key(row) or f"preferred:{len(ordered)}"
+        if (
+            not keep_preferred_only
+            and key not in fallback_keys
+            and not isinstance(row.get("viewCount"), (int, float))
+        ):
+            continue
         if key not in merged:
             ordered.append(key)
         merged[key] = row
@@ -17078,10 +17089,22 @@ def _merge_persona_archive_hot_metric(preferred_metric: Any, fallback_metric: An
         merged["postMetrics"] = _persona_archive_merge_metric_rows(
             preferred_metric.get("postMetrics"),
             fallback_metric.get("postMetrics"),
+            keep_preferred_only=preferred_has_views,
         )
     elif isinstance(preferred_metric.get("postMetrics"), list):
         merged["postMetrics"] = copy.deepcopy(preferred_metric.get("postMetrics"))
     if not preferred_has_views and fallback_has_views:
+        merged_rows = merged.get("postMetrics") if isinstance(merged.get("postMetrics"), list) else []
+        merged["likes"] = sum(_number((row or {}).get("likeCount"), 0) for row in merged_rows if isinstance(row, dict))
+        merged["comments"] = sum(_number((row or {}).get("commentCount"), 0) for row in merged_rows if isinstance(row, dict))
+        merged["shares"] = sum(_number((row or {}).get("shareCount"), 0) for row in merged_rows if isinstance(row, dict))
+        merged["reposts"] = sum(_number((row or {}).get("repostCount"), 0) for row in merged_rows if isinstance(row, dict))
+        merged["views"] = sum(_number((row or {}).get("viewCount"), 0) for row in merged_rows if isinstance(row, dict))
+        merged["viewResolvedPosts"] = sum(
+            1 for row in merged_rows
+            if isinstance(row, dict) and isinstance(row.get("viewCount"), (int, float))
+        )
+        merged["viewMissingPosts"] = max(0, len(merged_rows) - _number(merged.get("viewResolvedPosts"), 0))
         if not isinstance(merged.get("views"), (int, float)) and isinstance(fallback_metric.get("views"), (int, float)):
             merged["views"] = fallback_metric.get("views")
         if _number(merged.get("viewResolvedPosts"), 0) <= 0:
@@ -17204,6 +17227,15 @@ def _persona_dashboard_deleted_posts_version() -> str:
     except Exception:
         return ""
     return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+
+
+def _normalize_dashboard_post_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[?#].*$", "", text).rstrip("/")
+    text = re.sub(r"^https://www\.threads\.net/", "https://www.threads.com/", text, flags=re.I)
+    return text.lower()
 
 
 def _normalize_threads_username(value: Any) -> str:
@@ -17855,6 +17887,9 @@ def _dashboard_post_match_tokens(row: Any) -> set[str]:
         value = str(row.get(key) or "").strip()
         if value:
             tokens.add(value.lower())
+            normalized_url = _normalize_dashboard_post_url(value)
+            if normalized_url:
+                tokens.add(normalized_url)
     content = str(row.get("content") or row.get("originalContent") or row.get("title") or "").strip()
     if content:
         tokens.add(re.sub(r"\s+", " ", content).lower()[:160])
@@ -17906,15 +17941,21 @@ def _related_dashboard_media_items(row: dict[str, Any], posts: list[Any], publis
 def _persona_dashboard_post_key(archive_id: str, row: Any) -> str:
     if not isinstance(row, dict):
         return ""
-    parts = [
-        archive_id,
-        str(row.get("id") or row.get("archivePostId") or row.get("archive_post_id") or ""),
-        str(row.get("pk") or ""),
-        str(row.get("code") or ""),
-        str(row.get("sourceUrl") or row.get("source_url") or ""),
-        str(row.get("publishedAt") or row.get("published_at") or row.get("capturedAt") or row.get("captured_at") or ""),
-        str(row.get("content") or row.get("originalContent") or row.get("title") or "")[:240],
-    ]
+    normalized_url = _normalize_dashboard_post_url(row.get("sourceUrl") or row.get("source_url"))
+    stable_identity = (
+        normalized_url
+        or str(row.get("code") or "").strip()
+        or str(row.get("id") or row.get("archivePostId") or row.get("archive_post_id") or "").strip()
+        or str(row.get("pk") or "").strip()
+    )
+    if stable_identity:
+        parts = [archive_id, stable_identity]
+    else:
+        parts = [
+            archive_id,
+            str(row.get("publishedAt") or row.get("published_at") or row.get("capturedAt") or row.get("captured_at") or ""),
+            str(row.get("content") or row.get("originalContent") or row.get("title") or "")[:240],
+        ]
     digest = hashlib.sha1("|".join(parts).encode("utf-8", errors="ignore")).hexdigest()[:16]
     return f"post_{digest}"
 

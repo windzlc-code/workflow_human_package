@@ -567,6 +567,191 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertEqual(persona["post_metrics"][0]["view_count"], 300)
         self.assertEqual(overview["data_sources"]["archives"]["path"], "merged")
 
+    def test_overview_drops_cache_only_partial_rows_that_do_not_exist_in_primary_complete_metric(self):
+        primary_archives = [
+            {
+                "id": "persona-1",
+                "name": "测试人设",
+                "createdAt": "2026-06-20T00:00:00Z",
+                "updatedAt": "2026-07-01T00:00:00Z",
+                "setup": {
+                    "accountManagement": {"threads": {"handle": "history"}},
+                    "hotMetrics": {
+                        "threads::history": {
+                            "platform": "threads",
+                            "username": "history",
+                            "complete": True,
+                            "scope": "authenticated_full_profile",
+                            "likes": 30,
+                            "comments": 5,
+                            "shares": 2,
+                            "views": 450,
+                            "scannedPosts": 2,
+                            "viewResolvedPosts": 2,
+                            "viewMissingPosts": 0,
+                            "postMetrics": [
+                                {
+                                    "sourceUrl": "https://www.threads.com/@history/post/good-1",
+                                    "content": "post one",
+                                    "likeCount": 10,
+                                    "commentCount": 2,
+                                    "shareCount": 1,
+                                    "viewCount": 200,
+                                    "capturedAt": "2026-07-01T01:00:00Z",
+                                },
+                                {
+                                    "sourceUrl": "https://www.threads.com/@history/post/good-2",
+                                    "content": "post two",
+                                    "likeCount": 20,
+                                    "commentCount": 3,
+                                    "shareCount": 1,
+                                    "viewCount": 250,
+                                    "capturedAt": "2026-07-01T01:00:00Z",
+                                },
+                            ],
+                        }
+                    },
+                },
+                "posts": [],
+                "platformPosts": {},
+                "publishHistory": [],
+                "personaImageLibrary": [],
+            }
+        ]
+        fallback_payload = {
+            "persona_archives_v2": [
+                {
+                    "id": "persona-1",
+                    "name": "测试人设",
+                    "createdAt": "2026-06-20T00:00:00Z",
+                    "updatedAt": "2026-07-02T00:00:00Z",
+                    "setup": {
+                        "accountManagement": {"threads": {"handle": "history"}},
+                        "hotMetrics": {
+                            "threads::history": {
+                                "platform": "threads",
+                                "username": "history",
+                                "complete": False,
+                                "scope": "authenticated_full_profile",
+                                "likes": 210000,
+                                "comments": 2862,
+                                "shares": 54000,
+                                "views": None,
+                                "scannedPosts": 3,
+                                "viewResolvedPosts": 0,
+                                "viewMissingPosts": 3,
+                                "postMetrics": [
+                                    {
+                                        "sourceUrl": "https://www.threads.com/@history/post/good-1",
+                                        "content": "post one",
+                                        "likeCount": 12,
+                                        "commentCount": 2,
+                                        "shareCount": 1,
+                                        "capturedAt": "2026-07-02T01:00:00Z",
+                                    },
+                                    {
+                                        "sourceUrl": "https://www.threads.com/@history/post/good-2",
+                                        "content": "post two",
+                                        "likeCount": 22,
+                                        "commentCount": 3,
+                                        "shareCount": 1,
+                                        "capturedAt": "2026-07-02T01:00:00Z",
+                                    },
+                                    {
+                                        "sourceUrl": "https://www.threads.com/@history/post/bad-extra",
+                                        "content": "foreign content",
+                                        "likeCount": 210000,
+                                        "commentCount": 2862,
+                                        "shareCount": 54000,
+                                        "capturedAt": "2026-07-02T01:00:00Z",
+                                    },
+                                ],
+                            }
+                        },
+                    },
+                    "posts": [],
+                    "platformPosts": {},
+                    "publishHistory": [],
+                    "personaImageLibrary": [],
+                }
+            ]
+        }
+        self._write_archives_payload(primary_archives)
+        self._write_archives_cache_payload(fallback_payload)
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        self.assertEqual(persona["hot"]["likes"], 34)
+        self.assertEqual(persona["hot"]["comments"], 5)
+        self.assertEqual(persona["hot"]["shares"], 2)
+        self.assertEqual(persona["hot"]["post_views"], 450)
+        self.assertEqual(len(persona["post_metrics"]), 2)
+        self.assertTrue(all("bad-extra" not in (row.get("source_url") or "") for row in persona["post_metrics"]))
+
+    def test_overview_dedupes_threads_net_and_threads_com_versions_of_same_post(self):
+        archives = [
+            {
+                "id": "persona-1",
+                "name": "测试人设",
+                "createdAt": "2026-06-20T00:00:00Z",
+                "updatedAt": "2026-07-01T00:00:00Z",
+                "setup": {
+                    "accountManagement": {"threads": {"handle": "history"}},
+                    "hotMetrics": {
+                        "threads::history": {
+                            "platform": "threads",
+                            "username": "history",
+                            "complete": True,
+                            "scope": "authenticated_full_profile",
+                            "likes": 100,
+                            "comments": 10,
+                            "shares": 5,
+                            "views": 300,
+                            "scannedPosts": 1,
+                            "viewResolvedPosts": 1,
+                            "viewMissingPosts": 0,
+                            "postMetrics": [
+                                {
+                                    "sourceUrl": "https://www.threads.com/@history/post/abc",
+                                    "content": "same post",
+                                    "likeCount": 100,
+                                    "commentCount": 10,
+                                    "shareCount": 5,
+                                    "viewCount": 300,
+                                    "capturedAt": "2026-07-01T01:00:00Z",
+                                }
+                            ],
+                        }
+                    },
+                },
+                "posts": [],
+                "platformPosts": {},
+                "publishHistory": [
+                    {
+                        "platform": "threads",
+                        "publishedAt": "2026-07-01T01:00:00Z",
+                        "content": "same post",
+                        "publishedMeta": {
+                            "platform": "threads",
+                            "sourceUrl": "https://www.threads.net/@history/post/abc",
+                            "capturedAt": "2026-07-01T02:00:00Z",
+                            "metrics": {"like_count": 90, "comment_count": 9, "share_count": 4, "view_count": 280},
+                            "engagement": {"likeCount": 90, "commentCount": 9, "shareCount": 4, "viewCount": 280},
+                            "hotScore": 383,
+                        },
+                    }
+                ],
+                "personaImageLibrary": [],
+            }
+        ]
+        self._write_archives_payload(archives)
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        self.assertEqual(len(persona["post_metrics"]), 1)
+        self.assertEqual(persona["hot"]["likes"], 100)
+        self.assertEqual(persona["hot"]["comments"], 10)
+        self.assertEqual(persona["hot"]["shares"], 5)
+        self.assertEqual(persona["hot"]["post_views"], 300)
+
 
 if __name__ == "__main__":
     unittest.main()
