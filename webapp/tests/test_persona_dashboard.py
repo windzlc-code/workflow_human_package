@@ -121,6 +121,9 @@ class PersonaDashboardApiTests(unittest.TestCase):
     def _write_archives_payload(self, archives):
         (self.tool_runtime_dir / "persona_archives.json").write_text(json.dumps(archives), encoding="utf-8")
 
+    def _write_archives_cache_payload(self, payload):
+        (self.tool_runtime_dir / "persona_archives_cache.json").write_text(json.dumps(payload), encoding="utf-8")
+
     def _write_queue(self):
         conn = sqlite3.connect(str(self.tool_runtime_dir / "publish_queue.db"))
         conn.execute(
@@ -469,6 +472,100 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertEqual(trend_row["reposts"], 0)
         self.assertEqual(trend_row["post_views"], 300)
         self.assertEqual(trend_row["hot_score"], 317)
+
+    def test_overview_merges_newer_cache_metrics_without_dropping_primary_views(self):
+        primary_archives = [
+            {
+                "id": "persona-1",
+                "name": "测试人设",
+                "createdAt": "2026-06-20T00:00:00Z",
+                "updatedAt": "2026-06-30T00:00:00Z",
+                "setup": {
+                    "accountManagement": {"threads": {"handle": "history"}},
+                    "hotMetrics": {
+                        "threads::history": {
+                            "platform": "threads",
+                            "username": "history",
+                            "complete": True,
+                            "scope": "authenticated_full_profile",
+                            "likes": 10,
+                            "comments": 5,
+                            "shares": 2,
+                            "views": 300,
+                            "scannedPosts": 1,
+                            "viewResolvedPosts": 1,
+                            "postMetrics": [
+                                {
+                                    "sourceUrl": "https://www.threads.net/@history/post/abc",
+                                    "content": "post one",
+                                    "likeCount": 10,
+                                    "commentCount": 5,
+                                    "shareCount": 2,
+                                    "viewCount": 300,
+                                    "capturedAt": "2026-06-30T01:00:00Z",
+                                }
+                            ],
+                        }
+                    },
+                },
+                "posts": [],
+                "platformPosts": {},
+                "publishHistory": [],
+                "personaImageLibrary": [],
+            }
+        ]
+        fallback_payload = {
+            "persona_archives_v2": [
+                {
+                    "id": "persona-1",
+                    "name": "测试人设",
+                    "createdAt": "2026-06-20T00:00:00Z",
+                    "updatedAt": "2026-07-01T00:00:00Z",
+                    "setup": {
+                        "accountManagement": {"threads": {"handle": "history"}},
+                        "hotMetrics": {
+                            "threads::history": {
+                                "platform": "threads",
+                                "username": "history",
+                                "complete": True,
+                                "scope": "authenticated_full_profile",
+                                "likes": 99,
+                                "comments": 12,
+                                "shares": 3,
+                                "views": None,
+                                "scannedPosts": 1,
+                                "viewResolvedPosts": 0,
+                                "postMetrics": [
+                                    {
+                                        "sourceUrl": "https://www.threads.net/@history/post/abc",
+                                        "content": "post one",
+                                        "likeCount": 99,
+                                        "commentCount": 12,
+                                        "shareCount": 3,
+                                        "capturedAt": "2026-07-01T01:00:00Z",
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                    "posts": [],
+                    "platformPosts": {},
+                    "publishHistory": [],
+                    "personaImageLibrary": [],
+                }
+            ]
+        }
+        self._write_archives_payload(primary_archives)
+        self._write_archives_cache_payload(fallback_payload)
+        overview = self.unauth_client.get("/api/persona_dashboard/overview").json()
+        persona = overview["personas"][0]
+        self.assertEqual(persona["hot"]["likes"], 99)
+        self.assertEqual(persona["hot"]["comments"], 12)
+        self.assertEqual(persona["hot"]["shares"], 3)
+        self.assertEqual(persona["hot"]["post_views"], 300)
+        self.assertEqual(persona["hot"]["hot_score"], 414)
+        self.assertEqual(persona["post_metrics"][0]["view_count"], 300)
+        self.assertEqual(overview["data_sources"]["archives"]["path"], "merged")
 
 
 if __name__ == "__main__":

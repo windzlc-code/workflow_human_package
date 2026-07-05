@@ -201,11 +201,15 @@ function hasUsableMetrics(metrics: any): boolean {
 
 function isCompleteMetrics(metrics: any): boolean {
   const scannedPosts = Number(metrics?.scannedPosts || 0);
+  const hasResolvedViews = typeof metrics?.views === "number"
+    || Number(metrics?.viewResolvedPosts || 0) > 0
+    || (Array.isArray(metrics?.postMetrics) && metrics.postMetrics.some((row: any) => typeof row?.viewCount === "number"));
   return metrics?.complete === true
     && metrics?.scope === "authenticated_full_profile"
     && scannedPosts > 0
     && Array.isArray(metrics?.postMetrics)
-    && metrics.postMetrics.length >= scannedPosts;
+    && metrics.postMetrics.length >= scannedPosts
+    && hasResolvedViews;
 }
 
 async function main() {

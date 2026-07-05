@@ -16992,6 +16992,130 @@ def _extract_persona_archive_list(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _persona_archive_timestamp(value: Any) -> float:
+    if not isinstance(value, dict):
+        return 0.0
+    for key in ("updatedAt", "updated_at", "createdAt", "created_at"):
+        raw = str(value.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            return datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+    return 0.0
+
+
+def _persona_archive_metric_row_key(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    source_url = str(row.get("sourceUrl") or row.get("source_url") or "").strip().lower()
+    if source_url:
+        return re.sub(r"[?#].*$", "", source_url)
+    code = str(row.get("code") or "").strip().lower()
+    if code:
+        return f"code:{code}"
+    row_id = str(row.get("id") or row.get("pk") or "").strip().lower()
+    if row_id:
+        return f"id:{row_id}"
+    content = re.sub(r"\s+", " ", str(row.get("content") or row.get("originalContent") or row.get("text") or "")).strip().lower()
+    return f"content:{content[:180]}" if content else ""
+
+
+def _persona_archive_metric_has_resolved_views(metric: Any) -> bool:
+    if not isinstance(metric, dict):
+        return False
+    if isinstance(metric.get("views"), (int, float)):
+        return True
+    if _number(metric.get("viewResolvedPosts"), 0) > 0:
+        return True
+    rows = metric.get("postMetrics") if isinstance(metric.get("postMetrics"), list) else []
+    return any(
+        isinstance(row, dict) and isinstance(row.get("viewCount"), (int, float))
+        for row in rows
+    )
+
+
+def _persona_archive_merge_metric_rows(preferred_rows: Any, fallback_rows: Any) -> list[dict[str, Any]]:
+    preferred = [copy.deepcopy(row) for row in preferred_rows if isinstance(row, dict)] if isinstance(preferred_rows, list) else []
+    fallback = [copy.deepcopy(row) for row in fallback_rows if isinstance(row, dict)] if isinstance(fallback_rows, list) else []
+    if not preferred:
+        return fallback
+    if not fallback:
+        return preferred
+    merged: dict[str, dict[str, Any]] = {}
+    ordered: list[str] = []
+    for row in preferred:
+        key = _persona_archive_metric_row_key(row) or f"preferred:{len(ordered)}"
+        if key not in merged:
+            ordered.append(key)
+        merged[key] = row
+    for row in fallback:
+        key = _persona_archive_metric_row_key(row) or f"fallback:{len(ordered)}"
+        current = merged.get(key)
+        if current is None:
+            merged[key] = row
+            ordered.append(key)
+            continue
+        if not isinstance(current.get("viewCount"), (int, float)) and isinstance(row.get("viewCount"), (int, float)):
+            current["viewCount"] = row.get("viewCount")
+        if not current.get("publishedAt") and row.get("publishedAt"):
+            current["publishedAt"] = row.get("publishedAt")
+        if not current.get("capturedAt") and row.get("capturedAt"):
+            current["capturedAt"] = row.get("capturedAt")
+    return [merged[key] for key in ordered]
+
+
+def _merge_persona_archive_hot_metric(preferred_metric: Any, fallback_metric: Any) -> Any:
+    if not isinstance(preferred_metric, dict):
+        return copy.deepcopy(fallback_metric)
+    if not isinstance(fallback_metric, dict):
+        return copy.deepcopy(preferred_metric)
+    merged = copy.deepcopy(preferred_metric)
+    preferred_has_views = _persona_archive_metric_has_resolved_views(preferred_metric)
+    fallback_has_views = _persona_archive_metric_has_resolved_views(fallback_metric)
+    if fallback_has_views:
+        merged["postMetrics"] = _persona_archive_merge_metric_rows(
+            preferred_metric.get("postMetrics"),
+            fallback_metric.get("postMetrics"),
+        )
+    elif isinstance(preferred_metric.get("postMetrics"), list):
+        merged["postMetrics"] = copy.deepcopy(preferred_metric.get("postMetrics"))
+    if not preferred_has_views and fallback_has_views:
+        if not isinstance(merged.get("views"), (int, float)) and isinstance(fallback_metric.get("views"), (int, float)):
+            merged["views"] = fallback_metric.get("views")
+        if _number(merged.get("viewResolvedPosts"), 0) <= 0:
+            merged["viewResolvedPosts"] = _number(fallback_metric.get("viewResolvedPosts"), 0)
+        if _number(merged.get("viewMissingPosts"), 0) <= 0 and isinstance(fallback_metric.get("viewMissingPosts"), (int, float)):
+            merged["viewMissingPosts"] = _number(fallback_metric.get("viewMissingPosts"), 0)
+        if not merged.get("error"):
+            merged["error"] = fallback_metric.get("error")
+    return merged
+
+
+def _merge_persona_archive_records(preferred: Any, fallback: Any) -> dict[str, Any]:
+    if not isinstance(preferred, dict):
+        return copy.deepcopy(fallback) if isinstance(fallback, dict) else {}
+    if not isinstance(fallback, dict):
+        return copy.deepcopy(preferred)
+    merged = copy.deepcopy(preferred)
+    preferred_setup = merged.get("setup") if isinstance(merged.get("setup"), dict) else {}
+    fallback_setup = fallback.get("setup") if isinstance(fallback.get("setup"), dict) else {}
+    preferred_hot_metrics = preferred_setup.get("hotMetrics") if isinstance(preferred_setup.get("hotMetrics"), dict) else {}
+    fallback_hot_metrics = fallback_setup.get("hotMetrics") if isinstance(fallback_setup.get("hotMetrics"), dict) else {}
+    if preferred_hot_metrics or fallback_hot_metrics:
+        next_setup = dict(preferred_setup)
+        next_hot_metrics: dict[str, Any] = {}
+        for key in sorted(set(preferred_hot_metrics) | set(fallback_hot_metrics)):
+            next_hot_metrics[key] = _merge_persona_archive_hot_metric(
+                preferred_hot_metrics.get(key),
+                fallback_hot_metrics.get(key),
+            )
+        next_setup["hotMetrics"] = next_hot_metrics
+        merged["setup"] = next_setup
+    return merged
+
+
 PERSONA_DASHBOARD_REFRESH_TASKS: dict[str, dict[str, Any]] = {}
 PERSONA_DASHBOARD_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
@@ -17308,19 +17432,60 @@ def _read_tool_r18_persona_archives() -> tuple[list[dict[str, Any]], dict[str, A
                 mtime = 0.0
             candidates.append((path, raw, archives, mtime))
     if candidates:
-        path, _raw, archives, mtime = max(candidates, key=lambda item: item[3])
-        return archives, {
-            "path": path.name,
+        if len(candidates) == 1:
+            path, _raw, archives, mtime = candidates[0]
+            return archives, {
+                "path": path.name,
+                "exists": True,
+                "count": len(archives),
+                "fallback": path == fallback,
+                "mtime": mtime,
+                "candidates": [
+                    {
+                        "path": path.name,
+                        "count": len(archives),
+                        "mtime": mtime,
+                        "selected": True,
+                    }
+                ],
+            }
+        archive_maps: list[tuple[Path, dict[str, dict[str, Any]], float]] = []
+        for path, _raw, archives, mtime in candidates:
+            archive_maps.append((
+                path,
+                {
+                    str(item.get("id") or "").strip(): item
+                    for item in archives
+                    if isinstance(item, dict) and str(item.get("id") or "").strip()
+                },
+                mtime,
+            ))
+        merged_archives: list[dict[str, Any]] = []
+        all_ids: set[str] = set()
+        for _path, archive_map, _mtime in archive_maps:
+            all_ids.update(archive_map.keys())
+        for archive_id in all_ids:
+            variants = [archive_map.get(archive_id) for _path, archive_map, _mtime in archive_maps if archive_map.get(archive_id)]
+            if not variants:
+                continue
+            variants = sorted(variants, key=_persona_archive_timestamp, reverse=True)
+            merged = variants[0]
+            for other in variants[1:]:
+                merged = _merge_persona_archive_records(merged, other)
+            merged_archives.append(merged)
+        merged_archives.sort(key=_persona_archive_timestamp, reverse=True)
+        return merged_archives, {
+            "path": "merged",
             "exists": True,
-            "count": len(archives),
-            "fallback": path == fallback,
-            "mtime": mtime,
+            "count": len(merged_archives),
+            "fallback": False,
+            "mtime": max(item[3] for item in candidates),
             "candidates": [
                 {
                     "path": item_path.name,
                     "count": len(item_archives),
                     "mtime": item_mtime,
-                    "selected": item_path == path,
+                    "selected": True,
                 }
                 for item_path, _item_raw, item_archives, item_mtime in candidates
             ],
