@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 
@@ -10,6 +10,7 @@ const IDLE_MS = 5 * 60 * 1000;
 
 let child: ChildProcess | null = null;
 let shutdownTimer: NodeJS.Timeout | null = null;
+const ownsLocalSentimentRuntime = () => !String(process.env.TOOL_R18_SENTIMENT_BACKEND_URL || "").trim();
 
 export function resolveSentimentVendorDir(): string {
   return VENDOR_DIR;
@@ -45,7 +46,26 @@ export function stopSentimentRuntime() {
   if (child && child.exitCode === null && child.signalCode === null) {
     child.kill("SIGTERM");
   }
+  cleanupSentimentBackendProcesses();
   child = null;
+}
+
+function cleanupSentimentBackendProcesses() {
+  if (process.platform === "win32") return;
+  if (!ownsLocalSentimentRuntime()) return;
+  const backendDir = path.join(VENDOR_DIR, "standalone", "sentiment-backend", "src");
+  const patterns = [
+    path.join(backendDir, "scan-worker.js"),
+    path.join(backendDir, "server.js"),
+  ];
+  const quotedPatterns = patterns.map((item) => `'${item.replace(/'/g, "'\\''")}'`).join(" ");
+  try {
+    execFileSync("sh", ["-lc", `for pattern in ${quotedPatterns}; do ps -eo pid=,args= | awk -v needle="$pattern" 'index($0, needle) { print $1 }'; done | sort -u | xargs -r kill -TERM`], {
+      stdio: "ignore",
+    });
+  } catch {
+    // Best effort cleanup. Some images may not have the expected process tools, and no backend is also fine.
+  }
 }
 
 export async function ensureSentimentRuntime(): Promise<{ ok: boolean; url: string; warning?: string }> {
@@ -68,6 +88,7 @@ export async function ensureSentimentRuntime(): Promise<{ ok: boolean; url: stri
     return { ok: false, url, warning: "舆情 vendor 依赖尚未安装，已改用本地舆情资料库候选。" };
   }
   if (!child || child.exitCode !== null || child.signalCode !== null) {
+    cleanupSentimentBackendProcesses();
     child = spawn(process.execPath, [serverPath], {
       cwd: VENDOR_DIR,
       stdio: "ignore",

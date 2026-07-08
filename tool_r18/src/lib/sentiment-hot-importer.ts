@@ -1417,6 +1417,11 @@ export async function fetchSentimentHotCandidates(args: {
     ),
   );
   let keywords = keywordResult || [];
+  const personaSeedKeywords = buildSentimentHotKeywords({
+    archive,
+    prompt: args.prompt,
+    memorySummaries: args.memorySummaries,
+  });
   if (!keywordResult) {
     warnings.push("模型生成热点关键词超时，已停止本次抓取；不会使用规则关键词兜底。");
   }
@@ -1431,6 +1436,7 @@ export async function fetchSentimentHotCandidates(args: {
     const cachedKeywords = readArchiveScopedThreadsSearchKeywords(archiveId, 10);
     if (cachedKeywords.length > 0) keywords = [...keywords, ...cachedKeywords];
   }
+  if (personaSeedKeywords.length > 0) keywords = [...keywords, ...personaSeedKeywords];
   keywords = rankSearchKeywords([...new Set(
     keywords
       .map((item) => normalizeSentimentSearchKeyword(item, {
@@ -1438,7 +1444,7 @@ export async function fetchSentimentHotCandidates(args: {
         sourceText: [archive?.name, archive?.content, args.prompt, ...(args.memorySummaries || [])].map(cleanText).filter(Boolean).join(" "),
       }))
       .filter((item) => item && !isWeakRelevanceKeyword(item)),
-  )]).slice(0, 10);
+  )]).slice(0, 14);
   const limit = args.limit || 10;
   const poolLimit = Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
@@ -2084,7 +2090,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   const baseQueries = buildThreadsSearchQueries(args.keywords);
   const shownIds = getSentimentHotShownIds(args.archiveId);
   const primaryExcluded = args.refresh
-    ? getSentimentHotRefreshExcludedIds(args.archiveId)
+    ? new Set<string>()
     : getSentimentHotExcludedIds(args.archiveId);
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
   const desiredReturnLimit = args.refresh ? Math.min(args.limit, 10) : Math.min(args.limit, 2);
@@ -2313,6 +2319,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
   const excluded = args.excludeIds || (args.refresh ? getSentimentHotRefreshExcludedIds(args.archiveId) : getSentimentHotExcludedIds(args.archiveId));
   const all: SentimentHotCandidate[] = [];
   const allKeys = new Set<string>();
+  const rawCandidateLimit = Math.max(args.limit * 6, 60);
   const searches = await Promise.all(
     args.queries.map(async (query, index) => {
       const targetUrl = `https://www.threads.com/search?q=${encodeURIComponent(query)}`;
@@ -2340,7 +2347,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
       query: search.query,
       keywords: args.keywords,
       sourceUrl: search.targetUrl,
-      limit: args.limit,
+      limit: rawCandidateLimit,
     });
     for (const candidate of parsed) {
       if (excluded.has(candidate.id)) continue;
@@ -2349,9 +2356,9 @@ async function fetchThreadsReaderSearchCandidates(args: {
       if (all.some((item) => item.id === candidate.id) || allKeys.has(dedupeKey)) continue;
       allKeys.add(dedupeKey);
       all.push(candidate);
-      if (all.length >= args.limit) break;
+      if (all.length >= rawCandidateLimit) break;
     }
-    if (all.length >= args.limit) break;
+    if (all.length >= rawCandidateLimit) break;
   }
   return sortSentimentHotCandidatePool(await enrichThreadsCandidateDetails(all), args.keywords, args.limit);
 }
@@ -2449,12 +2456,10 @@ function cleanThreadsReaderContent(value: string): string {
 
 function parseThreadsReaderHotScore(block: string): number {
   let score = 80;
-  for (const match of block.matchAll(/(?:^|\n)\s*(\d+(?:[.,]\d+)?)(?:\s*([Kk萬万]))?\s*(?=\n|$)/g)) {
-    const base = Number(String(match[1] || "0").replace(/,/g, ""));
-    if (!Number.isFinite(base)) continue;
-    const unit = match[2] || "";
-    const value = /[Kk]/.test(unit) ? base * 1000 : /[萬万]/.test(unit) ? base * 10000 : base;
-    score += Math.min(50_000, Math.round(value));
+  for (const match of block.matchAll(/(?:^|\n)\s*(\d+(?:[.,]\d+)?\s*[KkMm\u842c\u4e07]?)\s*(?=\n|$)/g)) {
+    const value = parseMetricNumberLoose(match[1]);
+    if (typeof value !== "number") continue;
+    score += Math.min(50_000, value);
   }
   return score;
 }
@@ -2463,12 +2468,18 @@ function parseMetricNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
   const text = cleanText(value).replace(/,/g, "");
   if (!text) return undefined;
-  const match = text.match(/(\d+(?:\.\d+)?)\s*([Kk萬万])?/);
+  const match = text.match(/(\d+(?:\.\d+)?)\s*([KkMm\u842c\u4e07])?/);
   if (!match) return undefined;
   const base = Number(match[1]);
   if (!Number.isFinite(base)) return undefined;
   const unit = match[2] || "";
-  const valueNumber = /[Kk]/.test(unit) ? base * 1000 : /[萬万]/.test(unit) ? base * 10000 : base;
+  const valueNumber = /[Kk]/.test(unit)
+    ? base * 1000
+    : /[Mm]/.test(unit)
+      ? base * 1_000_000
+      : /[\u842c\u4e07]/.test(unit)
+        ? base * 10000
+        : base;
   return Math.max(0, Math.round(valueNumber));
 }
 
@@ -4257,12 +4268,12 @@ export function parseThreadsReaderSearchMarkdownCandidates(args: {
   if (!text || !/Search\s*•\s*Threads|Threads/i.test(text)) return [];
   const needleSource = args.keywords?.length ? args.keywords : [args.query];
   const needles = buildRelevanceNeedles(needleSource);
-  const postRegex = /\[(\d{2}\/\d{2}\/\d{2,4})]\((https:\/\/www\.threads\.net\/(?:@[^)\s]+\/post\/[^)\s]+|t\/[^)\s]+))\)\s*\n([\s\S]*?)(?=\n\[!\[Image\s+\d+:[^\]]*profile picture|\n\[[^\]\n]+]\(https:\/\/www\.threads\.net\/@|$)/g;
+  const postRegex = /\[(\d{2}\/\d{2}\/\d{2,4})]\((https:\/\/www\.threads\.(?:net|com)\/(?:@[^)\s]+\/post\/[^)\s]+|t\/[^)\s]+))\)\s*\n([\s\S]*?)(?=\n\[!\[Image\s+\d+:[^\]]*profile picture|\n\[[^\]\n]+]\(https:\/\/www\.threads\.(?:net|com)\/@|$)/g;
   const out: SentimentHotCandidate[] = [];
   let match: RegExpExecArray | null;
   while ((match = postRegex.exec(text)) !== null) {
     const before = text.slice(Math.max(0, match.index - 900), match.index);
-    const authorMatches = [...before.matchAll(/\[([^\]\n]{2,80})]\((https:\/\/www\.threads\.net\/@[^)\s]+)\)/g)];
+    const authorMatches = [...before.matchAll(/\[([^\]\n]{2,80})]\((https:\/\/www\.threads\.(?:net|com)\/@[^)\s]+)\)/g)];
     const author = cleanText(authorMatches.at(-1)?.[1] || "Threads");
     const sourceUrl = match[2];
     const publishedAt = normalizeSentimentPublishedAt(match[1]);
@@ -4639,6 +4650,13 @@ function buildThreadsSearchQueries(keywords: string[]): string[] {
   };
   for (const keyword of meaningfulNeedles(keywords)) {
     add(keyword);
+    if (/股市投資|股市投资/u.test(keyword)) add("股票投資");
+    if (/股票投資|股票投资/u.test(keyword)) add("股市投資");
+    if (/台股美股/u.test(keyword)) {
+      add("台股");
+      add("美股");
+      add("股票投資");
+    }
     for (const part of splitKeywords(keyword)) add(part);
   }
   for (const keyword of meaningfulNeedles(keywords)) {
@@ -4679,7 +4697,7 @@ function isThreadsSearchNoiseLine(line: string, query: string): boolean {
   if (text === query) return true;
   if (THREADS_SEARCH_NOISE_LINES.has(text)) return true;
   if (/^©\s*\d{4}/.test(text)) return true;
-  if (/^[\d,.，]+(?:\s*[萬万])?$/.test(text)) return true;
+  if (/^[\d,.\sKkMm\u842c\u4e07]+$/.test(text)) return true;
   if (/^\[\d+\]$/.test(text)) return true;
   if (/^(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周|月|年)|昨天|前天)$/.test(text)) return true;
   if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(text)) return true;
@@ -4698,8 +4716,14 @@ function parseThreadsHotScore(lines: string[]): number {
   let score = 30;
   for (const line of lines) {
     const text = line.replace(/,/g, "").trim();
-    const wan = text.match(/^(\d+(?:\.\d+)?)\s*[萬万]$/);
-    if (wan) score += Math.round(Number(wan[1]) * 10_000);
+    const metric = text.match(/^\[?(\d+(?:\.\d+)?\s*[KkMm\u842c\u4e07]?)\]?$/);
+    if (metric) {
+      const value = parseMetricNumberLoose(metric[1]) ?? parseMetricNumber(metric[1]);
+      if (typeof value === "number") {
+        score += Math.min(50_000, value);
+        continue;
+      }
+    }
     const plain = text.match(/^\[?(\d{1,6})\]?$/);
     if (plain) score += Math.min(20_000, Number(plain[1]));
   }

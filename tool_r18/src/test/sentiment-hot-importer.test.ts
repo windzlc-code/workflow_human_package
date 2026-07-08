@@ -556,20 +556,21 @@ describe("sentiment hot importer", () => {
     const candidates = parseThreadsReaderSearchMarkdownCandidates({
       query: "醫療",
       keywords: ["醫療", "醫生", "醫院"],
-      sourceUrl: "https://www.threads.net/search?q=%E9%86%AB%E7%99%82",
+      sourceUrl: "https://www.threads.com/search?q=%E9%86%AB%E7%99%82",
       text: `
 Search • Threads
 
-[Demo Doctor](https://www.threads.net/@demo_doctor)
-[01/02/2026](https://www.threads.net/@demo_doctor/post/abc123)
+[Demo Doctor](https://www.threads.com/@demo_doctor)
+[01/02/2026](https://www.threads.com/@demo_doctor/post/abc123)
 醫生分享醫療現場，今天醫院急診真的塞滿人，病人等待和醫療流程都被拿出來討論。
-1.2萬
+1.2\u842c
 340
 88
 `,
     });
 
     expect(candidates.length).toBe(1);
+    expect(candidates[0].sourceUrl).toContain("threads.com");
     expect(candidates[0].metrics.raw_engagement_signals).toEqual([12000, 340, 88]);
     expect(candidates[0].engagement?.rawSignals).toEqual([12000, 340, 88]);
   });
@@ -879,6 +880,24 @@ bunundoc
     expect(candidates[0].content).toContain("醫療");
     expect(candidates[0].content).not.toContain("翻譯");
     expect(candidates[0].sourceUrl).toContain("threads.com/search");
+  });
+
+  it("counts visible wan/k metrics from Threads search page candidates", () => {
+    const candidates = parseThreadsSearchTextCandidates({
+      query: "台股分析",
+      keywords: ["台股分析", "股票投資"],
+      sourceUrl: "https://www.threads.com/search?q=%E5%8F%B0%E8%82%A1%E5%88%86%E6%9E%90",
+      text: `
+stock_god_demo
+台股分析今天最重要的是資金流向，股票投資不要只看一根K線，要看成交量、族群輪動和風險控管，這種盤勢追高很容易被洗出去。
+3.7\u842c
+245
+`,
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].hotScore).toBeGreaterThanOrEqual(37_000);
+    expect(candidates[0].content).not.toContain("3.7");
   });
 
   it("keeps visible Threads profile metrics from the page body", () => {
