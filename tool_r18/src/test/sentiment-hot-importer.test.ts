@@ -136,6 +136,25 @@ describe("sentiment hot importer", () => {
     expect(keywords).not.toContain("深耕海外華人工薪信貸");
   });
 
+  it("filters abstract persona style keywords but keeps concrete identity hints", () => {
+    const keywords = buildSentimentHotKeywords({
+      archive: {
+        id: "anime-finance",
+        name: "\u5b85\u6025\u4fbf\u963f\u725b",
+        content: "\u8eab\u4efd\uff1a\u4e8c\u6b21\u5143\u7406\u8ca1\u9054\u4eba\u3002\u9818\u57df\uff1a\u52a0\u5bc6\u8ca8\u5e63\u3001\u6295\u8cc7\u7406\u8ca1\u3002\u8a9e\u6c23\uff1a\u5e7d\u9ed8\u3001\u63a5\u5730\u6c23\u3001\u5e36\u9ede\u5b85\u6c23\u3002",
+        setup: {
+          genres: ["\u52a0\u5bc6\u8ca8\u5e63", "\u6295\u8cc7\u7406\u8ca1", "\u4e8c\u6b21\u5143"],
+          personaType: "\u4e8c\u6b21\u5143\u7406\u8ca1\u9054\u4eba",
+          personality: "\u5e7d\u9ed8\u3001\u63a5\u5730\u6c23",
+        },
+        posts: [],
+      } as any,
+    });
+
+    expect(keywords).toEqual(expect.arrayContaining(["\u52a0\u5bc6\u8ca8\u5e63", "\u6295\u8cc7\u7406\u8ca1", "\u4e8c\u6b21\u5143"]));
+    expect(keywords.join(" ")).not.toMatch(/\u8eab\u4efd|\u9818\u57df|\u8a9e\u6c23|\u5e7d\u9ed8|\u63a5\u5730\u6c23|\u5e36\u9ede\u5b85\u6c23/);
+  });
+
   it("rejects hot candidates that conflict with the persona topic", () => {
     const medicalKeywords = ["醫療", "医生", "醫院", "黑心医生"];
     const beautyCandidate = {
@@ -176,6 +195,31 @@ describe("sentiment hot importer", () => {
     } as const;
 
     expect(candidateMatchesCurrentKeywords(genericCandidate, keywords)).toBe(false);
+  });
+
+  it("does not let personal finance keywords match on the generic personal fragment only", () => {
+    const keywords = ["個人理財", "薪資規劃", "信用分攻略"];
+    const genericPersonalCandidate = {
+      id: "generic-personal-1",
+      platform: "threads",
+      sourceUrl: "https://www.threads.net/@demo/post/generic-personal",
+      author: "ai",
+      content: "Naval 討論 AI 軟體未來，如何打造自己的個人 app store，也聊到產品團隊和軟體開發。",
+      media: [],
+      hotScore: 5000,
+      metrics: {},
+      capturedAt: new Date().toISOString(),
+    } as const;
+    const financeCandidate = {
+      ...genericPersonalCandidate,
+      id: "personal-finance-1",
+      sourceUrl: "https://www.threads.net/@demo/post/personal-finance",
+      author: "finance",
+      content: "個人理財要先看信用分數、薪資證明和信用卡週轉，再比較銀行信貸利率與還款壓力。",
+    } as const;
+
+    expect(candidateMatchesCurrentKeywords(genericPersonalCandidate, keywords)).toBe(false);
+    expect(candidateMatchesCurrentKeywords(financeCandidate, keywords)).toBe(true);
   });
 
   it("keeps strongly matched candidates for model-level persona judgment", () => {
