@@ -28161,7 +28161,10 @@ async function openThreadsLatestOwnPostFromProfile(
   maxAgeDays?: number,
   requireCommentBadge = true,
 ): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
-  const profile = await openThreadsProfileForAccountQuery(config, padCode);
+  let initialShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  let profile = initialShotUrl && await detectThreadsProfilePageLocally(initialShotUrl).catch(() => false)
+    ? { ok: true as const, screenshotUrl: initialShotUrl }
+    : await openThreadsProfileForAccountQuery(config, padCode);
   if (profile.ok !== true) return profile as { ok: false; error: string; screenshotUrl?: string };
   await delay(1200);
   let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(async () => (
@@ -28186,6 +28189,32 @@ async function openThreadsLatestOwnPostFromProfile(
   let lastOpenError: { ok: false; error: string; screenshotUrl?: string } | null = null;
   for (let openAttempt = 0; openAttempt < 2; openAttempt += 1) {
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
+    let profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
+    let profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
+    let hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
+    let hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText);
+    if (hasProfileSetupCard && !hasVisiblePostOrActionRow) {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-setup-card-before-heavy-locate",
+        screenshotUrl: shotUrl,
+        meta: { openAttempt, uiPreview: profileUiText.slice(0, 260) },
+      });
+      await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 520", 1000).catch(() => undefined);
+      await delay(450);
+      shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+      profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
+      profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
+      hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
+      hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText);
+      if (hasProfileSetupCard && !hasVisiblePostOrActionRow) {
+        return {
+          ok: false,
+          error: "个人页当前只有资料完善卡片，未看到可扫描的本人推文",
+          screenshotUrl: shotUrl,
+        };
+      }
+    }
     for (let setupRevealAttempt = 0; setupRevealAttempt < 2; setupRevealAttempt += 1) {
       const setupCardVisible = await detectThreadsProfileSetupCardLocally(shotUrl).catch(() => false);
       if (!setupCardVisible) break;
@@ -28204,7 +28233,6 @@ async function openThreadsLatestOwnPostFromProfile(
       3_000,
       "threadsAutoReply locate visible post fast timeout",
     ).catch(() => null);
-    let profileUiXml = "";
     if (target) {
       profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
       target = await withTimeout(
@@ -28221,12 +28249,12 @@ async function openThreadsLatestOwnPostFromProfile(
     if (!target) {
       for (let setupScrollAttempt = 0; setupScrollAttempt < 3; setupScrollAttempt += 1) {
         profileUiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
-        const profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
-        const hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
+        profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
+        hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
         const hasProfileSetupCardByPixels = await detectThreadsProfileSetupCardLocally(shotUrl).catch(() => false);
         const setupCardCommentTarget = await locateThreadsProfileTopCountedCommentTargetLocally(shotUrl).catch(() => null);
         const setupCardImage = await getImageDimensions(shotUrl).catch(() => null);
-        const hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText)
+        hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText)
           || Boolean(setupCardCommentTarget && !isThreadsProfileSetupCardBlockingActionTarget(
             setupCardCommentTarget,
             { width: setupCardImage?.width || BASE_SCREEN.width, height: setupCardImage?.height || BASE_SCREEN.height },
@@ -28461,6 +28489,23 @@ async function openThreadsLatestOwnPostFromProfile(
     const page = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
     if (page && (page.page === "login_required" || page.page === "challenge" || page.page === "system_dialog")) {
       return { ok: false, error: `Threads 当前不可自动回复：${page.reason}`, screenshotUrl: page.screenshotUrl || shotUrl };
+    }
+    if (page?.reason === "LOCAL_THREADS_INAPP_BROWSER") {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-comment-badge-opened-inapp-browser",
+        screenshotUrl: page.screenshotUrl || shotUrl,
+        meta: {
+          openAttempt,
+          target,
+          reason: page.reason,
+        },
+      });
+      const recovered = await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
+      if (!recovered.ok) return recovered;
+      shotUrl = recovered.screenshotUrl;
+      await delay(700);
+      continue;
     }
     if (page?.screenshotUrl) shotUrl = page.screenshotUrl;
     const detail = await withTimeout(
@@ -30623,6 +30668,24 @@ async function collectThreadsAutoReplyPostContext(
   let postPreview = "";
   let firstShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   throwIfDeadlineExceeded(deadlineAt);
+  if (firstShotUrl && await detectThreadsInAppBrowserLocally(firstShotUrl).catch(() => false)) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: "collect-abort-inapp-browser",
+      screenshotUrl: firstShotUrl,
+      meta: { reason: "LOCAL_THREADS_INAPP_BROWSER" },
+    });
+    throw new Error("Threads 评论采集进入内嵌浏览器，已停止当前帖子以避免误操作");
+  }
+  if (firstShotUrl && await detectThreadsFullscreenMediaViewerLocally(firstShotUrl).catch(() => false)) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: "collect-abort-media-viewer",
+      screenshotUrl: firstShotUrl,
+      meta: { reason: "LOCAL_FULLSCREEN_MEDIA_VIEWER" },
+    });
+    throw new Error("Threads 评论采集进入媒体查看器，已停止当前帖子以避免误操作");
+  }
   firstShotUrl = await openThreadsMediaOverlayCommentsIfVisible(config, padCode, firstShotUrl).catch(() => firstShotUrl) || firstShotUrl;
   throwIfDeadlineExceeded(deadlineAt);
   if (await detectAndroidKeyboardVisibleLocally(firstShotUrl).catch(() => false)) {
@@ -31335,14 +31398,17 @@ export async function autoReplyThreadsAccount(
   const replyScreenshots: string[] = [];
   const errors: string[] = [];
   const { repliedKeys, repliedCommentIdentityKeys, repliedCommentTextKeys } = loadThreadsAutoReplyRepliedSets(padCode);
+  report({ step: "Threads 自动回复预检：正在冷启动 Threads" });
   await relaunchThreads(config, padCode, 3_500).catch((error) => {
     errors.push(`Threads 启动恢复失败：${error instanceof Error ? error.message : String(error)}`);
   });
+  report({ step: "Threads 自动回复预检：正在恢复首页" });
   await ensureThreadsHomeFeed(config, padCode, (progress) => {
     report({ step: progress.step || "Threads 自动回复启动前恢复首页" });
   }).catch((error) => {
     errors.push(`Threads 首页自我修复失败：${error instanceof Error ? error.message : String(error)}`);
   });
+  report({ step: "Threads 自动回复预检：正在打开个人页" });
   const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
   await tapViaAdbAbsoluteQuick(
     config,
@@ -31351,6 +31417,7 @@ export async function autoReplyThreadsAccount(
     Math.round(screen.height * 0.96),
     2_000,
   ).catch(() => undefined);
+  report({ step: "Threads 自动回复预检：正在截取个人页" });
   const preflightProfileShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   saveThreadsAutoReplySampleStep({
     padCode,
@@ -31505,6 +31572,27 @@ export async function autoReplyThreadsAccount(
     maxAgeDays,
     requireCommentBadge: true,
   });
+  const preOpenUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
+  const preOpenUiText = normalizeSingleLine(decodeXmlAttr(preOpenUiXml));
+  const preOpenHasSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(preOpenUiText);
+  const preOpenHasPostAction = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|LIKE|Like|回覆|回复|轉發|转发)/i.test(preOpenUiText);
+  if (preOpenHasSetupCard && !preOpenHasPostAction) {
+    const result = {
+      step: "Threads 自动回复完成：个人页暂无可扫描推文",
+      scannedPosts,
+      scannedComments,
+      replied,
+      skipped: skipped + 1,
+      targetReplies,
+      completionStatus: "no_commented_posts" as const,
+      completionReason: "个人页当前只有资料完善卡片，未看到 2 天内带评论角标的本人推文",
+      replyScreenshots,
+      done: true,
+      error: undefined,
+    };
+    onProgress?.(result);
+    return result;
+  }
   if (preflightState?.page === "compose_editor" || preflightState?.page === "reply_composer") {
     await rememberEvidenceScreenshot("auto-reply-still-in-composer", {
       page: preflightState.page,
@@ -31597,6 +31685,10 @@ export async function autoReplyThreadsAccount(
           uiPreview: normalizeSingleLine(decodeXmlAttr(currentUiXml)).slice(0, 320),
         },
       });
+      const currentPageState = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
+      if (currentPageState?.reason === "LOCAL_THREADS_INAPP_BROWSER" || currentPageState?.page === "media_viewer") {
+        await restoreThreadsAutoReplyProfileForNextScan(config, padCode).catch(() => undefined);
+      }
       if (currentShotUrl) {
         const fallbackContext = await buildThreadsAutoReplyTimeoutFallbackContextFromScreenshot({
           padCode,
@@ -31845,9 +31937,14 @@ export async function autoReplyThreadsAccount(
 
     if (replied >= targetReplies || postIndex >= maxPosts - 1) break;
     report({ step: "正在返回主页并查找下一条带评论角标的本人推文" });
-    let nextOpened = await openThreadsNextVisibleOwnPostFromCurrentProfile(config, padCode, maxAgeDays).catch((error) => ({
+    let nextOpened = await withTimeout(
+      openThreadsNextVisibleOwnPostFromCurrentProfile(config, padCode, maxAgeDays),
+      70_000,
+      "threadsAutoReply open next post timeout",
+    ).catch(async (error) => ({
         ok: false as const,
         error: error instanceof Error ? error.message : String(error),
+        screenshotUrl: await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => ""),
       }));
     if (!nextOpened.ok && postIndex + 1 < maxPosts) {
       const nextShotUrl = nextOpened.screenshotUrl || await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
@@ -31865,9 +31962,14 @@ export async function autoReplyThreadsAccount(
         });
         await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 360 720", 1300);
         await delay(900);
-        nextOpened = await openThreadsNextVisibleOwnPostFromCurrentProfile(config, padCode, maxAgeDays).catch((error) => ({
+        nextOpened = await withTimeout(
+          openThreadsNextVisibleOwnPostFromCurrentProfile(config, padCode, maxAgeDays),
+          70_000,
+          "threadsAutoReply open next post rescan timeout",
+        ).catch(async (error) => ({
           ok: false as const,
           error: error instanceof Error ? error.message : String(error),
+          screenshotUrl: await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => ""),
         }));
       }
     }
@@ -31877,6 +31979,7 @@ export async function autoReplyThreadsAccount(
         postIndex: postIndex + 1,
         error: nextOpened.error,
       }, nextOpened.screenshotUrl);
+      await restoreThreadsAutoReplyProfileForNextScan(config, padCode).catch(() => undefined);
       break;
     }
   }

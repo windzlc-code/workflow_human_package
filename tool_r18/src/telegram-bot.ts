@@ -14676,10 +14676,14 @@ async function updateTelegramPublishStatus(
     });
     const elapsed = Date.now() - startedAt;
     if (elapsed >= 1200) console.log(`[telegram][status_edit_slow] chat=${chatId} msg=${messageId} platform=${platform} ms=${elapsed}`);
-  } catch {
+  } catch (error: any) {
+    console.warn(`[telegram][status_edit_error] chat=${chatId} msg=${messageId} platform=${platform} error=${error?.message || error}`);
     await bot.sendMessage(chatId, text, {
       reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
-    }).catch(() => undefined);
+    }).catch((sendError: any) => {
+      console.warn(`[telegram][status_send_error] chat=${chatId} msg=${messageId} platform=${platform} error=${sendError?.message || sendError}`);
+      return undefined;
+    });
   } finally {
     const latest = telegramStatusEditState.get(key);
     if (latest) {
@@ -18720,6 +18724,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
       } catch (error: any) {
         stopTyping();
+        console.error(`[telegram][threads_auto_reply_error] chat=${chatId} archive=${id} pad=${boundPad.padCode} error=${error?.message || error}`);
         if (isTelegramTaskCancelledError(error)) {
           await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆熱點推文任務\n\n智能體手機：${boundPad.padName}`);
           return;
@@ -18821,9 +18826,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const commentPersona = buildWarmupCommentPersonaFromArchive(archive);
         console.log(`[telegram][acctautoreply_trace] stage=lock_acquired chat=${chatId} archive=${id} pad=${boundPad.padCode} key=${padOperationKey}`);
         let lastProgress: ThreadsAutoReplyProgress | null = null;
-        await safeEditOrSend(bot, chatId, msgId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
+        const statusMessage = await safeEditOrSend(bot, chatId, msgId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 自動回覆", callback_data: returnCallback }]] },
         });
+        const statusMessageId = statusMessage?.message_id || msgId;
+        console.log(`[telegram][acctautoreply_trace] stage=start_message_ready chat=${chatId} archive=${id} pad=${boundPad.padCode} source_msg=${msgId} status_msg=${statusMessageId}`);
+        console.log(`[telegram][acctautoreply_trace] stage=core_start chat=${chatId} archive=${id} pad=${boundPad.padCode} days=${maxAgeDays}`);
         const result = await autoReplyThreadsAccount(
           creds,
           boundPad.padCode,
@@ -18831,14 +18839,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
           (p) => {
             assertPadOperationNotCancelled(padOperationKey);
             lastProgress = p;
+            console.log(`[telegram][acctautoreply_progress] chat=${chatId} archive=${id} pad=${boundPad.padCode} step=${JSON.stringify(p.step)} scannedPosts=${p.scannedPosts} scannedComments=${p.scannedComments} replied=${p.replied} skipped=${p.skipped} done=${Boolean(p.done)}`);
             const lines = formatThreadsAutoReplyProgressLines(p, {
               persona: archive.name,
               padName: boundPad.padName,
               maxAgeDays,
             });
-            void updateTelegramPublishStatus(bot, chatId, msgId, "threads_auto_reply", lines, p.step);
+            void updateTelegramPublishStatus(bot, chatId, statusMessageId, "threads_auto_reply", lines, p.step);
           },
         );
+        console.log(`[telegram][acctautoreply_trace] stage=core_done chat=${chatId} archive=${id} pad=${boundPad.padCode} scannedPosts=${result.scannedPosts} scannedComments=${result.scannedComments} replied=${result.replied} skipped=${result.skipped} status=${result.completionStatus || ""}`);
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
         const completionMessage = result.replied > 0
@@ -18863,6 +18873,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
       } catch (error: any) {
         stopTyping();
+        console.error(`[telegram][acctautoreply_error] chat=${chatId} archive=${id} pad=${boundPad.padCode} error=${error?.message || error}`);
         if (isTelegramTaskCancelledError(error)) {
           await bot.sendMessage(chatId, `🚇 已中止 Threads 自動回覆任務\n\n智能體手機：${boundPad.padName}`);
           return;
