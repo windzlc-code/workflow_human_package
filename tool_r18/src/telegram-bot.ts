@@ -801,7 +801,7 @@ const pendingPostSelections = new Map<number, {
   groupContentType?: TelegramGroupContentType;
 }>();
 
-const pendingPostActions = new Map<number, {
+type PendingPostAction = {
   archiveId: string;
   postId: string;
   source?: "posts" | "favorites";
@@ -809,7 +809,13 @@ const pendingPostActions = new Map<number, {
   linkEndingPresetApplied?: boolean;
   contentOverride?: string;
   publishPlatform?: TelegramPublishPlatform;
-}>();
+};
+
+type PendingPostActionCallback = PendingPostAction & {
+  createdAt: number;
+};
+
+const pendingPostActions = new Map<number, PendingPostAction>();
 
 type SentimentHotRewriteMode = "source_structure" | "persona_style";
 
@@ -926,6 +932,8 @@ type PendingPostImageRegenerationAction = {
   archiveId: string;
   postId: string;
   displayIndex: number;
+  source?: "posts" | "favorites";
+  groupContentType?: TelegramGroupContentType;
   createdAt: number;
 };
 
@@ -936,6 +944,8 @@ type PendingPostImageCandidateSelectionAction = {
   imageUrl: string;
   displayIndex: number;
   candidateIndex: number;
+  source?: "posts" | "favorites";
+  groupContentType?: TelegramGroupContentType;
   paidR18Context?: {
     archiveName: string;
     prompt: string;
@@ -1008,6 +1018,7 @@ type PendingPublishHistoryViewAction = {
 
 const POST_IMAGE_REGEN_CALLBACK_PREFIX = "pimgregen_";
 const POST_IMAGE_SELECT_CALLBACK_PREFIX = "pimgpick_";
+const POST_ACTION_CALLBACK_PREFIX = "pa_";
 const PAID_R18_FALLBACK_POST_CALLBACK_PREFIX = "pr18fb_";
 const PAID_R18_VIDEO_POST_CALLBACK_PREFIX = "pr18v_";
 const PUBLISH_HISTORY_REQUEUE_CALLBACK_PREFIX = "rh_";
@@ -1015,6 +1026,7 @@ const PUBLISH_HISTORY_VIEW_CALLBACK_PREFIX = "hv_";
 const POST_IMAGE_REGEN_ACTION_TTL_MS = 6 * 60 * 60_000;
 const POST_IMAGE_REGEN_ACTION_MAX = 500;
 const pendingPostImageRatioActions = new Map<number, PendingPostImageRatioAction>();
+const pendingPostActionCallbacks = new Map<string, PendingPostActionCallback>();
 const pendingPostImageRegenerationActions = new Map<string, PendingPostImageRegenerationAction>();
 const pendingPostImageCandidateSelectionActions = new Map<string, PendingPostImageCandidateSelectionAction>();
 const pendingPaidR18FallbackPostActions = new Map<string, PendingPaidR18FallbackPostAction>();
@@ -1043,6 +1055,52 @@ function parsePostImageCandidateSelectCallback(data: string): string | null {
   return data.startsWith(POST_IMAGE_SELECT_CALLBACK_PREFIX)
     ? data.slice(POST_IMAGE_SELECT_CALLBACK_PREFIX.length)
     : null;
+}
+
+type PostActionCallbackKind =
+  | "v"
+  | "pub"
+  | "pp"
+  | "dop"
+  | "dopm"
+  | "fav"
+  | "mp"
+  | "mpv"
+  | "mm"
+  | "ed"
+  | "eci"
+  | "ei"
+  | "rg"
+  | "rai"
+  | "ras"
+  | "rap"
+  | "rc"
+  | "imgai"
+  | "imgup"
+  | "rf"
+  | "del"
+  | "lt"
+  | "la"
+  | "lc"
+  | "mt"
+  | "msa"
+  | "mcl"
+  | "md"
+  | "mrs"
+  | "mru"
+  | "mra";
+
+function buildPostActionCallback(kind: PostActionCallbackKind, actionKey: string, value?: string): string {
+  return `${POST_ACTION_CALLBACK_PREFIX}${kind}_${actionKey}${value ? `_${value}` : ""}`;
+}
+
+function parsePostActionCallback(data: string): { kind: PostActionCallbackKind; key: string; value?: string } | null {
+  if (!data.startsWith(POST_ACTION_CALLBACK_PREFIX)) return null;
+  const payload = data.slice(POST_ACTION_CALLBACK_PREFIX.length);
+  const match = payload.match(/^([a-z]+)_([^_]+)(?:_(.+))?$/);
+  if (!match) return null;
+  const kind = match[1] as PostActionCallbackKind;
+  return { kind, key: match[2], value: match[3] };
 }
 
 function buildPaidR18FallbackPostCallback(actionKey: string): string {
@@ -1089,6 +1147,16 @@ function parsePublishHistoryViewCallback(data: string): string | null {
 
 function cleanupPostImageRegenerationActions() {
   const now = Date.now();
+  for (const [key, action] of pendingPostActionCallbacks.entries()) {
+    if (now - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
+      pendingPostActionCallbacks.delete(key);
+    }
+  }
+  while (pendingPostActionCallbacks.size > POST_IMAGE_REGEN_ACTION_MAX * 4) {
+    const firstKey = pendingPostActionCallbacks.keys().next().value;
+    if (!firstKey) break;
+    pendingPostActionCallbacks.delete(firstKey);
+  }
   for (const [key, action] of pendingPostImageRegenerationActions.entries()) {
     if (now - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
       pendingPostImageRegenerationActions.delete(key);
@@ -1154,6 +1222,60 @@ function cleanupPostImageRegenerationActions() {
     if (!firstKey) break;
     pendingPublishHistoryViewActions.delete(firstKey);
   }
+}
+
+function rememberPostActionCallback(args: PendingPostAction): string {
+  cleanupPostImageRegenerationActions();
+  const key = `pa${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  pendingPostActionCallbacks.set(key, { ...args, createdAt: Date.now() });
+  return key;
+}
+
+function getPostActionCallbackAction(key: string): PendingPostAction | null {
+  cleanupPostImageRegenerationActions();
+  const action = pendingPostActionCallbacks.get(key);
+  if (!action) return null;
+  if (Date.now() - action.createdAt > POST_IMAGE_REGEN_ACTION_TTL_MS) {
+    pendingPostActionCallbacks.delete(key);
+    return null;
+  }
+  return {
+    archiveId: action.archiveId,
+    postId: action.postId,
+    source: action.source,
+    groupContentType: action.groupContentType,
+    linkEndingPresetApplied: action.linkEndingPresetApplied,
+    contentOverride: action.contentOverride,
+    publishPlatform: action.publishPlatform,
+  };
+}
+
+function rememberPostActionForChat(chatId: number, action: PendingPostAction): string {
+  pendingPostActions.set(chatId, action);
+  return rememberPostActionCallback(action);
+}
+
+function resolvePostActionCallbackForChat(
+  chatId: number,
+  callback: { kind: PostActionCallbackKind; key: string; value?: string } | null,
+  kinds: PostActionCallbackKind | PostActionCallbackKind[],
+): PendingPostAction | null {
+  if (!callback) return null;
+  const allowed = Array.isArray(kinds) ? kinds : [kinds];
+  if (!allowed.includes(callback.kind)) return null;
+  const action = getPostActionCallbackAction(callback.key);
+  if (!action) return null;
+  pendingPostActions.set(chatId, action);
+  return action;
+}
+
+function resolvePostActionOrLegacyChatAction(
+  chatId: number,
+  callback: { kind: PostActionCallbackKind; key: string; value?: string } | null,
+  kinds: PostActionCallbackKind | PostActionCallbackKind[],
+): PendingPostAction | null {
+  if (callback) return resolvePostActionCallbackForChat(chatId, callback, kinds);
+  return pendingPostActions.get(chatId) || null;
 }
 
 function rememberPublishHistoryRequeueAction(args: Omit<PendingPublishHistoryRequeueAction, "createdAt">): string {
@@ -1271,6 +1393,8 @@ function buildPostImageCandidateKeyboard(args: {
   imageUrl: string;
   displayIndex: number;
   candidateIndex: number;
+  source?: "posts" | "favorites";
+  groupContentType?: TelegramGroupContentType;
   paidR18Context?: PendingPostImageCandidateSelectionAction["paidR18Context"];
 }) {
   const key = rememberPostImageCandidateSelectionAction(args);
@@ -1278,22 +1402,24 @@ function buildPostImageCandidateKeyboard(args: {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
     [{ text: `\u2705 \u9078\u64C7\u7B2C ${args.candidateIndex} \u5F35`, callback_data: buildPostImageCandidateSelectCallback(key) }],
   ];
-  if (args.postId) rows.push([{ text: "\uD83D\uDCDD \u67E5\u770B\u63A8\u6587\u5217\u8868", callback_data: buildStoredPostsPageCallback(args.archiveId, listPage) }]);
+  if (args.postId) rows.push([{ text: "\uD83D\uDCDD \u67E5\u770B\u63A8\u6587\u5217\u8868", callback_data: buildPostSourcePageCallback(args.archiveId, args.source, listPage, args.groupContentType) }]);
   else rows.push([{ text: "◀️ 返回人設詳情", callback_data: `pd_${args.archiveId}` }]);
   return { inline_keyboard: rows };
 }
 
-function buildGeneratedPostImageKeyboard(args: { archiveId: string; postId?: string; displayIndex: number }) {
+function buildGeneratedPostImageKeyboard(args: { archiveId: string; postId?: string; displayIndex: number; source?: "posts" | "favorites"; groupContentType?: TelegramGroupContentType }) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   if (args.postId) {
     const key = rememberPostImageRegenerationAction({
       archiveId: args.archiveId,
       postId: args.postId,
       displayIndex: args.displayIndex,
+      source: args.source,
+      groupContentType: args.groupContentType,
     });
     rows.push([{ text: "🖼 重新生成這張圖", callback_data: buildPostImageRegenerateCallback(key) }]);
   }
-  rows.push([{ text: "📝 查看推文列表", callback_data: `posts_${args.archiveId}` }]);
+  rows.push([{ text: "📝 查看推文列表", callback_data: buildPostSourcePageCallback(args.archiveId, args.source, Math.max(0, Math.floor((Math.max(1, args.displayIndex) - 1) / STORED_POSTS_PAGE_SIZE)), args.groupContentType) }]);
   return { inline_keyboard: rows };
 }
 
@@ -4053,14 +4179,20 @@ function parseThreadsAutoReplyDaysInput(text: string): number | null {
   const match = normalized.match(/\d+/);
   if (!match) return null;
   const days = Number(match[0]);
-  if (!Number.isInteger(days) || days < 1 || days > 15) return null;
+  if (!Number.isInteger(days) || days < 1 || days > 7) return null;
   return days;
 }
+
+type RuntimePadOperationHooks = {
+  acquire: (chatId: number, padCode: string, key: string, label: string) => Promise<boolean>;
+  release: (padCode: string, key: string) => void;
+};
 
 async function runPadThreadsAutoReplyFromTelegram(
   bot: TelegramBot,
   chatId: number,
   padCode: string,
+  runtimeOps: RuntimePadOperationHooks,
   maxAgeDays = 2,
 ): Promise<void> {
   const pads = await listPadsForThisBot();
@@ -4073,7 +4205,7 @@ async function runPadThreadsAutoReplyFromTelegram(
   }
   const padName = padDisplayName(allowedPad);
   const padOperationKey = `threads-auto-reply:${padCode}:${chatId}:${Date.now()}`;
-  if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "Threads自动回复"))) return;
+  if (!(await runtimeOps.acquire(chatId, padCode, padOperationKey, "Threads自动回复"))) return;
   const stopTyping = startTelegramTyping(bot, chatId);
   try {
     const creds = resolveVmosCredentials();
@@ -4139,7 +4271,7 @@ async function runPadThreadsAutoReplyFromTelegram(
       inlineKeyboard: [[{ text: "◀️ 返回", callback_data: `pad_detail_${padCode}` }]],
     });
   } finally {
-    releaseRuntimePadOperation(padCode, padOperationKey);
+    runtimeOps.release(padCode, padOperationKey);
   }
 }
 
@@ -4149,7 +4281,9 @@ async function runPersonaThreadsAutoReplyFromTelegram(
   archiveId: string,
   listPadsForThisBot: () => Promise<Array<{ padCode: string; padName?: string; padGrade?: string; padType?: string }>>,
   sendMainMenu: (chatId: number, msgId?: number) => void,
+  runtimeOps: RuntimePadOperationHooks,
   maxAgeDays = 2,
+  returnCallback = `acctautoreply_${archiveId}`,
 ): Promise<void> {
   const archive = await loadPersonaArchive(archiveId).catch(() => null);
   if (!archive) {
@@ -4157,22 +4291,21 @@ async function runPersonaThreadsAutoReplyFromTelegram(
     return;
   }
   const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
-  const returnCallback = `acctplatform_threads_${archiveId}`;
   if (!boundPad) {
     await bot.sendMessage(chatId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 自動回覆。`, {
-      reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${archiveId}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+      reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${archiveId}` }], [{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
     });
     return;
   }
   const padOperationKey = `threads-auto-reply:${boundPad.padCode}:${chatId}:${Date.now()}`;
-  if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, padOperationKey, "Threads自動回覆"))) return;
+  if (!(await runtimeOps.acquire(chatId, boundPad.padCode, padOperationKey, "Threads自動回覆"))) return;
   const stopTyping = startTelegramTyping(bot, chatId);
   try {
     const creds = resolveVmosCredentials();
     const commentPersona = buildWarmupCommentPersonaFromArchive(archive);
     let lastProgress: ThreadsAutoReplyProgress | null = null;
     const statusMessage = await bot.sendMessage(chatId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
-      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
     });
     const result = await autoReplyThreadsAccount(
       creds,
@@ -4193,7 +4326,7 @@ async function runPersonaThreadsAutoReplyFromTelegram(
     stopTyping();
     await bot.sendMessage(chatId, `✅ *Threads 自動回覆完成*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n本次目標：${result.targetReplies || 3} 條\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.completionReason ? `\n完成說明：${result.completionReason}` : ""}${result.error ? `\n補充：${result.error}` : ""}`, {
       parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
     });
     const screenshots = result.replied > 0
       ? (result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [])
@@ -4219,7 +4352,7 @@ async function runPersonaThreadsAutoReplyFromTelegram(
       chatId,
       error,
       { action: "Threads自動回覆", padName: boundPad.padName, padCode: boundPad.padCode },
-      [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]],
+      [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]],
     )) {
       return;
     }
@@ -4228,10 +4361,10 @@ async function runPersonaThreadsAutoReplyFromTelegram(
       padName: boundPad.padName,
       padCode: boundPad.padCode,
       fallback: "Threads 自動回覆失敗，請人工檢查目前 Threads 頁面後重試。",
-      inlineKeyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]],
+      inlineKeyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]],
     });
   } finally {
-    releaseRuntimePadOperation(boundPad.padCode, padOperationKey);
+    runtimeOps.release(boundPad.padCode, padOperationKey);
   }
 }
 
@@ -6131,7 +6264,7 @@ async function saveStoredPostCustomEdit(args: {
     await args.bot.sendMessage(args.chatId, "保存推文修改失敗，請稍後重試。");
     return;
   }
-  pendingPostActions.set(args.chatId, { archiveId: args.archiveId, postId: args.postId, source: args.source, groupContentType: args.groupContentType });
+  const actionKey = rememberPostActionForChat(args.chatId, { archiveId: args.archiveId, postId: args.postId, source: args.source, groupContentType: args.groupContentType });
   const sourcePosts = resolveArchivePostCollection(archive, args.source);
   const sourceIndex = sourcePosts.findIndex((item) => item.id === updated.id);
   const displayIndex = args.displayIndex || (updated.orderIndex ?? sourceIndex) + 1;
@@ -6156,6 +6289,7 @@ ${buildPostDetailTextWithArchive(displayIndex, updated.content, imageUrl, archiv
         favoriteAdded: args.source !== "favorites" && isArchivePostFavorited(archive, updated),
         backCallback: buildPostSourcePageCallback(args.archiveId, args.source, 0, args.groupContentType),
         backText: args.source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
+        actionKey,
       }),
     },
   });
@@ -9403,6 +9537,8 @@ async function sendPostImageCandidateMessage(bot: TelegramBot, chatId: number, a
   displayIndex: number;
   candidateIndex: number;
   totalCandidates: number;
+  source?: "posts" | "favorites";
+  groupContentType?: TelegramGroupContentType;
   paidR18Context?: PendingPostImageCandidateSelectionAction["paidR18Context"];
 }) {
   const caption = args.paidR18Context
@@ -9415,6 +9551,8 @@ async function sendPostImageCandidateMessage(bot: TelegramBot, chatId: number, a
     imageUrl: args.imageUrl,
     displayIndex: args.displayIndex,
     candidateIndex: args.candidateIndex,
+    source: args.source,
+    groupContentType: args.groupContentType,
     paidR18Context: args.paidR18Context,
   });
   const sent = await telegramBestEffort("generatePosts.sendPhotoCandidate", bot.sendPhoto(chatId, resolveTelegramPhotoInput(args.imageUrl), {
@@ -9435,6 +9573,8 @@ function buildPostImageGroupCandidateKeyboard(args: {
   imageUrls: string[];
   displayIndex: number;
   archiveDisplayIndex?: number;
+  source?: "posts" | "favorites";
+  groupContentType?: TelegramGroupContentType;
   paidR18Context?: PendingPostImageCandidateSelectionAction["paidR18Context"];
 }) {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
@@ -9448,13 +9588,15 @@ function buildPostImageGroupCandidateKeyboard(args: {
       imageUrl,
       displayIndex: args.archiveDisplayIndex || args.displayIndex,
       candidateIndex: index + 1,
+      source: args.source,
+      groupContentType: args.groupContentType,
       paidR18Context: args.paidR18Context,
     });
     candidateRows.push({ text: `\u2705 \u9078\u64C7\u7B2C ${index + 1} \u5F35`, callback_data: buildPostImageCandidateSelectCallback(key) });
   }
   for (let i = 0; i < candidateRows.length; i += 2) rows.push(candidateRows.slice(i, i + 2));
   const listPage = Math.max(0, Math.floor((Math.max(1, args.displayIndex) - 1) / STORED_POSTS_PAGE_SIZE));
-  rows.push([{ text: "\uD83D\uDCDD \u67E5\u770B\u63A8\u6587\u5217\u8868", callback_data: args.postId ? buildStoredPostsPageCallback(args.archiveId, listPage) : `posts_${args.archiveId}` }]);
+  rows.push([{ text: "\uD83D\uDCDD \u67E5\u770B\u63A8\u6587\u5217\u8868", callback_data: args.postId ? buildPostSourcePageCallback(args.archiveId, args.source, listPage, args.groupContentType) : buildPostSourcePageCallback(args.archiveId, args.source, 0, args.groupContentType) }]);
   return { inline_keyboard: rows };
 }
 
@@ -9467,6 +9609,8 @@ async function sendPostImageCandidateGroupMessage(bot: TelegramBot, chatId: numb
   archiveDisplayIndex?: number;
   totalPosts: number;
   displayFailureKeyboard?: Array<Array<{ text: string; callback_data: string }>>;
+  source?: "posts" | "favorites";
+  groupContentType?: TelegramGroupContentType;
   paidR18Context?: PendingPostImageCandidateSelectionAction["paidR18Context"];
 }) {
   const caption = args.paidR18Context
@@ -9516,6 +9660,8 @@ async function sendPostImageCandidateGroupMessage(bot: TelegramBot, chatId: numb
       imageUrls: args.imageUrls,
       displayIndex: args.displayIndex,
       archiveDisplayIndex: args.archiveDisplayIndex,
+      source: args.source,
+      groupContentType: args.groupContentType,
       paidR18Context: args.paidR18Context,
     }),
   }), 45_000);
@@ -10526,6 +10672,7 @@ async function saveAndSendPaidR18SelectedImagePost(args: {
     archiveId: args.archiveId,
     postId: post?.id || postId,
     displayIndex,
+    groupContentType: "paid",
   });
   if (caption && captionPrefix.length + caption.length <= 1024) {
     await args.bot.sendPhoto(args.chatId, resolveTelegramPhotoInput(args.imageUrl), {
@@ -10957,6 +11104,7 @@ async function generateCurrentPaidR18ImageFirstGroup(bot: TelegramBot, chatId: n
     imageUrls: imageResult.imageUrls,
     displayIndex: index + 1,
     totalPosts: flow.total,
+    groupContentType: "paid",
     paidR18Context: {
       archiveName: flow.archiveName,
       prompt: currentPrompt,
@@ -13115,7 +13263,9 @@ export function buildStoredPostMediaManageKeyboard(args: {
   selectedIndexes: number[];
   imageRegenerateCallback?: string;
   allowAiReplace?: boolean;
+  actionKey?: string;
 }) {
+  const mediaCallback = (kind: PostActionCallbackKind, fallback: string, value?: string) => args.actionKey ? buildPostActionCallback(kind, args.actionKey, value) : fallback;
   const selected = new Set(args.selectedIndexes);
   const mediaRows: Array<Array<{ text: string; callback_data: string }>> = [];
   for (let index = 0; index < args.mediaItems.length; index += 2) {
@@ -13126,7 +13276,7 @@ export function buildStoredPostMediaManageKeyboard(args: {
       const mediaLabel = kind === "video" ? "視頻" : kind === "image" ? "圖片" : "媒體";
       return {
         text: `${selected.has(mediaIndex) ? "☑️" : "⬜️"} ${mediaIcon} ${mediaIndex + 1}.${mediaLabel}`,
-        callback_data: `post_media_toggle_${mediaIndex}`,
+        callback_data: mediaCallback("mt", `post_media_toggle_${mediaIndex}`, String(mediaIndex)),
       };
     }));
   }
@@ -13136,21 +13286,21 @@ export function buildStoredPostMediaManageKeyboard(args: {
       const kind = item.type && item.type !== "unknown" ? item.type : inferStoredPostMediaKind(item.url);
       return kind === "video";
     })
-    .map(({ index }) => ({ text: `🎬 播放視頻 ${index + 1}`, callback_data: `post_media_play_${index}` })), 2);
+    .map(({ index }) => ({ text: `🎬 播放視頻 ${index + 1}`, callback_data: mediaCallback("mpv", `post_media_play_${index}`, String(index)) })), 2);
   return [
     ...mediaRows,
     ...videoRows,
     ...(args.imageRegenerateCallback ? [[{ text: "🖼 重新生成配圖", callback_data: args.imageRegenerateCallback }]] : []),
     [
-      { text: "✅ 全選", callback_data: "post_media_select_all" },
-      { text: "🧹 清空", callback_data: "post_media_clear" },
+      { text: "✅ 全選", callback_data: mediaCallback("msa", "post_media_select_all") },
+      { text: "🧹 清空", callback_data: mediaCallback("mcl", "post_media_clear") },
     ],
     [
-      { text: `🗑 刪除選中 ${selected.size}`, callback_data: "post_media_delete_selected" },
-      { text: `🔁 替換選中 ${selected.size}`, callback_data: "post_media_replace_selected" },
+      { text: `🗑 刪除選中 ${selected.size}`, callback_data: mediaCallback("md", "post_media_delete_selected") },
+      { text: `🔁 替換選中 ${selected.size}`, callback_data: mediaCallback("mrs", "post_media_replace_selected") },
     ],
-    ...(args.allowAiReplace ? [[{ text: `🤖 AI 生成圖片替換選中 ${selected.size}`, callback_data: "post_media_replace_ai" }]] : []),
-    [{ text: "◀️ 返回查看推文", callback_data: "post_action_view" }],
+    ...(args.allowAiReplace ? [[{ text: `🤖 AI 生成圖片替換選中 ${selected.size}`, callback_data: mediaCallback("mra", "post_media_replace_ai") }]] : []),
+    [{ text: "◀️ 返回查看推文", callback_data: mediaCallback("v", "post_action_view") }],
   ];
 }
 
@@ -13169,9 +13319,10 @@ async function renderStoredPostMediaManager(
     return;
   }
   const mediaItems = getStoredPostMediaItems(post);
+  const actionKey = rememberPostActionForChat(chatId, action);
   if (!mediaItems.length) {
     await safeEditOrSend(bot, chatId, messageId, "这篇推文当前没有媒体。", {
-      reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+      reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
     });
     return;
   }
@@ -13207,6 +13358,7 @@ async function renderStoredPostMediaManager(
     selectedIndexes,
     imageRegenerateCallback,
     allowAiReplace: true,
+    actionKey,
   });
   if (await sendStoredPostMediaGridDetail({
     bot,
@@ -13228,7 +13380,7 @@ async function renderStoredPostMediaManager(
     "",
     "点击编号可单选/多选；可删除选中媒体，或上传一张图片/视频替换选中媒体。",
   ].join("\n"), {
-    reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
+    reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true, actionKey }) },
   });
 }
 
@@ -13284,10 +13436,10 @@ async function updateStoredPostMediaItems(args: {
     await args.bot.sendMessage(args.chatId, "保存媒体修改失败，请稍后重试。");
     return;
   }
-  pendingPostActions.set(args.chatId, { archiveId: args.archiveId, postId: args.postId, source: args.source, groupContentType: args.groupContentType });
+  const actionKey = rememberPostActionForChat(args.chatId, { archiveId: args.archiveId, postId: args.postId, source: args.source, groupContentType: args.groupContentType });
   pendingPostMediaSelections.delete(args.chatId);
   await args.bot.sendMessage(args.chatId, `${args.successText}\n当前媒体: ${args.mediaItems.length} 个`, {
-    reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+    reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
   });
 }
 
@@ -13304,34 +13456,38 @@ export function buildPostDetailActionRows(args: {
   favoriteAdded?: boolean;
   backCallback?: string;
   backText?: string;
+  actionKey?: string;
 }) {
   const imageRegenCallback = typeof args.postIndex === "number"
     ? `post_img_regen_${args.archiveId}_${args.postIndex}`
     : "post_img_regen";
+  const actionCallback = (kind: PostActionCallbackKind, fallback: string) => args.actionKey ? buildPostActionCallback(kind, args.actionKey) : fallback;
+  const publishCallback = actionCallback("pub", args.publishCallback);
+  const deleteCallback = actionCallback("del", args.deleteCallback);
   const favoriteButton = args.favoriteCallback
-    ? [{ text: args.favoriteAdded ? "⭐ 已收藏" : "⭐ 收藏這篇", callback_data: args.favoriteAdded ? "post_action_view" : args.favoriteCallback }]
+    ? [{ text: args.favoriteAdded ? "⭐ 已收藏" : "⭐ 收藏這篇", callback_data: args.favoriteAdded ? actionCallback("v", "post_action_view") : actionCallback("fav", args.favoriteCallback) }]
     : null;
   if (args.allowSentimentEditControls) {
     return [
-      [{ text: "🚀 發布這篇", callback_data: args.publishCallback }],
-      ...(args.canRefreshMetrics ? [[{ text: "刷新熱度", callback_data: "post_refresh_metrics" }]] : []),
+      [{ text: "🚀 發布這篇", callback_data: publishCallback }],
+      ...(args.canRefreshMetrics ? [[{ text: "刷新熱度", callback_data: actionCallback("rf", "post_refresh_metrics") }]] : []),
       ...(args.hasImage
-        ? [[{ text: "🧩 媒體管理", callback_data: "post_media_manage" }]]
+        ? [[{ text: "🧩 媒體管理", callback_data: actionCallback("mm", "post_media_manage") }]]
         : [[{ text: "🖼 單獨生成配圖", callback_data: imageRegenCallback }]]),
-      [{ text: "✏️ 文案管理", callback_data: "post_edit_custom" }],
+      [{ text: "✏️ 文案管理", callback_data: actionCallback("ed", "post_edit_custom") }],
       ...(favoriteButton ? [favoriteButton] : []),
-      [{ text: "🗑 刪除這篇", callback_data: args.deleteCallback }],
+      [{ text: "🗑 刪除這篇", callback_data: deleteCallback }],
       [{ text: args.backText || "◀️ 返回推文列表", callback_data: args.backCallback || buildStoredPostsPageCallback(args.archiveId, 0, args.groupContentType) }],
     ];
   }
   return [
-    [{ text: "🚀 发布这篇", callback_data: args.publishCallback }],
-    ...(args.canRefreshMetrics ? [[{ text: "\u5237\u65b0\u70ed\u5ea6", callback_data: "post_refresh_metrics" }]] : []),
-    ...(args.hasImage ? [[{ text: "🖼 查看配圖/視頻", callback_data: "post_media_preview" }]] : []),
-    [{ text: "🔄 重新生成推文", callback_data: "post_regen" }],
+    [{ text: "🚀 发布这篇", callback_data: publishCallback }],
+    ...(args.canRefreshMetrics ? [[{ text: "\u5237\u65b0\u70ed\u5ea6", callback_data: actionCallback("rf", "post_refresh_metrics") }]] : []),
+    ...(args.hasImage ? [[{ text: "🖼 查看配圖/視頻", callback_data: actionCallback("mp", "post_media_preview") }]] : []),
+    [{ text: "🔄 重新生成推文", callback_data: actionCallback("rg", "post_regen") }],
     [{ text: args.hasImage ? "🖼 重新生成图片" : "🖼 单独生成图片", callback_data: imageRegenCallback }],
     ...(favoriteButton ? [favoriteButton] : []),
-    [{ text: "🗑 删除这篇", callback_data: args.deleteCallback }],
+    [{ text: "🗑 删除这篇", callback_data: deleteCallback }],
     [{ text: args.backText || "◀️ 返回推文列表", callback_data: args.backCallback || buildStoredPostsPageCallback(args.archiveId, 0, args.groupContentType) }],
   ];
 }
@@ -13344,6 +13500,7 @@ export function buildStoredPostPublishConfirmRows(args: {
   platforms?: TelegramPublishPlatform[];
   hasSelectableLinkTemplates?: boolean;
   selectedPlatform?: TelegramPublishPlatform;
+  actionKey?: string;
 }) {
   const platforms = args.platforms?.length ? args.platforms : [DEFAULT_PUBLISH_PLATFORM];
   const source = args.source || "posts";
@@ -13360,23 +13517,23 @@ export function buildStoredPostPublishConfirmRows(args: {
   if (!selectedPlatform) {
     rows.push(...chunk(platforms.map((platform) => ({
       text: platformText(platform),
-      callback_data: `post_action_${platform}`,
+      callback_data: args.actionKey ? buildPostActionCallback("pp", args.actionKey, platform) : `post_action_${platform}`,
     })), 2));
   } else {
     if (args.hasSelectableLinkTemplates) {
-      rows.push([{ text: "🔗 选择链接模板", callback_data: "post_link_templates" }]);
+      rows.push([{ text: "🔗 选择链接模板", callback_data: args.actionKey ? buildPostActionCallback("lt", args.actionKey) : "post_link_templates" }]);
     }
     const label = platformText(selectedPlatform).replace(/^.+?\s/, "");
     rows.push(
       [{
         text: `✅ 确认发布到绑定智能體手機 ${label}`,
-        callback_data: `dop_${selectedPlatform}`,
+        callback_data: args.actionKey ? buildPostActionCallback("dop", args.actionKey, selectedPlatform) : `dop_${selectedPlatform}`,
       }],
       [{
         text: `📱 选择多智能體手機发布 ${label}`,
-        callback_data: `dopm_${selectedPlatform}`,
+        callback_data: args.actionKey ? buildPostActionCallback("dopm", args.actionKey, selectedPlatform) : `dopm_${selectedPlatform}`,
       }],
-      [{ text: "◀️ 返回选择平台", callback_data: "post_action_clear" }],
+      [{ text: "◀️ 返回选择平台", callback_data: args.actionKey ? buildPostActionCallback("pp", args.actionKey, "clear") : "post_action_clear" }],
     );
   }
   rows.push([{ text: backText, callback_data: buildPostSourcePageCallback(args.archiveId, source, 0, args.groupContentType) }]);
@@ -15656,13 +15813,13 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
     return lines.join("\n");
   };
 
-  const buildStoredPostLinkTemplateRows = (archive: PersonaArchive) => {
+  const buildStoredPostLinkTemplateRows = (archive: PersonaArchive, actionKey?: string) => {
     const presets = getSelectableLinkEndingPresets(archive.setup as any);
     const rows = presets.slice(0, 10).map((preset, index) => ([{
       text: `${preset.name || preset.endingText || preset.linkUrl || "模板"}`,
-      callback_data: `post_link_apply_${index}`,
+      callback_data: actionKey ? buildPostActionCallback("la", actionKey, String(index)) : `post_link_apply_${index}`,
     }]));
-    rows.push([{ text: "◀️ 返回发布确认", callback_data: "post_action" }]);
+    rows.push([{ text: "◀️ 返回发布确认", callback_data: actionKey ? buildPostActionCallback("pub", actionKey) : "post_action" }]);
     return rows;
   };
 
@@ -17010,6 +17167,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data.startsWith("pad_threads_auto_reply_") && !data.startsWith("pad_threads_auto_reply_run_") && !data.startsWith("pad_threads_auto_reply_days_")) {
       pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
       const padCode = data.slice("pad_threads_auto_reply_".length);
       const pads = await listPadsForThisBot();
       const allowedPad = pads.find((p) => p.padCode === padCode);
@@ -17036,6 +17194,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data.startsWith("pad_threads_auto_reply_days_")) {
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
       const padCode = data.slice("pad_threads_auto_reply_days_".length);
       const pads = await listPadsForThisBot();
       const allowedPad = pads.find((p) => p.padCode === padCode);
@@ -17047,7 +17206,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       pendingThreadsAutoReplyDaysInputs.set(chatId, { type: "pad", padCode, createdAt: Date.now() });
       await safeEditOrSend(bot, chatId, msgId, `✍️ 請輸入 Threads 自動回覆要查看的天數。\n\n智能體手機：${padDisplayName(allowedPad)}\n預設：2 天\n可輸入：1-7\n\n例如：2`, {
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回智能體手機詳情", callback_data: `pad_detail_${padCode}` }]] },
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 自動回覆", callback_data: `pad_threads_auto_reply_${padCode}` }]] },
       });
       return;
     }
@@ -17112,7 +17271,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
       } catch (error: any) {
         stopTyping();
-        console.error(`[telegram][dopub_error] chat=${chatId} archive=${id} post=${post.id} pad=${padCode} error=${error?.message || error}`);
+        console.error(`[telegram][threads_auto_reply_error] chat=${chatId} pad=${padCode} days=${maxAgeDays} error=${error?.message || error}`);
         if (isTelegramTaskCancelledError(error)) {
           await bot.sendMessage(chatId, `🚫 已中止 Threads自动回复任務\n\n智能體手機：${padName}`);
           return;
@@ -18243,10 +18402,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
-      const returnCallback = `acctplatform_threads_${id}`;
+      const returnCallback = `persona_warmup_${id}`;
       if (!boundPad) {
         await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 養號。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回養號", callback_data: returnCallback }]] },
         });
         return;
       }
@@ -18279,7 +18438,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             [{ text: "滑動 + 隨機點讚", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_like` }],
             [{ text: "滑動 + 隨機留言", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_comment` }],
             [{ text: "滑動 + 隨機點讚/留言", callback_data: `warmup_engage_${platform}_${boundPad.padCode}_both` }],
-            [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }],
+            [{ text: "◀️ 返回養號", callback_data: returnCallback }],
           ],
         },
       });
@@ -18589,15 +18748,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data.startsWith("acctautoreply_") && !data.startsWith("acctautoreply_run_") && !data.startsWith("acctautoreply_days_")) {
       pendingThreadsAutoReplyDaysInputs.delete(chatId);
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
       pendingPersonaAccountActions.delete(chatId);
       const id = data.slice("acctautoreply_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
-      const returnCallback = `acctplatform_threads_${id}`;
+      const returnCallback = `persona_autoreply_${id}`;
       if (!boundPad) {
         await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 自動回覆。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
         });
         return;
       }
@@ -18607,7 +18767,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           inline_keyboard: [
             [{ text: "✅ 開始（預設 2 天）", callback_data: `acctautoreply_run_d2_${id}` }],
             [{ text: "✍️ 輸入查看天數", callback_data: `acctautoreply_days_${id}` }],
-            [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }],
+            [{ text: "◀️ 返回自動回覆", callback_data: returnCallback }],
           ],
         },
       });
@@ -18615,27 +18775,29 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data.startsWith("acctautoreply_days_")) {
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
       pendingPersonaAccountActions.delete(chatId);
       const id = data.slice("acctautoreply_days_".length);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
-      const returnCallback = `acctplatform_threads_${id}`;
+      const returnCallback = `acctautoreply_${id}`;
       if (!boundPad) {
         await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 自動回覆。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }]] },
         });
         return;
       }
       pendingThreadsAutoReplyDaysInputs.set(chatId, { type: "persona", archiveId: id, createdAt: Date.now() });
       await safeEditOrSend(bot, chatId, msgId, `✍️ 請輸入 Threads 自動回覆要查看的天數。\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n預設：2 天\n可輸入：1-7\n\n例如：2`, {
-        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 自動回覆", callback_data: returnCallback }]] },
       });
       return;
     }
 
     if (data.startsWith("acctautoreply_run_")) {
       pendingPersonaAccountActions.delete(chatId);
+      pendingThreadsOwnPostReplyInputs.delete(chatId);
       const runPayload = data.slice("acctautoreply_run_".length);
       const daysMatch = runPayload.match(/^d([1-7])_(.+)$/);
       const maxAgeDays = daysMatch ? Number(daysMatch[1]) : 2;
@@ -18644,10 +18806,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
-      const returnCallback = `acctplatform_threads_${id}`;
+      const returnCallback = `acctautoreply_${id}`;
       if (!boundPad) {
         await safeEditOrSend(bot, chatId, msgId, `❌ 這個人設還沒有可用的綁定智能體手機。\n\n人設：${archive.name}\n平台：Threads\n\n請先綁定智能體手機，再執行 Threads 自動回覆。`, {
-          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+          reply_markup: { inline_keyboard: [[{ text: "📱 綁定智能體手機", callback_data: `bindpad_${id}` }], [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${id}` }]] },
         });
         return;
       }
@@ -18660,7 +18822,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         console.log(`[telegram][acctautoreply_trace] stage=lock_acquired chat=${chatId} archive=${id} pad=${boundPad.padCode} key=${padOperationKey}`);
         let lastProgress: ThreadsAutoReplyProgress | null = null;
         await safeEditOrSend(bot, chatId, msgId, `💬 Threads 自動回覆執行中...\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n查看範圍：${maxAgeDays} 天內\n\n正在進入 Threads。`, {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 自動回覆", callback_data: returnCallback }]] },
         });
         const result = await autoReplyThreadsAccount(
           creds,
@@ -18684,7 +18846,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           : `✅ Threads 自動回覆完成\n\n本次沒有可發送的回覆截圖。\n已掃描推文：${result.scannedPosts}\n候選留言：${result.scannedComments}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`;
         await bot.sendMessage(chatId, completionMessage, {
           parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]] },
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
         });
         const screenshots = result.replied > 0
           ? (result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [])
@@ -18710,7 +18872,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           chatId,
           error,
           { action: "Threads自動回覆", padName: boundPad.padName, padCode: boundPad.padCode },
-          [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]],
+          [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]],
         )) {
           return;
         }
@@ -18719,7 +18881,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           padName: boundPad.padName,
           padCode: boundPad.padCode,
           fallback: "Threads 自動回覆失敗，請人工檢查目前 Threads 頁面後重試。",
-          inlineKeyboard: [[{ text: "◀️ 返回 Threads 帳號", callback_data: returnCallback }]],
+          inlineKeyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]],
         });
       } finally {
         releaseRuntimePadOperation(boundPad.padCode, padOperationKey);
@@ -20607,6 +20769,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           imageUrls: result.imageUrls,
           displayIndex,
           totalPosts: archive.posts.length || 1,
+          groupContentType: action.groupContentType,
         });
       } catch (error) {
         stopTyping();
@@ -21662,7 +21825,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const isSentimentImportedPost = isSentimentHotImportedPost(post);
       const isFavoriteSource = source === "favorites";
       const listPage = Math.max(0, Math.floor(Math.max(0, archiveIndex) / STORED_POSTS_PAGE_SIZE));
-      pendingPostActions.set(chatId, { archiveId, postId, source, groupContentType: selected?.groupContentType });
+      const actionKey = rememberPostActionForChat(chatId, { archiveId, postId, source, groupContentType: selected?.groupContentType });
       const detailRows = buildPostDetailActionRows({
         hasImage: mediaItems.length > 0 || Boolean(postImageUrl),
         publishCallback: "post_action",
@@ -21676,6 +21839,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         favoriteAdded: !isFavoriteSource && isArchivePostFavorited(archive, post),
         backCallback: buildPostSourcePageCallback(archiveId, source, listPage, selected?.groupContentType),
         backText: isFavoriteSource ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
+        actionKey,
       });
       if ((isSentimentImportedPost || isFavoriteSource ? mediaItems.length > 0 : mediaItems.length > 1)) {
         if (await sendStoredPostMediaGridDetail({
@@ -21703,6 +21867,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    const postActionCallback = parsePostActionCallback(data);
     const postImageRegenerateKey = parsePostImageRegenerateCallback(data);
     const postImageCandidateSelectKey = parsePostImageCandidateSelectCallback(data);
     const paidR18FallbackPostKey = parsePaidR18FallbackPostCallback(data);
@@ -21820,7 +21985,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await telegramBestEffort("postImageCandidate.writeStart", bot.sendMessage(chatId, "\u23F3 \u6B63\u5728\u5C07\u9019\u5F35\u5716\u5BEB\u5165\u63A8\u6587\uFF0C\u8ACB\u7A0D\u5019..."), 15_000);
         const result = await attachSelectedImageCandidateToArchivePost(action);
         const selectedPostId = String(result.postId || action.postId || "");
-        pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: selectedPostId });
+        pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: selectedPostId, source: action.source, groupContentType: action.groupContentType });
         pendingPostImageCandidateSelectionActions.delete(postImageCandidateSelectKey);
         const archive = result.archive || await loadPersonaForThisBot(action.archiveId).catch(() => null);
         const post = archive?.posts.find((item) => selectedPostId && item.id === selectedPostId)
@@ -21835,6 +22000,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
           archiveId: action.archiveId,
           postId: selectedPostId,
           displayIndex,
+          source: action.source,
+          groupContentType: action.groupContentType,
         });
         if (selectedCaption) {
           await bot.sendPhoto(chatId, resolveTelegramPhotoInput(result.imageUrl), {
@@ -21907,19 +22074,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const displayIndex = action.displayIndex || (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
-      pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: action.postId });
+      pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: action.postId, source: action.source, groupContentType: action.groupContentType });
       await sendPostImageRatioPicker(bot, chatId, msgId, {
         archiveId: action.archiveId,
         postId: action.postId,
         displayIndex,
+        groupContentType: action.groupContentType,
         source: "candidate_regen",
         createdAt: Date.now(),
       });
       return;
     }
 
-    if (data.startsWith("post_media_play_")) {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "mpv" || data.startsWith("post_media_play_")) {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "mpv");
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "請先從推文列表打開一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "人設列表", callback_data: "list_personas" }]] },
@@ -21935,7 +22103,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const mediaItems = getStoredPostMediaItems(post);
-      const mediaIndex = Number(data.slice("post_media_play_".length));
+      const mediaIndex = postActionCallback?.kind === "mpv"
+        ? Number(postActionCallback.value)
+        : Number(data.slice("post_media_play_".length));
       const item = Number.isInteger(mediaIndex) ? mediaItems[mediaIndex] : null;
       const kind = item ? (item.type && item.type !== "unknown" ? item.type : inferStoredPostMediaKind(item.url)) : "";
       if (!item?.url || kind !== "video") {
@@ -21950,9 +22120,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_media_manage" || data.startsWith("post_media_toggle_") || data === "post_media_select_all" || data === "post_media_clear" || data === "post_media_delete_selected" || data === "post_media_replace_selected" || data === "post_media_replace_upload" || data === "post_media_replace_ai") {
+    const postMediaCallbackKinds: PostActionCallbackKind[] = ["mm", "mt", "msa", "mcl", "md", "mrs", "mru", "mra"];
+    if ((postActionCallback && postMediaCallbackKinds.includes(postActionCallback.kind)) || data === "post_media_manage" || data.startsWith("post_media_toggle_") || data === "post_media_select_all" || data === "post_media_clear" || data === "post_media_delete_selected" || data === "post_media_replace_selected" || data === "post_media_replace_upload" || data === "post_media_replace_ai") {
       await deletePendingStoredPostMediaMessages(bot, chatId);
-      const action = pendingPostActions.get(chatId);
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, postMediaCallbackKinds);
+      const mediaData = postActionCallback?.kind === "mt" ? `post_media_toggle_${postActionCallback.value || ""}`
+        : postActionCallback?.kind === "msa" ? "post_media_select_all"
+          : postActionCallback?.kind === "mcl" ? "post_media_clear"
+            : postActionCallback?.kind === "md" ? "post_media_delete_selected"
+              : postActionCallback?.kind === "mrs" ? "post_media_replace_selected"
+                : postActionCallback?.kind === "mru" ? "post_media_replace_upload"
+                  : postActionCallback?.kind === "mra" ? "post_media_replace_ai"
+                    : postActionCallback?.kind === "mm" ? "post_media_manage"
+                      : data;
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "人设列表", callback_data: "list_personas" }]] },
@@ -21967,9 +22147,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const actionKey = rememberPostActionForChat(chatId, action);
       if (action.source !== "favorites" && !isSentimentHotImportedPost(post)) {
         await safeEditOrSend(bot, chatId, msgId, "普通生成推文不提供媒体管理；如需更换内容，请使用重新生成推文或重新生成图片。", {
-          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
         });
         return;
       }
@@ -21983,21 +22164,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
       let selectedIndexes = current?.archiveId === action.archiveId && current.postId === action.postId
         ? current.selectedIndexes.filter((index) => index >= 0 && index < mediaItems.length)
         : [];
-      if (data.startsWith("post_media_toggle_")) {
-        const mediaIndex = Number(data.slice("post_media_toggle_".length));
+      if (mediaData.startsWith("post_media_toggle_")) {
+        const mediaIndex = Number(mediaData.slice("post_media_toggle_".length));
         if (Number.isInteger(mediaIndex) && mediaIndex >= 0 && mediaIndex < mediaItems.length) {
           selectedIndexes = selectedIndexes.includes(mediaIndex)
             ? selectedIndexes.filter((index) => index !== mediaIndex)
             : [...selectedIndexes, mediaIndex].sort((a, b) => a - b);
         }
-      } else if (data === "post_media_select_all") {
+      } else if (mediaData === "post_media_select_all") {
         selectedIndexes = mediaItems.map((_, index) => index);
-      } else if (data === "post_media_clear") {
+      } else if (mediaData === "post_media_clear") {
         selectedIndexes = [];
-      } else if (data === "post_media_delete_selected") {
+      } else if (mediaData === "post_media_delete_selected") {
         if (!selectedIndexes.length) {
           await safeEditOrSend(bot, chatId, msgId, "请先选择要删除的媒体。", {
-            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true, actionKey }) },
           });
           return;
         }
@@ -22014,10 +22195,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
           successText: `已删除 ${selectedIndexes.length} 个媒体`,
         });
         return;
-      } else if (data === "post_media_replace_selected") {
+      } else if (mediaData === "post_media_replace_selected") {
         if (!selectedIndexes.length) {
           await safeEditOrSend(bot, chatId, msgId, "请先选择要替换的媒体。", {
-            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true, actionKey }) },
           });
           return;
         }
@@ -22032,17 +22213,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
         ].join("\n"), {
           reply_markup: {
             inline_keyboard: [
-              [{ text: "📤 手动上传替换", callback_data: "post_media_replace_upload" }],
-              [{ text: "🤖 AI 生成图片替换", callback_data: "post_media_replace_ai" }],
-              [{ text: "返回媒体管理", callback_data: "post_media_manage" }],
+              [{ text: "📤 手动上传替换", callback_data: buildPostActionCallback("mru", actionKey) }],
+              [{ text: "🤖 AI 生成图片替换", callback_data: buildPostActionCallback("mra", actionKey) }],
+              [{ text: "返回媒体管理", callback_data: buildPostActionCallback("mm", actionKey) }],
             ],
           },
         });
         return;
-      } else if (data === "post_media_replace_upload") {
+      } else if (mediaData === "post_media_replace_upload") {
         if (!selectedIndexes.length) {
           await safeEditOrSend(bot, chatId, msgId, "请先选择要替换的媒体。", {
-            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true, actionKey }) },
           });
           return;
         }
@@ -22061,13 +22242,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
           `已选择: ${selectedIndexes.map((index) => index + 1).join(", ")}`,
           "请发送一张图片或一个视频。新媒体会替换当前选中的媒体；caption 可同时作为新文案。",
         ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: "post_media_manage" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: buildPostActionCallback("mm", actionKey) }]] },
         });
         return;
-      } else if (data === "post_media_replace_ai") {
+      } else if (mediaData === "post_media_replace_ai") {
         if (!selectedIndexes.length) {
           await safeEditOrSend(bot, chatId, msgId, "请先选择要替换的媒体。", {
-            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true }) },
+            reply_markup: { inline_keyboard: buildStoredPostMediaManageKeyboard({ mediaItems, selectedIndexes, imageRegenerateCallback, allowAiReplace: true, actionKey }) },
           });
           return;
         }
@@ -22079,7 +22260,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "",
           "系统会根据当前推文内容和人设生成一张新图，并替换选中的媒体。",
         ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: "post_media_manage" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: buildPostActionCallback("mm", actionKey) }]] },
         });
         const stopTyping = startTelegramTyping(bot, chatId);
         try {
@@ -22107,7 +22288,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           });
         } catch (error) {
           await bot.sendMessage(chatId, `❌ AI 生成替换图片失败：${formatUserFacingError(error, "图片生成失败，请稍后重试。")}`, {
-            reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: "post_media_manage" }]] },
+            reply_markup: { inline_keyboard: [[{ text: "返回媒体管理", callback_data: buildPostActionCallback("mm", actionKey) }]] },
           });
         } finally {
           stopTyping();
@@ -22126,8 +22307,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_edit_custom") {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "ed" || data === "post_edit_custom") {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "ed");
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "人设列表", callback_data: "list_personas" }]] },
@@ -22144,13 +22325,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (action.source !== "favorites" && !isSentimentHotImportedPost(post)) {
         await safeEditOrSend(bot, chatId, msgId, "普通生成推文不提供热点抓取编辑面板；如需调整，请使用重新生成推文或重新生成图片。", {
-          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
         });
         return;
       }
       const sourcePosts = resolveArchivePostCollection(archive, action.source);
       const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
       const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
+      const actionKey = rememberPostActionForChat(chatId, action);
       const editText = [
         "✏️ 文案管理",
         "",
@@ -22162,9 +22344,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         "自訂文案只修改文字，圖片/視頻請到「媒體管理」處理。",
       ].join("\n");
       const keyboard = [
-        [{ text: "🤖 AI 重寫推文", callback_data: "post_regen_ai" }],
-        [{ text: "✍️ 自訂文案", callback_data: "post_regen_custom" }],
-        [{ text: "返回查看推文", callback_data: "post_action_view" }],
+        [{ text: "🤖 AI 重寫推文", callback_data: buildPostActionCallback("rai", actionKey) }],
+        [{ text: "✍️ 自訂文案", callback_data: buildPostActionCallback("rc", actionKey) }],
+        [{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }],
       ];
       await deletePendingStoredPostMediaMessages(bot, chatId);
       await safeEditOrSend(bot, chatId, msgId, editText, {
@@ -22173,8 +22355,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_edit_custom_input") {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "eci" || data === "post_edit_custom_input") {
+      const action = postActionCallback?.kind === "eci" ? resolvePostActionCallbackForChat(chatId, postActionCallback, "eci") : null;
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "請先從推文列表打開一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
@@ -22191,13 +22373,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (action.source !== "favorites" && !isSentimentHotImportedPost(post)) {
         await safeEditOrSend(bot, chatId, msgId, "普通生成推文不提供熱點抓取編輯面板；如需調整，請使用重新生成推文或重新生成圖片。", {
-          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
         });
         return;
       }
       const sourcePosts = resolveArchivePostCollection(archive, action.source);
       const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
       const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
+      const actionKey = rememberPostActionForChat(chatId, action);
       clearToolR18TransientState(chatId);
       pendingStoredPostEdits.set(chatId, {
         archiveId: action.archiveId,
@@ -22220,13 +22403,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
       ].join("\n");
       await deletePendingStoredPostMediaMessages(bot, chatId);
       await safeEditOrSend(bot, chatId, msgId, inputText, {
-        reply_markup: { inline_keyboard: [[{ text: "返回文案管理", callback_data: "post_edit_custom" }]] },
+        reply_markup: { inline_keyboard: [[{ text: "返回文案管理", callback_data: buildPostActionCallback("ed", actionKey) }]] },
       });
       return;
     }
 
-    if (data === "post_regen") {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "rg" || data === "post_regen") {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "rg");
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "請先從推文列表打開一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
@@ -22242,6 +22425,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const displayIndex = (post.orderIndex ?? archive.posts.findIndex((item) => item.id === post.id)) + 1;
+      const actionKey = rememberPostActionForChat(chatId, action);
       await safeEditOrSend(bot, chatId, msgId, [
         "🔄 重新生成推文",
         "",
@@ -22251,17 +22435,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
       ].join("\n"), {
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🤖 AI 重新生成", callback_data: "post_regen_ai" }],
-            [{ text: "✍️ 自定义发送文字", callback_data: "post_regen_custom" }],
-            [{ text: "返回查看推文", callback_data: "post_action_view" }],
+            [{ text: "🤖 AI 重新生成", callback_data: buildPostActionCallback("rai", actionKey) }],
+            [{ text: "✍️ 自定义发送文字", callback_data: buildPostActionCallback("rc", actionKey) }],
+            [{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }],
           ],
         },
       });
       return;
     }
 
-    if (data === "post_regen_custom") {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "rc" || data === "post_regen_custom") {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "rc");
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "請先從推文列表打開一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
@@ -22279,6 +22463,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const sourcePosts = resolveArchivePostCollection(archive, action.source);
       const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
       const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
+      const actionKey = rememberPostActionForChat(chatId, action);
       clearToolR18TransientState(chatId);
       pendingStoredPostEdits.set(chatId, {
         archiveId: action.archiveId,
@@ -22298,16 +22483,23 @@ function sendMainMenu(chatId: number, msgId?: number) {
         "这里只修改文案，原有圖片/視頻會保留。",
         "如需替換或刪除媒體，請返回「媒體管理」。",
       ].join("\n"), {
-        reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+        reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
       });
       return;
     }
 
-    if (data === "post_regen_ai" || data === "post_regen_ai_source" || data === "post_regen_ai_persona" || data === "post_img_regen" || data.startsWith("post_img_regen_") || data === "post_img_regen_ai" || data === "post_img_upload_replace") {
-      let action = pendingPostActions.get(chatId);
+    const postRegenerateCallbackData = postActionCallback?.kind === "rai" ? "post_regen_ai"
+      : postActionCallback?.kind === "ras" ? "post_regen_ai_source"
+        : postActionCallback?.kind === "rap" ? "post_regen_ai_persona"
+          : postActionCallback?.kind === "imgai" ? "post_img_regen_ai"
+            : postActionCallback?.kind === "imgup" ? "post_img_upload_replace"
+              : data;
+    const isPostImageIndexedRegenerateCallback = postRegenerateCallbackData !== "post_img_regen_ai" && postRegenerateCallbackData.startsWith("post_img_regen_");
+    if (["rai", "ras", "rap", "imgai", "imgup"].includes(postActionCallback?.kind || "") || postRegenerateCallbackData === "post_regen_ai" || postRegenerateCallbackData === "post_regen_ai_source" || postRegenerateCallbackData === "post_regen_ai_persona" || postRegenerateCallbackData === "post_img_regen" || isPostImageIndexedRegenerateCallback || postRegenerateCallbackData === "post_img_regen_ai" || postRegenerateCallbackData === "post_img_upload_replace") {
+      let action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, ["rai", "ras", "rap", "imgai", "imgup"]);
       let explicitPostIndex: number | null = null;
-      if (data.startsWith("post_img_regen_")) {
-        const payload = data.slice("post_img_regen_".length);
+      if (isPostImageIndexedRegenerateCallback) {
+        const payload = postRegenerateCallbackData.slice("post_img_regen_".length);
         const sep = payload.lastIndexOf("_");
         const archiveId = sep > 0 ? payload.slice(0, sep) : "";
         const index = sep > 0 ? Number(payload.slice(sep + 1)) : NaN;
@@ -22331,11 +22523,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       if (!action.postId) action.postId = post.id;
-      const isImageEntry = data === "post_img_regen" || data.startsWith("post_img_regen_");
-      const isImageOnly = isImageEntry || data === "post_img_regen_ai" || data === "post_img_upload_replace";
-      const rewriteMode: SentimentHotRewriteMode | undefined = data === "post_regen_ai_source"
+      if (explicitPostIndex !== null) {
+        action = { archiveId: action.archiveId, postId: post.id, source: "posts", groupContentType: action.groupContentType };
+        pendingPostActions.set(chatId, action);
+      }
+      const actionKey = rememberPostActionForChat(chatId, action);
+      const isImageEntry = postRegenerateCallbackData === "post_img_regen" || isPostImageIndexedRegenerateCallback;
+      const isImageOnly = isImageEntry || postRegenerateCallbackData === "post_img_regen_ai" || postRegenerateCallbackData === "post_img_upload_replace";
+      const rewriteMode: SentimentHotRewriteMode | undefined = postRegenerateCallbackData === "post_regen_ai_source"
         ? "source_structure"
-        : data === "post_regen_ai_persona"
+        : postRegenerateCallbackData === "post_regen_ai_persona"
           ? "persona_style"
           : undefined;
       const isSentimentImported = isSentimentHotImportedPost(post);
@@ -22345,11 +22542,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "",
           "普通推文請使用「AI 重新生成」，系統會按當前人設和原推文主題重新生成。",
         ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
         });
         return;
       }
-      if (data === "post_regen_ai" && isSentimentImported) {
+      if (postRegenerateCallbackData === "post_regen_ai" && isSentimentImported) {
         const sourcePosts = resolveArchivePostCollection(archive, action.source);
         const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
         const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
@@ -22365,9 +22562,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         ].join("\n"), {
           reply_markup: {
             inline_keyboard: [
-              [{ text: "🧬 按原帖结构样式生成", callback_data: "post_regen_ai_source" }],
-              [{ text: "👤 按当前人设风格生成", callback_data: "post_regen_ai_persona" }],
-              [{ text: "返回文案管理", callback_data: "post_edit_custom" }],
+              [{ text: "🧬 按原帖结构样式生成", callback_data: buildPostActionCallback("ras", actionKey) }],
+              [{ text: "👤 按当前人设风格生成", callback_data: buildPostActionCallback("rap", actionKey) }],
+              [{ text: "返回文案管理", callback_data: buildPostActionCallback("ed", actionKey) }],
             ],
           },
         });
@@ -22375,7 +22572,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (isImageOnly && action.source === "favorites") {
         await safeEditOrSend(bot, chatId, msgId, "收藏推文請先進入「媒體管理」上傳或替換媒體。", {
-          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
         });
         return;
       }
@@ -22393,15 +22590,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         ].join("\n"), {
           reply_markup: {
             inline_keyboard: [
-              [{ text: "🤖 AI 重新生成图片", callback_data: "post_img_regen_ai" }],
-              [{ text: "📤 上传自定义图片替换", callback_data: "post_img_upload_replace" }],
-              [{ text: "返回查看推文", callback_data: "post_action_view" }],
+              [{ text: "🤖 AI 重新生成图片", callback_data: buildPostActionCallback("imgai", actionKey) }],
+              [{ text: "📤 上传自定义图片替换", callback_data: buildPostActionCallback("imgup", actionKey) }],
+              [{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }],
             ],
           },
         });
         return;
       }
-      if (data === "post_img_upload_replace") {
+      if (postRegenerateCallbackData === "post_img_upload_replace") {
         const sourcePosts = resolveArchivePostCollection(archive, action.source);
         const sourceIndex = sourcePosts.findIndex((item) => item.id === post.id);
         const displayIndex = (post.orderIndex ?? sourceIndex) + 1;
@@ -22423,7 +22620,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "",
           "请直接发送一张图片。图片 caption 如有文字，会同时作为新文案；不写 caption 则保留原文案。",
         ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
         });
         return;
       }
@@ -22482,7 +22679,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           const updatedSourceIndex = updatedSourcePosts.findIndex((item) => item.id === updated.id);
           const updatedDisplayIndex = (updated.orderIndex ?? updatedSourceIndex) + 1;
           regeneratedSuccessText = `✅ 推文已重新生成${rewriteModeLabel}\n\n${buildPostDetailTextWithArchive(updatedDisplayIndex, updated.content, String(updated.imageUrl || ""), displayArchive, updated.sourceMeta)}`;
-          pendingPostActions.set(chatId, { archiveId: action.archiveId, postId: updated.id, source: action.source, groupContentType: action.groupContentType });
+          const updatedActionKey = rememberPostActionForChat(chatId, { archiveId: action.archiveId, postId: updated.id, source: action.source, groupContentType: action.groupContentType });
           await bot.sendMessage(chatId, regeneratedSuccessText, {
             parse_mode: "HTML",
             ...buildPostImagePreviewOptions(String(updated.imageUrl || "")),
@@ -22500,6 +22697,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 favoriteAdded: action.source !== "favorites" && isArchivePostFavorited(displayArchive, updated),
                 backCallback: buildPostSourcePageCallback(action.archiveId, action.source, 0, action.groupContentType),
                 backText: action.source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表",
+                actionKey: updatedActionKey,
               }),
             },
           });
@@ -22525,8 +22723,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_refresh_metrics") {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "rf" || data === "post_refresh_metrics") {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "rf");
       if (!action) {
         await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "人设列表", callback_data: "list_personas" }]] },
@@ -22549,6 +22747,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const mediaItems = getStoredPostMediaItems(post);
         const postImageUrl = String(mediaItems[0]?.url || post.imageUrl || latestHistoryImage || "").trim();
         const isSentimentImportedPost = isSentimentHotImportedPost(post);
+        const actionKey = rememberPostActionForChat(chatId, { archiveId: action.archiveId, postId: post.id, source: action.source, groupContentType: action.groupContentType });
         const detailRows = buildPostDetailActionRows({
           hasImage: mediaItems.length > 0 || Boolean(postImageUrl),
           publishCallback: "post_action",
@@ -22560,6 +22759,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           allowSentimentEditControls: isSentimentImportedPost,
           favoriteCallback: "post_favorite_action",
           favoriteAdded: isArchivePostFavorited(archive, post),
+          actionKey,
         });
         if (isSentimentImportedPost && mediaItems.length === 1 && (mediaItems[0].type === "video" || inferStoredPostMediaKind(mediaItems[0].url) === "video")) {
           if (await sendPostPhotoDetail(bot, chatId, msgId, {
@@ -22601,9 +22801,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_action_view" || data === "post_media_preview") {
+    if (postActionCallback?.kind === "v" || postActionCallback?.kind === "mp" || data === "post_action_view" || data === "post_media_preview") {
       const storedPostMediaRenderToken = await deletePendingStoredPostMediaMessages(bot, chatId);
-      const action = pendingPostActions.get(chatId);
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, ["v", "mp"]);
       if (!action) {
         await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "📋 人设列表", callback_data: "list_personas" }]] },
@@ -22628,7 +22828,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const mediaItems = getStoredPostMediaItems(post);
       const postImageUrl = String(mediaItems[0]?.url || post.imageUrl || latestHistoryImage || "").trim();
       const isSentimentImportedPost = isSentimentHotImportedPost(post);
-      if (data === "post_media_preview") {
+      const actionKey = rememberPostActionForChat(chatId, { archiveId: action.archiveId, postId: post.id, source: action.source, groupContentType: action.groupContentType });
+      if (data === "post_media_preview" || postActionCallback?.kind === "mp") {
         const previewItems = mediaItems.length ? mediaItems : (postImageUrl ? [{ url: postImageUrl }] : []);
         if (!previewItems.length) {
           await deleteTemporaryMessage(bot, chatId, loadingMessage);
@@ -22650,6 +22851,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           allowSentimentEditControls: isSentimentImportedPost,
           favoriteCallback: action.source === "favorites" ? undefined : "post_favorite_action",
           favoriteAdded: action.source !== "favorites" && isArchivePostFavorited(archive, post),
+          actionKey,
         });
         if ((isSentimentImportedPost || previewItems.length > 1) && await sendStoredPostMediaGridDetail({
           bot,
@@ -22690,6 +22892,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         allowSentimentEditControls: isSentimentImportedPost,
         favoriteCallback: action.source === "favorites" ? undefined : "post_favorite_action",
         favoriteAdded: action.source !== "favorites" && isArchivePostFavorited(archive, post),
+        actionKey,
       });
       if (isSentimentImportedPost && mediaItems.length === 1 && (mediaItems[0].type === "video" || inferStoredPostMediaKind(mediaItems[0].url) === "video")) {
         if (await sendPostPhotoDetail(bot, chatId, msgId, {
@@ -22730,8 +22933,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data === "post_favorite_action") {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "fav" || data === "post_favorite_action") {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "fav");
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "📋 人设列表", callback_data: "list_personas" }]] },
@@ -22741,7 +22944,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const updated = await addFavoritePostClone(action.archiveId, action.postId, action.source);
       if (!updated) {
         await safeEditOrSend(bot, chatId, msgId, "收藏失败，请稍后重试。", {
-          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action_view" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }]] },
         });
         return;
       }
@@ -22749,17 +22952,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
         reply_markup: {
           inline_keyboard: [
             [{ text: "⭐ 查看收藏推文", callback_data: buildFavoritePostsPageCallback(action.archiveId, 0) }],
-            [{ text: "⭐ 已收藏，返回查看推文", callback_data: "post_action_view" }],
+            [{ text: "⭐ 已收藏，返回查看推文", callback_data: buildPostActionCallback("v", actionKey) }],
           ],
         },
       });
       return;
     }
 
-    if (data === "post_action" || data.startsWith("post_action_")) {
+    if (postActionCallback?.kind === "pub" || postActionCallback?.kind === "pp" || data === "post_action" || data.startsWith("post_action_")) {
       await deletePendingStoredPostMediaMessages(bot, chatId);
-      const action = pendingPostActions.get(chatId);
-      const requestedPlatform = data.startsWith("post_action_") ? data.slice("post_action_".length) : "";
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, ["pub", "pp"]);
+      const requestedPlatform = postActionCallback?.kind === "pp" ? String(postActionCallback.value || "") : (data.startsWith("post_action_") ? data.slice("post_action_".length) : "");
       const publishPlatform = requestedPlatform === "clear"
         ? undefined
         : requestedPlatform
@@ -22824,7 +23027,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           return;
         }
       }
-      pendingPostActions.set(chatId, {
+      const actionKey = rememberPostActionForChat(chatId, {
         archiveId,
         postId,
         source,
@@ -22847,16 +23050,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
               platforms: allowedPublishPlatforms,
               hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
               selectedPlatform: publishPlatform,
+              actionKey,
             }),
-            ...(action?.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }]] : []),
+            ...(action?.linkEndingPresetApplied ? [[{ text: "↩️ 撤回链接模板", callback_data: buildPostActionCallback("lc", actionKey) }]] : []),
           ],
         },
       });
       return;
     }
 
-    if (data === "post_link_templates") {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "lt" || data === "post_link_templates") {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "lt");
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "请先从推文列表打开一篇推文。", {
           reply_markup: { inline_keyboard: [[{ text: "👥 人设列表", callback_data: "list_personas" }]] },
@@ -22879,16 +23083,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
       } else {
         await deletePendingStoredPostMediaMessages(bot, chatId);
       }
+      const actionKey = rememberPostActionForChat(chatId, action);
       await safeEditOrSend(bot, chatId, msgId, buildStoredPostLinkTemplateText(archive, post), {
         disable_web_page_preview: true,
-        reply_markup: { inline_keyboard: buildStoredPostLinkTemplateRows(archive) },
+        reply_markup: { inline_keyboard: buildStoredPostLinkTemplateRows(archive, actionKey) },
       });
       return;
     }
 
-    if (data.startsWith("post_link_apply_")) {
-      const action = pendingPostActions.get(chatId);
-      const presetIndex = Number.parseInt(data.slice("post_link_apply_".length), 10);
+    if (postActionCallback?.kind === "la" || data.startsWith("post_link_apply_")) {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "la");
+      const presetIndex = postActionCallback?.kind === "la" ? Number.parseInt(String(postActionCallback.value || ""), 10) : Number.parseInt(data.slice("post_link_apply_".length), 10);
       if (!action?.archiveId || !action.postId || !Number.isInteger(presetIndex)) {
         await safeEditOrSend(bot, chatId, msgId, "链接模板选择已过期，请重新打开推文。", {
           reply_markup: { inline_keyboard: [[{ text: "👥 人设列表", callback_data: "list_personas" }]] },
@@ -22907,7 +23112,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const nextContent = applyLinkEndingPresetToText(post.content || "", preset);
       const previewPost = buildPostWithPublishContentOverride(post, nextContent);
-      pendingPostActions.set(chatId, { ...action, linkEndingPresetApplied: true, contentOverride: nextContent });
+      const actionKey = rememberPostActionForChat(chatId, { ...action, linkEndingPresetApplied: true, contentOverride: nextContent });
       await safeEditOrSend(bot, chatId, msgId, `✅ 已添加链接模板（仅本次发布预览）\n\n${String(previewPost.content || "").trim()}\n\n可以直接发布，也可以撤回模板。`, {
         disable_web_page_preview: true,
         reply_markup: {
@@ -22920,16 +23125,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
               platforms: allowedPublishPlatforms,
               hasSelectableLinkTemplates: presets.length > 0,
               selectedPlatform: action.publishPlatform,
+              actionKey,
             }),
-            [{ text: "↩️ 撤回链接模板", callback_data: "post_link_clear" }],
+            [{ text: "↩️ 撤回链接模板", callback_data: buildPostActionCallback("lc", actionKey) }],
           ],
         },
       });
       return;
     }
 
-    if (data === "post_link_clear") {
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "lc" || data === "post_link_clear") {
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "lc");
       if (!action?.archiveId || !action.postId) {
         await safeEditOrSend(bot, chatId, msgId, "链接模板选择已过期，请重新打开推文。", {
           reply_markup: { inline_keyboard: [[{ text: "👥 人设列表", callback_data: "list_personas" }]] },
@@ -22944,7 +23150,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      pendingPostActions.set(chatId, { ...action, linkEndingPresetApplied: false, contentOverride: undefined });
+      const actionKey = rememberPostActionForChat(chatId, { ...action, linkEndingPresetApplied: false, contentOverride: undefined });
       await safeEditOrSend(bot, chatId, msgId, `↩️ 已撤回链接模板\n\n🚀 *確認發布推文*\n\n"${post.content.slice(0, 80)}..."`, {
         parse_mode: "Markdown",
         reply_markup: {
@@ -22956,18 +23162,21 @@ function sendMainMenu(chatId: number, msgId?: number) {
             platforms: allowedPublishPlatforms,
             hasSelectableLinkTemplates: getSelectableLinkEndingPresets(archive.setup as any).length > 0,
             selectedPlatform: action.publishPlatform,
+            actionKey,
           }),
         },
       });
       return;
     }
 
-    if (data.startsWith("delpost_") || data.startsWith("dp_") || data === "post_delete_action" || data.startsWith("confirm_delpost_") || data.startsWith("confirm_dp_") || data === "post_delete_confirm") {
+    if (postActionCallback?.kind === "del" || data.startsWith("delpost_") || data.startsWith("dp_") || data === "post_delete_action" || data.startsWith("confirm_delpost_") || data.startsWith("confirm_dp_") || data === "post_delete_confirm") {
       await deletePendingStoredPostMediaMessages(bot, chatId);
-      const isConfirmedDelete = data.startsWith("confirm_delpost_") || data.startsWith("confirm_dp_") || data === "post_delete_confirm";
+      const isConfirmedDelete = postActionCallback?.kind === "del" && postActionCallback.value === "confirm" || data.startsWith("confirm_delpost_") || data.startsWith("confirm_dp_") || data === "post_delete_confirm";
       const rawDeleteData = data.startsWith("confirm_") ? data.slice("confirm_".length) : (data === "post_delete_confirm" ? "post_delete_action" : data);
       const selected = rawDeleteData.startsWith("dp_") ? resolvePendingPostSelection(chatId, rawDeleteData, "dp_") : null;
-      const action = rawDeleteData === "post_delete_action" ? pendingPostActions.get(chatId) : null;
+      const action = postActionCallback
+        ? resolvePostActionCallbackForChat(chatId, postActionCallback, "del")
+        : (rawDeleteData === "post_delete_action" ? pendingPostActions.get(chatId) : null);
       const [, legacyArchiveId, legacyPostId] = rawDeleteData.startsWith("delpost_") ? rawDeleteData.split("_") : [];
       const archiveId = selected?.archiveId || action?.archiveId || legacyArchiveId;
       const postId = selected?.postId || action?.postId || legacyPostId;
@@ -22981,7 +23190,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const backCallback = buildPostSourcePageCallback(archiveId, source, 0, groupContentType);
       if (!isConfirmedDelete) {
-        const confirmCallback = rawDeleteData === "post_delete_action" ? "post_delete_confirm" : `confirm_${rawDeleteData}`;
+        const confirmCallback = postActionCallback?.kind === "del" ? buildPostActionCallback("del", postActionCallback.key, "confirm") : (rawDeleteData === "post_delete_action" ? "post_delete_confirm" : `confirm_${rawDeleteData}`);
+        const cancelCallback = postActionCallback?.kind === "del" ? buildPostActionCallback("v", postActionCallback.key) : "post_action_view";
         await safeEditOrSend(bot, chatId, msgId, [
           source === "favorites" ? "🗑 确认删除收藏推文" : "🗑 确认删除推文",
           "",
@@ -22990,7 +23200,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: {
             inline_keyboard: [
               [{ text: source === "favorites" ? "✅ 确认删除收藏推文" : "✅ 确认删除这篇推文", callback_data: confirmCallback }],
-              [{ text: "取消，返回查看推文", callback_data: "post_action_view" }],
+              [{ text: "取消，返回查看推文", callback_data: cancelCallback }],
               [{ text: source === "favorites" ? "◀️ 返回收藏推文" : "◀️ 返回推文列表", callback_data: backCallback }],
             ],
           },
@@ -24232,120 +24442,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     // ── 执行发布 ──
     if (data.startsWith("dopub_")) {
-      const parts = data.slice(6).split("_");
-      const id = parts[0];
-      const platform = parts.slice(1).join("_") as TelegramPublishPlatform;
-      console.log(`[telegram][dopub_trace] stage=enter chat=${chatId} archive=${id} platform=${platform}`);
-      const archive = await loadPersonaArchive(id).catch(() => null);
-      console.log(`[telegram][dopub_trace] stage=archive chat=${chatId} archive=${id} found=${archive ? 1 : 0} posts=${archive?.posts?.length || 0} pad=${archive?.boundPadCode || ""}`);
-      if (!archive || archive.posts.length === 0) { sendMainMenu(chatId, msgId); return; }
-      if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
-      const post = archive.posts[0];
-      const padCode = archive.boundPadCode || defaultPadCode;
-      console.log(`[telegram][dopub_trace] stage=post chat=${chatId} archive=${id} post=${post.id} pad=${padCode} mediaType=${post.mediaType || ""} media=${post.imageUrl || ""}`);
-      if (!credentials.ak || !credentials.sk) {
-        bot.editMessageText("❌ VMOS 凭据未配置", { chat_id: chatId, message_id: msgId });
-        return;
-      }
-
-      const publishLockKey = `dopub:${id}:${platform}:${post.id}`;
-      const publishScopeKey = `pad:${padCode}`;
-      if (!acquirePublishCommand(chatId, publishLockKey, "发布", publishScopeKey)) {
-        await sendDuplicatePublishNotice(bot, chatId, publishScopeKey);
-        return;
-      }
-      const padOperationKey = `publish:${padCode}:${publishLockKey}`;
-      if (!(await acquireRuntimePadOperation(chatId, padCode, padOperationKey, "发布"))) {
-        releasePublishCommand(chatId, publishLockKey, publishScopeKey);
-        return;
-      }
-      const statusMessage = await sendTelegramPublishStatusMessage(bot, chatId, platform).catch(() => null);
-      const statusMessageId = statusMessage?.message_id || msgId;
-      const stopTyping = startTelegramTyping(bot, chatId);
-
-      try {
-        const logs: string[] = [];
-        const finalCaption = buildPersonaPublishCaption(post.content, archive.setup);
-        console.log(`[telegram][dopub_trace] stage=publish_start chat=${chatId} archive=${id} post=${post.id} pad=${padCode}`);
-        const result = await publishPost(
-          credentials,
-          {
-            padCode,
-            platform: platform as any,
-            caption: finalCaption,
-            mediaUrl: post.imageUrl,
-            telegramChatId: chatId,
-            telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
-            telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined,
-          },
-          (progress) => {
-            assertPadOperationNotCancelled(padOperationKey);
-            console.log(`[telegram][dopub_progress] chat=${chatId} archive=${id} post=${post.id} pad=${padCode} done=${progress.done ? 1 : 0} step=${progress.step || ""}${progress.error ? ` error=${progress.error}` : ""}`);
-            logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
-            void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs, progress.step);
-            assertPadOperationNotCancelled(padOperationKey);
-          },
-          { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
-        );
-        console.log(`[telegram][dopub_trace] stage=publish_result chat=${chatId} archive=${id} post=${post.id} pad=${padCode} state=${result.state} detail=${result.detail || ""}`);
-        stopTyping();
-        const publishScreenshotUrl = result.screenshotUrl;
-        await markArchiveEpisodesPublished(
-          id,
-          [post.id],
-          { [post.id]: finalCaption },
-          {
-            [post.id]: {
-              platform,
-              padCode,
-              imageUrl: post.imageUrl,
-              screenshotUrl: publishScreenshotUrl,
-              sourceMeta: post.sourceMeta,
-              ...(await buildPublishedMetaFromResultWithInitialMetrics(platform, result)),
-            },
-          },
-        ).catch(() => null);
-        invalidatePersonaListCache();
-        bot.sendMessage(chatId, `${publishFinalTitle(result)}\n\n${logs.slice(-5).join("\n")}`, {
-          reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
-        });
-        if (publishScreenshotUrl) {
-          await sendOriginalScreenshotDocument(
-            bot,
-            chatId,
-            publishScreenshotUrl,
-            `📸 发布验证截图（${platform}）`,
-          ).catch(() => undefined);
-        }
-      } catch (error: any) {
-        stopTyping();
-        if (isTelegramTaskCancelledError(error)) {
-          await bot.sendMessage(chatId, `🛑 已中止发布任务\n\n人設：${archive.name}\n平台：${platform}\n智能體手機：${padCode}`);
-          return;
-        }
-        if (await sendCloudAccountStateNotice(
-          bot,
-          chatId,
-          error,
-          { action: "发布", padName: archive.boundPadName, padCode },
-          [[{ text: "🔄 重试", callback_data: data }, { text: "🏠 主選單", callback_data: "back_main" }]],
-        )) {
-          return;
-        }
-        await sendManualInterventionFailure(bot, chatId, error, {
-          action: "发布",
-          padName: archive.boundPadName,
-          padCode,
-          fallback: "发布失败，请人工检查当前界面后重试。",
-          inlineKeyboard: [[{ text: "🔄 重试", callback_data: data }, { text: "🏠 主選單", callback_data: "back_main" }]],
-        });
-      } finally {
-        releaseRuntimeAndPublishCommand(chatId, padCode, padOperationKey, publishLockKey, publishScopeKey);
-      }
+      await safeEditOrSend(bot, chatId, msgId, "這個舊發布入口沒有綁定具體推文，為避免發布錯誤，請從推文列表重新打開目標推文後發布。", {
+        reply_markup: { inline_keyboard: [[{ text: "📋 人設列表", callback_data: "list_personas" }]] },
+      });
       return;
     }
 
     // ── 快速发布 ──
+
     if (data === "create_persona_entry") {
       pendingActions.set(chatId, { type: "create-persona", archiveId: "", stage: "await_name" });
       await safeEditOrSend(bot, chatId, msgId, [
@@ -24862,9 +24966,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("dopm_")) {
-      const platform = parseShortPostPlatform(data, "dopm_");
-      const action = pendingPostActions.get(chatId);
+    if (postActionCallback?.kind === "dopm" || data.startsWith("dopm_")) {
+      const platform = postActionCallback?.kind === "dopm"
+        ? (postActionCallback.value as TelegramPublishPlatform | undefined)
+        : parseShortPostPlatform(data, "dopm_");
+      const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "dopm");
       const archiveId = action?.archiveId;
       const postId = action?.postId;
       if (!archiveId || !postId || !platform) {
@@ -24898,13 +25004,18 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (data.startsWith("schedpost_") || data.startsWith("sch_") || data.startsWith("schm_")) {
       deletePendingGeneratePost(chatId);
-      const multiPadSchedule = data.startsWith("schm_");
-      const shortPlatform = parseShortPostPlatform(data, multiPadSchedule ? "schm_" : "sch_");
-      const action = shortPlatform ? pendingPostActions.get(chatId) : null;
+      if (!data.startsWith("schedpost_")) {
+        await safeEditOrSend(bot, chatId, msgId, "這個定時發布入口已過期，請從推文列表重新打開目標推文後再操作。", {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回人設列表", callback_data: "list_personas" }]] },
+        });
+        return;
+      }
+      const multiPadSchedule = false;
+      const action: PendingPostAction | null = null;
       const parts = data.startsWith("schedpost_") ? data.slice("schedpost_".length).split("_") : [];
       const archiveId = action?.archiveId || parts[0];
       const postId = action?.postId || parts[1];
-      const platform = shortPlatform || (parts.slice(2).join("_") as TelegramPublishPlatform);
+      const platform = parts.slice(2).join("_") as TelegramPublishPlatform;
       if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
       if (!archiveId || !postId || !platform) {
         await safeEditOrSend(bot, chatId, msgId, "請先从推文列表選擇一篇推文。", {
@@ -25111,9 +25222,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
-    if (data.startsWith("dop_")) {
-      const shortPlatform = parseShortPostPlatform(data, "dop_");
-      const action = shortPlatform ? pendingPostActions.get(chatId) : null;
+    if (postActionCallback?.kind === "dop" || data.startsWith("dop_")) {
+      const shortPlatform = postActionCallback?.kind === "dop"
+        ? (postActionCallback.value as TelegramPublishPlatform | undefined)
+        : parseShortPostPlatform(data, "dop_");
+      const action = shortPlatform ? resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "dop") : null;
       const archiveId = action?.archiveId;
       const postId = action?.postId;
       const platform = shortPlatform;
@@ -25535,11 +25648,26 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       pendingThreadsAutoReplyDaysInputs.delete(chatId);
       if (pendingAutoReplyDays.type === "pad" && pendingAutoReplyDays.padCode) {
-        await runPadThreadsAutoReplyFromTelegram(bot, chatId, pendingAutoReplyDays.padCode, days);
+        await runPadThreadsAutoReplyFromTelegram(
+          bot,
+          chatId,
+          pendingAutoReplyDays.padCode,
+          { acquire: acquireRuntimePadOperation, release: releaseRuntimePadOperation },
+          days,
+        );
         return;
       }
       if (pendingAutoReplyDays.type === "persona" && pendingAutoReplyDays.archiveId) {
-        await runPersonaThreadsAutoReplyFromTelegram(bot, chatId, pendingAutoReplyDays.archiveId, listPadsForThisBot, sendMainMenu, days);
+        await runPersonaThreadsAutoReplyFromTelegram(
+          bot,
+          chatId,
+          pendingAutoReplyDays.archiveId,
+          listPadsForThisBot,
+          sendMainMenu,
+          { acquire: acquireRuntimePadOperation, release: releaseRuntimePadOperation },
+          days,
+          `acctautoreply_${pendingAutoReplyDays.archiveId}`,
+        );
         return;
       }
       await bot.sendMessage(chatId, "❌ 自動回覆狀態已失效，請重新進入 Threads 自動回覆。");

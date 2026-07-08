@@ -19670,6 +19670,9 @@ async function openThreadsProfileForAccountQuery(
         screenshotUrl: launchShotUrl,
       };
     }
+    await ensureThreadsHomeFeed(config, padCode, onProgress).catch((error) => {
+      throw new Error(`Threads ACP 個人頁前置恢復失敗：${error instanceof Error ? error.message : String(error)}`);
+    });
     let profileShotUrl = launchShotUrl;
     for (const point of [{ x: 620, y: 1510 }, { x: 650, y: 1510 }, { x: 620, y: 1510 }]) {
       await tapCloud720Point(config, padCode, point.x, point.y, 2200).catch(() => undefined);
@@ -31332,34 +31335,28 @@ export async function autoReplyThreadsAccount(
   const replyScreenshots: string[] = [];
   const errors: string[] = [];
   const { repliedKeys, repliedCommentIdentityKeys, repliedCommentTextKeys } = loadThreadsAutoReplyRepliedSets(padCode);
-  let preflightProfileShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-  const alreadyOnProfile = preflightProfileShotUrl
-    ? await withTimeout(
-      detectThreadsProfilePageLocally(preflightProfileShotUrl),
-      2_500,
-      "threadsAutoReply local profile precheck timeout",
-    ).catch(() => false)
-    : false;
-  if (!alreadyOnProfile) {
-    await relaunchThreads(config, padCode, 3_500).catch((error) => {
-      errors.push(`Threads 启动恢复失败：${error instanceof Error ? error.message : String(error)}`);
-    });
-    const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-    await tapViaAdbAbsoluteQuick(
-      config,
-      padCode,
-      Math.round(screen.width * 0.86),
-      Math.round(screen.height * 0.96),
-      2_000,
-    ).catch(() => undefined);
-    const profileTabShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-    preflightProfileShotUrl = profileTabShotUrl;
-  }
+  await relaunchThreads(config, padCode, 3_500).catch((error) => {
+    errors.push(`Threads 启动恢复失败：${error instanceof Error ? error.message : String(error)}`);
+  });
+  await ensureThreadsHomeFeed(config, padCode, (progress) => {
+    report({ step: progress.step || "Threads 自动回复启动前恢复首页" });
+  }).catch((error) => {
+    errors.push(`Threads 首页自我修复失败：${error instanceof Error ? error.message : String(error)}`);
+  });
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  await tapViaAdbAbsoluteQuick(
+    config,
+    padCode,
+    Math.round(screen.width * 0.86),
+    Math.round(screen.height * 0.96),
+    2_000,
+  ).catch(() => undefined);
+  const preflightProfileShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   saveThreadsAutoReplySampleStep({
     padCode,
     step: "auto-reply-preflight-profile-tab",
     screenshotUrl: preflightProfileShotUrl || undefined,
-    meta: { reason: alreadyOnProfile ? "already_on_profile_before_scan" : "recover_from_home_feed_or_launcher_before_profile_scan" },
+    meta: { reason: "cold_relaunch_before_profile_scan" },
   });
   const processedPostHashes = new Set<string>();
   const accountInfo = process.env.THREADS_AUTO_REPLY_ENABLE_ACCOUNT_MANAGER_QUERY
