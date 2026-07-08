@@ -14669,18 +14669,27 @@ async function updateTelegramPublishStatus(
   telegramStatusEditState.set(key, state);
   try {
     const startedAt = Date.now();
-    await bot.editMessageText(text, {
+    await telegramBestEffort(
+      "status_edit",
+      bot.editMessageText(text, {
       chat_id: chatId,
       message_id: messageId,
       reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
-    });
+      }),
+      TELEGRAM_API_TIMEOUT_MS,
+      { rethrow: true },
+    );
     const elapsed = Date.now() - startedAt;
     if (elapsed >= 1200) console.log(`[telegram][status_edit_slow] chat=${chatId} msg=${messageId} platform=${platform} ms=${elapsed}`);
   } catch (error: any) {
     console.warn(`[telegram][status_edit_error] chat=${chatId} msg=${messageId} platform=${platform} error=${error?.message || error}`);
-    await bot.sendMessage(chatId, text, {
+    await telegramBestEffort(
+      "status_send_fallback",
+      bot.sendMessage(chatId, text, {
       reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
-    }).catch((sendError: any) => {
+      }),
+      TELEGRAM_API_TIMEOUT_MS,
+    ).catch((sendError: any) => {
       console.warn(`[telegram][status_send_error] chat=${chatId} msg=${messageId} platform=${platform} error=${sendError?.message || sendError}`);
       return undefined;
     });

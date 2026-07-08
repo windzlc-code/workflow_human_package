@@ -28192,7 +28192,7 @@ async function openThreadsLatestOwnPostFromProfile(
     let profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
     let profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
     let hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
-    let hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText);
+    let hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?\s+ago|minutes?\s+ago|快點我看更多吧|快点我看更多吧|apple video|codex|(?:LIKE|Like)\s+\d+|\d+\s*(?:則|条|個|个)?\s*(?:回覆|回复|讚|赞|like|likes|轉發|转发|repost|reposts))/i.test(profileUiText);
     if (hasProfileSetupCard && !hasVisiblePostOrActionRow) {
       saveThreadsAutoReplySampleStep({
         padCode,
@@ -28206,7 +28206,7 @@ async function openThreadsLatestOwnPostFromProfile(
       profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
       profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
       hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
-      hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText);
+      hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?\s+ago|minutes?\s+ago|快點我看更多吧|快点我看更多吧|apple video|codex|(?:LIKE|Like)\s+\d+|\d+\s*(?:則|条|個|个)?\s*(?:回覆|回复|讚|赞|like|likes|轉發|转发|repost|reposts))/i.test(profileUiText);
       if (hasProfileSetupCard && !hasVisiblePostOrActionRow) {
         return {
           ok: false,
@@ -28254,7 +28254,7 @@ async function openThreadsLatestOwnPostFromProfile(
         const hasProfileSetupCardByPixels = await detectThreadsProfileSetupCardLocally(shotUrl).catch(() => false);
         const setupCardCommentTarget = await locateThreadsProfileTopCountedCommentTargetLocally(shotUrl).catch(() => null);
         const setupCardImage = await getImageDimensions(shotUrl).catch(() => null);
-        hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|快點我看更多吧|快点我看更多吧|apple video|codex|LIKE|Like|回覆|回复|轉發|转发)/i.test(profileUiText)
+        hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?\s+ago|minutes?\s+ago|快點我看更多吧|快点我看更多吧|apple video|codex|(?:LIKE|Like)\s+\d+|\d+\s*(?:則|条|個|个)?\s*(?:回覆|回复|讚|赞|like|likes|轉發|转发|repost|reposts))/i.test(profileUiText)
           || Boolean(setupCardCommentTarget && !isThreadsProfileSetupCardBlockingActionTarget(
             setupCardCommentTarget,
             { width: setupCardImage?.width || BASE_SCREEN.width, height: setupCardImage?.height || BASE_SCREEN.height },
@@ -28455,6 +28455,24 @@ async function openThreadsLatestOwnPostFromProfile(
       screenshotUrl: shotUrl,
       meta: { target, openAttempt },
     });
+    if (await detectThreadsInAppBrowserLocally(shotUrl).catch(() => false)) {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-comment-badge-opened-inapp-browser-immediate",
+        screenshotUrl: shotUrl,
+        meta: {
+          openAttempt,
+          target,
+          reason: "LOCAL_THREADS_INAPP_BROWSER",
+        },
+      });
+      await restoreThreadsAutoReplyProfileForNextScan(config, padCode).catch(() => undefined);
+      return {
+        ok: false,
+        error: "定位结果打开了 Threads 内置网页，已恢复个人页并停止当前扫描，避免误点外链",
+        screenshotUrl: shotUrl,
+      };
+    }
     if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
       return { ok: true, screenshotUrl: shotUrl };
     }
@@ -31402,23 +31420,75 @@ export async function autoReplyThreadsAccount(
   await relaunchThreads(config, padCode, 3_500).catch((error) => {
     errors.push(`Threads 启动恢复失败：${error instanceof Error ? error.message : String(error)}`);
   });
-  report({ step: "Threads 自动回复预检：正在恢复首页" });
-  await ensureThreadsHomeFeed(config, padCode, (progress) => {
-    report({ step: progress.step || "Threads 自动回复启动前恢复首页" });
-  }).catch((error) => {
-    errors.push(`Threads 首页自我修复失败：${error instanceof Error ? error.message : String(error)}`);
-  });
+  report({ step: "Threads 自动回复预检：冷启动完成，准备打开个人页" });
+  const coldStartShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  if (coldStartShotUrl && await detectThreadsInAppBrowserLocally(coldStartShotUrl).catch(() => false)) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: "auto-reply-cold-start-inapp-browser",
+      screenshotUrl: coldStartShotUrl,
+      meta: { reason: "LOCAL_THREADS_INAPP_BROWSER" },
+    });
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+    await delay(1200);
+  }
   report({ step: "Threads 自动回复预检：正在打开个人页" });
   const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-  await tapViaAdbAbsoluteQuick(
-    config,
-    padCode,
-    Math.round(screen.width * 0.86),
-    Math.round(screen.height * 0.96),
-    2_000,
-  ).catch(() => undefined);
+  const profileTapError = await withTimeout(
+    tapViaAdbAbsoluteQuick(
+      config,
+      padCode,
+      Math.round(screen.width * 0.86),
+      Math.round(screen.height * 0.96),
+      2_000,
+    ),
+    8_000,
+    "threadsAutoReply profile tab tap timeout",
+  ).then(() => "").catch((error) => (error instanceof Error ? error.message : String(error)));
+  if (profileTapError) {
+    const result: ThreadsAutoReplyProgress = {
+      step: "Threads 自动回复失败",
+      scannedPosts,
+      scannedComments,
+      replied,
+      skipped,
+      targetReplies,
+      completionStatus: "failed",
+      completionReason: profileTapError,
+      replyScreenshots,
+      done: true,
+      error: profileTapError,
+    };
+    onProgress?.(result);
+    return result;
+  }
   report({ step: "Threads 自动回复预检：正在截取个人页" });
-  const preflightProfileShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  const rawPreflightProfileShot = await withTimeout(
+    screenshot(config, padCode),
+    12_000,
+    "threadsAutoReply profile screenshot timeout",
+  ).catch(() => null);
+  const preflightProfileShotUrl = rawPreflightProfileShot
+    ? await freezeScreenshotUrl(rawPreflightProfileShot).catch(() => "")
+    : "";
+  if (!preflightProfileShotUrl) {
+    const completionReason = "Threads 自动回复截取个人页超时，已停止以释放任务锁";
+    const result: ThreadsAutoReplyProgress = {
+      step: "Threads 自动回复失败",
+      scannedPosts,
+      scannedComments,
+      replied,
+      skipped,
+      targetReplies,
+      completionStatus: "failed",
+      completionReason,
+      replyScreenshots,
+      done: true,
+      error: completionReason,
+    };
+    onProgress?.(result);
+    return result;
+  }
   saveThreadsAutoReplySampleStep({
     padCode,
     step: "auto-reply-preflight-profile-tab",
@@ -31575,8 +31645,23 @@ export async function autoReplyThreadsAccount(
   const preOpenUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
   const preOpenUiText = normalizeSingleLine(decodeXmlAttr(preOpenUiXml));
   const preOpenHasSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(preOpenUiText);
-  const preOpenHasPostAction = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?|minutes?|LIKE|Like|回覆|回复|轉發|转发)/i.test(preOpenUiText);
-  if (preOpenHasSetupCard && !preOpenHasPostAction) {
+  const preOpenHasSetupCardByPixels = preflightProfileShotUrl
+    ? await detectThreadsProfileSetupCardLocally(preflightProfileShotUrl).catch(() => false)
+    : false;
+  const preOpenHasPostTime = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?\s+ago|minutes?\s+ago)/i.test(preOpenUiText);
+  const preOpenHasPostMetric = /(?:\d+\s*(?:則|条|個|个)?\s*(?:回覆|回复|則回覆|条回复|讚|赞|like|likes|轉發|转发|repost|reposts)|(?:LIKE|Like)\s+\d+)/i.test(preOpenUiText);
+  const preOpenHasPostAction = preOpenHasPostTime || preOpenHasPostMetric;
+  if ((preOpenHasSetupCard || preOpenHasSetupCardByPixels) && !preOpenHasPostAction) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: "auto-reply-profile-setup-card-fast-return",
+      screenshotUrl: preflightProfileShotUrl || undefined,
+      meta: {
+        setupCardByUi: preOpenHasSetupCard,
+        setupCardByPixels: preOpenHasSetupCardByPixels,
+        uiPreview: preOpenUiText.slice(0, 260),
+      },
+    });
     const result = {
       step: "Threads 自动回复完成：个人页暂无可扫描推文",
       scannedPosts,
@@ -31621,7 +31706,7 @@ export async function autoReplyThreadsAccount(
         maxAgeDays,
         true,
       ),
-      150_000,
+      90_000,
       "threadsAutoReply open latest post timeout",
     ).catch((error) => ({
       ok: false as const,
@@ -31876,18 +31961,22 @@ export async function autoReplyThreadsAccount(
             },
           });
           report({ step: `第 ${postIndex + 1} 条回复框已打开，正在输入并发送模型回复` });
-          const result = await warmupExecuteCommentAtPoint(
-            config,
-            padCode,
-            commentTarget,
-            decision.reply,
-            {
-              sourceScreenshotUrl: openedReply.screenshotUrl || decision.candidate.sourceScreenshotUrl || actions?.screenshotUrl || context.sourceScreenshotUrl,
-              alreadyInReplyComposer: true,
-              preferBottomReplyInput: true,
-              skipAbsoluteOpenRetry: true,
-              debugReason: openedReply.debugReason || decision.candidate.debugReason || actions?.debugReason || "thread_detail_visual:auto_reply_comment_target",
-            },
+          const result = await withTimeout(
+            warmupExecuteCommentAtPoint(
+              config,
+              padCode,
+              commentTarget,
+              decision.reply,
+              {
+                sourceScreenshotUrl: openedReply.screenshotUrl || decision.candidate.sourceScreenshotUrl || actions?.screenshotUrl || context.sourceScreenshotUrl,
+                alreadyInReplyComposer: true,
+                preferBottomReplyInput: true,
+                skipAbsoluteOpenRetry: true,
+                debugReason: openedReply.debugReason || decision.candidate.debugReason || actions?.debugReason || "thread_detail_visual:auto_reply_comment_target",
+              },
+            ),
+            145_000,
+            "threadsAutoReply send comment timeout",
           );
           replied += 1;
           rememberThreadsAutoReplyComment({
