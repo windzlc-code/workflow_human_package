@@ -222,6 +222,25 @@ describe("sentiment hot importer", () => {
     expect(candidateMatchesCurrentKeywords(financeCandidate, keywords)).toBe(true);
   });
 
+  it("matches sparse persona domains through related concrete topic variants", () => {
+    const beautyCandidate = {
+      content: "這次整理日本藥妝店必買保養品，敏感肌護膚和日常保養都有踩雷心得。",
+      author: "beauty",
+    } as any;
+    const realEstateCandidate = {
+      content: "日本房地產投資要看地段、房貸條件和資產配置，不要只看豪宅照片。",
+      author: "estate",
+    } as any;
+    const animeCandidate = {
+      content: "本季新番和動漫周邊真的太多，二次元宅文化的坑越來越深。",
+      author: "anime",
+    } as any;
+
+    expect(candidateMatchesCurrentKeywords(beautyCandidate, ["美妝保養"])).toBe(true);
+    expect(candidateMatchesCurrentKeywords(realEstateCandidate, ["日本高端不動產"])).toBe(true);
+    expect(candidateMatchesCurrentKeywords(animeCandidate, ["宅文化"])).toBe(true);
+  });
+
   it("keeps strongly matched candidates for model-level persona judgment", () => {
     const keywords = ["醫療", "醫生", "黑色幽默"];
     const candidate = {

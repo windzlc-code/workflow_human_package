@@ -29,9 +29,12 @@ const MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT = 60;
 const SENTIMENT_HOT_CANDIDATE_POOL_TARGET = 400;
 const THREADS_SEARCH_CACHE_CANDIDATE_LIMIT = 2000;
 const THREADS_BROWSER_QUERY_LIMIT = 16;
-const THREADS_READER_INITIAL_QUERY_LIMIT = 10;
-const THREADS_READER_TOTAL_QUERY_LIMIT = 48;
-const THREADS_READER_QUERY_BATCH_SIZE = 8;
+const SENTIMENT_MODEL_KEYWORD_TARGET = 20;
+const SENTIMENT_HOT_KEYWORD_MODEL = "gemini-3.1-pro-preview";
+const SENTIMENT_HOT_KEYWORD_FALLBACK_MODEL = "xai/grok-4.3";
+const THREADS_READER_INITIAL_QUERY_LIMIT = 32;
+const THREADS_READER_TOTAL_QUERY_LIMIT = 96;
+const THREADS_READER_QUERY_BATCH_SIZE = 16;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 12_000;
@@ -279,6 +282,22 @@ function expandSentimentSearchKeywordVariants(value: string): string[] {
       "信用評分",
       "信用评分",
     ].forEach(add);
+  }
+
+  if (/(?:美妝|美妆|護膚|护肤|保養|保养|彩妝|彩妆|美容|化妝|化妆|穿搭)/u.test(text)) {
+    ["美妝", "護膚", "保養", "彩妝", "保養品", "美容", "化妝", "穿搭", "日常保養", "明星穿搭"].forEach(add);
+  }
+
+  if (/(?:不動產|不动产|房地產|房地产|豪宅|置產|置产|房貸|房贷|資產配置|资产配置|融資|融资)/u.test(text)) {
+    ["不動產", "房地產", "日本房地產", "海外置產", "豪宅投資", "資產配置", "房貸", "貸款", "跨境理財"].forEach(add);
+  }
+
+  if (/(?:二次元|動漫|动漫|宅文化|新番|紙片人|纸片人|公仔|Cosplay|遊戲|游戏)/iu.test(text)) {
+    ["二次元", "動漫", "動漫推薦", "新番", "動漫周邊", "宅文化", "Cosplay", "遊戲"].forEach(add);
+  }
+
+  if (/(?:校園|校园|教師|教师|師生|师生|教育|學生|学生|勵志|励志)/u.test(text)) {
+    ["校園", "教師", "教育", "師生", "學生成長", "勵志故事"].forEach(add);
   }
 
   return out.slice(0, 24);
@@ -622,7 +641,7 @@ const WEAK_RELEVANCE_STOPWORDS = new Set([
   "热门",
 ]);
 
-["規劃", "规划", "人生", "方向", "海外", "華人", "华人", "個人", "个人"].forEach((keyword) => WEAK_RELEVANCE_STOPWORDS.add(keyword));
+["規劃", "规划", "人生", "方向", "海外", "華人", "华人", "個人", "个人", "公分", "漫痛", "對著各種", "对着各种", "間裡", "间里", "發花痴", "发花痴", "能把娛樂話題", "能把娱乐话题", "生活八卦型"].forEach((keyword) => WEAK_RELEVANCE_STOPWORDS.add(keyword));
 
 const DOMAIN_RELEVANCE_KEYWORDS = new Set([
   "遊戲",
@@ -676,6 +695,47 @@ const PRIORITY_DOMAIN_KEYWORDS = new Set([
   "職場",
   "职场",
 ]);
+const SENTIMENT_BROAD_PRIORITY_KEYWORDS = [
+  "不動產",
+  "房地產",
+  "海外置產",
+  "資產配置",
+  "房貸",
+  "貸款",
+  "信貸",
+  "理財",
+  "跨境理財",
+  "投資理財",
+  "日本房地產",
+  "日本置產",
+  "海外金融",
+  "銀行貸款",
+  "貸款利率",
+  "信用卡",
+  "負債",
+  "債務整合",
+  "學貸",
+  "財富自由",
+  "理財規劃",
+  "銀行審核",
+  "信用評分",
+  "股市投資",
+  "股票投資",
+  "股市分析",
+  "投資心得",
+  "台股分析",
+  "美股投資",
+  "股票k線",
+  "K線圖",
+  "股市教學",
+  "股票教學",
+  "股市交易",
+  "投資策略",
+  "股票",
+  "台股",
+  "美股",
+];
+SENTIMENT_BROAD_PRIORITY_KEYWORDS.forEach((keyword) => PRIORITY_DOMAIN_KEYWORDS.add(keyword));
 
 function isGenericSentimentKeyword(value: string): boolean {
   const key = cleanText(value).toLowerCase();
@@ -856,9 +916,24 @@ function buildSearchKeywordCandidates(args: {
     const keyword = normalizeSentimentSearchKeyword(item, { archiveName: args.archiveName, sourceText: joined });
     if (keyword) out.push(keyword);
   }
-  return rankSearchKeywords([...new Set(out)]
-    .filter((item) => item.length >= 2 && item.length <= 12 && !isGenericSentimentKeyword(item))
-  ).slice(0, 10);
+  for (const item of [...out]) {
+    out.push(...expandSentimentSearchKeywordVariants(item));
+  }
+  return rankSearchKeywords(filterConflictingSearchKeywords([...new Set(out)])
+    .filter((item) => isConcreteSearchKeyword(item))
+  ).slice(0, SENTIMENT_MODEL_KEYWORD_TARGET);
+}
+
+function filterConflictingSearchKeywords(keywords: string[]): string[] {
+  const hasStockDomain = keywords.some((keyword) => /(?:股市|股票|台股|美股|K線|k線|K线|k线|投資策略|投资策略|投資心得|投资心得|股市分析|股票投資|股票投资|股市投資|股市投资)/u.test(cleanText(keyword)));
+  if (!hasStockDomain) return keywords;
+  const secondaryPattern = /(?:二次元|動漫|动漫|遊戲|游戏|新番|宅文化|動漫周邊|动漫周边|Cosplay|公仔|手辦|手办|紙片人|纸片人|美少女|動漫老婆|动漫老婆)/iu;
+  const primary: string[] = [];
+  const secondary: string[] = [];
+  for (const keyword of keywords) {
+    (secondaryPattern.test(cleanText(keyword)) ? secondary : primary).push(keyword);
+  }
+  return [...primary, ...secondary];
 }
 
 function rankSearchKeywords(keywords: string[]): string[] {
@@ -873,6 +948,17 @@ function rankSearchKeywords(keywords: string[]): string[] {
     })
     .sort((a, b) => b.score - a.score || a.index - b.index)
     .map((item) => item.keyword);
+}
+
+function isConcreteSearchKeyword(value: unknown): boolean {
+  const keyword = cleanText(value);
+  if (!keyword || !hasHan(keyword)) return false;
+  if (keyword.length < 2 || keyword.length > 12) return false;
+  if (isWeakRelevanceKeyword(keyword) || isGenericSentimentKeyword(keyword)) return false;
+  if (/[()（）「」『』【】[\]{}]|(?:^|[^\d])\d{2,}(?:公分|cm|CM)?/u.test(keyword)) return false;
+  if (/(?:自認|自认|說話|说话|語氣|语气|風格|风格|視覺|视觉|傾向|倾向|核心特色|領域專注|领域专注|內容專注|内容专注|穿著|穿着|房間|房间|身高|公分|老公|老婆|女孩|男孩|男人|女人|大叔|正妹|高雅|說服力|说服力|日常情緒|日常情绪|眼鏡|眼镜|金邊|金边|痛T|動漫老婆|动漫老婆|示愛|示爱|美少女|女角色|男角色)/u.test(keyword)) return false;
+  if (/(?:的|在|裡|里|於|于|與|与|把|將|将|這|这|那|很|是|和|及|以及|可以|能夠|能够|專注於|专注于|充滿|充满)/u.test(keyword)) return false;
+  return true;
 }
 
 function extractDirectHanKeywords(args: { archiveName: string; text: string }): string[] {
@@ -907,7 +993,7 @@ export function buildSentimentHotKeywords(args: {
     ...buildSearchKeywordCandidates({ archiveName: personaName, pieces }),
     ...extractDirectHanKeywords({ archiveName: personaName, text: joined }),
   ];
-  return rankSearchKeywords([...new Set(extracted.filter(Boolean))]).slice(0, 10);
+  return rankSearchKeywords([...new Set(extracted.filter(Boolean))]).slice(0, SENTIMENT_MODEL_KEYWORD_TARGET);
 }
 
 function parseModelKeywordList(text: string): string[] {
@@ -926,10 +1012,10 @@ async function reviewSentimentHotKeywordsWithModel(args: {
   personaText: string;
   rawKeywords: string[];
 }): Promise<string[]> {
-  const rawKeywords = args.rawKeywords.map(cleanText).filter(Boolean).slice(0, 16);
+  const rawKeywords = args.rawKeywords.map(cleanText).filter(Boolean).slice(0, SENTIMENT_MODEL_KEYWORD_TARGET);
   if (rawKeywords.length === 0) return [];
   const result = await callTextUnderstandingModelWithFallback(
-    "xai/grok-4.3",
+    SENTIMENT_HOT_KEYWORD_MODEL,
     [{
       role: "user",
       parts: [{
@@ -939,9 +1025,9 @@ async function reviewSentimentHotKeywordsWithModel(args: {
           "",
           "合格关键词只能是：领域词、行业词、职业/身份受众词、具体场景词、具体痛点词、具体产品/制度/事件词。",
           "必须删除：抽象人格词、性格词、语气词、风格词、自我描述、履历包装、身份包装、半截句子、代词句、泛词。",
-          "典型必须删除的形式：幽默、接地气、带点宅气、说话直白、发文语气随性、热爱某某文化、某某达人、专家、他自认为、年轻的前、内容主题、日常、热门、分享。",
-          "如果候选词是包装句，要改成其中可搜索的领域名词；例如“热爱二次元文化”应变成“二次元文化”，“二次元理财达人”应拆成“二次元文化”和“投资理财”，不要保留“达人”。",
-          "如果无法改成具体可搜索名词短语，就删除。宁可少于 10 个，不要凑数。",
+          "典型必须删除的形式：幽默、接地气、带点宅气、说话直白、发文语气随性、热爱某某文化、他自认为、年轻的前、内容主题、日常、热门、分享。",
+          "如果候选词是包装句，要改成其中可搜索的领域名词；例如“热爱二次元文化”应变成“二次元文化”，“二次元理财达人”应拆成“二次元文化”和“投资理财”。",
+          `如果无法改成具体可搜索名词短语，就删除。目标保留接近 ${SENTIMENT_MODEL_KEYWORD_TARGET} 个，但不要用抽象风格词凑数。`,
           "输出前自检：每个词单独放进搜索框时，是否能搜索到真实话题；如果答案不确定或只是形容人设，就删除。",
           "",
           "人设资料：",
@@ -954,7 +1040,7 @@ async function reviewSentimentHotKeywordsWithModel(args: {
         ].filter(Boolean).join("\n"),
       }],
     }],
-    { temperature: 0, maxOutputTokens: 256 },
+    { temperature: 0, maxOutputTokens: 384 },
     AbortSignal.timeout(2_000),
     {
       isUsableResponse: (data) => Boolean(extractText(data).trim()),
@@ -968,9 +1054,9 @@ async function expandSentimentHotKeywordsWithModel(args: {
   personaText: string;
   existingKeywords: string[];
 }): Promise<string[]> {
-  const existingKeywords = args.existingKeywords.map(cleanText).filter(Boolean).slice(0, 10);
+  const existingKeywords = args.existingKeywords.map(cleanText).filter(Boolean).slice(0, SENTIMENT_MODEL_KEYWORD_TARGET);
   const result = await callTextUnderstandingModelWithFallback(
-    "xai/grok-4.3",
+    SENTIMENT_HOT_KEYWORD_MODEL,
     [{
       role: "user",
       parts: [{
@@ -978,6 +1064,7 @@ async function expandSentimentHotKeywordsWithModel(args: {
           "請根據人設補充 Threads / Instagram 中文熱點搜索關鍵詞。",
           "只輸出 JSON 陣列，不要解釋。",
           "要求：每個詞必須是可直接搜索的具體名詞短語，2-12 個中文字符。",
+          `目標是補到 ${SENTIMENT_MODEL_KEYWORD_TARGET} 個可用搜索詞；如果人設領域較窄，就沿著同一領域擴展場景、痛點、產品、制度、事件、受眾詞，不要降級成抽象風格詞。`,
           "可以保留專家、达人、達人這類明確身份/受眾詞。",
           "必須排除抽象風格詞、語氣詞、性格詞、自我介紹片段，例如：幽默、接地氣、帶點宅氣、語氣、風格、口吻、身份、領域、日常、分享。",
           "不要重複已有關鍵詞；優先補充同一領域的產品、場景、痛點、制度、事件詞。",
@@ -990,8 +1077,8 @@ async function expandSentimentHotKeywordsWithModel(args: {
         ].join("\n"),
       }],
     }],
-    { temperature: 0.2, maxOutputTokens: 256 },
-    AbortSignal.timeout(6_000),
+    { temperature: 0.2, maxOutputTokens: 384 },
+    AbortSignal.timeout(5_000),
     {
       isUsableResponse: (data) => Boolean(extractText(data).trim()),
       isRetryableError: () => false,
@@ -1013,83 +1100,54 @@ async function buildSentimentHotKeywordsWithModel(args: {
     archive.content ? `人設簡介：${archive.content}` : "",
     Array.isArray((setup as any).interests) && (setup as any).interests.length ? `興趣標籤參考（只能作為參考，不能直接照抄）：${(setup as any).interests.join("、")}` : "",
     Array.isArray((setup as any).genres) && (setup as any).genres.length ? `類型：${(setup as any).genres.join("、")}` : "",
-    (setup as any).personality ? `性格邊界（只用於理解語氣與排除衝突，絕不可直接輸出為關鍵詞）：${(setup as any).personality}` : "",
     (setup as any).personaType ? `身份：${(setup as any).personaType}` : "",
-    setup.tweetStyleProfile ? `推文風格：${setup.tweetStyleProfile}` : "",
-    setup.tweetStyleSample ? `推文樣例：${setup.tweetStyleSample}` : "",
-    args.memorySummaries?.length ? `近期記憶：${args.memorySummaries.join("；")}` : "",
     args.prompt ? `本次補充要求：${args.prompt}` : "",
   ].filter(Boolean).join("\n");
   if (!personaText.trim()) return [];
 
   try {
-    const result = await callTextUnderstandingModelWithFallback(
-      "xai/grok-4.3",
-      [{
-        role: "user",
-        parts: [{
-          text: [
-            "你是社群热点搜索关键词规划器。请根据人设核心内容生成 Threads / Instagram 中文热点搜索关键词。",
-            "要求：",
-            "1. 只输出 JSON 数组，数组内是字符串，例如：[\"海外金融\",\"工薪信贷\",\"信用卡\"]。",
-            "2. 生成前先做判断：人设名称、人设简介、身份/类型、推文风格、近期记忆、兴趣标签参考用于确定领域；性格只用于判断语气边界和排除冲突，绝不能作为关键词输出。",
-            "3. 关键词必须是用户会真实输入搜索框的简单名词短语，只允许从以下通用模板中生成：领域词、行业词、职业/身份受众词、具体场景词、具体痛点词、具体产品/制度/事件词。",
-            "4. 输出的是搜索用关键词，不是人设标签、不是人物介绍、不是文案片段。优先选择能在 Threads / Instagram 搜到真实热点的领域词、场景词、受众痛点词。",
-            "5. 严禁输出抽象人格词、性格词、语气词、风格词、自我描述、履历碎片、身份包装、半截句子、代词句或泛词，例如：幽默、接地气、带点宅气、说话直白、发文语气随性、热爱某某文化、某某达人、专家、他自认为、年轻的前、内容主题、视觉倾向、生活、日常、热门、分享、科技。",
-            "6. 每个关键词都必须同时满足：贴合人设核心领域；能支撑该人设持续创作；不偏离人设身份和受众；单独拿出来也能直接搜索。",
-            "7. 如果某个词出现在否定、排除、边界描述里，例如“不做美食”，不要把它当关键词。",
-            "8. 不要为了凑数扩展到无关领域；宁可少于 10 个，也不要宽泛。",
-            "9. 输出前自检并删除不合格项：不是名词短语的删除；带“的/了/他/她/我/你/自认/说话/风格/性格”的删除；无法单独搜索的删除。",
-            "10. 单个关键词 2-12 个中文字，最多 10 个，按优先级排序。",
-            "\u0031\u0031\u002e \u5982\u679c\u4eba\u8a2d\u8cc7\u6599\u662f\u7c21\u9ad4\u4e2d\u6587\uff0c\u4f60\u5fc5\u9808\u81ea\u884c\u7522\u751f Threads / Instagram \u4e0a\u66f4\u5bb9\u6613\u641c\u5230\u7684\u7e41\u9ad4\u4e2d\u6587\u95dc\u9375\u8a5e\uff1b\u4f8b\u5982\u628a\u201c\u8d37\u6b3e\u201d\u6982\u5ff5\u8f38\u51fa\u70ba\u201c\u8cb8\u6b3e\u201d\uff0c\u628a\u201c\u7406\u8d22\u89c4\u5212\u201d\u6982\u5ff5\u8f38\u51fa\u70ba\u201c\u7406\u8ca1\u898f\u5283\u201d\u3002\u9019\u662f\u6a21\u578b\u8f38\u51fa\u898f\u7bc4\uff0c\u4e0d\u8981\u7b49\u7a0b\u5f0f\u515c\u5e95\u8f49\u63db\u3002",
-            "",
-            "人设资料：",
-            personaText,
-          ].join("\n"),
-        }],
+    const keywordContents = [{
+      role: "user",
+      parts: [{
+        text: [
+          `Return ONLY a JSON string array with EXACTLY ${SENTIMENT_MODEL_KEYWORD_TARGET} Traditional Chinese search keywords for Threads/Instagram.`,
+          "Each keyword must be a searchable noun phrase, 2-12 Chinese characters.",
+          "The array must include 5 exact niche terms, 5 broader same-domain high-volume terms, 5 pain/scene terms, and 5 product/policy/event/audience terms.",
+          "Broader terms are required because niche terms often have too few hot posts. They must still be topics this persona can naturally post about.",
+          "Do not output personality, tone, style, biography fragments, half sentences, quoted strings, or words containing 的/在/裡/里/風格/語氣/自認.",
+          "Use Taiwan Traditional Chinese terms where possible. No markdown. No explanation.",
+          "Persona:",
+          personaText,
+        ].join("\n"),
       }],
-      { temperature: 0.1, maxOutputTokens: 256 },
-      AbortSignal.timeout(10_000),
-      {
-        isUsableResponse: (data) => Boolean(extractText(data).trim()),
-        isRetryableError: () => false,
-      },
-    );
+    }];
+    const modelOptions = {
+      isUsableResponse: (data: unknown) => Boolean(extractText(data).trim()),
+      isRetryableError: (error: unknown) => /model_not_found|model not found|not_found|404|未返回|空內容|空内容|empty/i.test(error instanceof Error ? error.message : String(error)),
+    };
+    let result: Awaited<ReturnType<typeof callTextUnderstandingModelWithFallback>>;
+    try {
+      result = await callTextUnderstandingModelWithFallback(
+        SENTIMENT_HOT_KEYWORD_MODEL,
+        keywordContents,
+        { temperature: 0.1, maxOutputTokens: 512 },
+        AbortSignal.timeout(5_000),
+        modelOptions,
+      );
+    } catch (primaryError) {
+      args.warnings.push(`Gemini 熱點關鍵詞模型不可用，已改用人設核心領域詞補齊：${primaryError instanceof Error ? primaryError.message : String(primaryError)}`);
+      throw primaryError;
+    }
     const archiveName = cleanText(archive.name);
     const sourceText = personaText;
-    const rawKeywords = parseModelKeywordList(extractText(result.data));
-    const reviewedKeywords = await reviewSentimentHotKeywordsWithModel({
-      personaText,
-      rawKeywords,
-    }).catch((error) => {
-      args.warnings.push("\u6a21\u578b\u5ba1\u67e5\u70ed\u70b9\u5173\u952e\u8bcd\u5931\u8d25\uff0c\u5df2\u4f7f\u7528\u521d\u6b21\u6a21\u578b\u7ed3\u679c\u7ecf\u7a0b\u5f0f\u904e\u6ffe\u5f8c\u7ee7\u7eed\uff1a" + (error instanceof Error ? error.message : String(error)));
-      return rawKeywords;
-    });
-    const keywords = reviewedKeywords
+    const keywords = parseModelKeywordList(extractText(result.data))
       .map((item) => normalizeSentimentSearchKeyword(item, { archiveName, sourceText }))
-      .filter(Boolean);
-    let unique = rankSearchKeywords([...new Set(keywords)]).slice(0, 10);
-    if (unique.length > 0 && unique.length < 8) {
-      const expandedKeywords = await expandSentimentHotKeywordsWithModel({
-        personaText,
-        existingKeywords: unique,
-      }).catch((error) => {
-        args.warnings.push("模型補充熱點關鍵詞失敗，已使用現有關鍵詞繼續：" + (error instanceof Error ? error.message : String(error)));
-        return [];
-      });
-      if (expandedKeywords.length > 0) {
-        unique = rankSearchKeywords([...new Set([
-          ...unique,
-          ...expandedKeywords
-            .map((item) => normalizeSentimentSearchKeyword(item, { archiveName, sourceText }))
-            .filter((item) => item && !isWeakRelevanceKeyword(item)),
-        ])]).slice(0, 10);
-      }
-    }
+      .filter((item) => isConcreteSearchKeyword(item));
+    const unique = rankSearchKeywords([...new Set(keywords)]).slice(0, SENTIMENT_MODEL_KEYWORD_TARGET);
     if (unique.length > 0) return unique;
-    args.warnings.push("模型未返回可用热点搜索关键词，已停止本次抓取；不会使用规则关键词兜底。");
+    args.warnings.push("模型未返回可用热点搜索关键词，已改用人设核心领域词继续抓取。");
   } catch (error) {
-    args.warnings.push("模型生成热点搜索关键词失败，已停止本次抓取；不会使用规则关键词兜底：" + (error instanceof Error ? error.message : String(error)));
+    args.warnings.push("模型生成热点搜索关键词失败，已改用人设核心领域词继续抓取：" + (error instanceof Error ? error.message : String(error)));
   }
   return [];
 }
@@ -1423,28 +1481,34 @@ export async function fetchSentimentHotCandidates(args: {
     memorySummaries: args.memorySummaries,
   });
   if (!keywordResult) {
-    warnings.push("模型生成热点关键词超时，已停止本次抓取；不会使用规则关键词兜底。");
+    warnings.push("模型生成热点关键词超时，已改用人设核心领域词继续抓取。");
   }
   if (keywords.length === 0) {
-    const cachedKeywords = readArchiveScopedThreadsSearchKeywords(archiveId, 10);
+    const cachedKeywords = readArchiveScopedThreadsSearchKeywords(archiveId, SENTIMENT_MODEL_KEYWORD_TARGET);
     if (cachedKeywords.length > 0) {
       keywords = cachedKeywords;
       warnings.push("模型关键词不可用，已改用同一人设历史真实抓取关键词继续刷新。");
     }
   }
-  if (keywords.length > 0) {
-    const cachedKeywords = readArchiveScopedThreadsSearchKeywords(archiveId, 10);
+  if (keywords.length > 0 && keywordResult?.length) {
+    const cachedKeywords = readArchiveScopedThreadsSearchKeywords(archiveId, SENTIMENT_MODEL_KEYWORD_TARGET);
     if (cachedKeywords.length > 0) keywords = [...keywords, ...cachedKeywords];
   }
-  if (personaSeedKeywords.length > 0) keywords = [...keywords, ...personaSeedKeywords];
-  keywords = rankSearchKeywords([...new Set(
-    keywords
-      .map((item) => normalizeSentimentSearchKeyword(item, {
+  if (personaSeedKeywords.length > 0 && keywords.length < SENTIMENT_MODEL_KEYWORD_TARGET) {
+    keywords = [...keywords, ...personaSeedKeywords];
+    if (keywordResult?.length) {
+      warnings.push("模型關鍵詞數量不足，已用人設核心領域詞補足。");
+    } else {
+      warnings.push("模型與歷史關鍵詞不可用，已使用人設資料抽取詞作為最後兜底。");
+    }
+  }
+  const normalizedKeywords = keywords
+    .map((item) => normalizeSentimentSearchKeyword(item, {
         archiveName: archive?.name,
         sourceText: [archive?.name, archive?.content, args.prompt, ...(args.memorySummaries || [])].map(cleanText).filter(Boolean).join(" "),
       }))
-      .filter((item) => item && !isWeakRelevanceKeyword(item)),
-  )]).slice(0, 14);
+    .filter((item) => isConcreteSearchKeyword(item));
+  keywords = rankSearchKeywords(filterConflictingSearchKeywords([...new Set(normalizedKeywords)])).slice(0, SENTIMENT_MODEL_KEYWORD_TARGET);
   const limit = args.limit || 10;
   const poolLimit = Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
@@ -4662,7 +4726,7 @@ function buildThreadsSearchQueries(keywords: string[]): string[] {
   for (const keyword of meaningfulNeedles(keywords)) {
     for (const variant of buildDynamicSearchQueryVariants([keyword])) add(variant);
   }
-  return [...new Set(out)].slice(0, 48);
+  return [...new Set(out)].slice(0, 96);
 }
 
 const THREADS_SEARCH_NOISE_LINES = new Set([
