@@ -734,6 +734,18 @@ const SENTIMENT_BROAD_PRIORITY_KEYWORDS = [
   "股票",
   "台股",
   "美股",
+  "遊戲推薦",
+  "電競",
+  "手遊",
+  "手機遊戲",
+  "Switch遊戲",
+  "Steam遊戲",
+  "遊戲實況",
+  "遊戲直播",
+  "遊戲攻略",
+  "電競比賽",
+  "電競選手",
+  "直播",
 ];
 SENTIMENT_BROAD_PRIORITY_KEYWORDS.forEach((keyword) => PRIORITY_DOMAIN_KEYWORDS.add(keyword));
 
@@ -916,6 +928,22 @@ function buildSearchKeywordCandidates(args: {
     const keyword = normalizeSentimentSearchKeyword(item, { archiveName: args.archiveName, sourceText: joined });
     if (keyword) out.push(keyword);
   }
+  if (/[\u904a\u6e38]\u6232|\u96fb\u7af6|\u7535\u7ade|\u624b[\u904a\u6e38]|Switch|Steam|\u76f4\u64ad|\u5be6\u6cc1|\u5b9e\u51b5|\u968a\u53cb|\u961f\u53cb/iu.test(joined)) {
+    [
+      "\u904a\u6232\u63a8\u85a6",
+      "\u96fb\u7af6",
+      "\u624b\u904a",
+      "\u624b\u6a5f\u904a\u6232",
+      "Switch\u904a\u6232",
+      "Steam\u904a\u6232",
+      "\u904a\u6232\u5be6\u6cc1",
+      "\u904a\u6232\u76f4\u64ad",
+      "\u904a\u6232\u653b\u7565",
+      "\u96fb\u7af6\u6bd4\u8cfd",
+      "\u96fb\u7af6\u9078\u624b",
+      "\u76f4\u64ad",
+    ].forEach((keyword) => out.push(keyword));
+  }
   for (const item of [...out]) {
     out.push(...expandSentimentSearchKeywordVariants(item));
   }
@@ -953,6 +981,7 @@ function rankSearchKeywords(keywords: string[]): string[] {
 function isConcreteSearchKeyword(value: unknown): boolean {
   const keyword = cleanText(value);
   if (!keyword || !hasHan(keyword)) return false;
+  if (/(?:反差吸引力|外表|中二感|社群梗|小劇場|小剧场)/u.test(keyword)) return false;
   if (keyword.length < 2 || keyword.length > 12) return false;
   if (isWeakRelevanceKeyword(keyword) || isGenericSentimentKeyword(keyword)) return false;
   if (/[()（）「」『』【】[\]{}]|(?:^|[^\d])\d{2,}(?:公分|cm|CM)?/u.test(keyword)) return false;
@@ -1641,17 +1670,46 @@ export async function fetchSentimentHotCandidates(args: {
     channelStats.push(`Instagram 已跳過，預篩 ${preInstagramReadyCount}/${limit}`);
   }
 
-  const runtime = await measureSentimentStage(warnings, "runtime", () => withSentimentTimeout(ensureSentimentRuntime(), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 7_000)), {
-    ok: false,
-    url: resolveSentimentBackendUrl(),
-    warning: "\u8206\u60c5\u5f8c\u53f0\u555f\u52d5\u8f03\u6162\uff0c\u5df2\u512a\u5148\u4f7f\u7528\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u5019\u9078\u3002",
-  }));
-  if (!runtime.ok && runtime.warning) warnings.push(runtime.warning);
+  if (hasSearchKeywords && candidates.length < limit) {
+    candidates = await fillSentimentHotCandidatesToLimit({
+      archiveId,
+      keywords,
+      candidates,
+      limit,
+      refresh: args.refresh === true,
+      warnings,
+    });
+    candidates = sortSentimentHotCandidatePool(candidates, keywords, Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET));
+  }
 
-  let cookieStatuses = await measureSentimentStage(warnings, "cookie-status", () => withSentimentTimeout(fetchSentimentCookieStatuses(), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 6_000)), [
+  const hasReadyCandidatesForDisplay = hasSearchKeywords
+    && finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: args.refresh === true }).length >= limit;
+  const shouldRunRealtimeSupplement = shouldFetchLiveCandidates && !hasReadyCandidatesForDisplay;
+  if (shouldFetchLiveCandidates && hasReadyCandidatesForDisplay) {
+    channelStats.push(`即時掃描已跳過，候選已補齊 ${limit}/${limit}`);
+  }
+
+  const defaultCookieStatuses: SentimentCookieStatus[] = [
     { platform: "threads" as const, health: "unknown" as const, label: "Threads", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
     { platform: "instagram" as const, health: "unknown" as const, label: "Instagram", message: "\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u72c0\u614b\u6aa2\u67e5\u8d85\u6642\u3002" },
-  ]));
+  ];
+  let runtime = {
+    ok: false,
+    url: resolveSentimentBackendUrl(),
+    warning: "",
+  };
+  let cookieStatuses = defaultCookieStatuses;
+
+  if (shouldRunRealtimeSupplement) {
+    runtime = await measureSentimentStage(warnings, "runtime", () => withSentimentTimeout(ensureSentimentRuntime(), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 7_000)), {
+      ok: false,
+      url: resolveSentimentBackendUrl(),
+      warning: "\u8206\u60c5\u5f8c\u53f0\u555f\u52d5\u8f03\u6162\uff0c\u5df2\u512a\u5148\u4f7f\u7528\u0020\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u0072\u0065\u0061\u0064\u0065\u0072\u0020\u5019\u9078\u3002",
+    }));
+    if (!runtime.ok && runtime.warning) warnings.push(runtime.warning);
+
+    cookieStatuses = await measureSentimentStage(warnings, "cookie-status", () => withSentimentTimeout(fetchSentimentCookieStatuses(), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 6_000)), defaultCookieStatuses));
+  }
   if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok && hasSentimentHotTotalBudget(startedAt, 7_000)) {
     cookieStatuses = await measureSentimentStage(warnings, "cookie-refresh", () => withSentimentTimeout(refreshSentimentBrowserCookies(cookieStatuses, warnings), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 5_000)), cookieStatuses));
   } else if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok) {
@@ -1722,7 +1780,7 @@ export async function fetchSentimentHotCandidates(args: {
   } else if (runtime.ok) {
     warnings.push("\u0054\u0068\u0072\u0065\u0061\u0064\u0073\u0020\u002f\u0020\u0049\u006e\u0073\u0074\u0061\u0067\u0072\u0061\u006d\u0020\u7f3a\u5c11\u6709\u6548\u0020\u0043\u006f\u006f\u006b\u0069\u0065\uff0c\u5df2\u8df3\u904e\u771f\u5be6\u6383\u63cf\uff1b\u8acb\u5148\u5728\u8206\u60c5\u0020\u0043\u006f\u006f\u006b\u0069\u0065\u0020\u914d\u7f6e\u4e2d\u6388\u6b0a\u5f8c\u518d\u5237\u65b0\u6293\u53d6\u3002");
   }
-  if (!hasSentimentHotTotalBudget(startedAt, 1_000)) {
+  if (candidates.length < limit && !hasSentimentHotTotalBudget(startedAt, 1_000)) {
     pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
   }
 
