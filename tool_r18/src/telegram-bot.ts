@@ -16615,6 +16615,12 @@ function parsePostPlatformValue(value: string | undefined | null): TelegramPubli
   return null;
 }
 
+function parsePostActionIndexValue(value: string | undefined | null): number | null {
+  if (!/^\d+$/.test(String(value || ""))) return null;
+  const index = Number(value);
+  return Number.isInteger(index) ? index : null;
+}
+
 function buildScheduledQueueLines(tasks: Array<{ id: string; platform: string; caption: string; scheduled_at: string; archive_id?: string; created_at?: string; last_error?: string; failure_step?: string; manual_intervention_required?: number }>, archivesById: Map<string, string>) {
   return tasks.map((t, idx) => {
     const archiveName = t.archive_id ? (archivesById.get(t.archive_id) || t.archive_id) : "未綁定人設";
@@ -22130,7 +22136,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const mediaItems = getStoredPostMediaItems(post);
       const mediaIndex = postActionCallback?.kind === "mpv"
-        ? Number(postActionCallback.value)
+        ? parsePostActionIndexValue(postActionCallback.value)
         : Number(data.slice("post_media_play_".length));
       const item = Number.isInteger(mediaIndex) ? mediaItems[mediaIndex] : null;
       const kind = item ? (item.type && item.type !== "unknown" ? item.type : inferStoredPostMediaKind(item.url)) : "";
@@ -22191,7 +22197,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         ? current.selectedIndexes.filter((index) => index >= 0 && index < mediaItems.length)
         : [];
       if (mediaData.startsWith("post_media_toggle_")) {
-        const mediaIndex = Number(mediaData.slice("post_media_toggle_".length));
+        const mediaIndex = parsePostActionIndexValue(mediaData.slice("post_media_toggle_".length));
         if (Number.isInteger(mediaIndex) && mediaIndex >= 0 && mediaIndex < mediaItems.length) {
           selectedIndexes = selectedIndexes.includes(mediaIndex)
             ? selectedIndexes.filter((index) => index !== mediaIndex)
@@ -23002,7 +23008,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const groupContentType = action?.groupContentType;
       if (requestedPlatform && requestedPlatform !== "clear" && !publishPlatform) {
         await safeEditOrSend(bot, chatId, msgId, "发布平台已失效，请重新选择。", {
-          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: "post_action" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "返回查看推文", callback_data: postActionCallback?.key ? buildPostActionCallback("pub", postActionCallback.key) : "post_action" }]] },
         });
         return;
       }
@@ -24996,7 +25002,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (postActionCallback?.kind === "dopm" || data.startsWith("dopm_")) {
       const platform = postActionCallback?.kind === "dopm"
-        ? (postActionCallback.value as TelegramPublishPlatform | undefined)
+        ? parsePostPlatformValue(postActionCallback.value)
         : parseShortPostPlatform(data, "dopm_");
       const action = resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "dopm");
       const archiveId = action?.archiveId;
@@ -25252,7 +25258,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
 
     if (postActionCallback?.kind === "dop" || data.startsWith("dop_")) {
       const shortPlatform = postActionCallback?.kind === "dop"
-        ? (postActionCallback.value as TelegramPublishPlatform | undefined)
+        ? parsePostPlatformValue(postActionCallback.value)
         : parseShortPostPlatform(data, "dop_");
       const action = shortPlatform ? resolvePostActionOrLegacyChatAction(chatId, postActionCallback, "dop") : null;
       const archiveId = action?.archiveId;
