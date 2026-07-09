@@ -16609,6 +16609,12 @@ function parseShortPostPlatform(data: string, prefix: string): TelegramPublishPl
   return null;
 }
 
+function parsePostPlatformValue(value: string | undefined | null): TelegramPublishPlatform | null {
+  if (value === "threads") return "threads";
+  if (value === "telegram") return "telegram";
+  return null;
+}
+
 function buildScheduledQueueLines(tasks: Array<{ id: string; platform: string; caption: string; scheduled_at: string; archive_id?: string; created_at?: string; last_error?: string; failure_step?: string; manual_intervention_required?: number }>, archivesById: Map<string, string>) {
   return tasks.map((t, idx) => {
     const archiveName = t.archive_id ? (archivesById.get(t.archive_id) || t.archive_id) : "未綁定人設";
@@ -22986,7 +22992,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const publishPlatform = requestedPlatform === "clear"
         ? undefined
         : requestedPlatform
-          ? parseShortPostPlatform(data, "post_action_") || undefined
+          ? (postActionCallback?.kind === "pp"
+              ? parsePostPlatformValue(requestedPlatform)
+              : parseShortPostPlatform(data, "post_action_")) || undefined
           : action?.publishPlatform;
       const archiveId = action?.archiveId;
       const postId = action?.postId;
