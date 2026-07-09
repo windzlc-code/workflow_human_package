@@ -7,6 +7,7 @@ import copy
 import datetime
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -997,6 +998,8 @@ def _load_admin_vmos_pads() -> list[dict[str, Any]]:
 
 
 def _sanitize_payload(value: Any) -> Any:
+    if callable(value):
+        return f"<callable:{getattr(value, '__name__', value.__class__.__name__)}>"
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for k, v in value.items():
@@ -15769,6 +15772,115 @@ def _run_face_swap(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return _run_remote_comfy_mapped_task(task_id, payload, "face_swap")
 
 
+def _run_tool_r18_skill_task(
+    task_id: str,
+    payload: dict[str, Any],
+    task_type: str,
+    script_name: str,
+    input_name: str,
+    *,
+    default_timeout: int = 900,
+    min_timeout: int = 60,
+    force_dry_run_false: bool = False,
+) -> dict[str, Any]:
+    tool_dir = ROOT_DIR / "tool_r18"
+    script = tool_dir / "scripts" / "skills" / script_name
+    if not script.exists():
+        raise RuntimeError(f"{task_type} script not found: {script}")
+    workdir = _build_task_workdir(task_id, fallback_username="telegram")
+    input_path = workdir / input_name
+    input_payload = {
+        str(key): value
+        for key, value in dict(payload or {}).items()
+        if not str(key).startswith("_") and not callable(value)
+    }
+    if force_dry_run_false:
+        input_payload["dryRun"] = False
+    input_path.write_text(json.dumps(input_payload, ensure_ascii=False), encoding="utf-8")
+    env = os.environ.copy()
+    env.setdefault("TOOL_R18_RUNTIME_DIR", str(TOOL_R18_RUNTIME_DIR))
+    completed = subprocess.run(
+        ["node", "--import", "tsx", str(script), f"@{input_path}"],
+        cwd=str(tool_dir),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=max(_to_int(input_payload.get("timeout_seconds"), default_timeout), min_timeout),
+    )
+    raw_output = (completed.stdout or "").strip()
+    raw_error = (completed.stderr or "").strip()
+    parsed: dict[str, Any] = {}
+    if raw_output:
+        try:
+            parsed = json.loads(raw_output)
+        except Exception:
+            match = re.search(r"(\{[\s\S]*\})\s*$", raw_output)
+            if match:
+                parsed = json.loads(match.group(1))
+    if completed.returncode != 0 or parsed.get("ok") is False:
+        detail = parsed.get("error") if isinstance(parsed, dict) else ""
+        raise RuntimeError(str(detail or raw_error or raw_output or f"{task_type} exited {completed.returncode}"))
+    return {
+        "ok": True,
+        "task_type": task_type,
+        "input_path": str(input_path),
+        "stdout": raw_output[-4000:],
+        "stderr": raw_error[-2000:],
+        **(parsed if isinstance(parsed, dict) else {}),
+    }
+
+
+def _run_threads_warmup(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "threads_warmup",
+        "threads-warmup-once.ts",
+        "threads-warmup-input.json",
+        default_timeout=1800,
+        force_dry_run_false=True,
+    )
+
+
+def _run_threads_profile_update(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "threads_profile_update",
+        "threads-profile-update-once.ts",
+        "threads-profile-update-input.json",
+    )
+
+
+def _run_threads_login(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(task_id, payload, "threads_login", "threads-login-once.ts", "threads-login-input.json")
+
+
+def _run_threads_account_query(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "threads_account_query",
+        "threads-account-query-once.ts",
+        "threads-account-query-input.json",
+        default_timeout=120,
+        min_timeout=30,
+    )
+
+
+def _run_threads_auto_reply(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "threads_auto_reply",
+        "threads-auto-reply-once.ts",
+        "threads-auto-reply-input.json",
+        default_timeout=1800,
+        force_dry_run_false=True,
+    )
+
+
 TASK_RUNNERS = {
     "text_to_image": _run_text_to_image_disabled,
     "replace_model": _run_replace_model,
@@ -15786,6 +15898,11 @@ TASK_RUNNERS = {
     "batch_create_video": _run_batch_create_video,
     "batch_replace_model": _run_batch_replace_model,
     "batch_replace_product": _run_batch_replace_product,
+    "threads_warmup": _run_threads_warmup,
+    "threads_profile_update": _run_threads_profile_update,
+    "threads_login": _run_threads_login,
+    "threads_account_query": _run_threads_account_query,
+    "threads_auto_reply": _run_threads_auto_reply,
 }
 TG_AGENT_PRODUCTION_TASK_TYPES = set(TASK_RUNNERS.keys())
 
@@ -16323,11 +16440,26 @@ def _require_internal_tg_request(request: Request) -> None:
         if provided_token != expected_token:
             raise HTTPException(status_code=403, detail="TG 内部提交 token 不正确")
         return
+    allowed_hosts = {
+        item.strip()
+        for item in str(os.getenv("TG_INTERNAL_ALLOWED_HOSTS") or "").split(",")
+        if item.strip()
+    }
     client_host = ""
     try:
         client_host = str(request.client.host if request.client else "")
     except Exception:
         client_host = ""
+    if client_host in {"127.0.0.1", "::1", "localhost"} or client_host in allowed_hosts:
+        return
+    try:
+        client_ip = ipaddress.ip_address(client_host)
+        if client_ip.is_loopback or client_ip.is_private or client_ip.is_link_local:
+            return
+    except Exception:
+        pass
+    if client_host:
+        logger.warning("Blocked internal TG request from non-local host: %s", client_host)
     if client_host not in {"127.0.0.1", "::1", "localhost"}:
         raise HTTPException(status_code=403, detail="TG 内部提交接口仅允许本机调用")
 
@@ -16518,6 +16650,83 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         payload["user_input"] = str(payload.get("user_input") or payload.get("message") or "").strip()
         if not payload["user_input"]:
             raise HTTPException(status_code=400, detail="get_gemini 需要 user_input")
+        return payload
+
+    if typ == "threads_warmup":
+        pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+        if not pad_code:
+            raise HTTPException(status_code=400, detail="threads_warmup 需要 padCode")
+        mode = str(payload.get("mode") or "browse").strip()
+        if mode not in {"browse", "like", "comment", "both"}:
+            raise HTTPException(status_code=400, detail="threads_warmup mode 必须是 browse/like/comment/both")
+        payload["padCode"] = pad_code
+        payload["mode"] = mode
+        payload["browseCount"] = max(_to_int(payload.get("browseCount") or payload.get("browse_count"), 80), 1)
+        payload["minSessionMinutes"] = max(_to_int(payload.get("minSessionMinutes") or payload.get("min_session_minutes"), 7), 1)
+        payload["maxSessionMinutes"] = max(_to_int(payload.get("maxSessionMinutes") or payload.get("max_session_minutes"), 10), payload["minSessionMinutes"])
+        payload["interactionEveryMinPosts"] = max(_to_int(payload.get("interactionEveryMinPosts") or payload.get("interaction_every_min_posts"), 2), 1)
+        payload["interactionEveryMaxPosts"] = max(_to_int(payload.get("interactionEveryMaxPosts") or payload.get("interaction_every_max_posts"), 3), payload["interactionEveryMinPosts"])
+        payload["searchChance"] = max(min(_to_int(payload.get("searchChance") or payload.get("search_chance"), 16), 100), 0)
+        payload["maxLikes"] = max(_to_int(payload.get("maxLikes") or payload.get("max_likes"), 1), 1) if mode in {"like", "both"} else 0
+        payload["maxComments"] = max(_to_int(payload.get("maxComments") or payload.get("max_comments"), 1), 1) if mode in {"comment", "both"} else 0
+        return payload
+
+    if typ == "threads_profile_update":
+        pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+        kind = str(payload.get("kind") or "").strip()
+        value = str(payload.get("value") or "").strip()
+        if not pad_code:
+            raise HTTPException(status_code=400, detail="threads_profile_update 需要 padCode")
+        if kind not in {"link", "bio", "name", "avatar"}:
+            raise HTTPException(status_code=400, detail="threads_profile_update kind 必须是 link/bio/name/avatar")
+        if not value:
+            raise HTTPException(status_code=400, detail="threads_profile_update 需要 value")
+        payload["padCode"] = pad_code
+        payload["kind"] = kind
+        payload["value"] = value
+        payload["timeout_seconds"] = max(_to_int(payload.get("timeout_seconds"), 900), 60)
+        return payload
+
+    if typ == "threads_login":
+        pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "").strip()
+        if not pad_code:
+            raise HTTPException(status_code=400, detail="threads_login 需要 padCode")
+        if not username:
+            raise HTTPException(status_code=400, detail="threads_login 需要 username")
+        if not password:
+            raise HTTPException(status_code=400, detail="threads_login 需要 password")
+        payload["padCode"] = pad_code
+        payload["username"] = username
+        payload["password"] = password
+        payload["timeout_seconds"] = max(_to_int(payload.get("timeout_seconds"), 900), 60)
+        return payload
+
+    if typ == "threads_account_query":
+        pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+        if not pad_code:
+            raise HTTPException(status_code=400, detail="threads_account_query 需要 padCode")
+        payload["padCode"] = pad_code
+        payload["timeout_seconds"] = max(_to_int(payload.get("timeout_seconds"), 120), 30)
+        return payload
+
+    if typ == "threads_auto_reply":
+        pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+        if not pad_code:
+            raise HTTPException(status_code=400, detail="threads_auto_reply 需要 padCode")
+        payload["padCode"] = pad_code
+        payload["maxAgeDays"] = max(_to_int(payload.get("maxAgeDays") or payload.get("max_age_days"), 7), 1)
+        payload["maxPosts"] = max(_to_int(payload.get("maxPosts") or payload.get("max_posts"), 3), 1)
+        payload["maxReplies"] = max(_to_int(payload.get("maxReplies") or payload.get("max_replies"), 3), 1)
+        persona = payload.get("commentPersona") if isinstance(payload.get("commentPersona"), dict) else {}
+        payload["commentPersona"] = {
+            "name": str(persona.get("name") or "").strip(),
+            "profile": str(persona.get("profile") or "")[:4000],
+            "replyMode": str(persona.get("replyMode") or "ai_persona").strip() or "ai_persona",
+            "customContent": str(persona.get("customContent") or "")[:4000],
+        }
+        payload["timeout_seconds"] = max(_to_int(payload.get("timeout_seconds"), 1800), 60)
         return payload
 
     raise HTTPException(status_code=400, detail=f"TG 暂不支持的任务类型: {typ}")
@@ -21787,6 +21996,102 @@ def create_app() -> FastAPI:
             conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
         _delete_task_artifacts(tid)
         return {"ok": True, "id": tid}
+
+    THREADS_CONSOLE_PREFIX = "/threads-console"
+    THREADS_CONSOLE_UPSTREAM = str(
+        os.getenv("THREADS_CONSOLE_UPSTREAM", "http://adbfacebook-console:8080") or ""
+    ).rstrip("/")
+
+    def _threads_console_rewrite(content: bytes, content_type: str) -> bytes:
+        if not content_type.lower().startswith(("text/html", "application/javascript", "text/javascript", "text/css")):
+            return content
+        try:
+            body = content.decode("utf-8")
+        except UnicodeDecodeError:
+            return content
+        replacements = {
+            'href="/': f'href="{THREADS_CONSOLE_PREFIX}/',
+            "href='/": f"href='{THREADS_CONSOLE_PREFIX}/",
+            'action="/': f'action="{THREADS_CONSOLE_PREFIX}/',
+            "action='/": f"action='{THREADS_CONSOLE_PREFIX}/",
+            'src="/': f'src="{THREADS_CONSOLE_PREFIX}/',
+            "src='/": f"src='{THREADS_CONSOLE_PREFIX}/",
+            'fetch("/': f'fetch("{THREADS_CONSOLE_PREFIX}/',
+            "fetch('/": f"fetch('{THREADS_CONSOLE_PREFIX}/",
+            'url("/': f'url("{THREADS_CONSOLE_PREFIX}/',
+            "url('/": f"url('{THREADS_CONSOLE_PREFIX}/",
+            'window.location.href = "/': f'window.location.href = "{THREADS_CONSOLE_PREFIX}/',
+            "window.location.href = '/": f"window.location.href = '{THREADS_CONSOLE_PREFIX}/",
+        }
+        for old, new in replacements.items():
+            body = body.replace(old, new)
+        return body.encode("utf-8")
+
+    def _threads_console_headers(resp: requests.Response) -> dict[str, str]:
+        excluded = {"content-length", "transfer-encoding", "connection", "content-encoding"}
+        headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
+        location = headers.get("location") or headers.get("Location")
+        if location:
+            upstream = THREADS_CONSOLE_UPSTREAM
+            if location.startswith("/"):
+                location = THREADS_CONSOLE_PREFIX + location
+            elif upstream and location.startswith(upstream + "/"):
+                location = THREADS_CONSOLE_PREFIX + location[len(upstream):]
+            headers["location"] = location
+            headers.pop("Location", None)
+        return headers
+
+    async def _threads_console_request(path: str, request: Request) -> Response:
+        if not THREADS_CONSOLE_UPSTREAM:
+            raise HTTPException(status_code=503, detail="Threads console upstream is not configured")
+        target_path = "/" + path.lstrip("/")
+        url = THREADS_CONSOLE_UPSTREAM + target_path
+        body = await request.body()
+        inbound_headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in {"host", "content-length", "accept-encoding"}
+        }
+        content_type = str(inbound_headers.get("content-type") or inbound_headers.get("Content-Type") or "")
+        if body and "application/json" in content_type.lower():
+            try:
+                body = json.dumps(json.loads(body.decode("utf-8")), ensure_ascii=False).encode("utf-8")
+                inbound_headers["content-type"] = "application/json; charset=utf-8"
+                inbound_headers.pop("Content-Type", None)
+            except Exception:
+                pass
+        inbound_headers["x-forwarded-prefix"] = THREADS_CONSOLE_PREFIX
+        try:
+            resp = await asyncio.to_thread(
+                requests.request,
+                request.method,
+                url,
+                params=list(request.query_params.multi_items()),
+                data=body,
+                headers=inbound_headers,
+                allow_redirects=False,
+                timeout=120,
+            )
+        except requests.RequestException as exc:
+            logger.warning("Threads console proxy failed: %s", exc)
+            raise HTTPException(status_code=502, detail="Threads console is unavailable") from exc
+        content_type = resp.headers.get("content-type", "")
+        content = _threads_console_rewrite(resp.content, content_type)
+        return Response(
+            content=content,
+            status_code=resp.status_code,
+            headers=_threads_console_headers(resp),
+            media_type=content_type or None,
+        )
+
+    @app.api_route("/threads-console", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], include_in_schema=False)
+    async def threads_console_root(request: Request) -> Response:
+        if request.method == "GET":
+            return RedirectResponse(url="/threads-console/", status_code=302)
+        return await _threads_console_request("", request)
+
+    @app.api_route("/threads-console/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], include_in_schema=False)
+    async def threads_console_proxy(path: str, request: Request) -> Response:
+        return await _threads_console_request(path, request)
 
     return app
 
