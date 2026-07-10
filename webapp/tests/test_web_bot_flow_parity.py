@@ -138,6 +138,15 @@ def test_source_archive_id_wins_over_local_projection_id() -> None:
     assert 'get("source_archive_id")' in resolver
 
 
+def test_background_persona_refresh_keeps_remote_callback_ids() -> None:
+    refresh = _function_source("_refresh_persona_overview_cache")
+
+    assert "build_overview(force_remote=force_remote)" in refresh
+    assert "source_rows = _cached_remote_persona_rows()" in refresh
+    assert "_merge_source_and_local_rows(source_rows)" in refresh
+    assert 'overview.get("personas")' not in refresh
+
+
 def test_source_media_tasks_request_web_polling_until_result_is_ready() -> None:
     submit = _function_source("_submit_source_post_task")
     detail = _function_source("_source_task_detail")

@@ -3031,11 +3031,11 @@ def _refresh_persona_overview_cache(*, force_remote: bool = False) -> None:
     if not _PERSONA_OVERVIEW_REFRESH_LOCK.acquire(blocking=False):
         return
     try:
-        overview = build_overview(force_remote=force_remote)
-        rows = overview.get("personas") if isinstance(overview.get("personas"), list) else []
-        clean_rows = [row for row in rows if isinstance(row, dict)]
-        if clean_rows:
-            _PERSONA_MENU_CACHE.update({"at": time.time(), "rows": clean_rows})
+        build_overview(force_remote=force_remote)
+        source_rows = _cached_remote_persona_rows()
+        rows = _merge_source_and_local_rows(source_rows) if source_rows else _local_persona_rows()
+        if rows:
+            _PERSONA_MENU_CACHE.update({"at": time.time(), "rows": rows})
     except Exception:
         pass
     finally:
