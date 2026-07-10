@@ -7343,6 +7343,21 @@ def _source_archive_post(archive_id: str, post_id: str) -> tuple[Persona | None,
     return local, row, None
 
 
+def _web_post_action_key(archive_id: str, post_id: str) -> str:
+    return hashlib.sha1(f"{archive_id}|{post_id}".encode("utf-8", errors="ignore")).hexdigest()[:10]
+
+
+def _web_post_action_from_state(action: str, state: dict[str, Any]) -> tuple[str, str, str] | None:
+    draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+    archive_id = str(draft.get("archive_id") or draft.get("persona_id") or "").strip()
+    post_id = str(draft.get("post_id") or "").strip()
+    parts = str(action or "").split("_")
+    key = parts[2] if len(parts) > 2 and parts[0] == "pa" else ""
+    if not archive_id or not post_id or key != _web_post_action_key(archive_id, post_id):
+        return None
+    return archive_id, post_id, key
+
+
 def _source_post_detail(action: str) -> dict[str, Any]:
     try:
         archive_id, post_id = action.split(":", 2)[1:]
@@ -7357,6 +7372,9 @@ def _source_post_detail(action: str) -> dict[str, Any]:
     media_urls = _source_post_media_urls(post)
     safe_media_urls = [url for item in media_urls if (url := _safe_web_media_url(item))]
     preview_image = next((url for url in safe_media_urls if _is_web_image_url(url)), "")
+    post_rows = _source_pending_posts(row)
+    post_index = next((index for index, item in enumerate(post_rows) if str(item.get("id") or "") == post_id), 0)
+    action_key = _web_post_action_key(archive_id, post_id)
     media_cards = [
         {
             "title": f"媒體 {index}",
@@ -7379,14 +7397,64 @@ def _source_post_detail(action: str) -> dict[str, Any]:
         _message(
             "\n".join(lines),
             _rows(
-                [_btn("🚀 發布這篇", f"source_post_publish:{archive_id}:{post_id}")],
-                [_btn("🖼 重新生成配圖" if media_urls else "🖼 單獨生成配圖", f"source_post_image:{archive_id}:{post_id}")],
+                [_btn("🚀 發布這篇", f"pa_pub_{action_key}")],
+                *([[_btn("🖼 查看配圖/視頻", f"pa_mp_{action_key}")]] if media_urls else []),
+                [_btn("🖼 重新生成图片" if media_urls else "🖼 单独生成图片", f"post_img_regen_{archive_id}_{post_index}")],
                 [_btn("◀️ 返回查看推文", f"posts_{archive_id}_ct_{group_type}_p0" if _is_workflow_persona_row(row, archive_id) else f"posts_{archive_id}_p0")],
             ),
             image=preview_image,
             cards=media_cards,
         ),
-        state={"flow": "source_post_detail", "draft": {"persona_id": archive_id, "archive_id": archive_id, "post_id": post_id, "group_content_type": group_type}},
+        state={"flow": "source_post_detail", "draft": {"persona_id": archive_id, "archive_id": archive_id, "post_id": post_id, "group_content_type": group_type, "post_action_key": action_key}},
+    )
+
+
+def _source_post_image_ratio_picker(archive_id: str, post_id: str, post_index: int) -> dict[str, Any]:
+    local, row, post = _source_archive_post(archive_id, post_id)
+    if not post:
+        return _response(_message("沒有找到這篇推文。", [[_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    name = local.name if local else _persona_row_name(row or {})
+    keyboard = [
+        [_btn(item["label"], f"post_img_ratio_{item['id']}") for item in GENPOST_RATIO_OPTIONS[index : index + 2]]
+        for index in range(0, len(GENPOST_RATIO_OPTIONS), 2)
+    ]
+    keyboard.append([_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")])
+    return _response(
+        _message(
+            "\n".join(["🖼 單篇推文配圖", "", f"人設：{name}", f"推文：第 {post_index + 1} 篇", "", "請選擇配圖畫面比例："]),
+            keyboard,
+        ),
+        state={"flow": "source_post_image_ratio", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "post_index": post_index}},
+    )
+
+
+def _source_post_image_regen_entry(action: str) -> dict[str, Any]:
+    payload = action[len("post_img_regen_") :]
+    archive_id, separator, raw_index = payload.rpartition("_")
+    if not separator or not archive_id:
+        return _response(_message("配圖入口已失效。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    posts = _source_pending_posts(_resolve_persona_for_action(archive_id)[1])
+    index = max(0, _num(raw_index))
+    if index >= len(posts):
+        return _response(_message("沒有找到這篇推文。", [[_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    post_id = str(posts[index].get("id") or "")
+    return _source_post_image_ratio_picker(archive_id, post_id, index)
+
+
+def _source_post_image_ratio_submit(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+    archive_id = str(draft.get("archive_id") or "")
+    post_id = str(draft.get("post_id") or "")
+    ratio_id = action[len("post_img_ratio_") :]
+    option = next((item for item in GENPOST_RATIO_OPTIONS if item["id"] == ratio_id), None)
+    if not archive_id or not post_id or not option:
+        return _response(_message("配圖比例選擇已過期，請從推文列表重新打開。", [[_btn("📝 查看推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    return _submit_source_post_task(
+        "persona_generate_post_image",
+        archive_id,
+        post_id,
+        {"archiveId": archive_id, "postId": post_id, "chatId": SOURCE_WEB_BOT_CHAT_ID, "imageAspectRatio": option["ratio"], "imageRatioLabel": option["label"]},
+        "推文配圖任務",
     )
 
 
@@ -7448,7 +7516,7 @@ def _source_post_generate_image(action: str) -> dict[str, Any]:
     )
 
 
-def _source_post_publish_start(action: str) -> dict[str, Any]:
+def _source_post_publish_start(action: str, action_key: str = "") -> dict[str, Any]:
     try:
         archive_id, post_id = action.split(":", 2)[1:]
     except ValueError:
@@ -7456,12 +7524,13 @@ def _source_post_publish_start(action: str) -> dict[str, Any]:
     _local, _row, post = _source_archive_post(archive_id, post_id)
     if not post:
         return _response(_message("找不到這篇待發布推文。", [[_btn("📝 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    key = action_key or _web_post_action_key(archive_id, post_id)
     return _response(
         _message(
             "🚀 發布這篇\n\n請選擇發布平台：",
-            _rows([_btn("Threads", "source_post_platform:threads"), _btn("Telegram", "source_post_platform:telegram")], [_btn("◀️ 返回查看推文", f"source_post:{archive_id}:{post_id}")]),
+            _rows([_btn("🧵 Threads", f"pa_pp_{key}_threads"), _btn("📣 Telegram 群组", f"pa_pp_{key}_telegram")], [_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")]),
         ),
-        state={"flow": "source_post_publish_platform", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id}},
+        state={"flow": "source_post_publish_platform", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "post_action_key": key}},
     )
 
 
@@ -7480,10 +7549,11 @@ def _source_post_publish_platform(action: str, state: dict[str, Any]) -> dict[st
             state={"flow": ""},
         )
     platform_label = "Threads" if platform == "threads" else "Telegram 群組"
+    action_key = str(draft.get("post_action_key") or _web_post_action_key(archive_id, post_id))
     return _response(
         _message(
             f"🚀 確認發布推文\n\n平台：{platform_label}\nPAD_CODE：{pad_code}\n\n{_remote_post_preview(post, 220)}",
-            _rows([_btn(f"✅ 確認發布到 {platform_label}", "source_post_execute")], [_btn("◀️ 返回選擇平台", f"source_post_publish:{archive_id}:{post_id}")]),
+            _rows([_btn(f"✅ 确认发布到绑定智能體手機 {platform_label}", f"pa_dop_{action_key}_{platform}")], [_btn("◀️ 返回选择平台", f"pa_pp_{action_key}_clear")], [_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")]),
         ),
         state={"flow": "source_post_publish_confirm", "draft": {**draft, "platform": platform, "pad_code": pad_code}},
     )
@@ -10238,6 +10308,12 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     if action == "pa_back":
         return _response(_post_select_message(state.get("draft", {})), state={"flow": "post_select", "draft": state.get("draft", {})})
     if action.startswith("pa_pp_"):
+        resolved = _web_post_action_from_state(action, state)
+        if resolved:
+            platform = action.rsplit("_", 1)[1]
+            if platform == "clear":
+                return _source_post_publish_start(f"source_post_publish:{resolved[0]}:{resolved[1]}", resolved[2])
+            return _source_post_publish_platform(f"source_post_platform:{platform}", state)
         _kind, _action_key, platform = _parse_tg_post_action(action)
         return _publish_platform(f"publish_platform:{platform}", state)
     if action.startswith("pa_dopimg_"):
@@ -10248,8 +10324,13 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
             draft["selected_personas"] = [str(draft.get("persona_id"))]
         return _matrix_pads_menu({"draft": draft})
     if action.startswith("pa_dop_"):
+        if _web_post_action_from_state(action, state):
+            return _source_post_publish_execute(state)
         return _enqueue_selected_posts(state, with_image=False)
     if action.startswith("pa_pub_"):
+        resolved = _web_post_action_from_state(action, state)
+        if resolved:
+            return _source_post_publish_start(f"source_post_publish:{resolved[0]}:{resolved[1]}", resolved[2])
         _kind, action_key, _value = _parse_tg_post_action(action)
         return _post_publish_one(f"post_publish_one:{_tg_post_action_index(action_key)}", state)
     if action.startswith("pa_img_"):
@@ -10605,6 +10686,27 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _source_workflow_start(action.split(":", 1)[1])
     if action.startswith("source_post:"):
         return _source_post_detail(action)
+    if action.startswith("pa_mp_"):
+        resolved = _web_post_action_from_state(action, state)
+        return _source_post_detail(f"source_post:{resolved[0]}:{resolved[1]}") if resolved else _response(_message("推文操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    if action.startswith("pa_pub_"):
+        resolved = _web_post_action_from_state(action, state)
+        return _source_post_publish_start(f"source_post_publish:{resolved[0]}:{resolved[1]}", resolved[2]) if resolved else _response(_message("推文操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    if action.startswith("pa_pp_"):
+        resolved = _web_post_action_from_state(action, state)
+        if not resolved:
+            return _response(_message("發布操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+        platform = action.rsplit("_", 1)[1]
+        if platform == "clear":
+            return _source_post_publish_start(f"source_post_publish:{resolved[0]}:{resolved[1]}", resolved[2])
+        return _source_post_publish_platform(f"source_post_platform:{platform}", state)
+    if action.startswith("pa_dop_"):
+        resolved = _web_post_action_from_state(action, state)
+        return _source_post_publish_execute(state) if resolved else _response(_message("發布操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    if action.startswith("post_img_regen_"):
+        return _source_post_image_regen_entry(action)
+    if action.startswith("post_img_ratio_"):
+        return _source_post_image_ratio_submit(action, state)
     if action.startswith("source_post_image:"):
         return _source_post_generate_image(action)
     if action.startswith("source_post_publish:"):

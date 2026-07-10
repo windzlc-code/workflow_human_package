@@ -76,8 +76,9 @@ def test_source_post_actions_keep_real_archive_and_post_ids() -> None:
     image = _function_source("_source_post_generate_image")
     publish = _function_source("_source_post_publish_execute")
 
-    assert "source_post_publish:{archive_id}:{post_id}" in detail
-    assert "source_post_image:{archive_id}:{post_id}" in detail
+    assert "pa_pub_{action_key}" in detail
+    assert "post_img_regen_{archive_id}_{post_index}" in detail
+    assert "source_post_publish:{archive_id}:{post_id}" not in detail
     assert '"persona_generate_post_image"' in image
     assert '"persona_publish_post"' in publish
     assert '"dryRun": False' in publish
