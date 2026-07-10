@@ -6130,6 +6130,8 @@ def _post_list_callback_for_draft(draft: dict[str, Any]) -> str:
 
 def _no_persona_reference_generate_response(draft: dict[str, Any]) -> dict[str, Any]:
     persona_id = str(draft.get("persona_id") or "")
+    source_archive_id = str(draft.get("source_archive_id") or "").strip()
+    callback_persona_id = source_archive_id or persona_id
     name = str(draft.get("name") or persona_id or "人設")
     lines = [
         "⚠️ 此人設尚未生成人設圖。",
@@ -6139,17 +6141,36 @@ def _no_persona_reference_generate_response(draft: dict[str, Any]) -> dict[str, 
     return _response(
         _message(
             "\n".join(lines),
-            _rows([_btn("🎨 生成人設圖", f"genimg_{persona_id}")], [_btn("◀️ 返回人設詳情", f"pd_{persona_id}")]),
+            _rows([_btn("🎨 生成人設圖", f"genimg_{callback_persona_id}")], [_btn("◀️ 返回人設詳情", f"pd_{callback_persona_id}")]),
         ),
         state={"flow": "genpost_no_reference", "draft": {**draft, "name": name}},
     )
 
 
+def _generation_persona_reference(
+    persona_id: str,
+    draft: dict[str, Any] | None = None,
+) -> tuple[str, Persona | None, dict[str, Any] | None, bool, bool]:
+    draft = draft if isinstance(draft, dict) else {}
+    lookup_id = str(draft.get("source_archive_id") or persona_id or "").strip()
+    local, row = _resolve_persona_for_action(lookup_id)
+    source_archive_id = _tool_r18_archive_id(lookup_id, local, row) or lookup_id
+    has_reference = bool((local and _avatar_exists(local)) or _persona_reference_image_url(row))
+    if not has_reference:
+        row = _fresh_persona_row(source_archive_id or lookup_id, local, row)
+        source_archive_id = _tool_r18_archive_id(source_archive_id or lookup_id, local, row) or source_archive_id
+        has_reference = bool((local and _avatar_exists(local)) or _persona_reference_image_url(row))
+    is_workflow = _is_workflow_persona_row(row, source_archive_id or lookup_id)
+    return source_archive_id, local, row, has_reference, is_workflow
+
+
 def _continue_no_reference_generate(state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     persona_id = str(draft.get("persona_id") or "")
-    persona = PersonaRepo.get(persona_id)
-    if not persona or not _avatar_exists(persona):
+    source_archive_id, _local, _row, has_reference, is_workflow = _generation_persona_reference(persona_id, draft)
+    if source_archive_id:
+        draft["source_archive_id"] = source_archive_id
+    if not has_reference and not is_workflow:
         return _no_persona_reference_generate_response(draft)
     words = str(draft.get("words") or draft.get("target_words") or "80")
     return _continue_generate_posts(words, {"flow": "genpost_words", "draft": draft})
@@ -6274,8 +6295,10 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
 
     if flow == "genpost_words":
         words = max(20, min(_num(text), 500))
-        local, row = _resolve_persona_for_action(persona_id)
-        if not bool(draft.get("text_only")) and local and not _avatar_exists(local):
+        source_archive_id, local, row, has_reference, is_workflow = _generation_persona_reference(persona_id, draft)
+        if source_archive_id:
+            draft["source_archive_id"] = source_archive_id
+        if not bool(draft.get("text_only")) and not has_reference and not is_workflow:
             draft["words"] = words
             draft["target_words"] = words
             return _no_persona_reference_generate_response(draft)
@@ -6289,7 +6312,6 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
             hot_context,
         ]
         selected_ids = [str(item) for item in draft.get("selected_memory_entry_ids", []) if str(item).strip()]
-        source_archive_id = _tool_r18_archive_id(persona_id, local, row)
         if not source_archive_id:
             return _response(
                 _message(
@@ -10236,8 +10258,10 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             return _response(_message("新建推文模式入口無效，請返回重新選擇。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
         persona_id, local, row, name = _genpost_context(persona_id)
+        source_archive_id = _tool_r18_archive_id(persona_id, local, row)
         draft = {
             "persona_id": persona_id,
+            "source_archive_id": source_archive_id,
             "name": name,
             "content_branch": _genpost_branch_from_token(branch_token),
             "text_only": mode_token == "t",

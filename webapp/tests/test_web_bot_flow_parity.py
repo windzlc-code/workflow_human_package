@@ -117,6 +117,19 @@ def test_persona_and_post_views_render_source_media() -> None:
     assert "cards=media_cards" in post_detail
 
 
+def test_post_generation_reference_gate_uses_source_archive_image() -> None:
+    flow = _function_source("_continue_generate_posts")
+    resume = _function_source("_continue_no_reference_generate")
+    gate = _function_source("_generation_persona_reference")
+
+    assert "_persona_reference_image_url(row)" in gate
+    assert "_fresh_persona_row(" in gate
+    assert "_is_workflow_persona_row(" in gate
+    assert "not has_reference and not is_workflow" in flow
+    assert "not has_reference and not is_workflow" in resume
+    assert 'draft["source_archive_id"]' in flow
+
+
 def test_source_archive_id_wins_over_local_projection_id() -> None:
     resolver = _function_source("_tool_r18_archive_id")
 
