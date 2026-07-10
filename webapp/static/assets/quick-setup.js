@@ -11,6 +11,7 @@ async function qsApi(path, opts = {}) {
   return data;
 }
 
+const DEFAULT_LLM_BASE_URL = "https://llm.runninghub.cn/v1";
 const qsEl = (id) => document.getElementById(id);
 
 let maskedTokenValue = "";
@@ -363,7 +364,7 @@ function fillSetupForm(resp) {
   qsEl("botTokenStatus").textContent = configuredText(runtime, "telegram_bot_token");
   qsEl("setupBotState").textContent = runtime.telegram_bot_token_configured ? "已配置" : "尚未配置";
 
-  qsEl("llmBaseUrl").value = runtime.llm_base_url || "https://llm.runninghub.ai/v1";
+  qsEl("llmBaseUrl").value = runtime.llm_base_url || DEFAULT_LLM_BASE_URL;
   maskedTextKeyValue = runtime.llm_api_key_gpt_masked || runtime.llm_api_key_masked || "";
   const textKeyInput = qsEl("llmApiKey");
   if (textKeyInput && document.activeElement !== textKeyInput) textKeyInput.value = displayMaskedInput(maskedTextKeyValue);
@@ -431,7 +432,7 @@ async function saveModelConfig() {
     quickApplyRunningHubPresetToHidden("persona");
     quickApplyRunningHubPresetToHidden("tweet");
     const payload = {
-      llm_base_url: qsEl("llmBaseUrl")?.value.trim() || "https://llm.runninghub.ai/v1",
+      llm_base_url: qsEl("llmBaseUrl")?.value.trim() || DEFAULT_LLM_BASE_URL,
       image_model_provider_base_url: qsEl("imageBaseUrl")?.value.trim() || "http://202.90.21.53:3008",
       new_persona_runninghub_base_url: qsEl("newPersonaRunningHubBaseUrl")?.value.trim() || "https://www.runninghub.ai",
       new_persona_runninghub_persona_t2i_detail_url: qsEl("newPersonaPersonaT2iDetailUrl")?.value.trim() || "https://www.runninghub.cn/call-api/api-detail/2046514150500524033",
