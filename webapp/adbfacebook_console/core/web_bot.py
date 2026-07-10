@@ -2733,7 +2733,7 @@ def _dt(ts: Any) -> str:
 
 
 def _btn(label: str, action: str, style: str = "tg") -> dict[str, str]:
-    return {"label": to_traditional(label), "action": action, "style": style}
+    return {"label": str(label), "action": action, "style": style}
 
 
 def _rows(*rows: list[dict[str, str]]) -> list[list[dict[str, str]]]:
@@ -2756,7 +2756,7 @@ def _message(
     actions = [button for row in keyboard for button in row]
     payload: dict[str, Any] = {
         "role": "bot",
-        "text": to_traditional(text),
+        "text": str(text),
         "keyboard": keyboard,
         "actions": actions,
         "cards": _traditionalize_cards(cards or []),
@@ -2810,33 +2810,17 @@ def _main_keyboard() -> list[list[dict[str, str]]]:
     )
 
 
-def _main_keyboard() -> list[list[dict[str, str]]]:
-    return _rows(
-        [_btn("👤 我的人設", "list_personas"), _btn("🔐 帳號管理", "accounts_console")],
-        [_btn("📱 智能體手機管理", "pad_mgmt"), _btn("📊 排程狀態", "menu_status")],
-        [_btn("⏰ 定時任務", "schedule_publish"), _btn("🔥 熱點資料看板", "dashboard")],
-        [_btn("🧩 AI 圖像工作流", "image_menu"), _btn("🎬 影片/數字人", "video_menu")],
-        [_btn("📊 來源任務狀態", "source_status"), _btn("⚙️ 後台工作流配置", "source_runtime_config")],
-        [_btn("🧭 TG 全功能", "capabilities"), _btn("🚀 矩陣發布", "matrix_start")],
-        [_btn("🛑 強制中止目前任務", "force_stop_current_task", "danger")],
-    )
-
-
 def _main_menu() -> dict[str, Any]:
-    counts = PersonaRepo.counts()
     devices = _active_devices()
-    tasks = _task_counts(_visible_tasks(limit=10000))
+    default_pad_code = devices[0].pad_code if devices else "未設定"
     text = "\n".join(
         [
-            "数字人短视频-R18 机器人",
+            "🤖 自動化推文營運控制台",
             "",
-            "请选择要执行的操作。",
+            f"預設智能體手機：{default_pad_code}",
+            "預設平台：Threads",
             "",
-            f"人设：{counts.get('total', 0)} 个",
-            f"智能体手机：{len(devices)} 台",
-            f"待发布任务：{tasks.get('pending', 0)} 条",
-            "",
-            f"已载入 Telegram 来源功能：{SOURCE_ROOT}",
+            "你可以直接發送自然語言指令，也可以點擊按鈕操作：",
         ]
     )
     return _response(_message(text, _main_keyboard()), state={"flow": ""})
@@ -3185,16 +3169,7 @@ def _persona_hot_text(row: dict[str, Any]) -> str:
 
 
 def _personas_menu(page: int = 0, bind_filter: str = "all") -> dict[str, Any]:
-    source_rows = _persona_menu_rows()
-    active_pads = {device.pad_code for device in _active_devices()}
-    all_rows = []
-    for row in source_rows:
-        _, pad_code = _persona_bound_info(row)
-        if pad_code and active_pads and pad_code not in active_pads:
-            continue
-        all_rows.append(row)
-    all_rows.sort(key=lambda row: _persona_row_name(row).lower())
-    personas = all_rows
+    personas = _persona_menu_rows()
     page_action = "list_personas"
     page_size = 8
     total_pages = max(1, (len(personas) + page_size - 1) // page_size)
@@ -3216,7 +3191,7 @@ def _personas_menu(page: int = 0, bind_filter: str = "all") -> dict[str, Any]:
         persona_id = str(row.get("id") or row.get("name") or "").strip()
         if not persona_id:
             continue
-        keyboard.append([_btn(_persona_action_label(row)[:48], f"pd_{persona_id}")])
+        keyboard.append([_btn(_persona_action_label(row), f"pd_{persona_id}")])
     if total_pages > 1:
         if safe_page > 0:
             keyboard.append(
@@ -9083,53 +9058,84 @@ def _matrix_selected_personas(draft: dict[str, Any]) -> list[Persona]:
     return personas
 
 
+def _matrix_persona_rows() -> list[tuple[Persona, dict[str, Any]]]:
+    result: list[tuple[Persona, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for row in _persona_menu_rows():
+        persona_id = str(row.get("id") or "").strip()
+        if not persona_id or persona_id in seen:
+            continue
+        persona = _ensure_local_persona_from_row(row, PersonaRepo.get(persona_id))
+        if not persona:
+            continue
+        result.append((persona, row))
+        seen.add(persona.id)
+    return result
+
+
 def _matrix_start() -> dict[str, Any]:
-    personas = PersonaRepo.list_all(limit=24)
-    if not personas:
+    rows = _matrix_persona_rows()
+    if not rows:
         return _response(_message("目前沒有可矩陣發布的人設，請先建立新的人設。", [[_btn("➕ 建立人設", "create_persona_entry")]]))
-    lines = ["🚀 矩陣發布", "", "請選擇要參與矩陣發布的人設："]
-    buttons = [_btn(f"☐ {_local_persona_display_name(persona)[:16]}", f"mxpt:{persona.id}") for persona in personas]
-    keyboard = _chunk_buttons(buttons, 2)
-    keyboard.extend(_rows([_btn("🧹 清本頁", "mxpclr")], [_btn("下一步：選擇來源（0）", "mxpc")], [_btn("◀️ 返回主選單", "menu")]))
-    return _response(_message("\n".join(lines), keyboard), state={"flow": "matrix_select", "draft": {"selected_personas": []}})
+    return _matrix_persona_selection({"selected_personas": [], "matrix_page": 0})
 
 
 def _matrix_persona_selection(draft: dict[str, Any], note: str = "") -> dict[str, Any]:
-    personas = PersonaRepo.list_all(limit=24)
+    rows = _matrix_persona_rows()
     selected = {str(item) for item in draft.get("selected_personas", []) if str(item).strip()}
-    lines = ["🚀 矩陣發布", "", f"已選人設：{len(selected)} 個", "請選擇要參與矩陣發布的人設："]
+    page_size = 8
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(_num(draft.get("matrix_page")), total_pages - 1))
+    visible = rows[page * page_size : (page + 1) * page_size]
+    draft["matrix_page"] = page
+    lines = ["🚀 矩陣發布", ""]
+    if total_pages > 1:
+        lines.extend([f"第 {page + 1}/{total_pages} 頁", ""])
+    lines.extend([f"已選人設：{len(selected)} 個", "請選擇要一起發布的人設。"])
     if note:
         lines.extend(["", note])
-    buttons = [
-        _btn(f"{'☑️' if persona.id in selected else '☐'} {_local_persona_display_name(persona)[:16]}", f"mxpt:{persona.id}")
-        for persona in personas
+    keyboard = [
+        [_btn(f"{'✅' if persona.id in selected else '⬜'} {_persona_action_label(row)}", f"mxpt_{persona.id}")]
+        for persona, row in visible
     ]
-    keyboard = _chunk_buttons(buttons, 2)
+    if total_pages > 1:
+        if page > 0:
+            keyboard.append([_btn("⏮ 首頁", "mxpg_0"), _btn("◀️ 上一頁", f"mxpg_{page - 1}")])
+        keyboard.append([_btn(f"{page + 1}/{total_pages}", f"mxpg_{page}")])
+        if page < total_pages - 1:
+            keyboard.append([_btn("下一頁 ▶️", f"mxpg_{page + 1}"), _btn("尾頁 ⏭", f"mxpg_{total_pages - 1}")])
     keyboard.extend(
         _rows(
-            [_btn("☑️ 全選本頁", "mxpsel"), _btn("🧹 清本頁", "mxpclr")],
+            [_btn("✅ 選本頁", "mxpsel"), _btn("🧹 清本頁", "mxpclr")],
             [_btn(f"下一步：選擇來源（{len(selected)}）", "mxpc")],
-            [_btn("◀️ 返回主選單", "menu")],
+            [_btn("◀️ 返回人設列表", "list_personas")],
         )
     )
-    return _response(_message("\n".join(lines), keyboard), state={"flow": "matrix_select", "draft": {"selected_personas": sorted(selected)}})
+    draft["selected_personas"] = sorted(selected)
+    return _response(_message("\n".join(lines), keyboard), state={"flow": "matrix_select", "draft": draft})
 
 
 def _matrix_toggle_persona(action: str, state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     selected = {str(item) for item in draft.get("selected_personas", []) if str(item).strip()}
-    personas = PersonaRepo.list_all(limit=24)
-    valid_ids = {persona.id for persona in personas}
-    if action.startswith("mxpt:"):
-        persona_id = action.split(":", 1)[1]
+    rows = _matrix_persona_rows()
+    valid_ids = {persona.id for persona, _ in rows}
+    page_size = 8
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(_num(draft.get("matrix_page")), total_pages - 1))
+    visible_ids = {persona.id for persona, _ in rows[page * page_size : (page + 1) * page_size]}
+    if action.startswith("mxpg_"):
+        draft["matrix_page"] = max(0, min(_num(action[len("mxpg_") :]), total_pages - 1))
+    elif action.startswith("mxpt_"):
+        persona_id = action[len("mxpt_") :]
         if persona_id in selected:
             selected.remove(persona_id)
         elif persona_id in valid_ids:
             selected.add(persona_id)
     elif action == "mxpsel":
-        selected.update(valid_ids)
+        selected.update(visible_ids)
     elif action == "mxpclr":
-        selected.clear()
+        selected.difference_update(visible_ids)
     draft["selected_personas"] = sorted(selected)
     return _matrix_persona_selection(draft)
 
@@ -10071,7 +10077,7 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _publish_history(action)
     if action == "matrix_start":
         return _matrix_start()
-    if action.startswith("mxpt:") or action in {"mxpsel", "mxpclr"}:
+    if action.startswith("mxpg_") or action.startswith("mxpt_") or action in {"mxpsel", "mxpclr"}:
         return _matrix_toggle_persona(action, state)
     if action in {"mxpc", "mxb_source"}:
         return _matrix_source_menu(state)
