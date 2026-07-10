@@ -4124,6 +4124,145 @@ async function refreshThreadsOwnPostReplyTargetViewCounts(
   return out;
 }
 
+export async function runThreadsOwnPostReplyOnce(
+  input: {
+    archiveId: string;
+    padCode: string;
+    replyMode: "manual" | "ai";
+    replyText?: string;
+    minViews: number;
+    maxAgeDays: number;
+    dryRun?: boolean;
+  },
+  onProgress?: (progress: ThreadsOwnPostReplyProgress) => void,
+) {
+  const archiveId = String(input.archiveId || "").trim();
+  const padCode = String(input.padCode || "").trim();
+  const replyMode = input.replyMode;
+  const replyText = String(input.replyText || "").trim();
+  const minViews = Number(input.minViews);
+  const maxAgeDays = Number(input.maxAgeDays);
+  const dryRun = input.dryRun === true;
+  if (!archiveId) throw new Error("missing archiveId");
+  if (!padCode) throw new Error("missing padCode");
+  if (replyMode !== "manual" && replyMode !== "ai") throw new Error("replyMode must be manual or ai");
+  if (replyMode === "manual" && !replyText) throw new Error("replyText is required when replyMode is manual");
+  if (!Number.isFinite(minViews) || minViews < 0) throw new Error("minViews must be a non-negative number");
+  if (!Number.isFinite(maxAgeDays) || maxAgeDays < 1) throw new Error("maxAgeDays must be at least 1");
+
+  const archive = await loadPersonaArchive(archiveId);
+  if (!archive) throw new Error("persona archive not found");
+  const resolvedTargets = await resolvePublishedThreadsOwnPostReplyTargets(archive);
+  const allTargets = await refreshThreadsOwnPostReplyTargetViewCounts(resolvedTargets.targets, {
+    enabled: minViews > 0,
+    limit: 5,
+  });
+  const targets = filterUnrepliedThreadsOwnPostTargets(resolvedTargets.archive, allTargets, {
+    minViews: Math.floor(minViews),
+    maxAgeDays: Math.floor(maxAgeDays),
+  }).slice(0, 5);
+  const base = {
+    archiveId,
+    padCode,
+    dryRun,
+    recovered: resolvedTargets.recovered,
+    scanned: allTargets.length,
+    matched: targets.length,
+  };
+  if (dryRun || !targets.length) {
+    return {
+      ...base,
+      executionScanned: 0,
+      replied: 0,
+      skipped: 0,
+      targetReplies: 0,
+      repliedUrls: [] as string[],
+      repliedComments: [] as Array<{ url: string; comment: string }>,
+      replyScreenshots: [] as string[],
+      error: targets.length ? undefined : "no matching unreplied published Threads posts",
+    };
+  }
+
+  const result = await replyOwnPublishedThreadsPosts(
+    resolveVmosCredentials(),
+    padCode,
+    {
+      targets,
+      replyMode,
+      replyText,
+      maxPosts: 5,
+      maxReplies: 3,
+      commentPersona: buildWarmupCommentPersonaFromArchive(resolvedTargets.archive),
+    },
+    onProgress,
+  );
+
+  if (result.repliedUrls?.length) {
+    const latestArchive = await loadPersonaArchive(archiveId).catch(() => resolvedTargets.archive) || resolvedTargets.archive;
+    const existing = getThreadsOwnPostReplyHistory(latestArchive);
+    const existingUrls = new Set(existing.map((item) => item.url));
+    const nowIso = new Date().toISOString();
+    const commentsByUrl = new Map((result.repliedComments || []).map((item) => [
+      normalizeThreadsOwnPostReplyHistoryUrl(item.url),
+      item.comment,
+    ]));
+    const targetByUrl = new Map(targets.map((target) => [
+      normalizeThreadsOwnPostReplyHistoryUrl(target.url),
+      target,
+    ]));
+    const appended = result.repliedUrls
+      .map((url) => ({
+        url: normalizeThreadsOwnPostReplyHistoryUrl(url),
+        replyText: commentsByUrl.get(normalizeThreadsOwnPostReplyHistoryUrl(url)) || replyText,
+        repliedAt: nowIso,
+      }))
+      .filter((item) => item.url && !existingUrls.has(item.url));
+    const existingKnownTargets = Array.isArray((latestArchive.setup as any)?.threadsOwnPostAutoReply?.knownPostTargets)
+      ? (latestArchive.setup as any).threadsOwnPostAutoReply.knownPostTargets
+      : [];
+    const knownTargetByUrl = new Map(existingKnownTargets
+      .map((item: any) => [normalizeThreadsOwnPostReplyHistoryUrl(item?.url), item])
+      .filter(([url]) => Boolean(url)));
+    for (const url of result.repliedUrls) {
+      const normalizedUrl = normalizeThreadsOwnPostReplyHistoryUrl(url);
+      if (!normalizedUrl || knownTargetByUrl.has(normalizedUrl)) continue;
+      const target = targetByUrl.get(normalizedUrl);
+      knownTargetByUrl.set(normalizedUrl, {
+        url: normalizedUrl,
+        label: target?.label || "known-own-post",
+        expectedText: target?.expectedText || "",
+        viewCount: target?.viewCount,
+        publishedAt: target?.publishedAt,
+        rememberedAt: nowIso,
+      });
+    }
+    if (appended.length || knownTargetByUrl.size !== existingKnownTargets.length) {
+      await updatePersonaArchiveProfile(archiveId, {
+        setup: {
+          ...(latestArchive.setup || {}),
+          threadsOwnPostAutoReply: {
+            ...((latestArchive.setup as any)?.threadsOwnPostAutoReply || {}),
+            repliedPosts: appended.length ? [...existing, ...appended].slice(-500) : existing,
+            knownPostTargets: [...knownTargetByUrl.values()].slice(-500),
+          },
+        } as any,
+      });
+    }
+  }
+
+  return {
+    ...base,
+    executionScanned: result.scannedPosts,
+    replied: result.replied,
+    skipped: result.skipped,
+    targetReplies: result.targetReplies,
+    repliedUrls: result.repliedUrls || [],
+    repliedComments: result.repliedComments || [],
+    replyScreenshots: result.replyScreenshots || [],
+    error: result.error,
+  };
+}
+
 function formatThreadsOwnPostReplyProgressLines(
   progress: ThreadsOwnPostReplyProgress,
   args: { persona: string; padName: string },
@@ -18601,36 +18740,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const creds = resolveVmosCredentials();
-      const resolvedTargets = await resolvePublishedThreadsOwnPostReplyTargets(archive);
-      let allTargets = resolvedTargets.targets;
-      const effectiveArchive = resolvedTargets.archive;
-      if (resolvedTargets.recovered > 0) {
-        console.log(`[telegram][own-post-auto-reply][url-recovered] archive=${id} recovered=${resolvedTargets.recovered} targets=${allTargets.length}`);
-      }
-      allTargets = await refreshThreadsOwnPostReplyTargetViewCounts(allTargets, {
-        enabled: runState.minViews > 0,
-        limit: 5,
-      });
-      const targets = filterUnrepliedThreadsOwnPostTargets(effectiveArchive, allTargets, {
-        minViews: runState.minViews,
-        maxAgeDays: runState.maxAgeDays,
-      }).slice(0, 5);
-      if (!targets.length) {
-        await safeEditOrSend(bot, chatId, msgId, [
-          "ℹ️ 沒有符合條件的已發布 Threads 推文。",
-          "",
-          `人設：${archive.name}`,
-          `已發布連結：${allTargets.length} 篇`,
-          `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
-          `查看天數：${runState.maxAgeDays} 天內`,
-          "",
-          "可能原因：沒有真實發布連結、瀏覽量不足、超出天數、或已回覆過。",
-        ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
-        });
-        return;
-      }
       const padOperationKey = `threads-own-post-autoreply:${boundPad.padCode}:${chatId}:${Date.now()}`;
       if (!(await acquireRuntimePadOperation(chatId, boundPad.padCode, padOperationKey, "Threads自動回覆熱點推文"))) return;
       const stopTyping = startTelegramTyping(bot, chatId);
@@ -18641,7 +18750,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "",
           `人設：${archive.name}`,
           `智能體手機：${boundPad.padName}`,
-          `目標：${targets.length} 篇`,
+          "目標：條件篩選後最多 5 篇",
           `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
           `查看天數：${runState.maxAgeDays} 天內`,
           "",
@@ -18649,16 +18758,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         ].join("\n"), {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
         });
-        const result = await replyOwnPublishedThreadsPosts(
-          creds,
-          boundPad.padCode,
+        const result = await runThreadsOwnPostReplyOnce(
           {
-            targets,
+            archiveId: id,
+            padCode: boundPad.padCode,
             replyMode: runState.replyMode,
             replyText: runState.replyText || "",
-            maxPosts: 5,
-            maxReplies: 3,
-            commentPersona: buildWarmupCommentPersonaFromArchive(effectiveArchive),
+            minViews: runState.minViews,
+            maxAgeDays: runState.maxAgeDays,
+            dryRun: false,
           },
           (p) => {
             assertPadOperationNotCancelled(padOperationKey);
@@ -18671,71 +18779,25 @@ function sendMainMenu(chatId: number, msgId?: number) {
         );
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
-        if (result.repliedUrls?.length) {
-          const latestArchive = await loadPersonaForThisBot(id).catch(() => archive) || archive;
-          const existing = getThreadsOwnPostReplyHistory(latestArchive);
-          const existingUrls = new Set(existing.map((item) => item.url));
-          const nowIso = new Date().toISOString();
-          const commentsByUrl = new Map((result.repliedComments || []).map((item) => [
-            normalizeThreadsOwnPostReplyHistoryUrl(item.url),
-            item.comment,
-          ]));
-          const targetByUrl = new Map(targets.map((target) => [
-            normalizeThreadsOwnPostReplyHistoryUrl(target.url),
-            target,
-          ]));
-          const appended = result.repliedUrls
-            .map((url) => ({
-              url: normalizeThreadsOwnPostReplyHistoryUrl(url),
-              replyText: commentsByUrl.get(normalizeThreadsOwnPostReplyHistoryUrl(url)) || runState.replyText || "",
-              repliedAt: nowIso,
-            }))
-            .filter((item) => item.url && !existingUrls.has(item.url));
-          const existingKnownTargets = Array.isArray((latestArchive.setup as any)?.threadsOwnPostAutoReply?.knownPostTargets)
-            ? (latestArchive.setup as any).threadsOwnPostAutoReply.knownPostTargets
-            : [];
-          const knownTargetByUrl = new Map(existingKnownTargets
-            .map((item: any) => [normalizeThreadsOwnPostReplyHistoryUrl(item?.url), item])
-            .filter(([url]) => Boolean(url)));
-          for (const url of result.repliedUrls) {
-            const normalizedUrl = normalizeThreadsOwnPostReplyHistoryUrl(url);
-            if (!normalizedUrl || knownTargetByUrl.has(normalizedUrl)) continue;
-            const target = targetByUrl.get(normalizedUrl);
-            knownTargetByUrl.set(normalizedUrl, {
-              url: normalizedUrl,
-              label: target?.label || "known-own-post",
-              expectedText: target?.expectedText || "",
-              viewCount: target?.viewCount,
-              publishedAt: target?.publishedAt,
-              rememberedAt: nowIso,
-            });
-          }
-          if (appended.length) {
-            await updatePersonaArchiveProfile(id, {
-              setup: {
-                ...(latestArchive.setup || {}),
-                threadsOwnPostAutoReply: {
-                  ...((latestArchive.setup as any)?.threadsOwnPostAutoReply || {}),
-                  repliedPosts: [...existing, ...appended].slice(-500),
-                  knownPostTargets: [...knownTargetByUrl.values()].slice(-500),
-                },
-              } as any,
-            });
-          } else if (knownTargetByUrl.size !== existingKnownTargets.length) {
-            await updatePersonaArchiveProfile(id, {
-              setup: {
-                ...(latestArchive.setup || {}),
-                threadsOwnPostAutoReply: {
-                  ...((latestArchive.setup as any)?.threadsOwnPostAutoReply || {}),
-                  knownPostTargets: [...knownTargetByUrl.values()].slice(-500),
-                },
-              } as any,
-            });
-          }
+        if (!result.matched) {
+          pendingThreadsOwnPostReplyRuns.delete(chatId);
+          await safeEditOrSend(bot, chatId, msgId, [
+            "ℹ️ 沒有符合條件的已發布 Threads 推文。",
+            "",
+            `人設：${archive.name}`,
+            `已發布連結：${result.scanned} 篇`,
+            `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
+            `查看天數：${runState.maxAgeDays} 天內`,
+            "",
+            "可能原因：沒有真實發布連結、瀏覽量不足、超出天數、或已回覆過。",
+          ].join("\n"), {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
+          });
+          return;
         }
         pendingThreadsOwnPostReplyRuns.delete(chatId);
         const screenshots = result.replyScreenshots?.length ? result.replyScreenshots : lastProgress?.replyScreenshots || [];
-        await bot.sendMessage(chatId, `✅ Threads 自動回覆熱點推文完成\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n已掃描：${result.scannedPosts}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
+        await bot.sendMessage(chatId, `✅ Threads 自動回覆熱點推文完成\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n已掃描：${result.executionScanned}\n已回覆：${result.replied}\n已跳過：${result.skipped}${result.error ? `\n補充：${result.error}` : ""}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
         });
         for (let i = 0; i < screenshots.length; i += 1) {

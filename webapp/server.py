@@ -15883,6 +15883,18 @@ def _run_threads_auto_reply(task_id: str, payload: dict[str, Any]) -> dict[str, 
     )
 
 
+def _run_threads_own_post_reply(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "threads_own_post_reply",
+        "threads-own-post-reply-once.ts",
+        "threads-own-post-reply-input.json",
+        default_timeout=1800,
+        force_dry_run_false=True,
+    )
+
+
 def _run_persona_generate_posts(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return _run_tool_r18_skill_task(
         task_id,
@@ -15950,6 +15962,16 @@ def _run_persona_publish_post(task_id: str, payload: dict[str, Any]) -> dict[str
     )
 
 
+def _run_persona_enqueue_posts(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_enqueue_posts",
+        "persona-enqueue-posts-once.ts",
+        "persona-enqueue-posts-input.json",
+    )
+
+
 TASK_RUNNERS = {
     "text_to_image": _run_text_to_image_disabled,
     "replace_model": _run_replace_model,
@@ -15972,12 +15994,14 @@ TASK_RUNNERS = {
     "threads_login": _run_threads_login,
     "threads_account_query": _run_threads_account_query,
     "threads_auto_reply": _run_threads_auto_reply,
+    "threads_own_post_reply": _run_threads_own_post_reply,
     "persona_generate_posts": _run_persona_generate_posts,
     "persona_create": _run_persona_create,
     "persona_rewrite_intro": _run_persona_rewrite_intro,
     "persona_generate_image": _run_persona_generate_image,
     "persona_generate_post_image": _run_persona_generate_post_image,
     "persona_publish_post": _run_persona_publish_post,
+    "persona_enqueue_posts": _run_persona_enqueue_posts,
 }
 TG_AGENT_PRODUCTION_TASK_TYPES = set(TASK_RUNNERS.keys())
 
@@ -16825,6 +16849,24 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
             normalized["platform"] = platform
         return normalized
 
+    if typ == "persona_enqueue_posts":
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        post_ids = payload.get("postIds") if isinstance(payload.get("postIds"), list) else []
+        pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+        platform = str(payload.get("platform") or "threads").strip().lower()
+        scheduled_at = str(payload.get("scheduledAt") or payload.get("scheduled_at") or "").strip()
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="persona_enqueue_posts requires archiveId")
+        if not post_ids or not all(str(item).strip() for item in post_ids):
+            raise HTTPException(status_code=400, detail="persona_enqueue_posts requires postIds")
+        if not pad_code:
+            raise HTTPException(status_code=400, detail="persona_enqueue_posts requires padCode")
+        if platform not in {"threads", "telegram"}:
+            raise HTTPException(status_code=400, detail="persona_enqueue_posts platform must be threads or telegram")
+        if not scheduled_at:
+            raise HTTPException(status_code=400, detail="persona_enqueue_posts requires scheduledAt")
+        return {"archiveId": archive_id, "postIds": [str(item).strip() for item in post_ids], "padCode": pad_code, "platform": platform, "scheduledAt": scheduled_at}
+
     if typ == "threads_warmup":
         pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
         if not pad_code:
@@ -16843,6 +16885,23 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         payload["maxLikes"] = max(_to_int(payload.get("maxLikes") or payload.get("max_likes"), 1), 1) if mode in {"like", "both"} else 0
         payload["maxComments"] = max(_to_int(payload.get("maxComments") or payload.get("max_comments"), 1), 1) if mode in {"comment", "both"} else 0
         return payload
+
+    if typ == "threads_own_post_reply":
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+        reply_mode = str(payload.get("replyMode") or payload.get("reply_mode") or "ai").strip().lower()
+        reply_text = str(payload.get("replyText") or payload.get("reply_text") or "").strip()
+        min_views = max(_to_int(payload.get("minViews") or payload.get("min_views"), 0), 0)
+        max_age_days = min(max(_to_int(payload.get("maxAgeDays") or payload.get("max_age_days"), 2), 1), 7)
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="threads_own_post_reply requires archiveId")
+        if not pad_code:
+            raise HTTPException(status_code=400, detail="threads_own_post_reply requires padCode")
+        if reply_mode not in {"manual", "ai"}:
+            raise HTTPException(status_code=400, detail="threads_own_post_reply replyMode must be manual or ai")
+        if reply_mode == "manual" and not reply_text:
+            raise HTTPException(status_code=400, detail="threads_own_post_reply manual mode requires replyText")
+        return {"archiveId": archive_id, "padCode": pad_code, "replyMode": reply_mode, "replyText": reply_text, "minViews": min_views, "maxAgeDays": max_age_days}
 
     if typ == "threads_profile_update":
         pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
@@ -20474,7 +20533,7 @@ def create_app() -> FastAPI:
                     }
                     if persona_task_type in {
                         "persona_generate_posts", "persona_create", "persona_rewrite_intro",
-                        "persona_generate_image", "persona_generate_post_image", "persona_publish_post",
+                        "persona_generate_image", "persona_generate_post_image", "persona_publish_post", "persona_enqueue_posts",
                     }
                     else {}
                 ),

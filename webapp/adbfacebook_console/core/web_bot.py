@@ -7739,6 +7739,156 @@ def _persona_autoreply_mode_menu(persona_id: str) -> dict[str, Any]:
     )
 
 
+def _own_reply_mode_menu(persona_id: str) -> dict[str, Any]:
+    persona, row = _resolve_persona_for_action(persona_id)
+    if not persona and not row:
+        return _response(_message("沒有找到這個人設。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+    if persona:
+        persona_id = persona.id
+    name = persona.name if persona else _persona_row_name(row or {})
+    history = row.get("publish_history") if isinstance((row or {}).get("publish_history"), list) else []
+    return _response(
+        _message(
+            "\n".join(
+                [
+                    "🔥 自動回覆熱點推文",
+                    "",
+                    f"人設：{name}",
+                    f"可回覆推文：{len(history)} 篇",
+                    "",
+                    "請選擇回覆分支：",
+                    "1. 自定義內容回覆：找到符合條件的自己主推文後，直接發送你輸入的內容。",
+                    "2. AI 自動回覆：根據目前人設和推文內容自動生成自然回覆。",
+                ]
+            ),
+            _rows(
+                [_btn("✍️ 使用自定義內容回覆", f"ownreply_mode_manual_{persona_id}")],
+                [_btn("🤖 AI 根據人設自動回覆", f"ownreply_mode_ai_{persona_id}")],
+                [_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")],
+            ),
+        ),
+        state={"flow": ""},
+    )
+
+
+def _own_reply_mode_start(action: str) -> dict[str, Any]:
+    manual = action.startswith("ownreply_mode_manual_")
+    prefix = "ownreply_mode_manual_" if manual else "ownreply_mode_ai_"
+    persona_id = action[len(prefix) :]
+    persona, _row = _resolve_persona_for_action(persona_id)
+    if not persona:
+        return _response(_message("沒有找到本地人設。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+    draft = {"persona_id": persona.id, "reply_mode": "manual" if manual else "ai"}
+    if manual:
+        return _response(
+            _message(
+                f"🔥 自動回覆熱點推文\n\n人設：{persona.name}\n回覆模式：使用自定義內容\n\n請直接輸入要回覆到自己已發布主推文內的內容。",
+                [[_btn("◀️ 返回分支選擇", f"persona_autoreply_hot_{persona.id}")]],
+            ),
+            state={"flow": "ownreply_reply_text", "draft": draft},
+        )
+    return _own_reply_views_prompt(draft)
+
+
+def _own_reply_views_prompt(draft: dict[str, Any]) -> dict[str, Any]:
+    persona_id = str(draft.get("persona_id") or "")
+    persona = PersonaRepo.get(persona_id)
+    mode = "使用自定義內容" if draft.get("reply_mode") == "manual" else "AI 根據人設和推文自動回覆"
+    lines = ["🔥 自動回覆熱點推文", "", f"人設：{persona.name if persona else persona_id}", f"回覆模式：{mode}"]
+    if draft.get("reply_text"):
+        lines.append(f"回覆內容：{draft.get('reply_text')}")
+    lines.extend(["", "請輸入瀏覽量門檻。", "只有已發布推文瀏覽量大於等於這個值時才會自動評論。", "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。"])
+    rows = []
+    if draft.get("reply_mode") == "manual":
+        rows.append([_btn("✏️ 重新編輯文案", f"ownreply_text_{persona_id}")])
+    rows.append([_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")])
+    return _response(_message("\n".join(lines), rows), state={"flow": "ownreply_views", "draft": draft})
+
+
+def _parse_own_reply_views(text: str) -> int | None:
+    raw = str(text or "").strip().lower().replace(",", "")
+    multiplier = 10000 if raw.endswith(("萬", "万")) else 1
+    if multiplier != 1:
+        raw = raw[:-1].strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return max(0, int(value * multiplier))
+
+
+def _own_reply_days_prompt(draft: dict[str, Any]) -> dict[str, Any]:
+    persona_id = str(draft.get("persona_id") or "")
+    persona = PersonaRepo.get(persona_id)
+    mode = "使用自定義內容" if draft.get("reply_mode") == "manual" else "AI 根據人設和推文自動回覆"
+    return _response(
+        _message(
+            "\n".join(
+                [
+                    "🔥 自動回覆熱點推文",
+                    "",
+                    f"人設：{persona.name if persona else persona_id}",
+                    f"回覆模式：{mode}",
+                    f"瀏覽量條件：大於等於 {_compact(draft.get('min_views'))}",
+                    "",
+                    "請輸入查看天數，規則和自動回覆評論一致。",
+                    "可輸入：1-7，例如：2。",
+                ]
+            ),
+            _rows([_btn("👁 重新設定瀏覽量", f"ownreply_views_{persona_id}")], [_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]),
+        ),
+        state={"flow": "ownreply_days", "draft": draft},
+    )
+
+
+def _own_reply_confirmation(draft: dict[str, Any]) -> dict[str, Any]:
+    persona_id = str(draft.get("persona_id") or "")
+    persona = PersonaRepo.get(persona_id)
+    return _response(
+        _message(
+            "\n".join(
+                [
+                    "🔥 自動回覆熱點推文確認",
+                    "",
+                    f"人設：{persona.name if persona else persona_id}",
+                    "平台：Threads",
+                    f"回覆模式：{'使用自定義內容' if draft.get('reply_mode') == 'manual' else 'AI 根據人設和推文自動回覆'}",
+                    f"瀏覽量條件：大於等於 {_compact(draft.get('min_views'))}",
+                    f"查看天數：{draft.get('max_age_days')} 天",
+                    "",
+                    "確認後才會建立真實回覆任務。",
+                ]
+            ),
+            _rows([_btn("✅ 開始自動回覆", "ownreply_run")], [_btn("◀️ 返回設定天數", f"ownreply_days_{persona_id}")]),
+        ),
+        state={"flow": "ownreply_confirm", "draft": draft},
+    )
+
+
+def _own_reply_submit(state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    persona_id = str(draft.get("persona_id") or "")
+    persona, row = _resolve_persona_for_action(persona_id)
+    archive_id = _tool_r18_archive_id(persona_id, persona, row)
+    if not persona or not archive_id or not persona.pad_code:
+        return _response(_message("人設、來源歸檔或綁定智能體手機已失效，請重新設定。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]), state={"flow": ""})
+    params = {
+        "archiveId": archive_id,
+        "padCode": persona.pad_code,
+        "replyMode": str(draft.get("reply_mode") or "ai"),
+        "replyText": str(draft.get("reply_text") or ""),
+        "minViews": max(0, _num(draft.get("min_views"))),
+        "maxAgeDays": max(1, min(_num(draft.get("max_age_days")), 7)),
+        "dryRun": False,
+    }
+    job = SourceWorkflowJobRepo.create("threads_own_post_reply", f"熱點推文自動回覆：{persona.name}", params, status="submitting")
+    _submit_source_task_job_async(job.id, "threads_own_post_reply", params)
+    return _response(
+        _message("✅ 已提交真實熱點推文回覆任務。", _rows([_btn("📊 查看來源任務", "source_tasks")], [_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")])),
+        state={"flow": ""},
+    )
+
+
 def _persona_warmup_platform_menu(persona_id: str) -> dict[str, Any]:
     persona = PersonaRepo.get(persona_id)
     if not persona:
@@ -9086,6 +9236,24 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
     if flow == "automation_fixed_reply" and persona:
         kind = str(draft.get("kind") or "auto_reply_comments")
         return _automation_run(f"automation_run:{kind}:fixed:{persona_id}", custom_content=text)
+    if flow == "ownreply_reply_text" and persona:
+        if not text or len(text) > 220:
+            return _response(_message("❌ 回覆內容格式不正確，請輸入 1-220 字的回覆內容。", [[_btn("◀️ 返回分支選擇", f"persona_autoreply_hot_{persona_id}")]]), state=state)
+        draft["reply_text"] = text
+        draft["reply_mode"] = "manual"
+        return _own_reply_views_prompt(draft)
+    if flow == "ownreply_views" and persona:
+        min_views = _parse_own_reply_views(text)
+        if min_views is None:
+            return _response(_message("❌ 瀏覽量格式不正確，請輸入數字，例如：10000、1萬、2.5萬。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]), state=state)
+        draft["min_views"] = min_views
+        return _own_reply_days_prompt(draft)
+    if flow == "ownreply_days" and persona:
+        days = _num(text)
+        if not 1 <= days <= 7:
+            return _response(_message("❌ 查看天數格式不正確。\n\n請輸入 1-7 之間的數字，例如：2。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]), state=state)
+        draft["max_age_days"] = days
+        return _own_reply_confirmation(draft)
     if flow == "threads_profile_update" and persona:
         return _threads_profile_submit(persona_id, str(draft.get("kind") or ""), text)
     if flow == "threads_login_username" and persona:
@@ -9350,6 +9518,12 @@ def _matrix_selected_personas(draft: dict[str, Any]) -> list[Persona]:
     return personas
 
 
+def _matrix_real_posts(persona_id: str) -> tuple[str, Persona | None, dict[str, Any] | None, list[dict[str, Any]]]:
+    local, row = _resolve_persona_for_action(persona_id)
+    archive_id = _tool_r18_archive_id(persona_id, local, row)
+    return archive_id, local, row, _source_pending_posts(row) if archive_id else []
+
+
 def _matrix_persona_rows() -> list[tuple[Persona, dict[str, Any]]]:
     result: list[tuple[Persona, dict[str, Any]]] = []
     seen: set[str] = set()
@@ -9463,9 +9637,13 @@ def _matrix_count_menu(action: str, state: dict[str, Any]) -> dict[str, Any]:
     platform = action.split("_", 1)[1] if action.startswith("mxplat_") else str(draft.get("matrix_platform") or "threads")
     draft["matrix_platform"] = platform
     source = str(draft.get("matrix_source") or "posts")
-    favorite_only = source == "favorites"
     personas = _matrix_selected_personas(draft)
-    counts = [_generated_posts_for_persona(persona.id, favorite_only=favorite_only) for persona in personas]
+    if source == "favorites":
+        return _response(
+            _message("收藏推文必须先按 TG Bot 流程回存为待发布推文，再执行矩阵发布。", [[_btn("◀️ 返回来源", "mxb_source")]]),
+            state={"flow": "matrix_source", "draft": draft},
+        )
+    counts = [_matrix_real_posts(persona.id)[3] for persona in personas]
     common_limit = min((len(items) for items in counts), default=0)
     lines = ["🚀 矩陣發布", "", f"人設：{len(personas)} 個", f"平台：{platform}", f"每個人設共同可發布上限：{common_limit} 篇", "", "請選擇每個人設要發布幾篇："]
     rows = [[_btn("1 篇", "mxc_1"), _btn("2 篇", "mxc_2")], [_btn("3 篇", "mxc_3"), _btn("每人全部", "mxc_all")], [_btn("◀️ 返回平台", "mxback_platform")]]
@@ -9478,16 +9656,15 @@ def _matrix_confirm(action: str, state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     token = action.split("_", 1)[1] if action.startswith("mxc_") else str(draft.get("matrix_count") or "1")
     source = str(draft.get("matrix_source") or "posts")
-    favorite_only = source == "favorites"
     personas = _matrix_selected_personas(draft)
-    common_limit = min((len(_generated_posts_for_persona(persona.id, favorite_only=favorite_only)) for persona in personas), default=0)
+    common_limit = min((len(_matrix_real_posts(persona.id)[3]) for persona in personas), default=0)
     count: int | str = "all" if token == "all" else _num(token)
     if common_limit <= 0 or (count != "all" and (count <= 0 or count > common_limit)):
         return _matrix_count_menu("mxplat_" + str(draft.get("matrix_platform") or "threads"), {"draft": draft})
     draft["matrix_count"] = count
     display_count = "每人全部" if count == "all" else f"每人 {count} 篇"
     source_label = "待發布推文" if source == "posts" else "收藏推文"
-    total = sum(len(_generated_posts_for_persona(persona.id, favorite_only=favorite_only)) if count == "all" else int(count) for persona in personas)
+    total = sum(len(_matrix_real_posts(persona.id)[3]) if count == "all" else int(count) for persona in personas)
     text = "\n".join(["🚀 矩陣發布確認", "", f"人設：{len(personas)} 個", f"來源：{source_label}", f"平台：{draft.get('matrix_platform') or 'threads'}", f"篇數：{display_count}", f"預計任務：{total} 條", "", "確認後會加入發布隊列。"])
     return _response(_message(text, _rows([_btn("🚀 開始矩陣發布", "mxrun", "primary")], [_btn("◀️ 返回篇數", "mxb_confirm")], [_btn("👤 重新選人設", "matrix_start")])), state={"flow": "matrix_confirm", "draft": draft})
 
@@ -9496,56 +9673,59 @@ def _matrix_run(state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     personas = _matrix_selected_personas(draft)
     source = str(draft.get("matrix_source") or "posts")
-    favorite_only = source == "favorites"
+    if source != "posts":
+        return _response(_message("目前只能从真实待发布推文执行矩阵发布。", [[_btn("◀️ 返回来源", "mxb_source")]]), state={"flow": "matrix_source", "draft": draft})
     count_value = draft.get("matrix_count") or 1
-    entries: list[dict[str, Any]] = []
+    submitted = 0
     missing: list[str] = []
     for persona in personas:
-        posts = _generated_posts_for_persona(persona.id, favorite_only=favorite_only)
-        if not posts:
+        archive_id, local, _row, posts = _matrix_real_posts(persona.id)
+        pad_code = str(local.pad_code or "").strip() if local else ""
+        if not archive_id or not posts or not pad_code:
             missing.append(_local_persona_display_name(persona))
             continue
         limit = len(posts) if count_value == "all" else min(int(count_value), len(posts))
-        username = _ensure_publish_account(persona)
-        for text in posts[:limit]:
-            entries.append({"username": username, "text": to_traditional(text), "scheduled_at": 0, "media_paths": "", "batch_dir": ""})
-        _record_post_memory(
-            persona.id,
-            "\n\n".join(posts[:limit]),
-            granularity="daily",
-            source_type="matrix_publish_queue",
-            title=f"矩陣發布佇列 {limit} 篇",
-            payload={"source": source, "platform": draft.get("matrix_platform") or "threads", "count": count_value},
-        )
-    if not entries:
+        for post in posts[:limit]:
+            post_id = str(post.get("id") or "").strip()
+            if not post_id:
+                continue
+            params = {
+                "archiveId": archive_id,
+                "postId": post_id,
+                "padCode": pad_code,
+                "platform": str(draft.get("matrix_platform") or "threads"),
+                "dryRun": False,
+            }
+            job = SourceWorkflowJobRepo.create("persona_publish_post", f"矩陣發布：{persona.name}", params, status="submitting")
+            _submit_source_task_job_async(job.id, "persona_publish_post", params)
+            submitted += 1
+    if not submitted:
         return _response(_message("❌ 沒有可建立的矩陣發布任務，請先生成或收藏推文。", [[_btn("◀️ 返回來源", "mxb_source")]]), state={"flow": "matrix_source", "draft": draft})
-    added = TaskRepo.add_many(traditionalize_task_entries(entries))
-    lines = ["✅ 已提交矩陣發布任務", "", f"任務數：{added}", f"人設：{len(personas)} 個"]
+    lines = ["✅ 已提交矩陣發布任務", "", f"來源真實發布任務：{submitted}", f"人設：{len(personas)} 個"]
     if missing:
         lines.extend(["", "以下人設沒有可發布推文：", *[f"• {name}" for name in missing[:6]]])
-    return _response(_message("\n".join(lines), _rows([_btn("📋 發布任務", "open:/tasks"), _btn("📊 排程狀態", "menu_status")], [_btn("返回主選單", "menu")])), state={"flow": ""})
+    return _response(_message("\n".join(lines), _rows([_btn("📊 來源任務", "source_tasks"), _btn("📊 排程狀態", "menu_status")], [_btn("返回主選單", "menu")])), state={"flow": ""})
 
 
 def _schedule_publish_start() -> dict[str, Any]:
-    personas = [persona for persona in PersonaRepo.list_all(limit=24) if _generated_posts_for_persona(persona.id)]
-    if not personas:
+    rows = [(persona, row) for persona, row in _matrix_persona_rows() if _matrix_real_posts(persona.id)[3]]
+    if not rows:
         return _response(_message("目前沒有可定時發布的人設，請先建立並生成推文。", [[_btn("➕ 建立人設", "create_persona_entry")], [_btn("◀️ 返回主選單", "menu")]]))
     lines = ["⏰ 定時發布", "", "請選擇要定時發布的人設："]
-    keyboard = _chunk_buttons([_btn(_local_persona_display_name(persona)[:18], f"sched_persona_{persona.id}") for persona in personas], 1)
+    keyboard = _chunk_buttons([_btn(_persona_action_label(row)[:18], f"sched_persona_{persona.id}") for persona, row in rows], 1)
     keyboard.append([_btn("◀️ 返回主選單", "menu")])
     return _response(_message("\n".join(lines), keyboard), state={"flow": "schedule_select_persona", "draft": {}})
 
 
 def _schedule_persona_posts(action: str) -> dict[str, Any]:
     persona_id = action[len("sched_persona_") :]
-    persona = PersonaRepo.get(persona_id)
-    posts = _generated_posts_for_persona(persona_id)
+    _archive_id, persona, _row, posts = _matrix_real_posts(persona_id)
     if not persona or not posts:
         return _response(_message("這個人設目前沒有待發布推文，請先生成推文。", [[_btn("◀️ 返回", "schedule_publish")]]))
     lines = ["⏰ 定時發布", "", f"已選擇人設：{_local_persona_display_name(persona)}", "", "請選擇要定時發布的推文："]
     keyboard = []
-    for index, text in enumerate(posts[:8]):
-        lines.extend(["", f"{index + 1}. {_memory_excerpt(text, 80)}"])
+    for index, post in enumerate(posts[:8]):
+        lines.extend(["", f"{index + 1}. {_memory_excerpt(post.get('content'), 80)}"])
         keyboard.append([_btn(f"第 {index + 1} 篇", f"sched_post_{persona_id}_{index}")])
     keyboard.append([_btn("◀️ 返回", "schedule_publish")])
     return _response(_message("\n".join(lines), keyboard), state={"flow": "schedule_select_post", "draft": {"persona_id": persona_id}})
@@ -9558,13 +9738,13 @@ def _schedule_platform(action: str) -> dict[str, Any]:
     persona_id, index_text = payload.rsplit("_", 1)
     if not index_text.isdigit():
         return _schedule_publish_start()
-    persona = PersonaRepo.get(persona_id)
-    posts = _generated_posts_for_persona(persona_id)
+    archive_id, persona, _row, posts = _matrix_real_posts(persona_id)
     index = int(index_text)
     if not persona or not (0 <= index < len(posts)):
         return _response(_message("沒有找到要定時發布的推文。", [[_btn("◀️ 返回", "schedule_publish")]]))
-    draft = {"persona_id": persona_id, "post_index": index, "post_text": posts[index], "platform": "threads"}
-    text = "\n".join(["⏰ 定時發布", "", f"人設：{_local_persona_display_name(persona)}", f"推文：{_memory_excerpt(posts[index], 100)}", "", "請選擇發布平台："])
+    post = posts[index]
+    draft = {"persona_id": persona_id, "archive_id": archive_id, "post_id": str(post.get("id") or ""), "post_index": index, "post_text": str(post.get("content") or ""), "pad_code": persona.pad_code, "platform": "threads"}
+    text = "\n".join(["⏰ 定時發布", "", f"人設：{_local_persona_display_name(persona)}", f"推文：{_memory_excerpt(post.get('content'), 100)}", "", "請選擇發布平台："])
     return _response(_message(text, _rows([_btn("Threads", "sched_platform_threads")], [_btn("◀️ 返回", f"sched_persona_{persona_id}")])) , state={"flow": "schedule_platform", "draft": draft})
 
 
@@ -9619,11 +9799,22 @@ def _schedule_submit_at(timestamp: float, state: dict[str, Any]) -> dict[str, An
         return _response(_message("❌ 定時發布狀態已失效，請重新選擇。", [[_btn("◀️ 返回", "schedule_publish")]]), state={"flow": ""})
     if timestamp <= time.time() + 60:
         return _response(_message("❌ 沒識別到有效發布時間，請用例如「明天 09:00」或「2026-05-18 21:30」。", [[_btn("◀️ 返回", "schedule_publish")]]), state=state)
-    username = _ensure_publish_account(persona)
-    added = TaskRepo.add_many(traditionalize_task_entries([{"username": username, "text": to_traditional(text), "scheduled_at": timestamp, "media_paths": "", "batch_dir": ""}]))
+    archive_id = str(draft.get("archive_id") or "")
+    post_id = str(draft.get("post_id") or "")
+    pad_code = str(draft.get("pad_code") or persona.pad_code or "")
+    if not archive_id or not post_id or not pad_code:
+        return _response(_message("❌ 定時發布來源資料已失效，請重新選擇。", [[_btn("◀️ 返回", "schedule_publish")]]), state={"flow": ""})
     when = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-    _record_post_memory(persona_id, text, granularity="daily", source_type="scheduled_publish_queue", title=f"定時發布 {when}", payload={"scheduled_at": timestamp, "platform": draft.get("platform") or "threads"})
-    return _response(_message(f"✅ 已加入定時發布佇列\n\n人設：{_local_persona_display_name(persona)}\n平台：{draft.get('platform') or 'threads'}\n時間：{when}\n任務數：{added}", _rows([_btn("📊 排程狀態", "menu_status"), _btn("📋 發布任務", "open:/tasks")], [_btn("◀️ 返回主選單", "menu")])) , state={"flow": ""})
+    params = {
+        "archiveId": archive_id,
+        "postIds": [post_id],
+        "padCode": pad_code,
+        "platform": str(draft.get("platform") or "threads"),
+        "scheduledAt": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
+    }
+    job = SourceWorkflowJobRepo.create("persona_enqueue_posts", f"定時發布：{persona.name} / {when}", params, status="submitting")
+    _submit_source_task_job_async(job.id, "persona_enqueue_posts", params)
+    return _response(_message(f"✅ 已提交 Tool R18 定時發布佇列\n\n人設：{_local_persona_display_name(persona)}\n平台：{draft.get('platform') or 'threads'}\n時間：{when}\n來源任務：提交中", _rows([_btn("📊 來源任務", "source_tasks"), _btn("📊 排程狀態", "menu_status")], [_btn("◀️ 返回主選單", "menu")])) , state={"flow": ""})
 
 
 def _route_text(message: str) -> str:
@@ -9957,7 +10148,26 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     if action.startswith("persona_autoreply_original_"):
         return _automation_run(f"automation_run:auto_reply_comments:ai:{action[len('persona_autoreply_original_'):]}")
     if action.startswith("persona_autoreply_hot_"):
-        return _automation_run(f"automation_run:auto_reply_hot_posts:ai:{action[len('persona_autoreply_hot_'):]}")
+        return _own_reply_mode_menu(action[len("persona_autoreply_hot_") :])
+    if action.startswith("ownreply_mode_manual_") or action.startswith("ownreply_mode_ai_"):
+        return _own_reply_mode_start(action)
+    if action.startswith("ownreply_text_"):
+        pid = action[len("ownreply_text_") :]
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft.update({"persona_id": pid, "reply_mode": "manual"})
+        return _response(_message("請重新輸入要回覆的內容。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{pid}")]]), state={"flow": "ownreply_reply_text", "draft": draft})
+    if action.startswith("ownreply_views_"):
+        pid = action[len("ownreply_views_") :]
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft["persona_id"] = pid
+        return _own_reply_views_prompt(draft)
+    if action.startswith("ownreply_days_"):
+        pid = action[len("ownreply_days_") :]
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft["persona_id"] = pid
+        return _own_reply_days_prompt(draft)
+    if action == "ownreply_run":
+        return _own_reply_submit(state)
     if action.startswith("acctautoreply_"):
         return _persona_autoreply_mode_menu(action[len("acctautoreply_") :])
     if action.startswith("persona_autoreply_"):

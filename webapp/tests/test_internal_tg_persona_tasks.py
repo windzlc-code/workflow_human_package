@@ -11,6 +11,8 @@ REWRITE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-rewrit
 GENERATE_IMAGE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-generate-image-once.ts"
 GENERATE_POST_IMAGE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-generate-post-image-once.ts"
 PUBLISH_POST_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-publish-post-once.ts"
+ENQUEUE_POSTS_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-enqueue-posts-once.ts"
+OWN_POST_REPLY_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "threads-own-post-reply-once.ts"
 
 
 def test_persona_internal_tg_runners_are_registered() -> None:
@@ -24,6 +26,8 @@ def test_persona_internal_tg_runners_are_registered() -> None:
     assert '"persona_generate_image": _run_persona_generate_image' in source
     assert '"persona_generate_post_image": _run_persona_generate_post_image' in source
     assert '"persona_publish_post": _run_persona_publish_post' in source
+    assert '"persona_enqueue_posts": _run_persona_enqueue_posts' in source
+    assert '"threads_own_post_reply": _run_threads_own_post_reply' in source
 
 
 def test_persona_rewrite_payload_normalizes_direct_and_replace_modes() -> None:
@@ -225,3 +229,13 @@ def test_persona_skill_tasks_invalidate_dashboard_cache() -> None:
     source = inspect.getsource(server._run_tool_r18_skill_task)
     assert 'startswith("persona_")' in source
     assert "_invalidate_persona_dashboard_overview_cache()" in source
+
+
+def test_schedule_and_own_post_reply_scripts_use_tool_r18_sources() -> None:
+    enqueue = ENQUEUE_POSTS_SCRIPT_PATH.read_text(encoding="utf-8")
+    own_reply = OWN_POST_REPLY_SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert 'action: "enqueue-posts"' in enqueue
+    assert "scheduled_at: scheduledAt" in enqueue
+    assert "runThreadsOwnPostReplyOnce" in own_reply
+    assert "dryRun: input.dryRun === true" in own_reply

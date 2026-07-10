@@ -88,3 +88,26 @@ def test_persona_image_delegates_to_tg_source_task() -> None:
 
     assert '"persona_generate_image"' in image
     assert "_submit_persona_image_job(" not in image
+
+
+def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
+    handle = _function_source("handle")
+    continuation = _function_source("_continue_state_text")
+
+    assert '_own_reply_mode_menu(action[len("persona_autoreply_hot_") :])' in handle
+    assert "ownreply_mode_manual_" in handle
+    assert "ownreply_mode_ai_" in handle
+    assert 'flow == "ownreply_reply_text"' in continuation
+    assert 'flow == "ownreply_views"' in continuation
+    assert 'flow == "ownreply_days"' in continuation
+    assert '"threads_own_post_reply"' in _function_source("_own_reply_submit")
+
+
+def test_matrix_and_schedule_use_real_tool_r18_posts() -> None:
+    matrix = _function_source("_matrix_run")
+    schedule = _function_source("_schedule_submit_at")
+
+    assert '"persona_publish_post"' in matrix
+    assert "TaskRepo.add_many" not in matrix
+    assert '"persona_enqueue_posts"' in schedule
+    assert "TaskRepo.add_many" not in schedule
