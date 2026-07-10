@@ -4917,13 +4917,42 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
                 lines.append(f"模式：{result.get('mode')}")
             result_rows.extend(_rows([_btn("◀️ 返回人設詳情", f"pd_{archive_id}")], [_btn("◀️ 返回設定", f"settings_{archive_id}")]))
         elif task_type == "persona_generate_post_image" and post_id:
+            generated_post_ids = [
+                str(value or "").strip()
+                for value in (task_input.get("uiGeneratedPostIds") if isinstance(task_input.get("uiGeneratedPostIds"), list) else [])
+                if str(value or "").strip()
+            ]
+            generated_post_index = max(0, _num(task_input.get("uiPostIndex")))
             if candidate_images:
-                lines = ["✅ 已生成推文候選配圖", "", f"共 {len(candidate_images)} 張，請選擇要寫入推文的一張。"]
+                title = (
+                    f"🖼 第 {generated_post_index + 1}/{len(generated_post_ids)} 篇候選配圖（共 {len(candidate_images)} 張）"
+                    if generated_post_ids
+                    else "✅ 已生成推文候選配圖"
+                )
+                lines = [title, "", "請選擇要寫入推文的一張。"]
                 result_rows.extend([
                     [_btn(f"✅ 選擇第 {index + 1} 張", f"pimgpick:{task_id}:{index}")]
                     for index in range(len(candidate_images))
                 ])
                 result_rows.extend(_rows([_btn("🔄 重新生成候選圖", _source_post_image_retry_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page, post_index=_num(task_input.get("uiPostIndex"))))], [_btn("📋 返回推文列表", _source_posts_callback(archive_id, source=task_source, content_type=task_content_type, page=task_page))]))
+            elif str(task_input.get("action") or "") == "select_candidate" and generated_post_ids:
+                next_index = generated_post_index + 1
+                if next_index >= len(generated_post_ids):
+                    lines = [f"✅ 配圖選擇完成：{len(generated_post_ids)}/{len(generated_post_ids)} 篇"]
+                    result_rows.extend(_rows(
+                        [_btn("📝 查看推文列表", _source_posts_callback(archive_id, source=task_source, content_type=task_content_type, page=task_page))],
+                        [_btn("◀️ 返回人設詳情", f"pd_{archive_id}")],
+                    ))
+                else:
+                    lines = [
+                        f"✅ 已選完第 {next_index}/{len(generated_post_ids)} 篇的配圖。",
+                        "",
+                        f"點擊下方按鈕生成第 {next_index + 1}/{len(generated_post_ids)} 組圖片。",
+                    ]
+                    result_rows.extend(_rows(
+                        [_btn(f"🖼 生成第 {next_index + 1} 組圖片", f"source_genpost_image_next:{task_id}")],
+                        [_btn("📝 查看推文列表", _source_posts_callback(archive_id, source=task_source, content_type=task_content_type, page=task_page))],
+                    ))
             else:
                 lines = ["✅ 已寫入推文配圖", "", "圖片已保存到同一篇 Tool R18 推文。"]
                 result_rows.extend(_rows([_btn("📝 查看這篇推文", _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page))], [_btn("📋 返回推文列表", _source_posts_callback(archive_id, source=task_source, content_type=task_content_type, page=task_page))]))
@@ -5017,6 +5046,47 @@ def _source_generated_post_image_start(task_id: str) -> dict[str, Any]:
         "uiPage": 0,
         "uiPostIndex": 0,
         "uiGeneratedPostIds": [str(post.get("id") or "") for post in posts if str(post.get("id") or "").strip()],
+    }
+    return _submit_source_post_task("persona_generate_post_image", archive_id, post_id, params, "推文配圖任務")
+
+
+def _source_generated_post_image_next(task_id: str) -> dict[str, Any]:
+    try:
+        _base, data = _source_task_detail_data(task_id)
+    except Exception as exc:
+        return _response(_message(f"讀取配圖進度失敗：{exc}", [[_btn("🔄 重新查看任務", f"source_task_detail:{task_id}")]]), state={"flow": ""})
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    archive_id = str(result.get("archiveId") or task_input.get("archiveId") or "").strip()
+    generated_post_ids = [
+        str(value or "").strip()
+        for value in (task_input.get("uiGeneratedPostIds") if isinstance(task_input.get("uiGeneratedPostIds"), list) else [])
+        if str(value or "").strip()
+    ]
+    next_index = max(0, _num(task_input.get("uiPostIndex"))) + 1
+    if str(task.get("status") or "").lower() != "success" or not archive_id or next_index >= len(generated_post_ids):
+        return _response(
+            _message(
+                f"✅ 配圖選擇完成：{len(generated_post_ids)}/{len(generated_post_ids)} 篇" if generated_post_ids else "配圖分組狀態已失效，請重新生成推文。",
+                _rows([_btn("📝 查看推文列表", _source_posts_callback(archive_id))], [_btn("◀️ 返回人設詳情", f"pd_{archive_id}")]),
+            ),
+            state={"flow": ""},
+        )
+    post_id = generated_post_ids[next_index]
+    params = {
+        "archiveId": archive_id,
+        "postId": post_id,
+        "action": "generate_candidates",
+        "chatId": SOURCE_WEB_BOT_CHAT_ID,
+        "imageAspectRatio": str(task_input.get("imageAspectRatio") or task_input.get("uiImageAspectRatio") or ""),
+        "imageWidth": _num(task_input.get("imageWidth") or task_input.get("uiImageWidth")),
+        "imageHeight": _num(task_input.get("imageHeight") or task_input.get("uiImageHeight")),
+        "imageRatioLabel": str(task_input.get("imageRatioLabel") or task_input.get("uiImageRatioLabel") or ""),
+        "postSource": "posts",
+        "uiPage": 0,
+        "uiPostIndex": next_index,
+        "uiGeneratedPostIds": generated_post_ids,
     }
     return _submit_source_post_task("persona_generate_post_image", archive_id, post_id, params, "推文配圖任務")
 
@@ -8311,7 +8381,26 @@ def _source_post_pick_candidate(action: str) -> dict[str, Any]:
         "persona_generate_post_image",
         archive_id,
         post_id,
-        {"archiveId": archive_id, "postId": post_id, "action": "select_candidate", "imageUrl": images[index], "postSource": source, "selectedIndexes": [int(item) for item in task_input.get("uiSelectedIndexes", []) if isinstance(item, int) and item >= 0], "uiContentType": content_type, "uiPage": page},
+        {
+            "archiveId": archive_id,
+            "postId": post_id,
+            "action": "select_candidate",
+            "imageUrl": images[index],
+            "postSource": source,
+            "selectedIndexes": [int(item) for item in task_input.get("uiSelectedIndexes", []) if isinstance(item, int) and item >= 0],
+            "uiContentType": content_type,
+            "uiPage": page,
+            "uiPostIndex": max(0, _num(task_input.get("uiPostIndex"))),
+            "uiGeneratedPostIds": [
+                str(value or "").strip()
+                for value in (task_input.get("uiGeneratedPostIds") if isinstance(task_input.get("uiGeneratedPostIds"), list) else [])
+                if str(value or "").strip()
+            ],
+            "uiImageAspectRatio": str(task_input.get("imageAspectRatio") or task_input.get("uiImageAspectRatio") or ""),
+            "uiImageWidth": _num(task_input.get("imageWidth") or task_input.get("uiImageWidth")),
+            "uiImageHeight": _num(task_input.get("imageHeight") or task_input.get("uiImageHeight")),
+            "uiImageRatioLabel": str(task_input.get("imageRatioLabel") or task_input.get("uiImageRatioLabel") or ""),
+        },
         "寫入推文候選配圖",
     )
 
@@ -11663,6 +11752,8 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _source_task_poll(action.split(":", 1)[1])
     if action.startswith("source_genpost_image_start:"):
         return _source_generated_post_image_start(action.split(":", 1)[1])
+    if action.startswith("source_genpost_image_next:"):
+        return _source_generated_post_image_next(action.split(":", 1)[1])
     if action.startswith("source_rerun_task:"):
         return _source_rerun_task(action.split(":", 1)[1])
     if action == "source_rerun_latest":

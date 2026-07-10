@@ -302,6 +302,22 @@ def test_post_image_flow_generates_candidates_then_persists_selection() -> None:
     assert "cards=" in detail
 
 
+def test_generated_post_image_groups_preserve_progress_and_expose_next_callback() -> None:
+    start = _function_source("_source_generated_post_image_start")
+    pick = _function_source("_source_post_pick_candidate")
+    next_group = _function_source("_source_generated_post_image_next")
+    detail = _function_source("_source_task_detail")
+    handle = _function_source("handle")
+
+    assert '"uiGeneratedPostIds"' in start
+    assert '"uiGeneratedPostIds"' in pick
+    assert '"uiPostIndex"' in pick
+    assert '"uiGeneratedPostIds"' in next_group
+    assert '"uiPostIndex": next_index' in next_group
+    assert 'f"source_genpost_image_next:{task_id}"' in detail
+    assert 'action.startswith("source_genpost_image_next:")' in handle
+
+
 def test_content_type_source_and_page_survive_every_return_path() -> None:
     callback = _function_source("_source_post_detail_callback")
     detail = _function_source("_source_post_detail")
