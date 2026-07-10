@@ -266,6 +266,18 @@ def test_view_posts_uses_real_archive_state_and_tg_layout() -> None:
     assert "_source_post_view_from_state" in handle
 
 
+def test_post_and_history_pages_match_telegram_five_item_page_size() -> None:
+    assert "STORED_POSTS_PAGE_SIZE = 5" in SOURCE
+
+
+def test_generate_mode_uses_cached_persona_memories_before_remote_refresh() -> None:
+    memory_options = _function_source("_genpost_memory_options")
+
+    assert 'isinstance(row.get("memory_entries"), list)' in memory_options
+    assert 'if not has_cached_source_entries:' in memory_options
+    assert memory_options.index('if not has_cached_source_entries:') < memory_options.index('_fresh_persona_row(')
+
+
 def test_source_post_detail_exposes_all_tg_actions() -> None:
     detail = _function_source("_source_post_detail")
     handle = _function_source("handle")

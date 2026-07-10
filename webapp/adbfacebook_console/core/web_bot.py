@@ -36,7 +36,7 @@ SOURCE_WEB_BOT_CHAT_ID = int(os.getenv("SOURCE_WEB_BOT_CHAT_ID", "8080001"))
 SOURCE_API_TIMEOUT = 18
 PERSONA_MENU_CACHE_TTL_SECONDS = 30.0
 CREATE_PERSONA_MAX_SELECTED_KEYWORDS = 2
-STORED_POSTS_PAGE_SIZE = 3
+STORED_POSTS_PAGE_SIZE = 5
 GENPOST_MAX_COUNT = 20
 GENPOST_IMAGE_BATCH_SIZE = STORED_POSTS_PAGE_SIZE
 GENPOST_IMAGE_CANDIDATE_COUNT = 4
@@ -5766,7 +5766,9 @@ def _is_auto_imported_hot_memory(summary: Any) -> bool:
 
 def _genpost_memory_options(persona_id: str) -> list[dict[str, Any]]:
     local, row = _resolve_persona_for_action(persona_id)
-    row = _fresh_persona_row(persona_id, local, row)
+    has_cached_source_entries = isinstance(row, dict) and isinstance(row.get("memory_entries"), list)
+    if not has_cached_source_entries:
+        row = _fresh_persona_row(persona_id, local, row)
     source_entries = row.get("memory_entries") if isinstance(row, dict) and isinstance(row.get("memory_entries"), list) else []
     options = [
         {
