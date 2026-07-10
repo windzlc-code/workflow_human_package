@@ -2546,6 +2546,10 @@ def _sentiment_hot_media_edit(action: str, state: dict[str, Any]) -> dict[str, A
             return _sentiment_hot_expired(draft)
         draft["hot_edit_index"] = index
         draft["hot_edit_action_key"] = key
+        candidate_id = str(candidates[index].get("id") or index)
+        deleted_map = dict(draft.get("hot_deleted_media_indexes") if isinstance(draft.get("hot_deleted_media_indexes"), dict) else {})
+        deleted_map[candidate_id] = []
+        draft["hot_deleted_media_indexes"] = deleted_map
         return _sentiment_hot_media_edit("shmedia_start", {"draft": draft})
     index = _num(draft.get("hot_edit_index"))
     key = str(draft.get("hot_edit_action_key") or "")
