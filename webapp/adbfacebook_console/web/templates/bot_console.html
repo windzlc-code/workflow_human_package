@@ -348,6 +348,9 @@
   const mediaInput = document.getElementById('bot-media-input');
   const subtitle = document.getElementById('bot-subtitle');
   const timeEl = document.getElementById('ios-time');
+  const webBotEndpoint = window.location.pathname.startsWith('/threads-console')
+    ? '/threads-console/api/web-bot/message'
+    : '/api/web-bot/message';
   let state = {};
   let sourcePollTimer = null;
   let sourceFollowupTimer = null;
@@ -522,7 +525,7 @@
     }
     subtitle.textContent = '正在输入...';
     try {
-      const res = await fetch('/api/web-bot/message', {
+      const res = await fetch(webBotEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...payload, state }),

@@ -21,6 +21,14 @@ def _function_source(name: str) -> str:
     return ast.get_source_segment(SOURCE, matches[-1]) or ""
 
 
+def test_console_uses_8098_proxy_prefix_when_served_under_threads_console() -> None:
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert "window.location.pathname.startsWith('/threads-console')" in template
+    assert "'/threads-console/api/web-bot/message'" in template
+    assert "fetch(webBotEndpoint" in template
+
+
 def test_specific_publish_callbacks_are_routed_before_generic_pub_prefix() -> None:
     handle = _function_source("handle")
     generic = handle.index('if action.startswith("pub_"):')
