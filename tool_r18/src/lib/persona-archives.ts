@@ -39,7 +39,7 @@ interface LegacyPersonaPreset {
 
 
 interface PersonaArchivesBridge {
-  save: (archive: unknown) => Promise<{ ok?: boolean; error?: string } | undefined>;
+  save: (archive: unknown, options?: { baseUpdatedAt?: string }) => Promise<{ ok?: boolean; error?: string; archive?: unknown } | undefined>;
   load: (id: string) => Promise<unknown | null>;
   list: () => Promise<unknown[]>;
   delete: (id: string) => Promise<{ ok?: boolean; error?: string } | undefined>;
@@ -681,13 +681,14 @@ function saveLocalArchives(archives: PersonaArchive[], allowLightweightFallback 
   }
 }
 
-async function saveElectronArchive(archive: PersonaArchive): Promise<void> {
+async function saveElectronArchive(archive: PersonaArchive, baseUpdatedAt?: string): Promise<PersonaArchive> {
   const api = archiveAPI();
-  if (!api) return;
-  const result = await api.save(archive);
+  if (!api) return archive;
+  const result = await api.save(archive, { baseUpdatedAt });
   if (result?.ok === false) {
     throw new Error(result.error || "Electron 存檔寫入失敗");
   }
+  return result?.archive ? normalizeArchive(result.archive) : archive;
 }
 
 function mergeArchives(localArchives: PersonaArchive[], remoteArchives: PersonaArchive[]): PersonaArchive[] {
@@ -717,22 +718,20 @@ function mergeArchives(localArchives: PersonaArchive[], remoteArchives: PersonaA
   return normalizeArchives([...byId.values()]);
 }
 
-async function persistArchive(archive: PersonaArchive): Promise<PersonaArchive> {
+async function persistArchive(archive: PersonaArchive, baseUpdatedAt?: string): Promise<PersonaArchive> {
   const normalized = normalizeArchive(archive);
   const local = getLocalArchives();
-  const next = local.some((item) => item.id === normalized.id)
-    ? local.map((item) => (item.id === normalized.id ? normalized : item))
-    : [normalized, ...local];
   const api = archiveAPI();
-  if (api) {
-    await saveElectronArchive(normalized);
-  }
+  const persisted = api ? await saveElectronArchive(normalized, baseUpdatedAt) : normalized;
+  const next = local.some((item) => item.id === persisted.id)
+    ? local.map((item) => (item.id === persisted.id ? persisted : item))
+    : [persisted, ...local];
   try {
     saveLocalArchives(next, Boolean(api));
   } catch (error) {
     if (!api) throw error;
   }
-  return normalized;
+  return persisted;
 }
 
 export function getCachedPersonaArchives(): PersonaArchive[] {
@@ -762,7 +761,7 @@ export async function listPersonaArchives(): Promise<PersonaArchive[]> {
   await Promise.all(
     merged
       .filter((archive) => shouldRewriteRemote || !remoteIds.has(archive.id))
-      .map((archive) => saveElectronArchive(archive).catch(() => {})),
+      .map((archive) => saveElectronArchive(archive, archive.updatedAt).catch(() => {})),
   );
 
   return merged;
@@ -778,13 +777,14 @@ export async function loadPersonaArchive(id: string): Promise<PersonaArchive | n
 }
 
 export async function savePersonaArchive(archive: PersonaArchive): Promise<PersonaArchive> {
+  const baseUpdatedAt = archive.updatedAt;
   return persistArchive({
     ...archive,
     updatedAt: new Date().toISOString(),
     posts: sortArchivePosts(archive.posts || []),
     favoritePosts: sortArchivePosts(archive.favoritePosts || []),
     publishHistory: archive.publishHistory,
-  });
+  }, baseUpdatedAt);
 }
 
 export async function createPersonaArchive(input: {
@@ -1283,6 +1283,7 @@ export async function markArchiveEpisodesPublished(
     ? getArchivePendingPostsForPlatform(archive, publishPlatform)
     : archive.posts;
   const publishedPosts = sourcePosts.filter((post) => idSet.has(post.id));
+  if (publishedPosts.length === 0) return null;
 
   const getSentContent = (post: PersonaArchivePost) => {
     const sentContent = typeof publishedContentById[post.id] === "string"

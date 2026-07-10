@@ -67,6 +67,8 @@ def test_persona_scripts_reuse_telegram_business_functions() -> None:
     assert "content: direction" in rewrite_source
     assert "personaDescription: direction" in rewrite_source
     assert "customTopic: direction" in rewrite_source
+    assert "installNodePersonaArchiveBridge" in create_source
+    assert "installNodePersonaArchiveBridge" in rewrite_source
 
 
 def test_internal_tg_task_detail_exposes_only_persona_results() -> None:
@@ -76,6 +78,7 @@ def test_internal_tg_task_detail_exposes_only_persona_results() -> None:
 
     assert "else _sanitize_payload(output_payload)" in detail_source
     assert 'safe_persona_result' in detail_source
+    assert '"screenshotUrl"' in detail_source
     assert '"persona_generate_image", "persona_generate_post_image", "persona_publish_post"' in detail_source
 
 

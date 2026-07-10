@@ -135,7 +135,11 @@ def _load_remote_overview(force: bool = False) -> tuple[dict[str, Any], dict[str
             return cached, meta
     if REMOTE_OVERVIEW_URL:
         try:
-            resp = requests.get(REMOTE_OVERVIEW_URL, timeout=12)
+            resp = requests.get(
+                REMOTE_OVERVIEW_URL,
+                params={"force_refresh": "true"} if force else None,
+                timeout=12,
+            )
             resp.raise_for_status()
             payload = _decode_response(resp)
             if payload.get("ok"):
@@ -230,6 +234,8 @@ def _local_persona_row(persona: Persona, remote_match: dict[str, Any] | None = N
         "name": name,
         "content": persona.description,
         "source": "local+remote" if remote_match else "local",
+        "source_archive_id": str(matched.get("id") or ""),
+        "reference_image_url": str(matched.get("reference_image_url") or ""),
         "created_at": datetime.fromtimestamp(persona.created_at).isoformat() if persona.created_at else "",
         "updated_at": datetime.fromtimestamp(persona.updated_at).isoformat() if persona.updated_at else "",
         "bound_pad_code": persona.pad_code,

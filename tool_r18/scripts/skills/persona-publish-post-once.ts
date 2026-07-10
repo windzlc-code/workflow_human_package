@@ -85,7 +85,14 @@ async function main() {
     },
   });
 
-  printJson({ ok: true, archiveId, postId, imageUrl, publishedUrl });
+  printJson({
+    ok: true,
+    archiveId,
+    postId,
+    imageUrl,
+    screenshotUrl: result?.screenshotUrl,
+    publishedUrl,
+  });
 }
 
 main().catch((error) => {

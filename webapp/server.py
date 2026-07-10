@@ -18353,6 +18353,7 @@ def _persona_reference_image_url(archive: Any) -> str:
     setup = archive.get("setup") if isinstance(archive.get("setup"), dict) else {}
     candidates.extend([
         setup.get("personaReferenceSheet"),
+        setup.get("personaImageReferenceUrl"),
         setup.get("personaReferenceImageUrl"),
         setup.get("referenceImageUrl"),
     ])
@@ -19025,6 +19026,20 @@ def _persona_dashboard_overview_cache_is_fresh(payload: Any) -> bool:
     try:
         updated_ts = datetime.datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp()
     except Exception:
+        return False
+    try:
+        cached_archive_mtime = float(
+            ((payload.get("data_sources") or {}).get("archives") or {}).get("mtime") or 0
+        )
+    except (TypeError, ValueError):
+        cached_archive_mtime = 0.0
+    current_archive_mtime = 0.0
+    for filename in ("persona_archives.json", "persona_archives_cache.json"):
+        try:
+            current_archive_mtime = max(current_archive_mtime, (TOOL_R18_RUNTIME_DIR / filename).stat().st_mtime)
+        except OSError:
+            continue
+    if abs(current_archive_mtime - cached_archive_mtime) > 0.001:
         return False
     return (time.time() - updated_ts) <= PERSONA_DASHBOARD_OVERVIEW_CACHE_MAX_AGE_SECONDS
 
@@ -20128,8 +20143,11 @@ def create_app() -> FastAPI:
         return api_me(user)
 
     @app.get("/api/persona_dashboard/overview")
-    def api_persona_dashboard_overview():
-        return _build_persona_dashboard_overview(allow_background_refresh=True)
+    def api_persona_dashboard_overview(force_refresh: bool = False):
+        return _build_persona_dashboard_overview(
+            force_refresh=force_refresh,
+            allow_background_refresh=not force_refresh,
+        )
 
     @app.get("/api/persona_dashboard/settings")
     def api_persona_dashboard_settings():
@@ -20543,7 +20561,7 @@ def create_app() -> FastAPI:
         persona_task_type = str(row["type"] or "")
         safe_persona_result = {
             key: output_payload.get(key)
-            for key in ("ok", "archiveId", "postId", "imageUrl", "publishedUrl", "mode")
+            for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "mode")
             if key in output_payload
         }
         return {

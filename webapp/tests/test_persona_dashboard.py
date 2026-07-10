@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -156,6 +157,21 @@ class PersonaDashboardApiTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+
+    def test_overview_cache_expires_when_archive_file_changes(self):
+        archive_path = self.tool_runtime_dir / "persona_archives.json"
+        archive_path.write_text("[]", encoding="utf-8")
+        payload = {
+            "ok": True,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "data_sources": {"archives": {"mtime": 0}},
+        }
+
+        self.assertFalse(server._persona_dashboard_overview_cache_is_fresh(payload))
+        payload["data_sources"]["archives"]["mtime"] = archive_path.stat().st_mtime
+        self.assertTrue(server._persona_dashboard_overview_cache_is_fresh(payload))
+        payload["data_sources"]["archives"]["mtime"] = archive_path.stat().st_mtime + 10
+        self.assertFalse(server._persona_dashboard_overview_cache_is_fresh(payload))
 
     def test_overview_returns_empty_when_archive_files_are_missing(self):
         resp = self.client.get("/api/persona_dashboard/overview")

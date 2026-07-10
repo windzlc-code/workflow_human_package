@@ -100,6 +100,7 @@ def test_source_persona_results_return_media_and_keep_tg_callbacks() -> None:
     assert 'f"pd_{archive_id}"' in detail
     assert 'f"settings_{archive_id}"' in detail
     assert 'result.get("publishedUrl")' in detail
+    assert 'result.get("screenshotUrl")' in detail
 
 
 def test_persona_and_post_views_render_source_media() -> None:
@@ -114,6 +115,14 @@ def test_persona_and_post_views_render_source_media() -> None:
     assert "_fresh_persona_row(" in settings
     assert "image=preview_image" in post_detail
     assert "cards=media_cards" in post_detail
+
+
+def test_source_archive_id_wins_over_local_projection_id() -> None:
+    resolver = _function_source("_tool_r18_archive_id")
+
+    assert resolver.index('get("source_archive_id")') < resolver.index('source_id.startswith("source:")')
+    assert resolver.index('source_id.startswith("source:")') < resolver.index("if row_id:")
+    assert 'get("source_archive_id")' in resolver
 
 
 def test_source_media_tasks_request_web_polling_until_result_is_ready() -> None:

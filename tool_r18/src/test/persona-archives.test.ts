@@ -927,4 +927,24 @@ describe("persona archives migration", () => {
     expect(getCachedPersonaArchives()[0].posts).toHaveLength(1);
     expect(getPersonaMemory(archive.id).entries).toHaveLength(0);
   });
+
+  it("does not report publish persistence success for an unknown post", async () => {
+    const archive = await createPersonaArchive({
+      id: "missing-published-post",
+      name: "Publish guard",
+      content: "Persona",
+    });
+    await appendEpisodesToArchive(archive.id, [{
+      number: 1,
+      title: "Post #1",
+      content: "Keep this post pending",
+      wordCount: 22,
+      createdAt: "2026-07-10T00:00:00.000Z",
+    }]);
+
+    await expect(markArchiveEpisodesPublished(archive.id, ["missing-post-id"]))
+      .resolves.toBeNull();
+    expect(getCachedPersonaArchives()[0].posts).toHaveLength(1);
+    expect(getCachedPersonaArchives()[0].publishHistory || []).toHaveLength(0);
+  });
 });

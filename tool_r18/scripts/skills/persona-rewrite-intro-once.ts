@@ -1,7 +1,10 @@
 import "@/runtime/node/browser-shim";
 import fs from "node:fs";
 import { loadPersonaArchive, updatePersonaArchiveProfile } from "@/lib/persona-archives";
+import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import { rewritePersonaIntroWithCodex } from "@/telegram-bot";
+
+installNodePersonaArchiveBridge();
 
 type PersonaRewriteIntroInput = {
   archiveId: string;

@@ -1,5 +1,8 @@
 import { fetchThreadsProfileHotMetrics, getLiveSentimentBrowserAuthProfileBinding, refreshSentimentBrowserCookiesForPlatform } from "@/lib/sentiment-hot-importer";
 import { listPersonaArchives, updatePersonaArchiveProfile } from "@/lib/persona-archives";
+import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
+
+installNodePersonaArchiveBridge();
 
 function normalizeThreadsUsername(value: unknown): string {
   return String(value || "")

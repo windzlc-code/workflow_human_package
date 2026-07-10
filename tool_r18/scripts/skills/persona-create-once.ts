@@ -1,9 +1,12 @@
 import "@/runtime/node/browser-shim";
 import fs from "node:fs";
+import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import {
   createPersonaBySpec,
   derivePersonaSpecWithCodex,
 } from "@/telegram-bot";
+
+installNodePersonaArchiveBridge();
 
 type PersonaCreateInput = {
   name: string;

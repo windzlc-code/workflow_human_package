@@ -4897,9 +4897,11 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
     archive_id = str(result.get("archiveId") or result.get("archive_id") or task_input.get("archiveId") or task_input.get("archive_id") or "").strip()
     post_id = str(result.get("postId") or result.get("post_id") or task_input.get("postId") or task_input.get("post_id") or "").strip()
-    preview_image = _safe_web_media_url(result.get("imageUrl") or result.get("image_url"))
-    published_url = _safe_web_media_url(result.get("publishedUrl") or result.get("published_url"))
     task_type = str(task.get("type") or "").strip()
+    generated_image = _safe_web_media_url(result.get("imageUrl") or result.get("image_url"))
+    publish_screenshot = _safe_web_media_url(result.get("screenshotUrl") or result.get("screenshot_url"))
+    preview_image = publish_screenshot if task_type == "persona_publish_post" and publish_screenshot else generated_image
+    published_url = _safe_web_media_url(result.get("publishedUrl") or result.get("published_url"))
     if result.get("generatedCount") is not None:
         lines.extend(["", f"已生成：{_num(result.get('generatedCount'))} 篇"])
     if archive_id:
@@ -5503,11 +5505,14 @@ def _genpost_context(persona_id: str) -> tuple[str, Persona | None, dict[str, An
 
 def _tool_r18_archive_id(persona_id: str, local: Persona | None, row: dict[str, Any] | None) -> str:
     row_id = str((row or {}).get("id") or "").strip()
+    row_source_id = str(row.get("source_archive_id") or "").strip() if row else ""
+    if row_source_id:
+        return row_source_id[len("source:") :].strip() if row_source_id.startswith("source:") else row_source_id
+    source_id = str(local.source_archive_id or "").strip() if local else ""
+    if source_id.startswith("source:") and (not row_id or (local and row_id == local.id)):
+        return source_id[len("source:") :].strip()
     if row_id:
         return row_id
-    source_id = str(local.source_archive_id or "").strip() if local else ""
-    if source_id.startswith("source:"):
-        return source_id[len("source:") :].strip()
     if str(persona_id or "").startswith("workflow-persona-"):
         return str(persona_id).strip()
     return ""
