@@ -3316,8 +3316,7 @@ def _persona_detail(persona_id: str) -> dict[str, Any]:
             _message("沒有找到這個人設。", [[_btn("◀️ 返回人設列表", "list_personas")]]),
             state={"flow": ""},
         )
-    if local:
-        persona_id = local.id
+    persona_id = _tool_r18_archive_id(persona_id, local, row) or (local.id if local else persona_id)
     pad_name, pad_code = _persona_bound_info(row, local)
     if local:
         name = _clean_persona_name(local.name, pad_code)
@@ -7107,8 +7106,8 @@ def _regenerate_post_images(state: dict[str, Any], *, next_group: bool = False) 
 
 def _publish_context(persona_id: str) -> tuple[str, Persona | None, dict[str, Any] | None, str]:
     local, row = _resolve_persona_for_action(persona_id)
+    source_persona_id = _tool_r18_archive_id(persona_id, local, row) or (local.id if local else persona_id)
     if local:
-        persona_id = local.id
         name = _local_persona_display_name(local)
         if row and _is_placeholder_persona_name(name, local.pad_code):
             name = _persona_row_name(row)
@@ -7116,7 +7115,7 @@ def _publish_context(persona_id: str) -> tuple[str, Persona | None, dict[str, An
         name = _persona_row_name(row)
     else:
         name = "人设"
-    return persona_id, local, row, name
+    return source_persona_id, local, row, name
 
 
 def _publish_username_candidates(persona: Persona | None, row: dict[str, Any] | None = None) -> set[str]:

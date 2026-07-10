@@ -147,6 +147,15 @@ def test_background_persona_refresh_keeps_remote_callback_ids() -> None:
     assert 'overview.get("personas")' not in refresh
 
 
+def test_persona_detail_and_post_context_keep_tool_r18_archive_id() -> None:
+    detail = _function_source("_persona_detail")
+    publish = _function_source("_publish_context")
+
+    assert "persona_id = _tool_r18_archive_id(persona_id, local, row)" in detail
+    assert "source_persona_id = _tool_r18_archive_id(persona_id, local, row)" in publish
+    assert "return source_persona_id, local, row, name" in publish
+
+
 def test_source_media_tasks_request_web_polling_until_result_is_ready() -> None:
     submit = _function_source("_submit_source_post_task")
     detail = _function_source("_source_task_detail")
