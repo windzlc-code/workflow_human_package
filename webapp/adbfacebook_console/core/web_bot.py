@@ -4902,6 +4902,9 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     publish_screenshot = _safe_web_media_url(result.get("screenshotUrl") or result.get("screenshot_url"))
     preview_image = publish_screenshot if task_type == "persona_publish_post" and publish_screenshot else generated_image
     published_url = _safe_web_media_url(result.get("publishedUrl") or result.get("published_url"))
+    candidate_images = [url for value in (result.get("imageUrls") if isinstance(result.get("imageUrls"), list) else []) if (url := _safe_web_media_url(value))]
+    if not preview_image and candidate_images:
+        preview_image = candidate_images[0]
     if result.get("generatedCount") is not None:
         lines.extend(["", f"已生成：{_num(result.get('generatedCount'))} 篇"])
     if archive_id:
@@ -4912,6 +4915,9 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
         lines.append(f"發布連結：{published_url}")
     result_rows: list[list[dict[str, str]]] = []
     status = str(task.get("status") or "").lower()
+    task_source = "favorites" if str(task_input.get("postSource") or task_input.get("source") or "posts") == "favorites" else "posts"
+    task_content_type = str(task_input.get("uiContentType") or "")
+    task_page = max(0, _num(task_input.get("uiPage")))
     if status == "success" and archive_id:
         if task_type.startswith("persona_"):
             _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": []})
@@ -4930,15 +4936,51 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
                 lines.append(f"模式：{result.get('mode')}")
             result_rows.extend(_rows([_btn("◀️ 返回人設詳情", f"pd_{archive_id}")], [_btn("◀️ 返回設定", f"settings_{archive_id}")]))
         elif task_type == "persona_generate_post_image" and post_id:
-            lines = ["✅ 已寫入推文配圖", "", "圖片已保存到同一篇 Tool R18 推文。"]
-            result_rows.extend(_rows([_btn("📝 查看這篇推文", f"source_post:{archive_id}:{post_id}")], [_btn("📋 返回推文列表", f"posts_{archive_id}_p0")]))
+            if candidate_images:
+                lines = ["✅ 已生成推文候選配圖", "", f"共 {len(candidate_images)} 張，請選擇要寫入推文的一張。"]
+                result_rows.extend([
+                    [_btn(f"✅ 選擇第 {index + 1} 張", f"pimgpick:{task_id}:{index}")]
+                    for index in range(len(candidate_images))
+                ])
+                result_rows.extend(_rows([_btn("🔄 重新生成候選圖", _source_post_image_retry_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page, post_index=_num(task_input.get("uiPostIndex"))))], [_btn("📋 返回推文列表", _source_posts_callback(archive_id, source=task_source, content_type=task_content_type, page=task_page))]))
+            else:
+                lines = ["✅ 已寫入推文配圖", "", "圖片已保存到同一篇 Tool R18 推文。"]
+                result_rows.extend(_rows([_btn("📝 查看這篇推文", _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page))], [_btn("📋 返回推文列表", _source_posts_callback(archive_id, source=task_source, content_type=task_content_type, page=task_page))]))
         elif task_type == "persona_publish_post":
             lines = ["✅ 推文發布完成"] + (["", f"發布連結：{published_url}"] if published_url else [])
+            if _num(result.get("publishedCount")) > 1:
+                lines.extend(["", f"完成發布：{_num(result.get('publishedCount'))} 個推文/智能體手機組合"])
             result_rows.extend(_rows([_btn("🕘 查看發布歷史", f"history_{archive_id}")], [_btn("🧾 返回人設詳情", f"pd_{archive_id}")]))
+        elif task_type == "persona_post_action":
+            action_name = str(result.get("action") or task_input.get("action") or "")
+            labels = {
+                "regenerate_content": "✅ 推文已重新生成",
+                "favorite": "⭐ 已收藏",
+                "delete": "✅ 推文已刪除",
+                "delete_many": "✅ 已刪除所選推文",
+                "update_content": "✅ 自訂文案已保存",
+                "refresh_metrics": "✅ 推文熱度已刷新",
+                "delete_media": "✅ 已刪除所選媒體",
+                "replace_media": "✅ 已替換所選媒體",
+            }
+            lines = [labels.get(action_name, "✅ 推文操作已完成")]
+            if action_name == "favorite":
+                lines.extend(["", f"當前收藏：{_num(result.get('favoriteCount'))} 篇"])
+            if action_name in {"delete", "delete_many"}:
+                lines.extend(["", f"剩餘：{_num(result.get('remaining'))} 篇"])
+                result_rows.extend(_rows([_btn("◀️ 返回收藏推文" if task_source == "favorites" else "◀️ 返回推文列表", _source_posts_callback(archive_id, source=task_source, content_type=task_content_type, page=task_page))]))
+            elif post_id:
+                result_rows.extend(_rows(
+                    [_btn("👁 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page))],
+                    *([[_btn("⭐ 查看收藏推文", _source_posts_callback(archive_id, source="favorites"))]] if action_name == "favorite" else []),
+                ))
     if status in {"queued", "running"}:
         result_rows.extend(_rows([_btn("🔄 刷新本次任務", f"source_task_detail:{task_id}")]))
         if archive_id:
-            result_rows.extend(_rows([_btn("◀️ 返回設定", f"settings_{archive_id}")]))
+            if post_id:
+                result_rows.extend(_rows([_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page))]))
+            else:
+                result_rows.extend(_rows([_btn("◀️ 返回設定", f"settings_{archive_id}")]))
     if not (status == "success" and task_type.startswith("persona_")):
         result_rows.extend(_rows([_btn("任務列表", "source_tasks"), _btn("返回主選單", "back_main")]))
     response = _response(
@@ -4946,6 +4988,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             "\n".join(lines),
             result_rows,
             image=preview_image,
+            cards=[{"title": f"候選圖 {index + 1}", "image": url} for index, url in enumerate(candidate_images)],
         ),
         state={"flow": ""},
     )
@@ -6109,7 +6152,7 @@ def _parse_tg_post_action(action: str) -> tuple[str, str, str]:
     if not action.startswith("pa_"):
         return "", "", ""
     payload = action[len("pa_") :]
-    for kind in ("dopm", "dop", "pp", "pub", "imgai", "imgup", "img", "media", "edit", "fav", "del", "v", "mm", "mp", "ed", "rg"):
+    for kind in ("dopm", "dop", "pp", "pub", "imgai", "imgup", "img", "media", "edit", "fav", "del", "rai", "ras", "rap", "rc", "rf", "msa", "mcl", "mrs", "mru", "mra", "mt", "md", "v", "mm", "mp", "ed", "rg"):
         prefix = kind + "_"
         if payload.startswith(prefix):
             rest = payload[len(prefix) :]
@@ -7194,15 +7237,107 @@ def _source_pending_posts(row: dict[str, Any] | None, content_type: str = "") ->
     return result
 
 
+def _source_favorite_posts(row: dict[str, Any] | None) -> list[dict[str, Any]]:
+    posts = row.get("favorite_posts") if isinstance(row, dict) and isinstance(row.get("favorite_posts"), list) else []
+    return [item for item in posts if isinstance(item, dict) and str(item.get("id") or "").strip()]
+
+
+def _source_post_collection(
+    row: dict[str, Any] | None,
+    source: str = "posts",
+    content_type: str = "",
+) -> list[dict[str, Any]]:
+    return _source_favorite_posts(row) if source == "favorites" else _source_pending_posts(row, content_type)
+
+
+def _source_posts_callback(
+    archive_id: str,
+    *,
+    source: str = "posts",
+    content_type: str = "",
+    page: int = 0,
+) -> str:
+    if source == "favorites":
+        return f"favs_{archive_id}_p{max(0, page)}"
+    suffix = f"_ct_{content_type}" if content_type in {"free", "paid"} else ""
+    return f"posts_{archive_id}{suffix}_p{max(0, page)}"
+
+
+def _source_post_detail_callback(
+    archive_id: str,
+    post_id: str,
+    *,
+    source: str = "posts",
+    content_type: str = "",
+    page: int = 0,
+) -> str:
+    return ":".join([
+        "source_post",
+        urllib.parse.quote(str(archive_id or ""), safe=""),
+        urllib.parse.quote(str(post_id or ""), safe=""),
+        "favorites" if source == "favorites" else "posts",
+        content_type if content_type in {"free", "paid"} else "all",
+        str(max(0, page)),
+    ])
+
+
+def _source_post_image_retry_callback(
+    archive_id: str,
+    post_id: str,
+    *,
+    source: str = "posts",
+    content_type: str = "",
+    page: int = 0,
+    post_index: int = 0,
+) -> str:
+    return ":".join([
+        "source_post_image_retry",
+        urllib.parse.quote(str(archive_id or ""), safe=""),
+        urllib.parse.quote(str(post_id or ""), safe=""),
+        "favorites" if source == "favorites" else "posts",
+        content_type if content_type in {"free", "paid"} else "all",
+        str(max(0, page)),
+        str(max(0, post_index)),
+    ])
+
+
+def _source_post_type_label(post: dict[str, Any]) -> str:
+    urls = _source_post_media_urls(post)
+    if not urls:
+        return "純文字"
+    has_video = any(re.search(r"^data:video/|\.(?:mp4|mov|m4v|webm)(?:[?#].*)?$", url, re.I) for url in urls)
+    has_image = any(not re.search(r"^data:video/|\.(?:mp4|mov|m4v|webm)(?:[?#].*)?$", url, re.I) for url in urls)
+    if has_video and has_image:
+        return "圖片+視頻"
+    return "視頻" if has_video else "圖片"
+
+
 def _source_post_media_urls(post: dict[str, Any]) -> list[str]:
     values: list[str] = []
-    for key in ("mediaUrl", "media_url", "videoUrl", "video_url"):
+    def add_items(raw: Any) -> None:
+        if not isinstance(raw, list):
+            return
+        for item in raw:
+            value = str(item.get("url") if isinstance(item, dict) else item or "").strip()
+            if value:
+                values.append(value)
+
+    add_items(post.get("mediaItems"))
+    source_meta = post.get("sourceMeta") if isinstance(post.get("sourceMeta"), dict) else {}
+    add_items(source_meta.get("mediaItems"))
+    for key in ("imageUrl", "image_url", "mediaUrl", "media_url"):
         value = str(post.get(key) or "").strip()
         if value:
             values.append(value)
-    raw = post.get("mediaUrls") if isinstance(post.get("mediaUrls"), list) else post.get("media_urls")
-    if isinstance(raw, list):
-        values.extend(str(item).strip() for item in raw if str(item).strip())
+    history = post.get("imageHistory") if isinstance(post.get("imageHistory"), list) else []
+    if history:
+        value = str((history[-1] if isinstance(history[-1], dict) else {}).get("imageUrl") or "").strip()
+        if value:
+            values.append(value)
+    if not values:
+        raw = post.get("mediaUrls") if isinstance(post.get("mediaUrls"), list) else post.get("media_urls")
+        if isinstance(raw, list):
+            values.extend(str(item).strip() for item in raw if str(item).strip())
     return list(dict.fromkeys(values))
 
 
@@ -7302,72 +7437,94 @@ def _parse_publish_page_action(action: str) -> tuple[int, str]:
     return max(0, page), persona_id
 
 
-def _publish_posts_list(action: str, content_type: str = "") -> dict[str, Any]:
+def _publish_posts_list(action: str, content_type: str = "", source: str = "posts") -> dict[str, Any]:
     page, persona_id = _parse_publish_page_action(action)
     persona_id, persona, row, name = _publish_context(persona_id)
     if not persona and not row:
         return _response(_message("没有找到这个人设。", [[_btn("◀️ 返回人设列表", "list_personas")]]), state={"flow": ""})
 
-    tasks = [task for task in _publish_tasks_for_persona(persona, row) if task.status in {"pending", "publishing"}]
-    source_posts = _source_pending_posts(row, content_type)
-    source_post_count = max(len(source_posts), _source_count(row, "posts"))
-    items: list[tuple[str, Any]] = [("task", task) for task in tasks] + [("source", post) for post in source_posts if isinstance(post, dict)]
-    total_pages = max(1, (len(items) + STORED_POSTS_PAGE_SIZE - 1) // STORED_POSTS_PAGE_SIZE)
+    archive_id = _tool_r18_archive_id(persona_id, persona, row) or persona_id
+    posts = _source_post_collection(row, source, content_type)
+    total_pages = max(1, (len(posts) + STORED_POSTS_PAGE_SIZE - 1) // STORED_POSTS_PAGE_SIZE)
     safe_page = min(page, total_pages - 1)
-    visible = items[safe_page * STORED_POSTS_PAGE_SIZE : (safe_page + 1) * STORED_POSTS_PAGE_SIZE]
-
-    display_total = max(len(items), source_post_count)
-    lines = ["📋 推文列表", "", f"人設：{name}", f"第 {safe_page + 1}/{total_pages} 頁，共 {display_total} 筆"]
+    start = safe_page * STORED_POSTS_PAGE_SIZE
+    visible = posts[start : start + STORED_POSTS_PAGE_SIZE]
+    title = "⭐ 收藏推文" if source == "favorites" else "📝 待發布推文列表"
+    branch = " - 付費內容" if content_type == "paid" else " - 免費內容" if content_type == "free" else ""
+    lines = [f"{title}{branch}（共 {len(posts)} 篇，第 {safe_page + 1}/{total_pages} 頁）"]
     if not visible:
-        if source_post_count:
-            lines.extend(["", f"來源顯示有 {source_post_count} 篇待發布推文，但目前沒有返回單帖明細。", "可以先用「生成推文」在 Web 端建立可選草稿，或返回發布中心直接發新內容。"])
-        else:
-            lines.extend(["", "目前沒有待發布推文或來源單帖資料。", "請先生成推文，或直接發新內容建立任務。"])
-    for offset, (kind, item) in enumerate(visible, start=safe_page * STORED_POSTS_PAGE_SIZE + 1):
-        if kind == "task":
-            task = item
-            scheduled = "立即發布" if not task.scheduled_at else _task_time(task.scheduled_at)
-            lines.extend(
-                [
-                    "",
-                    f"{offset}. 本機任務 #{task.id}｜{_task_status_label(task.status)}",
-                    f"時間：{scheduled}｜媒體：{_task_media_label(task)}",
-                    f"內容：{_task_preview(task.text)}",
-                ]
-            )
-        else:
-            post = item
-            group_type = str(post.get("telegramGroupContentType") or post.get("telegram_group_content_type") or "free").strip().lower()
-            media_label = f"{len(_source_post_media_urls(post))} 個媒體" if _source_post_media_urls(post) else "無媒體"
-            lines.extend(["", f"{offset}. {'付費' if group_type == 'paid' else '免費'}內容｜{media_label}", f"內容：{_remote_post_preview(post)}"])
+        lines.extend(["", "当前没有收藏推文。" if source == "favorites" else "当前没有待发布推文。"])
+    for offset, post in enumerate(visible, start=start + 1):
+        metric = post.get("sourceMeta") if isinstance(post.get("sourceMeta"), dict) else {}
+        metric_line = ""
+        if metric.get("source") == "sentiment_hot_import":
+            score = metric.get("hotScore")
+            metric_line = f"\n數據：熱度 {score}" if score not in (None, "") else ""
+        lines.extend([
+            "",
+            f"【{offset}】類型: {_source_post_type_label(post)}{metric_line}",
+            _remote_post_preview(post, 120),
+        ])
 
-    source_buttons = [
-        _btn(f"📝 第 {index + 1} 篇", f"source_post:{persona_id}:{str(post.get('id') or '')}")
-        for index, (kind, post) in enumerate(visible)
-        if kind == "source" and isinstance(post, dict) and str(post.get("id") or "").strip()
+    keyboard = [
+        [_btn(f"👁 查看第{start + index + 1}篇（{_source_post_type_label(post)}）", f"vp_{start + index}")]
+        for index, post in enumerate(visible)
     ]
-    keyboard = _chunk_buttons(source_buttons, 1)
-    keyboard.extend(_rows(
-        [
-            _btn("◀️ 上一頁", f"pub_posts:{max(0, safe_page - 1)}:{persona_id}"),
-            _btn(f"{safe_page + 1}/{total_pages}", f"pub_posts:{safe_page}:{persona_id}"),
-            _btn("下一頁 ▶️", f"pub_posts:{min(total_pages - 1, safe_page + 1)}:{persona_id}"),
-        ]
-        if total_pages > 1
-        else [],
-        [_btn("✍️ 生成推文", f"genpost:{persona_id}"), _btn("✏️ 直接发新内容", f"pub_direct:{persona_id}")],
-        [_btn("📋 打开发帖任务", "open:/tasks"), _btn("🕘 发布历史", f"pub_history:0:{persona_id}")],
-        [_btn("◀️ 返回", f"posts_branch_{persona_id}" if content_type else f"pd:{persona_id}")],
-    ))
-    return _response(_message("\n".join(lines), keyboard), state={"flow": "publish_center", "draft": {"persona_id": persona_id, "name": name}})
+    if total_pages > 1:
+        keyboard.extend(_rows(
+            [_btn("⏮ 首頁", _source_posts_callback(archive_id, source=source, content_type=content_type, page=0)), _btn("◀️ 上一頁", _source_posts_callback(archive_id, source=source, content_type=content_type, page=max(0, safe_page - 1)))],
+            [_btn(f"{safe_page + 1}/{total_pages}", _source_posts_callback(archive_id, source=source, content_type=content_type, page=safe_page))],
+            [_btn("下一頁 ▶️", _source_posts_callback(archive_id, source=source, content_type=content_type, page=min(total_pages - 1, safe_page + 1))), _btn("尾頁 ⏭", _source_posts_callback(archive_id, source=source, content_type=content_type, page=total_pages - 1))],
+        ))
+    if source != "favorites":
+        keyboard.append([_btn(f"⭐ 收藏推文（{len(_source_favorite_posts(row))}）", _source_posts_callback(archive_id, source="favorites"))])
+        if posts:
+            suffix = f"_ct_{content_type}" if content_type else ""
+            keyboard.append([_btn("🚀 發布推文", f"bulkpub_{archive_id}{suffix}_p{safe_page}"), _btn("🗑 刪除推文", f"bulkdel_{archive_id}{suffix}_p{safe_page}")])
+    back_action = f"posts_branch_{archive_id}" if content_type else f"pd_{archive_id}"
+    keyboard.append([_btn("◀️ 返回", back_action)])
+    return _response(
+        _message("\n".join(lines), keyboard),
+        state={
+            "flow": "source_posts_list",
+            "draft": {
+                "persona_id": archive_id,
+                "archive_id": archive_id,
+                "name": name,
+                "source": source,
+                "group_content_type": content_type,
+                "post_page": safe_page,
+                "source_post_ids": [str(post.get("id") or "") for post in posts],
+            },
+        },
+    )
 
 
-def _source_archive_post(archive_id: str, post_id: str) -> tuple[Persona | None, dict[str, Any] | None, dict[str, Any] | None]:
+def _source_archive_post(
+    archive_id: str,
+    post_id: str,
+    source: str = "posts",
+    content_type: str = "",
+) -> tuple[Persona | None, dict[str, Any] | None, dict[str, Any] | None]:
     local, row = _resolve_persona_for_action(archive_id)
-    for post in _source_pending_posts(row):
+    for post in _source_post_collection(row, source, content_type):
         if str(post.get("id") or "").strip() == str(post_id or "").strip():
             return local, row, post
     return local, row, None
+
+
+def _source_post_view_from_state(index: int, state: dict[str, Any]) -> dict[str, Any] | None:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    post_ids = [str(item) for item in draft.get("source_post_ids", []) if str(item).strip()]
+    if not post_ids or not (0 <= index < len(post_ids)):
+        return None
+    archive_id = str(draft.get("archive_id") or draft.get("persona_id") or "").strip()
+    if not archive_id:
+        return None
+    return _source_post_detail(
+        f"source_post:{archive_id}:{post_ids[index]}",
+        context=draft,
+    )
 
 
 def _web_post_action_key(archive_id: str, post_id: str) -> str:
@@ -7385,23 +7542,48 @@ def _web_post_action_from_state(action: str, state: dict[str, Any]) -> tuple[str
     return archive_id, post_id, key
 
 
-def _source_post_detail(action: str) -> dict[str, Any]:
-    try:
-        archive_id, post_id = action.split(":", 2)[1:]
-    except ValueError:
+def _is_source_post_action_state(state: dict[str, Any]) -> bool:
+    draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+    return bool(str(draft.get("archive_id") or "").strip() and str(draft.get("post_id") or "").strip())
+
+
+def _expired_source_post_action() -> dict[str, Any]:
+    return _response(_message("推文操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+
+
+def _source_post_detail(action: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = dict(context or {})
+    parts = str(action or "").split(":")
+    if len(parts) < 3:
         return _response(_message("推文入口無效，請返回人設重新選擇。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
-    local, row, post = _source_archive_post(archive_id, post_id)
+    archive_id = urllib.parse.unquote(parts[1])
+    post_id = urllib.parse.unquote(parts[2])
+    source_token = parts[3] if len(parts) > 3 else str(context.get("source") or "posts")
+    content_token = parts[4] if len(parts) > 4 else str(context.get("group_content_type") or "")
+    page_token = parts[5] if len(parts) > 5 else context.get("post_page")
+    source = "favorites" if source_token == "favorites" else "posts"
+    content_type = content_token if content_token in {"free", "paid"} else ""
+    page = max(0, _num(page_token))
+    local, row, post = _source_archive_post(archive_id, post_id, source, content_type)
     if not post:
-        return _response(_message("找不到這篇待發布推文，資料可能已更新。", [[_btn("📝 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+        return _response(_message("找不到這篇待發布推文，資料可能已更新。", [[_btn("📝 返回推文列表", _source_posts_callback(archive_id, source=source, content_type=content_type, page=page))]]), state={"flow": ""})
     archive_id = _tool_r18_archive_id(archive_id, local, row) or archive_id
     content = str(post.get("content") or post.get("text") or "").strip()
     group_type = str(post.get("telegramGroupContentType") or post.get("telegram_group_content_type") or "free").strip().lower()
     media_urls = _source_post_media_urls(post)
     safe_media_urls = [url for item in media_urls if (url := _safe_web_media_url(item))]
     preview_image = next((url for url in safe_media_urls if _is_web_image_url(url)), "")
-    post_rows = _source_pending_posts(row)
+    post_rows = _source_post_collection(row, source, content_type)
     post_index = next((index for index, item in enumerate(post_rows) if str(item.get("id") or "") == post_id), 0)
     action_key = _web_post_action_key(archive_id, post_id)
+    source_meta = post.get("sourceMeta") if isinstance(post.get("sourceMeta"), dict) else {}
+    is_sentiment = str(source_meta.get("source") or "") == "sentiment_hot_import"
+    favorites = _source_favorite_posts(row)
+    favorite_added = any(
+        str(item.get("id") or "") == post_id
+        or str((item.get("sourceMeta") if isinstance(item.get("sourceMeta"), dict) else {}).get("favoriteSourcePostId") or "") == post_id
+        for item in favorites
+    )
     media_cards = [
         {
             "title": f"媒體 {index}",
@@ -7412,7 +7594,7 @@ def _source_post_detail(action: str) -> dict[str, Any]:
         if url != preview_image
     ]
     lines = [
-        "📝 查看推文",
+        f"📝 查看第 {post_index + 1} 篇推文",
         "",
         f"人設：{_persona_row_name(row or {})}",
         f"內容類型：{'付費內容' if group_type == 'paid' else '免費內容'}",
@@ -7420,24 +7602,441 @@ def _source_post_detail(action: str) -> dict[str, Any]:
         "",
         content or "（空內容）",
     ]
+    rows: list[list[dict[str, str]]] = [[_btn("🚀 發布這篇", f"pa_pub_{action_key}")]]
+    if is_sentiment and source != "favorites":
+        rows.append([_btn("刷新熱度", f"pa_rf_{action_key}")])
+    if is_sentiment or source == "favorites":
+        rows.append([_btn("🧩 媒體管理", f"pa_mm_{action_key}")]) if media_urls else rows.append([_btn("🖼 單獨生成配圖", f"post_img_regen_{archive_id}_{post_index}")])
+        rows.append([_btn("✏️ 文案管理", f"pa_ed_{action_key}")])
+    else:
+        if media_urls:
+            rows.append([_btn("🖼 查看配圖/視頻", f"pa_mp_{action_key}")])
+        rows.append([_btn("🔄 重新生成推文", f"pa_rg_{action_key}")])
+        rows.append([_btn("🖼 重新生成圖片" if media_urls else "🖼 單獨生成配圖", f"post_img_regen_{archive_id}_{post_index}")])
+    if source != "favorites":
+        rows.append([_btn("⭐ 已收藏" if favorite_added else "⭐ 收藏這篇", f"pa_v_{action_key}" if favorite_added else f"pa_fav_{action_key}")])
+    rows.extend([
+        [_btn("🗑 刪除這篇", f"pa_del_{action_key}")],
+        [_btn("◀️ 返回收藏推文" if source == "favorites" else "◀️ 返回推文列表", _source_posts_callback(archive_id, source=source, content_type=content_type, page=page))],
+    ])
+    next_context = {
+        **context,
+        "persona_id": archive_id,
+        "archive_id": archive_id,
+        "post_id": post_id,
+        "source": source,
+        "group_content_type": content_type,
+        "post_page": page,
+        "post_index": post_index,
+        "post_action_key": action_key,
+        "source_post_ids": [str(item.get("id") or "") for item in post_rows],
+        "is_sentiment_post": is_sentiment,
+        "media_urls": media_urls,
+    }
     return _response(
         _message(
             "\n".join(lines),
-            _rows(
-                [_btn("🚀 發布這篇", f"pa_pub_{action_key}")],
-                *([[_btn("🖼 查看配圖/視頻", f"pa_mp_{action_key}")]] if media_urls else []),
-                [_btn("🖼 重新生成图片" if media_urls else "🖼 单独生成图片", f"post_img_regen_{archive_id}_{post_index}")],
-                [_btn("◀️ 返回查看推文", f"posts_{archive_id}_ct_{group_type}_p0" if _is_workflow_persona_row(row, archive_id) else f"posts_{archive_id}_p0")],
-            ),
+            rows,
             image=preview_image,
             cards=media_cards,
         ),
-        state={"flow": "source_post_detail", "draft": {"persona_id": archive_id, "archive_id": archive_id, "post_id": post_id, "group_content_type": group_type, "post_action_key": action_key}},
+        state={"flow": "source_post_detail", "draft": next_context},
     )
 
 
-def _source_post_image_ratio_picker(archive_id: str, post_id: str, post_index: int) -> dict[str, Any]:
-    local, row, post = _source_archive_post(archive_id, post_id)
+def _source_post_action_context(state: dict[str, Any]) -> tuple[dict[str, Any], str, str, str, str, int]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    archive_id = str(draft.get("archive_id") or draft.get("persona_id") or "").strip()
+    post_id = str(draft.get("post_id") or "").strip()
+    source = "favorites" if str(draft.get("source") or "posts") == "favorites" else "posts"
+    content_type = str(draft.get("group_content_type") or "")
+    page = max(0, _num(draft.get("post_page")))
+    content_type = str(draft.get("group_content_type") or "").strip().lower()
+    if content_type not in {"free", "paid"}:
+        content_type = ""
+    return draft, archive_id, post_id, source, content_type, max(0, _num(draft.get("post_page")))
+
+
+def _source_post_detail_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    if not archive_id or not post_id:
+        return _response(_message("推文操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    return _source_post_detail(
+        _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page),
+        context=draft,
+    )
+
+
+def _source_post_media_preview(state: dict[str, Any]) -> dict[str, Any]:
+    draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    _local, _row, post = _source_archive_post(archive_id, post_id, source, content_type)
+    if not post:
+        return _response(_message("沒有找到這篇推文。", [[_btn("◀️ 返回推文列表", _source_posts_callback(archive_id, source=source, content_type=content_type, page=page))]]), state={"flow": ""})
+    urls = [url for value in _source_post_media_urls(post) if (url := _safe_web_media_url(value))]
+    if not urls:
+        return _response(_message("這篇推文沒有可預覽的配圖或視頻。", [[_btn("👁 查看這篇", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))]]), state=state)
+    cards = [
+        {
+            "title": f"媒體 {index}",
+            "subtitle": "圖片" if _is_web_image_url(url) else "視頻 / 媒體文件",
+            **({"image": url} if _is_web_image_url(url) else {"url": url}),
+        }
+        for index, url in enumerate(urls, start=1)
+    ]
+    return _response(
+        _message(
+            f"🖼 推文媒體預覽\n\n共 {len(urls)} 個媒體。",
+            _rows(
+                [_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))],
+                [_btn("◀️ 返回推文列表", _source_posts_callback(archive_id, source=source, content_type=content_type, page=page))],
+            ),
+            image=next((url for url in urls if _is_web_image_url(url)), ""),
+            cards=cards,
+        ),
+        state=state,
+    )
+
+
+def _source_post_regenerate_menu(state: dict[str, Any], *, edit_mode: bool = False) -> dict[str, Any]:
+    draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    key = str(draft.get("post_action_key") or _web_post_action_key(archive_id, post_id))
+    is_sentiment = bool(draft.get("is_sentiment_post"))
+    if edit_mode:
+        rows = _rows(
+            [_btn("🤖 AI 重寫推文", f"pa_rai_{key}")],
+            [_btn("✍️ 自訂文案", f"pa_rc_{key}")],
+            [_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))],
+        )
+        return _response(_message("✏️ 文案管理\n\n請選擇要執行的操作。", rows), state={"flow": "source_post_edit_menu", "draft": draft})
+    rows = _rows(
+        [_btn("🤖 AI 重新生成", f"pa_rai_{key}")],
+        [_btn("✍️ 自訂發送文字", f"pa_rc_{key}")],
+        [_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))],
+    )
+    if is_sentiment:
+        rows = _rows(
+            [_btn("🧬 按原帖結構樣式生成", f"pa_ras_{key}")],
+            [_btn("👤 按當前人設風格生成", f"pa_rap_{key}")],
+            [_btn("◀️ 返回文案管理", f"pa_ed_{key}")],
+        )
+    return _response(_message("🔄 重新生成推文\n\n請選擇生成方式。", rows), state={"flow": "source_post_regenerate", "draft": draft})
+
+
+def _source_post_action_submit(
+    state: dict[str, Any],
+    action_name: str,
+    *,
+    label: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    if not archive_id or (not post_id and action_name != "delete_many"):
+        return _response(_message("推文操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    params: dict[str, Any] = {
+        "archiveId": archive_id,
+        "postId": post_id,
+        "action": action_name,
+        "source": source,
+        "uiContentType": content_type,
+        "uiPage": page,
+        **(extra or {}),
+    }
+    response = _submit_source_post_task("persona_post_action", archive_id, post_id, params, label)
+    response["state"] = {"flow": "source_post_task", "draft": draft}
+    return response
+
+
+def _source_post_delete_confirm(state: dict[str, Any]) -> dict[str, Any]:
+    draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    key = str(draft.get("post_action_key") or _web_post_action_key(archive_id, post_id))
+    label = "收藏推文" if source == "favorites" else "推文"
+    return _response(
+        _message(
+            f"🗑 確認刪除{label}\n\n刪除後無法撤回。",
+            _rows(
+                [_btn(f"✅ 確認刪除這篇{label}", f"pa_del_{key}_confirm")],
+                [_btn("取消，返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))],
+                [_btn("◀️ 返回收藏推文" if source == "favorites" else "◀️ 返回推文列表", _source_posts_callback(archive_id, source=source, content_type=content_type, page=page))],
+            ),
+        ),
+        state={"flow": "source_post_delete_confirm", "draft": draft},
+    )
+
+
+def _source_post_media_manager(state: dict[str, Any]) -> dict[str, Any]:
+    draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    _local, _row, post = _source_archive_post(archive_id, post_id, source, content_type)
+    if not post:
+        return _response(_message("沒有找到這篇推文。", [[_btn("◀️ 返回推文列表", _source_posts_callback(archive_id, source=source, content_type=content_type, page=page))]]), state={"flow": ""})
+    urls = _source_post_media_urls(post)
+    selected = {int(item) for item in draft.get("selected_media_indexes", []) if str(item).isdigit() and 0 <= int(item) < len(urls)}
+    key = str(draft.get("post_action_key") or _web_post_action_key(archive_id, post_id))
+    rows: list[list[dict[str, str]]] = []
+    for start in range(0, len(urls), 2):
+        row_buttons = []
+        for index in range(start, min(start + 2, len(urls))):
+            kind = "視頻" if re.search(r"^data:video/|\.(?:mp4|mov|m4v|webm)(?:[?#].*)?$", urls[index], re.I) else "圖片"
+            row_buttons.append(_btn(f"{'☑️' if index in selected else '⬜️'} {index + 1}.{kind}", f"pa_mt_{key}_{index}"))
+        rows.append(row_buttons)
+    rows.extend(_rows(
+        [_btn("✅ 全選", f"pa_msa_{key}"), _btn("🧹 清空", f"pa_mcl_{key}")],
+        [_btn(f"🗑 刪除選中 {len(selected)}", f"pa_md_{key}"), _btn(f"🔁 替換選中 {len(selected)}", f"pa_mrs_{key}")],
+        [_btn(f"🤖 AI 生成圖片替換選中 {len(selected)}", f"pa_mra_{key}")],
+        [_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))],
+    ))
+    cards = [{"title": f"媒體 {index + 1}", **({"image": url} if _is_web_image_url(url) else {"url": url})} for index, url in enumerate(urls)]
+    draft["selected_media_indexes"] = sorted(selected)
+    return _response(
+        _message(f"媒體管理\n\n媒體：{len(urls)} 個\n已選：{len(selected)} 個\n\n點擊下方編號可單選/多選。", rows, cards=cards),
+        state={"flow": "source_post_media_manage", "draft": draft},
+    )
+
+
+def _source_post_media_replace_menu(state: dict[str, Any]) -> dict[str, Any]:
+    draft, archive_id, post_id, _source, _content_type, _page = _source_post_action_context(state)
+    selected = [int(item) for item in draft.get("selected_media_indexes", []) if str(item).isdigit()]
+    if not selected:
+        return _source_post_media_manager(state)
+    key = str(draft.get("post_action_key") or _web_post_action_key(archive_id, post_id))
+    return _response(
+        _message(
+            f"🔁 替換選中媒體\n\n已選：{len(selected)} 個\n請選擇替換方式。",
+            _rows(
+                [_btn("📤 手動上傳替換", f"pa_mru_{key}")],
+                [_btn("🤖 AI 生成圖片替換", f"pa_mra_{key}")],
+                [_btn("◀️ 返回媒體管理", f"pa_mm_{key}")],
+            ),
+        ),
+        state={"flow": "source_post_media_replace", "draft": draft},
+    )
+
+
+def _source_bulk_start(action: str, mode: str) -> dict[str, Any]:
+    prefix = "bulkpub_" if mode == "publish" else "bulkdel_"
+    rest = action[len(prefix) :]
+    page = 0
+    if "_p" in rest:
+        rest, page_text = rest.rsplit("_p", 1)
+        page = max(0, _num(page_text))
+    content_type = ""
+    if "_ct_" in rest:
+        archive_id, content_type = rest.split("_ct_", 1)
+    else:
+        archive_id = rest
+    local, row = _resolve_persona_for_action(archive_id)
+    archive_id = _tool_r18_archive_id(archive_id, local, row) or archive_id
+    posts = _source_pending_posts(row, content_type)
+    draft = {
+        "archive_id": archive_id,
+        "persona_id": archive_id,
+        "source": "posts",
+        "group_content_type": content_type,
+        "post_page": page,
+        "bulk_mode": mode,
+        "source_post_ids": [str(post.get("id") or "") for post in posts],
+        "selected_post_ids": [],
+    }
+    return _source_bulk_render(draft)
+
+
+def _source_bulk_render(draft: dict[str, Any], note: str = "") -> dict[str, Any]:
+    archive_id = str(draft.get("archive_id") or "")
+    content_type = str(draft.get("group_content_type") or "")
+    local, row = _resolve_persona_for_action(archive_id)
+    posts = _source_pending_posts(row, content_type)
+    post_ids = [str(post.get("id") or "") for post in posts]
+    selected = {str(item) for item in draft.get("selected_post_ids", []) if str(item) in post_ids}
+    page = max(0, _num(draft.get("post_page")))
+    total_pages = max(1, (len(posts) + STORED_POSTS_PAGE_SIZE - 1) // STORED_POSTS_PAGE_SIZE)
+    page = min(page, total_pages - 1)
+    start = page * STORED_POSTS_PAGE_SIZE
+    visible = posts[start : start + STORED_POSTS_PAGE_SIZE]
+    mode = str(draft.get("bulk_mode") or "publish")
+    action_text = "發布" if mode == "publish" else "刪除"
+    lines = [f"請選擇要{action_text}的推文：", f"已選：{len(selected)} 篇"]
+    if note:
+        lines.extend(["", note])
+    for index, post in enumerate(visible, start=start + 1):
+        post_id = str(post.get("id") or "")
+        lines.extend(["", f"{'☑️' if post_id in selected else '⬜'} 第 {index} 篇｜{_source_post_type_label(post)}", _remote_post_preview(post, 100)])
+    rows = [
+        [_btn(f"{'☑️' if str(post.get('id') or '') in selected else '⬜'} 第 {start + index + 1} 篇", f"sbtog_{start + index}")]
+        for index, post in enumerate(visible)
+    ]
+    rows.extend(_rows(
+        [_btn("☑️ 全選本頁", "sbsel_page"), _btn("⬜ 清空本頁", "sbclear_page")],
+        [_btn(f"✅ 確認{action_text}（已選 {len(selected)} 篇）", "sbconfirm")],
+        [_btn("◀️ 返回推文列表", _source_posts_callback(archive_id, content_type=content_type, page=page))],
+    ))
+    draft.update({"post_page": page, "source_post_ids": post_ids, "selected_post_ids": sorted(selected)})
+    return _response(_message("\n".join(lines), rows), state={"flow": "source_post_bulk", "draft": draft})
+
+
+def _source_bulk_toggle(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    post_ids = [str(item) for item in draft.get("source_post_ids", []) if str(item)]
+    selected = {str(item) for item in draft.get("selected_post_ids", []) if str(item) in post_ids}
+    page = max(0, _num(draft.get("post_page")))
+    start = page * STORED_POSTS_PAGE_SIZE
+    visible_ids = post_ids[start : start + STORED_POSTS_PAGE_SIZE]
+    if action.startswith("sbtog_"):
+        index = _num(action[len("sbtog_") :])
+        if 0 <= index < len(post_ids):
+            post_id = post_ids[index]
+            selected.remove(post_id) if post_id in selected else selected.add(post_id)
+    elif action == "sbsel_page":
+        selected.update(visible_ids)
+    elif action == "sbclear_page":
+        selected.difference_update(visible_ids)
+    draft["selected_post_ids"] = sorted(selected)
+    return _source_bulk_render(draft)
+
+
+def _source_bulk_confirm(state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    selected = [str(item) for item in draft.get("selected_post_ids", []) if str(item)]
+    if not selected:
+        return _source_bulk_render(draft, "請至少選擇一篇推文。")
+    archive_id = str(draft.get("archive_id") or "")
+    content_type = str(draft.get("group_content_type") or "")
+    page = max(0, _num(draft.get("post_page")))
+    if draft.get("bulk_mode") == "delete":
+        return _response(
+            _message(
+                f"🗑 確認刪除推文\n\n已選擇：{len(selected)} 篇\n刪除後無法撤回。",
+                _rows(
+                    [_btn("✅ 確認刪除", "sbdelete_confirm")],
+                    [_btn("◀️ 返回選擇", "sbback")],
+                    [_btn("◀️ 返回推文列表", _source_posts_callback(archive_id, content_type=content_type, page=page))],
+                ),
+            ),
+            state={"flow": "source_post_bulk_delete_confirm", "draft": draft},
+        )
+    return _response(
+        _message(
+            f"🚀 批量發布推文\n\n已選擇：{len(selected)} 篇\n\n請選擇發布平台：",
+            _rows(
+                [_btn("🧵 Threads", "sbplatform_threads"), _btn("📣 Telegram 群組", "sbplatform_telegram")],
+                [_btn("◀️ 返回選擇", "sbback")],
+            ),
+        ),
+        state={"flow": "source_post_bulk_platform", "draft": draft},
+    )
+
+
+def _source_bulk_delete_execute(state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    archive_id = str(draft.get("archive_id") or "")
+    selected = [str(item) for item in draft.get("selected_post_ids", []) if str(item)]
+    response = _submit_source_post_task(
+        "persona_post_action",
+        archive_id,
+        "",
+        {"archiveId": archive_id, "action": "delete_many", "source": "posts", "postIds": selected, "uiContentType": str(draft.get("group_content_type") or ""), "uiPage": _num(draft.get("post_page"))},
+        "批量刪除推文",
+    )
+    response["state"] = {"flow": "source_post_task", "draft": draft}
+    return response
+
+
+def _source_bulk_publish_platform(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    platform = action[len("sbplatform_") :]
+    archive_id = str(draft.get("archive_id") or "")
+    local, row = _resolve_persona_for_action(archive_id)
+    pad_code = str((local.pad_code if local else "") or (row or {}).get("bound_pad_code") or "").strip()
+    if not pad_code:
+        return _response(_message("這個人設尚未綁定智能體手機，請先綁定後再發布。", _rows([_btn("📱 綁定智能體手機", f"bindpad_{archive_id}")], [_btn("◀️ 返回選擇平台", "sbconfirm")])), state=state)
+    draft.update({"platform": platform, "pad_code": pad_code})
+    selected = [str(item) for item in draft.get("selected_post_ids", []) if str(item)]
+    label = "Threads" if platform == "threads" else "Telegram 群組"
+    return _response(
+        _message(
+            f"🚀 確認發布推文\n\n平台：{label}\n智能體手機：{pad_code}\n推文：{len(selected)} 篇",
+            _rows(
+                [_btn("✅ 確認發布到綁定智能體手機", "sbpublish_confirm")],
+                [_btn("◀️ 返回選擇平台", "sbconfirm")],
+            ),
+        ),
+        state={"flow": "source_post_bulk_publish_confirm", "draft": draft},
+    )
+
+
+def _source_bulk_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    archive_id = str(draft.get("archive_id") or "")
+    platform = str(draft.get("platform") or "threads")
+    pad_code = str(draft.get("pad_code") or "")
+    selected = [str(item) for item in draft.get("selected_post_ids", []) if str(item)]
+    if not archive_id or not selected or not pad_code:
+        return _source_bulk_render(draft, "發布狀態已失效，請重新選擇推文和智能體手機。")
+    response = _submit_source_post_task(
+        "persona_publish_post",
+        archive_id,
+        selected[0],
+        {"archiveId": archive_id, "postId": selected[0], "postIds": selected, "padCode": pad_code, "platform": platform, "postSource": "posts", "uiContentType": str(draft.get("group_content_type") or ""), "uiPage": _num(draft.get("post_page")), "dryRun": False},
+        "批量真實發布任務",
+    )
+    response["state"] = {"flow": "source_post_task", "draft": draft}
+    return response
+
+
+def _source_post_pad_menu(state: dict[str, Any]) -> dict[str, Any]:
+    draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    devices = _active_devices()
+    selected = {str(item) for item in draft.get("selected_pad_codes", []) if str(item)}
+    rows = [
+        [_btn(f"{'☑️' if device.pad_code in selected else '⬜'} {device.alias or device.pad_code}", f"sppad:{device.pad_code}")]
+        for device in devices[:20]
+    ]
+    rows.extend(_rows(
+        [_btn("☑️ 全選本頁", "sppad_all"), _btn("⬜ 清空本頁", "sppad_clear")],
+        [_btn(f"✅ 確認發布智能體手機（{len(selected)}）", "sppad_confirm")],
+        [_btn("◀️ 返回發布確認", f"pa_pp_{draft.get('post_action_key')}_{draft.get('platform') or 'threads'}")],
+        [_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))],
+    ))
+    draft["selected_pad_codes"] = sorted(selected)
+    return _response(_message(f"📱 選擇多智能體手機發布\n\n已選：{len(selected)} 台", rows), state={"flow": "source_post_publish_pads", "draft": draft})
+
+
+def _source_post_pad_action(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    selected = {str(item) for item in draft.get("selected_pad_codes", []) if str(item)}
+    devices = _active_devices()[:20]
+    if action.startswith("sppad:"):
+        pad_code = action.split(":", 1)[1]
+        selected.remove(pad_code) if pad_code in selected else selected.add(pad_code)
+    elif action == "sppad_all":
+        selected.update(device.pad_code for device in devices)
+    elif action == "sppad_clear":
+        selected.clear()
+    draft["selected_pad_codes"] = sorted(selected)
+    return _source_post_pad_menu({"flow": "source_post_publish_pads", "draft": draft})
+
+
+def _source_post_multi_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
+    draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    pad_codes = [str(item) for item in draft.get("selected_pad_codes", []) if str(item)]
+    if not pad_codes:
+        return _source_post_pad_menu({"flow": "source_post_publish_pads", "draft": {**draft, "pad_notice": "請至少選擇一台智能體手機。"}})
+    platform = str(draft.get("platform") or "threads")
+    response = _submit_source_post_task(
+        "persona_publish_post",
+        archive_id,
+        post_id,
+        {"archiveId": archive_id, "postId": post_id, "padCode": pad_codes[0], "padCodes": pad_codes, "platform": platform, "postSource": source, "uiContentType": content_type, "uiPage": page, "dryRun": False},
+        "多智能體手機真實發布任務",
+    )
+    response["state"] = {"flow": "source_post_task", "draft": draft}
+    return response
+
+
+def _source_post_image_ratio_picker(archive_id: str, post_id: str, post_index: int, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = dict(context or {})
+    source = "favorites" if str(context.get("source") or "posts") == "favorites" else "posts"
+    content_type = str(context.get("group_content_type") or "")
+    page = max(0, _num(context.get("post_page")))
+    local, row, post = _source_archive_post(archive_id, post_id, source, content_type)
     if not post:
         return _response(_message("沒有找到這篇推文。", [[_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
     name = local.name if local else _persona_row_name(row or {})
@@ -7445,27 +8044,44 @@ def _source_post_image_ratio_picker(archive_id: str, post_id: str, post_index: i
         [_btn(item["label"], f"post_img_ratio_{item['id']}") for item in GENPOST_RATIO_OPTIONS[index : index + 2]]
         for index in range(0, len(GENPOST_RATIO_OPTIONS), 2)
     ]
-    keyboard.append([_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")])
+    keyboard.append([_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))])
     return _response(
         _message(
             "\n".join(["🖼 單篇推文配圖", "", f"人設：{name}", f"推文：第 {post_index + 1} 篇", "", "請選擇配圖畫面比例："]),
             keyboard,
         ),
-        state={"flow": "source_post_image_ratio", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "post_index": post_index}},
+        state={"flow": "source_post_image_ratio", "draft": {**context, "archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "post_index": post_index, "source": source, "group_content_type": content_type, "post_page": page}},
     )
 
 
-def _source_post_image_regen_entry(action: str) -> dict[str, Any]:
+def _source_post_image_regen_entry(action: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = dict((state or {}).get("draft") if isinstance((state or {}).get("draft"), dict) else {})
     payload = action[len("post_img_regen_") :]
     archive_id, separator, raw_index = payload.rpartition("_")
     if not separator or not archive_id:
         return _response(_message("配圖入口已失效。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
-    posts = _source_pending_posts(_resolve_persona_for_action(archive_id)[1])
+    source = "favorites" if str(context.get("source") or "posts") == "favorites" else "posts"
+    content_type = str(context.get("group_content_type") or "")
+    posts = _source_post_collection(_resolve_persona_for_action(archive_id)[1], source, content_type)
     index = max(0, _num(raw_index))
     if index >= len(posts):
         return _response(_message("沒有找到這篇推文。", [[_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
     post_id = str(posts[index].get("id") or "")
-    return _source_post_image_ratio_picker(archive_id, post_id, index)
+    return _source_post_image_ratio_picker(archive_id, post_id, index, context)
+
+
+def _source_post_image_retry(action: str) -> dict[str, Any]:
+    parts = str(action or "").split(":")
+    if len(parts) < 7:
+        return _response(_message("配圖入口已失效。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    archive_id = urllib.parse.unquote(parts[1])
+    post_id = urllib.parse.unquote(parts[2])
+    source = "favorites" if parts[3] == "favorites" else "posts"
+    content_type = parts[4] if parts[4] in {"free", "paid"} else ""
+    page = max(0, _num(parts[5]))
+    post_index = max(0, _num(parts[6]))
+    context = {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "source": source, "group_content_type": content_type, "post_page": page, "post_index": post_index}
+    return _source_post_image_ratio_picker(archive_id, post_id, post_index, context)
 
 
 def _source_post_image_ratio_submit(action: str, state: dict[str, Any]) -> dict[str, Any]:
@@ -7476,17 +8092,23 @@ def _source_post_image_ratio_submit(action: str, state: dict[str, Any]) -> dict[
     option = next((item for item in GENPOST_RATIO_OPTIONS if item["id"] == ratio_id), None)
     if not archive_id or not post_id or not option:
         return _response(_message("配圖比例選擇已過期，請從推文列表重新打開。", [[_btn("📝 查看推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    source = "favorites" if str(draft.get("source") or "posts") == "favorites" else "posts"
+    content_type = str(draft.get("group_content_type") or "")
+    page = max(0, _num(draft.get("post_page")))
     return _submit_source_post_task(
         "persona_generate_post_image",
         archive_id,
         post_id,
-        {"archiveId": archive_id, "postId": post_id, "chatId": SOURCE_WEB_BOT_CHAT_ID, "imageAspectRatio": option["ratio"], "imageRatioLabel": option["label"]},
+        {"archiveId": archive_id, "postId": post_id, "action": "generate_candidates", "chatId": SOURCE_WEB_BOT_CHAT_ID, "imageAspectRatio": option["ratio"], "imageWidth": option["width"], "imageHeight": option["height"], "imageRatioLabel": option["label"], "postSource": source, "uiContentType": content_type, "uiPage": page, "uiPostIndex": _num(draft.get("post_index")), "uiSelectedIndexes": [int(item) for item in draft.get("selected_media_indexes", []) if str(item).isdigit()]},
         "推文配圖任務",
     )
 
 
 def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, params: dict[str, Any], label: str) -> dict[str, Any]:
-    back_action = f"source_post:{archive_id}:{post_id}" if post_id else f"pd_{archive_id}"
+    task_source = "favorites" if str(params.get("postSource") or params.get("source") or "posts") == "favorites" else "posts"
+    task_content_type = str(params.get("uiContentType") or "")
+    task_page = max(0, _num(params.get("uiPage")))
+    back_action = _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page) if post_id else f"pd_{archive_id}"
     back_label = "◀️ 返回推文" if post_id else "◀️ 返回人設詳情"
     job = SourceWorkflowJobRepo.create(task_type, label, params, status="submitting")
     try:
@@ -7496,7 +8118,7 @@ def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, para
         SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
         return _response(
             _message(f"❌ {label}提交失敗\n\n{exc}", [[_btn(back_label, back_action)]]),
-            state={"flow": ""},
+            state={"flow": "source_post_task", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "source": task_source, "group_content_type": task_content_type, "post_page": task_page}},
         )
     source_task_id = str(data.get("id") or "")
     if task_type == "persona_generate_image":
@@ -7508,6 +8130,9 @@ def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, para
     elif task_type == "persona_publish_post":
         pending_text = "🚀 推文發布中，請稍候..."
         pending_rows = _rows([_btn(back_label, back_action)])
+    elif task_type == "persona_post_action":
+        pending_text = f"⏳ {label}執行中，完成後會直接寫回同一篇 Tool R18 推文。"
+        pending_rows = _rows([_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}") if source_task_id else _btn("📊 查看任務列表", "source_tasks")], [_btn(back_label, back_action)])
     else:
         pending_text = f"⏳ {label}已提交\n\n來源任務 ID：{source_task_id or '-'}\n完成後會直接寫回同一個 Tool R18 人設歸檔。"
         pending_rows = _rows(
@@ -7519,9 +8144,9 @@ def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, para
             pending_text,
             pending_rows,
         ),
-        state={"flow": ""},
+        state={"flow": "source_post_task", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "source": task_source, "group_content_type": task_content_type, "post_page": task_page}},
     )
-    if source_task_id and task_type in {"persona_generate_image", "persona_generate_post_image", "persona_publish_post"}:
+    if source_task_id and task_type in {"persona_generate_image", "persona_generate_post_image", "persona_publish_post", "persona_post_action"}:
         response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
     return response
 
@@ -7543,21 +8168,55 @@ def _source_post_generate_image(action: str) -> dict[str, Any]:
     )
 
 
-def _source_post_publish_start(action: str, action_key: str = "") -> dict[str, Any]:
+def _source_post_pick_candidate(action: str) -> dict[str, Any]:
+    try:
+        _prefix, task_id, raw_index = action.split(":", 2)
+        index = int(raw_index)
+    except (TypeError, ValueError):
+        return _response(_message("候選圖片選擇已失效。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    try:
+        _base, data = _source_task_detail_data(task_id)
+    except Exception as exc:
+        return _response(_message(f"讀取候選圖片失敗：{exc}", [[_btn("🔄 重新查看任務", f"source_task_detail:{task_id}")]]), state={"flow": ""})
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
+    images = [url for value in (result.get("imageUrls") if isinstance(result.get("imageUrls"), list) else []) if (url := _safe_web_media_url(value))]
+    if not (0 <= index < len(images)):
+        return _response(_message("找不到這張候選圖片。", [[_btn("🔄 返回候選圖片", f"source_task_detail:{task_id}")]]), state={"flow": ""})
+    archive_id = str(result.get("archiveId") or task_input.get("archiveId") or "")
+    post_id = str(result.get("postId") or task_input.get("postId") or "")
+    source = "favorites" if str(task_input.get("postSource") or "posts") == "favorites" else "posts"
+    content_type = str(task_input.get("uiContentType") or "")
+    page = max(0, _num(task_input.get("uiPage")))
+    return _submit_source_post_task(
+        "persona_generate_post_image",
+        archive_id,
+        post_id,
+        {"archiveId": archive_id, "postId": post_id, "action": "select_candidate", "imageUrl": images[index], "postSource": source, "selectedIndexes": [int(item) for item in task_input.get("uiSelectedIndexes", []) if isinstance(item, int) and item >= 0], "uiContentType": content_type, "uiPage": page},
+        "寫入推文候選配圖",
+    )
+
+
+def _source_post_publish_start(action: str, action_key: str = "", context: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = dict(context or {})
     try:
         archive_id, post_id = action.split(":", 2)[1:]
     except ValueError:
         return _response(_message("發布入口無效。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
-    _local, _row, post = _source_archive_post(archive_id, post_id)
+    source = "favorites" if str(context.get("source") or "posts") == "favorites" else "posts"
+    content_type = str(context.get("group_content_type") or "")
+    page = max(0, _num(context.get("post_page")))
+    _local, _row, post = _source_archive_post(archive_id, post_id, source, content_type)
     if not post:
         return _response(_message("找不到這篇待發布推文。", [[_btn("📝 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
     key = action_key or _web_post_action_key(archive_id, post_id)
     return _response(
         _message(
             "🚀 發布這篇\n\n請選擇發布平台：",
-            _rows([_btn("🧵 Threads", f"pa_pp_{key}_threads"), _btn("📣 Telegram 群组", f"pa_pp_{key}_telegram")], [_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")]),
+            _rows([_btn("🧵 Threads", f"pa_pp_{key}_threads"), _btn("📣 Telegram 群组", f"pa_pp_{key}_telegram")], [_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))]),
         ),
-        state={"flow": "source_post_publish_platform", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "post_action_key": key}},
+        state={"flow": "source_post_publish_platform", "draft": {**context, "archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "post_action_key": key, "source": source, "group_content_type": content_type, "post_page": page}},
     )
 
 
@@ -7566,7 +8225,10 @@ def _source_post_publish_platform(action: str, state: dict[str, Any]) -> dict[st
     platform = action.split(":", 1)[1] if ":" in action else "threads"
     archive_id = str(draft.get("archive_id") or "")
     post_id = str(draft.get("post_id") or "")
-    local, row, post = _source_archive_post(archive_id, post_id)
+    source = "favorites" if str(draft.get("source") or "posts") == "favorites" else "posts"
+    content_type = str(draft.get("group_content_type") or "")
+    page = max(0, _num(draft.get("post_page")))
+    local, row, post = _source_archive_post(archive_id, post_id, source, content_type)
     if not post:
         return _response(_message("發布狀態已失效，請重新選擇推文。", [[_btn("📝 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
     pad_code = str((local.pad_code if local else "") or (row or {}).get("bound_pad_code") or "").strip()
@@ -7580,7 +8242,7 @@ def _source_post_publish_platform(action: str, state: dict[str, Any]) -> dict[st
     return _response(
         _message(
             f"🚀 確認發布推文\n\n平台：{platform_label}\nPAD_CODE：{pad_code}\n\n{_remote_post_preview(post, 220)}",
-            _rows([_btn(f"✅ 确认发布到绑定智能體手機 {platform_label}", f"pa_dop_{action_key}_{platform}")], [_btn("◀️ 返回选择平台", f"pa_pp_{action_key}_clear")], [_btn("◀️ 返回推文列表", f"posts_{archive_id}_p0")]),
+            _rows([_btn(f"✅ 确认发布到绑定智能體手機 {platform_label}", f"pa_dop_{action_key}_{platform}")], [_btn("📱 選擇多智能體手機發布", f"pa_dopm_{action_key}_{platform}")], [_btn("◀️ 返回选择平台", f"pa_pp_{action_key}_clear")], [_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))]),
         ),
         state={"flow": "source_post_publish_confirm", "draft": {**draft, "platform": platform, "pad_code": pad_code}},
     )
@@ -7592,13 +8254,16 @@ def _source_post_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
     post_id = str(draft.get("post_id") or "")
     platform = str(draft.get("platform") or "threads")
     pad_code = str(draft.get("pad_code") or "")
+    source = "favorites" if str(draft.get("source") or "posts") == "favorites" else "posts"
+    content_type = str(draft.get("group_content_type") or "")
+    page = max(0, _num(draft.get("post_page")))
     if not archive_id or not post_id or not pad_code:
         return _response(_message("發布狀態已失效，請重新選擇推文。", [[_btn("👤 返回人設", f"pd_{archive_id}")]]), state={"flow": ""})
     return _submit_source_post_task(
         "persona_publish_post",
         archive_id,
         post_id,
-        {"archiveId": archive_id, "postId": post_id, "padCode": pad_code, "platform": platform, "dryRun": False},
+        {"archiveId": archive_id, "postId": post_id, "padCode": pad_code, "platform": platform, "postSource": source, "uiContentType": content_type, "uiPage": page, "dryRun": False},
         "真實發布任務",
     )
 
@@ -9457,6 +10122,16 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
         return _continue_account_create(text, state)
     if flow.startswith("link_ending_"):
         return _save_link_ending_input(text, state)
+    if flow == "source_post_custom_content":
+        if not text:
+            return _response(_message("請直接輸入要保存的新文案。", [[_btn("◀️ 返回文案管理", f"pa_ed_{draft.get('post_action_key')}")]]), state=state)
+        return _source_post_action_submit(state, "update_content", label="保存自訂推文文案", extra={"content": text})
+    if flow == "source_post_replace_media_url":
+        media_url = _safe_web_media_url(text)
+        indexes = [int(item) for item in draft.get("selected_media_indexes", []) if str(item).isdigit()]
+        if not media_url:
+            return _response(_message("請輸入可直接訪問的圖片或視頻 URL。", [[_btn("◀️ 返回替換方式", f"pa_mrs_{draft.get('post_action_key')}")]]), state=state)
+        return _source_post_action_submit(state, "replace_media", label="替換推文媒體", extra={"selectedIndexes": indexes, "mediaUrl": media_url})
     if flow.startswith("genpost_"):
         return _continue_generate_posts(text, state)
     if flow == "tg_credentials" and persona:
@@ -10213,9 +10888,11 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
             pid = rest
         if "_ct_" in pid:
             pid, content_type = pid.split("_ct_", 1)
-        restored = _stored_generated_posts_response(pid, page, state)
-        if restored is not None:
-            return restored
+        _local, source_row = _resolve_persona_for_action(pid)
+        if not _source_pending_posts(source_row, content_type) and not _is_workflow_persona_row(source_row, pid):
+            restored = _stored_generated_posts_response(pid, page, state)
+            if restored is not None:
+                return restored
         return _publish_posts_list(f"pub_posts:{page}:{pid}", content_type)
     if action.startswith("history_branch_"):
         return _persona_content_type_picker(action[len("history_branch_") :], "history")
@@ -10333,21 +11010,94 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     if action == "gpnoref_continue":
         return _continue_no_reference_generate(state)
     if action.startswith("vp_"):
+        source_view = _source_post_view_from_state(_num(action[len("vp_") :]), state)
+        if source_view is not None:
+            return source_view
         return _post_view_action(f"post_view:{_num(action[len('vp_'):])}", state)
     if action == "pa_back":
         return _response(_post_select_message(state.get("draft", {})), state={"flow": "post_select", "draft": state.get("draft", {})})
+    if action.startswith("pa_v_") and _web_post_action_from_state(action, state):
+        return _source_post_detail_from_state(state)
+    if action.startswith("pa_mp_") and _web_post_action_from_state(action, state):
+        return _source_post_media_preview(state)
+    if action.startswith("pa_mm_") and _web_post_action_from_state(action, state):
+        return _source_post_media_manager(state)
+    if action.startswith("pa_ed_") and _web_post_action_from_state(action, state):
+        return _source_post_regenerate_menu(state, edit_mode=True)
+    if action.startswith("pa_rg_") and _web_post_action_from_state(action, state):
+        return _source_post_regenerate_menu(state)
+    if action.startswith("pa_rai_") and _web_post_action_from_state(action, state):
+        draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+        if draft.get("is_sentiment_post"):
+            return _source_post_regenerate_menu(state)
+        return _source_post_action_submit(state, "regenerate_content", label="AI 重新生成推文", extra={"rewriteMode": "persona_style"})
+    if action.startswith("pa_ras_") and _web_post_action_from_state(action, state):
+        return _source_post_action_submit(state, "regenerate_content", label="按原帖結構重寫推文", extra={"rewriteMode": "source_structure"})
+    if action.startswith("pa_rap_") and _web_post_action_from_state(action, state):
+        return _source_post_action_submit(state, "regenerate_content", label="按當前人設重寫推文", extra={"rewriteMode": "persona_style"})
+    if action.startswith("pa_rc_") and _web_post_action_from_state(action, state):
+        draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+        return _response(
+            _message("✍️ 自訂文案\n\n請直接輸入要保存到這篇推文的新文案。", [[_btn("◀️ 返回文案管理", f"pa_ed_{draft.get('post_action_key')}")]]),
+            state={"flow": "source_post_custom_content", "draft": draft},
+        )
+    if action.startswith("pa_rf_") and _web_post_action_from_state(action, state):
+        return _source_post_action_submit(state, "refresh_metrics", label="刷新推文熱度")
+    if action.startswith("pa_fav_") and _web_post_action_from_state(action, state):
+        return _source_post_action_submit(state, "favorite", label="收藏推文")
+    if action.startswith("pa_del_") and _web_post_action_from_state(action, state):
+        if action.endswith("_confirm"):
+            return _source_post_action_submit(state, "delete", label="刪除推文")
+        return _source_post_delete_confirm(state)
+    if action.startswith("pa_mt_") and _web_post_action_from_state(action, state):
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        index = _num(action.rsplit("_", 1)[1])
+        selected = {int(item) for item in draft.get("selected_media_indexes", []) if str(item).isdigit()}
+        selected.remove(index) if index in selected else selected.add(index)
+        draft["selected_media_indexes"] = sorted(selected)
+        return _source_post_media_manager({"flow": "source_post_media_manage", "draft": draft})
+    if action.startswith("pa_msa_") and _web_post_action_from_state(action, state):
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft["selected_media_indexes"] = list(range(len(draft.get("media_urls", []))))
+        return _source_post_media_manager({"flow": "source_post_media_manage", "draft": draft})
+    if action.startswith("pa_mcl_") and _web_post_action_from_state(action, state):
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft["selected_media_indexes"] = []
+        return _source_post_media_manager({"flow": "source_post_media_manage", "draft": draft})
+    if action.startswith("pa_md_") and _web_post_action_from_state(action, state):
+        draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+        indexes = [int(item) for item in draft.get("selected_media_indexes", []) if str(item).isdigit()]
+        if not indexes:
+            return _response([_message("請先選擇要刪除的媒體。", kind="status"), *_source_post_media_manager(state).get("messages", [])], state=state)
+        return _source_post_action_submit(state, "delete_media", label="刪除推文媒體", extra={"selectedIndexes": indexes})
+    if action.startswith("pa_mrs_") and _web_post_action_from_state(action, state):
+        return _source_post_media_replace_menu(state)
+    if action.startswith("pa_mru_") and _web_post_action_from_state(action, state):
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        return _response(_message("📤 手動上傳替換\n\n請貼上要用來替換所選媒體的圖片或視頻 URL。", [[_btn("◀️ 返回替換方式", f"pa_mrs_{draft.get('post_action_key')}")]]), state={"flow": "source_post_replace_media_url", "draft": draft})
+    if action.startswith("pa_mra_") and _web_post_action_from_state(action, state):
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        return _source_post_image_ratio_picker(str(draft.get("archive_id") or ""), str(draft.get("post_id") or ""), _num(draft.get("post_index")), draft)
     if action.startswith("pa_pp_"):
         resolved = _web_post_action_from_state(action, state)
         if resolved:
             platform = action.rsplit("_", 1)[1]
             if platform == "clear":
-                return _source_post_publish_start(f"source_post_publish:{resolved[0]}:{resolved[1]}", resolved[2])
+                return _source_post_publish_start(f"source_post_publish:{resolved[0]}:{resolved[1]}", resolved[2], state.get("draft") if isinstance(state.get("draft"), dict) else {})
             return _source_post_publish_platform(f"source_post_platform:{platform}", state)
+        if _is_source_post_action_state(state):
+            return _expired_source_post_action()
         _kind, _action_key, platform = _parse_tg_post_action(action)
         return _publish_platform(f"publish_platform:{platform}", state)
     if action.startswith("pa_dopimg_"):
+        if _is_source_post_action_state(state):
+            return _expired_source_post_action()
         return _enqueue_selected_posts(state, with_image=True)
     if action.startswith("pa_dopm_"):
+        if _web_post_action_from_state(action, state):
+            return _source_post_pad_menu(state)
+        if _is_source_post_action_state(state):
+            return _expired_source_post_action()
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
         if draft.get("persona_id") and not draft.get("selected_personas"):
             draft["selected_personas"] = [str(draft.get("persona_id"))]
@@ -10355,13 +11105,19 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     if action.startswith("pa_dop_"):
         if _web_post_action_from_state(action, state):
             return _source_post_publish_execute(state)
+        if _is_source_post_action_state(state):
+            return _expired_source_post_action()
         return _enqueue_selected_posts(state, with_image=False)
     if action.startswith("pa_pub_"):
         resolved = _web_post_action_from_state(action, state)
         if resolved:
-            return _source_post_publish_start(f"source_post_publish:{resolved[0]}:{resolved[1]}", resolved[2])
+            return _source_post_publish_start(f"source_post_publish:{resolved[0]}:{resolved[1]}", resolved[2], state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        if _is_source_post_action_state(state):
+            return _expired_source_post_action()
         _kind, action_key, _value = _parse_tg_post_action(action)
         return _post_publish_one(f"post_publish_one:{_tg_post_action_index(action_key)}", state)
+    if action.startswith("pa_") and _is_source_post_action_state(state):
+        return _expired_source_post_action()
     if action.startswith("pa_img_"):
         _kind, action_key, _value = _parse_tg_post_action(action)
         return _generate_single_post_image(f"genpost_image:{_tg_post_action_index(action_key)}", state)
@@ -10378,14 +11134,35 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     if action.startswith("pa_del_"):
         _kind, action_key, _value = _parse_tg_post_action(action)
         return _post_delete(f"post_delete:{_tg_post_action_index(action_key)}", state)
+    if action.startswith("sbtog_") or action in {"sbsel_page", "sbclear_page"}:
+        return _source_bulk_toggle(action, state)
+    if action == "sbconfirm":
+        return _source_bulk_confirm(state)
+    if action == "sbback":
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        return _source_bulk_render(draft)
+    if action == "sbdelete_confirm":
+        return _source_bulk_delete_execute(state)
+    if action.startswith("sbplatform_"):
+        return _source_bulk_publish_platform(action, state)
+    if action == "sbpublish_confirm":
+        return _source_bulk_publish_execute(state)
+    if action.startswith("sppad:") or action in {"sppad_all", "sppad_clear"}:
+        return _source_post_pad_action(action, state)
+    if action == "sppad_confirm":
+        return _source_post_multi_publish_execute(state)
     if action.startswith("bulkpub_"):
-        return _post_select_action("bconfirm", state)
+        return _source_bulk_start(action, "publish")
     if action.startswith("bulkdel_"):
-        return _bulk_delete_selected_posts(state)
+        return _source_bulk_start(action, "delete")
     if action.startswith("favs_"):
         rest = action[len("favs_") :]
-        persona_id = rest.split("_p", 1)[0] if "_p" in rest else rest
-        return _genpost_memory_list(f"genpost_favorites:{persona_id}:all:0", state, favorite_only=True)
+        if "_p" in rest:
+            persona_id, page_text = rest.rsplit("_p", 1)
+            page = _num(page_text)
+        else:
+            persona_id, page = rest, 0
+        return _publish_posts_list(f"pub_posts:{page}:{persona_id}", source="favorites")
     if action.startswith("persona_autoreply_original_"):
         return _automation_run(f"automation_run:auto_reply_comments:ai:{action[len('persona_autoreply_original_'):]}")
     if action.startswith("persona_autoreply_hot_"):
@@ -10714,7 +11491,7 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     if action.startswith("source_task_start:"):
         return _source_workflow_start(action.split(":", 1)[1])
     if action.startswith("source_post:"):
-        return _source_post_detail(action)
+        return _source_post_detail(action, context=state.get("draft") if isinstance(state.get("draft"), dict) else {})
     if action.startswith("pa_mp_"):
         resolved = _web_post_action_from_state(action, state)
         return _source_post_detail(f"source_post:{resolved[0]}:{resolved[1]}") if resolved else _response(_message("推文操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
@@ -10733,13 +11510,17 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         resolved = _web_post_action_from_state(action, state)
         return _source_post_publish_execute(state) if resolved else _response(_message("發布操作已過期，請重新打開推文。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
     if action.startswith("post_img_regen_"):
-        return _source_post_image_regen_entry(action)
+        return _source_post_image_regen_entry(action, state)
+    if action.startswith("source_post_image_retry:"):
+        return _source_post_image_retry(action)
     if action.startswith("post_img_ratio_"):
         return _source_post_image_ratio_submit(action, state)
+    if action.startswith("pimgpick:"):
+        return _source_post_pick_candidate(action)
     if action.startswith("source_post_image:"):
         return _source_post_generate_image(action)
     if action.startswith("source_post_publish:"):
-        return _source_post_publish_start(action)
+        return _source_post_publish_start(action, context=state.get("draft") if isinstance(state.get("draft"), dict) else {})
     if action.startswith("source_post_platform:"):
         return _source_post_publish_platform(action, state)
     if action == "source_post_execute":

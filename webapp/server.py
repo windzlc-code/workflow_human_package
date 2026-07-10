@@ -15962,6 +15962,17 @@ def _run_persona_publish_post(task_id: str, payload: dict[str, Any]) -> dict[str
     )
 
 
+def _run_persona_post_action(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_post_action",
+        "persona-post-action-once.ts",
+        "persona-post-action-input.json",
+        default_timeout=900,
+    )
+
+
 def _run_persona_enqueue_posts(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return _run_tool_r18_skill_task(
         task_id,
@@ -16001,6 +16012,7 @@ TASK_RUNNERS = {
     "persona_generate_image": _run_persona_generate_image,
     "persona_generate_post_image": _run_persona_generate_post_image,
     "persona_publish_post": _run_persona_publish_post,
+    "persona_post_action": _run_persona_post_action,
     "persona_enqueue_posts": _run_persona_enqueue_posts,
 }
 TG_AGENT_PRODUCTION_TASK_TYPES = set(TASK_RUNNERS.keys())
@@ -16823,6 +16835,79 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         payload.pop("prompt", None)
         return payload
 
+    if typ == "persona_post_action":
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        action = str(payload.get("action") or "").strip().lower()
+        source = str(params.get("source") or params.get("postSource") or params.get("post_source") or "posts").strip().lower()
+        allowed_actions = {
+            "regenerate_content", "favorite", "delete", "delete_many",
+            "update_content", "refresh_metrics", "delete_media", "replace_media",
+        }
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="persona_post_action requires archiveId")
+        if len(archive_id) > 200:
+            raise HTTPException(status_code=400, detail="persona_post_action archiveId is too long")
+        if action not in allowed_actions:
+            raise HTTPException(status_code=400, detail="persona_post_action action is not supported")
+        if source not in {"posts", "favorites"}:
+            raise HTTPException(status_code=400, detail="persona_post_action source must be posts or favorites")
+
+        normalized: dict[str, Any] = {"archiveId": archive_id, "action": action, "postSource": source}
+        ui_content_type = str(payload.get("uiContentType") or "").strip().lower()
+        if ui_content_type in {"free", "paid"}:
+            normalized["uiContentType"] = ui_content_type
+        if "uiPage" in payload:
+            normalized["uiPage"] = max(_to_int(payload.get("uiPage"), 0), 0)
+        if action == "delete_many":
+            raw_post_ids = payload.get("postIds") if isinstance(payload.get("postIds"), list) else payload.get("post_ids")
+            if not isinstance(raw_post_ids, list):
+                raise HTTPException(status_code=400, detail="persona_post_action delete_many requires postIds")
+            post_ids = list(dict.fromkeys(str(item).strip() for item in raw_post_ids if str(item).strip()))
+            if not post_ids:
+                raise HTTPException(status_code=400, detail="persona_post_action delete_many requires postIds")
+            if len(post_ids) > 200 or any(len(item) > 200 for item in post_ids):
+                raise HTTPException(status_code=400, detail="persona_post_action postIds exceed the allowed limit")
+            normalized["postIds"] = post_ids
+            return normalized
+
+        post_id = str(payload.get("postId") or payload.get("post_id") or "").strip()
+        if not post_id:
+            raise HTTPException(status_code=400, detail=f"persona_post_action {action} requires postId")
+        if len(post_id) > 200:
+            raise HTTPException(status_code=400, detail="persona_post_action postId is too long")
+        normalized["postId"] = post_id
+
+        if action == "regenerate_content":
+            rewrite_mode = str(payload.get("rewriteMode") or payload.get("rewrite_mode") or "persona_style").strip().lower()
+            if rewrite_mode not in {"source_structure", "persona_style"}:
+                raise HTTPException(status_code=400, detail="persona_post_action rewriteMode is invalid")
+            normalized["rewriteMode"] = rewrite_mode
+        elif action == "update_content":
+            content = str(payload.get("content") or "").strip()
+            if not content:
+                raise HTTPException(status_code=400, detail="persona_post_action update_content requires content")
+            if len(content) > 20000:
+                raise HTTPException(status_code=400, detail="persona_post_action content is too long")
+            normalized["content"] = content
+        elif action == "refresh_metrics" and source != "posts":
+            raise HTTPException(status_code=400, detail="persona_post_action refresh_metrics only supports posts")
+        elif action in {"delete_media", "replace_media"}:
+            raw_indexes = payload.get("selectedIndexes") if isinstance(payload.get("selectedIndexes"), list) else payload.get("selected_indexes")
+            if not isinstance(raw_indexes, list) or not raw_indexes:
+                raise HTTPException(status_code=400, detail="persona_post_action delete_media requires selectedIndexes")
+            if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in raw_indexes):
+                raise HTTPException(status_code=400, detail="persona_post_action selectedIndexes must be non-negative integers")
+            selected_indexes = sorted(set(raw_indexes))
+            if len(selected_indexes) > 20:
+                raise HTTPException(status_code=400, detail="persona_post_action selectedIndexes exceed the allowed limit")
+            normalized["selectedIndexes"] = selected_indexes
+            if action == "replace_media":
+                media_url = str(payload.get("mediaUrl") or "").strip()
+                if not media_url or len(media_url) > 8_000_000:
+                    raise HTTPException(status_code=400, detail="persona_post_action replace_media requires mediaUrl")
+                normalized["mediaUrl"] = media_url
+        return normalized
+
     if typ == "persona_generate_image":
         archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
         if not archive_id:
@@ -16833,20 +16918,83 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
     if typ in {"persona_generate_post_image", "persona_publish_post"}:
         archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
         post_id = str(payload.get("postId") or payload.get("post_id") or "").strip()
+        post_ids = list(dict.fromkeys(
+            str(item).strip()
+            for item in (payload.get("postIds") if isinstance(payload.get("postIds"), list) else [])
+            if str(item).strip()
+        ))
+        if post_id and post_id not in post_ids:
+            post_ids.insert(0, post_id)
         if not archive_id:
             raise HTTPException(status_code=400, detail=f"{typ} requires archiveId")
-        if not post_id:
+        if not post_ids:
             raise HTTPException(status_code=400, detail=f"{typ} requires postId")
-        normalized = {"archiveId": archive_id, "postId": post_id}
+        normalized = {"archiveId": archive_id, "postId": post_ids[0]}
+        if typ == "persona_publish_post" and len(post_ids) > 1:
+            normalized["postIds"] = post_ids[:200]
+        if typ == "persona_generate_post_image":
+            image_action = str(payload.get("action") or "").strip().lower()
+            if image_action in {"generate_candidates", "select_candidate"}:
+                normalized["action"] = image_action
+            if image_action == "generate_candidates":
+                normalized["imageAspectRatio"] = str(payload.get("imageAspectRatio") or "").strip()[:40]
+                normalized["imageWidth"] = max(_to_int(payload.get("imageWidth"), 0), 0)
+                normalized["imageHeight"] = max(_to_int(payload.get("imageHeight"), 0), 0)
+                normalized["imageRatioLabel"] = str(payload.get("imageRatioLabel") or "").strip()[:120]
+            elif image_action == "select_candidate":
+                image_url = str(payload.get("imageUrl") or "").strip()
+                if not image_url or len(image_url) > 8_000_000:
+                    raise HTTPException(status_code=400, detail="persona_generate_post_image select_candidate requires imageUrl")
+                normalized["imageUrl"] = image_url
+            if "postSource" in payload or "post_source" in payload:
+                post_source = str(payload.get("postSource") or payload.get("post_source") or "posts").strip().lower()
+                if post_source in {"posts", "favorites"}:
+                    normalized["postSource"] = post_source
+            ui_content_type = str(payload.get("uiContentType") or "").strip().lower()
+            if ui_content_type in {"free", "paid"}:
+                normalized["uiContentType"] = ui_content_type
+            if "uiPage" in payload:
+                normalized["uiPage"] = max(_to_int(payload.get("uiPage"), 0), 0)
+            if "uiPostIndex" in payload:
+                normalized["uiPostIndex"] = max(_to_int(payload.get("uiPostIndex"), 0), 0)
+            if isinstance(payload.get("uiSelectedIndexes"), list):
+                normalized["uiSelectedIndexes"] = sorted({
+                    int(item) for item in payload.get("uiSelectedIndexes", [])
+                    if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+                })[:20]
+            if image_action == "select_candidate" and isinstance(payload.get("selectedIndexes"), list):
+                normalized["selectedIndexes"] = sorted({
+                    int(item) for item in payload.get("selectedIndexes", [])
+                    if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+                })[:20]
         if typ == "persona_publish_post":
             pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+            pad_codes = list(dict.fromkeys(
+                str(item).strip()
+                for item in (payload.get("padCodes") if isinstance(payload.get("padCodes"), list) else [])
+                if str(item).strip()
+            ))
+            if pad_code and pad_code not in pad_codes:
+                pad_codes.insert(0, pad_code)
             platform = str(payload.get("platform") or "").strip().lower()
-            if not pad_code:
-                raise HTTPException(status_code=400, detail="persona_publish_post requires padCode")
+            if not pad_codes:
+                raise HTTPException(status_code=400, detail="persona_publish_post requires padCode or padCodes")
             if platform not in {"threads", "telegram"}:
                 raise HTTPException(status_code=400, detail="persona_publish_post platform must be threads or telegram")
-            normalized["padCode"] = pad_code
+            normalized["padCode"] = pad_codes[0]
+            if len(pad_codes) > 1:
+                normalized["padCodes"] = pad_codes[:50]
             normalized["platform"] = platform
+            if "postSource" in payload or "post_source" in payload:
+                post_source = str(payload.get("postSource") or payload.get("post_source") or "posts").strip().lower()
+                if post_source not in {"posts", "favorites"}:
+                    raise HTTPException(status_code=400, detail="persona_publish_post postSource must be posts or favorites")
+                normalized["postSource"] = post_source
+            ui_content_type = str(payload.get("uiContentType") or "").strip().lower()
+            if ui_content_type in {"free", "paid"}:
+                normalized["uiContentType"] = ui_content_type
+            if "uiPage" in payload:
+                normalized["uiPage"] = max(_to_int(payload.get("uiPage"), 0), 0)
         return normalized
 
     if typ == "persona_enqueue_posts":
@@ -17586,7 +17734,7 @@ PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_WAKE_EVENT = threading.Event()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
-PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 8
+PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 9
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_STARTED = False
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE: dict[str, Any] = {
@@ -18369,6 +18517,75 @@ def _persona_reference_image_url(archive: Any) -> str:
     return ""
 
 
+def _compact_pending_post_media_items(post: Any) -> list[dict[str, str]]:
+    compact: list[dict[str, str]] = []
+    seen: set[str] = set()
+    if not isinstance(post, dict):
+        return compact
+
+    def add(value: Any, media_type: Any = "") -> None:
+        safe_url = _safe_pending_post_media_url(value)
+        if not safe_url or safe_url in seen:
+            return
+        seen.add(safe_url)
+        compact.append({
+            "url": safe_url,
+            "type": _guess_media_type(safe_url, media_type),
+        })
+
+    for item in post.get("mediaItems") if isinstance(post.get("mediaItems"), list) else []:
+        add(item.get("url"), item.get("type")) if isinstance(item, dict) else add(item)
+    source_meta = post.get("sourceMeta") if isinstance(post.get("sourceMeta"), dict) else {}
+    for item in source_meta.get("mediaItems") if isinstance(source_meta.get("mediaItems"), list) else []:
+        add(item.get("url"), item.get("type")) if isinstance(item, dict) else add(item)
+    add(post.get("imageUrl"), "image")
+    add(post.get("mediaUrl"))
+    history = post.get("imageHistory") if isinstance(post.get("imageHistory"), list) else []
+    if history and isinstance(history[-1], dict):
+        add(history[-1].get("imageUrl"), "image")
+    return compact[:20]
+
+
+def _compact_pending_post_source_meta(source_meta: Any) -> dict[str, Any]:
+    if not isinstance(source_meta, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in ("source", "platform", "publishedAt", "capturedAt", "favoriteSourcePostId", "favoriteAddedAt"):
+        value = str(source_meta.get(key) or "").strip()
+        if value:
+            compact[key] = value[:800]
+    source_url = _safe_pending_post_media_url(source_meta.get("sourceUrl"))
+    if source_url:
+        compact["sourceUrl"] = source_url
+    if isinstance(source_meta.get("hotScore"), (int, float)):
+        compact["hotScore"] = source_meta.get("hotScore")
+    if isinstance(source_meta.get("edited"), bool):
+        compact["edited"] = source_meta.get("edited")
+    original_content = str(source_meta.get("originalContent") or "")
+    if original_content:
+        compact["originalContent"] = original_content[:5000]
+    for key in ("metrics", "engagement"):
+        if isinstance(source_meta.get(key), dict):
+            compact[key] = _sanitize_dashboard_value(source_meta.get(key), key)
+    warnings = source_meta.get("warnings")
+    if isinstance(warnings, list):
+        compact["warnings"] = [str(item)[:800] for item in warnings[:20] if str(item).strip()]
+    original_media_url = _safe_pending_post_media_url(source_meta.get("originalMediaUrl"))
+    if original_media_url:
+        compact["originalMediaUrl"] = original_media_url
+    original_media_urls = source_meta.get("originalMediaUrls")
+    if isinstance(original_media_urls, list):
+        safe_original_media_urls = [
+            safe_url
+            for value in original_media_urls[:20]
+            if (safe_url := _safe_pending_post_media_url(value))
+        ]
+        if safe_original_media_urls:
+            compact["originalMediaUrls"] = list(dict.fromkeys(safe_original_media_urls))
+    compact["mediaItems"] = _compact_pending_post_media_items({"mediaItems": source_meta.get("mediaItems")})
+    return compact
+
+
 def _compact_pending_archive_post(post: Any) -> dict[str, Any] | None:
     if not isinstance(post, dict):
         return None
@@ -18408,6 +18625,8 @@ def _compact_pending_archive_post(post: Any) -> dict[str, Any] | None:
     video_url = _safe_pending_post_media_url(post.get("videoUrl"))
     if not video_url:
         video_url = next((url for url in media_urls if re.search(r"^data:video/|\.(?:mp4|mov|m4v|webm)(?:[?#].*)?$", url, re.I)), "")
+    media_items = _compact_pending_post_media_items(post)
+    source_meta = _compact_pending_post_source_meta(post.get("sourceMeta"))
     return {
         "id": str(post.get("id") or "").strip(),
         "content": str(post.get("content") or ""),
@@ -18416,8 +18635,30 @@ def _compact_pending_archive_post(post: Any) -> dict[str, Any] | None:
         "telegramGroupContentType": str(post.get("telegramGroupContentType") or "").strip(),
         "mediaUrl": media_urls[0] if media_urls else "",
         "mediaUrls": media_urls,
+        "mediaItems": media_items,
         "videoUrl": video_url,
+        "sourceMeta": source_meta,
         "createdAt": post.get("createdAt"),
+    }
+
+
+def _safe_persona_post_action_result(output_payload: Any) -> dict[str, Any]:
+    if not isinstance(output_payload, dict):
+        return {}
+    media_urls: list[str] = []
+    for value in output_payload.get("mediaUrls") if isinstance(output_payload.get("mediaUrls"), list) else []:
+        safe_url = _safe_pending_post_media_url(value)
+        if safe_url and safe_url not in media_urls:
+            media_urls.append(safe_url)
+    return {
+        "ok": _to_bool(output_payload.get("ok"), False),
+        "archiveId": str(output_payload.get("archiveId") or "")[:200],
+        "postId": str(output_payload.get("postId") or "")[:200],
+        "action": str(output_payload.get("action") or "")[:80],
+        "remaining": max(_to_int(output_payload.get("remaining"), 0), 0),
+        "favoriteCount": max(_to_int(output_payload.get("favoriteCount"), 0), 0),
+        "content": str(output_payload.get("content") or "")[:20000],
+        "mediaUrls": media_urls[:20],
     }
 
 
@@ -19454,6 +19695,11 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "hot_score_formula": "热度 = 逐帖浏览合计 + 点赞 + 评论 + 分享 + 转发；不包含账号主页浏览。",
             "hot_platforms": hot_platforms,
             "pending_posts": [item for post in posts if (item := _compact_pending_archive_post(post)) is not None],
+            "favorite_posts": [
+                item
+                for post in (archive.get("favoritePosts") if isinstance(archive.get("favoritePosts"), list) else [])
+                if (item := _compact_pending_archive_post(post)) is not None
+            ],
             "post_metrics": post_metric_rows[:80],
             "publish_history": [_compact_publish_record(item, threads_handle) for item in publish_history[:20] if isinstance(item, dict)],
             "queue": queue_for_archive,
@@ -19560,7 +19806,11 @@ def _persona_dashboard_overview_needs_refresh(payload: Any) -> bool:
         return True
     return any(
         isinstance(persona, dict)
-        and ("bound_vmos_account_name" not in persona or "pending_posts" not in persona)
+        and (
+            "bound_vmos_account_name" not in persona
+            or "pending_posts" not in persona
+            or "favorite_posts" not in persona
+        )
         for persona in personas
     )
 
@@ -20561,9 +20811,20 @@ def create_app() -> FastAPI:
         persona_task_type = str(row["type"] or "")
         safe_persona_result = {
             key: output_payload.get(key)
-            for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "mode")
+            for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "publishedCount", "mode")
             if key in output_payload
         }
+        if persona_task_type == "persona_publish_post" and isinstance(output_payload.get("postIds"), list):
+            safe_persona_result["postIds"] = [str(item)[:200] for item in output_payload.get("postIds", [])[:200] if str(item).strip()]
+        if persona_task_type == "persona_generate_post_image":
+            safe_persona_result["imageUrls"] = [
+                safe_url
+                for value in (output_payload.get("imageUrls") if isinstance(output_payload.get("imageUrls"), list) else [])
+                if (safe_url := _safe_pending_post_media_url(value))
+            ][:8]
+            if output_payload.get("content"):
+                safe_persona_result["content"] = str(output_payload.get("content"))[:20000]
+        safe_persona_post_action_result = _safe_persona_post_action_result(output_payload)
         return {
             "ok": True,
             "task": {
@@ -20584,7 +20845,9 @@ def create_app() -> FastAPI:
                 **(
                     {
                         "result": (
-                            safe_persona_result
+                            safe_persona_post_action_result
+                            if persona_task_type == "persona_post_action"
+                            else safe_persona_result
                             if persona_task_type in {"persona_generate_image", "persona_generate_post_image", "persona_publish_post"}
                             else _sanitize_payload(output_payload)
                         )
@@ -20592,6 +20855,7 @@ def create_app() -> FastAPI:
                     if persona_task_type in {
                         "persona_generate_posts", "persona_create", "persona_rewrite_intro",
                         "persona_generate_image", "persona_generate_post_image", "persona_publish_post", "persona_enqueue_posts",
+                        "persona_post_action",
                     }
                     else {}
                 ),

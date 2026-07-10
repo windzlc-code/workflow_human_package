@@ -11254,7 +11254,7 @@ async function generateCurrentPaidR18ImageFirstGroup(bot: TelegramBot, chatId: n
     },
   });
 }
-async function attachSelectedImageCandidateToArchivePost(args: {
+export async function attachSelectedImageCandidateToArchivePost(args: {
   archiveId: string;
   postId?: string;
   content: string;
@@ -11537,7 +11537,7 @@ async function rewriteNormalArchivePostContent(args: {
   return rewritten;
 }
 
-async function regenerateArchivePostContent(args: {
+export async function regenerateArchivePostContent(args: {
   archiveId: string;
   postId: string;
   source?: "posts" | "favorites";
@@ -11734,9 +11734,10 @@ async function generateStoredPostReplacementImage(args: {
   };
 }
 
-async function generateArchivePostImageCandidates(args: {
+export async function generateArchivePostImageCandidates(args: {
   archiveId: string;
   postId: string;
+  source?: "posts" | "favorites";
   chatId?: number;
   imageAspectRatio?: string;
   imageWidth?: number;
@@ -11745,7 +11746,7 @@ async function generateArchivePostImageCandidates(args: {
 }) {
   const archive = await loadPersonaArchive(args.archiveId);
   if (!archive) throw new Error("\u4EBA\u8A2D\u4E0D\u5B58\u5728");
-  const post = archive.posts.find((item) => item.id === args.postId);
+  const post = (args.source === "favorites" ? archive.favoritePosts || [] : archive.posts).find((item) => item.id === args.postId);
   if (!post) throw new Error("\u63A8\u6587\u4E0D\u5B58\u5728");
   const personaVisualIdentity = buildArchivePersonaVisualIdentityCue(archive, archive.name, post.content);
   const hasExplicitPersonaReference = Boolean(getExplicitPersonaReferenceImageUrl(archive));
@@ -12909,7 +12910,7 @@ function canRefreshSentimentPostMetrics(post?: Pick<PersonaArchive["posts"][numb
   );
 }
 
-async function refreshStoredPostSentimentMetrics(args: {
+export async function refreshStoredPostSentimentMetrics(args: {
   archiveId: string;
   postId: string;
 }): Promise<PersonaArchive["posts"][number] | null> {

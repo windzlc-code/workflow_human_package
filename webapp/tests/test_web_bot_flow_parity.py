@@ -167,3 +167,81 @@ def test_matrix_and_schedule_use_real_tool_r18_posts() -> None:
     assert "TaskRepo.add_many" not in matrix
     assert '"persona_enqueue_posts"' in schedule
     assert "TaskRepo.add_many" not in schedule
+
+
+def test_view_posts_uses_real_archive_state_and_tg_layout() -> None:
+    listing = _function_source("_publish_posts_list")
+    handle = _function_source("handle")
+
+    assert "_source_post_collection(row, source, content_type)" in listing
+    assert '"source_post_ids"' in listing
+    assert 'f"vp_{start + index}"' in listing
+    assert '"⭐ 收藏推文（' in listing
+    assert '"🚀 發布推文"' in listing
+    assert '"🗑 刪除推文"' in listing
+    assert handle.index('if action.startswith("vp_"):') < handle.index('if action.startswith("pa_pp_"):')
+    assert "_source_post_view_from_state" in handle
+
+
+def test_source_post_detail_exposes_all_tg_actions() -> None:
+    detail = _function_source("_source_post_detail")
+    handle = _function_source("handle")
+
+    for callback in ("pa_pub_", "pa_mp_", "pa_mm_", "pa_ed_", "pa_rg_", "pa_rf_", "pa_fav_", "pa_del_"):
+        assert callback in detail
+    for route in ("pa_mp_", "pa_mm_", "pa_ed_", "pa_rg_", "pa_rai_", "pa_ras_", "pa_rap_", "pa_rc_", "pa_rf_", "pa_fav_", "pa_del_"):
+        assert f'action.startswith("{route}")' in handle
+    assert '"source"' in detail
+    assert '"group_content_type"' in detail
+    assert '"post_page"' in detail
+
+
+def test_source_post_mutations_delegate_to_real_archive_task() -> None:
+    submit = _function_source("_source_post_action_submit")
+    bulk_delete = _function_source("_source_bulk_delete_execute")
+    continuation = _function_source("_continue_state_text")
+
+    assert '"persona_post_action"' in submit
+    assert '"delete_many"' in bulk_delete
+    assert 'flow == "source_post_custom_content"' in continuation
+    assert '"update_content"' in continuation
+
+
+def test_post_image_flow_generates_candidates_then_persists_selection() -> None:
+    ratio = _function_source("_source_post_image_ratio_submit")
+    pick = _function_source("_source_post_pick_candidate")
+    detail = _function_source("_source_task_detail")
+
+    assert '"action": "generate_candidates"' in ratio
+    assert '"imageWidth"' in ratio and '"imageHeight"' in ratio
+    assert '"action": "select_candidate"' in pick
+    assert 'f"pimgpick:{task_id}:{index}"' in detail
+    assert "cards=" in detail
+
+
+def test_content_type_source_and_page_survive_every_return_path() -> None:
+    callback = _function_source("_source_post_detail_callback")
+    detail = _function_source("_source_post_detail")
+    publish = _function_source("_source_post_publish_platform")
+
+    assert '"favorites" if source == "favorites" else "posts"' in callback
+    assert 'content_type if content_type in {"free", "paid"} else "all"' in callback
+    assert '"post_page": page' in detail
+    assert "_source_post_detail_callback" in publish
+
+
+def test_expired_source_pa_callbacks_never_fall_into_legacy_draft_actions() -> None:
+    handle = _function_source("handle")
+    source_guard = handle.index('if action.startswith("pa_") and _is_source_post_action_state(state):')
+
+    assert source_guard < handle.index('if action.startswith("pa_img_"):')
+    assert '_expired_source_post_action()' in handle[handle.index('if action.startswith("pa_pp_"):'):source_guard]
+
+
+def test_candidate_retry_encodes_exact_post_identity_not_list_index_only() -> None:
+    detail = _function_source("_source_task_detail")
+    retry = _function_source("_source_post_image_retry_callback")
+
+    assert "_source_post_image_retry_callback" in detail
+    assert 'urllib.parse.quote(str(post_id or ""), safe="")' in retry
+    assert '"favorites" if source == "favorites" else "posts"' in retry

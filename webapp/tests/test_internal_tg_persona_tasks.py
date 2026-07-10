@@ -1,5 +1,10 @@
+import json
 import inspect
+import os
 from pathlib import Path
+import subprocess
+
+import pytest
 
 from webapp import server
 
@@ -13,6 +18,7 @@ GENERATE_POST_IMAGE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "pe
 PUBLISH_POST_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-publish-post-once.ts"
 ENQUEUE_POSTS_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-enqueue-posts-once.ts"
 OWN_POST_REPLY_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "threads-own-post-reply-once.ts"
+POST_ACTION_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-post-action-once.ts"
 
 
 def test_persona_internal_tg_runners_are_registered() -> None:
@@ -27,6 +33,7 @@ def test_persona_internal_tg_runners_are_registered() -> None:
     assert '"persona_generate_post_image": _run_persona_generate_post_image' in source
     assert '"persona_publish_post": _run_persona_publish_post' in source
     assert '"persona_enqueue_posts": _run_persona_enqueue_posts' in source
+    assert '"persona_post_action": _run_persona_post_action' in source
     assert '"threads_own_post_reply": _run_threads_own_post_reply' in source
 
 
@@ -71,6 +78,78 @@ def test_persona_scripts_reuse_telegram_business_functions() -> None:
     assert "installNodePersonaArchiveBridge" in rewrite_source
 
 
+def test_persona_post_action_payloads_are_strictly_normalized() -> None:
+    regenerate = server._build_internal_tg_task_payload(
+        "task-regenerate",
+        "persona_post_action",
+        {
+            "archive_id": "archive-1",
+            "post_id": "post-1",
+            "action": "regenerate_content",
+            "source": "favorites",
+            "rewrite_mode": "source_structure",
+            "ignored": "secret",
+        },
+    )
+    delete_many = server._build_internal_tg_task_payload(
+        "task-delete-many",
+        "persona_post_action",
+        {"archiveId": "archive-1", "action": "delete_many", "postIds": ["post-1", "post-1", "post-2"]},
+    )
+    delete_media = server._build_internal_tg_task_payload(
+        "task-delete-media",
+        "persona_post_action",
+        {"archiveId": "archive-1", "postId": "post-1", "action": "delete_media", "selectedIndexes": [2, 0, 2]},
+    )
+
+    assert regenerate == {
+        "archiveId": "archive-1",
+        "postId": "post-1",
+        "action": "regenerate_content",
+        "postSource": "favorites",
+        "rewriteMode": "source_structure",
+    }
+    assert delete_many == {
+        "archiveId": "archive-1",
+        "action": "delete_many",
+        "postSource": "posts",
+        "postIds": ["post-1", "post-2"],
+    }
+    assert delete_media["selectedIndexes"] == [0, 2]
+    with pytest.raises(server.HTTPException):
+        server._build_internal_tg_task_payload(
+            "task-invalid",
+            "persona_post_action",
+            {"archiveId": "archive-1", "postId": "post-1", "action": "refresh_metrics", "source": "favorites"},
+        )
+
+
+def test_persona_post_action_result_exposes_only_safe_fields() -> None:
+    safe = server._safe_persona_post_action_result({
+        "ok": True,
+        "archiveId": "archive-1",
+        "postId": "post-1",
+        "action": "update_content",
+        "remaining": 2,
+        "favoriteCount": 1,
+        "content": "updated",
+        "mediaUrls": ["https://cdn.example.com/a.jpg", "C:\\private\\b.jpg"],
+        "stdout": "secret process output",
+        "input_path": "C:\\private\\input.json",
+    })
+
+    assert safe == {
+        "ok": True,
+        "archiveId": "archive-1",
+        "postId": "post-1",
+        "action": "update_content",
+        "remaining": 2,
+        "favoriteCount": 1,
+        "content": "updated",
+        "mediaUrls": ["https://cdn.example.com/a.jpg"],
+    }
+
+
 def test_internal_tg_task_detail_exposes_only_persona_results() -> None:
     source = SERVER_PATH.read_text(encoding="utf-8")
     detail_source = source[source.index("def api_internal_tg_task_detail"):]
@@ -80,6 +159,8 @@ def test_internal_tg_task_detail_exposes_only_persona_results() -> None:
     assert 'safe_persona_result' in detail_source
     assert '"screenshotUrl"' in detail_source
     assert '"persona_generate_image", "persona_generate_post_image", "persona_publish_post"' in detail_source
+    assert 'persona_task_type == "persona_post_action"' in detail_source
+    assert "safe_persona_post_action_result" in detail_source
 
 
 def test_persona_media_and_publish_payloads_are_normalized() -> None:
@@ -138,10 +219,29 @@ def test_persona_clis_reuse_real_telegram_and_archive_paths() -> None:
     assert "generateAndPersistPersonaReferenceImage" in generate_image
     assert "loadPersonaArchive" in generate_image
     assert "regenerateArchivePostImage" in generate_post_image
+    assert "generateArchivePostImageCandidates" in generate_post_image
+    assert "attachSelectedImageCandidateToArchivePost" in generate_post_image
     assert "publishPost" in publish
     assert "getArchivePendingPostsForPlatform" in publish
     assert 'action: "finalize-published"' in publish
     assert 'input.dryRun !== false' in publish
+    assert "input.padCodes" in publish
+    assert "input.postIds" in publish
+    assert "for (const post of posts)" in publish
+    assert "for (const targetPadCode of padCodes)" in publish
+    assert "publishedTargets" in publish
+    assert "webPublishCheckpoints" in publish
+    assert "savePublishCheckpoint" in publish
+    assert "clearPublishCheckpoints" in publish
+
+    post_action = POST_ACTION_SCRIPT_PATH.read_text(encoding="utf-8")
+    telegram_source = (ROOT / "tool_r18" / "src" / "telegram-bot.ts").read_text(encoding="utf-8")
+    assert "regenerateArchivePostContent" in post_action
+    assert "refreshStoredPostSentimentMetrics" in post_action
+    assert "installNodePersonaArchiveBridge" in post_action
+    assert "savePersonaArchive" in post_action
+    assert "export async function regenerateArchivePostContent" in telegram_source
+    assert "export async function refreshStoredPostSentimentMetrics" in telegram_source
 
 
 def test_pending_posts_are_whitelisted_and_media_urls_are_safe() -> None:
@@ -180,7 +280,15 @@ def test_pending_posts_are_whitelisted_and_media_urls_are_safe() -> None:
             "https://cdn.example.com/post.mp4",
             "https://cdn.example.com/source.webp",
         ],
+        "mediaItems": [
+            {"url": "https://cdn.example.com/post.mp4", "type": "video"},
+            {"url": "https://cdn.example.com/source.webp", "type": "image"},
+            {"url": "https://cdn.example.com/post.jpg", "type": "image"},
+        ],
         "videoUrl": "https://cdn.example.com/post.mp4",
+        "sourceMeta": {
+            "mediaItems": [{"url": "https://cdn.example.com/source.webp", "type": "image"}],
+        },
         "createdAt": "2026-07-10T00:00:00Z",
     }
     assert "pending_posts" in SERVER_PATH.read_text(encoding="utf-8")
@@ -208,6 +316,15 @@ def test_persona_dashboard_overview_includes_real_pending_posts(monkeypatch) -> 
             "mediaUrl": "https://cdn.example.com/pending.jpg",
             "createdAt": "2026-07-10T00:00:00Z",
         }],
+        "favoritePosts": [{
+            "id": "favorite-1",
+            "content": "favorite content",
+            "title": "Favorite",
+            "orderIndex": 0,
+            "mediaItems": [{"url": "https://cdn.example.com/favorite.webp", "type": "image"}],
+            "sourceMeta": {"favoriteSourcePostId": "post-1"},
+            "createdAt": "2026-07-10T01:00:00Z",
+        }],
         "platformPosts": {},
         "publishHistory": [],
         "personaImageLibrary": [],
@@ -231,8 +348,23 @@ def test_persona_dashboard_overview_includes_real_pending_posts(monkeypatch) -> 
         "telegramGroupContentType": "free",
         "mediaUrl": "https://cdn.example.com/pending.jpg",
         "mediaUrls": ["https://cdn.example.com/pending.jpg"],
+        "mediaItems": [{"url": "https://cdn.example.com/pending.jpg", "type": "image"}],
         "videoUrl": "",
+        "sourceMeta": {},
         "createdAt": "2026-07-10T00:00:00Z",
+    }]
+    assert overview["personas"][0]["favorite_posts"] == [{
+        "id": "favorite-1",
+        "content": "favorite content",
+        "title": "Favorite",
+        "orderIndex": 0,
+        "telegramGroupContentType": "",
+        "mediaUrl": "https://cdn.example.com/favorite.webp",
+        "mediaUrls": ["https://cdn.example.com/favorite.webp"],
+        "mediaItems": [{"url": "https://cdn.example.com/favorite.webp", "type": "image"}],
+        "videoUrl": "",
+        "sourceMeta": {"favoriteSourcePostId": "post-1", "mediaItems": []},
+        "createdAt": "2026-07-10T01:00:00Z",
     }]
 
 
@@ -277,3 +409,83 @@ def test_schedule_and_own_post_reply_scripts_use_tool_r18_sources() -> None:
     assert "scheduled_at: scheduledAt" in enqueue
     assert "runThreadsOwnPostReplyOnce" in own_reply
     assert "dryRun: input.dryRun === true" in own_reply
+
+
+def test_persona_post_action_cli_writes_the_real_archive_store(tmp_path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    archive_path = runtime_dir / "persona_archives.json"
+    archive_path.write_text(json.dumps([{
+        "id": "archive-1",
+        "name": "Persona",
+        "content": "Profile",
+        "createdAt": "2026-07-10T00:00:00Z",
+        "updatedAt": "2026-07-10T00:00:00Z",
+        "posts": [{
+            "id": "post-1",
+            "title": "Post",
+            "content": "before",
+            "wordCount": 6,
+            "orderIndex": 0,
+            "createdAt": "2026-07-10T00:00:00Z",
+            "updatedAt": "2026-07-10T00:00:00Z",
+            "imageUrl": "https://cdn.example.com/a.jpg",
+            "mediaUrl": "https://cdn.example.com/a.jpg",
+            "mediaItems": [
+                {"url": "https://cdn.example.com/a.jpg", "type": "image"},
+                {"url": "https://cdn.example.com/b.mp4", "type": "video"},
+            ],
+        }],
+        "favoritePosts": [],
+    }]), encoding="utf-8")
+    env = os.environ.copy()
+    env["TOOL_R18_RUNTIME_DIR"] = str(runtime_dir)
+    tool_dir = ROOT / "tool_r18"
+
+    def run_action(payload: dict) -> dict:
+        completed = subprocess.run(
+            ["node", "--import", "tsx", str(POST_ACTION_SCRIPT_PATH), json.dumps(payload)],
+            cwd=tool_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    updated = run_action({
+        "archiveId": "archive-1",
+        "postId": "post-1",
+        "action": "update_content",
+        "content": "after",
+    })
+    assert updated["content"] == "after"
+    media = run_action({
+        "archiveId": "archive-1",
+        "postId": "post-1",
+        "action": "delete_media",
+        "selectedIndexes": [0],
+    })
+    assert media["mediaUrls"] == ["https://cdn.example.com/b.mp4"]
+    favorite = run_action({
+        "archiveId": "archive-1",
+        "postId": "post-1",
+        "action": "favorite",
+    })
+    assert favorite["favoriteCount"] == 1
+    deleted = run_action({
+        "archiveId": "archive-1",
+        "action": "delete_many",
+        "postIds": ["post-1"],
+    })
+    assert deleted["remaining"] == 0
+
+    stored = json.loads(archive_path.read_text(encoding="utf-8"))[0]
+    assert stored["posts"] == []
+    assert stored["favoritePosts"][0]["content"] == "after"
+    assert stored["favoritePosts"][0]["mediaItems"] == [{
+        "url": "https://cdn.example.com/b.mp4",
+        "type": "video",
+    }]
