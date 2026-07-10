@@ -3,6 +3,8 @@ from pathlib import Path
 
 
 WEB_BOT_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "core" / "web_bot.py"
+BOT_CONSOLE_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "web" / "templates" / "bot_console.html"
+PERSONA_DASHBOARD_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "core" / "persona_dashboard.py"
 SERVER_PATH = Path(__file__).parents[1] / "server.py"
 GENERATOR_PATH = Path(__file__).parents[2] / "tool_r18" / "scripts" / "skills" / "persona-generate-posts-once.ts"
 SOURCE = WEB_BOT_PATH.read_text(encoding="utf-8")
@@ -162,6 +164,69 @@ def test_source_media_tasks_request_web_polling_until_result_is_ready() -> None:
 
     assert 'response["poll"]' in submit
     assert 'response["poll"]' in detail
+
+
+def test_post_generation_polls_and_returns_generated_content() -> None:
+    flow = _function_source("_continue_generate_posts")
+    detail = _function_source("_source_task_detail")
+    image_followup = _function_source("_source_generated_post_image_start")
+
+    assert 'f"source_task_poll:{source_task_id}"' in flow
+    assert 'result.get("posts")' in detail
+    assert "推文生成完成" in detail
+    assert 'f"source_genpost_image_start:{task_id}"' in detail
+    assert '"persona_generate_post_image"' in image_followup
+    assert '"action": "generate_candidates"' in image_followup
+
+
+def test_web_console_edits_callback_panels_and_polls_in_place() -> None:
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert "activeBotGroup" in template
+    assert "replacePanel" in template
+    assert "replaceTarget.replaceWith(group)" in template
+    assert "btn.closest('.msg-group')" in template
+    assert "showUser: false" in template
+    assert "isPoll: true" in template
+    assert "scheduleSourceFollowup" in template
+    assert "isFollowup: true" in template
+
+
+def test_post_generation_text_steps_match_tg_input_contract() -> None:
+    count_prompt = _function_source("_genpost_tg_count_prompt")
+    words_prompt = _function_source("_genpost_tg_words_prompt")
+    flow = _function_source("_continue_generate_posts")
+
+    assert "1-20" in flow
+    assert "10-2000" in flow
+    assert "例如：3" in count_prompt
+    assert "例如：120" in words_prompt
+    assert "genpost_words_20" not in words_prompt
+
+
+def test_web_generation_uses_tool_r18_memory_and_mode_labels() -> None:
+    memory_options = _function_source("_genpost_memory_options")
+    hot_filter = _function_source("_is_auto_imported_hot_memory")
+    memory_actions = _function_source("_genmem_action")
+    continuation = _function_source("_continue_generate_posts")
+    ratio_picker = _function_source("_genpost_ratio_picker")
+    server = SERVER_PATH.read_text(encoding="utf-8")
+    dashboard = PERSONA_DASHBOARD_PATH.read_text(encoding="utf-8")
+
+    assert 'row.get("memory_entries")' in memory_options
+    assert '"source": "tool_r18"' in memory_options
+    assert "reverse=True" in memory_options
+    assert "_is_auto_imported_hot_memory" in memory_options
+    assert "輿情熱點素材" in hot_filter
+    assert '"memory_entries": persona_memories.get(archive_id, [])' in server
+    assert '"memory_entries": row.get("memory_entries")' in dashboard
+    assert '"memory_entries": matched.get("memory_entries")' in dashboard
+    assert 'memories/delete' in memory_actions
+    assert 'memories/add' in continuation
+    assert '/api/internal/tg/personas/{archive_id}/memories/delete' in server
+    assert '/api/internal/tg/personas/{archive_id}/memories/add' in server
+    assert "生成推文+配圖/視頻" in ratio_picker
+    assert "未指定 + 配圖" not in ratio_picker
 
 
 def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:

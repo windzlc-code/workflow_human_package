@@ -37,7 +37,7 @@ SOURCE_API_TIMEOUT = 18
 PERSONA_MENU_CACHE_TTL_SECONDS = 30.0
 CREATE_PERSONA_MAX_SELECTED_KEYWORDS = 2
 STORED_POSTS_PAGE_SIZE = 3
-GENPOST_MAX_COUNT = 12
+GENPOST_MAX_COUNT = 20
 GENPOST_IMAGE_BATCH_SIZE = STORED_POSTS_PAGE_SIZE
 GENPOST_IMAGE_CANDIDATE_COUNT = 4
 PERSONA_SETTING_COOLDOWN_DAYS = 60
@@ -4902,6 +4902,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     preview_image = publish_screenshot if task_type == "persona_publish_post" and publish_screenshot else generated_image
     published_url = _safe_web_media_url(result.get("publishedUrl") or result.get("published_url"))
     candidate_images = [url for value in (result.get("imageUrls") if isinstance(result.get("imageUrls"), list) else []) if (url := _safe_web_media_url(value))]
+    generated_posts = [post for post in (result.get("posts") if isinstance(result.get("posts"), list) else []) if isinstance(post, dict)]
     if not preview_image and candidate_images:
         preview_image = candidate_images[0]
     if result.get("generatedCount") is not None:
@@ -4926,6 +4927,19 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
         elif task_type == "persona_rewrite_intro":
             result_rows.extend(_rows([_btn("⚙️ 返回人設設定", f"settings_{archive_id}")]))
         elif task_type == "persona_generate_posts":
+            generated_count = _num(result.get("generatedCount")) or len(generated_posts)
+            lines = [f"✅ 推文生成完成：{generated_count} 篇"]
+            used = len(lines[0])
+            for index, post in enumerate(generated_posts, start=1):
+                content = str(post.get("content") or "").strip()
+                if not content:
+                    continue
+                block = f"\n\n【第{index}篇】\n{content}"
+                if used + len(block) > 12000:
+                    lines.extend(["", f"其餘 {len(generated_posts) - index + 1} 篇可在推文列表查看。"])
+                    break
+                lines.append(block)
+                used += len(block)
             result_rows.extend(_rows([_btn("📝 查看推文列表", f"posts_{archive_id}_p0")], [_btn("🧾 返回人設詳情", f"pd_{archive_id}")]))
         elif task_type == "persona_generate_image":
             local, row = _resolve_persona_for_action(archive_id)
@@ -4993,6 +5007,8 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     )
     if status in {"queued", "running"}:
         response["poll"] = {"action": f"source_task_poll:{task_id}", "interval_ms": 2000}
+    elif status == "success" and task_type == "persona_generate_posts" and task_input.get("uiTextOnly") is False and generated_posts:
+        response["followup"] = {"action": f"source_genpost_image_start:{task_id}", "delay_ms": 700}
     return response
 
 
@@ -5002,6 +5018,39 @@ def _source_task_poll(task_id: str) -> dict[str, Any]:
     if poll:
         return {"messages": [], "state": {"flow": ""}, "poll": poll}
     return result
+
+
+def _source_generated_post_image_start(task_id: str) -> dict[str, Any]:
+    try:
+        _base, data = _source_task_detail_data(task_id)
+    except Exception as exc:
+        return _response(_message(f"讀取已生成推文失敗：{exc}", [[_btn("🔄 重新查看任務", f"source_task_detail:{task_id}")]]), state={"flow": ""})
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
+    posts = [post for post in (result.get("posts") if isinstance(result.get("posts"), list) else []) if isinstance(post, dict)]
+    archive_id = str(result.get("archiveId") or task_input.get("archiveId") or "").strip()
+    post_id = str((posts[0] if posts else {}).get("id") or "").strip()
+    if str(task.get("status") or "").lower() != "success" or not archive_id or not post_id:
+        return _response(
+            _message("推文已生成，但找不到可開始配圖的推文。", [[_btn("📝 查看推文列表", f"posts_{archive_id}_p0")]]),
+            state={"flow": ""},
+        )
+    params = {
+        "archiveId": archive_id,
+        "postId": post_id,
+        "action": "generate_candidates",
+        "chatId": SOURCE_WEB_BOT_CHAT_ID,
+        "imageAspectRatio": str(task_input.get("uiImageAspectRatio") or ""),
+        "imageWidth": _num(task_input.get("uiImageWidth")),
+        "imageHeight": _num(task_input.get("uiImageHeight")),
+        "imageRatioLabel": str(task_input.get("uiImageRatioLabel") or ""),
+        "postSource": "posts",
+        "uiPage": 0,
+        "uiPostIndex": 0,
+        "uiGeneratedPostIds": [str(post.get("id") or "") for post in posts if str(post.get("id") or "").strip()],
+    }
+    return _submit_source_post_task("persona_generate_post_image", archive_id, post_id, params, "推文配圖任務")
 
 
 def _source_cancel_latest() -> dict[str, Any]:
@@ -5616,9 +5665,46 @@ def _genpost_mode_picker(persona_id: str, content_branch: str = "") -> dict[str,
     )
 
 
-def _genpost_memory_options(persona_id: str) -> list[PostMemory]:
+def _is_auto_imported_hot_memory(summary: Any) -> bool:
+    text = re.sub(r"\s+", " ", str(summary or "")).strip().lower()
+    return bool(
+        re.search(r"(?:舆情热点素材|輿情熱點素材|热点素材|熱點素材)\s*\|\s*平台[:：]?\s*(?:threads|instagram)", text, re.I)
+        or re.search(r"平台[:：]?\s*(?:threads|instagram)\s*\|\s*(?:数据|數據)[:：]?", text, re.I)
+    )
+
+
+def _genpost_memory_options(persona_id: str) -> list[dict[str, Any]]:
+    local, row = _resolve_persona_for_action(persona_id)
+    row = _fresh_persona_row(persona_id, local, row)
+    source_entries = row.get("memory_entries") if isinstance(row, dict) and isinstance(row.get("memory_entries"), list) else []
+    options = [
+        {
+            "id": str(item.get("id") or ""),
+            "title": str(item.get("summary") or ""),
+            "content": str(item.get("content") or item.get("summary") or ""),
+            "granularity": str(item.get("kind") or "post"),
+            "memory_date": str(item.get("date") or ""),
+            "source": "tool_r18",
+        }
+        for item in sorted(source_entries, key=lambda value: str(value.get("date") or "") if isinstance(value, dict) else "", reverse=True)
+        if (
+            isinstance(item, dict)
+            and str(item.get("id") or "").strip()
+            and str(item.get("summary") or "").strip()
+            and not _is_auto_imported_hot_memory(item.get("summary"))
+        )
+    ]
+    if options:
+        return options[:100]
     return [
-        memory
+        {
+            "id": memory.id,
+            "title": memory.title,
+            "content": memory.content,
+            "granularity": memory.granularity,
+            "memory_date": memory.memory_date,
+            "source": "web",
+        }
         for memory in PostMemoryRepo.list_for_persona(persona_id, limit=80)
         if memory.source_type != LINK_ENDING_SOURCE_TYPE
     ]
@@ -5631,33 +5717,31 @@ def _genpost_memory_selection(draft: dict[str, Any]) -> dict[str, Any]:
     page = max(0, _num(draft.get("memory_page")))
     options = draft.get("memory_options")
     if not isinstance(options, list):
-        options = [
-            {"id": item.id, "title": item.title, "content": item.content, "granularity": item.granularity, "memory_date": item.memory_date}
-            for item in _genpost_memory_options(persona_id)
-        ]
+        options = _genpost_memory_options(persona_id)
         draft["memory_options"] = options
     selected = {str(item) for item in draft.get("selected_memory_entry_ids", [])}
-    page_size = 5
+    page_size = 10
     total_pages = max(1, (len(options) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
     draft["memory_page"] = page
     visible = options[page * page_size : (page + 1) * page_size]
     mode_label = "只生成推文（不配圖）" if draft.get("text_only") else "生成推文+配圖/視頻"
-    lines = ["✍️ 新建推文", "", f"人設：{name}"]
-    if content_branch:
-        lines.append(f"內容類型：{_genpost_branch_label(content_branch)}")
-    lines.extend([f"生成模式：{mode_label}", f"指定記憶：已選 {len(selected)} 條", "", "請選擇要參考的人設記憶。"])
-    if visible:
-        for absolute_index, item in enumerate(visible, start=page * page_size):
-            mark = "☑️" if str(item.get("id") or absolute_index) in selected else "☐"
-            title = item.get("title") or item.get("content") or "記憶"
-            lines.append(f"{absolute_index + 1}. {mark} {_memory_excerpt(title, 44)}")
-    else:
-        lines.append("目前沒有可選記憶，可以新增自訂記憶或不指定記憶。")
+    lines = [
+        "🧠 選擇本次參考的人設記憶",
+        "",
+        f"人設：{name}",
+        f"模式：{mode_label}",
+        f"可選記憶：{len(options)} 條",
+        f"已選：{len(selected)} 條",
+        "",
+        "勾選後，本輪生成的推文會圍繞這些記憶自然延展；也可以跳過。",
+    ]
     keyboard: list[list[dict[str, str]]] = []
     for absolute_index, item in enumerate(visible, start=page * page_size):
-        mark = "☑️" if str(item.get("id") or absolute_index) in selected else "☐"
-        keyboard.append([_btn(f"{mark} {_memory_excerpt(item.get('title') or item.get('content'), 22)}", f"genmem_toggle_{absolute_index}")])
+        mark = "✅" if str(item.get("id") or absolute_index) in selected else "☐"
+        date = str(item.get("memory_date") or "")[:10]
+        summary = _memory_excerpt(item.get("content") or item.get("title"), 44)
+        keyboard.append([_btn(f"{mark} {absolute_index + 1}. {date} {summary}".strip(), f"genmem_toggle_{absolute_index}")])
     if total_pages > 1:
         keyboard.append(
             [
@@ -5666,10 +5750,14 @@ def _genpost_memory_selection(draft: dict[str, Any]) -> dict[str, Any]:
                 _btn("下一頁 ▶️", f"genmem_page_{min(total_pages - 1, page + 1)}"),
             ]
         )
+    if options:
+        all_ids = {str(item.get("id") or index) for index, item in enumerate(options)}
+        keyboard.append([_btn("☐ 取消全選" if selected == all_ids else "✅ 全選記憶", "genmem_select_all")])
+    if selected:
+        keyboard.append([_btn("🗑 刪除已選記憶", "genmem_delete_selected")])
     keyboard.extend(
         _rows(
-            [_btn("☑️ 全選/清空", "genmem_select_all"), _btn("🗑 刪除已選記憶", "genmem_delete_selected")],
-            [_btn("➕ 新增自訂記憶", "genmem_add_custom")],
+            [_btn("➕ 添加自定義記憶", "genmem_add_custom")],
             [_btn("✅ 使用已選記憶", "genmem_done")],
             [_btn("⏭ 不指定記憶", "genmem_skip")],
             [_btn("◀️ 返回生成模式", f"genpost_{'r18' if content_branch == 'r18' else 'nonr18' if content_branch == 'nonr18' else 'branch'}_{persona_id}")],
@@ -5717,15 +5805,32 @@ def _genpost_tg_count_prompt(draft: dict[str, Any]) -> dict[str, Any]:
         lines.append(f"內容類型：{_genpost_branch_label(str(draft.get('content_branch') or ''))}")
     if draft.get("content_time_slot"):
         lines.append(f"文案時段：{draft.get('content_time_slot')}")
-    lines.extend([f"指定記憶：已選 {len(selected)} 條", "", "請輸入生成數量，只需發送數字。", "", "例如：3"])
-    return _response(_message("\n".join(lines), [[_btn("◀️ 返回記憶選擇", "genpost_count_back")]]), state={"flow": "genpost_count", "draft": draft})
+    mode_label = "只生成推文（不配圖）" if draft.get("text_only") else "生成推文+配圖/視頻"
+    lines.extend(
+        [
+            f"模式：{mode_label}",
+            f"指定記憶：{f'{len(selected)} 條' if selected else '不指定'}",
+            "",
+            "⭐ 請輸入生成數量 ⭐",
+            "　　只需要發送數字即可。",
+            "",
+            "例如：3",
+        ]
+    )
+    return _response(_message("\n".join(lines), [[_btn("◀️ 返回", "genpost_count_back")]]), state={"flow": "genpost_count", "draft": draft})
 
 
 def _genpost_tg_prompt_input(draft: dict[str, Any]) -> dict[str, Any]:
-    persona_id = str(draft.get("persona_id") or "")
-    text = "\n".join(["✍️ 新建推文", "", "請發送本次生成的提示詞，也可以跳過讓 AI 自動生成。"])
+    name = str(draft.get("name") or draft.get("persona_id") or "人設")
+    mode_label = "只生成推文（不配圖）" if draft.get("text_only") else "生成推文+配圖/視頻"
+    ratio_line = f"\n畫面比例：{draft.get('imageAspectRatio')}（{draft.get('imageRatioLabel')}）" if draft.get("imageAspectRatio") else ""
+    text = (
+        f"✍️ 新建推文\n\n人設：{name}\n模式：{mode_label}\n數量：{draft.get('count') or 0} 篇{ratio_line}"
+        "\n\n⭐ 請發送本次生成的提示詞 ⭐\n　　也可以跳過提示詞，讓 AI 根據人設自由發展。"
+        "\n\n例如：圍繞教師生活，寫得像群內早安日常。"
+    )
     return _response(
-        _message(text, _rows([_btn("⏭ 跳過提示詞", "genpost_prompt_skip")], [_btn("◀️ 返回數量", "genpost_count_back")])),
+        _message(text, _rows([_btn("⏭ 跳過提示詞，讓 AI 自由發展", "genpost_prompt_skip")], [_btn("◀️ 返回生成數量", "genpost_count_back")])),
         state={"flow": "genpost_prompt", "draft": draft},
     )
 
@@ -5748,7 +5853,7 @@ def _genpost_ratio_picker(draft: dict[str, Any]) -> dict[str, Any]:
         "✍️ 新建推文",
         "",
         f"人設：{name}",
-        f"模式：{_genpost_branch_label(str(draft.get('content_branch') or ''))} + 配圖 / 視頻",
+        f"模式：{_genpost_branch_label(str(draft.get('content_branch') or '')) + ' + 配圖 / 視頻' if draft.get('content_branch') else '生成推文+配圖/視頻'}",
         f"數量：{draft.get('count') or 0} 篇",
         "",
         "請選擇免費群配圖畫面比例：",
@@ -5780,11 +5885,11 @@ def _genpost_apply_ratio(action: str, state: dict[str, Any]) -> dict[str, Any]:
     return _genpost_tg_prompt_input(draft)
 
 
-def _genpost_tg_words_prompt(draft: dict[str, Any]) -> dict[str, Any]:
+def _genpost_tg_words_prompt(draft: dict[str, Any], received_prompt: str | None = None) -> dict[str, Any]:
+    prefix = f"✅ 已收到提示詞：{received_prompt}" if received_prompt is not None else "✅ 已選擇讓 AI 自動生成提示詞。"
     return _response(
         _message(
-            "✍️ 新建推文\n\n請輸入每篇推文目標字數，例如 20。",
-            _rows([_btn("20", "genpost_words_20"), _btn("50", "genpost_words_50"), _btn("80", "genpost_words_80")], [_btn("◀️ 返回提示詞", "genpost_prompt_back")]),
+            prefix + "\n\n⭐ 請輸入每篇推文的目標字數 ⭐\n只需要發送數字即可。\n\n例如：120",
         ),
         state={"flow": "genpost_words", "draft": draft},
     )
@@ -5838,7 +5943,27 @@ def _genmem_action(action: str, state: dict[str, Any]) -> dict[str, Any]:
         return _genpost_memory_selection(draft)
     if action == "genmem_delete_confirm":
         deleted = 0
-        for memory_id in list(selected):
+        source_ids = {
+            str(item.get("id") or "")
+            for item in options
+            if str(item.get("id") or "") in selected and item.get("source") == "tool_r18"
+        }
+        if source_ids:
+            archive_id = str(draft.get("source_archive_id") or draft.get("persona_id") or "").strip()
+            try:
+                _base, result = _source_http_request(
+                    "POST",
+                    f"/api/internal/tg/personas/{urllib.parse.quote(archive_id, safe='')}/memories/delete",
+                    payload={"tg_chat_id": SOURCE_WEB_BOT_CHAT_ID, "entry_ids": sorted(source_ids)},
+                    timeout=30,
+                )
+                deleted += _num(result.get("deleted"))
+            except Exception as exc:
+                return _response(
+                    _message(f"刪除人設記憶失敗：{exc}", [[_btn("◀️ 返回記憶選擇", "genmem_delete_cancel")]]),
+                    state={"flow": "genpost_tg_memory", "draft": draft},
+                )
+        for memory_id in selected - source_ids:
             if PostMemoryRepo.delete(memory_id):
                 deleted += 1
         draft["selected_memory_entry_ids"] = []
@@ -6230,13 +6355,27 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
             return _response(_message("請直接發送要新增的人設記憶。", [[_btn("◀️ 返回記憶選擇", "genmem_custom_back")]]), state=state)
         custom = to_traditional(text[:1600])
         draft["custom_memory"] = custom
-        saved = _record_post_memory(persona_id, custom, granularity="daily", source_type="manual", title="自訂新建記憶")
-        if saved:
+        archive_id = str(draft.get("source_archive_id") or persona_id).strip()
+        try:
+            _base, result = _source_http_request(
+                "POST",
+                f"/api/internal/tg/personas/{urllib.parse.quote(archive_id, safe='')}/memories/add",
+                payload={"tg_chat_id": SOURCE_WEB_BOT_CHAT_ID, "summary": custom},
+                timeout=30,
+            )
+        except Exception as exc:
+            return _response(
+                _message(f"新增人設記憶失敗：{exc}", [[_btn("◀️ 返回記憶選擇", "genmem_custom_back")]]),
+                state=state,
+            )
+        entry = result.get("entry") if isinstance(result.get("entry"), dict) else {}
+        entry_id = str(entry.get("id") or "").strip()
+        if entry_id:
             options = draft.get("memory_options") if isinstance(draft.get("memory_options"), list) else []
-            options.insert(0, {"id": saved.id, "title": saved.title, "content": saved.content, "granularity": saved.granularity, "memory_date": saved.memory_date})
+            options.insert(0, {"id": entry_id, "title": custom, "content": custom, "granularity": "post", "memory_date": str(entry.get("date") or ""), "source": "tool_r18"})
             draft["memory_options"] = options
             selected = list(draft.get("selected_memory_entry_ids") if isinstance(draft.get("selected_memory_entry_ids"), list) else [])
-            selected.append(saved.id)
+            selected.append(entry_id)
             draft["selected_memory_entry_ids"] = selected
         return _genpost_memory_selection(draft)
 
@@ -6315,10 +6454,12 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
 
     if flow == "genpost_count":
         count = _num(text)
-        if count <= 0:
-            return _response(_message("請輸入要生成的推文數量，例如：3。", [[_btn("◀️ 返回記憶選擇", f"genpost:{persona_id}")]]), state=state)
-        capped = min(count, GENPOST_MAX_COUNT)
-        draft["count"] = capped
+        if count < 1 or count > GENPOST_MAX_COUNT:
+            return _response(
+                _message("❌ 數量格式不正確。\n\n⭐ 請發送 1-20 之間的數字 ⭐\n　　　只需要發送數字即可。\n\n例如：3"),
+                state=state,
+            )
+        draft["count"] = count
         if not bool(draft.get("text_only")) and str(draft.get("content_branch") or "") != "r18":
             return _genpost_ratio_picker(draft)
         return _genpost_tg_prompt_input(draft)
@@ -6333,10 +6474,18 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
 
     if flow == "genpost_prompt":
         draft["prompt"] = to_traditional(text[:1200])
-        return _genpost_tg_words_prompt(draft)
+        return _genpost_tg_words_prompt(draft, draft["prompt"])
 
     if flow == "genpost_words":
-        words = max(20, min(_num(text), 500))
+        words = _num(text)
+        if words < 10 or words > 2000:
+            return _response(
+                _message(
+                    "❌ 字數格式不正確。\n\n⭐ 請發送 10-2000 之間的數字 ⭐\n　　　只需要發送數字即可。\n\n例如：120",
+                    [[_btn("◀️ 返回人設詳情", f"pd_{persona_id}")]],
+                ),
+                state=state,
+            )
         source_archive_id, local, row, has_reference, is_workflow = _generation_persona_reference(persona_id, draft)
         if source_archive_id:
             draft["source_archive_id"] = source_archive_id
@@ -6369,6 +6518,12 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
             "selectedMemoryEntryIds": selected_ids,
             "selectedMemorySummaries": [memory] if memory and not selected_ids else [],
             "textModelBranch": "paid" if str(draft.get("content_branch") or "") == "r18" else "free",
+            "uiTextOnly": bool(draft.get("text_only")),
+            "uiPersonaId": persona_id,
+            "uiImageAspectRatio": str(draft.get("imageAspectRatio") or ""),
+            "uiImageWidth": _num(draft.get("imageWidth")),
+            "uiImageHeight": _num(draft.get("imageHeight")),
+            "uiImageRatioLabel": str(draft.get("imageRatioLabel") or ""),
         }
         job = SourceWorkflowJobRepo.create(
             "persona_generate_posts",
@@ -6394,28 +6549,24 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
                 ),
                 state={"flow": "genpost_words", "draft": draft},
             )
-        return _response(
+        source_task_id = str(data.get("id") or "").strip()
+        response = _response(
             _message(
                 "\n".join(
                     [
-                        "🧠 正在生成推文...",
+                        f"⏳ 正在為人設「{name}」生成 {count} 篇推文{' + 配圖' if not bool(draft.get('text_only')) else ''}，請稍候...",
                         "",
-                        f"人設：{name}",
-                        f"數量：{count} 篇",
-                        f"目標字數：{words}",
-                        f"來源任務 ID：{data.get('id') or '-'}",
-                        "",
-                        "已直接交給 TG Bot 使用的 Tool R18 人設工作流。完成後推文會寫入同一個人設待發布庫。",
+                        f"指定記憶：{f'{len(selected_ids)} 條' if selected_ids else '不指定'}",
+                        f"目標字數：約 {words} 字/篇",
                     ]
                 ),
-                _rows(
-                    [_btn("📊 查看生成任務", "source_tasks")],
-                    [_btn("📝 查看推文列表", f"posts_{persona_id}_p0")],
-                    [_btn("◀️ 返回人設詳情", f"pd_{persona_id}")],
-                ),
+                [[_btn("◀️ 返回人設詳情", f"pd_{persona_id}")]],
             ),
             state={"flow": ""},
         )
+        if source_task_id:
+            response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+        return response
 
     return _main_menu()
 
@@ -11528,6 +11679,8 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _source_task_detail(action.split(":", 1)[1])
     if action.startswith("source_task_poll:"):
         return _source_task_poll(action.split(":", 1)[1])
+    if action.startswith("source_genpost_image_start:"):
+        return _source_generated_post_image_start(action.split(":", 1)[1])
     if action.startswith("source_rerun_task:"):
         return _source_rerun_task(action.split(":", 1)[1])
     if action == "source_rerun_latest":

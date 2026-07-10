@@ -17525,6 +17525,12 @@ class InternalTgSubmitPayload(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class InternalTgPersonaMemoryPayload(BaseModel):
+    tg_chat_id: int
+    entry_ids: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
 class InternalTgPromptPreviewPayload(BaseModel):
     task_type: str
     tg_chat_id: int
@@ -17734,7 +17740,7 @@ PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_WAKE_EVENT = threading.Event()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
-PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 9
+PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 10
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_STARTED = False
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE: dict[str, Any] = {
@@ -19292,8 +19298,89 @@ def _persona_dashboard_attach_live_settings(payload: dict[str, Any]) -> dict[str
     data_sources["persona_dashboard_monitor"] = dict(PERSONA_DASHBOARD_MONITOR_STATE)
     next_payload["data_sources"] = data_sources
     return next_payload
+
+
+def _read_tool_r18_persona_memories() -> dict[str, list[dict[str, Any]]]:
+    path = TOOL_R18_RUNTIME_DIR / "persona_memory.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    memories: dict[str, list[dict[str, Any]]] = {}
+    for raw_persona_id, raw_entries in payload.items():
+        persona_id = str(raw_persona_id or "").strip()
+        if not persona_id or not isinstance(raw_entries, list):
+            continue
+        entries: list[dict[str, Any]] = []
+        for raw_entry in raw_entries[:100]:
+            if not isinstance(raw_entry, dict):
+                continue
+            summary = re.sub(r"\s+", " ", str(raw_entry.get("summary") or "")).strip()
+            if not summary:
+                continue
+            entries.append({
+                "id": str(raw_entry.get("id") or "").strip(),
+                "date": str(raw_entry.get("date") or "").strip(),
+                "summary": summary[:1200],
+                "content": re.sub(r"\s+", " ", str(raw_entry.get("content") or "")).strip()[:2400],
+                "kind": "consolidated" if raw_entry.get("kind") == "consolidated" else "post",
+            })
+        memories[persona_id] = entries
+    return memories
+
+
+PERSONA_MEMORY_FILE_LOCK = threading.Lock()
+
+
+def _mutate_tool_r18_persona_memories(
+    archive_id: str,
+    *,
+    delete_ids: set[str] | None = None,
+    add_summary: str = "",
+) -> dict[str, Any]:
+    persona_id = str(archive_id or "").strip()
+    if not persona_id:
+        raise HTTPException(status_code=400, detail="archive_id 不能为空")
+    path = TOOL_R18_RUNTIME_DIR / "persona_memory.json"
+    with PERSONA_MEMORY_FILE_LOCK:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"读取人设记忆失败：{exc}") from exc
+        if not isinstance(payload, dict):
+            payload = {}
+        entries = [item for item in (payload.get(persona_id) if isinstance(payload.get(persona_id), list) else []) if isinstance(item, dict)]
+        deleted = 0
+        ids = {str(item).strip() for item in (delete_ids or set()) if str(item).strip()}
+        if ids:
+            kept = [entry for entry in entries if str(entry.get("id") or "").strip() not in ids]
+            deleted = len(entries) - len(kept)
+            entries = kept
+        created: dict[str, Any] | None = None
+        summary = re.sub(r"\s+", " ", str(add_summary or "")).strip()
+        if summary:
+            created = {
+                "id": _new_id("memory"),
+                "date": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                "summary": summary[:1200],
+                "content": summary[:2400],
+                "kind": "post",
+            }
+            entries.insert(0, created)
+        payload[persona_id] = entries[:100]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp.replace(path)
+    _invalidate_persona_dashboard_overview_cache()
+    return {"ok": True, "deleted": deleted, "entry": created, "count": len(entries[:100])}
+
+
 def _compute_persona_dashboard_overview() -> dict[str, Any]:
     archives, archives_source = _read_tool_r18_persona_archives()
+    persona_memories = _read_tool_r18_persona_memories()
     queue_stats = _read_tool_r18_publish_queue_stats()
     sentiment_stats = _read_tool_r18_sentiment_hot_stats()
     deleted_posts = _read_persona_dashboard_deleted_posts()
@@ -19695,6 +19782,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "hot_score_formula": "热度 = 逐帖浏览合计 + 点赞 + 评论 + 分享 + 转发；不包含账号主页浏览。",
             "hot_platforms": hot_platforms,
             "pending_posts": [item for post in posts if (item := _compact_pending_archive_post(post)) is not None],
+            "memory_entries": persona_memories.get(archive_id, []),
             "favorite_posts": [
                 item
                 for post in (archive.get("favoritePosts") if isinstance(archive.get("favoritePosts"), list) else [])
@@ -20439,6 +20527,22 @@ def create_app() -> FastAPI:
         with db() as conn:
             pricing = _get_pricing_config(conn)
         return {"pricing": pricing}
+
+    @app.post("/api/internal/tg/personas/{archive_id}/memories/delete")
+    def api_internal_tg_delete_persona_memories(archive_id: str, payload: InternalTgPersonaMemoryPayload, request: Request):
+        _require_internal_tg_request(request)
+        if int(payload.tg_chat_id or 0) <= 0:
+            raise HTTPException(status_code=400, detail="tg_chat_id 必须为正整数")
+        return _mutate_tool_r18_persona_memories(archive_id, delete_ids=set(payload.entry_ids))
+
+    @app.post("/api/internal/tg/personas/{archive_id}/memories/add")
+    def api_internal_tg_add_persona_memory(archive_id: str, payload: InternalTgPersonaMemoryPayload, request: Request):
+        _require_internal_tg_request(request)
+        if int(payload.tg_chat_id or 0) <= 0:
+            raise HTTPException(status_code=400, detail="tg_chat_id 必须为正整数")
+        if not str(payload.summary or "").strip():
+            raise HTTPException(status_code=400, detail="summary 不能为空")
+        return _mutate_tool_r18_persona_memories(archive_id, add_summary=payload.summary)
 
     @app.post("/api/internal/tg/submit")
     def api_internal_tg_submit(payload: InternalTgSubmitPayload, request: Request):

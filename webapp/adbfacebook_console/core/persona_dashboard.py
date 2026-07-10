@@ -197,6 +197,7 @@ def _normalize_remote_persona(row: dict[str, Any]) -> dict[str, Any]:
         "publish_history": row.get("publish_history") if isinstance(row.get("publish_history"), list) else [],
         "pending_posts": row.get("pending_posts") if isinstance(row.get("pending_posts"), list) else [],
         "favorite_posts": row.get("favorite_posts") if isinstance(row.get("favorite_posts"), list) else [],
+        "memory_entries": row.get("memory_entries") if isinstance(row.get("memory_entries"), list) else [],
         "warnings": row.get("warnings") if isinstance(row.get("warnings"), list) else [],
         "hot_score_formula": "热度 = 逐帖浏览 + 点赞 + 评论 + 分享 + 转发；不包含账号主页浏览。",
     }
@@ -258,6 +259,7 @@ def _local_persona_row(persona: Persona, remote_match: dict[str, Any] | None = N
         "publish_history": matched.get("publish_history") if isinstance(matched.get("publish_history"), list) else [],
         "pending_posts": matched.get("pending_posts") if isinstance(matched.get("pending_posts"), list) else [],
         "favorite_posts": matched.get("favorite_posts") if isinstance(matched.get("favorite_posts"), list) else [],
+        "memory_entries": matched.get("memory_entries") if isinstance(matched.get("memory_entries"), list) else [],
         "warnings": matched.get("warnings") if isinstance(matched.get("warnings"), list) else [],
         "hot_score_formula": "热度 = 逐帖浏览 + 点赞 + 评论 + 分享 + 转发；不包含账号主页浏览。",
     }
