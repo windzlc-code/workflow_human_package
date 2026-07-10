@@ -2594,7 +2594,7 @@ def _sentiment_hot_media_edit(action: str, state: dict[str, Any]) -> dict[str, A
         f"媒体: {len(media_items)} 个，已选删除 {len(selected)} 个，保存后保留 {kept_count} 个",
         "",
         "图片已按媒体编号排版；下方按钮可多选删除，红色标记表示保存时会删除。",
-        "可以直接发送新文案；也可以点击纸夹发送图片/视频+文案来整体替换媒体。",
+        "可以直接发送新文案；也可以发送图片/视频+文案来整体替换媒体。",
     ]
     if not media_items:
         lines.extend(["", "这篇候选没有可管理的媒体，仍可直接使用文字内容。"])

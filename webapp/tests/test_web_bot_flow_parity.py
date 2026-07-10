@@ -381,6 +381,7 @@ def test_hot_candidate_callbacks_keep_snapshot_and_tg_layout() -> None:
     assert 'action == "shmedia_select_all"' in media
     assert 'action == "shmedia_clear"' in media
     assert 'action == "shmedia_save"' in media
+    assert "可以直接发送新文案；也可以发送图片/视频+文案来整体替换媒体。" in media
     assert '"replacementMedia"' in _function_source("_sentiment_hot_import")
     assert "_sentiment_hot_import" in continuation
 
