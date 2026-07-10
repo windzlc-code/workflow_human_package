@@ -437,6 +437,38 @@ def test_persona_publish_runner_is_the_only_layer_forcing_live_publish(monkeypat
     assert captured["args"][3] == "persona-publish-post-once.ts"
 
 
+def test_persona_publish_payload_accepts_custom_media_and_content_overrides() -> None:
+    custom = server._build_internal_tg_task_payload(
+        "task-custom",
+        "persona_publish_post",
+        {
+            "archiveId": "archive-1",
+            "padCodes": ["PAD-1", "PAD-1", "PAD-2"],
+            "platform": "threads",
+            "customContent": "custom text",
+            "customMediaUrl": "data:image/png;base64,YWJj",
+            "generateImage": True,
+        },
+    )
+    stored = server._build_internal_tg_task_payload(
+        "task-stored",
+        "persona_publish_post",
+        {
+            "archiveId": "archive-1",
+            "postIds": ["post-1", "post-2"],
+            "padCode": "PAD-1",
+            "platform": "telegram",
+            "contentOverrides": {"post-1": "with link", "unknown": "ignored"},
+        },
+    )
+
+    assert custom["customContent"] == "custom text"
+    assert custom["customMediaUrl"].startswith("data:image/png")
+    assert custom["generateImage"] is True
+    assert custom["padCodes"] == ["PAD-1", "PAD-2"]
+    assert stored["contentOverrides"] == {"post-1": "with link"}
+
+
 def test_persona_clis_reuse_real_telegram_and_archive_paths() -> None:
     generate_image = GENERATE_IMAGE_SCRIPT_PATH.read_text(encoding="utf-8")
     generate_post_image = GENERATE_POST_IMAGE_SCRIPT_PATH.read_text(encoding="utf-8")

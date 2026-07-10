@@ -192,6 +192,57 @@ def test_web_console_edits_callback_panels_and_polls_in_place() -> None:
     assert "isFollowup: true" in template
 
 
+def test_publish_entry_and_custom_media_route_to_real_source_publish() -> None:
+    center = _function_source("_publish_center")
+    handle = _function_source("handle")
+    custom = _function_source("_custom_publish_execute")
+    multi = _function_source("_source_post_multi_publish_execute")
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert "custom_publish_persona:" in center
+    assert "stored_publish:" in center
+    for route in (
+        'action.startswith("custom_publish_persona:")',
+        'action.startswith("stored_publish:")',
+        'action.startswith("stored_platform:")',
+        'action.startswith("stored_pick:")',
+        'action.startswith("stored_count:")',
+        'action == "custom_publish_publish_now"',
+        'action == "custom_publish_multi_now"',
+    ):
+        assert route in handle
+    assert 'state.get("flow") == "custom_publish_content" and (message or media)' in handle
+    assert '"persona_publish_post"' in custom
+    assert '"customContent"' in custom
+    assert '"customMediaUrl"' in custom
+    assert '"generateImage"' in custom
+    assert '"padCodes"' in multi
+    assert "state.flow === 'sentiment_hot_edit_input' || state.flow === 'custom_publish_content'" in template
+
+
+def test_publish_platforms_links_multi_pad_and_retry_match_tg_contract() -> None:
+    start = _function_source("_source_post_publish_start")
+    platform = _function_source("_source_post_publish_platform")
+    bulk = _function_source("_source_bulk_publish_platform")
+    pads = _function_source("_source_post_pad_menu")
+    detail = _function_source("_source_task_detail")
+    publish_cli = (WEB_BOT_PATH.parents[3] / "tool_r18" / "scripts" / "skills" / "persona-publish-post-once.ts").read_text(encoding="utf-8")
+
+    assert "_allowed_publish_platforms()" in start
+    assert "_valid_publish_platform(platform)" in platform
+    assert "選擇鏈接模板" in platform
+    assert "選擇多智能體手機發布" in bulk
+    for callback in ("sppad_all_pages", "sppad_clear_all", "sppad_page:"):
+        assert callback in pads
+    assert "只重試失敗/未完成項" in detail
+    assert "createNodePublishQueueRepository" in publish_cli
+    assert "acquirePadLock" in publish_cli
+    assert "releasePadLock" in publish_cli
+    assert "contentOverrides" in publish_cli
+    assert "generateArchivePostImageCandidates" in publish_cli
+    assert sum(1 for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == "_publish_platform") == 1
+
+
 def test_post_generation_text_steps_match_tg_input_contract() -> None:
     count_prompt = _function_source("_genpost_tg_count_prompt")
     words_prompt = _function_source("_genpost_tg_words_prompt")

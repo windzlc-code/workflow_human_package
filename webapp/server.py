@@ -17063,6 +17063,8 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
 
     if typ in {"persona_generate_post_image", "persona_publish_post"}:
         archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        custom_content = str(payload.get("customContent") or "").strip() if typ == "persona_publish_post" else ""
+        custom_media_url = str(payload.get("customMediaUrl") or "").strip() if typ == "persona_publish_post" else ""
         post_id = str(payload.get("postId") or payload.get("post_id") or "").strip()
         post_ids = list(dict.fromkeys(
             str(item).strip()
@@ -17073,9 +17075,11 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
             post_ids.insert(0, post_id)
         if not archive_id:
             raise HTTPException(status_code=400, detail=f"{typ} requires archiveId")
-        if not post_ids:
+        if not post_ids and not (typ == "persona_publish_post" and (custom_content or custom_media_url)):
             raise HTTPException(status_code=400, detail=f"{typ} requires postId")
-        normalized = {"archiveId": archive_id, "postId": post_ids[0]}
+        normalized = {"archiveId": archive_id}
+        if post_ids:
+            normalized["postId"] = post_ids[0]
         if typ == "persona_publish_post" and len(post_ids) > 1:
             normalized["postIds"] = post_ids[:200]
         if typ == "persona_generate_post_image":
@@ -17130,6 +17134,29 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
                     if isinstance(item, int) and not isinstance(item, bool) and item >= 0
                 })[:20]
         if typ == "persona_publish_post":
+            if custom_content:
+                if len(custom_content) > 20000:
+                    raise HTTPException(status_code=400, detail="persona_publish_post customContent is too long")
+                normalized["customContent"] = custom_content
+            if custom_media_url:
+                if len(custom_media_url) > 40_000_000:
+                    raise HTTPException(status_code=400, detail="persona_publish_post customMediaUrl is too large")
+                normalized["customMediaUrl"] = custom_media_url
+            if payload.get("generateImage") is True:
+                if not custom_content:
+                    raise HTTPException(status_code=400, detail="persona_publish_post generateImage requires customContent")
+                normalized["generateImage"] = True
+            raw_overrides = payload.get("contentOverrides")
+            if isinstance(raw_overrides, dict) and post_ids:
+                overrides = {
+                    str(post_id): str(raw_overrides.get(post_id) or "").strip()
+                    for post_id in post_ids
+                    if str(raw_overrides.get(post_id) or "").strip()
+                }
+                if any(len(value) > 20000 for value in overrides.values()):
+                    raise HTTPException(status_code=400, detail="persona_publish_post contentOverrides value is too long")
+                if overrides:
+                    normalized["contentOverrides"] = overrides
             pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
             pad_codes = list(dict.fromkeys(
                 str(item).strip()

@@ -546,7 +546,7 @@
   });
 
   attach.addEventListener('click', () => {
-    if (state.flow === 'sentiment_hot_edit_input') {
+    if (state.flow === 'sentiment_hot_edit_input' || state.flow === 'custom_publish_content') {
       mediaInput.click();
       return;
     }
