@@ -90,6 +90,39 @@ def test_persona_image_delegates_to_tg_source_task() -> None:
     assert "_submit_persona_image_job(" not in image
 
 
+def test_source_persona_results_return_media_and_keep_tg_callbacks() -> None:
+    detail = _function_source("_source_task_detail")
+
+    assert 'result.get("imageUrl")' in detail
+    assert "image=preview_image" in detail
+    assert 'f"source_task_detail:{task_id}"' in detail
+    assert 'f"pd_{archive_id}"' in detail
+    assert 'f"settings_{archive_id}"' in detail
+    assert 'result.get("publishedUrl")' in detail
+
+
+def test_persona_and_post_views_render_source_media() -> None:
+    view_image = _function_source("_view_persona_image")
+    settings = _function_source("_persona_settings")
+    post_detail = _function_source("_source_post_detail")
+
+    assert "_persona_reference_image_url(row)" in view_image
+    assert "_fresh_persona_row(" in view_image
+    assert "_generate_persona_image_response(" not in view_image
+    assert "_persona_reference_image_url(row)" in settings
+    assert "_fresh_persona_row(" in settings
+    assert "image=preview_image" in post_detail
+    assert "cards=media_cards" in post_detail
+
+
+def test_source_media_tasks_request_web_polling_until_result_is_ready() -> None:
+    submit = _function_source("_submit_source_post_task")
+    detail = _function_source("_source_task_detail")
+
+    assert 'response["poll"]' in submit
+    assert 'response["poll"]' in detail
+
+
 def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
     handle = _function_source("handle")
     continuation = _function_source("_continue_state_text")

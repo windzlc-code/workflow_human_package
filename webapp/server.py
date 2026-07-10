@@ -26,7 +26,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import requests
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -18329,8 +18329,42 @@ def _safe_pending_post_media_url(value: Any) -> str:
         if not parsed.netloc or parsed.username or parsed.password:
             return ""
         return text
+    normalized = text.replace("\\", "/")
+    runtime_prefixes = {
+        "/data/tool_r18_runtime/",
+        str(_tool_r18_runtime_dir()).replace("\\", "/").rstrip("/") + "/",
+    }
+    for prefix in runtime_prefixes:
+        if not normalized.startswith(prefix):
+            continue
+        relative = normalized[len(prefix) :]
+        parts = [part for part in relative.split("/") if part]
+        if len(parts) == 2 and parts[0] == "sentiment-hot-media" and parts[1] not in {".", ".."}:
+            return f"/persona_media/sentiment-hot-media/{quote(parts[1])}"
     if text.startswith("/") and not text.startswith("//") and "\\" not in text and ".." not in text.split("/"):
         return text
+    return ""
+
+
+def _persona_reference_image_url(archive: Any) -> str:
+    if not isinstance(archive, dict):
+        return ""
+    candidates: list[Any] = [archive.get("personaReferenceSheet")]
+    setup = archive.get("setup") if isinstance(archive.get("setup"), dict) else {}
+    candidates.extend([
+        setup.get("personaReferenceSheet"),
+        setup.get("personaReferenceImageUrl"),
+        setup.get("referenceImageUrl"),
+    ])
+    image_library = archive.get("personaImageLibrary")
+    if isinstance(image_library, list):
+        for item in image_library:
+            if isinstance(item, dict):
+                candidates.extend([item.get("imageUrl"), item.get("url")])
+    for candidate in candidates:
+        safe_url = _safe_pending_post_media_url(candidate)
+        if safe_url:
+            return safe_url
     return ""
 
 
@@ -19376,6 +19410,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "id": archive_id,
             "name": archive.get("name") or "未命名人设",
             "content": str(archive.get("content") or "")[:800],
+            "reference_image_url": _persona_reference_image_url(archive),
             "created_at": archive.get("createdAt"),
             "updated_at": archive.get("updatedAt"),
             "bound_pad_code": archive.get("boundPadCode"),
@@ -19573,6 +19608,11 @@ def create_app() -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
     app.mount("/tool_r18_uploads", StaticFiles(directory=str(TOOL_R18_UPLOAD_ROOT)), name="tool_r18_uploads")
+    app.mount(
+        "/persona_media/sentiment-hot-media",
+        StaticFiles(directory=str(_tool_r18_runtime_dir() / "sentiment-hot-media"), check_dir=False),
+        name="persona-sentiment-media",
+    )
 
     @app.on_event("startup")
     def start_tool_r18_stop_responder() -> None:
@@ -20503,7 +20543,7 @@ def create_app() -> FastAPI:
         persona_task_type = str(row["type"] or "")
         safe_persona_result = {
             key: output_payload.get(key)
-            for key in ("ok", "archiveId", "postId", "imageUrl", "publishedUrl")
+            for key in ("ok", "archiveId", "postId", "imageUrl", "publishedUrl", "mode")
             if key in output_payload
         }
         return {

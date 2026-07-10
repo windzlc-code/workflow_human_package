@@ -183,11 +183,18 @@ def test_pending_posts_are_whitelisted_and_media_urls_are_safe() -> None:
     assert "pending_posts" in SERVER_PATH.read_text(encoding="utf-8")
 
 
+def test_runtime_sentiment_media_is_rewritten_to_public_read_only_path() -> None:
+    assert server._safe_pending_post_media_url(
+        "/data/tool_r18_runtime/sentiment-hot-media/example image.jpg"
+    ) == "/persona_media/sentiment-hot-media/example%20image.jpg"
+
+
 def test_persona_dashboard_overview_includes_real_pending_posts(monkeypatch) -> None:
     archive = {
         "id": "archive-1",
         "name": "Persona",
         "content": "Profile",
+        "personaReferenceSheet": "https://cdn.example.com/persona-reference.png",
         "setup": {},
         "posts": [{
             "id": "post-1",
@@ -212,6 +219,7 @@ def test_persona_dashboard_overview_includes_real_pending_posts(monkeypatch) -> 
 
     overview = server._compute_persona_dashboard_overview()
 
+    assert overview["personas"][0]["reference_image_url"] == "https://cdn.example.com/persona-reference.png"
     assert overview["personas"][0]["pending_posts"] == [{
         "id": "post-1",
         "content": "pending content",
@@ -223,6 +231,33 @@ def test_persona_dashboard_overview_includes_real_pending_posts(monkeypatch) -> 
         "videoUrl": "",
         "createdAt": "2026-07-10T00:00:00Z",
     }]
+
+
+def test_persona_dashboard_reference_image_falls_back_to_latest_library_item(monkeypatch) -> None:
+    archive = {
+        "id": "archive-2",
+        "name": "Persona 2",
+        "content": "Profile",
+        "setup": {},
+        "posts": [],
+        "platformPosts": {},
+        "publishHistory": [],
+        "personaImageLibrary": [
+            {"imageUrl": "https://cdn.example.com/latest-reference.webp"},
+            {"imageUrl": "file:///tmp/private-reference.png"},
+        ],
+    }
+    monkeypatch.setattr(server, "_read_tool_r18_persona_archives", lambda: ([archive], {"exists": True}))
+    monkeypatch.setattr(server, "_read_tool_r18_publish_queue_stats", lambda: {"by_archive": {}, "by_status": {}, "rows": [], "total": 0})
+    monkeypatch.setattr(server, "_read_tool_r18_sentiment_hot_stats", lambda: {})
+    monkeypatch.setattr(server, "_read_persona_dashboard_deleted_posts", lambda: {})
+    monkeypatch.setattr(server, "_load_admin_vmos_pads", lambda: [])
+    monkeypatch.setattr(server, "_load_persona_dashboard_settings_payload", lambda: {})
+    monkeypatch.setattr(server, "_persona_dashboard_deleted_posts_version", lambda: "")
+
+    overview = server._compute_persona_dashboard_overview()
+
+    assert overview["personas"][0]["reference_image_url"] == "https://cdn.example.com/latest-reference.webp"
 
 
 def test_persona_skill_tasks_invalidate_dashboard_cache() -> None:

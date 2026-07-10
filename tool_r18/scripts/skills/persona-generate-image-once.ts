@@ -28,7 +28,7 @@ async function main() {
 
   const result = await generateAndPersistPersonaReferenceImage(archiveId, archive.name);
   if (!result.ok || !result.imageUrl) throw new Error(result.error || "persona image generation failed");
-  printJson({ ok: true, archiveId, imageUrl: result.imageUrl });
+  printJson({ ok: true, archiveId, imageUrl: result.imageUrl, mode: result.mode || "" });
 }
 
 main().catch((error) => {

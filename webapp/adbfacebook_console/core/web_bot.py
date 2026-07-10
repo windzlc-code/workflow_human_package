@@ -713,6 +713,53 @@ def _image_data_url(path: str | Path) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
+def _safe_web_media_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if re.match(r"^data:(?:image|video)/[a-z0-9.+-]+;base64,[a-z0-9+/=\r\n]+$", text, re.I):
+        return text
+    if (
+        text.startswith(("/persona_media/", "/tool_r18_uploads/"))
+        and not text.startswith("//")
+        and "\\" not in text
+        and ".." not in text.split("/")
+    ):
+        return text
+    if not re.match(r"^https?://", text, re.I):
+        return ""
+    parsed = urllib.parse.urlsplit(text)
+    if not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    return text
+
+
+def _is_web_image_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        re.match(r"^data:image/", text, re.I)
+        or re.search(r"\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$", text, re.I)
+    )
+
+
+def _persona_reference_image_url(row: dict[str, Any] | None) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return _safe_web_media_url(row.get("reference_image_url") or row.get("referenceImageUrl"))
+
+
+def _fresh_persona_row(persona_id: str, local: Persona | None, row: dict[str, Any] | None) -> dict[str, Any] | None:
+    target_id = _tool_r18_archive_id(persona_id, local, row) or str(persona_id or "").strip()
+    if not target_id:
+        return row
+    try:
+        overview = build_overview(force_remote=True)
+        fresh = find_persona(overview, target_id)
+        if fresh:
+            return fresh
+    except Exception:
+        pass
+    return row
+
+
 def _font(size: int, *, bold: bool = False):
     from PIL import ImageFont
 
@@ -1437,15 +1484,37 @@ def _generate_persona_image_response(persona_id: str, *, regenerate: bool = Fals
 
 
 def _view_persona_image(persona_id: str) -> dict[str, Any]:
-    persona, _row = _resolve_persona_for_action(persona_id)
-    if not persona:
+    persona, row = _resolve_persona_for_action(persona_id)
+    if not persona and not row:
         return _response(_message("没有找到这个本地人设。", [[_btn("◀️ 返回人设列表", "list_personas")]]))
-    if _avatar_exists(persona):
+    if persona and _avatar_exists(persona):
         return _response(
             _persona_image_message(persona, persona.avatar_path),
             state={"flow": "persona_image", "draft": {"persona_id": persona.id, "name": persona.name}},
         )
-    return _generate_persona_image_response(persona.id)
+    source_image = _persona_reference_image_url(row)
+    if not source_image:
+        row = _fresh_persona_row(persona_id, persona, row)
+        source_image = _persona_reference_image_url(row)
+    if source_image:
+        name = persona.name if persona else _persona_row_name(row or {})
+        archive_id = _tool_r18_archive_id(persona_id, persona, row) or persona_id
+        return _response(
+            _message(
+                f"👁 人设「{name}」当前参考图",
+                [[_btn("◀️ 返回设置", f"settings_{archive_id}")]],
+                image=source_image,
+            ),
+            state={"flow": "persona_image", "draft": {"persona_id": archive_id, "name": name}},
+        )
+    archive_id = _tool_r18_archive_id(persona_id, persona, row) or persona_id
+    return _response(
+        _message(
+            "❌ 这个非工作流人設还没有人设图，请先生成。",
+            [[_btn("◀️ 返回设置", f"settings_{archive_id}")]],
+        ),
+        state={"flow": ""},
+    )
 
 
 def _run_persona_image_job(job_id: str, persona_id: str, regenerate: bool, instruction: str) -> None:
@@ -3312,6 +3381,8 @@ def _persona_settings(persona_id: str) -> dict[str, Any]:
         )
     if local:
         persona_id = local.id
+    if not ((local and _avatar_exists(local)) or _persona_reference_image_url(row)):
+        row = _fresh_persona_row(persona_id, local, row)
     pad_name, pad_code = _persona_bound_info(row, local)
     if local:
         name = _clean_persona_name(local.name, pad_code)
@@ -3356,7 +3427,7 @@ def _persona_settings(persona_id: str) -> dict[str, Any]:
         buttons.extend([_btn("TG免費群", f"bindtg_free_{persona_id}"), _btn("TG付費群", f"bindtg_paid_{persona_id}")])
     else:
         buttons.append(_btn("TG通用群", f"bindtg_free_{persona_id}"))
-        if local and _avatar_exists(local):
+        if (local and _avatar_exists(local)) or _persona_reference_image_url(row):
             buttons.extend([_btn("👁 查看人设图", f"viewimg_{persona_id}"), _btn("🔄 重新生成人设图", f"regenimg_{persona_id}")])
         else:
             buttons.append(_btn("🎨 生成人设图", f"genimg_{persona_id}"))
@@ -4823,15 +4894,23 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     if task.get("batch_summary"):
         lines.extend(["", f"批次：{json.dumps(task.get('batch_summary'), ensure_ascii=False)[:500]}"])
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
-    archive_id = str(result.get("archiveId") or result.get("archive_id") or "").strip()
-    post_id = str(result.get("postId") or result.get("post_id") or "").strip()
+    task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
+    archive_id = str(result.get("archiveId") or result.get("archive_id") or task_input.get("archiveId") or task_input.get("archive_id") or "").strip()
+    post_id = str(result.get("postId") or result.get("post_id") or task_input.get("postId") or task_input.get("post_id") or "").strip()
+    preview_image = _safe_web_media_url(result.get("imageUrl") or result.get("image_url"))
+    published_url = _safe_web_media_url(result.get("publishedUrl") or result.get("published_url"))
     task_type = str(task.get("type") or "").strip()
     if result.get("generatedCount") is not None:
         lines.extend(["", f"已生成：{_num(result.get('generatedCount'))} 篇"])
     if archive_id:
         lines.append(f"人設 ID：{archive_id}")
+    if preview_image:
+        lines.append("媒體：已返回並寫入人設歸檔")
+    if published_url:
+        lines.append(f"發布連結：{published_url}")
     result_rows: list[list[dict[str, str]]] = []
-    if str(task.get("status") or "").lower() == "success" and archive_id:
+    status = str(task.get("status") or "").lower()
+    if status == "success" and archive_id:
         if task_type.startswith("persona_"):
             _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": []})
             _refresh_persona_overview_cache(force_remote=True)
@@ -4842,19 +4921,43 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
         elif task_type == "persona_generate_posts":
             result_rows.extend(_rows([_btn("📝 查看推文列表", f"posts_{archive_id}_p0")], [_btn("🧾 返回人設詳情", f"pd_{archive_id}")]))
         elif task_type == "persona_generate_image":
-            result_rows.extend(_rows([_btn("🧾 查看人設詳情", f"pd_{archive_id}")], [_btn("✍️ 新建推文", f"genpost_branch_{archive_id}")]))
+            local, row = _resolve_persona_for_action(archive_id)
+            name = local.name if local else _persona_row_name(row or {})
+            lines = [f"✅ 已为人设「{name}」生成参考图"]
+            if result.get("mode"):
+                lines.append(f"模式：{result.get('mode')}")
+            result_rows.extend(_rows([_btn("◀️ 返回人設詳情", f"pd_{archive_id}")], [_btn("◀️ 返回設定", f"settings_{archive_id}")]))
         elif task_type == "persona_generate_post_image" and post_id:
+            lines = ["✅ 已寫入推文配圖", "", "圖片已保存到同一篇 Tool R18 推文。"]
             result_rows.extend(_rows([_btn("📝 查看這篇推文", f"source_post:{archive_id}:{post_id}")], [_btn("📋 返回推文列表", f"posts_{archive_id}_p0")]))
         elif task_type == "persona_publish_post":
+            lines = ["✅ 推文發布完成"] + (["", f"發布連結：{published_url}"] if published_url else [])
             result_rows.extend(_rows([_btn("🕘 查看發布歷史", f"history_{archive_id}")], [_btn("🧾 返回人設詳情", f"pd_{archive_id}")]))
-    result_rows.extend(_rows([_btn("重跑这个任务", f"source_rerun_task:{task.get('id') or task_id}")], [_btn("任务列表", "source_tasks"), _btn("返回主选单", "menu")]))
-    return _response(
+    if status in {"queued", "running"}:
+        result_rows.extend(_rows([_btn("🔄 刷新本次任務", f"source_task_detail:{task_id}")]))
+        if archive_id:
+            result_rows.extend(_rows([_btn("◀️ 返回設定", f"settings_{archive_id}")]))
+    if not (status == "success" and task_type.startswith("persona_")):
+        result_rows.extend(_rows([_btn("任務列表", "source_tasks"), _btn("返回主選單", "back_main")]))
+    response = _response(
         _message(
             "\n".join(lines),
             result_rows,
+            image=preview_image,
         ),
         state={"flow": ""},
     )
+    if status in {"queued", "running"}:
+        response["poll"] = {"action": f"source_task_poll:{task_id}", "interval_ms": 2000}
+    return response
+
+
+def _source_task_poll(task_id: str) -> dict[str, Any]:
+    result = _source_task_detail(task_id)
+    poll = result.get("poll") if isinstance(result.get("poll"), dict) else None
+    if poll:
+        return {"messages": [], "state": {"flow": ""}, "poll": poll}
+    return result
 
 
 def _source_cancel_latest() -> dict[str, Any]:
@@ -7252,6 +7355,17 @@ def _source_post_detail(action: str) -> dict[str, Any]:
     content = str(post.get("content") or post.get("text") or "").strip()
     group_type = str(post.get("telegramGroupContentType") or post.get("telegram_group_content_type") or "free").strip().lower()
     media_urls = _source_post_media_urls(post)
+    safe_media_urls = [url for item in media_urls if (url := _safe_web_media_url(item))]
+    preview_image = next((url for url in safe_media_urls if _is_web_image_url(url)), "")
+    media_cards = [
+        {
+            "title": f"媒體 {index}",
+            "subtitle": "圖片" if _is_web_image_url(url) else "視頻 / 媒體文件",
+            **({"image": url} if _is_web_image_url(url) and url != preview_image else {"url": url}),
+        }
+        for index, url in enumerate(safe_media_urls, start=1)
+        if url != preview_image
+    ]
     lines = [
         "📝 查看推文",
         "",
@@ -7269,6 +7383,8 @@ def _source_post_detail(action: str) -> dict[str, Any]:
                 [_btn("🖼 重新生成配圖" if media_urls else "🖼 單獨生成配圖", f"source_post_image:{archive_id}:{post_id}")],
                 [_btn("◀️ 返回查看推文", f"posts_{archive_id}_ct_{group_type}_p0" if _is_workflow_persona_row(row, archive_id) else f"posts_{archive_id}_p0")],
             ),
+            image=preview_image,
+            cards=media_cards,
         ),
         state={"flow": "source_post_detail", "draft": {"persona_id": archive_id, "archive_id": archive_id, "post_id": post_id, "group_content_type": group_type}},
     )
@@ -7288,16 +7404,31 @@ def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, para
             state={"flow": ""},
         )
     source_task_id = str(data.get("id") or "")
-    return _response(
+    if task_type == "persona_generate_image":
+        pending_text = f"🎨 正在為人設生成图片...\n\n人設 ID：{archive_id}"
+        pending_rows = _rows([_btn("◀️ 返回", f"settings_{archive_id}")])
+    elif task_type == "persona_generate_post_image":
+        pending_text = "⏳ 正在生成推文配圖，完成後會直接寫回同一篇推文。"
+        pending_rows = _rows([_btn(back_label, back_action)])
+    elif task_type == "persona_publish_post":
+        pending_text = "🚀 推文發布中，請稍候..."
+        pending_rows = _rows([_btn(back_label, back_action)])
+    else:
+        pending_text = f"⏳ {label}已提交\n\n來源任務 ID：{source_task_id or '-'}\n完成後會直接寫回同一個 Tool R18 人設歸檔。"
+        pending_rows = _rows(
+            [_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}") if source_task_id else _btn("📊 查看任務列表", "source_tasks")],
+            [_btn(back_label, back_action)],
+        )
+    response = _response(
         _message(
-            f"⏳ {label}已提交\n\n來源任務 ID：{source_task_id or '-'}\n完成後會直接寫回同一個 Tool R18 人設歸檔。",
-            _rows(
-                [_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}") if source_task_id else _btn("📊 查看任務列表", "source_tasks")],
-                [_btn(back_label, back_action)],
-            ),
+            pending_text,
+            pending_rows,
         ),
         state={"flow": ""},
     )
+    if source_task_id and task_type in {"persona_generate_image", "persona_generate_post_image", "persona_publish_post"}:
+        response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+    return response
 
 
 def _source_post_generate_image(action: str) -> dict[str, Any]:
@@ -10484,6 +10615,8 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _source_post_publish_execute(state)
     if action.startswith("source_task_detail:"):
         return _source_task_detail(action.split(":", 1)[1])
+    if action.startswith("source_task_poll:"):
+        return _source_task_poll(action.split(":", 1)[1])
     if action.startswith("source_rerun_task:"):
         return _source_rerun_task(action.split(":", 1)[1])
     if action == "source_rerun_latest":

@@ -177,6 +177,7 @@ def _normalize_remote_persona(row: dict[str, Any]) -> dict[str, Any]:
         "id": str(row.get("id") or "").strip(),
         "name": str(row.get("name") or "未命名人设").strip(),
         "content": str(row.get("content") or ""),
+        "reference_image_url": str(row.get("reference_image_url") or row.get("referenceImageUrl") or "").strip(),
         "source": "remote",
         "created_at": row.get("created_at") or row.get("createdAt") or "",
         "updated_at": row.get("updated_at") or row.get("updatedAt") or "",
