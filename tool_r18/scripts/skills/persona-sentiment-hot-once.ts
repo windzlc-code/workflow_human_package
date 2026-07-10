@@ -1,5 +1,6 @@
 import "@/runtime/node/browser-shim";
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 import { loadPersonaArchive } from "@/lib/persona-archives";
 import { cleanSentimentCandidateContent, fetchSentimentHotCandidates } from "@/lib/sentiment-hot-importer";
 import {
@@ -7,7 +8,6 @@ import {
   rememberSentimentHotSelected,
   type SentimentHotCandidate,
 } from "@/lib/sentiment-candidate-store";
-import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import {
   buildSentimentHotCandidateDetailText,
@@ -32,6 +32,8 @@ type Input = {
     candidate: SentimentHotCandidate;
     content?: string;
     media?: SentimentHotCandidate["media"];
+    overrideMediaUrl?: string;
+    overrideMediaType?: "image" | "video" | "unknown";
     edited?: boolean;
     sourceIndex?: number;
   }>;
@@ -43,7 +45,7 @@ function input(): Input {
   return JSON.parse((raw.startsWith("@") ? fs.readFileSync(raw.slice(1), "utf8") : raw).replace(/^\uFEFF/, ""));
 }
 
-async function fetchCandidates(value: Input) {
+export async function fetchCandidates(value: Input) {
   const archive = await loadPersonaArchive(value.archiveId);
   if (!archive) throw new Error(`persona archive not found: ${value.archiveId}`);
   const memorySummaries = (await loadSelectablePersonaMemories(archive.id).catch(() => []))
@@ -73,7 +75,7 @@ async function fetchCandidates(value: Input) {
     archiveName: archive.name,
     candidates: result.candidates.map((candidate, index) => ({
       ...candidate,
-      media: candidate.media.map(({ type, url, warning }) => ({ type, url, ...(warning ? { warning } : {}) })),
+      media: candidate.media.map((item) => ({ ...item })),
       listText: formatSentimentHotCandidateLine(candidate, index),
       detailText: buildSentimentHotCandidateDetailText({ pending, candidate, index }),
       metricLine: formatSentimentMetricLine(candidate),
@@ -85,7 +87,7 @@ async function fetchCandidates(value: Input) {
   };
 }
 
-async function importCandidates(value: Input) {
+export async function importCandidates(value: Input) {
   const archive = await loadPersonaArchive(value.archiveId);
   if (!archive) throw new Error(`persona archive not found: ${value.archiveId}`);
   const items = (value.items || []).slice(0, 10);
@@ -104,6 +106,7 @@ async function importCandidates(value: Input) {
   const failures = [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
+    const sourceIndex = Number.isInteger(item.sourceIndex) ? Number(item.sourceIndex) : index;
     try {
       const current = await loadPersonaArchive(archive.id);
       const existing = current?.posts.find((post) => post.sourceMeta?.source === "sentiment_hot_import"
@@ -112,29 +115,54 @@ async function importCandidates(value: Input) {
           ? post.sourceMeta?.sourceUrl === item.candidate.sourceUrl
           : post.sourceMeta?.originalContent === cleanSentimentCandidateContent(item.candidate.content)));
       if (existing) {
-        posts.push({ candidateId: item.candidate.id, postId: existing.id, content: existing.content, sourceUrl: item.candidate.sourceUrl, duplicate: true });
+        posts.push({
+          candidateId: item.candidate.id,
+          postId: existing.id,
+          content: existing.content,
+          sourceUrl: item.candidate.sourceUrl,
+          platform: item.candidate.platform,
+          metricLine: formatSentimentMetricLine(item.candidate),
+          mediaUrl: existing.mediaUrl || existing.mediaItems?.[0]?.url || "",
+          mediaType: existing.mediaType || existing.mediaItems?.[0]?.type || "",
+          edited: item.edited === true,
+          duplicate: true,
+        });
         continue;
       }
       const before = new Set(current?.posts.map((post) => post.id) || []);
-      rememberSentimentHotSelected(archive.id, item.candidate.id);
       const saved = await appendSentimentHotCandidatePost({
         pending,
         candidate: item.candidate,
-        index: Number.isInteger(item.sourceIndex) ? Number(item.sourceIndex) : index,
+        index: sourceIndex,
         overrideContent: item.content,
+        overrideMediaUrl: item.overrideMediaUrl,
+        overrideMediaType: item.overrideMediaType,
         overrideMediaItems: item.media,
         edited: item.edited === true,
       });
+      rememberSentimentHotSelected(archive.id, item.candidate.id);
       rememberSentimentHotImported(archive.id, item.candidate.id);
       const updated = await loadPersonaArchive(archive.id);
       const post = updated?.posts.find((candidate) => !before.has(candidate.id));
-      posts.push({ candidateId: item.candidate.id, postId: post?.id || "", content: saved.finalContent, sourceUrl: item.candidate.sourceUrl });
+      posts.push({
+        candidateId: item.candidate.id,
+        postId: post?.id || "",
+        content: saved.finalContent,
+        sourceUrl: item.candidate.sourceUrl,
+        platform: item.candidate.platform,
+        metricLine: formatSentimentMetricLine(item.candidate),
+        mediaUrl: saved.mediaUrl,
+        mediaType: saved.mediaType || "",
+        edited: item.edited === true,
+      });
     } catch (error) {
-      failures.push({ index, candidateId: item.candidate.id, error: error instanceof Error ? error.message : String(error) });
+      failures.push({ index: sourceIndex, candidateId: item.candidate.id, error: error instanceof Error ? error.message : String(error) });
     }
   }
+  const ok = posts.length > 0;
   return {
-    ok: true,
+    ok,
+    ...(!ok ? { error: "all sentiment hot candidates failed to import" } : {}),
     action: "import",
     archiveId: archive.id,
     fetchTaskId: value.fetchTaskId || "",
@@ -145,11 +173,20 @@ async function importCandidates(value: Input) {
   };
 }
 
-const value = input();
-(value.action === "fetch" ? fetchCandidates(value) : value.action === "import" ? importCandidates(value) : Promise.reject(new Error("invalid action")))
-  .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
-  .catch((error) => {
+async function main() {
+  const value = input();
+  const result = await (value.action === "fetch"
+    ? fetchCandidates(value)
+    : value.action === "import"
+      ? importCandidates(value)
+      : Promise.reject(new Error("invalid action")));
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (!result.ok) process.exitCode = 1;
+}
+
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((error) => {
     process.stdout.write(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);
     process.exitCode = 1;
-  })
-  .finally(() => stopSentimentRuntime());
+  });
+}

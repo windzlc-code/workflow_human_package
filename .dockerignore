@@ -20,6 +20,8 @@ build
 .pytest_cache
 .serena
 .codex-run-logs
+.codex-tmp
+.playwright-cli
 .playwright-mcp
 qa_task_*
 tmp_*

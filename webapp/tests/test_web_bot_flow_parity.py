@@ -359,6 +359,7 @@ def test_hot_fetch_and_import_delegate_to_one_real_tool_r18_task() -> None:
     assert '"fetchTaskId": fetch_task_id' in import_flow
     assert '"candidateIds"' in import_flow
     assert "_source_submit_task(task_type, params)" in submit
+    assert 'replacement["url"] = "[uploaded media]"' in submit
     assert "_record_post_memory(" not in import_flow
     assert "_sentiment_hot_fetch_start(persona_id, content_branch" in handle
 
@@ -367,18 +368,45 @@ def test_hot_candidate_callbacks_keep_snapshot_and_tg_layout() -> None:
     listing = _function_source("_genpost_hot_menu")
     detail = _function_source("_sentiment_hot_detail")
     media = _function_source("_sentiment_hot_media_edit")
-    continuation = _function_source("_continue_state_text")
+    continuation = _function_source("_continue_sentiment_hot_edit")
 
     assert 'incoming_draft.get("hot_candidates"' in listing
     assert "_genpost_hot_candidates(" not in listing
-    for label in ("查看第 {index + 1} 篇", "使用第 {index + 1} 篇", "全選", "清空選擇", "保存已選", "刷新抓取", "返回新建推文"):
+    for label in ("查看第 {index + 1} 篇", "使用第 {index + 1} 篇", "全选", "清空选择", "保存已选", "刷新抓取", "返回新建推文"):
         assert label in listing
     assert "_sentiment_hot_key_matches" in detail
     assert "_sentiment_hot_media_cards(candidate)" in detail
+    for label in ("☑️ 已加入多选", "⬜️ 加入多选", "✅ 使用第", "✏️ 编辑后使用", "全选", "清空选择", "保存已选"):
+        assert label in detail
     assert 'action == "shmedia_select_all"' in media
     assert 'action == "shmedia_clear"' in media
     assert 'action == "shmedia_save"' in media
-    assert 'flow == "sentiment_hot_edit_text"' in continuation
+    assert '"replacementMedia"' in _function_source("_sentiment_hot_import")
+    assert "_sentiment_hot_import" in continuation
+
+
+def test_hot_entry_has_one_tg_picker_and_no_fake_global_scope() -> None:
+    prompt = _function_source("_genpost_memory_prompt")
+    memory_list = _function_source("_genpost_memory_list")
+    handle = _function_source("handle")
+
+    for source in (prompt, memory_list):
+        assert "gph_x_" not in source
+        assert "全局輿情熱點" not in source
+        assert "genpost_trending" not in source
+    assert "return _genpost_branch_picker" in handle
+
+
+def test_hot_media_upload_uses_web_composer_and_tg_edit_flow() -> None:
+    html = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+    handle = _function_source("handle")
+    media_input = _function_source("_sentiment_hot_input_media")
+
+    assert 'id="bot-media-input"' in html
+    assert "readAsDataURL(file)" in html
+    assert "state.flow === 'sentiment_hot_edit_input'" in html
+    assert 'state.get("flow") == "sentiment_hot_edit_input"' in handle
+    assert 'media_type not in {"image", "video"}' in media_input
 
 
 def test_hot_task_result_restores_candidates_media_and_closed_loop_buttons() -> None:
@@ -390,9 +418,9 @@ def test_hot_task_result_restores_candidates_media_and_closed_loop_buttons() -> 
     assert "_genpost_hot_menu" in task_result
     assert "_sentiment_hot_restore_import_draft" in task_result
     assert "查看推文列表" in task_result
-    assert "返回候選列表" in task_result
-    assert "繼續刷新抓取" in task_result
-    assert "返回人設詳情" in task_result
+    assert "返回候选列表" in task_result
+    assert "继续刷新抓取" in task_result
+    assert "返回人设详情" in task_result
     assert 'result.get("candidates")' in fetch_draft
     assert 'result.get("cookieStatuses")' in fetch_draft
     assert 'result.get("warnings")' in fetch_draft

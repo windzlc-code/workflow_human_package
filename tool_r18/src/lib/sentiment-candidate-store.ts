@@ -42,6 +42,61 @@ type StoreState = {
 };
 
 const STORE_FILE = resolveRuntimeFile("sentiment_hot_candidates.json");
+const STORE_LOCK_FILE = resolveRuntimeFile("sentiment_hot_candidates.lock");
+const STORE_LOCK_TIMEOUT_MS = 30_000;
+const STORE_LOCK_POLL_MS = 100;
+const STORE_LOCK_STALE_MS = 2 * 60_000;
+
+function sleepSync(ms: number) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function clearStaleStoreLock(): boolean {
+  try {
+    const [pidText, createdAtText] = fs.readFileSync(STORE_LOCK_FILE, "utf8").trim().split(/\s+/);
+    const pid = Number(pidText);
+    const createdAt = Number(createdAtText);
+    let ownerAlive = Number.isInteger(pid) && pid > 0;
+    if (ownerAlive) {
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        ownerAlive = (error as NodeJS.ErrnoException)?.code !== "ESRCH";
+      }
+    }
+    if (ownerAlive && Number.isFinite(createdAt) && Date.now() - createdAt <= STORE_LOCK_STALE_MS) return false;
+    fs.unlinkSync(STORE_LOCK_FILE);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function withStoreFileLock<T>(fn: () => T): T {
+  fs.mkdirSync(path.dirname(STORE_LOCK_FILE), { recursive: true });
+  const started = Date.now();
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try {
+      fd = fs.openSync(STORE_LOCK_FILE, "wx");
+      fs.writeFileSync(fd, `${process.pid} ${Date.now()}\n`, "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") throw error;
+      if (clearStaleStoreLock()) continue;
+      if (Date.now() - started > STORE_LOCK_TIMEOUT_MS) {
+        throw new Error("sentiment candidate store write lock timeout");
+      }
+      sleepSync(STORE_LOCK_POLL_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(STORE_LOCK_FILE); } catch {}
+  }
+}
 
 function emptyState(): StoreState {
   return { shown: {}, selected: {}, imported: {} };
@@ -63,7 +118,13 @@ function readState(): StoreState {
 
 function writeState(state: StoreState) {
   fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
-  fs.writeFileSync(STORE_FILE, JSON.stringify(state, null, 2), "utf8");
+  const tempFile = `${STORE_FILE}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  try {
+    fs.writeFileSync(tempFile, JSON.stringify(state, null, 2), "utf8");
+    fs.renameSync(tempFile, STORE_FILE);
+  } finally {
+    try { fs.unlinkSync(tempFile); } catch {}
+  }
 }
 
 export function buildSentimentCandidateId(input: { platform: string; sourceUrl?: string; content?: string }): string {
@@ -111,32 +172,38 @@ export function getSentimentHotShownAtMap(archiveId: string): Map<string, number
 }
 
 export function rememberSentimentHotShown(archiveId: string, candidates: SentimentHotCandidate[]) {
-  const state = readState();
-  const now = new Date().toISOString();
-  const current = new Map<string, { id: string; at: string }>();
-  for (const entry of state.shown[archiveId] || []) {
-    const id = shownEntryId(entry);
-    if (!id) continue;
-    const at = typeof entry === "string" ? "" : String(entry.at || "");
-    current.set(id, { id, at });
-  }
-  for (const candidate of candidates) current.set(candidate.id, { id: candidate.id, at: now });
-  state.shown[archiveId] = [...current.values()].slice(-500);
-  writeState(state);
+  withStoreFileLock(() => {
+    const state = readState();
+    const now = new Date().toISOString();
+    const current = new Map<string, { id: string; at: string }>();
+    for (const entry of state.shown[archiveId] || []) {
+      const id = shownEntryId(entry);
+      if (!id) continue;
+      const at = typeof entry === "string" ? "" : String(entry.at || "");
+      current.set(id, { id, at });
+    }
+    for (const candidate of candidates) current.set(candidate.id, { id: candidate.id, at: now });
+    state.shown[archiveId] = [...current.values()].slice(-500);
+    writeState(state);
+  });
 }
 
 export function rememberSentimentHotSelected(archiveId: string, candidateId: string) {
-  const state = readState();
-  const selected = new Set(state.selected[archiveId] || []);
-  selected.add(candidateId);
-  state.selected[archiveId] = [...selected].slice(-500);
-  writeState(state);
+  withStoreFileLock(() => {
+    const state = readState();
+    const selected = new Set(state.selected[archiveId] || []);
+    selected.add(candidateId);
+    state.selected[archiveId] = [...selected].slice(-500);
+    writeState(state);
+  });
 }
 
 export function rememberSentimentHotImported(archiveId: string, candidateId: string) {
-  const state = readState();
-  const imported = new Set(state.imported[archiveId] || []);
-  imported.add(candidateId);
-  state.imported[archiveId] = [...imported].slice(-500);
-  writeState(state);
+  withStoreFileLock(() => {
+    const state = readState();
+    const imported = new Set(state.imported[archiveId] || []);
+    imported.add(candidateId);
+    state.imported[archiveId] = [...imported].slice(-500);
+    writeState(state);
+  });
 }

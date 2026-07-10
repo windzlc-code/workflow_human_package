@@ -1995,13 +1995,12 @@ def _genpost_memory_prompt(persona_id: str, name: str) -> dict[str, Any]:
                 "",
                 f"人設：{name}",
                 "請選擇這次推文要繼承的記憶顆粒。",
-                "每日記憶會每天保存；收藏記憶可長期反覆使用；熱點輿情會抓此人設或全局熱門資料來生成。",
+                "每日記憶會每天保存；收藏記憶可長期反覆使用；熱點抓取會按此人設從 Threads / Instagram 取得候選推文。",
                 "",
                 *recent_lines,
             ]
         ),
         _rows(
-            [_btn("🔥 熱點推文", f"genpost_hot:{persona_id}:hot"), _btn("📣 全局輿情熱點", f"genpost_trending:{persona_id}:hot")],
             [_btn("➕ 新增熱點/輿情", "genpost_hot_manual"), _btn("📝 普通推文", f"genpost_memlist:{persona_id}:daily:0")],
             [_btn("📅 每日記憶", f"genpost_memlist:{persona_id}:daily:0"), _btn("🧩 主題記憶", f"genpost_memlist:{persona_id}:topic:0")],
             [_btn("🧠 長期人設記憶", f"genpost_memlist:{persona_id}:persona:0"), _btn("⭐ 收藏記憶", f"genpost_favorites:{persona_id}:all:0")],
@@ -2093,7 +2092,6 @@ def _genpost_memory_list(action: str, state: dict[str, Any], *, favorite_only: b
         )
     keyboard.extend(
         _rows(
-            [_btn("🔥 此人設熱點", f"genpost_hot:{persona_id}:hot"), _btn("📣 全局輿情熱點", f"genpost_trending:{persona_id}:hot")],
             [_btn("➕ 新增熱點/輿情", "genpost_hot_manual")],
             [_btn("✍️ 手動輸入記憶", "genpost_memory_manual"), _btn("⏭ 不使用記憶", "genpost_memory_skip")],
             [_btn("◀️ 返回記憶選擇", f"genpost:{persona_id}")],
@@ -2271,7 +2269,7 @@ def _sentiment_action_key(persona_id: str, scope: str, draft: dict[str, Any]) ->
 def _sentiment_hot_expired(draft: dict[str, Any]) -> dict[str, Any]:
     persona_id = str(draft.get("persona_id") or "")
     return _response(
-        _message("熱點候選已過期，請重新刷新抓取。", [[_btn("返回新建推文", f"genpost_branch_{persona_id}")]]),
+        _message("热点候选已过期，请重新刷新抓取。", [[_btn("返回新建推文", f"genpost_branch_{persona_id}")]]),
         state={"flow": ""},
     )
 
@@ -2290,6 +2288,20 @@ def _sentiment_hot_media(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in (candidate.get("media") if isinstance(candidate.get("media"), list) else []) if isinstance(item, dict)]
 
 
+def _sentiment_hot_input_media(payload: Any) -> list[dict[str, str]]:
+    items = payload if isinstance(payload, list) else []
+    result: list[dict[str, str]] = []
+    for item in items[:1]:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        media_type = str(item.get("type") or "").strip().lower()
+        if not url or media_type not in {"image", "video"}:
+            continue
+        result.append({"url": url, "type": media_type, "name": str(item.get("name") or "").strip()[:160]})
+    return result
+
+
 def _sentiment_hot_media_cards(candidate: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     cards: list[dict[str, Any]] = []
     preview = ""
@@ -2301,8 +2313,8 @@ def _sentiment_hot_media_cards(candidate: dict[str, Any]) -> tuple[str, list[dic
         if is_image and not preview:
             preview = url
         cards.append({
-            "title": f"媒體 {index}",
-            "subtitle": "視頻" if str(item.get("type") or "").lower() == "video" else "圖片",
+            "title": f"媒体 {index}",
+            "subtitle": "视频" if str(item.get("type") or "").lower() == "video" else "图片",
             **({"image": url} if is_image else {"url": url}),
         })
     return preview, cards
@@ -2325,7 +2337,14 @@ def _sentiment_hot_memory_summaries(row: dict[str, Any] | None) -> list[str]:
 
 
 def _sentiment_hot_submit(task_type: str, label: str, params: dict[str, Any], loading_text: str) -> dict[str, Any]:
-    job = SourceWorkflowJobRepo.create(task_type, label, params, status="submitting")
+    stored_params = params
+    if task_type == "persona_sentiment_hot" and isinstance(params.get("edits"), list):
+        stored_params = json.loads(json.dumps(params, ensure_ascii=False))
+        for edit in stored_params.get("edits", []):
+            replacement = edit.get("replacementMedia") if isinstance(edit, dict) and isinstance(edit.get("replacementMedia"), dict) else None
+            if replacement and str(replacement.get("url") or "").startswith("data:"):
+                replacement["url"] = "[uploaded media]"
+    job = SourceWorkflowJobRepo.create(task_type, label, stored_params, status="submitting")
     try:
         base, data = _source_submit_task(task_type, params)
         source_task_id = str(data.get("id") or "")
@@ -2351,7 +2370,7 @@ def _sentiment_hot_fetch_start(persona_id: str, content_branch: str = "", *, ref
     persona_id, local, row, name = _genpost_context(persona_id)
     archive_id = _tool_r18_archive_id(persona_id, local, row)
     if not archive_id:
-        return _response(_message("這個人設尚未連接 Tool R18 人設歸檔，不能抓取熱點。", [[_btn("返回新建推文", f"genpost_branch_{persona_id}")]]), state={"flow": ""})
+        return _response(_message("这个人设尚未连接 Tool R18 人设归档，不能抓取热点。", [[_btn("返回新建推文", f"genpost_branch_{persona_id}")]]), state={"flow": ""})
     params = {
         "action": "fetch",
         "archiveId": archive_id,
@@ -2364,9 +2383,9 @@ def _sentiment_hot_fetch_start(persona_id: str, content_branch: str = "", *, ref
     }
     return _sentiment_hot_submit(
         "persona_sentiment_hot",
-        f"抓取人設熱點：{name}",
+        f"抓取人设热点：{name}",
         params,
-        "正在抓取 Threads / Instagram 熱點，請稍候...",
+        "正在抓取 Threads / Instagram 热点，请稍候...",
     )
 
 
@@ -2383,19 +2402,19 @@ def _genpost_hot_menu(action: str, state: dict[str, Any], *, global_context: boo
         if str(item).isdigit() and 0 <= int(item) < len(candidates)
     }
     lines = [
-        "🔥 熱點抓取",
+        "🔥 热点抓取",
         "",
-        f"人設: {name}",
-        "來源: Threads + Instagram",
-        f"關鍵詞: {' / '.join(str(item) for item in incoming_draft.get('hot_keywords', []) if str(item).strip()) or '自動分析'}",
+        f"人设: {name}",
+        "来源: Threads + Instagram",
+        f"关键词: {' / '.join(str(item) for item in incoming_draft.get('hot_keywords', []) if str(item).strip()) or '自动分析'}",
         "",
-        "Cookie 狀態:",
+        "Cookie 状态:",
         *[str(item) for item in incoming_draft.get("hot_cookie_lines", []) if str(item).strip()],
         *(["", "提示:", *[f"- {item}" for item in incoming_draft.get("hot_warnings", []) if str(item).strip()]] if incoming_draft.get("hot_warnings") else []),
         "",
-        f"已選: {len(selected)}/{len(candidates)} 篇，可多選後一次保存。" if candidates else "暫時沒有抓到可用熱點，請刷新或檢查 Cookie。",
+        f"已选: {len(selected)}/{len(candidates)} 篇，可多选后一次保存。" if candidates else "暂时没有抓到可用热点，请刷新或检查 Cookie。",
         "",
-        "候選熱點:" if candidates else "",
+        "候选热点:" if candidates else "",
     ]
     for index, candidate in enumerate(candidates):
         marker = "☑️" if index in selected else "⬜️"
@@ -2416,8 +2435,8 @@ def _genpost_hot_menu(action: str, state: dict[str, Any], *, global_context: boo
     if candidates:
         keyboard.extend(
             _rows(
-                [_btn("全選", f"shselall_{action_key}"), _btn("清空選擇", f"shselclear_{action_key}")],
-                [_btn(f"保存已選 {len(selected)} 篇" if selected else "保存已選（先勾選）", f"shsave_{action_key}", "primary")],
+                [_btn("全选", f"shselall_{action_key}"), _btn("清空选择", f"shselclear_{action_key}")],
+                [_btn(f"保存已选 {len(selected)} 篇" if selected else "保存已选（先勾选）", f"shsave_{action_key}", "primary")],
             )
         )
     keyboard.extend(_rows([_btn("刷新抓取", f"shrf_{action_key}")], [_btn("返回新建推文", f"genpost_branch_{persona_id}")]))
@@ -2474,18 +2493,20 @@ def _sentiment_hot_detail(action: str, state: dict[str, Any]) -> dict[str, Any]:
         return _sentiment_hot_expired(draft)
     index = int(match.group(2))
     if not (0 <= index < len(candidates)):
-        return _response(_message("熱點候選參數無效，請重新刷新抓取。", [[_btn("返回新建推文", f"genpost_branch_{draft.get('persona_id')}")]]), state=state)
+        return _response(_message("热点候选参数无效，请重新刷新抓取。", [[_btn("返回新建推文", f"genpost_branch_{draft.get('persona_id')}")]]), state=state)
     candidate = candidates[index]
-    lines = [str(candidate.get("detailText") or "熱點候選詳情")]
+    lines = [str(candidate.get("detailText") or "热点候选详情")]
     edited_content = _sentiment_hot_candidate_content(draft, candidate)
     if edited_content and edited_content != str(candidate.get("content") or "").strip():
-        lines.extend(["", "編輯後正文:", edited_content])
+        lines.extend(["", "编辑后正文:", edited_content])
     key = str(draft.get("sentiment_action_key") or "00000000")
     keyboard = _rows(
-        [_btn("加入多選" if index not in selected else "已加入多選", f"shsel_{key}_{index}")],
-        [_btn(f"使用第 {index + 1} 篇", f"shuse_{key}_{index}")],
-        [_btn("編輯後使用", f"shedit_{key}_{index}")],
-        [_btn("返回候選列表", f"shlist_{key}")],
+        [_btn("☑️ 已加入多选" if index in selected else "⬜️ 加入多选", f"shsel_{key}_{index}")],
+        [_btn(f"✅ 使用第 {index + 1} 篇", f"shuse_{key}_{index}")],
+        [_btn("✏️ 编辑后使用", f"shedit_{key}_{index}")],
+        [_btn("全选", f"shselall_{key}"), _btn("清空选择", f"shselclear_{key}")],
+        [_btn(f"保存已选 {len(selected)} 篇" if selected else "保存已选（先勾选）", f"shsave_{key}")],
+        [_btn("返回候选列表", f"shlist_{key}")],
         [_btn("刷新抓取", f"shrf_{key}")],
         [_btn("返回新建推文", f"genpost_branch_{draft.get('persona_id')}")],
     )
@@ -2525,13 +2546,7 @@ def _sentiment_hot_media_edit(action: str, state: dict[str, Any]) -> dict[str, A
             return _sentiment_hot_expired(draft)
         draft["hot_edit_index"] = index
         draft["hot_edit_action_key"] = key
-        return _response(
-            _message(
-                "\n".join(["✏️ 編輯熱點推文", "", f"人設: {draft.get('name') or draft.get('persona_id')}", f"數據: {candidates[index].get('metricLine') or '-'}", "", "請直接發送新文案；也可以保留原文，進入媒體管理後選擇要刪除的圖片或視頻。"]),
-                _rows([_btn("保留原文並管理媒體", "shmedia_start")], [_btn("返回候選詳情", f"shdet_{key}_{index}")]),
-            ),
-            state={"flow": "sentiment_hot_edit_text", "draft": draft},
-        )
+        return _sentiment_hot_media_edit("shmedia_start", {"draft": draft})
     index = _num(draft.get("hot_edit_index"))
     key = str(draft.get("hot_edit_action_key") or "")
     if not _sentiment_hot_key_matches(draft, key) or not (0 <= index < len(candidates)):
@@ -2571,27 +2586,40 @@ def _sentiment_hot_media_edit(action: str, state: dict[str, Any]) -> dict[str, A
     deleted_map[candidate_id] = sorted(selected)
     draft["hot_deleted_media_indexes"] = deleted_map
     kept_count = max(0, len(media_items) - len(selected))
-    lines = ["✏️ 編輯熱點推文", "", f"人設: {draft.get('name') or draft.get('persona_id')}", f"數據: {candidate.get('metricLine') or '-'}", f"媒體: {len(media_items)} 個，已選刪除 {len(selected)} 個，保存後保留 {kept_count} 個", "", "下方按鈕可多選刪除媒體。"]
+    lines = [
+        "✏️ 编辑热点推文",
+        "",
+        f"人设: {draft.get('name') or draft.get('persona_id')}",
+        f"数据: {candidate.get('metricLine') or '-'}",
+        f"媒体: {len(media_items)} 个，已选删除 {len(selected)} 个，保存后保留 {kept_count} 个",
+        "",
+        "图片已按媒体编号排版；下方按钮可多选删除，红色标记表示保存时会删除。",
+        "可以直接发送新文案；也可以点击纸夹发送图片/视频+文案来整体替换媒体。",
+    ]
     if not media_items:
-        lines.extend(["", "這篇候選沒有可管理的媒體，仍可直接使用文字內容。"])
+        lines.extend(["", "这篇候选没有可管理的媒体，仍可直接使用文字内容。"])
     else:
         for media_index, item in enumerate(media_items):
             mark = "☑️" if media_index in selected else "⬜️"
-            preview = item if isinstance(item, str) else str(item.get("url") or item.get("type") or "媒體")[:80]
+            preview = item if isinstance(item, str) else str(item.get("url") or item.get("type") or "媒体")[:80]
             lines.append(f"{media_index + 1}. {mark} {preview}")
     keyboard: list[list[dict[str, str]]] = []
     for media_index, _item in enumerate(media_items):
-        media_type = "視頻" if isinstance(_item, dict) and str(_item.get("type") or "") == "video" else "圖片"
-        keyboard.append([_btn(f"{'☑️' if media_index in selected else '⬜️'} {media_index + 1}.{media_type}", f"shmedia_toggle_{media_index}")])
+        media_type = "视频" if isinstance(_item, dict) and str(_item.get("type") or "") == "video" else "图片"
+        button = _btn(f"{'☑️' if media_index in selected else '⬜️'} {media_index + 1}.{media_type}", f"shmedia_toggle_{media_index}")
+        if media_index % 2 == 0:
+            keyboard.append([button])
+        else:
+            keyboard[-1].append(button)
     keyboard.extend(
         _rows(
-            [_btn("全選刪除", "shmedia_select_all"), _btn("清空選擇", "shmedia_clear")],
-            [_btn(f"保存並使用（刪除 {len(selected)} 個媒體）", "shmedia_save")],
-            [_btn("返回候選詳情", f"shdet_{key}_{index}")],
+            [_btn("全选删除", "shmedia_select_all"), _btn("清空选择", "shmedia_clear")],
+            [_btn(f"保存并使用（删除 {len(selected)} 个媒体）", "shmedia_save")],
+            [_btn("返回候选详情", f"shdet_{key}_{index}")],
         )
     )
     preview, cards = _sentiment_hot_media_cards(candidate)
-    return _response(_message("\n".join(lines), keyboard, image=preview, cards=cards), state={"flow": "sentiment_hot_media_edit", "draft": draft})
+    return _response(_message("\n".join(lines), keyboard, image=preview, cards=cards), state={"flow": "sentiment_hot_edit_input", "draft": draft})
 
 
 def _sentiment_candidate_to_post(candidate: dict[str, Any]) -> str:
@@ -2610,7 +2638,7 @@ def _sentiment_hot_import(action: str, state: dict[str, Any]) -> dict[str, Any]:
         if not save_match or not _sentiment_hot_key_matches(draft, save_match.group(1)):
             return _sentiment_hot_expired(draft)
     if not selected:
-        return _response(_message("請先勾選要保存的熱點推文。", [[_btn("返回候選列表", f"shlist_{draft.get('sentiment_action_key') or '00000000'}")]]), state=state)
+        return _response(_message("请先勾选要保存的热点推文。", [[_btn("返回候选列表", f"shlist_{draft.get('sentiment_action_key') or '00000000'}")]]), state=state)
     imported = [candidates[index] for index in sorted(selected) if 0 <= index < len(candidates)]
     persona_id = str(draft.get("persona_id") or "")
     name = str(draft.get("name") or persona_id or "人設")
@@ -2619,6 +2647,7 @@ def _sentiment_hot_import(action: str, state: dict[str, Any]) -> dict[str, Any]:
         return _sentiment_hot_expired(draft)
     edited_contents = draft.get("hot_edited_contents") if isinstance(draft.get("hot_edited_contents"), dict) else {}
     deleted_map = draft.get("hot_deleted_media_indexes") if isinstance(draft.get("hot_deleted_media_indexes"), dict) else {}
+    replacement_map = draft.get("hot_replacement_media") if isinstance(draft.get("hot_replacement_media"), dict) else {}
     edits: list[dict[str, Any]] = []
     for source_index in sorted(selected):
         if not (0 <= source_index < len(candidates)):
@@ -2631,6 +2660,14 @@ def _sentiment_hot_import(action: str, state: dict[str, Any]) -> dict[str, Any]:
         if candidate_id in deleted_map:
             deleted = {int(item) for item in deleted_map.get(candidate_id, []) if str(item).isdigit()}
             edit["keptMediaIndexes"] = [index for index in range(len(_sentiment_hot_media(candidate))) if index not in deleted]
+        replacement = replacement_map.get(candidate_id)
+        if isinstance(replacement, dict) and str(replacement.get("url") or "").strip():
+            edit["replacementMedia"] = {
+                "url": str(replacement.get("url") or "").strip(),
+                "type": str(replacement.get("type") or "unknown").strip().lower(),
+                "name": str(replacement.get("name") or "").strip()[:160],
+            }
+            edit.pop("keptMediaIndexes", None)
         if len(edit) > 1:
             edits.append(edit)
     params = {
@@ -2645,9 +2682,9 @@ def _sentiment_hot_import(action: str, state: dict[str, Any]) -> dict[str, Any]:
     }
     return _sentiment_hot_submit(
         "persona_sentiment_hot",
-        f"導入人設熱點：{name}",
+        f"导入人设热点：{name}",
         params,
-        f"正在導入 {len(imported)} 篇熱點推文並下載媒體，請稍候...",
+        f"正在导入 {len(imported)} 篇热点推文并下载媒体，请稍候...",
     )
 
 
@@ -4783,7 +4820,7 @@ def _sentiment_hot_source_task_response(task_id: str, task: dict[str, Any], task
     archive_id = str(result.get("archiveId") or task_input.get("archiveId") or "")
     name = str(result.get("archiveName") or task_input.get("uiPersonaName") or persona_id or "人設")
     if status in {"queued", "running"}:
-        text = "正在抓取 Threads / Instagram 熱點，請稍候..." if action == "fetch" else "正在導入熱點推文並下載媒體，請稍候..."
+        text = "正在抓取 Threads / Instagram 热点，请稍候..." if action == "fetch" else "正在导入热点推文并下载媒体，请稍候..."
         response = _response(
             _message(text, _rows([_btn("刷新本次任務", f"source_task_detail:{task_id}")], [_btn("返回新建推文", f"genpost_branch_{persona_id}")])),
             state={"flow": "sentiment_hot_wait", "draft": {"source_task_id": task_id}},
@@ -4791,17 +4828,17 @@ def _sentiment_hot_source_task_response(task_id: str, task: dict[str, Any], task
         response["poll"] = {"action": f"source_task_poll:{task_id}", "interval_ms": 2000}
         return response
     if status != "success":
-        error = str(task.get("error") or "熱點任務執行失敗")
+        error = str(task.get("error") or "热点任务执行失败")
         if action == "import":
             try:
                 draft = _sentiment_hot_restore_import_draft(task_input)
                 key = str(draft.get("sentiment_action_key") or "")
                 if key:
-                    return _response(_message(f"❌ 熱點導入失敗\n\n{error}", [[_btn("返回候選列表", f"shlist_{key}")]]), state={"flow": "sentiment_hot_select", "draft": draft})
+                    return _response(_message(f"❌ 热点导入失败\n\n{error}", [[_btn("返回候选列表", f"shlist_{key}")]]), state={"flow": "sentiment_hot_select", "draft": draft})
             except Exception:
                 pass
         return _response(
-            _message(f"❌ 熱點{'抓取' if action == 'fetch' else '導入'}失敗\n\n{error}", _rows([_btn("重新抓取", f"gph_{_genpost_branch_token(str(task_input.get('contentBranch') or ''))}_{persona_id}")], [_btn("返回新建推文", f"genpost_branch_{persona_id}")])),
+            _message(f"❌ 热点{'抓取' if action == 'fetch' else '导入'}失败\n\n{error}", _rows([_btn("重新抓取", f"gph_{_genpost_branch_token(str(task_input.get('contentBranch') or ''))}_{persona_id}")], [_btn("返回新建推文", f"genpost_branch_{persona_id}")])),
             state={"flow": ""},
         )
     if action == "fetch":
@@ -4815,20 +4852,32 @@ def _sentiment_hot_source_task_response(task_id: str, task: dict[str, Any], task
         draft = _sentiment_hot_restore_import_draft(task_input, imported_ids)
     except Exception:
         draft = {"persona_id": persona_id, "source_archive_id": archive_id, "name": name, "hot_candidates": [], "selected_hot_indexes": []}
-    lines = [
-        f"✅ 已導入 {len(imported_posts)} 篇熱點推文" if imported_posts else "⚠️ 本次沒有成功導入熱點推文",
-        f"人設: {name}",
-        "已加入待發布推文，發布成功後才會寫入人設記憶。",
-    ]
+    requested_items = [item for item in (task_input.get("items") if isinstance(task_input.get("items"), list) else []) if isinstance(item, dict)]
+    if len(requested_items) == 1 and imported_posts:
+        first = imported_posts[0]
+        lines = [
+            "✅ 已导入编辑后的热点推文" if first.get("edited") else "✅ 已导入热点推文",
+            f"人设: {name}",
+            f"来源: {first.get('platform') or '-'}",
+            f"数据: {first.get('metricLine') or '-'}",
+            f"媒体: {first.get('mediaType') or 'unknown'}" if first.get("mediaUrl") else "媒体: 无",
+            "已加入待发布推文，发布成功后才会写入人设记忆。",
+        ]
+    else:
+        lines = [
+            f"✅ 已批量导入 {len(imported_posts)} 篇热点推文" if imported_posts else "⚠️ 本次没有成功导入热点推文",
+            f"人设: {name}",
+            "已加入待发布推文，发布成功后才会写入人设记忆。",
+        ]
     if failures:
-        lines.extend(["", "失敗:", *[f"- 第 {_num(item.get('index')) + 1} 篇：{item.get('error') or '保存失敗'}" for item in failures[:5]]])
+        lines.extend(["", "失败:", *[f"- 第 {_num(item.get('index')) + 1} 篇：{item.get('error') or '保存失败'}" for item in failures[:5]]])
     key = str(draft.get("sentiment_action_key") or "")
     rows = [[_btn("查看推文列表", f"posts_{archive_id}_p0")]]
     if draft.get("hot_candidates") and key:
-        rows.append([_btn(f"返回候選列表（剩餘 {len(draft['hot_candidates'])} 篇）", f"shlist_{key}")])
+        rows.append([_btn(f"返回候选列表（剩余 {len(draft['hot_candidates'])} 篇）", f"shlist_{key}")])
     if key:
-        rows.append([_btn("繼續刷新抓取", f"shrf_{key}")])
-    rows.append([_btn("返回人設詳情", f"pd_{archive_id}")])
+        rows.append([_btn("继续刷新抓取", f"shrf_{key}")])
+    rows.append([_btn("返回人设详情", f"pd_{archive_id}")])
     return _response(_message("\n".join(lines), rows), state={"flow": "sentiment_hot_select", "draft": draft})
 
 
@@ -8578,7 +8627,7 @@ def _post_library(persona_id: str = "") -> dict[str, Any]:
             _rows(
                 [_btn("📋 待發布推文", f"pub_posts:0:{persona_id}"), _btn("⭐ 收藏推文", f"genpost_favorites:{persona_id}:all:0")],
                 [_btn("🕘 發布歷史", f"pub_history:0:{persona_id}"), _btn("♻️ 重新回庫", f"restore_history:0:{persona_id}")],
-                [_btn("✍️ 新建推文", f"genpost:{persona_id}"), _btn("🔥 熱點抓取推文", f"genpost_hot:{persona_id}:hot")],
+                [_btn("✍️ 新建推文", f"genpost:{persona_id}")],
                 [_btn("🚀 發布推文", f"pub:{persona_id}"), _btn("◀️ 返回人設", f"pd:{persona_id}")],
             ),
         ),
@@ -10307,6 +10356,25 @@ def _continue_persona_context_text(message: str, state: dict[str, Any]) -> dict[
     return None
 
 
+def _continue_sentiment_hot_edit(message: str, media: list[dict[str, str]], state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    candidates = [item for item in draft.get("hot_candidates", []) if isinstance(item, dict)]
+    index = _num(draft.get("hot_edit_index"))
+    if not (0 <= index < len(candidates)) or (not message and not media):
+        return _sentiment_hot_expired(draft)
+    candidate_id = str(candidates[index].get("id") or "")
+    if message:
+        edited = dict(draft.get("hot_edited_contents") if isinstance(draft.get("hot_edited_contents"), dict) else {})
+        edited[candidate_id] = message
+        draft["hot_edited_contents"] = edited
+    if media:
+        replacements = dict(draft.get("hot_replacement_media") if isinstance(draft.get("hot_replacement_media"), dict) else {})
+        replacements[candidate_id] = media[0]
+        draft["hot_replacement_media"] = replacements
+    key = str(draft.get("hot_edit_action_key") or draft.get("sentiment_action_key") or "")
+    return _sentiment_hot_import(f"shuse_{key}_{index}", {"draft": draft})
+
+
 def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
     flow = str(state.get("flow") or "")
     draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
@@ -10339,16 +10407,8 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
         if not media_url:
             return _response(_message("請輸入可直接訪問的圖片或視頻 URL。", [[_btn("◀️ 返回替換方式", f"pa_mrs_{draft.get('post_action_key')}")]]), state=state)
         return _source_post_action_submit(state, "replace_media", label="替換推文媒體", extra={"selectedIndexes": indexes, "mediaUrl": media_url})
-    if flow == "sentiment_hot_edit_text":
-        candidates = [item for item in draft.get("hot_candidates", []) if isinstance(item, dict)]
-        index = _num(draft.get("hot_edit_index"))
-        if not text or not (0 <= index < len(candidates)):
-            return _sentiment_hot_expired(draft)
-        candidate_id = str(candidates[index].get("id") or "")
-        edited = dict(draft.get("hot_edited_contents") if isinstance(draft.get("hot_edited_contents"), dict) else {})
-        edited[candidate_id] = text
-        draft["hot_edited_contents"] = edited
-        return _sentiment_hot_media_edit("shmedia_start", {"draft": draft})
+    if flow == "sentiment_hot_edit_input":
+        return _continue_sentiment_hot_edit(text, [], state)
     if flow.startswith("genpost_"):
         return _continue_generate_posts(text, state)
     if flow == "tg_credentials" and persona:
@@ -11024,9 +11084,12 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     action = str(payload.get("action") or "").strip()
     message = str(payload.get("message") or "").strip()
     state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+    media = _sentiment_hot_input_media(payload.get("media"))
 
     if action.startswith("open:"):
         return _open(action.split(":", 1)[1], state)
+    if not action and state.get("flow") == "sentiment_hot_edit_input" and (message or media):
+        return _continue_sentiment_hot_edit(message, media, state)
     if not action and state.get("flow") and message:
         return _continue_state_text(message, state)
     if not action and message:
@@ -11800,10 +11863,10 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _genpost_use_memory(action, state)
     if action.startswith("genpost_hot:"):
         parts = action.split(":")
-        return _sentiment_hot_fetch_start(parts[1] if len(parts) > 1 else "", "", refresh=True)
+        return _genpost_branch_picker(parts[1] if len(parts) > 1 else "")
     if action.startswith("genpost_trending:"):
         parts = action.split(":")
-        return _sentiment_hot_fetch_start(parts[1] if len(parts) > 1 else "", "", refresh=True)
+        return _genpost_branch_picker(parts[1] if len(parts) > 1 else "")
     if action == "genpost_hot_manual":
         return _genpost_hot_manual_prompt(state)
     if action == "genpost_memory_manual":

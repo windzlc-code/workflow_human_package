@@ -1,12 +1,16 @@
+import base64
+from contextlib import contextmanager
 import json
 import inspect
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 
 import pytest
 
 from webapp import server
+from webapp.db import get_db_path
 
 
 ROOT = Path(__file__).parents[2]
@@ -85,7 +89,7 @@ def test_persona_sentiment_hot_import_payload_is_a_thin_candidate_mapping(monkey
         "capturedAt": "2026-07-10T00:00:00Z",
     }
     resolved = [{"candidate": candidate, "content": "edited", "media": [candidate["media"][1]], "edited": True, "sourceIndex": 0}]
-    monkeypatch.setattr(server, "_sentiment_hot_import_items", lambda fetch_task_id, archive_id, payload: resolved)
+    monkeypatch.setattr(server, "_sentiment_hot_import_items", lambda fetch_task_id, archive_id, payload, **kwargs: resolved)
     payload = server._build_internal_tg_task_payload(
         "task-hot-import",
         "persona_sentiment_hot",
@@ -105,9 +109,120 @@ def test_persona_sentiment_hot_import_payload_is_a_thin_candidate_mapping(monkey
     assert payload["items"][0]["edited"] is True
     assert payload["contentBranch"] == "r18"
 
-    assert 'SELECT type, status, output_json FROM tasks WHERE id = ?' in source
+    assert 'SELECT type, status, input_json, output_json FROM tasks WHERE id = ?' in source
     assert 'output.get("archiveId")' in source
     assert 'candidate_id not in by_id' in source
+    assert "_get_tg_chat_id_from_payload(fetch_input) != request_chat_id" in source
+
+
+def test_sentiment_hot_replacement_media_is_written_inside_persistent_runtime(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(server, "_tool_r18_runtime_dir", lambda: runtime_dir)
+    encoded = base64.b64encode(b"web-hot-image").decode("ascii")
+
+    result = server._persist_sentiment_hot_replacement_media(
+        "task-hot-media",
+        {"replacementMedia": {"url": f"data:image/png;base64,{encoded}", "type": "image"}},
+    )
+
+    assert result is not None
+    path, media_type = result
+    assert media_type == "image"
+    assert Path(path).is_relative_to(runtime_dir / "sentiment-hot-media")
+    assert Path(path).read_bytes() == b"web-hot-image"
+
+
+def test_sentiment_hot_task_result_maps_local_media_to_browser_url(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "runtime"
+    media_path = runtime_dir / "sentiment-hot-media" / "candidate.jpg"
+    media_path.parent.mkdir(parents=True)
+    media_path.write_bytes(b"image")
+    monkeypatch.setattr(server, "_tool_r18_runtime_dir", lambda: runtime_dir)
+
+    result = server._safe_persona_sentiment_hot_result({
+        "ok": True,
+        "action": "fetch",
+        "candidates": [{
+            "id": "candidate-1",
+            "media": [{"type": "image", "url": "relative/candidate.jpg", "localPath": str(media_path)}],
+        }],
+    })
+
+    assert result["candidates"][0]["media"] == [{
+        "url": "/persona_media/sentiment-hot-media/candidate.jpg",
+        "type": "image",
+    }]
+
+
+def test_sentiment_hot_import_binds_fetch_owner_and_uploaded_replacement(tmp_path, monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE tasks (id TEXT, type TEXT, status TEXT, input_json TEXT, output_json TEXT)")
+    candidate = {
+        "id": "candidate-1",
+        "platform": "threads",
+        "content": "source content",
+        "media": [{"type": "image", "url": "https://cdn.example.com/source.jpg"}],
+    }
+    conn.execute(
+        "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
+        (
+            "fetch-1",
+            "persona_sentiment_hot",
+            "success",
+            json.dumps({"tg_chat_id": 8080001}),
+            json.dumps({"action": "fetch", "archiveId": "archive-1", "candidates": [candidate]}),
+        ),
+    )
+
+    @contextmanager
+    def fake_db():
+        yield conn
+
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "_tool_r18_runtime_dir", lambda: tmp_path / "runtime")
+    encoded = base64.b64encode(b"replacement-image").decode("ascii")
+    items = server._sentiment_hot_import_items(
+        "fetch-1",
+        "archive-1",
+        {
+            "candidateIds": ["candidate-1"],
+            "edits": [{
+                "candidateId": "candidate-1",
+                "content": "edited content",
+                "replacementMedia": {"url": f"data:image/png;base64,{encoded}", "type": "image"},
+            }],
+        },
+        task_id="import-1",
+        request_chat_id=8080001,
+    )
+
+    assert items[0]["content"] == "edited content"
+    assert items[0]["overrideMediaType"] == "image"
+    assert Path(items[0]["overrideMediaUrl"]).read_bytes() == b"replacement-image"
+    with pytest.raises(server.HTTPException) as exc:
+        server._sentiment_hot_import_items(
+            "fetch-1",
+            "archive-1",
+            {"candidateIds": ["candidate-1"]},
+            request_chat_id=999,
+        )
+    assert exc.value.status_code == 404
+    conn.close()
+
+
+def test_sentiment_hot_runner_does_not_block_shared_worker_pool() -> None:
+    source = inspect.getsource(server._run_persona_sentiment_hot)
+
+    assert "_PERSONA_SENTIMENT_HOT_IMPORT_LOCK" not in source
+    assert "with " not in source
+
+
+def test_default_app_db_uses_the_persistent_webapp_data_dir(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("APP_DB_PATH", raising=False)
+    monkeypatch.setenv("WEBAPP_DATA_DIR", str(tmp_path))
+
+    assert Path(get_db_path()) == tmp_path / "app.db"
 
 
 def test_persona_rewrite_payload_normalizes_direct_and_replace_modes() -> None:
@@ -642,6 +757,7 @@ def test_persona_sentiment_hot_import_cli_writes_once_to_real_archive(tmp_path) 
             cwd=ROOT / "tool_r18",
             env=env,
             text=True,
+            encoding="utf-8",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=60,

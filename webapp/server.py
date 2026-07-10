@@ -15905,26 +15905,17 @@ def _run_persona_generate_posts(task_id: str, payload: dict[str, Any]) -> dict[s
     )
 
 
-_PERSONA_SENTIMENT_HOT_IMPORT_LOCK = threading.Lock()
-
-
 def _run_persona_sentiment_hot(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     timeout = 120 if str(payload.get("action") or "") == "fetch" else 1800
-    def run() -> dict[str, Any]:
-        return _run_tool_r18_skill_task(
-            task_id,
-            payload,
-            "persona_sentiment_hot",
-            "persona-sentiment-hot-once.ts",
-            "persona-sentiment-hot-input.json",
-            default_timeout=timeout,
-            min_timeout=60,
-        )
-    if str(payload.get("action") or "") == "fetch":
-        result = run()
-    else:
-        with _PERSONA_SENTIMENT_HOT_IMPORT_LOCK:
-            result = run()
+    result = _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_sentiment_hot",
+        "persona-sentiment-hot-once.ts",
+        "persona-sentiment-hot-input.json",
+        default_timeout=timeout,
+        min_timeout=60,
+    )
     for key in ("input_path", "stdout", "stderr"):
         result.pop(key, None)
     return result
@@ -16615,14 +16606,56 @@ def _validated_local_file(value: Any, *, label: str) -> str:
     return str(resolved)
 
 
-def _sentiment_hot_import_items(fetch_task_id: str, archive_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _persist_sentiment_hot_replacement_media(task_id: str, edit: dict[str, Any]) -> tuple[str, str] | None:
+    media = edit.get("replacementMedia") if isinstance(edit.get("replacementMedia"), dict) else {}
+    raw = str(media.get("url") or "").strip()
+    if not raw:
+        return None
+    match = re.fullmatch(r"data:(image/(?:png|jpeg|webp|gif)|video/(?:mp4|webm|quicktime));base64,([A-Za-z0-9+/=\r\n]+)", raw, re.I)
+    if not match:
+        raise HTTPException(status_code=400, detail="replacementMedia must be an uploaded image or video")
+    mime = match.group(1).lower()
+    try:
+        content = base64.b64decode(re.sub(r"\s+", "", match.group(2)), validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="replacementMedia is not valid base64") from exc
+    if not content or len(content) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="replacementMedia must be between 1 byte and 25 MB")
+    extension = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "video/mp4": ".mp4",
+        "video/webm": ".webm",
+        "video/quicktime": ".mov",
+    }[mime]
+    media_type = "video" if mime.startswith("video/") else "image"
+    target_dir = _tool_r18_runtime_dir() / "sentiment-hot-media"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"replacement-{hashlib.sha256(content).hexdigest()[:16]}{extension}"
+    target.write_bytes(content)
+    return str(target.resolve()), media_type
+
+
+def _sentiment_hot_import_items(
+    fetch_task_id: str,
+    archive_id: str,
+    payload: dict[str, Any],
+    *,
+    task_id: str = "",
+    request_chat_id: int = 0,
+) -> list[dict[str, Any]]:
     with db() as conn:
-        row = conn.execute("SELECT type, status, output_json FROM tasks WHERE id = ?", (fetch_task_id,)).fetchone()
+        row = conn.execute("SELECT type, status, input_json, output_json FROM tasks WHERE id = ?", (fetch_task_id,)).fetchone()
     output = _json_loads(row["output_json"], {}) if row is not None else {}
     if row is None or row["type"] != "persona_sentiment_hot" or row["status"] != "success":
         raise HTTPException(status_code=400, detail="sentiment hot fetch task is missing or incomplete")
     if output.get("action") != "fetch" or str(output.get("archiveId") or "") != archive_id:
         raise HTTPException(status_code=400, detail="sentiment hot fetch task does not match archiveId")
+    fetch_input = _json_loads(row["input_json"], {}) if row is not None else {}
+    if request_chat_id > 0 and _get_tg_chat_id_from_payload(fetch_input) != request_chat_id:
+        raise HTTPException(status_code=404, detail="sentiment hot fetch task does not exist")
     candidates = [item for item in (output.get("candidates") if isinstance(output.get("candidates"), list) else []) if isinstance(item, dict)]
     by_id = {str(item.get("id") or ""): (index, item) for index, item in enumerate(candidates) if str(item.get("id") or "")}
     candidate_ids = list(dict.fromkeys(str(item).strip() for item in payload.get("candidateIds", []) if str(item).strip()))[:10]
@@ -16645,6 +16678,10 @@ def _sentiment_hot_import_items(fetch_task_id: str, archive_id: str, payload: di
             media = candidate.get("media") if isinstance(candidate.get("media"), list) else []
             indexes = sorted({index for index in edit["keptMediaIndexes"] if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(media)})
             item["media"] = [media[index] for index in indexes]
+        replacement = _persist_sentiment_hot_replacement_media(task_id or _new_id("hot-media"), edit)
+        if replacement:
+            item["overrideMediaUrl"], item["overrideMediaType"] = replacement
+            item.pop("media", None)
         items.append(item)
     if not items:
         raise HTTPException(status_code=400, detail="persona_sentiment_hot import requires candidates")
@@ -16855,7 +16892,13 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         fetch_task_id = str(payload.get("fetchTaskId") or payload.get("fetch_task_id") or "").strip()
         if not fetch_task_id or len(fetch_task_id) > 200:
             raise HTTPException(status_code=400, detail="persona_sentiment_hot import requires fetchTaskId")
-        items = _sentiment_hot_import_items(fetch_task_id, archive_id, payload)
+        items = _sentiment_hot_import_items(
+            fetch_task_id,
+            archive_id,
+            payload,
+            task_id=task_id,
+            request_chat_id=_to_int(payload.get("_requestTgChatId"), 0),
+        )
         return {
             "action": "import",
             "archiveId": archive_id,
@@ -18617,6 +18660,30 @@ def _safe_pending_post_media_url(value: Any) -> str:
     if text.startswith("/") and not text.startswith("//") and "\\" not in text and ".." not in text.split("/"):
         return text
     return ""
+
+
+def _safe_persona_sentiment_hot_result(output: dict[str, Any]) -> dict[str, Any]:
+    result = _sanitize_payload(output)
+    candidates = output.get("candidates") if isinstance(output.get("candidates"), list) else []
+    safe_candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
+    for index, source_candidate in enumerate(candidates):
+        if index >= len(safe_candidates) or not isinstance(source_candidate, dict) or not isinstance(safe_candidates[index], dict):
+            continue
+        source_media = source_candidate.get("media") if isinstance(source_candidate.get("media"), list) else []
+        safe_media: list[dict[str, Any]] = []
+        for source_item in source_media:
+            if not isinstance(source_item, dict):
+                continue
+            safe_url = _safe_pending_post_media_url(source_item.get("localPath") or source_item.get("url"))
+            if not safe_url:
+                continue
+            safe_media.append({
+                "url": safe_url,
+                "type": str(source_item.get("type") or _guess_media_type(safe_url, "unknown")),
+                **({"warning": str(source_item.get("warning"))} if str(source_item.get("warning") or "").strip() else {}),
+            })
+        safe_candidates[index]["media"] = safe_media
+    return result
 
 
 def _persona_reference_image_url(archive: Any) -> str:
@@ -20670,7 +20737,8 @@ def create_app() -> FastAPI:
         if not typ:
             raise HTTPException(status_code=400, detail="task_type 不能为空")
         task_id = _new_id("task")
-        params = payload.params if isinstance(payload.params, dict) else {}
+        params = dict(payload.params) if isinstance(payload.params, dict) else {}
+        params["_requestTgChatId"] = int(payload.tg_chat_id)
         task_payload = _build_internal_tg_task_payload(task_id, typ, params)
         task_payload = _ensure_internal_tg_payload_chinese_image_prompt(typ, task_payload)
         task_payload = _ensure_internal_tg_payload_english_prompt(typ, task_payload)
@@ -21072,6 +21140,8 @@ def create_app() -> FastAPI:
                             if persona_task_type == "persona_post_action"
                             else safe_persona_result
                             if persona_task_type in {"persona_generate_image", "persona_generate_post_image", "persona_publish_post"}
+                            else _safe_persona_sentiment_hot_result(output_payload)
+                            if persona_task_type == "persona_sentiment_hot"
                             else _sanitize_payload(output_payload)
                         )
                     }

@@ -92,6 +92,7 @@ export async function ensureSentimentRuntime(): Promise<{ ok: boolean; url: stri
     child = spawn(process.execPath, [serverPath], {
       cwd: VENDOR_DIR,
       stdio: "ignore",
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
         HOST: "127.0.0.1",
@@ -103,6 +104,7 @@ export async function ensureSentimentRuntime(): Promise<{ ok: boolean; url: stri
     child.once("exit", () => {
       child = null;
     });
+    child.unref();
   }
 
   const deadline = Date.now() + 30_000;

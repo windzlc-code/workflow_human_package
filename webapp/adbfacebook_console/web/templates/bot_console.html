@@ -325,7 +325,8 @@
     </div>
     <form class="composer" id="bot-form">
       <button class="menu-btn" type="button" data-bot-action="menu">☰ 菜单</button>
-      <button class="round" type="button" data-bot-action="image_menu">📎</button>
+      <button class="round" id="bot-attach" type="button" title="发送图片或视频">📎</button>
+      <input id="bot-media-input" type="file" accept="image/*,video/*" hidden>
       <div class="input-wrap">
         <input id="bot-input" type="text" autocomplete="off" placeholder="输入消息">
       </div>
@@ -339,6 +340,8 @@
   const log = document.getElementById('chat-log');
   const form = document.getElementById('bot-form');
   const input = document.getElementById('bot-input');
+  const attach = document.getElementById('bot-attach');
+  const mediaInput = document.getElementById('bot-media-input');
   const subtitle = document.getElementById('bot-subtitle');
   const timeEl = document.getElementById('ios-time');
   let state = {};
@@ -540,6 +543,45 @@
     if (!text) return;
     input.value = '';
     send({ message: text }, text);
+  });
+
+  attach.addEventListener('click', () => {
+    if (state.flow === 'sentiment_hot_edit_input') {
+      mediaInput.click();
+      return;
+    }
+    send({ action: 'image_menu' }, '', { replacePanel: true, showUser: false });
+  });
+
+  mediaInput.addEventListener('change', async () => {
+    const file = mediaInput.files && mediaInput.files[0];
+    mediaInput.value = '';
+    if (!file) return;
+    const type = file.type.startsWith('video/') ? 'video' : file.type.startsWith('image/') ? 'image' : '';
+    if (!type) {
+      appendBot({ text: '请发送图片或视频。', keyboard: [] });
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      appendBot({ text: '媒体文件不能超过 25 MB。', keyboard: [] });
+      return;
+    }
+    const caption = input.value.trim();
+    input.value = '';
+    const url = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('读取媒体失败'));
+      reader.readAsDataURL(file);
+    }).catch(err => {
+      appendBot({ text: '读取媒体失败：' + err, keyboard: [] });
+      return '';
+    });
+    if (!url) return;
+    send(
+      { message: caption, media: [{ type, url, name: file.name }] },
+      '📎 ' + file.name + (caption ? '\n' + caption : '')
+    );
   });
 
   document.addEventListener('click', e => {
