@@ -49,8 +49,49 @@ LOCAL_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 TOOL_R18_PROJECT_DIR = Path(SOURCE_ROOT) / "tool_r18"
 TOOL_R18_SKILLS_DIR = TOOL_R18_PROJECT_DIR / "scripts" / "skills"
 _PERSONA_MENU_CACHE: dict[str, Any] = {"at": 0.0, "rows": []}
+_PUBLISH_PLATFORM_CACHE: dict[str, Any] = {"at": 0.0, "values": []}
 _PERSONA_OVERVIEW_REFRESH_LOCK = threading.Lock()
+_CUSTOM_PUBLISH_MEDIA_LOCK = threading.Lock()
+_CUSTOM_PUBLISH_MEDIA_CACHE: dict[str, dict[str, Any]] = {}
 _TO_TRADITIONAL_IMPL = to_traditional
+
+
+def _store_custom_publish_media(item: dict[str, str]) -> str:
+    url = str(item.get("url") or "").strip()
+    if not url:
+        return ""
+    now = time.time()
+    token = hashlib.sha256(f"{time.time_ns()}|{threading.get_ident()}|{len(url)}".encode("utf-8")).hexdigest()[:32]
+    with _CUSTOM_PUBLISH_MEDIA_LOCK:
+        expired = [key for key, value in _CUSTOM_PUBLISH_MEDIA_CACHE.items() if now - float(value.get("at") or 0.0) > 1800]
+        for key in expired:
+            _CUSTOM_PUBLISH_MEDIA_CACHE.pop(key, None)
+        while len(_CUSTOM_PUBLISH_MEDIA_CACHE) >= 5:
+            oldest = min(_CUSTOM_PUBLISH_MEDIA_CACHE, key=lambda key: float(_CUSTOM_PUBLISH_MEDIA_CACHE[key].get("at") or 0.0))
+            _CUSTOM_PUBLISH_MEDIA_CACHE.pop(oldest, None)
+        _CUSTOM_PUBLISH_MEDIA_CACHE[token] = {"at": now, "url": url, "type": str(item.get("type") or ""), "name": str(item.get("name") or "")}
+    return token
+
+
+def _custom_publish_media(draft: dict[str, Any]) -> dict[str, Any]:
+    token = str(draft.get("custom_media_token") or "").strip()
+    if token:
+        with _CUSTOM_PUBLISH_MEDIA_LOCK:
+            item = _CUSTOM_PUBLISH_MEDIA_CACHE.get(token)
+            if item and time.time() - float(item.get("at") or 0.0) <= 1800:
+                return dict(item)
+    legacy_url = str(draft.get("custom_media_url") or "").strip()
+    return {"url": legacy_url, "type": str(draft.get("custom_media_type") or ""), "name": str(draft.get("custom_media_name") or "")} if legacy_url else {}
+
+
+def _drop_custom_publish_media(draft: dict[str, Any]) -> None:
+    token = str(draft.pop("custom_media_token", "") or "")
+    draft.pop("custom_media_url", None)
+    draft.pop("custom_media_type", None)
+    draft.pop("custom_media_name", None)
+    if token:
+        with _CUSTOM_PUBLISH_MEDIA_LOCK:
+            _CUSTOM_PUBLISH_MEDIA_CACHE.pop(token, None)
 
 
 def _cjk_count(text: str) -> int:
@@ -263,11 +304,17 @@ def _source_runtime_config_data() -> tuple[str, dict[str, Any]]:
 
 
 def _allowed_publish_platforms() -> list[str]:
+    now = time.time()
+    cached = _PUBLISH_PLATFORM_CACHE.get("values")
+    if isinstance(cached, list) and cached and now - float(_PUBLISH_PLATFORM_CACHE.get("at") or 0.0) < 30.0:
+        return list(cached)
     _base, runtime = _source_runtime_config_data()
     configured = runtime.get("allowedPublishPlatforms") if isinstance(runtime, dict) else None
     values = configured if isinstance(configured, list) else ["threads", "telegram"]
     platforms = [str(item).strip().lower() for item in values if str(item).strip().lower() in {"threads", "telegram"}]
-    return list(dict.fromkeys(platforms)) or ["threads", "telegram"]
+    result = list(dict.fromkeys(platforms)) or ["threads", "telegram"]
+    _PUBLISH_PLATFORM_CACHE.update({"at": now, "values": result})
+    return list(result)
 
 
 def _publish_platform_buttons(prefix: str) -> list[list[dict[str, str]]]:
@@ -277,6 +324,15 @@ def _publish_platform_buttons(prefix: str) -> list[list[dict[str, str]]]:
 
 def _valid_publish_platform(platform: str) -> bool:
     return str(platform or "").strip().lower() in _allowed_publish_platforms()
+
+
+def _ensure_publish_request_id(draft: dict[str, Any]) -> str:
+    current = str(draft.get("publish_request_id") or "").strip()
+    if current:
+        return current
+    request_id = hashlib.sha256(f"{time.time_ns()}|{threading.get_ident()}|{draft.get('archive_id')}".encode("utf-8")).hexdigest()[:32]
+    draft["publish_request_id"] = request_id
+    return request_id
 
 
 def _source_submit_task(task_type: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -4956,6 +5012,8 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     task_source = "favorites" if str(task_input.get("postSource") or task_input.get("source") or "posts") == "favorites" else "posts"
     task_content_type = str(task_input.get("uiContentType") or "")
     task_page = max(0, _num(task_input.get("uiPage")))
+    task_content_suffix = f"_ct_{task_content_type}" if task_content_type in {"free", "paid"} else ""
+    is_custom_publish_task = task_type == "persona_publish_post" and bool(task_input.get("customContent") or task_input.get("customMediaUrl") or result.get("customPublish"))
     if status == "success" and archive_id:
         if task_type.startswith("persona_"):
             _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": []})
@@ -5033,7 +5091,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             if result.get("customPublish"):
                 result_rows.extend(_rows([_btn("🏠 主選單", "back_main")]))
             else:
-                result_rows.extend(_rows([_btn("📝 查看剩餘推文", f"posts_{archive_id}_p0")], [_btn("◀️ 返回發布方式", f"pub_{archive_id}")]))
+                result_rows.extend(_rows([_btn("📝 查看剩餘推文", f"posts_{archive_id}{task_content_suffix}_p0")], [_btn("◀️ 返回發布方式", f"pub_{archive_id}{task_content_suffix}")]))
         elif task_type == "persona_post_action":
             action_name = str(result.get("action") or task_input.get("action") or "")
             labels = {
@@ -5063,9 +5121,9 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             if post_id:
                 result_rows.extend(_rows([_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page))]))
             else:
-                result_rows.extend(_rows([_btn("◀️ 返回設定", f"settings_{archive_id}")]))
+                result_rows.extend(_rows([_btn("◀️ 返回發布方式" if is_custom_publish_task else "◀️ 返回設定", f"pub_{archive_id}{task_content_suffix}" if is_custom_publish_task else f"settings_{archive_id}")]))
     if status == "failed" and task_type == "persona_publish_post":
-        result_rows.extend(_rows([_btn("🔄 只重試失敗/未完成項", f"source_rerun_task:{task_id}")], [_btn("◀️ 返回發布方式", f"pub_{archive_id}")]))
+        result_rows.extend(_rows([_btn("🔄 只重試失敗/未完成項", f"source_rerun_task:{task_id}")], [_btn("◀️ 返回發布方式", f"pub_{archive_id}{task_content_suffix}")]))
     if not (status == "success" and task_type.startswith("persona_")):
         result_rows.extend(_rows([_btn("任務列表", "source_tasks"), _btn("返回主選單", "back_main")]))
     response = _response(
@@ -5716,6 +5774,8 @@ def _tool_r18_archive_id(persona_id: str, local: Persona | None, row: dict[str, 
     if source_id.startswith("source:") and (not row_id or (local and row_id == local.id)):
         return source_id[len("source:") :].strip()
     if row_id:
+        if local and row_id == local.id and not _is_workflow_persona_row(row, persona_id):
+            return ""
         return row_id
     if str(persona_id or "").startswith("workflow-persona-"):
         return str(persona_id).strip()
@@ -7372,7 +7432,7 @@ def _regenerate_post_images(state: dict[str, Any], *, next_group: bool = False) 
 
 def _publish_context(persona_id: str) -> tuple[str, Persona | None, dict[str, Any] | None, str]:
     local, row = _resolve_persona_for_action(persona_id)
-    source_persona_id = _tool_r18_archive_id(persona_id, local, row) or (local.id if local else persona_id)
+    source_persona_id = _tool_r18_archive_id(persona_id, local, row)
     if local:
         name = _local_persona_display_name(local)
         if row and _is_placeholder_persona_name(name, local.pad_code):
@@ -7649,6 +7709,12 @@ def _publish_center(persona_id: str, content_type: str = "") -> dict[str, Any]:
     persona_id, persona, row, name = _publish_context(persona_id)
     if not persona and not row:
         return _response(_message("没有找到本地人设，不能创建发布任务。", [[_btn("◀️ 返回人设列表", "list_personas")]]))
+    if not persona_id:
+        local_id = persona.id if persona else ""
+        return _response(
+            _message("這個人設只有本地資料，尚未同步到 Tool R18 人設庫，不能建立真實發布任務。", [[_btn("◀️ 返回人設詳情", f"pd_{local_id}")], [_btn("◀️ 返回人設列表", "list_personas")]]),
+            state={"flow": ""},
+        )
 
     source_posts = _source_pending_posts(row, content_type)
     lines = [
@@ -8150,9 +8216,13 @@ def _stored_publish_posts(state: dict[str, Any], page: int | None = None) -> dic
 def _stored_publish_pick(action: str, state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     post_ids = [str(item) for item in draft.get("source_post_ids", []) if str(item)]
-    index = _num(str(action).split(":", 1)[1] if ":" in str(action) else -1)
+    token = str(action).split(":", 1)[1] if ":" in str(action) else ""
+    if not token.isdigit():
+        return _stored_publish_posts(state)
+    index = int(token)
     if not (0 <= index < len(post_ids)):
         return _stored_publish_posts(state)
+    draft.pop("publish_request_id", None)
     draft.update({"selected_post_ids": [post_ids[index]], "post_id": post_ids[index], "post_index": index, "stored_selection_mode": "single"})
     return _source_bulk_publish_platform(f"sbplatform_{draft.get('platform')}", {"draft": draft})
 
@@ -8171,10 +8241,14 @@ def _stored_publish_count_menu(state: dict[str, Any]) -> dict[str, Any]:
 def _stored_publish_count(action: str, state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     post_ids = [str(item) for item in draft.get("source_post_ids", []) if str(item)]
-    count = min(max(1, _num(str(action).split(":", 1)[1] if ":" in str(action) else 1)), len(post_ids))
+    token = str(action).split(":", 1)[1] if ":" in str(action) else ""
+    if not token.isdigit() or not post_ids:
+        return _stored_publish_posts(state)
+    count = min(max(1, int(token)), len(post_ids))
     selected = post_ids[:count]
     if not selected:
         return _stored_publish_posts(state)
+    draft.pop("publish_request_id", None)
     draft.update({"selected_post_ids": selected, "post_id": selected[0], "post_index": 0, "stored_selection_mode": "batch"})
     return _source_bulk_publish_platform(f"sbplatform_{draft.get('platform')}", {"draft": draft})
 
@@ -8284,7 +8358,10 @@ def _source_bulk_publish_platform(action: str, state: dict[str, Any]) -> dict[st
     archive_id = str(draft.get("archive_id") or "")
     local, row = _resolve_persona_for_action(archive_id)
     pad_code = str((local.pad_code if local else "") or (row or {}).get("bound_pad_code") or "").strip()
+    if draft.get("platform") and draft.get("platform") != platform:
+        draft.pop("publish_request_id", None)
     draft.update({"platform": platform, "pad_code": pad_code})
+    _ensure_publish_request_id(draft)
     selected = [str(item) for item in draft.get("selected_post_ids", []) if str(item)]
     label = "Threads" if platform == "threads" else "Telegram 群組"
     if draft.get("publish_origin") == "stored":
@@ -8344,12 +8421,15 @@ def _publish_link_template_apply(action: str, state: dict[str, Any]) -> dict[str
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     archive_id = str(draft.get("archive_id") or draft.get("persona_id") or "")
     presets = _publish_link_presets(archive_id)
-    index = _num(str(action).split(":", 1)[1] if ":" in str(action) else -1)
+    token = str(action).split(":", 1)[1] if ":" in str(action) else ""
+    if not token.isdigit():
+        return _publish_link_template_menu(state)
+    index = int(token)
     if not (0 <= index < len(presets)):
         return _publish_link_template_menu(state)
     preset = presets[index]
     custom_content = str(draft.get("custom_content") or "")
-    if custom_content:
+    if draft.get("publish_origin") == "custom":
         draft["custom_content_base"] = str(draft.get("custom_content_base") or custom_content)
         draft["custom_content"] = _apply_link_ending_to_text(str(draft["custom_content_base"]), preset)
     else:
@@ -8362,6 +8442,7 @@ def _publish_link_template_apply(action: str, state: dict[str, Any]) -> dict[str
             if str(post.get("id") or "") in selected
         }
     draft["link_template_applied"] = True
+    draft.pop("publish_request_id", None)
     return _publish_confirmation({"draft": draft})
 
 
@@ -8371,12 +8452,13 @@ def _publish_link_template_clear(state: dict[str, Any]) -> dict[str, Any]:
         draft["custom_content"] = str(draft.pop("custom_content_base") or "")
     draft.pop("content_overrides", None)
     draft["link_template_applied"] = False
+    draft.pop("publish_request_id", None)
     return _publish_confirmation({"draft": draft})
 
 
 def _publish_confirmation(state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
-    if draft.get("custom_content") or draft.get("custom_media_url"):
+    if draft.get("publish_origin") == "custom":
         return _custom_publish_confirmation({"draft": draft})
     if draft.get("post_action_key") and draft.get("post_id"):
         return _source_post_publish_platform(f"source_post_platform:{draft.get('platform') or ''}", {"draft": draft})
@@ -8388,14 +8470,17 @@ def _source_bulk_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
     archive_id = str(draft.get("archive_id") or "")
     platform = str(draft.get("platform") or "threads")
     pad_code = str(draft.get("pad_code") or "")
-    selected = [str(item) for item in draft.get("selected_post_ids", []) if str(item)]
-    if not archive_id or not selected or not pad_code or not _valid_publish_platform(platform):
+    _local, row = _resolve_persona_for_action(archive_id)
+    allowed_post_ids = {str(post.get("id") or "") for post in _source_pending_posts(row, str(draft.get("group_content_type") or ""))}
+    selected = [str(item) for item in draft.get("selected_post_ids", []) if str(item) in allowed_post_ids]
+    active_pad_codes = {device.pad_code for device in _active_devices()}
+    if not archive_id or not selected or pad_code not in active_pad_codes or not _valid_publish_platform(platform):
         return _source_bulk_render(draft, "發布狀態已失效，請重新選擇推文和智能體手機。")
     response = _submit_source_post_task(
         "persona_publish_post",
         archive_id,
         selected[0],
-        {"archiveId": archive_id, "postId": selected[0], "postIds": selected, "padCode": pad_code, "platform": platform, "postSource": "posts", "contentOverrides": draft.get("content_overrides") or {}, "uiContentType": str(draft.get("group_content_type") or ""), "uiPage": _num(draft.get("post_page")), "dryRun": False},
+        {"archiveId": archive_id, "postId": selected[0], "postIds": selected, "padCode": pad_code, "platform": platform, "postSource": "posts", "contentOverrides": draft.get("content_overrides") or {}, "linkTemplateApplied": bool(draft.get("link_template_applied")), "idempotencyKey": _ensure_publish_request_id(draft), "uiContentType": str(draft.get("group_content_type") or ""), "uiPage": _num(draft.get("post_page")), "dryRun": False},
         "批量真實發布任務",
     )
     response["state"] = {"flow": "source_post_task", "draft": draft}
@@ -8426,7 +8511,7 @@ def _source_post_pad_menu(state: dict[str, Any]) -> dict[str, Any]:
     if not back_action:
         back_action = f"pa_pp_{draft.get('post_action_key')}_{draft.get('platform') or 'threads'}" if post_id else "publish_confirm_back"
     rows.append([_btn("◀️ 返回發布確認", back_action)])
-    if post_id:
+    if post_id and len([item for item in draft.get("selected_post_ids", []) if str(item)]) <= 1 and draft.get("publish_origin") != "custom":
         rows.append([_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))])
     draft.update({"selected_pad_codes": sorted(selected), "pad_page": pad_page})
     note = str(draft.pop("pad_notice", "") or "")
@@ -8444,7 +8529,11 @@ def _source_post_pad_action(action: str, state: dict[str, Any]) -> dict[str, Any
     visible = devices[page * 10 : (page + 1) * 10]
     if action.startswith("sppad:"):
         pad_code = action.split(":", 1)[1]
-        selected.remove(pad_code) if pad_code in selected else selected.add(pad_code)
+        valid_codes = {device.pad_code for device in devices}
+        if pad_code in selected:
+            selected.remove(pad_code)
+        elif pad_code in valid_codes:
+            selected.add(pad_code)
     elif action == "sppad_all":
         selected.update(device.pad_code for device in visible)
     elif action == "sppad_clear":
@@ -8461,19 +8550,23 @@ def _source_post_pad_action(action: str, state: dict[str, Any]) -> dict[str, Any
 
 def _source_post_multi_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
     draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
-    pad_codes = [str(item) for item in draft.get("selected_pad_codes", []) if str(item)]
+    active_pad_codes = {device.pad_code for device in _active_devices()}
+    pad_codes = [str(item) for item in draft.get("selected_pad_codes", []) if str(item) in active_pad_codes]
     if not pad_codes:
         return _source_post_pad_menu({"flow": "source_post_publish_pads", "draft": {**draft, "pad_notice": "請至少選擇一台智能體手機。"}})
     platform = str(draft.get("platform") or "threads")
-    selected_posts = [str(item) for item in draft.get("selected_post_ids", []) if str(item)]
+    _local, row = _resolve_persona_for_action(archive_id)
+    allowed_post_ids = {str(post.get("id") or "") for post in _source_pending_posts(row, content_type)}
+    selected_posts = [str(item) for item in draft.get("selected_post_ids", []) if str(item) in allowed_post_ids]
     custom_content = str(draft.get("custom_content") or "").strip()
-    if not selected_posts and post_id:
+    if not selected_posts and post_id in allowed_post_ids:
         selected_posts = [post_id]
     if not _valid_publish_platform(platform):
         return _source_post_pad_menu({"flow": "source_post_publish_pads", "draft": {**draft, "pad_notice": "發布平台已失效，請返回重新選擇。"}})
-    params = {"archiveId": archive_id, "padCode": pad_codes[0], "padCodes": pad_codes, "platform": platform, "postSource": source, "contentOverrides": draft.get("content_overrides") or {}, "uiContentType": content_type, "uiPage": page, "dryRun": False}
-    if custom_content or draft.get("custom_media_url"):
-        params.update({"customContent": custom_content, "customMediaUrl": str(draft.get("custom_media_url") or ""), "generateImage": bool(draft.get("custom_generate_image") and not draft.get("custom_media_url"))})
+    params = {"archiveId": archive_id, "padCode": pad_codes[0], "padCodes": pad_codes, "platform": platform, "postSource": source, "contentOverrides": draft.get("content_overrides") or {}, "linkTemplateApplied": bool(draft.get("link_template_applied")), "idempotencyKey": _ensure_publish_request_id(draft), "uiContentType": content_type, "uiPage": page, "dryRun": False}
+    custom_media = _custom_publish_media(draft)
+    if draft.get("publish_origin") == "custom":
+        params.update({"customContent": custom_content, "customMediaUrl": str(custom_media.get("url") or ""), "generateImage": bool(draft.get("custom_generate_image") and not custom_media.get("url"))})
     elif selected_posts:
         params.update({"postId": selected_posts[0], "postIds": selected_posts})
     else:
@@ -8568,7 +8661,10 @@ def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, para
     task_page = max(0, _num(params.get("uiPage")))
     back_action = _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page) if post_id else f"pd_{archive_id}"
     back_label = "◀️ 返回推文" if post_id else "◀️ 返回人設詳情"
-    job = SourceWorkflowJobRepo.create(task_type, label, params, status="submitting")
+    stored_params = dict(params)
+    if str(stored_params.get("customMediaUrl") or "").startswith("data:"):
+        stored_params["customMediaUrl"] = "[uploaded media]"
+    job = SourceWorkflowJobRepo.create(task_type, label, stored_params, status="submitting")
     try:
         base, data = _source_submit_task(task_type, params)
         SourceWorkflowJobRepo.update(job.id, status="submitted", result=data, source_task_id=str(data.get("id") or ""), source_base_url=base)
@@ -8717,7 +8813,10 @@ def _source_post_publish_platform(action: str, state: dict[str, Any]) -> dict[st
     pad_code = str((local.pad_code if local else "") or (row or {}).get("bound_pad_code") or "").strip()
     platform_label = "Threads" if platform == "threads" else "Telegram 群組"
     action_key = str(draft.get("post_action_key") or _web_post_action_key(archive_id, post_id))
+    if draft.get("platform") and draft.get("platform") != platform:
+        draft.pop("publish_request_id", None)
     next_draft = {**draft, "platform": platform, "pad_code": pad_code, "selected_post_ids": [post_id], "pad_back_action": f"pa_pp_{action_key}_{platform}"}
+    _ensure_publish_request_id(next_draft)
     rows: list[list[dict[str, str]]] = []
     if pad_code:
         rows.append([_btn(f"✅ 確認發布到綁定智能體手機 {platform_label}", f"pa_dop_{action_key}_{platform}")])
@@ -8745,13 +8844,15 @@ def _source_post_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
     source = "favorites" if str(draft.get("source") or "posts") == "favorites" else "posts"
     content_type = str(draft.get("group_content_type") or "")
     page = max(0, _num(draft.get("post_page")))
-    if not archive_id or not post_id or not pad_code or not _valid_publish_platform(platform):
+    _local, row, post = _source_archive_post(archive_id, post_id, source, content_type)
+    active_pad_codes = {device.pad_code for device in _active_devices()}
+    if not archive_id or not post or pad_code not in active_pad_codes or not _valid_publish_platform(platform):
         return _response(_message("發布狀態已失效，請重新選擇推文。", [[_btn("👤 返回人設", f"pd_{archive_id}")]]), state={"flow": ""})
     return _submit_source_post_task(
         "persona_publish_post",
         archive_id,
         post_id,
-        {"archiveId": archive_id, "postId": post_id, "padCode": pad_code, "platform": platform, "postSource": source, "contentOverrides": draft.get("content_overrides") or {}, "uiContentType": content_type, "uiPage": page, "dryRun": False},
+        {"archiveId": archive_id, "postId": post_id, "padCode": pad_code, "platform": platform, "postSource": source, "contentOverrides": draft.get("content_overrides") or {}, "linkTemplateApplied": bool(draft.get("link_template_applied")), "idempotencyKey": _ensure_publish_request_id(draft), "uiContentType": content_type, "uiPage": page, "dryRun": False},
         "真實發布任務",
     )
 
@@ -9960,7 +10061,7 @@ def _custom_publish_start(action: str) -> dict[str, Any]:
             "🖼 自定義發布\n\n請選擇發布平台：",
             rows,
         ),
-        state={"flow": "custom_publish_platform", "draft": {"persona_id": archive_id, "archive_id": archive_id, "group_content_type": content_type}},
+        state={"flow": "custom_publish_platform", "draft": {"persona_id": archive_id, "archive_id": archive_id, "group_content_type": content_type, "publish_origin": "custom"}},
     )
 
 
@@ -9969,6 +10070,8 @@ def _custom_publish_platform(action: str, state: dict[str, Any]) -> dict[str, An
     platform = str(action or "").split(":", 1)[1] if ":" in str(action or "") else ""
     if not _valid_publish_platform(platform):
         return _response(_message("發布平台已失效，請重新選擇。", [[_btn("◀️ 返回選平台", f"custom_publish_persona:{draft.get('archive_id')}:{draft.get('group_content_type') or ''}")]]), state=state)
+    if draft.get("platform") and draft.get("platform") != platform:
+        draft.pop("publish_request_id", None)
     draft["platform"] = platform
     label = "Threads" if platform == "threads" else "Telegram 群組"
     return _response(
@@ -9987,7 +10090,8 @@ def _custom_publish_platform(action: str, state: dict[str, Any]) -> dict[str, An
 
 def _custom_publish_content_prompt(state: dict[str, Any], *, with_image: bool = False) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
-    draft.update({"custom_generate_image": bool(with_image), "custom_content": "", "custom_media_url": ""})
+    _drop_custom_publish_media(draft)
+    draft.update({"custom_generate_image": bool(with_image), "custom_content": "", "publish_origin": "custom"})
     mode_line = "收到文字後會先生成圖片，再進入最終發布確認。" if with_image else "可以發送純文字、圖片/視頻加 caption，或先後補齊文字與媒體。"
     return _response(
         _message(
@@ -10003,10 +10107,13 @@ def _continue_custom_publish(message: str, media: list[dict[str, str]], state: d
     if message.strip():
         draft["custom_content"] = message.strip()
     if media:
-        draft["custom_media_url"] = str(media[0].get("url") or "").strip()
+        _drop_custom_publish_media(draft)
+        draft["custom_media_token"] = _store_custom_publish_media(media[0])
         draft["custom_media_type"] = str(media[0].get("type") or "").strip()
         draft["custom_media_name"] = str(media[0].get("name") or "").strip()
-    if not draft.get("custom_content") and not draft.get("custom_media_url"):
+    draft.pop("publish_request_id", None)
+    custom_media = _custom_publish_media(draft)
+    if not draft.get("custom_content") and not custom_media:
         return _custom_publish_content_prompt({"draft": draft}, with_image=bool(draft.get("custom_generate_image")))
     if draft.get("custom_generate_image") and not draft.get("custom_content"):
         return _response(_message("根據文字生成圖片需要先提供文字內容。", [[_btn("◀️ 返回發布方式", f"custom_publish_platform:{draft.get('platform')}")]]), state={"flow": "custom_publish_content", "draft": draft})
@@ -10019,8 +10126,10 @@ def _custom_publish_confirmation(state: dict[str, Any]) -> dict[str, Any]:
     local, row = _resolve_persona_for_action(archive_id)
     pad_code = str((local.pad_code if local else "") or (row or {}).get("bound_pad_code") or "").strip()
     draft.update({"pad_code": pad_code, "pad_back_action": "custom_publish_publish_options"})
+    _ensure_publish_request_id(draft)
     content = str(draft.get("custom_content") or "").strip()
-    media_line = f"媒體：{draft.get('custom_media_name') or draft.get('custom_media_type') or '已附加'}" if draft.get("custom_media_url") else "媒體：無"
+    custom_media = _custom_publish_media(draft)
+    media_line = f"媒體：{custom_media.get('name') or custom_media.get('type') or '已附加'}" if custom_media else "媒體：無"
     rows: list[list[dict[str, str]]] = []
     if pad_code:
         rows.append([_btn(f"✅ 發布到綁定智能體手機 {pad_code}", "custom_publish_publish_now")])
@@ -10028,6 +10137,7 @@ def _custom_publish_confirmation(state: dict[str, Any]) -> dict[str, Any]:
     if _publish_link_presets(archive_id):
         rows.append([_btn("↩️ 撤回鏈接模板" if draft.get("link_template_applied") else "🔗 選擇鏈接模板", "publish_link_clear" if draft.get("link_template_applied") else "publish_link_templates")])
     rows.extend(_rows(
+        [_btn("📎 更換媒體" if custom_media else "📎 添加媒體", "custom_publish_add_media")],
         [_btn("♻️ 清除並重發內容", "custom_publish_clear_content")],
         [_btn("◀️ 返回發布方式", f"custom_publish_platform:{draft.get('platform')}")],
     ))
@@ -10044,13 +10154,18 @@ def _custom_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
     platform = str(draft.get("platform") or "")
     if not archive_id or not pad_code or not _valid_publish_platform(platform):
         return _custom_publish_confirmation({"draft": draft})
+    custom_media = _custom_publish_media(draft)
+    if draft.get("custom_media_token") and not custom_media:
+        return _response(_message("上傳媒體已過期，請重新添加。", [[_btn("📎 重新添加媒體", "custom_publish_add_media")], [_btn("◀️ 返回發布確認", "custom_publish_publish_options")]]), state={"flow": "custom_publish_ready", "draft": draft})
     params = {
         "archiveId": archive_id,
         "padCode": pad_code,
         "platform": platform,
         "customContent": str(draft.get("custom_content") or ""),
-        "customMediaUrl": str(draft.get("custom_media_url") or ""),
-        "generateImage": bool(draft.get("custom_generate_image") and not draft.get("custom_media_url")),
+        "customMediaUrl": str(custom_media.get("url") or ""),
+        "generateImage": bool(draft.get("custom_generate_image") and not custom_media.get("url")),
+        "linkTemplateApplied": bool(draft.get("link_template_applied")),
+        "idempotencyKey": _ensure_publish_request_id(draft),
         "uiContentType": str(draft.get("group_content_type") or ""),
         "dryRun": False,
     }
@@ -11350,7 +11465,7 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _open(action.split(":", 1)[1], state)
     if not action and state.get("flow") == "sentiment_hot_edit_input" and (message or media):
         return _continue_sentiment_hot_edit(message, media, state)
-    if not action and state.get("flow") == "custom_publish_content" and (message or media):
+    if not action and state.get("flow") in {"custom_publish_content", "custom_publish_ready"} and (message or media):
         return _continue_custom_publish(message, media, state)
     if not action and state.get("flow") and message:
         return _continue_state_text(message, state)
@@ -11473,6 +11588,12 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _source_post_pad_menu({"draft": draft})
     if action == "custom_publish_clear_content":
         return _custom_publish_content_prompt(state, with_image=bool((state.get("draft") or {}).get("custom_generate_image")))
+    if action == "custom_publish_add_media":
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        return _response(
+            _message("📎 請發送要添加或替換的圖片/視頻，可同時附上文字。", [[_btn("◀️ 返回發布確認", "custom_publish_publish_options")]]),
+            state={"flow": "custom_publish_content", "draft": draft},
+        )
     if action.startswith("stored_publish:"):
         return _stored_publish_start(action)
     if action.startswith("stored_platform:"):

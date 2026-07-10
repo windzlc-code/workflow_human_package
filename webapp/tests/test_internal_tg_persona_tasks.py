@@ -448,6 +448,8 @@ def test_persona_publish_payload_accepts_custom_media_and_content_overrides() ->
             "customContent": "custom text",
             "customMediaUrl": "data:image/png;base64,YWJj",
             "generateImage": True,
+            "linkTemplateApplied": True,
+            "uiContentType": "paid",
         },
     )
     stored = server._build_internal_tg_task_payload(
@@ -463,10 +465,42 @@ def test_persona_publish_payload_accepts_custom_media_and_content_overrides() ->
     )
 
     assert custom["customContent"] == "custom text"
-    assert custom["customMediaUrl"].startswith("data:image/png")
+    staged_media = Path(custom["customMediaUrl"])
+    assert staged_media.name == "custom-publish-media.png"
+    assert staged_media.read_bytes() == b"abc"
     assert custom["generateImage"] is True
+    assert custom["linkTemplateApplied"] is True
+    assert custom["uiContentType"] == "paid"
     assert custom["padCodes"] == ["PAD-1", "PAD-2"]
     assert stored["contentOverrides"] == {"post-1": "with link"}
+
+    retry = server._build_internal_tg_task_payload(
+        "task-custom-retry",
+        "persona_publish_post",
+        {
+            "archiveId": "archive-1",
+            "padCode": "PAD-1",
+            "platform": "threads",
+            "customContent": "custom text",
+            "customMediaUrl": custom["customMediaUrl"],
+        },
+    )
+    assert retry["customMediaUrl"] == custom["customMediaUrl"]
+
+
+def test_persona_publish_payload_rejects_non_media_custom_urls() -> None:
+    with pytest.raises(Exception, match="customMediaUrl must be image/video data or http"):
+        server._build_internal_tg_task_payload(
+            "task-invalid-media",
+            "persona_publish_post",
+            {
+                "archiveId": "archive-1",
+                "padCode": "PAD-1",
+                "platform": "threads",
+                "customContent": "text",
+                "customMediaUrl": "data:text/html;base64,PGgxPmJhZDwvaDE+",
+            },
+        )
 
 
 def test_persona_clis_reuse_real_telegram_and_archive_paths() -> None:

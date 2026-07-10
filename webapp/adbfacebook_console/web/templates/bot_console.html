@@ -228,6 +228,10 @@
     line-height: 1.25;
     overflow-wrap: anywhere;
   }
+  .key:disabled {
+    cursor: progress;
+    opacity: .68;
+  }
   .key:active { filter: brightness(.92); }
   .key.danger { background: linear-gradient(145deg, rgba(201, 54, 54, .88), rgba(145, 42, 42, .9)); }
   .key.primary { background: linear-gradient(145deg, rgba(83, 172, 80, .95), rgba(36, 130, 82, .96)); }
@@ -348,6 +352,8 @@
   let sourcePollTimer = null;
   let sourceFollowupTimer = null;
   let activeBotGroup = null;
+  let requestGeneration = 0;
+  let userRequestInFlight = false;
 
   function clearSourcePoll() {
     if (sourcePollTimer !== null) {
@@ -498,6 +504,14 @@
     const isPoll = options.isPoll === true;
     const isFollowup = options.isFollowup === true;
     const targetGroup = options.targetGroup || (replacePanel ? activeBotGroup : null);
+    const isInteractive = !isPoll && !isFollowup;
+    if (isInteractive && userRequestInFlight) return;
+    const generation = isInteractive ? ++requestGeneration : requestGeneration;
+    const pendingButtons = targetGroup ? Array.from(targetGroup.querySelectorAll('button')) : [];
+    if (isInteractive) {
+      userRequestInFlight = true;
+      pendingButtons.forEach(button => { button.disabled = true; });
+    }
     if (!isPoll && !isFollowup) {
       clearSourcePoll();
       clearSourceFollowup();
@@ -514,6 +528,7 @@
         body: JSON.stringify({ ...payload, state }),
       });
       const data = await res.json();
+      if (generation !== requestGeneration) return;
       state = data.state || {};
       const messages = data.messages || [];
       let responseGroup = targetGroup;
@@ -527,13 +542,20 @@
         return;
       }
     } catch (err) {
+      if (generation !== requestGeneration) return;
       appendBot({
         text: '操作失败：' + err,
         keyboard: [[{ label: '返回主选单', action: 'menu' }]]
       }, replacePanel ? targetGroup : null);
     } finally {
-      subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
-      input.focus();
+      if (isInteractive && generation === requestGeneration) {
+        userRequestInFlight = false;
+        pendingButtons.forEach(button => { if (button.isConnected) button.disabled = false; });
+      }
+      if (generation === requestGeneration) {
+        subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
+        input.focus();
+      }
     }
   }
 
@@ -546,7 +568,7 @@
   });
 
   attach.addEventListener('click', () => {
-    if (state.flow === 'sentiment_hot_edit_input' || state.flow === 'custom_publish_content') {
+    if (state.flow === 'sentiment_hot_edit_input' || state.flow === 'custom_publish_content' || state.flow === 'custom_publish_ready') {
       mediaInput.click();
       return;
     }

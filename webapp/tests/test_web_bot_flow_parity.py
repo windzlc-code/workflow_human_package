@@ -211,13 +211,17 @@ def test_publish_entry_and_custom_media_route_to_real_source_publish() -> None:
         'action == "custom_publish_multi_now"',
     ):
         assert route in handle
-    assert 'state.get("flow") == "custom_publish_content" and (message or media)' in handle
+    assert 'state.get("flow") in {"custom_publish_content", "custom_publish_ready"} and (message or media)' in handle
     assert '"persona_publish_post"' in custom
     assert '"customContent"' in custom
     assert '"customMediaUrl"' in custom
     assert '"generateImage"' in custom
     assert '"padCodes"' in multi
-    assert "state.flow === 'sentiment_hot_edit_input' || state.flow === 'custom_publish_content'" in template
+    assert "state.flow === 'sentiment_hot_edit_input' || state.flow === 'custom_publish_content' || state.flow === 'custom_publish_ready'" in template
+    assert 'action == "custom_publish_add_media"' in handle
+    assert '"linkTemplateApplied"' in custom
+    assert '"idempotencyKey"' in custom
+    assert "custom_media_token" in _function_source("_continue_custom_publish")
 
 
 def test_publish_platforms_links_multi_pad_and_retry_match_tg_contract() -> None:
@@ -240,6 +244,12 @@ def test_publish_platforms_links_multi_pad_and_retry_match_tg_contract() -> None
     assert "releasePadLock" in publish_cli
     assert "contentOverrides" in publish_cli
     assert "generateArchivePostImageCandidates" in publish_cli
+    assert "input.linkTemplateApplied" in publish_cli
+    assert 'input.uiContentType === "paid"' in publish_cli
+    assert "legacyPublishCheckpointKey" in publish_cli
+    assert 'createHash("sha256")' in publish_cli
+    assert publish_cli.index("savePublishCheckpoint(archiveId, checkpointKey") < publish_cli.index("releasePadLock(targetPadCode, lockOwner)")
+    assert "recoveredHistoryPostIds" in publish_cli
     assert sum(1 for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == "_publish_platform") == 1
 
 
@@ -472,6 +482,19 @@ def test_hot_media_upload_uses_web_composer_and_tg_edit_flow() -> None:
     assert "state.flow === 'sentiment_hot_edit_input'" in html
     assert 'state.get("flow") == "sentiment_hot_edit_input"' in handle
     assert 'media_type not in {"image", "video"}' in media_input
+
+
+def test_console_guards_duplicate_and_stale_publish_requests() -> None:
+    html = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+    server = SERVER_PATH.read_text(encoding="utf-8")
+
+    assert "requestGeneration" in html
+    assert "userRequestInFlight" in html
+    assert "generation !== requestGeneration" in html
+    assert "button.disabled = true" in html
+    assert "_INTERNAL_TG_SUBMIT_LOCK" in server
+    assert 'previous.get("idempotencyKey")' in server
+    assert '"deduplicated": True' in server
 
 
 def test_hot_task_result_restores_candidates_media_and_closed_loop_buttons() -> None:

@@ -27,10 +27,26 @@ type Input = {
   customContent?: string;
   customMediaUrl?: string;
   generateImage?: boolean;
+  linkTemplateApplied?: boolean;
+  uiContentType?: "free" | "paid";
   dryRun?: boolean;
 };
 
 installNodePersonaArchiveBridge();
+const archiveMutationRepo = createNodePublishQueueRepository();
+
+async function withArchiveMutationLock<T>(archiveId: string, operation: () => Promise<T>): Promise<T> {
+  const lockCode = `__web_archive__:${archiveId}`;
+  const owner = `web-archive-${process.pid}-${randomUUID()}`;
+  if (!archiveMutationRepo.acquirePadLock(lockCode, owner)) {
+    throw new Error("人設歸檔正在被其他發布任務更新，請稍後重試");
+  }
+  try {
+    return await operation();
+  } finally {
+    archiveMutationRepo.releasePadLock(lockCode, owner);
+  }
+}
 
 function printJson(value: unknown) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -43,8 +59,21 @@ function readInput(): Input {
   return JSON.parse(payload.replace(/^\uFEFF/, "")) as Input;
 }
 
-function publishCheckpointKey(postId: string, platform: Platform, padCode: string) {
+function legacyPublishCheckpointKey(postId: string, platform: Platform, padCode: string) {
   return `${postId}|${platform}|${padCode}`;
+}
+
+function publishCheckpointKey(args: {
+  postId: string;
+  platform: Platform;
+  padCode: string;
+  caption: string;
+  mediaUrl: string;
+  telegramTargetGroupName?: string;
+  telegramGroupContentType?: string;
+}) {
+  const digest = createHash("sha256").update(JSON.stringify(args)).digest("hex").slice(0, 24);
+  return `${args.postId}|${args.platform}|${args.padCode}|${digest}`;
 }
 
 async function loadPublishCheckpoints(archiveId: string): Promise<Record<string, any>> {
@@ -54,21 +83,25 @@ async function loadPublishCheckpoints(archiveId: string): Promise<Record<string,
 }
 
 async function savePublishCheckpoint(archiveId: string, key: string, value: any) {
-  const archive = await loadPersonaArchive(archiveId);
-  if (!archive) throw new Error("persona archive disappeared while saving publish checkpoint");
-  const checkpoints = await loadPublishCheckpoints(archiveId);
-  await updatePersonaArchiveProfile(archiveId, {
-    setup: { ...(archive.setup || {}), webPublishCheckpoints: { ...checkpoints, [key]: value } } as any,
+  await withArchiveMutationLock(archiveId, async () => {
+    const archive = await loadPersonaArchive(archiveId);
+    if (!archive) throw new Error("persona archive disappeared while saving publish checkpoint");
+    const checkpoints = (archive.setup as any)?.webPublishCheckpoints || {};
+    await updatePersonaArchiveProfile(archiveId, {
+      setup: { ...(archive.setup || {}), webPublishCheckpoints: { ...checkpoints, [key]: value } } as any,
+    });
   });
 }
 
 async function clearPublishCheckpoints(archiveId: string, keys: string[]) {
-  const archive = await loadPersonaArchive(archiveId);
-  if (!archive) return;
-  const checkpoints = { ...await loadPublishCheckpoints(archiveId) };
-  for (const key of keys) delete checkpoints[key];
-  await updatePersonaArchiveProfile(archiveId, {
-    setup: { ...(archive.setup || {}), webPublishCheckpoints: checkpoints } as any,
+  await withArchiveMutationLock(archiveId, async () => {
+    const archive = await loadPersonaArchive(archiveId);
+    if (!archive) return;
+    const checkpoints = { ...((archive.setup as any)?.webPublishCheckpoints || {}) };
+    for (const key of keys) delete checkpoints[key];
+    await updatePersonaArchiveProfile(archiveId, {
+      setup: { ...(archive.setup || {}), webPublishCheckpoints: checkpoints } as any,
+    });
   });
 }
 
@@ -95,35 +128,73 @@ async function main() {
   let archive = await loadPersonaArchive(archiveId);
   if (!archive) throw new Error("persona archive not found");
   if (isCustomPublish && input.generateImage === true && !customMediaUrl) {
+    const checkpoints = await loadPublishCheckpoints(archiveId);
+    const prefix = `${postId}|${platform}|`;
+    const recovered = Object.entries(checkpoints).find(([key, value]) => key.startsWith(prefix) && String(value?.mediaUrl || "").trim());
+    customMediaUrl = recovered ? String(recovered[1]?.mediaUrl || "").trim() : "";
+  }
+  if (isCustomPublish && input.generateImage === true && !customMediaUrl) {
     const tempPostId = randomUUID();
-    const now = new Date().toISOString();
-    await savePersonaArchive({
-      ...archive,
-      posts: [...archive.posts, {
-        id: tempPostId,
-        title: "Web custom publish image",
-        content: customContent,
-        wordCount: customContent.length,
-        orderIndex: archive.posts.length,
-        createdAt: now,
-        updatedAt: now,
-        sourceMeta: { source: "web_custom_publish" },
-      }],
-    });
+    const tempLockCode = `__web_custom_image__:${archiveId}`;
+    const tempLockOwner = `web-custom-image-${process.pid}-${tempPostId}`;
+    if (!archiveMutationRepo.acquirePadLock(tempLockCode, tempLockOwner)) {
+      throw new Error("這個人設正在生成另一個自定義發布圖片，請稍後重試");
+    }
     try {
+      await withArchiveMutationLock(archiveId, async () => {
+        const latest = await loadPersonaArchive(archiveId);
+        if (!latest) throw new Error("persona archive disappeared before custom image generation");
+        const now = new Date().toISOString();
+        const withoutStaleTemps = latest.posts.filter((post) => String(post.sourceMeta?.source || "") !== "web_custom_publish_temp");
+        await savePersonaArchive({
+          ...latest,
+          posts: [...withoutStaleTemps, {
+            id: tempPostId,
+            title: "Web custom publish image",
+            content: customContent,
+            wordCount: customContent.length,
+            orderIndex: withoutStaleTemps.length,
+            createdAt: now,
+            updatedAt: now,
+            sourceMeta: { source: "web_custom_publish_temp" },
+          }],
+        });
+      });
       const generated = await generateArchivePostImageCandidates({ archiveId, postId: tempPostId, source: "posts" });
       customMediaUrl = String(generated.imageUrls?.[0] || "").trim();
       if (!customMediaUrl) throw new Error("custom publish image generation returned no image");
     } finally {
-      await deleteArchiveEpisode(archiveId, tempPostId).catch(() => undefined);
+      try {
+        await withArchiveMutationLock(archiveId, async () => {
+          await deleteArchiveEpisode(archiveId, tempPostId);
+        });
+      } finally {
+        archiveMutationRepo.releasePadLock(tempLockCode, tempLockOwner);
+      }
     }
     archive = await loadPersonaArchive(archiveId);
     if (!archive) throw new Error("persona archive disappeared after custom image generation");
   }
   const availablePosts = postSource === "favorites" ? archive.favoritePosts || [] : getArchivePendingPostsForPlatform(archive, platform);
+  const historyByPostId = new Map((archive.publishHistory || []).map((record) => [String(record.archivePostId || ""), record]));
+  const recoveredHistoryPostIds = new Set<string>();
   const posts = isCustomPublish
-    ? [{ id: postId, content: customContent, imageUrl: customMediaUrl, mediaUrl: customMediaUrl } as any]
-    : postIds.map((id) => availablePosts.find((item) => item.id === id)).filter(Boolean) as typeof availablePosts;
+    ? [{ id: postId, content: customContent, imageUrl: customMediaUrl, mediaUrl: customMediaUrl, telegramGroupContentType: input.uiContentType === "paid" ? "paid" : "free" } as any]
+    : postIds.map((id) => {
+        const pending = availablePosts.find((item) => item.id === id);
+        if (pending) return pending;
+        const history = historyByPostId.get(id);
+        if (!history) return null;
+        recoveredHistoryPostIds.add(id);
+        return {
+          id,
+          content: history.content,
+          imageUrl: history.imageUrl,
+          mediaUrl: history.imageUrl,
+          telegramGroupContentType: history.telegramGroupContentType,
+          sourceMeta: history.sourceMeta,
+        } as any;
+      }).filter(Boolean) as typeof availablePosts;
   if (posts.length !== postIds.length) throw new Error("one or more persona posts are not pending for this platform");
 
   const publishedContentById: Record<string, string> = {};
@@ -133,15 +204,23 @@ async function main() {
   const publishQueue = createNodePublishQueueRepository();
   for (const post of posts) {
     const override = String(input.contentOverrides?.[post.id] || "").trim();
-    const caption = isCustomPublish
-      ? buildPersonaPublishCaption(customContent, archive.setup)
-      : buildPersonaPublishCaption(override || post.content, archive.setup);
+    const rawContent = isCustomPublish ? customContent : override || post.content;
+    const caption = input.linkTemplateApplied
+      ? String(rawContent || "").trim()
+      : buildPersonaPublishCaption(rawContent, archive.setup);
     const imageUrl = isCustomPublish ? customMediaUrl : getStoredPostPrimaryMediaUrl(post) || post.imageUrl || "";
     publishedContentById[post.id] = caption;
     const publishResults = [];
     for (const targetPadCode of padCodes) {
-      const checkpointKey = publishCheckpointKey(post.id, platform, targetPadCode);
-      const existingCheckpoint = (await loadPublishCheckpoints(archiveId))[checkpointKey];
+      const telegramTargetGroupName = platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined;
+      const telegramGroupContentType = platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined;
+      const checkpointKey = publishCheckpointKey({ postId: post.id, platform, padCode: targetPadCode, caption, mediaUrl: imageUrl, telegramTargetGroupName, telegramGroupContentType });
+      const legacyCheckpointKey = legacyPublishCheckpointKey(post.id, platform, targetPadCode);
+      const checkpoints = await loadPublishCheckpoints(archiveId);
+      const existingCheckpoint = checkpoints[checkpointKey] || checkpoints[legacyCheckpointKey];
+      if (recoveredHistoryPostIds.has(post.id) && !existingCheckpoint) {
+        throw new Error(`推文 ${post.id} 已完成歸檔，但缺少可恢復的發布 checkpoint`);
+      }
       const lockOwner = `web-publish-${process.pid}-${post.id}-${targetPadCode}`;
       if (!existingCheckpoint && !publishQueue.acquirePadLock(targetPadCode, lockOwner)) {
         throw new Error(`智能體手機 ${targetPadCode} 正在執行其他發布任務，請稍後重試`);
@@ -155,22 +234,27 @@ async function main() {
               platform,
               caption,
               mediaUrl: imageUrl || undefined,
-              telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post) : undefined,
-              telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post) : undefined,
+              telegramTargetGroupName,
+              telegramGroupContentType,
             },
             () => undefined,
           );
+        if (!existingCheckpoint) {
+          await savePublishCheckpoint(archiveId, checkpointKey, {
+            publishedUrl: String(result?.publishedUrl || "").trim(),
+            screenshotUrl: result?.screenshotUrl,
+            caption,
+            mediaUrl: imageUrl,
+            telegramTargetGroupName,
+            telegramGroupContentType,
+            completedAt: new Date().toISOString(),
+          });
+        }
       } finally {
         if (!existingCheckpoint) publishQueue.releasePadLock(targetPadCode, lockOwner);
       }
-      if (!existingCheckpoint) {
-        await savePublishCheckpoint(archiveId, checkpointKey, {
-          publishedUrl: String(result?.publishedUrl || "").trim(),
-          screenshotUrl: result?.screenshotUrl,
-          completedAt: new Date().toISOString(),
-        });
-      }
       completedCheckpointKeys.push(checkpointKey);
+      if (checkpoints[legacyCheckpointKey]) completedCheckpointKeys.push(legacyCheckpointKey);
       publishResults.push({ padCode: targetPadCode, result });
       allPublishResults.push({ postId: post.id, imageUrl, caption, padCode: targetPadCode, result });
     }
@@ -198,17 +282,22 @@ async function main() {
         })),
     };
   }
-  if (isCustomPublish) {
+  const pendingPostIds = postIds.filter((id) => !recoveredHistoryPostIds.has(id));
+  if (isCustomPublish || pendingPostIds.length === 0) {
     // Custom publishes are intentionally not moved through the stored-post archive.
   } else if (postSource === "favorites") {
-    await markFavoritePostsPublished(archiveId, postIds, publishedContentById, publishedMetaById);
+    await withArchiveMutationLock(archiveId, async () => {
+      await markFavoritePostsPublished(archiveId, pendingPostIds, publishedContentById, publishedMetaById);
+    });
   } else {
-    await runPersonaWorkflow({
-      action: "finalize-published",
-      archiveId,
-      postIds,
-      publishedContentById,
-      publishedMetaById,
+    await withArchiveMutationLock(archiveId, async () => {
+      await runPersonaWorkflow({
+        action: "finalize-published",
+        archiveId,
+        postIds: pendingPostIds,
+        publishedContentById,
+        publishedMetaById,
+      });
     });
   }
   await clearPublishCheckpoints(archiveId, completedCheckpointKeys);

@@ -232,6 +232,7 @@ _TASK_QUEUE: queue.Queue[tuple[str, int, str, dict[str, Any]]] = queue.Queue(max
 _WORKERS: list[threading.Thread] = []
 _WORKERS_LOCK = threading.Lock()
 _RUNTIME_CONFIG_LOCK = threading.RLock()
+_INTERNAL_TG_SUBMIT_LOCK = threading.Lock()
 _COMFY_GPU_SEMAPHORE = threading.BoundedSemaphore(int(COMFY_GPU_LOCAL_SEMAPHORE_LIMIT))
 _COMFY_GPU_LOCK = threading.Lock()
 _COMFY_GPU_WAITING = 0
@@ -17134,6 +17135,9 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
                     if isinstance(item, int) and not isinstance(item, bool) and item >= 0
                 })[:20]
         if typ == "persona_publish_post":
+            idempotency_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(payload.get("idempotencyKey") or ""))[:80]
+            if idempotency_key:
+                normalized["idempotencyKey"] = idempotency_key
             if custom_content:
                 if len(custom_content) > 20000:
                     raise HTTPException(status_code=400, detail="persona_publish_post customContent is too long")
@@ -17141,11 +17145,50 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
             if custom_media_url:
                 if len(custom_media_url) > 40_000_000:
                     raise HTTPException(status_code=400, detail="persona_publish_post customMediaUrl is too large")
-                normalized["customMediaUrl"] = custom_media_url
+                valid_data_media = custom_media_url.lower().startswith(("data:image/", "data:video/"))
+                parsed_media = urlsplit(custom_media_url)
+                valid_remote_media = parsed_media.scheme in {"http", "https"} and bool(parsed_media.netloc)
+                staged_path = (
+                    Path(custom_media_url).resolve()
+                    if not valid_data_media and not valid_remote_media and not custom_media_url.lower().startswith("file:")
+                    else None
+                )
+                valid_staged_media = bool(
+                    staged_path
+                    and staged_path.is_relative_to(OUTPUT_ROOT.resolve())
+                    and staged_path.name.startswith("custom-publish-media.")
+                    and staged_path.is_file()
+                )
+                if not valid_data_media and not valid_remote_media and not valid_staged_media:
+                    raise HTTPException(status_code=400, detail="persona_publish_post customMediaUrl must be image/video data or http(s) URL")
+                if valid_data_media:
+                    match = re.match(r"^data:(image|video)/([a-zA-Z0-9.+-]+);base64,(.+)$", custom_media_url, flags=re.DOTALL | re.IGNORECASE)
+                    if not match:
+                        raise HTTPException(status_code=400, detail="persona_publish_post customMediaUrl data payload is invalid")
+                    try:
+                        media_bytes = base64.b64decode(match.group(3), validate=True)
+                    except Exception as exc:
+                        raise HTTPException(status_code=400, detail="persona_publish_post customMediaUrl base64 is invalid") from exc
+                    if not media_bytes or len(media_bytes) > 25 * 1024 * 1024:
+                        raise HTTPException(status_code=400, detail="persona_publish_post custom media exceeds 25 MB")
+                    subtype = match.group(2).lower()
+                    extension = {
+                        "jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif",
+                        "mp4": ".mp4", "quicktime": ".mov", "webm": ".webm",
+                    }.get(subtype)
+                    if not extension:
+                        raise HTTPException(status_code=400, detail="persona_publish_post custom media type is not supported")
+                    media_path = _build_task_workdir(task_id, fallback_username="telegram") / f"custom-publish-media{extension}"
+                    media_path.write_bytes(media_bytes)
+                    normalized["customMediaUrl"] = str(media_path)
+                else:
+                    normalized["customMediaUrl"] = custom_media_url
             if payload.get("generateImage") is True:
                 if not custom_content:
                     raise HTTPException(status_code=400, detail="persona_publish_post generateImage requires customContent")
                 normalized["generateImage"] = True
+            if payload.get("linkTemplateApplied") is True:
+                normalized["linkTemplateApplied"] = True
             raw_overrides = payload.get("contentOverrides")
             if isinstance(raw_overrides, dict) and post_ids:
                 overrides = {
@@ -20763,17 +20806,33 @@ def create_app() -> FastAPI:
         typ = str(payload.task_type or "").strip()
         if not typ:
             raise HTTPException(status_code=400, detail="task_type 不能为空")
-        task_id = _new_id("task")
         params = dict(payload.params) if isinstance(payload.params, dict) else {}
-        params["_requestTgChatId"] = int(payload.tg_chat_id)
-        task_payload = _build_internal_tg_task_payload(task_id, typ, params)
-        task_payload = _ensure_internal_tg_payload_chinese_image_prompt(typ, task_payload)
-        task_payload = _ensure_internal_tg_payload_english_prompt(typ, task_payload)
-        task_payload["tg_chat_id"] = int(payload.tg_chat_id)
-        task_payload["source"] = "telegram"
-        user_id = _internal_tg_submit_user_id()
-        _enqueue_task(task_id, user_id, typ, task_payload)
-        return {"ok": True, "id": task_id, "task_type": typ, "prompt_preview": _tg_prompt_preview(task_payload)}
+        idempotency_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(params.get("idempotencyKey") or ""))[:80]
+        with _INTERNAL_TG_SUBMIT_LOCK:
+            if typ == "persona_publish_post" and idempotency_key:
+                with db() as conn:
+                    rows = conn.execute(
+                        "SELECT id, status, input_json FROM tasks WHERE type = ? ORDER BY created_at DESC LIMIT 200",
+                        (typ,),
+                    ).fetchall()
+                for row in rows:
+                    previous = _json_loads(row["input_json"], {})
+                    if (
+                        str(previous.get("idempotencyKey") or "") == idempotency_key
+                        and _get_tg_chat_id_from_payload(previous) == int(payload.tg_chat_id)
+                        and str(row["status"] or "").lower() in {"queued", "running", "success"}
+                    ):
+                        return {"ok": True, "id": row["id"], "task_type": typ, "deduplicated": True}
+            task_id = _new_id("task")
+            params["_requestTgChatId"] = int(payload.tg_chat_id)
+            task_payload = _build_internal_tg_task_payload(task_id, typ, params)
+            task_payload = _ensure_internal_tg_payload_chinese_image_prompt(typ, task_payload)
+            task_payload = _ensure_internal_tg_payload_english_prompt(typ, task_payload)
+            task_payload["tg_chat_id"] = int(payload.tg_chat_id)
+            task_payload["source"] = "telegram"
+            user_id = _internal_tg_submit_user_id()
+            _enqueue_task(task_id, user_id, typ, task_payload)
+            return {"ok": True, "id": task_id, "task_type": typ, "prompt_preview": _tg_prompt_preview(task_payload)}
 
     @app.get("/api/internal/tg/runtime_config")
     def api_internal_tg_runtime_config(request: Request):
@@ -21129,7 +21188,7 @@ def create_app() -> FastAPI:
         persona_task_type = str(row["type"] or "")
         safe_persona_result = {
             key: output_payload.get(key)
-            for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "publishedCount", "mode")
+            for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "publishedCount", "customPublish", "mode")
             if key in output_payload
         }
         if persona_task_type == "persona_publish_post" and isinstance(output_payload.get("postIds"), list):
