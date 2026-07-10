@@ -18229,7 +18229,6 @@ function sendMainMenu(chatId: number, msgId?: number) {
         `绑定智能體手機: ${archive.boundPadCode || defaultPadCode}${archive.boundPadName ? ` (${archive.boundPadName})` : ""}\n\n` +
         `${interestLine}${archive.content.slice(0, 200)}`,
         {
-          parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
               [
