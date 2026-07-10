@@ -17060,6 +17060,22 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
                 normalized["uiPage"] = max(_to_int(payload.get("uiPage"), 0), 0)
             if "uiPostIndex" in payload:
                 normalized["uiPostIndex"] = max(_to_int(payload.get("uiPostIndex"), 0), 0)
+            if isinstance(payload.get("uiGeneratedPostIds"), list):
+                generated_post_ids = list(dict.fromkeys(
+                    str(item).strip()
+                    for item in payload.get("uiGeneratedPostIds", [])
+                    if str(item).strip() and len(str(item).strip()) <= 200
+                ))[:20]
+                if generated_post_ids:
+                    normalized["uiGeneratedPostIds"] = generated_post_ids
+            if "uiImageAspectRatio" in payload:
+                normalized["uiImageAspectRatio"] = str(payload.get("uiImageAspectRatio") or "").strip()[:40]
+            if "uiImageWidth" in payload:
+                normalized["uiImageWidth"] = max(_to_int(payload.get("uiImageWidth"), 0), 0)
+            if "uiImageHeight" in payload:
+                normalized["uiImageHeight"] = max(_to_int(payload.get("uiImageHeight"), 0), 0)
+            if "uiImageRatioLabel" in payload:
+                normalized["uiImageRatioLabel"] = str(payload.get("uiImageRatioLabel") or "").strip()[:120]
             if isinstance(payload.get("uiSelectedIndexes"), list):
                 normalized["uiSelectedIndexes"] = sorted({
                     int(item) for item in payload.get("uiSelectedIndexes", [])

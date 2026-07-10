@@ -269,6 +269,44 @@ def test_persona_media_and_publish_payloads_are_normalized() -> None:
     }
 
 
+def test_post_image_group_progress_survives_internal_task_normalization() -> None:
+    generated_post_ids = ["post-1", "post-2"]
+    candidates = server._build_internal_tg_task_payload(
+        "task-candidates",
+        "persona_generate_post_image",
+        {
+            "archiveId": "archive-1",
+            "postId": "post-1",
+            "action": "generate_candidates",
+            "uiPostIndex": 0,
+            "uiGeneratedPostIds": generated_post_ids,
+        },
+    )
+    selected = server._build_internal_tg_task_payload(
+        "task-selected",
+        "persona_generate_post_image",
+        {
+            "archiveId": "archive-1",
+            "postId": "post-1",
+            "action": "select_candidate",
+            "imageUrl": "https://cdn.example.com/selected.jpg",
+            "uiPostIndex": 0,
+            "uiGeneratedPostIds": generated_post_ids,
+            "uiImageAspectRatio": "2:3",
+            "uiImageWidth": 848,
+            "uiImageHeight": 1264,
+            "uiImageRatioLabel": "2:3 基礎豎圖",
+        },
+    )
+
+    assert candidates["uiGeneratedPostIds"] == generated_post_ids
+    assert selected["uiGeneratedPostIds"] == generated_post_ids
+    assert selected["uiImageAspectRatio"] == "2:3"
+    assert selected["uiImageWidth"] == 848
+    assert selected["uiImageHeight"] == 1264
+    assert selected["uiImageRatioLabel"] == "2:3 基礎豎圖"
+
+
 def test_persona_publish_runner_is_the_only_layer_forcing_live_publish(monkeypatch) -> None:
     captured = {}
 
