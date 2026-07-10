@@ -1483,30 +1483,26 @@ def _submit_persona_image_job(persona: Persona, *, regenerate: bool = False, ins
 
 def _generate_persona_image_response(persona_id: str, *, regenerate: bool = False, instruction: str = "") -> dict[str, Any]:
     persona, row = _resolve_persona_for_action(persona_id)
-    if not persona:
-        return _response(_message("沒有找到這個本地人設，不能生成人設圖。", [[_btn("◀️ 返回人設列表", "list_personas")]]))
+    if not persona and not row:
+        return _response(_message("沒有找到這個人設，不能生成人設圖。", [[_btn("◀️ 返回人設列表", "list_personas")]]))
     if _is_workflow_persona_row(row, persona_id):
         return _response(
-            _message("⭐ 工作流人設不需要單獨生成人設圖。", [[_btn("◀️ 返回設定", f"settings_{persona.id}")]]),
-            state={"flow": "", "draft": {"persona_id": persona.id, "name": persona.name}},
+            _message("⭐ 工作流人設不需要單獨生成人設圖。", [[_btn("◀️ 返回設定", f"settings_{persona_id}")]]),
+            state={"flow": "", "draft": {"persona_id": persona_id}},
         )
-    job = _submit_persona_image_job(persona, regenerate=regenerate, instruction=instruction)
-    return _response(
-        _message(
-            "\n".join(
-                [
-                    f"🎨 已加入人設圖生成任務：{persona.name}",
-                    "",
-                    f"Job ID：{job.id}",
-                    "底層會繼續執行來源人設圖工作流，完成後會寫回這個人設的人設圖。",
-                ]
-            ),
-            _rows(
-                [_btn("📊 腳本任務狀態", "local_jobs")],
-                [_btn("👁 查看人設圖", f"viewimg_{persona.id}"), _btn("◀️ 返回人設詳情", f"pd_{persona.id}")],
-            ),
-        ),
-        state={"flow": "persona_image", "draft": {"persona_id": persona.id, "name": persona.name, "job_id": job.id}},
+    source_archive_id = _tool_r18_archive_id(persona_id, persona, row)
+    if not source_archive_id:
+        return _response(
+            _message("這個 Web 本地人設尚未同步到 Tool R18 人設庫，不能執行 TG Bot 人設圖流程。", [[_btn("◀️ 返回人設詳情", f"pd_{persona_id}")]]),
+            state={"flow": ""},
+        )
+    name = persona.name if persona else _persona_row_name(row or {})
+    return _submit_source_post_task(
+        "persona_generate_image",
+        source_archive_id,
+        "",
+        {"archiveId": source_archive_id, "regenerate": bool(regenerate), "instruction": str(instruction or "").strip()},
+        f"{'重新生成' if regenerate else '生成'}人設圖：{name}",
     )
 
 
@@ -2962,11 +2958,11 @@ def _merge_source_and_local_rows(source_rows: list[dict[str, Any]]) -> list[dict
     return rows
 
 
-def _refresh_persona_overview_cache() -> None:
+def _refresh_persona_overview_cache(*, force_remote: bool = False) -> None:
     if not _PERSONA_OVERVIEW_REFRESH_LOCK.acquire(blocking=False):
         return
     try:
-        overview = build_overview()
+        overview = build_overview(force_remote=force_remote)
         rows = overview.get("personas") if isinstance(overview.get("personas"), list) else []
         clean_rows = [row for row in rows if isinstance(row, dict)]
         if clean_rows:
@@ -2990,6 +2986,13 @@ def _persona_menu_rows() -> list[dict[str, Any]]:
     if isinstance(cached_rows, list) and cached_rows and now - float(_PERSONA_MENU_CACHE.get("at") or 0) < PERSONA_MENU_CACHE_TTL_SECONDS:
         return cached_rows
     source_rows = _cached_remote_persona_rows()
+    source_cache_has_pending_schema = bool(source_rows) and any("pending_posts" in row for row in source_rows)
+    if not source_rows or not source_cache_has_pending_schema:
+        try:
+            overview = build_overview(force_remote=True)
+            source_rows = [row for row in overview.get("personas", []) if isinstance(row, dict)]
+        except Exception:
+            source_rows = []
     rows = _merge_source_and_local_rows(source_rows) if source_rows else _local_persona_rows()
     _PERSONA_MENU_CACHE.update({"at": now, "rows": rows})
     _schedule_persona_overview_refresh()
@@ -3283,11 +3286,15 @@ def _persona_detail(persona_id: str) -> dict[str, Any]:
         "",
         f"{interest_line}{intro}",
     ]
+    workflow_persona = _is_workflow_persona_row(row, persona_id)
     keyboard = _rows(
-        [_btn("📝 查看推文", f"posts_{persona_id}_p0"), _btn("🕘 发布历史", f"history_{persona_id}")],
+        [
+            _btn("📝 查看推文", f"posts_branch_{persona_id}" if workflow_persona else f"posts_{persona_id}_p0"),
+            _btn("🕘 发布历史", f"history_branch_{persona_id}" if workflow_persona else f"history_{persona_id}"),
+        ],
         [_btn("✍️ 新建推文", f"genpost_branch_{persona_id}"), _btn("⚙️ 人设设置", f"settings_{persona_id}")],
         [_btn("💬 自動回覆", f"persona_autoreply_{persona_id}"), _btn("🌱 養號", f"persona_warmup_{persona_id}")],
-        [_btn("🚀 发布推文", f"pub_{persona_id}")],
+        [_btn("🚀 发布推文", f"pub_branch_{persona_id}" if workflow_persona else f"pub_{persona_id}")],
         [_btn("◀️ 返回", "list_personas")],
     )
     return _response(
@@ -3436,12 +3443,12 @@ def _persona_settings_flow(persona_id: str, flow: str, prompt: str) -> dict[str,
                         f"剩餘：約 {_format_cooldown_remaining(remaining)}",
                     ]
                 ),
-                [[_btn("◀️ 返回人設設定", f"pd:{persona_id}")]],
+                [[_btn("◀️ 返回人設設定", f"settings_{persona_id}")]],
             ),
             state={"flow": ""},
         )
     return _response(
-        _message(prompt, [[_btn("❌ 取消", f"pd:{persona_id}")]]),
+        _message(prompt, [[_btn("❌ 取消", f"settings_{persona_id}")]]),
         state={"flow": flow, "draft": {"persona_id": persona_id}},
     )
 
@@ -3493,28 +3500,52 @@ def _persona_content_edit_menu(persona_id: str) -> dict[str, Any]:
 
 
 def _generate_persona_bio_response(persona_id: str, direction: str = "") -> dict[str, Any]:
-    persona = PersonaRepo.get(persona_id)
+    persona, row = _resolve_persona_for_action(persona_id)
     if not persona:
         return _response(_message("只能编辑本地人设，请先同步或新建。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
-    seed = (direction or persona.style_prompt or persona.description or persona.name).strip()
-    seed = " ".join(seed.split())
-    seed = seed[:180] if seed else "高辨识度、稳定输出、适合长期运营"
-    bio = to_traditional(
-        "\n".join(
-            [
-                f"{persona.name} 是一个面向 Threads 长期运营的人设账号。",
-                f"核心定位：{seed}",
-                "内容表达保持真实、克制、有记忆点，避免空泛口号；贴文优先围绕日常观察、情绪价值、热点切入和可互动话题展开。",
-                "运营目标是持续沉淀账号可信度，配合人设图、简介、贴文素材和发布任务形成闭环。",
-            ]
+    source_archive_id = _tool_r18_archive_id(persona_id, persona, row)
+    if not source_archive_id:
+        return _response(
+            _message(
+                "這個 Web 本地人設尚未同步到 Tool R18 人設庫，不能使用 TG Bot 的 AI 簡介重寫流程。",
+                [[_btn("◀️ 返回設定", f"settings_{persona.id}")]],
+            ),
+            state={"flow": ""},
         )
-    )
-    PersonaRepo.upsert(_persona_payload(persona, description=bio))
-    _record_persona_setting_update(persona_id, "description", bio)
+    params = {"archiveId": source_archive_id, "direction": str(direction or "").strip(), "mode": "replace"}
+    job = SourceWorkflowJobRepo.create("persona_rewrite_intro", f"重新生成人設簡介：{persona.name}", params, status="submitting")
+    try:
+        base, data = _source_submit_task("persona_rewrite_intro", params)
+        SourceWorkflowJobRepo.update(
+            job.id,
+            status="submitted",
+            result=data,
+            source_task_id=str(data.get("id") or ""),
+            source_base_url=base,
+        )
+    except Exception as exc:
+        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+        return _response(
+            _message(f"❌ AI 人設簡介任務提交失敗\n\n{exc}", [[_btn("◀️ 返回設定", f"settings_{persona.id}")]]),
+            state={"flow": ""},
+        )
+    source_task_id = str(data.get("id") or "")
     return _response(
         _message(
-            "\n".join(["✅ 人設簡介已重新生成。", "", bio]),
-            [[_btn("◀️ 返回设置", f"pd:{persona_id}"), _btn("✍️ 新建推文", f"genpost:{persona_id}")]],
+            "\n".join(
+                [
+                    "🧠 正在重新生成人設簡介...",
+                    "",
+                    f"人設：{persona.name}",
+                    f"來源任務 ID：{source_task_id or '-'}",
+                    "",
+                    "完成後會直接更新 Tool R18 中同一個人設的 content 與 setup。",
+                ]
+            ),
+            _rows(
+                [_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}") if source_task_id else _btn("📊 查看任務列表", "source_tasks")],
+                [_btn("◀️ 返回設定", f"settings_{persona.id}")],
+            ),
         ),
         state={"flow": ""},
     )
@@ -3744,40 +3775,53 @@ def _finish_create_persona(name: str, prompt: str, selected: list[str]) -> dict[
 def _finish_create_persona(name: str, prompt: str, selected: list[str]) -> dict[str, Any]:
     devices = _active_devices()
     pad_code = devices[0].pad_code if devices else ""
-    account = next((item for item in _active_accounts() if item.pad_code == pad_code), None) if pad_code else None
-    description = "\n".join(
-        [
-            prompt,
-            "",
-            f"核心關鍵詞：{'、'.join(selected) if selected else '沿用原始提示'}",
-        ]
-    ).strip()
-    persona_id, _ = PersonaRepo.upsert(
-        {
-            "name": name,
-            "description": description,
-            "style_prompt": "，".join(selected),
-            "pad_code": pad_code,
-            "account_username": account.username if account else "",
-            "source_archive_id": "web-bot:telegram-create-persona",
-        }
+    params = {
+        "name": name,
+        "prompt": prompt,
+        "selectedKeywords": selected,
+        "ownerBotName": "web-console",
+        "chatId": SOURCE_WEB_BOT_CHAT_ID,
+        "defaultPadCode": pad_code,
+    }
+    job = SourceWorkflowJobRepo.create("persona_create", f"新建人設：{name}", params, status="submitting")
+    try:
+        base, data = _source_submit_task("persona_create", params)
+        SourceWorkflowJobRepo.update(
+            job.id,
+            status="submitted",
+            result=data,
+            source_task_id=str(data.get("id") or ""),
+            source_base_url=base,
+        )
+    except Exception as exc:
+        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+        return _response(
+            _message(
+                f"❌ 新建人設任務提交失敗\n\n{exc}",
+                _rows([_btn("➕ 重新新建人設", "create_persona_entry")], [_btn("◀️ 返回人設列表", "list_personas")]),
+            ),
+            state={"flow": ""},
+        )
+    source_task_id = str(data.get("id") or "")
+    return _response(
+        _message(
+            "\n".join(
+                [
+                    f"🧠 正在根據「{'、'.join(selected) or '原始提示'}」生成人設...",
+                    "",
+                    f"角色名稱：{name}",
+                    f"來源任務 ID：{source_task_id or '-'}",
+                    "",
+                    "已交給 TG Bot 使用的 AI 人設生成與 Tool R18 人設存儲流程。完成後請查看任務結果，再生成人設圖。",
+                ]
+            ),
+            _rows(
+                [_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}") if source_task_id else _btn("📊 查看任務列表", "source_tasks")],
+                [_btn("◀️ 返回人設列表", "list_personas")],
+            ),
+        ),
+        state={"flow": ""},
     )
-    persona = PersonaRepo.get(persona_id)
-    job = _submit_persona_image_job(persona) if persona else None
-    keyboard = _rows(
-        [_btn("🎨 查看人設圖任務", "local_jobs")],
-        [_btn("🧾 人設詳情", f"pd_{persona_id}"), _btn("✍️ 新建推文", f"genpost_branch_{persona_id}")],
-    )
-    lines = [
-        f"✅ 已新建人設：{name}",
-        "",
-        description,
-        "",
-        "🎨 人設圖已加入後台生成任務。",
-    ]
-    if job:
-        lines.append(f"Job ID：{job.id}")
-    return _response(_message("\n".join(lines), keyboard), state={"flow": ""})
 
 
 def _sync_personas() -> dict[str, Any]:
@@ -4778,10 +4822,36 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
         lines.extend(["", f"错误：{task.get('error')}"])
     if task.get("batch_summary"):
         lines.extend(["", f"批次：{json.dumps(task.get('batch_summary'), ensure_ascii=False)[:500]}"])
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    archive_id = str(result.get("archiveId") or result.get("archive_id") or "").strip()
+    post_id = str(result.get("postId") or result.get("post_id") or "").strip()
+    task_type = str(task.get("type") or "").strip()
+    if result.get("generatedCount") is not None:
+        lines.extend(["", f"已生成：{_num(result.get('generatedCount'))} 篇"])
+    if archive_id:
+        lines.append(f"人設 ID：{archive_id}")
+    result_rows: list[list[dict[str, str]]] = []
+    if str(task.get("status") or "").lower() == "success" and archive_id:
+        if task_type.startswith("persona_"):
+            _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": []})
+            _refresh_persona_overview_cache(force_remote=True)
+        if task_type == "persona_create":
+            result_rows.extend(_rows([_btn("🎨 生成人設圖", f"genimg_{archive_id}")], [_btn("🧾 查看人設詳情", f"pd_{archive_id}")]))
+        elif task_type == "persona_rewrite_intro":
+            result_rows.extend(_rows([_btn("⚙️ 返回人設設定", f"settings_{archive_id}")]))
+        elif task_type == "persona_generate_posts":
+            result_rows.extend(_rows([_btn("📝 查看推文列表", f"posts_{archive_id}_p0")], [_btn("🧾 返回人設詳情", f"pd_{archive_id}")]))
+        elif task_type == "persona_generate_image":
+            result_rows.extend(_rows([_btn("🧾 查看人設詳情", f"pd_{archive_id}")], [_btn("✍️ 新建推文", f"genpost_branch_{archive_id}")]))
+        elif task_type == "persona_generate_post_image" and post_id:
+            result_rows.extend(_rows([_btn("📝 查看這篇推文", f"source_post:{archive_id}:{post_id}")], [_btn("📋 返回推文列表", f"posts_{archive_id}_p0")]))
+        elif task_type == "persona_publish_post":
+            result_rows.extend(_rows([_btn("🕘 查看發布歷史", f"history_{archive_id}")], [_btn("🧾 返回人設詳情", f"pd_{archive_id}")]))
+    result_rows.extend(_rows([_btn("重跑这个任务", f"source_rerun_task:{task.get('id') or task_id}")], [_btn("任务列表", "source_tasks"), _btn("返回主选单", "menu")]))
     return _response(
         _message(
             "\n".join(lines),
-            _rows([_btn("重跑这个任务", f"source_rerun_task:{task.get('id') or task_id}")], [_btn("任务列表", "source_tasks"), _btn("返回主选单", "menu")]),
+            result_rows,
         ),
         state={"flow": ""},
     )
@@ -5326,6 +5396,18 @@ def _genpost_context(persona_id: str) -> tuple[str, Persona | None, dict[str, An
     else:
         name = str(persona_id or "人設")
     return persona_id, local, row, name
+
+
+def _tool_r18_archive_id(persona_id: str, local: Persona | None, row: dict[str, Any] | None) -> str:
+    row_id = str((row or {}).get("id") or "").strip()
+    if row_id:
+        return row_id
+    source_id = str(local.source_archive_id or "").strip() if local else ""
+    if source_id.startswith("source:"):
+        return source_id[len("source:") :].strip()
+    if str(persona_id or "").startswith("workflow-persona-"):
+        return str(persona_id).strip()
+    return ""
 
 
 def _genpost_content_counts(row: dict[str, Any] | None) -> tuple[int, int]:
@@ -6084,104 +6166,84 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
 
     if flow == "genpost_words":
         words = max(20, min(_num(text), 500))
-        local = PersonaRepo.get(persona_id)
+        local, row = _resolve_persona_for_action(persona_id)
         if not bool(draft.get("text_only")) and local and not _avatar_exists(local):
             draft["words"] = words
             draft["target_words"] = words
             return _no_persona_reference_generate_response(draft)
-        description = "\n".join([part for part in [local.description, local.style_prompt] if part]) if local else ""
         count = min(int(draft.get("count") or 3), GENPOST_MAX_COUNT)
         memory = str(draft.get("memory") or "").strip()
         hot_context = str(draft.get("hot_context") or "").strip()
-        posts = _apply_link_ending_to_posts(persona_id, _generate_draft_posts(name, description, count, words, memory, hot_context))
-        active_granularity = str(draft.get("memory_granularity") or "daily")
-        memory_payload = {
-            "posts": posts,
-            "words": words,
-            "input_memory": memory,
-            "hot_context": hot_context,
-            "memory_granularity": active_granularity,
-            "post_image_paths": ["" for _ in posts],
-            "post_image_candidates": {},
-            "selected": list(range(min(2, len(posts)))),
-            "content_branch": str(draft.get("content_branch") or "推文生成"),
-            "content_time_slot": str(draft.get("content_time_slot") or "即時"),
-        }
-        generated_memory = _record_post_memory(
-            persona_id,
-            "\n\n".join(posts),
-            granularity="daily",
-            source_type="generated_posts",
-            source_ref=str(draft.get("memory_id") or ""),
-            title=f"{_memory_date()} 生成推文 {len(posts)} 篇",
-            payload=memory_payload,
-        )
-        if active_granularity and active_granularity != "daily":
-            _record_post_memory(
-                persona_id,
-                "\n\n".join(posts),
-                granularity=active_granularity,
-                source_type="generated_posts_context",
-                source_ref=str(draft.get("memory_id") or ""),
-                title=f"{_memory_granularity_label(active_granularity)} 推文記憶 {len(posts)} 篇",
-                payload=memory_payload,
-            )
-        draft.update(
-            {
-                "words": words,
-                "posts": posts,
-                "selected": list(range(min(2, len(posts)))),
-                "image_group": 1,
-                "memory": memory,
-                "generated_memory_id": generated_memory.id if generated_memory else "",
-                "post_image_paths": ["" for _ in posts],
-                "post_image_candidates": {},
-                "content_branch": str(draft.get("content_branch") or "推文生成"),
-                "content_time_slot": str(draft.get("content_time_slot") or "即時"),
-            }
-        )
-        _persist_generated_post_draft(draft)
-        messages = [
-            _message(
-                f"✅ 已生成 {len(posts)} 篇繁體推文，並保存為今天的推文記憶。\n\n記憶來源：{'有' if memory or hot_context else '未使用'}\n目標字數：{words}",
-                kind="status",
-            )
+        instruction_parts = [
+            str(draft.get("prompt") or "").strip(),
+            f"每篇目標約 {words} 字。",
+            f"文案時段：{draft.get('content_time_slot')}" if draft.get("content_time_slot") else "",
+            hot_context,
         ]
-        if not bool(draft.get("text_only")) and local and posts:
-            messages.append(
+        selected_ids = [str(item) for item in draft.get("selected_memory_entry_ids", []) if str(item).strip()]
+        source_archive_id = _tool_r18_archive_id(persona_id, local, row)
+        if not source_archive_id:
+            return _response(
                 _message(
-                    "已生成推文草稿。配图请进入单篇推文详情后点击「生成/重新生成图片」，避免批量生图阻塞当前对话。",
-                    kind="status",
-                )
+                    "這個 Web 本地人設尚未同步到 Tool R18 人設庫，暫時不能生成真實推文。",
+                    _rows([_btn("🔄 同步設備生成人設", "sync_personas")], [_btn("◀️ 返回人設詳情", f"pd_{persona_id}")]),
+                ),
+                state={"flow": ""},
             )
-        if False and not bool(draft.get("text_only")) and local and posts:
-            messages.append(_message(f"🖼 已生成 {len(posts)} 篇推文，正在生成第 1/{len(posts)} 篇候選配圖...", kind="status"))
-            try:
-                _generate_post_image_candidates_for_index(local, posts, 0, draft)
-                messages.append(_post_candidate_message(draft, 0))
-            except Exception as exc:
-                messages.append(
-                    _message(
-                        f"配圖生成暫時失敗：{exc}\n\n推文已保存，可稍後從推文詳情重新生成圖片。",
-                        [[_btn("🔄 重新生成圖片", f"pa_img_{_tg_post_action_key(0)}")]],
-                        kind="status",
-                    )
-                )
-        messages.append(_post_select_message(draft))
-        return _response(messages, state={"flow": "post_select", "draft": draft})
-        if local and posts:
-            try:
-                if not _avatar_exists(local):
-                    messages.append(_message(f"正在為「{name}」準備人設圖，後續配圖會沿用這張人物長相。", kind="status"))
-                    _generate_persona_reference_image(local)
-                    local = PersonaRepo.get(persona_id) or local
-                messages.append(_message(f"正在生成第 1/{len(posts)} 篇推文候選圖，每篇可再單獨生成。", kind="status"))
-                _generate_post_image_candidates_for_index(local, posts, 0, draft)
-                messages.append(_post_candidate_message(draft, 0))
-            except Exception as exc:
-                messages.append(_message(f"配圖生成暫時失敗，但推文與記憶已保存，可稍後逐篇重試：{exc}", kind="status"))
-        messages.append(_post_select_message(draft))
-        return _response(messages, state={"flow": "post_select", "draft": draft})
+        params = {
+            "archiveId": source_archive_id,
+            "count": count,
+            "customInstruction": "\n\n".join(part for part in instruction_parts if part),
+            "selectedMemoryEntryIds": selected_ids,
+            "selectedMemorySummaries": [memory] if memory and not selected_ids else [],
+            "textModelBranch": "paid" if str(draft.get("content_branch") or "") == "r18" else "free",
+        }
+        job = SourceWorkflowJobRepo.create(
+            "persona_generate_posts",
+            f"生成推文：{name} / {count} 篇",
+            params,
+            status="submitting",
+        )
+        try:
+            base, data = _source_submit_task("persona_generate_posts", params)
+            SourceWorkflowJobRepo.update(
+                job.id,
+                status="submitted",
+                result=data,
+                source_task_id=str(data.get("id") or ""),
+                source_base_url=base,
+            )
+        except Exception as exc:
+            SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+            return _response(
+                _message(
+                    f"❌ 推文生成任務提交失敗\n\n{exc}",
+                    _rows([_btn("◀️ 返回字數設定", "genpost_prompt_back")], [_btn("◀️ 返回人設詳情", f"pd_{persona_id}")]),
+                ),
+                state={"flow": "genpost_words", "draft": draft},
+            )
+        return _response(
+            _message(
+                "\n".join(
+                    [
+                        "🧠 正在生成推文...",
+                        "",
+                        f"人設：{name}",
+                        f"數量：{count} 篇",
+                        f"目標字數：{words}",
+                        f"來源任務 ID：{data.get('id') or '-'}",
+                        "",
+                        "已直接交給 TG Bot 使用的 Tool R18 人設工作流。完成後推文會寫入同一個人設待發布庫。",
+                    ]
+                ),
+                _rows(
+                    [_btn("📊 查看生成任務", "source_tasks")],
+                    [_btn("📝 查看推文列表", f"posts_{persona_id}_p0")],
+                    [_btn("◀️ 返回人設詳情", f"pd_{persona_id}")],
+                ),
+            ),
+            state={"flow": ""},
+        )
 
     return _main_menu()
 
@@ -6989,7 +7051,71 @@ def _source_count(row: dict[str, Any] | None, key: str) -> int:
     return _num(value)
 
 
-def _publish_center(persona_id: str) -> dict[str, Any]:
+def _source_pending_posts(row: dict[str, Any] | None, content_type: str = "") -> list[dict[str, Any]]:
+    posts = row.get("pending_posts") if isinstance(row, dict) and isinstance(row.get("pending_posts"), list) else []
+    result = [item for item in posts if isinstance(item, dict) and str(item.get("id") or "").strip()]
+    if content_type in {"free", "paid"}:
+        result = [
+            item
+            for item in result
+            if str(item.get("telegramGroupContentType") or item.get("telegram_group_content_type") or "free").strip().lower()
+            == content_type
+        ]
+    return result
+
+
+def _source_post_media_urls(post: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("mediaUrl", "media_url", "videoUrl", "video_url"):
+        value = str(post.get(key) or "").strip()
+        if value:
+            values.append(value)
+    raw = post.get("mediaUrls") if isinstance(post.get("mediaUrls"), list) else post.get("media_urls")
+    if isinstance(raw, list):
+        values.extend(str(item).strip() for item in raw if str(item).strip())
+    return list(dict.fromkeys(values))
+
+
+def _persona_content_type_picker(persona_id: str, target: str) -> dict[str, Any]:
+    local, row = _resolve_persona_for_action(persona_id)
+    if not local and not row:
+        return _response(_message("找不到這個人設。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    if local:
+        persona_id = local.id
+    if not _is_workflow_persona_row(row, persona_id):
+        if target == "history":
+            return _publish_history(f"pub_history:0:{persona_id}")
+        if target == "publish":
+            return _publish_center(persona_id)
+        return _publish_posts_list(f"pub_posts:0:{persona_id}")
+    if target == "history":
+        items = row.get("publish_history") if isinstance((row or {}).get("publish_history"), list) else []
+    else:
+        items = _source_pending_posts(row)
+    counts = {"free": 0, "paid": 0}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("telegramGroupContentType") or item.get("telegram_group_content_type") or "free").strip().lower()
+        counts["paid" if kind == "paid" else "free"] += 1
+    title = "發布歷史" if target == "history" else "發布推文" if target == "publish" else "待發布推文"
+    prefix = "history" if target == "history" else "pub" if target == "publish" else "posts"
+    return _response(
+        _message(
+            f"請選擇要查看的{title}內容類型：",
+            _rows(
+                [
+                    _btn(f"免費內容（{counts['free']}）", f"{prefix}_{persona_id}_ct_free"),
+                    _btn(f"付費內容（{counts['paid']}）", f"{prefix}_{persona_id}_ct_paid"),
+                ],
+                [_btn("◀️ 返回人設詳情", f"pd_{persona_id}")],
+            ),
+        ),
+        state={"flow": "", "draft": {"persona_id": persona_id}},
+    )
+
+
+def _publish_center(persona_id: str, content_type: str = "") -> dict[str, Any]:
     persona_id, persona, row, name = _publish_context(persona_id)
     if not persona and not row:
         return _response(_message("没有找到本地人设，不能创建发布任务。", [[_btn("◀️ 返回人设列表", "list_personas")]]))
@@ -6997,7 +7123,7 @@ def _publish_center(persona_id: str) -> dict[str, Any]:
     tasks = _publish_tasks_for_persona(persona, row)
     open_tasks = [task for task in tasks if task.status in {"pending", "publishing"}]
     history_tasks = [task for task in tasks if task.status not in {"pending", "publishing"}]
-    source_posts = row.get("post_metrics") if isinstance((row or {}).get("post_metrics"), list) else []
+    source_posts = _source_pending_posts(row, content_type)
     source_history = row.get("publish_history") if isinstance((row or {}).get("publish_history"), list) else []
     source_post_count = max(len(source_posts), _source_count(row, "posts"))
     source_history_count = max(len(source_history), _source_count(row, "published"))
@@ -7029,10 +7155,10 @@ def _publish_center(persona_id: str) -> dict[str, Any]:
         _message(
             "\n".join(lines),
             _rows(
-                [_btn("📋 查看推文列表", f"pub_posts:0:{persona_id}"), _btn("🕘 发布历史", f"pub_history:0:{persona_id}")],
+                [_btn("📋 查看推文列表", f"posts_{persona_id}{f'_ct_{content_type}' if content_type else ''}_p0"), _btn("🕘 发布历史", f"history_{persona_id}{f'_ct_{content_type}' if content_type else ''}")],
                 [_btn("✍️ 生成推文", f"genpost:{persona_id}"), _btn("✏️ 直接发新内容", f"pub_direct:{persona_id}")],
                 [_btn("📋 打开发帖任务", "open:/tasks"), _btn("📊 人设数据", f"open:/personas/{persona_id}/data")],
-                [_btn("◀️ 返回人设详情", f"pd:{persona_id}")],
+                [_btn("◀️ 返回", f"pub_branch_{persona_id}" if content_type else f"pd:{persona_id}")],
             ),
         ),
         state={"flow": "publish_center", "draft": {"persona_id": persona_id, "name": name}},
@@ -7046,14 +7172,14 @@ def _parse_publish_page_action(action: str) -> tuple[int, str]:
     return max(0, page), persona_id
 
 
-def _publish_posts_list(action: str) -> dict[str, Any]:
+def _publish_posts_list(action: str, content_type: str = "") -> dict[str, Any]:
     page, persona_id = _parse_publish_page_action(action)
     persona_id, persona, row, name = _publish_context(persona_id)
     if not persona and not row:
         return _response(_message("没有找到这个人设。", [[_btn("◀️ 返回人设列表", "list_personas")]]), state={"flow": ""})
 
     tasks = [task for task in _publish_tasks_for_persona(persona, row) if task.status in {"pending", "publishing"}]
-    source_posts = row.get("post_metrics") if isinstance((row or {}).get("post_metrics"), list) else []
+    source_posts = _source_pending_posts(row, content_type)
     source_post_count = max(len(source_posts), _source_count(row, "posts"))
     items: list[tuple[str, Any]] = [("task", task) for task in tasks] + [("source", post) for post in source_posts if isinstance(post, dict)]
     total_pages = max(1, (len(items) + STORED_POSTS_PAGE_SIZE - 1) // STORED_POSTS_PAGE_SIZE)
@@ -7081,18 +7207,17 @@ def _publish_posts_list(action: str) -> dict[str, Any]:
             )
         else:
             post = item
-            metrics = [
-                f"讚 {_compact(post.get('like_count'))}",
-                f"評 {_compact(post.get('comment_count'))}",
-                f"轉 {_compact(post.get('repost_count'))}",
-            ]
-            if post.get("view_count") is not None:
-                metrics.append(f"瀏覽 {_compact(post.get('view_count'))}")
-            lines.extend(["", f"{offset}. 來源推文資料", "數據：" + " · ".join(metrics), f"內容：{_remote_post_preview(post)}"])
-            if post.get("source_url"):
-                lines.append(f"原帖：{post.get('source_url')}")
+            group_type = str(post.get("telegramGroupContentType") or post.get("telegram_group_content_type") or "free").strip().lower()
+            media_label = f"{len(_source_post_media_urls(post))} 個媒體" if _source_post_media_urls(post) else "無媒體"
+            lines.extend(["", f"{offset}. {'付費' if group_type == 'paid' else '免費'}內容｜{media_label}", f"內容：{_remote_post_preview(post)}"])
 
-    keyboard = _rows(
+    source_buttons = [
+        _btn(f"📝 第 {index + 1} 篇", f"source_post:{persona_id}:{str(post.get('id') or '')}")
+        for index, (kind, post) in enumerate(visible)
+        if kind == "source" and isinstance(post, dict) and str(post.get("id") or "").strip()
+    ]
+    keyboard = _chunk_buttons(source_buttons, 1)
+    keyboard.extend(_rows(
         [
             _btn("◀️ 上一頁", f"pub_posts:{max(0, safe_page - 1)}:{persona_id}"),
             _btn(f"{safe_page + 1}/{total_pages}", f"pub_posts:{safe_page}:{persona_id}"),
@@ -7102,12 +7227,155 @@ def _publish_posts_list(action: str) -> dict[str, Any]:
         else [],
         [_btn("✍️ 生成推文", f"genpost:{persona_id}"), _btn("✏️ 直接发新内容", f"pub_direct:{persona_id}")],
         [_btn("📋 打开发帖任务", "open:/tasks"), _btn("🕘 发布历史", f"pub_history:0:{persona_id}")],
-        [_btn("◀️ 返回发布中心", f"pub:{persona_id}")],
-    )
+        [_btn("◀️ 返回", f"posts_branch_{persona_id}" if content_type else f"pd:{persona_id}")],
+    ))
     return _response(_message("\n".join(lines), keyboard), state={"flow": "publish_center", "draft": {"persona_id": persona_id, "name": name}})
 
 
-def _publish_history(action: str) -> dict[str, Any]:
+def _source_archive_post(archive_id: str, post_id: str) -> tuple[Persona | None, dict[str, Any] | None, dict[str, Any] | None]:
+    local, row = _resolve_persona_for_action(archive_id)
+    for post in _source_pending_posts(row):
+        if str(post.get("id") or "").strip() == str(post_id or "").strip():
+            return local, row, post
+    return local, row, None
+
+
+def _source_post_detail(action: str) -> dict[str, Any]:
+    try:
+        archive_id, post_id = action.split(":", 2)[1:]
+    except ValueError:
+        return _response(_message("推文入口無效，請返回人設重新選擇。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    local, row, post = _source_archive_post(archive_id, post_id)
+    if not post:
+        return _response(_message("找不到這篇待發布推文，資料可能已更新。", [[_btn("📝 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    archive_id = _tool_r18_archive_id(archive_id, local, row) or archive_id
+    content = str(post.get("content") or post.get("text") or "").strip()
+    group_type = str(post.get("telegramGroupContentType") or post.get("telegram_group_content_type") or "free").strip().lower()
+    media_urls = _source_post_media_urls(post)
+    lines = [
+        "📝 查看推文",
+        "",
+        f"人設：{_persona_row_name(row or {})}",
+        f"內容類型：{'付費內容' if group_type == 'paid' else '免費內容'}",
+        f"媒體：{len(media_urls)} 個" if media_urls else "媒體：暫無配圖/視頻",
+        "",
+        content or "（空內容）",
+    ]
+    return _response(
+        _message(
+            "\n".join(lines),
+            _rows(
+                [_btn("🚀 發布這篇", f"source_post_publish:{archive_id}:{post_id}")],
+                [_btn("🖼 重新生成配圖" if media_urls else "🖼 單獨生成配圖", f"source_post_image:{archive_id}:{post_id}")],
+                [_btn("◀️ 返回查看推文", f"posts_{archive_id}_ct_{group_type}_p0" if _is_workflow_persona_row(row, archive_id) else f"posts_{archive_id}_p0")],
+            ),
+        ),
+        state={"flow": "source_post_detail", "draft": {"persona_id": archive_id, "archive_id": archive_id, "post_id": post_id, "group_content_type": group_type}},
+    )
+
+
+def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, params: dict[str, Any], label: str) -> dict[str, Any]:
+    back_action = f"source_post:{archive_id}:{post_id}" if post_id else f"pd_{archive_id}"
+    back_label = "◀️ 返回推文" if post_id else "◀️ 返回人設詳情"
+    job = SourceWorkflowJobRepo.create(task_type, label, params, status="submitting")
+    try:
+        base, data = _source_submit_task(task_type, params)
+        SourceWorkflowJobRepo.update(job.id, status="submitted", result=data, source_task_id=str(data.get("id") or ""), source_base_url=base)
+    except Exception as exc:
+        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+        return _response(
+            _message(f"❌ {label}提交失敗\n\n{exc}", [[_btn(back_label, back_action)]]),
+            state={"flow": ""},
+        )
+    source_task_id = str(data.get("id") or "")
+    return _response(
+        _message(
+            f"⏳ {label}已提交\n\n來源任務 ID：{source_task_id or '-'}\n完成後會直接寫回同一個 Tool R18 人設歸檔。",
+            _rows(
+                [_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}") if source_task_id else _btn("📊 查看任務列表", "source_tasks")],
+                [_btn(back_label, back_action)],
+            ),
+        ),
+        state={"flow": ""},
+    )
+
+
+def _source_post_generate_image(action: str) -> dict[str, Any]:
+    try:
+        archive_id, post_id = action.split(":", 2)[1:]
+    except ValueError:
+        return _response(_message("推文配圖入口無效。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    _local, _row, post = _source_archive_post(archive_id, post_id)
+    if not post:
+        return _response(_message("找不到這篇待發布推文。", [[_btn("📝 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    return _submit_source_post_task(
+        "persona_generate_post_image",
+        archive_id,
+        post_id,
+        {"archiveId": archive_id, "postId": post_id, "chatId": SOURCE_WEB_BOT_CHAT_ID},
+        "推文配圖任務",
+    )
+
+
+def _source_post_publish_start(action: str) -> dict[str, Any]:
+    try:
+        archive_id, post_id = action.split(":", 2)[1:]
+    except ValueError:
+        return _response(_message("發布入口無效。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    _local, _row, post = _source_archive_post(archive_id, post_id)
+    if not post:
+        return _response(_message("找不到這篇待發布推文。", [[_btn("📝 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    return _response(
+        _message(
+            "🚀 發布這篇\n\n請選擇發布平台：",
+            _rows([_btn("Threads", "source_post_platform:threads"), _btn("Telegram", "source_post_platform:telegram")], [_btn("◀️ 返回查看推文", f"source_post:{archive_id}:{post_id}")]),
+        ),
+        state={"flow": "source_post_publish_platform", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id}},
+    )
+
+
+def _source_post_publish_platform(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    platform = action.split(":", 1)[1] if ":" in action else "threads"
+    archive_id = str(draft.get("archive_id") or "")
+    post_id = str(draft.get("post_id") or "")
+    local, row, post = _source_archive_post(archive_id, post_id)
+    if not post:
+        return _response(_message("發布狀態已失效，請重新選擇推文。", [[_btn("📝 返回推文列表", f"posts_{archive_id}_p0")]]), state={"flow": ""})
+    pad_code = str((local.pad_code if local else "") or (row or {}).get("bound_pad_code") or "").strip()
+    if not pad_code:
+        return _response(
+            _message("這個人設尚未綁定智能體手機，請先綁定後再發布。", _rows([_btn("📱 綁定智能體手機", f"bindpad_{archive_id}")], [_btn("◀️ 返回查看推文", f"source_post:{archive_id}:{post_id}")])),
+            state={"flow": ""},
+        )
+    platform_label = "Threads" if platform == "threads" else "Telegram 群組"
+    return _response(
+        _message(
+            f"🚀 確認發布推文\n\n平台：{platform_label}\nPAD_CODE：{pad_code}\n\n{_remote_post_preview(post, 220)}",
+            _rows([_btn(f"✅ 確認發布到 {platform_label}", "source_post_execute")], [_btn("◀️ 返回選擇平台", f"source_post_publish:{archive_id}:{post_id}")]),
+        ),
+        state={"flow": "source_post_publish_confirm", "draft": {**draft, "platform": platform, "pad_code": pad_code}},
+    )
+
+
+def _source_post_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    archive_id = str(draft.get("archive_id") or "")
+    post_id = str(draft.get("post_id") or "")
+    platform = str(draft.get("platform") or "threads")
+    pad_code = str(draft.get("pad_code") or "")
+    if not archive_id or not post_id or not pad_code:
+        return _response(_message("發布狀態已失效，請重新選擇推文。", [[_btn("👤 返回人設", f"pd_{archive_id}")]]), state={"flow": ""})
+    return _submit_source_post_task(
+        "persona_publish_post",
+        archive_id,
+        post_id,
+        {"archiveId": archive_id, "postId": post_id, "padCode": pad_code, "platform": platform, "dryRun": False},
+        "真實發布任務",
+    )
+
+
+def _publish_history(action: str, content_type: str = "") -> dict[str, Any]:
     page, persona_id = _parse_publish_page_action(action)
     persona_id, persona, row, name = _publish_context(persona_id)
     if not persona and not row:
@@ -7115,6 +7383,13 @@ def _publish_history(action: str) -> dict[str, Any]:
 
     tasks = [task for task in _publish_tasks_for_persona(persona, row) if task.status not in {"pending", "publishing"}]
     source_history = row.get("publish_history") if isinstance((row or {}).get("publish_history"), list) else []
+    if content_type in {"free", "paid"}:
+        source_history = [
+            item
+            for item in source_history
+            if isinstance(item, dict)
+            and str(item.get("telegramGroupContentType") or item.get("telegram_group_content_type") or "free").strip().lower() == content_type
+        ]
     items: list[tuple[str, Any]] = [("task", task) for task in tasks] + [("source", item) for item in source_history if isinstance(item, dict)]
     total_pages = max(1, (len(items) + STORED_POSTS_PAGE_SIZE - 1) // STORED_POSTS_PAGE_SIZE)
     safe_page = min(page, total_pages - 1)
@@ -7161,7 +7436,7 @@ def _publish_history(action: str) -> dict[str, Any]:
         if total_pages > 1
         else [],
         [_btn("📋 查看推文列表", f"pub_posts:0:{persona_id}"), _btn("📋 打开发帖任务", "open:/tasks")],
-        [_btn("◀️ 返回发布中心", f"pub:{persona_id}")],
+        [_btn("◀️ 返回", f"history_branch_{persona_id}" if content_type else f"pd:{persona_id}")],
     )
     return _response(_message("\n".join(lines), keyboard), state={"flow": "publish_center", "draft": {"persona_id": persona_id, "name": name}})
 
@@ -8758,7 +9033,7 @@ def _select_pad(action: str) -> dict[str, Any]:
         return _response(_message("绑定失败：人设或智能体手机不存在。", [[_btn("◀️ 返回", f"pd:{persona_id}")]]))
     PersonaRepo.upsert(_persona_payload(persona, pad_code=pad_code))
     return _response(
-        _message(f"✅ 已绑定智能体手机：{device.alias or pad_code}", [[_btn("◀️ 返回设置", f"pd:{persona_id}"), _btn("📱 手机详情", f"pad_detail:{pad_code}")]]),
+        _message(f"✅ 已绑定智能体手机：{device.alias or pad_code}", [[_btn("◀️ 返回设置", f"settings_{persona_id}"), _btn("📱 手机详情", f"pad_detail:{pad_code}")]]),
         state={"flow": ""},
     )
 
@@ -8837,11 +9112,28 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
     if flow == "edit_persona_name" and persona:
         PersonaRepo.upsert(_persona_payload(persona, name=text[:80]))
         _record_persona_setting_update(persona_id, "name", text[:80])
-        return _response(_message(f"✅ 人设名称已更新为：{text[:80]}", [[_btn("◀️ 返回设置", f"pd:{persona_id}")]]), state={"flow": ""})
+        return _response(_message(f"✅ 人设名称已更新为：{text[:80]}", [[_btn("◀️ 返回设置", f"settings_{persona_id}")]]), state={"flow": ""})
     if flow == "edit_persona_desc" and persona:
-        PersonaRepo.upsert(_persona_payload(persona, description=text))
-        _record_persona_setting_update(persona_id, "description", text)
-        return _response(_message("✅ 人设简介已更新。", [[_btn("◀️ 返回设置", f"pd:{persona_id}"), _btn("✍️ 新建推文", f"genpost:{persona_id}")]]), state={"flow": ""})
+        _local, row = _resolve_persona_for_action(persona_id)
+        source_archive_id = _tool_r18_archive_id(persona_id, persona, row)
+        if not source_archive_id:
+            return _response(_message("這個 Web 本地人設尚未同步到 Tool R18 人設庫，不能直接替換來源人設簡介。", [[_btn("◀️ 返回設定", f"settings_{persona_id}")]]), state={"flow": ""})
+        params = {"archiveId": source_archive_id, "direction": text, "mode": "direct"}
+        job = SourceWorkflowJobRepo.create("persona_rewrite_intro", f"替換人設簡介：{persona.name}", params, status="submitting")
+        try:
+            base, data = _source_submit_task("persona_rewrite_intro", params)
+            SourceWorkflowJobRepo.update(job.id, status="submitted", result=data, source_task_id=str(data.get("id") or ""), source_base_url=base)
+        except Exception as exc:
+            SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+            return _response(_message(f"❌ 人設簡介任務提交失敗\n\n{exc}", [[_btn("◀️ 返回設定", f"settings_{persona_id}")]]), state={"flow": ""})
+        source_task_id = str(data.get("id") or "")
+        return _response(
+            _message(
+                f"🧠 正在替換人設簡介...\n\n人設：{persona.name}\n來源任務 ID：{source_task_id or '-'}\n\n完成後會同步更新 Tool R18 人設庫。",
+                _rows([_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}")], [_btn("◀️ 返回設定", f"settings_{persona_id}")]),
+            ),
+            state={"flow": ""},
+        )
     if flow == "edit_persona_desc_regen" and persona:
         return _generate_persona_bio_response(persona_id, text)
     if flow == "edit_persona_style" and persona:
@@ -8854,10 +9146,10 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
             title="推文風格案例",
             favorite=True,
         )
-        return _response(_message("✅ 推文風格已保存，後續生成會優先參考這個語氣、格式與行文邏輯。", [[_btn("◀️ 返回設定", f"pd:{persona_id}"), _btn("✍️ 生成推文", f"genpost:{persona_id}")]]), state={"flow": ""})
+        return _response(_message("✅ 推文風格已保存，後續生成會優先參考這個語氣、格式與行文邏輯。", [[_btn("◀️ 返回設定", f"settings_{persona_id}"), _btn("✍️ 生成推文", f"genpost_branch_{persona_id}")]]), state={"flow": ""})
     if flow == "bind_tg_group" and persona:
         PersonaRepo.upsert(_persona_payload(persona, tg_free_group_name=text))
-        return _response(_message(f"✅ 已保存 TG 通用群：{text}", [[_btn("◀️ 返回设置", f"pd:{persona_id}")]]), state={"flow": ""})
+        return _response(_message(f"✅ 已保存 TG 通用群：{text}", [[_btn("◀️ 返回设置", f"settings_{persona_id}")]]), state={"flow": ""})
     if flow == "bindtg_paid" and persona:
         PersonaRepo.upsert(_persona_payload(persona, tg_paid_group_name=text))
         return _response(_message(f"✅ 已保存 TG 付費群：{text}", [[_btn("◀️ 返回設定", f"settings_{persona_id}")]]), state={"flow": ""})
@@ -8871,9 +9163,9 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
     if flow == "bind_pad_manual" and persona:
         pad_code = text
         if not DeviceRepo.exists(pad_code):
-            return _response(_message("这台智能体手机不在当前列表中，请先导入设备或重新输入。", [[_btn("◀️ 返回设置", f"pd:{persona_id}")]]), state=state)
+            return _response(_message("这台智能体手机不在当前列表中，请先导入设备或重新输入。", [[_btn("◀️ 返回设置", f"settings_{persona_id}")]]), state=state)
         PersonaRepo.upsert(_persona_payload(persona, pad_code=pad_code))
-        return _response(_message(f"✅ 已绑定智能体手机：{pad_code}", [[_btn("◀️ 返回设置", f"pd:{persona_id}")]]), state={"flow": ""})
+        return _response(_message(f"✅ 已绑定智能体手机：{pad_code}", [[_btn("◀️ 返回设置", f"settings_{persona_id}")]]), state={"flow": ""})
     if flow == "custom_publish_content" and persona:
         username = _ensure_publish_account(persona)
         text = _apply_link_ending_to_text(text, _active_link_ending_preset(persona_id))
@@ -9489,22 +9781,25 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _persona_settings(action.split("_", 1)[1])
     if action.startswith("settings:"):
         return _persona_settings(action.split(":", 1)[1])
+    if action.startswith("posts_branch_"):
+        return _persona_content_type_picker(action[len("posts_branch_") :], "posts")
     if action.startswith("posts_"):
         rest = action[len("posts_") :]
         page = 0
+        content_type = ""
         if "_p" in rest:
             pid, page_text = rest.rsplit("_p", 1)
             page = _num(page_text)
         else:
             pid = rest
         if "_ct_" in pid:
-            pid = pid.split("_ct_", 1)[0]
+            pid, content_type = pid.split("_ct_", 1)
         restored = _stored_generated_posts_response(pid, page, state)
         if restored is not None:
             return restored
-        return _publish_posts_list(f"pub_posts:{page}:{pid}")
+        return _publish_posts_list(f"pub_posts:{page}:{pid}", content_type)
     if action.startswith("history_branch_"):
-        return _publish_history(f"pub_history:0:{action[len('history_branch_'):]}")
+        return _persona_content_type_picker(action[len("history_branch_") :], "history")
     if action.startswith("history_"):
         rest = action[len("history_") :]
         page = 0
@@ -9513,16 +9808,24 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
             page = _num(page_text)
         else:
             pid = rest
+        content_type = ""
         if "_ct_" in pid:
-            pid = pid.split("_ct_", 1)[0]
-        return _publish_history(f"pub_history:{page}:{pid}")
+            pid, content_type = pid.split("_ct_", 1)
+        return _publish_history(f"pub_history:{page}:{pid}", content_type)
     if action.startswith("pub_branch_"):
-        return _publish_center(action[len("pub_branch_") :])
+        return _persona_content_type_picker(action[len("pub_branch_") :], "publish")
+    if action.startswith("pub_direct:"):
+        return _publish_direct_start(action.split(":", 1)[1])
+    if action.startswith("pub_posts:"):
+        return _publish_posts_list(action)
+    if action.startswith("pub_history:"):
+        return _publish_history(action)
     if action.startswith("pub_"):
         pid = action[len("pub_") :]
+        content_type = ""
         if "_ct_" in pid:
-            pid = pid.split("_ct_", 1)[0]
-        return _publish_center(pid)
+            pid, content_type = pid.split("_ct_", 1)
+        return _publish_center(pid, content_type)
     if action.startswith("genpost_branch_"):
         return _start_generate_posts(action[len("genpost_branch_") :])
     if action.startswith("genpost_nonr18_"):
@@ -9811,11 +10114,11 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         operation = action.split(":", 1)[0].replace("threads_profile_", "")
         pid = action.split(":", 1)[1] if ":" in action else ""
         return _threads_profile_prompt(pid, operation)
-    if action.startswith("bindpad_") or action.startswith("bindpad:"):
-        return _bind_pad(action.split("_", 1)[1] if action.startswith("bindpad_") else action.split(":", 1)[1])
     if action.startswith("bindpad_manual:"):
         pid = action.split(":", 1)[1]
         return _response(_message("⭐ 请手动输入 padCode ⭐", [[_btn("❌ 取消", f"pd:{pid}")]]), state={"flow": "bind_pad_manual", "draft": {"persona_id": pid}})
+    if action.startswith("bindpad_") or action.startswith("bindpad:"):
+        return _bind_pad(action.split("_", 1)[1] if action.startswith("bindpad_") else action.split(":", 1)[1])
     if action.startswith("selectpad:"):
         return _select_pad(action)
     if action.startswith("queryaccounts:"):
@@ -9959,6 +10262,16 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _source_workflow_start(action.split(":", 1)[1])
     if action.startswith("source_task_start:"):
         return _source_workflow_start(action.split(":", 1)[1])
+    if action.startswith("source_post:"):
+        return _source_post_detail(action)
+    if action.startswith("source_post_image:"):
+        return _source_post_generate_image(action)
+    if action.startswith("source_post_publish:"):
+        return _source_post_publish_start(action)
+    if action.startswith("source_post_platform:"):
+        return _source_post_publish_platform(action, state)
+    if action == "source_post_execute":
+        return _source_post_publish_execute(state)
     if action.startswith("source_task_detail:"):
         return _source_task_detail(action.split(":", 1)[1])
     if action.startswith("source_rerun_task:"):
@@ -10067,14 +10380,10 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _enqueue_selected_posts(state, with_image=False)
     if action in {"publish_with_image", "custom_publish_confirm_pad_with_image"}:
         return _enqueue_selected_posts(state, with_image=True)
+    if action == "custom_publish_multi_now":
+        return _matrix_pads_menu(state)
     if action.startswith("pub:"):
         return _publish_center(action.split(":", 1)[1])
-    if action.startswith("pub_direct:"):
-        return _publish_direct_start(action.split(":", 1)[1])
-    if action.startswith("pub_posts:"):
-        return _publish_posts_list(action)
-    if action.startswith("pub_history:"):
-        return _publish_history(action)
     if action == "matrix_start":
         return _matrix_start()
     if action.startswith("mxpg_") or action.startswith("mxpt_") or action in {"mxpsel", "mxpclr"}:

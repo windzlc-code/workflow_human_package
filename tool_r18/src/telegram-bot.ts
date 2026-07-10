@@ -2242,7 +2242,7 @@ function getStoredPostMediaUrlForList(post: StoredPostListItem) {
   return getStoredPostPrimaryMediaUrl(post);
 }
 
-function getStoredPostPrimaryMediaUrl(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">): string {
+export function getStoredPostPrimaryMediaUrl(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">): string {
   return String(getStoredPostMediaItems(post)[0]?.url || "").trim();
 }
 
@@ -2469,7 +2469,7 @@ function buildBulkStoredPostsSelectView(args: {
   };
 }
 
-function resolveTelegramGroupContentTypeForPost(
+export function resolveTelegramGroupContentTypeForPost(
   post?: { telegramGroupContentType?: "free" | "paid" } | null,
   fallbackGroupContentType?: TelegramGroupContentType,
 ): TelegramGroupContentType | undefined {
@@ -2478,7 +2478,7 @@ function resolveTelegramGroupContentTypeForPost(
   return fallbackGroupContentType;
 }
 
-function resolveTelegramTargetGroupNameForPost(
+export function resolveTelegramTargetGroupNameForPost(
   archive: {
     boundTelegramFreeGroupId?: string;
     boundTelegramPaidGroupId?: string;
@@ -5038,7 +5038,7 @@ function removeTrailingLinkEndingSegment(content: string, segment: string): stri
   return next === source ? source.trim() : next.trim();
 }
 
-function buildPersonaPublishCaption(content: string, setup: any): string {
+export function buildPersonaPublishCaption(content: string, setup: any): string {
   const active = getActiveLinkEndingPreset(setup) || buildLegacyLinkEndingPreset(setup);
   if (!active) return String(content || "").trim();
   return applyLinkEndingPresetToText(content, active);
@@ -9050,7 +9050,7 @@ function normalizeCodexPersonaSpec(raw: any, originalText: string): { name: stri
   return { name, content, setup };
 }
 
-async function derivePersonaSpecWithCodex(text: string): Promise<{ name: string; content: string; setup: DramaSetup }> {
+export async function derivePersonaSpecWithCodex(text: string): Promise<{ name: string; content: string; setup: DramaSetup }> {
   const originalText = String(text || "").trim();
   const aiInput = compactLongAiInput(originalText);
   const instruction = [
@@ -9224,7 +9224,7 @@ function normalizePersonaDirectionKeywords(raw: unknown, originalText: string): 
   return result.slice(0, CREATE_PERSONA_KEYWORD_COUNT);
 }
 
-async function derivePersonaDirectionKeywordsWithCodex(personaName: string, userPrompt: string): Promise<string[]> {
+export async function derivePersonaDirectionKeywordsWithCodex(personaName: string, userPrompt: string): Promise<string[]> {
   const originalText = String(userPrompt || "").trim();
   const keywordContextText = [personaName, originalText].filter(Boolean).join(" ");
   const aiInput = compactLongAiInput(originalText, 3000);
@@ -9396,7 +9396,7 @@ function normalizeCodexPersonaIntroUpdate(raw: any, archive: any, userText: stri
   return { content, setup };
 }
 
-async function rewritePersonaIntroWithCodex(archive: any, userText: string, mode: "patch" | "replace" = "patch"): Promise<{ content: string; setup: Partial<DramaSetup> }> {
+export async function rewritePersonaIntroWithCodex(archive: any, userText: string, mode: "patch" | "replace" = "patch"): Promise<{ content: string; setup: Partial<DramaSetup> }> {
   const originalText = String(userText || "").trim();
   const aiInput = compactLongAiInput(originalText);
   const instruction = [
@@ -11495,7 +11495,7 @@ async function regenerateArchivePostContent(args: {
   return updated;
 }
 
-async function regenerateArchivePostImage(args: {
+export async function regenerateArchivePostImage(args: {
   archiveId: string;
   postId: string;
   chatId?: number;
@@ -15037,7 +15037,7 @@ async function generatePersonaImageForArchive(
   });
 }
 
-async function generateAndPersistPersonaReferenceImage(
+export async function generateAndPersistPersonaReferenceImage(
   archiveId: string,
   archiveName: string,
 ): Promise<{ ok: boolean; imageUrl?: string; mode?: string; error?: string }> {

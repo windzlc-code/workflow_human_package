@@ -15821,6 +15821,8 @@ def _run_tool_r18_skill_task(
     if completed.returncode != 0 or parsed.get("ok") is False:
         detail = parsed.get("error") if isinstance(parsed, dict) else ""
         raise RuntimeError(str(detail or raw_error or raw_output or f"{task_type} exited {completed.returncode}"))
+    if str(task_type or "").startswith("persona_"):
+        _invalidate_persona_dashboard_overview_cache()
     return {
         "ok": True,
         "task_type": task_type,
@@ -15881,6 +15883,73 @@ def _run_threads_auto_reply(task_id: str, payload: dict[str, Any]) -> dict[str, 
     )
 
 
+def _run_persona_generate_posts(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_generate_posts",
+        "persona-generate-posts-once.ts",
+        "persona-generate-posts-input.json",
+    )
+
+
+def _run_persona_create(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    skill_payload = dict(payload or {})
+    if _to_int(skill_payload.get("chatId"), 0) <= 0:
+        tg_chat_id = _to_int(skill_payload.get("tg_chat_id"), 0)
+        if tg_chat_id > 0:
+            skill_payload["chatId"] = tg_chat_id
+    return _run_tool_r18_skill_task(
+        task_id,
+        skill_payload,
+        "persona_create",
+        "persona-create-once.ts",
+        "persona-create-input.json",
+    )
+
+
+def _run_persona_rewrite_intro(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_rewrite_intro",
+        "persona-rewrite-intro-once.ts",
+        "persona-rewrite-intro-input.json",
+    )
+
+
+def _run_persona_generate_image(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_generate_image",
+        "persona-generate-image-once.ts",
+        "persona-generate-image-input.json",
+    )
+
+
+def _run_persona_generate_post_image(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_generate_post_image",
+        "persona-generate-post-image-once.ts",
+        "persona-generate-post-image-input.json",
+    )
+
+
+def _run_persona_publish_post(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_publish_post",
+        "persona-publish-post-once.ts",
+        "persona-publish-post-input.json",
+        default_timeout=1800,
+        force_dry_run_false=True,
+    )
+
+
 TASK_RUNNERS = {
     "text_to_image": _run_text_to_image_disabled,
     "replace_model": _run_replace_model,
@@ -15903,6 +15972,12 @@ TASK_RUNNERS = {
     "threads_login": _run_threads_login,
     "threads_account_query": _run_threads_account_query,
     "threads_auto_reply": _run_threads_auto_reply,
+    "persona_generate_posts": _run_persona_generate_posts,
+    "persona_create": _run_persona_create,
+    "persona_rewrite_intro": _run_persona_rewrite_intro,
+    "persona_generate_image": _run_persona_generate_image,
+    "persona_generate_post_image": _run_persona_generate_post_image,
+    "persona_publish_post": _run_persona_publish_post,
 }
 TG_AGENT_PRODUCTION_TASK_TYPES = set(TASK_RUNNERS.keys())
 
@@ -16652,6 +16727,104 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
             raise HTTPException(status_code=400, detail="get_gemini 需要 user_input")
         return payload
 
+    if typ == "persona_generate_posts":
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="persona_generate_posts requires archiveId")
+
+        selected_memory_entry_ids = payload.get("selectedMemoryEntryIds", [])
+        if not isinstance(selected_memory_entry_ids, list):
+            raise HTTPException(status_code=400, detail="selectedMemoryEntryIds must be a list")
+        selected_memory_summaries = payload.get("selectedMemorySummaries", [])
+        if not isinstance(selected_memory_summaries, list):
+            raise HTTPException(status_code=400, detail="selectedMemorySummaries must be a list")
+
+        text_model_branch = str(payload.get("textModelBranch") or "free").strip().lower()
+        if text_model_branch not in {"free", "paid"}:
+            raise HTTPException(status_code=400, detail="textModelBranch must be free or paid")
+
+        payload["archiveId"] = archive_id
+        payload["count"] = max(_to_int(payload.get("count"), 3), 1)
+        payload["customInstruction"] = str(payload.get("customInstruction") or "").strip()
+        payload["selectedMemoryEntryIds"] = [
+            str(item).strip() for item in selected_memory_entry_ids if str(item).strip()
+        ]
+        payload["selectedMemorySummaries"] = [
+            str(item).strip() for item in selected_memory_summaries if str(item).strip()
+        ]
+        payload["textModelBranch"] = text_model_branch
+        payload.pop("archive_id", None)
+        return payload
+
+    if typ == "persona_create":
+        name = str(payload.get("name") or "").strip()
+        prompt = str(payload.get("prompt") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="persona_create requires name")
+        if not prompt:
+            raise HTTPException(status_code=400, detail="persona_create requires prompt")
+        selected_keywords = payload.get("selectedKeywords", [])
+        if not isinstance(selected_keywords, list):
+            raise HTTPException(status_code=400, detail="selectedKeywords must be a list")
+
+        payload["name"] = name
+        payload["prompt"] = prompt
+        payload["selectedKeywords"] = [
+            str(item).strip() for item in selected_keywords if str(item).strip()
+        ][:2]
+        payload["ownerBotName"] = str(payload.get("ownerBotName") or "").strip()
+        payload["defaultPadCode"] = str(payload.get("defaultPadCode") or "").strip()
+        chat_id = _to_int(payload.get("chatId"), 0)
+        if chat_id > 0:
+            payload["chatId"] = chat_id
+        else:
+            payload.pop("chatId", None)
+        return payload
+
+    if typ == "persona_rewrite_intro":
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        direction = str(payload.get("direction") or payload.get("prompt") or "").strip()
+        mode = str(payload.get("mode") or "direct").strip().lower()
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="persona_rewrite_intro requires archiveId")
+        if not direction:
+            raise HTTPException(status_code=400, detail="persona_rewrite_intro requires direction")
+        if mode not in {"direct", "replace"}:
+            raise HTTPException(status_code=400, detail="persona_rewrite_intro mode must be direct or replace")
+
+        payload["archiveId"] = archive_id
+        payload["direction"] = direction
+        payload["mode"] = mode
+        payload.pop("archive_id", None)
+        payload.pop("prompt", None)
+        return payload
+
+    if typ == "persona_generate_image":
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="persona_generate_image requires archiveId")
+        payload = {"archiveId": archive_id}
+        return payload
+
+    if typ in {"persona_generate_post_image", "persona_publish_post"}:
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        post_id = str(payload.get("postId") or payload.get("post_id") or "").strip()
+        if not archive_id:
+            raise HTTPException(status_code=400, detail=f"{typ} requires archiveId")
+        if not post_id:
+            raise HTTPException(status_code=400, detail=f"{typ} requires postId")
+        normalized = {"archiveId": archive_id, "postId": post_id}
+        if typ == "persona_publish_post":
+            pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
+            platform = str(payload.get("platform") or "").strip().lower()
+            if not pad_code:
+                raise HTTPException(status_code=400, detail="persona_publish_post requires padCode")
+            if platform not in {"threads", "telegram"}:
+                raise HTTPException(status_code=400, detail="persona_publish_post platform must be threads or telegram")
+            normalized["padCode"] = pad_code
+            normalized["platform"] = platform
+        return normalized
+
     if typ == "threads_warmup":
         pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
         if not pad_code:
@@ -17354,7 +17527,7 @@ PERSONA_DASHBOARD_ARCHIVE_LOCK_TIMEOUT_SECONDS = 30
 PERSONA_DASHBOARD_MONITOR_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_WAKE_EVENT = threading.Event()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
-PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 7
+PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION = 8
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_LOCK = threading.Lock()
 PERSONA_DASHBOARD_MONITOR_STARTED = False
 PERSONA_DASHBOARD_PAGE_VIEW_REFRESH_STATE: dict[str, Any] = {
@@ -18086,6 +18259,72 @@ def _compact_dashboard_media_items(*sources: Any) -> list[dict[str, str]]:
     for source in sources:
         walk(source)
     return media[:12]
+
+
+def _safe_pending_post_media_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if re.match(r"^data:(?:image|video)/[a-z0-9.+-]+;base64,[a-z0-9+/=\r\n]+$", text, re.I):
+        return text
+    if re.match(r"^https?://", text, re.I):
+        parsed = urlsplit(text)
+        if not parsed.netloc or parsed.username or parsed.password:
+            return ""
+        return text
+    if text.startswith("/") and not text.startswith("//") and "\\" not in text and ".." not in text.split("/"):
+        return text
+    return ""
+
+
+def _compact_pending_archive_post(post: Any) -> dict[str, Any] | None:
+    if not isinstance(post, dict):
+        return None
+    media_urls: list[str] = []
+
+    def add(value: Any) -> None:
+        safe_url = _safe_pending_post_media_url(value)
+        if safe_url and safe_url not in media_urls:
+            media_urls.append(safe_url)
+
+    def add_media_fields(source: Any) -> None:
+        if not isinstance(source, dict):
+            return
+        for key in ("mediaUrl", "imageUrl", "videoUrl"):
+            add(source.get(key))
+        for key in ("mediaUrls", "imageUrls", "videoUrls", "originalMediaUrls"):
+            values = source.get(key)
+            if isinstance(values, list):
+                for value in values[:20]:
+                    add(value)
+        for key in ("mediaItems", "media"):
+            items = source.get(key)
+            if isinstance(items, list):
+                for item in items[:20]:
+                    if isinstance(item, dict):
+                        add(item.get("url"))
+                    else:
+                        add(item)
+
+    add_media_fields(post)
+    add_media_fields(post.get("sourceMeta"))
+    image_history = post.get("imageHistory")
+    if isinstance(image_history, list):
+        for item in image_history[:20]:
+            if isinstance(item, dict):
+                add(item.get("imageUrl"))
+    video_url = _safe_pending_post_media_url(post.get("videoUrl"))
+    if not video_url:
+        video_url = next((url for url in media_urls if re.search(r"^data:video/|\.(?:mp4|mov|m4v|webm)(?:[?#].*)?$", url, re.I)), "")
+    return {
+        "id": str(post.get("id") or "").strip(),
+        "content": str(post.get("content") or ""),
+        "title": str(post.get("title") or ""),
+        "orderIndex": _to_int(post.get("orderIndex"), 0),
+        "telegramGroupContentType": str(post.get("telegramGroupContentType") or "").strip(),
+        "mediaUrl": media_urls[0] if media_urls else "",
+        "mediaUrls": media_urls,
+        "videoUrl": video_url,
+        "createdAt": post.get("createdAt"),
+    }
 
 
 def _dashboard_post_match_tokens(row: Any) -> set[str]:
@@ -19105,6 +19344,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
             "hot": persona_hot,
             "hot_score_formula": "热度 = 逐帖浏览合计 + 点赞 + 评论 + 分享 + 转发；不包含账号主页浏览。",
             "hot_platforms": hot_platforms,
+            "pending_posts": [item for post in posts if (item := _compact_pending_archive_post(post)) is not None],
             "post_metrics": post_metric_rows[:80],
             "publish_history": [_compact_publish_record(item, threads_handle) for item in publish_history[:20] if isinstance(item, dict)],
             "queue": queue_for_archive,
@@ -19209,7 +19449,11 @@ def _persona_dashboard_overview_needs_refresh(payload: Any) -> bool:
     personas = payload.get("personas")
     if not isinstance(personas, list):
         return True
-    return any(isinstance(persona, dict) and "bound_vmos_account_name" not in persona for persona in personas)
+    return any(
+        isinstance(persona, dict)
+        and ("bound_vmos_account_name" not in persona or "pending_posts" not in persona)
+        for persona in personas
+    )
 
 
 def _build_persona_dashboard_overview(force_refresh: bool = False, allow_background_refresh: bool = False) -> dict[str, Any]:
@@ -20197,6 +20441,12 @@ def create_app() -> FastAPI:
         batch_summary = _extract_batch_summary(_format_display_error_fields(output_payload))
         if str(batch_summary.get("first_error") or "").strip():
             batch_summary["first_error"] = _format_user_visible_task_error(str(batch_summary.get("first_error") or ""))
+        persona_task_type = str(row["type"] or "")
+        safe_persona_result = {
+            key: output_payload.get(key)
+            for key in ("ok", "archiveId", "postId", "imageUrl", "publishedUrl")
+            if key in output_payload
+        }
         return {
             "ok": True,
             "task": {
@@ -20214,6 +20464,20 @@ def create_app() -> FastAPI:
                 "image_paths": _extract_existing_file_paths(output_payload.get("image_paths")) if isinstance(output_payload.get("image_paths"), list) else [],
                 "batch_summary": batch_summary,
                 "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
+                **(
+                    {
+                        "result": (
+                            safe_persona_result
+                            if persona_task_type in {"persona_generate_image", "persona_generate_post_image", "persona_publish_post"}
+                            else _sanitize_payload(output_payload)
+                        )
+                    }
+                    if persona_task_type in {
+                        "persona_generate_posts", "persona_create", "persona_rewrite_intro",
+                        "persona_generate_image", "persona_generate_post_image", "persona_publish_post",
+                    }
+                    else {}
+                ),
             },
         }
 
