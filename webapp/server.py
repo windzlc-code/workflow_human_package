@@ -15905,6 +15905,31 @@ def _run_persona_generate_posts(task_id: str, payload: dict[str, Any]) -> dict[s
     )
 
 
+_PERSONA_SENTIMENT_HOT_IMPORT_LOCK = threading.Lock()
+
+
+def _run_persona_sentiment_hot(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    timeout = 120 if str(payload.get("action") or "") == "fetch" else 1800
+    def run() -> dict[str, Any]:
+        return _run_tool_r18_skill_task(
+            task_id,
+            payload,
+            "persona_sentiment_hot",
+            "persona-sentiment-hot-once.ts",
+            "persona-sentiment-hot-input.json",
+            default_timeout=timeout,
+            min_timeout=60,
+        )
+    if str(payload.get("action") or "") == "fetch":
+        result = run()
+    else:
+        with _PERSONA_SENTIMENT_HOT_IMPORT_LOCK:
+            result = run()
+    for key in ("input_path", "stdout", "stderr"):
+        result.pop(key, None)
+    return result
+
+
 def _run_persona_create(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     skill_payload = dict(payload or {})
     if _to_int(skill_payload.get("chatId"), 0) <= 0:
@@ -16007,6 +16032,7 @@ TASK_RUNNERS = {
     "threads_auto_reply": _run_threads_auto_reply,
     "threads_own_post_reply": _run_threads_own_post_reply,
     "persona_generate_posts": _run_persona_generate_posts,
+    "persona_sentiment_hot": _run_persona_sentiment_hot,
     "persona_create": _run_persona_create,
     "persona_rewrite_intro": _run_persona_rewrite_intro,
     "persona_generate_image": _run_persona_generate_image,
@@ -16589,6 +16615,42 @@ def _validated_local_file(value: Any, *, label: str) -> str:
     return str(resolved)
 
 
+def _sentiment_hot_import_items(fetch_task_id: str, archive_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    with db() as conn:
+        row = conn.execute("SELECT type, status, output_json FROM tasks WHERE id = ?", (fetch_task_id,)).fetchone()
+    output = _json_loads(row["output_json"], {}) if row is not None else {}
+    if row is None or row["type"] != "persona_sentiment_hot" or row["status"] != "success":
+        raise HTTPException(status_code=400, detail="sentiment hot fetch task is missing or incomplete")
+    if output.get("action") != "fetch" or str(output.get("archiveId") or "") != archive_id:
+        raise HTTPException(status_code=400, detail="sentiment hot fetch task does not match archiveId")
+    candidates = [item for item in (output.get("candidates") if isinstance(output.get("candidates"), list) else []) if isinstance(item, dict)]
+    by_id = {str(item.get("id") or ""): (index, item) for index, item in enumerate(candidates) if str(item.get("id") or "")}
+    candidate_ids = list(dict.fromkeys(str(item).strip() for item in payload.get("candidateIds", []) if str(item).strip()))[:10]
+    edits = {
+        str(item.get("candidateId") or ""): item
+        for item in (payload.get("edits") if isinstance(payload.get("edits"), list) else [])
+        if isinstance(item, dict) and str(item.get("candidateId") or "")
+    }
+    items: list[dict[str, Any]] = []
+    for candidate_id in candidate_ids:
+        if candidate_id not in by_id:
+            raise HTTPException(status_code=400, detail=f"sentiment hot candidate is not in fetch snapshot: {candidate_id}")
+        source_index, candidate = by_id[candidate_id]
+        edit = edits.get(candidate_id, {})
+        item: dict[str, Any] = {"candidate": candidate, "sourceIndex": source_index, "edited": bool(edit)}
+        content = str(edit.get("content") or "").strip()
+        if content:
+            item["content"] = content[:20000]
+        if isinstance(edit.get("keptMediaIndexes"), list):
+            media = candidate.get("media") if isinstance(candidate.get("media"), list) else []
+            indexes = sorted({index for index in edit["keptMediaIndexes"] if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(media)})
+            item["media"] = [media[index] for index in indexes]
+        items.append(item)
+    if not items:
+        raise HTTPException(status_code=400, detail="persona_sentiment_hot import requires candidates")
+    return items
+
+
 def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[str, Any]) -> dict[str, Any]:
     typ = str(task_type or "").strip()
     payload = dict(params or {})
@@ -16762,6 +16824,47 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         if not payload["user_input"]:
             raise HTTPException(status_code=400, detail="get_gemini 需要 user_input")
         return payload
+
+    if typ == "persona_sentiment_hot":
+        action = str(payload.get("action") or "").strip().lower()
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        if action not in {"fetch", "import"}:
+            raise HTTPException(status_code=400, detail="persona_sentiment_hot action must be fetch or import")
+        if not archive_id or len(archive_id) > 200:
+            raise HTTPException(status_code=400, detail="persona_sentiment_hot requires a valid archiveId")
+        content_branch = str(payload.get("contentBranch") or payload.get("content_branch") or "").strip().lower()
+        if content_branch not in {"", "nonr18", "r18"}:
+            raise HTTPException(status_code=400, detail="persona_sentiment_hot contentBranch is invalid")
+        ui_persona_id = str(payload.get("uiPersonaId") or archive_id).strip()[:200]
+        ui_persona_name = str(payload.get("uiPersonaName") or "").strip()[:200]
+
+        if action == "fetch":
+            summaries = payload.get("memorySummaries") if isinstance(payload.get("memorySummaries"), list) else []
+            return {
+                "action": "fetch",
+                "archiveId": archive_id,
+                "limit": min(max(_to_int(payload.get("limit"), 10), 1), 10),
+                "refresh": _to_bool(payload.get("refresh"), False),
+                "prompt": str(payload.get("prompt") or "").strip()[:1200],
+                "memorySummaries": [str(item).strip()[:2000] for item in summaries if str(item).strip()][:8],
+                "contentBranch": content_branch,
+                "uiPersonaId": ui_persona_id,
+                "uiPersonaName": ui_persona_name,
+            }
+
+        fetch_task_id = str(payload.get("fetchTaskId") or payload.get("fetch_task_id") or "").strip()
+        if not fetch_task_id or len(fetch_task_id) > 200:
+            raise HTTPException(status_code=400, detail="persona_sentiment_hot import requires fetchTaskId")
+        items = _sentiment_hot_import_items(fetch_task_id, archive_id, payload)
+        return {
+            "action": "import",
+            "archiveId": archive_id,
+            "fetchTaskId": fetch_task_id,
+            "contentBranch": content_branch,
+            "items": items,
+            "uiPersonaId": ui_persona_id,
+            "uiPersonaName": ui_persona_name,
+        }
 
     if typ == "persona_generate_posts":
         archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
@@ -20959,7 +21062,7 @@ def create_app() -> FastAPI:
                     if persona_task_type in {
                         "persona_generate_posts", "persona_create", "persona_rewrite_intro",
                         "persona_generate_image", "persona_generate_post_image", "persona_publish_post", "persona_enqueue_posts",
-                        "persona_post_action",
+                        "persona_post_action", "persona_sentiment_hot",
                     }
                     else {}
                 ),

@@ -19,6 +19,7 @@ PUBLISH_POST_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-p
 ENQUEUE_POSTS_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-enqueue-posts-once.ts"
 OWN_POST_REPLY_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "threads-own-post-reply-once.ts"
 POST_ACTION_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-post-action-once.ts"
+SENTIMENT_HOT_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-sentiment-hot-once.ts"
 
 
 def test_persona_internal_tg_runners_are_registered() -> None:
@@ -34,7 +35,79 @@ def test_persona_internal_tg_runners_are_registered() -> None:
     assert '"persona_publish_post": _run_persona_publish_post' in source
     assert '"persona_enqueue_posts": _run_persona_enqueue_posts' in source
     assert '"persona_post_action": _run_persona_post_action' in source
+    assert '"persona_sentiment_hot": _run_persona_sentiment_hot' in source
     assert '"threads_own_post_reply": _run_threads_own_post_reply' in source
+
+
+def test_persona_sentiment_hot_fetch_payload_is_strictly_normalized() -> None:
+    payload = server._build_internal_tg_task_payload(
+        "task-hot-fetch",
+        "persona_sentiment_hot",
+        {
+            "action": "fetch",
+            "archive_id": "archive-1",
+            "limit": 99,
+            "refresh": True,
+            "memorySummaries": [" memory 1 ", "memory 2"],
+            "content_branch": "nonr18",
+            "uiPersonaId": "web-persona-1",
+            "ignored": "secret",
+        },
+    )
+
+    assert payload == {
+        "action": "fetch",
+        "archiveId": "archive-1",
+        "limit": 10,
+        "refresh": True,
+        "prompt": "",
+        "memorySummaries": ["memory 1", "memory 2"],
+        "contentBranch": "nonr18",
+        "uiPersonaId": "web-persona-1",
+        "uiPersonaName": "",
+    }
+
+
+def test_persona_sentiment_hot_import_payload_is_a_thin_candidate_mapping(monkeypatch) -> None:
+    source = inspect.getsource(server._sentiment_hot_import_items)
+    candidate = {
+        "id": "candidate-1",
+        "platform": "threads",
+        "sourceUrl": "https://www.threads.net/@a/post/1",
+        "author": "a",
+        "content": "source",
+        "media": [
+            {"type": "image", "url": "https://cdn.example.com/a.jpg"},
+            {"type": "video", "url": "https://cdn.example.com/b.mp4"},
+        ],
+        "hotScore": 100,
+        "metrics": {},
+        "capturedAt": "2026-07-10T00:00:00Z",
+    }
+    resolved = [{"candidate": candidate, "content": "edited", "media": [candidate["media"][1]], "edited": True, "sourceIndex": 0}]
+    monkeypatch.setattr(server, "_sentiment_hot_import_items", lambda fetch_task_id, archive_id, payload: resolved)
+    payload = server._build_internal_tg_task_payload(
+        "task-hot-import",
+        "persona_sentiment_hot",
+        {
+            "action": "import",
+            "archiveId": "archive-1",
+            "fetchTaskId": "task-hot-fetch",
+            "candidateIds": ["candidate-1"],
+            "edits": [{"candidateId": "candidate-1", "content": "edited", "keptMediaIndexes": [1]}],
+            "contentBranch": "r18",
+        },
+    )
+
+    assert payload["items"][0]["candidate"]["id"] == "candidate-1"
+    assert payload["items"][0]["content"] == "edited"
+    assert payload["items"][0]["media"] == [candidate["media"][1]]
+    assert payload["items"][0]["edited"] is True
+    assert payload["contentBranch"] == "r18"
+
+    assert 'SELECT type, status, output_json FROM tasks WHERE id = ?' in source
+    assert 'output.get("archiveId")' in source
+    assert 'candidate_id not in by_id' in source
 
 
 def test_persona_rewrite_payload_normalizes_direct_and_replace_modes() -> None:
@@ -489,3 +562,75 @@ def test_persona_post_action_cli_writes_the_real_archive_store(tmp_path) -> None
         "url": "https://cdn.example.com/b.mp4",
         "type": "video",
     }]
+
+
+def test_persona_sentiment_hot_import_cli_writes_once_to_real_archive(tmp_path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    archive_path = runtime_dir / "persona_archives.json"
+    archive_path.write_text(json.dumps([{
+        "id": "archive-hot",
+        "name": "Hot Persona",
+        "content": "Profile",
+        "createdAt": "2026-07-10T00:00:00Z",
+        "updatedAt": "2026-07-10T00:00:00Z",
+        "posts": [],
+        "favoritePosts": [],
+    }]), encoding="utf-8")
+    candidate = {
+        "id": "candidate-hot-1",
+        "platform": "threads",
+        "sourceUrl": "https://www.threads.net/@author/post/example",
+        "author": "author",
+        "content": "original hot content",
+        "media": [{"type": "image", "url": "data:image/png;base64,YWJj"}],
+        "hotScore": 12000,
+        "metrics": {"view_count": 12000},
+        "capturedAt": "2026-07-10T00:00:00Z",
+    }
+    payload = {
+        "action": "import",
+        "archiveId": "archive-hot",
+        "fetchTaskId": "task-hot-fetch",
+        "contentBranch": "nonr18",
+        "items": [{"candidate": candidate, "content": "edited hot content", "edited": True}],
+    }
+    env = os.environ.copy()
+    env["TOOL_R18_RUNTIME_DIR"] = str(runtime_dir)
+
+    def run_import() -> dict:
+        completed = subprocess.run(
+            ["node", "--import", "tsx", str(SENTIMENT_HOT_SCRIPT_PATH), json.dumps(payload)],
+            cwd=ROOT / "tool_r18",
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    first = run_import()
+    second = run_import()
+    stored = json.loads(archive_path.read_text(encoding="utf-8"))[0]
+
+    assert first["importedCount"] == 1
+    assert first["posts"][0]["postId"]
+    assert second["posts"][0]["duplicate"] is True
+    assert len(stored["posts"]) == 1
+    assert stored["posts"][0]["content"] == "edited hot content"
+    assert stored["posts"][0]["telegramGroupContentType"] == "free"
+    assert stored["posts"][0]["sourceMeta"]["source"] == "sentiment_hot_import"
+    assert stored["posts"][0]["sourceMeta"]["sourceUrl"] == candidate["sourceUrl"]
+    assert stored["posts"][0]["mediaItems"] == [{"url": "data:image/png;base64,YWJj", "type": "image"}]
+
+    script = SENTIMENT_HOT_SCRIPT_PATH.read_text(encoding="utf-8")
+    telegram = (ROOT / "tool_r18" / "src" / "telegram-bot.ts").read_text(encoding="utf-8")
+    assert "appendSentimentHotCandidatePost" in script
+    assert "rememberSentimentHotSelected" in script
+    assert "rememberSentimentHotImported" in script
+    assert "loadSelectablePersonaMemories" in script
+    assert "formatSentimentHotCandidateLine" in script
+    assert "appendCustomPersonaArchivePost" not in script
+    assert "export async function appendSentimentHotCandidatePost" in telegram

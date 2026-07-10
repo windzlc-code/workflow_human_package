@@ -328,3 +328,58 @@ def test_candidate_retry_encodes_exact_post_identity_not_list_index_only() -> No
     assert "_source_post_image_retry_callback" in detail
     assert 'urllib.parse.quote(str(post_id or ""), safe="")' in retry
     assert '"favorites" if source == "favorites" else "posts"' in retry
+
+
+def test_hot_fetch_and_import_delegate_to_one_real_tool_r18_task() -> None:
+    handle = _function_source("handle")
+    submit = _function_source("_sentiment_hot_submit")
+    fetch = _function_source("_sentiment_hot_fetch_start")
+    import_flow = _function_source("_sentiment_hot_import")
+
+    assert '"persona_sentiment_hot"' in fetch
+    assert '"action": "fetch"' in fetch
+    assert '"limit": 10' in fetch
+    assert '"action": "import"' in import_flow
+    assert '"fetchTaskId": fetch_task_id' in import_flow
+    assert '"candidateIds"' in import_flow
+    assert "_source_submit_task(task_type, params)" in submit
+    assert "_record_post_memory(" not in import_flow
+    assert "_sentiment_hot_fetch_start(persona_id, content_branch" in handle
+
+
+def test_hot_candidate_callbacks_keep_snapshot_and_tg_layout() -> None:
+    listing = _function_source("_genpost_hot_menu")
+    detail = _function_source("_sentiment_hot_detail")
+    media = _function_source("_sentiment_hot_media_edit")
+    continuation = _function_source("_continue_state_text")
+
+    assert 'incoming_draft.get("hot_candidates"' in listing
+    assert "_genpost_hot_candidates(" not in listing
+    for label in ("查看第 {index + 1} 篇", "使用第 {index + 1} 篇", "全選", "清空選擇", "保存已選", "刷新抓取", "返回新建推文"):
+        assert label in listing
+    assert "_sentiment_hot_key_matches" in detail
+    assert "_sentiment_hot_media_cards(candidate)" in detail
+    assert 'action == "shmedia_select_all"' in media
+    assert 'action == "shmedia_clear"' in media
+    assert 'action == "shmedia_save"' in media
+    assert 'flow == "sentiment_hot_edit_text"' in continuation
+
+
+def test_hot_task_result_restores_candidates_media_and_closed_loop_buttons() -> None:
+    task_result = _function_source("_sentiment_hot_source_task_response")
+    fetch_draft = _function_source("_sentiment_hot_draft_from_fetch")
+    restore = _function_source("_sentiment_hot_restore_import_draft")
+
+    assert 'action == "fetch"' in task_result
+    assert "_genpost_hot_menu" in task_result
+    assert "_sentiment_hot_restore_import_draft" in task_result
+    assert "查看推文列表" in task_result
+    assert "返回候選列表" in task_result
+    assert "繼續刷新抓取" in task_result
+    assert "返回人設詳情" in task_result
+    assert 'result.get("candidates")' in fetch_draft
+    assert 'result.get("cookieStatuses")' in fetch_draft
+    assert 'result.get("warnings")' in fetch_draft
+    assert "_source_task_detail_data(fetch_task_id)" in restore
+    assert '"hot_edited_contents"' in restore
+    assert '"hot_deleted_media_indexes"' in restore

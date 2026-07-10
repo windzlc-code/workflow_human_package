@@ -1466,7 +1466,7 @@ type PendingPaidR18ImageFlowState = {
 
 const pendingPaidR18ImageFlows = new Map<number, PendingPaidR18ImageFlowState>();
 
-type PendingSentimentHotImportState = {
+export type PendingSentimentHotImportState = {
   archiveId: string;
   archiveName: string;
   contentBranch?: GeneratePostContentBranch;
@@ -5734,7 +5734,7 @@ function sentimentEngagementMetrics(candidateOrMeta: Pick<SentimentHotCandidate,
   return { likeCount, commentCount, viewCount, shareCount, spreadScore, influenceScore, kolScore, rawSignals };
 }
 
-function formatSentimentMetricLine(candidateOrMeta: Pick<SentimentHotCandidate, "hotScore" | "metrics" | "engagement"> | { hotScore?: number; metrics?: Record<string, unknown>; engagement?: Record<string, unknown> }) {
+export function formatSentimentMetricLine(candidateOrMeta: Pick<SentimentHotCandidate, "hotScore" | "metrics" | "engagement"> | { hotScore?: number; metrics?: Record<string, unknown>; engagement?: Record<string, unknown> }) {
   const metrics = sentimentEngagementMetrics(candidateOrMeta);
   const parts = [
     `热度 ${formatCompactCount(Number(candidateOrMeta.hotScore || 0))}`,
@@ -5770,7 +5770,7 @@ function sentimentHotCandidateTextLength(candidate: Pick<SentimentHotCandidate, 
   return Array.from(cleanSentimentCandidateContent(candidate.content).replace(/\s+/g, "")).length;
 }
 
-function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index: number) {
+export function formatSentimentHotCandidateLine(candidate: SentimentHotCandidate, index: number) {
   const platform = candidate.platform === "threads" ? "Threads" : "Instagram";
   const content = cleanSentimentCandidateContent(candidate.content);
   const text = content.slice(0, 72);
@@ -5813,7 +5813,7 @@ function buildSentimentHotBulkRows(pending: PendingSentimentHotImportState, acti
   ];
 }
 
-function formatSentimentCookieLine(status: SentimentCookieStatus) {
+export function formatSentimentCookieLine(status: SentimentCookieStatus) {
   const icon = status.health === "healthy" ? "OK" : status.health === "watch" ? "WARN" : status.health === "expired" || status.health === "missing" ? "MISS" : "INFO";
   return `${icon} ${status.label}: ${status.message}`;
 }
@@ -5931,7 +5931,7 @@ async function deletePendingSentimentHotLoadingMessage(bot: TelegramBot, chatId:
   await bot.deleteMessage(chatId, loading.messageId).catch(() => undefined);
 }
 
-function buildSentimentHotCandidateDetailText(args: {
+export function buildSentimentHotCandidateDetailText(args: {
   pending: NonNullable<ReturnType<typeof pendingSentimentHotImports.get>>;
   candidate: SentimentHotCandidate;
   index: number;
@@ -6167,7 +6167,7 @@ async function renderSentimentHotEditPanel(bot: TelegramBot, chatId: number, mes
   return;
 }
 
-async function appendSentimentHotCandidatePost(args: {
+export async function appendSentimentHotCandidatePost(args: {
   pending: PendingSentimentHotImportState;
   candidate: SentimentHotCandidate;
   index: number;
@@ -13741,7 +13741,7 @@ function trimTelegramButtonLabel(text: string, maxChars = 42): string {
   return normalized.length > maxChars ? `${normalized.slice(0, maxChars - 1)}…` : normalized;
 }
 
-async function loadSelectablePersonaMemories(archiveId: string): Promise<PersonaMemoryEntry[]> {
+export async function loadSelectablePersonaMemories(archiveId: string): Promise<PersonaMemoryEntry[]> {
   const memory = await getPersonaMemoryAsync(archiveId).catch(() => null);
   const persisted = (memory?.entries || [])
     .map((entry) => ({
