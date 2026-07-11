@@ -534,9 +534,10 @@
       if (generation !== requestGeneration) return;
       state = data.state || {};
       const messages = data.messages || [];
+      const shouldReplaceResponse = replacePanel && data.replace_panel !== false;
       let responseGroup = targetGroup;
       messages.forEach((message, index) => {
-        responseGroup = appendBot(message, replacePanel && index === 0 ? responseGroup : null);
+        responseGroup = appendBot(message, shouldReplaceResponse && index === 0 ? responseGroup : null);
       });
       scheduleSourcePoll(data.poll, responseGroup);
       scheduleSourceFollowup(data.followup);

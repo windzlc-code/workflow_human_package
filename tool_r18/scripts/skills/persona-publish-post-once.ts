@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
 import { deleteArchiveEpisode, getArchivePendingPostsForPlatform, loadPersonaArchive, markFavoritePostsPublished, savePersonaArchive, updatePersonaArchiveProfile } from "@/lib/persona-archives";
-import { publishPost, type Platform } from "@/lib/vmos-publisher";
+import { publishPost, type Platform, type PublishProgress } from "@/lib/vmos-publisher";
 import { resolveVmosCredentials } from "@/runtime/node/config";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
@@ -50,6 +50,23 @@ async function withArchiveMutationLock<T>(archiveId: string, operation: () => Pr
 
 function printJson(value: unknown) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+const publishProgressFile = String(process.env.WEB_PUBLISH_PROGRESS_FILE || "").trim();
+
+function publishProgressIcon(progress: Pick<PublishProgress, "done" | "warning" | "error">) {
+  if (progress.error) return "❌";
+  if (progress.warning) return "⚠️";
+  return progress.done ? "✅" : "▶️";
+}
+
+function emitPublishProgress(event: Record<string, unknown>) {
+  if (!publishProgressFile) return;
+  try {
+    fs.appendFileSync(publishProgressFile, `${JSON.stringify({ at: Date.now(), ...event })}\n`, "utf8");
+  } catch {
+    // Progress reporting must never interrupt a real publication.
+  }
 }
 
 function readInput(): Input {
@@ -202,7 +219,7 @@ async function main() {
   const allPublishResults: Array<{ postId: string; imageUrl: string; caption: string; padCode: string; result: any }> = [];
   const completedCheckpointKeys: string[] = [];
   const publishQueue = createNodePublishQueueRepository();
-  for (const post of posts) {
+  for (const [postIndex, post] of posts.entries()) {
     const override = String(input.contentOverrides?.[post.id] || "").trim();
     const rawContent = isCustomPublish ? customContent : override || post.content;
     const caption = input.linkTemplateApplied
@@ -227,6 +244,15 @@ async function main() {
       }
       let result: any;
       try {
+        emitPublishProgress({
+          step: `開始發布第 ${postIndex + 1}/${posts.length} 篇`,
+          line: `▶️ 開始發布第 ${postIndex + 1}/${posts.length} 篇（${targetPadCode}）`,
+          platform,
+          padCode: targetPadCode,
+          postId: post.id,
+          postIndex: postIndex + 1,
+          postCount: posts.length,
+        });
         result = existingCheckpoint || await publishPost(
             resolveVmosCredentials(),
             {
@@ -237,8 +263,36 @@ async function main() {
               telegramTargetGroupName,
               telegramGroupContentType,
             },
-            () => undefined,
+            (progress) => {
+              const prefix = posts.length > 1 || padCodes.length > 1
+                ? `[第 ${postIndex + 1}/${posts.length} 篇 · ${targetPadCode}] `
+                : "";
+              emitPublishProgress({
+                step: progress.step,
+                line: `${publishProgressIcon(progress)} ${prefix}${progress.step}`,
+                platform,
+                padCode: targetPadCode,
+                postId: post.id,
+                postIndex: postIndex + 1,
+                postCount: posts.length,
+                done: Boolean(progress.done),
+                warning: Boolean(progress.warning),
+                error: Boolean(progress.error),
+              });
+            },
           );
+        if (existingCheckpoint) {
+          emitPublishProgress({
+            step: "已恢復完成的發布結果",
+            line: `✅ 已恢復第 ${postIndex + 1}/${posts.length} 篇的發布結果（${targetPadCode}）`,
+            platform,
+            padCode: targetPadCode,
+            postId: post.id,
+            postIndex: postIndex + 1,
+            postCount: posts.length,
+            done: true,
+          });
+        }
         if (!existingCheckpoint) {
           await savePublishCheckpoint(archiveId, checkpointKey, {
             publishedUrl: String(result?.publishedUrl || "").trim(),

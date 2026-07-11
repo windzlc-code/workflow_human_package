@@ -15800,6 +15800,10 @@ def _run_tool_r18_skill_task(
     input_path.write_text(json.dumps(input_payload, ensure_ascii=False), encoding="utf-8")
     env = os.environ.copy()
     env.setdefault("TOOL_R18_RUNTIME_DIR", str(TOOL_R18_RUNTIME_DIR))
+    if task_type == "persona_publish_post":
+        progress_path = workdir / "publish-progress.jsonl"
+        progress_path.unlink(missing_ok=True)
+        env["WEB_PUBLISH_PROGRESS_FILE"] = str(progress_path)
     completed = subprocess.run(
         ["node", "--import", "tsx", str(script), f"@{input_path}"],
         cwd=str(tool_dir),
@@ -16500,6 +16504,42 @@ def _latest_user_visible_task_event(task_id: str) -> dict[str, Any]:
             "created_at": int(row["created_at"] or 0),
         }
     return {}
+
+
+def _read_persona_publish_progress(task_id: str, limit: int = 80) -> list[dict[str, Any]]:
+    path = _build_task_workdir(str(task_id or "").strip(), fallback_username="telegram") / "publish-progress.jsonl"
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as handle:
+            size = path.stat().st_size
+            if size > 512 * 1024:
+                handle.seek(size - 512 * 1024)
+            text = handle.read().decode("utf-8", "replace")
+    except Exception:
+        return []
+    events: list[dict[str, Any]] = []
+    for raw_line in text.splitlines()[-max(1, min(int(limit or 80), 200)) :]:
+        try:
+            raw = json.loads(raw_line)
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        event: dict[str, Any] = {}
+        for key in ("step", "line", "platform", "padCode", "postId"):
+            value = str(raw.get(key) or "").strip()
+            if value:
+                event[key] = value[:500]
+        for key in ("postIndex", "postCount"):
+            if isinstance(raw.get(key), int) and not isinstance(raw.get(key), bool):
+                event[key] = max(0, int(raw[key]))
+        for key in ("done", "warning", "error"):
+            if key in raw:
+                event[key] = bool(raw.get(key))
+        if event.get("step") or event.get("line"):
+            events.append(event)
+    return events
 
 
 def _emit_stage(
@@ -21219,6 +21259,7 @@ def create_app() -> FastAPI:
                 "image_paths": _extract_existing_file_paths(output_payload.get("image_paths")) if isinstance(output_payload.get("image_paths"), list) else [],
                 "batch_summary": batch_summary,
                 "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
+                "progress_logs": _read_persona_publish_progress(str(row["id"] or "")) if persona_task_type == "persona_publish_post" else [],
                 **(
                     {
                         "result": (

@@ -105,7 +105,7 @@ def test_source_persona_results_return_media_and_keep_tg_callbacks() -> None:
     detail = _function_source("_source_task_detail")
 
     assert 'result.get("imageUrl")' in detail
-    assert "image=preview_image" in detail
+    assert "image=message_preview_image" in detail
     assert 'f"source_task_detail:{task_id}"' in detail
     assert 'f"pd_{archive_id}"' in detail
     assert 'f"settings_{archive_id}"' in detail
@@ -198,6 +198,18 @@ def test_web_console_edits_callback_panels_and_polls_in_place() -> None:
     assert "isPoll: true" in template
     assert "scheduleSourceFollowup" in template
     assert "isFollowup: true" in template
+
+
+def test_publish_poll_keeps_progress_and_appends_terminal_messages() -> None:
+    poll = _function_source("_source_task_poll")
+    detail = _function_source("_source_task_detail")
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert 'return {"messages": []' not in poll
+    assert 'response["replace_panel"] = False' in detail
+    assert 'response["messages"].append(' in detail
+    assert '"📸 發佈驗證截圖' in detail
+    assert "data.replace_panel !== false" in template
 
 
 def test_publish_entry_and_custom_media_route_to_real_source_publish() -> None:

@@ -4990,6 +4990,24 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     post_id = str(result.get("postId") or result.get("post_id") or task_input.get("postId") or task_input.get("post_id") or "").strip()
     task_type = str(task.get("type") or "").strip()
     status = str(task.get("status") or "").lower()
+    publish_progress = [
+        item
+        for item in (task.get("progress_logs") if isinstance(task.get("progress_logs"), list) else [])
+        if isinstance(item, dict)
+    ]
+    publish_status_lines: list[str] = []
+    if task_type == "persona_publish_post":
+        platform_label = "Threads" if str(task_input.get("platform") or "").lower() == "threads" else "Telegram"
+        fallback_step = "準備開始" if status in {"queued", "running"} else "發布完成" if status == "success" else "發布失敗"
+        current_step = str((publish_progress[-1] if publish_progress else {}).get("step") or event_line or fallback_step).strip()
+        progress_lines = [str(item.get("line") or item.get("step") or "").strip() for item in publish_progress]
+        publish_status_lines = [
+            f"⏳ 正在發布到 {platform_label}...",
+            f"目前狀態：{current_step}",
+            *[line for line in progress_lines[-6:] if line],
+        ]
+        if status in {"queued", "running"}:
+            lines = publish_status_lines
     if task_type == "persona_sentiment_hot":
         return _sentiment_hot_source_task_response(task_id, task, task_input, result)
     generated_image = _safe_web_media_url(result.get("imageUrl") or result.get("image_url"))
@@ -5002,7 +5020,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
         preview_image = candidate_images[0]
     if result.get("generatedCount") is not None:
         lines.extend(["", f"已生成：{_num(result.get('generatedCount'))} 篇"])
-    if archive_id:
+    if archive_id and not (task_type == "persona_publish_post" and status in {"queued", "running"}):
         lines.append(f"人設 ID：{archive_id}")
     if preview_image:
         lines.append("媒體：已返回並寫入人設歸檔")
@@ -5116,38 +5134,53 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
                     *([[_btn("⭐ 查看收藏推文", _source_posts_callback(archive_id, source="favorites"))]] if action_name == "favorite" else []),
                 ))
     if status in {"queued", "running"}:
-        result_rows.extend(_rows([_btn("🔄 刷新本次任務", f"source_task_detail:{task_id}")]))
-        if archive_id:
-            if post_id:
-                result_rows.extend(_rows([_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page))]))
-            else:
-                result_rows.extend(_rows([_btn("◀️ 返回發布方式" if is_custom_publish_task else "◀️ 返回設定", f"pub_{archive_id}{task_content_suffix}" if is_custom_publish_task else f"settings_{archive_id}")]))
+        if task_type == "persona_publish_post":
+            result_rows.extend(_rows([_btn("🏠 主選單", "back_main")]))
+        else:
+            result_rows.extend(_rows([_btn("🔄 刷新本次任務", f"source_task_detail:{task_id}")]))
+            if archive_id:
+                if post_id:
+                    result_rows.extend(_rows([_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=task_source, content_type=task_content_type, page=task_page))]))
+                else:
+                    result_rows.extend(_rows([_btn("◀️ 返回發布方式" if is_custom_publish_task else "◀️ 返回設定", f"pub_{archive_id}{task_content_suffix}" if is_custom_publish_task else f"settings_{archive_id}")]))
     if status == "failed" and task_type == "persona_publish_post":
         result_rows.extend(_rows([_btn("🔄 只重試失敗/未完成項", f"source_rerun_task:{task_id}")], [_btn("◀️ 返回發布方式", f"pub_{archive_id}{task_content_suffix}")]))
-    if not (status == "success" and task_type.startswith("persona_")):
+    if not (status == "success" and task_type.startswith("persona_")) and not (task_type == "persona_publish_post" and status in {"queued", "running"}):
         result_rows.extend(_rows([_btn("任務列表", "source_tasks"), _btn("返回主選單", "back_main")]))
+    message_preview_image = "" if status == "success" and task_type == "persona_publish_post" else preview_image
     response = _response(
         _message(
             "\n".join(lines),
             result_rows,
-            image=preview_image,
+            image=message_preview_image,
             cards=[{"title": f"候選圖 {index + 1}", "image": url} for index, url in enumerate(candidate_images)],
         ),
         state={"flow": ""},
     )
     if status in {"queued", "running"}:
         response["poll"] = {"action": f"source_task_poll:{task_id}", "interval_ms": 2000}
+        if task_type == "persona_publish_post":
+            response["publish_progress"] = True
+    elif task_type == "persona_publish_post" and status in {"success", "failed", "cancelled"}:
+        if publish_progress:
+            response["messages"].insert(
+                0,
+                _message("\n".join(publish_status_lines), _rows([_btn("🏠 主選單", "back_main")]))
+            )
+        else:
+            response["replace_panel"] = False
+        if status == "success" and publish_screenshot:
+            platform_label = "Threads" if str(task_input.get("platform") or "").lower() == "threads" else "Telegram"
+            response["messages"].append(
+                _message(f"📸 發佈驗證截圖（{platform_label}）", image=publish_screenshot)
+            )
     elif status == "success" and task_type == "persona_generate_posts" and task_input.get("uiTextOnly") is False and generated_posts:
         response["followup"] = {"action": f"source_genpost_image_start:{task_id}", "delay_ms": 700}
     return response
 
 
 def _source_task_poll(task_id: str) -> dict[str, Any]:
-    result = _source_task_detail(task_id)
-    poll = result.get("poll") if isinstance(result.get("poll"), dict) else None
-    if poll:
-        return {"messages": [], "state": {"flow": ""}, "poll": poll}
-    return result
+    return _source_task_detail(task_id)
 
 
 def _source_generated_post_image_start(task_id: str) -> dict[str, Any]:
@@ -8682,8 +8715,9 @@ def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, para
         pending_text = "⏳ 正在生成推文配圖，完成後會直接寫回同一篇推文。"
         pending_rows = _rows([_btn(back_label, back_action)])
     elif task_type == "persona_publish_post":
-        pending_text = "🚀 推文發布中，請稍候..."
-        pending_rows = _rows([_btn(back_label, back_action)])
+        platform_label = "Threads" if str(params.get("platform") or "").lower() == "threads" else "Telegram"
+        pending_text = f"⏳ 正在發布到 {platform_label}...\n目前狀態：準備開始"
+        pending_rows = _rows([_btn("🏠 主選單", "back_main")])
     elif task_type == "persona_post_action":
         pending_text = f"⏳ {label}執行中，完成後會直接寫回同一篇 Tool R18 推文。"
         pending_rows = _rows([_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}") if source_task_id else _btn("📊 查看任務列表", "source_tasks")], [_btn(back_label, back_action)])

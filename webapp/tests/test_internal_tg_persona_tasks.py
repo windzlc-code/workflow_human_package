@@ -437,6 +437,24 @@ def test_persona_publish_runner_is_the_only_layer_forcing_live_publish(monkeypat
     assert captured["args"][3] == "persona-publish-post-once.ts"
 
 
+def test_persona_publish_progress_reader_keeps_safe_ordered_events(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "_build_task_workdir", lambda *_args, **_kwargs: tmp_path)
+    progress_path = tmp_path / "publish-progress.jsonl"
+    progress_path.write_text(
+        "\n".join([
+            json.dumps({"step": "打开 Threads", "line": "▶️ 打开 Threads", "padCode": "PAD-1", "postIndex": 1, "postCount": 2}),
+            "not-json",
+            json.dumps({"step": "发布完成", "line": "✅ 发布完成", "done": True, "private": "ignored"}),
+        ]),
+        encoding="utf-8",
+    )
+
+    assert server._read_persona_publish_progress("task-1") == [
+        {"step": "打开 Threads", "line": "▶️ 打开 Threads", "padCode": "PAD-1", "postIndex": 1, "postCount": 2},
+        {"step": "发布完成", "line": "✅ 发布完成", "done": True},
+    ]
+
+
 def test_persona_publish_payload_accepts_custom_media_and_content_overrides() -> None:
     custom = server._build_internal_tg_task_payload(
         "task-custom",
@@ -519,7 +537,7 @@ def test_persona_clis_reuse_real_telegram_and_archive_paths() -> None:
     assert 'input.dryRun !== false' in publish
     assert "input.padCodes" in publish
     assert "input.postIds" in publish
-    assert "for (const post of posts)" in publish
+    assert "for (const [postIndex, post] of posts.entries())" in publish
     assert "for (const targetPadCode of padCodes)" in publish
     assert "publishedTargets" in publish
     assert "webPublishCheckpoints" in publish
