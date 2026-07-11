@@ -568,5 +568,7 @@ def test_threads_automation_matches_tg_progress_and_evidence_lifecycle() -> None
         assert task_type in detail
     assert "automation_screenshots" in detail
     assert 'response["messages"].append(' in detail
+    assert "own_reply_no_match" in detail
+    assert "if own_reply_no_match:" in detail
     for source in (warmup_cli, auto_reply_cli, own_reply_cli):
         assert "emitWebTaskProgress" in source

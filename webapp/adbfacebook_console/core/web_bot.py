@@ -5316,7 +5316,9 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             )
     elif task_type in threads_automation_task_types and status in {"success", "failed", "cancelled"}:
         own_reply_no_match = task_type == "threads_own_post_reply" and status == "success" and not _num(result.get("matched"))
-        if automation_progress and not own_reply_no_match:
+        if own_reply_no_match:
+            pass
+        elif automation_progress:
             response["messages"].insert(
                 0,
                 _message("\n".join(automation_status_lines), [[_btn("◀️ 返回自動化", automation_back_action)]])
