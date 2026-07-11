@@ -186,6 +186,19 @@ class PersonaDashboardApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["summary"]["persona_count"], 1)
 
+    def test_revision_is_lightweight_and_changes_with_archive(self):
+        first = self.client.get("/api/persona_dashboard/revision")
+        self.assertEqual(first.status_code, 200)
+        first_data = first.json()
+        self.assertTrue(first_data["ok"])
+        self.assertEqual(first_data["refresh_interval_seconds"], 86400)
+        self.assertNotIn("personas", first_data)
+
+        self._write_archives()
+        second = self.client.get("/api/persona_dashboard/revision")
+        self.assertEqual(second.status_code, 200)
+        self.assertNotEqual(first_data["revision"], second.json()["revision"])
+
     def test_overview_aggregates_personas_and_queue_stats(self):
         self._write_archives()
         self._write_queue()

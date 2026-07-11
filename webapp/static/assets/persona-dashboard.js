@@ -41,6 +41,8 @@ let personaDashboardTabPage = 1;
 let personaDashboardPostModalKey = "";
 let personaDashboardGalleryIndex = -1;
 let personaDashboardAutoPollTimer = 0;
+let personaDashboardSourceRevision = "";
+let personaDashboardRevisionPollInFlight = false;
 let personaDashboardPostSort = localStorage.getItem("personaDashboardPostSort") || "hot_desc";
 let personaDashboardPostTypeFilter = localStorage.getItem("personaDashboardPostTypeFilter") || "all";
 
@@ -1059,6 +1061,7 @@ async function pdLoadDashboard(options = {}) {
   try {
     const data = await pdApi("/api/persona_dashboard/overview");
     personaDashboardData = data;
+    personaDashboardSourceRevision = String(data && data.revision || personaDashboardSourceRevision);
     pdSyncPadFilter(data);
     const updated = pdEl("personaDashboardUpdated");
     if (updated) {
@@ -1067,17 +1070,49 @@ async function pdLoadDashboard(options = {}) {
     }
     if (!silent) pdSetMsg("");
     pdRenderDashboard();
+    return true;
   } catch (err) {
     if (!silent) pdSetMsg(String((err && (err.detail || err.message)) || err || "加载失败"), "err");
+    return false;
+  }
+}
+
+async function pdPollSourceRevision() {
+  if (document.hidden || personaDashboardRefreshTask || personaDashboardRevisionPollInFlight) return;
+  personaDashboardRevisionPollInFlight = true;
+  try {
+    const data = await pdApi("/api/persona_dashboard/revision");
+    const next = String(data && data.revision || "");
+    if (!next) return;
+    if (!personaDashboardSourceRevision) {
+      personaDashboardSourceRevision = next;
+      return;
+    }
+    if (next === personaDashboardSourceRevision) return;
+    const loaded = await pdLoadDashboard({ silent: true });
+    if (loaded) personaDashboardSourceRevision = next;
+  } catch (_) {
+    // Keep the current dashboard visible while revision checks are unavailable.
+  } finally {
+    personaDashboardRevisionPollInFlight = false;
   }
 }
 
 function pdStartAutoPoll() {
   if (personaDashboardAutoPollTimer) window.clearInterval(personaDashboardAutoPollTimer);
   personaDashboardAutoPollTimer = window.setInterval(() => {
-    if (document.hidden) return;
+    void pdPollSourceRevision();
+  }, 3000);
+}
+
+const personaDashboardDataChannel = "BroadcastChannel" in window
+  ? new BroadcastChannel("workflow-console-data")
+  : null;
+if (personaDashboardDataChannel) {
+  personaDashboardDataChannel.addEventListener("message", (event) => {
+    if (!event.data || event.data.type !== "workflow:persona-changed" || document.hidden) return;
     pdLoadDashboard({ silent: true });
-  }, 60000);
+  });
 }
 
 async function pdBindThreads(persona) {

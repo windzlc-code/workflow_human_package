@@ -104,7 +104,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "telegram_bots": [],
     "telegram_persona_data_scope": "shared",
     "telegram_primary_allowed_pad_codes": [],
-    "persona_dashboard_refresh_interval_seconds": 300,
+    "persona_dashboard_refresh_interval_seconds": 86400,
     "remote_comfy_gateway_url": "",
     "remote_comfy_gateway_token": "",
     "remote_comfy_workflow_mappings": {"face_swap": "__converted__/flux_人物换脸工作流.api.json"},
@@ -3633,7 +3633,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["telegram_persona_data_scope"] = "isolated" if scope == "isolated" else "shared"
     merged["telegram_bots"] = _normalize_telegram_bots_config(merged.get("telegram_bots"))
     merged["persona_dashboard_refresh_interval_seconds"] = min(
-        max(_to_int(merged.get("persona_dashboard_refresh_interval_seconds"), 300), 60),
+        max(_to_int(merged.get("persona_dashboard_refresh_interval_seconds"), 86400), 60),
         86400,
     )
     primary_pad_codes = merged.get("telegram_primary_allowed_pad_codes")
@@ -18104,6 +18104,48 @@ PERSONA_DASHBOARD_MONITOR_STATE: dict[str, Any] = {
     "last_message": "",
     "interval_seconds": 0,
 }
+
+
+def _persona_dashboard_refresh_tasks_file() -> Path:
+    return TOOL_R18_RUNTIME_DIR / "persona_dashboard_refresh_tasks.json"
+
+
+def _persist_persona_dashboard_refresh_tasks_unlocked() -> None:
+    path = _persona_dashboard_refresh_tasks_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tasks = sorted(
+        (dict(task) for task in PERSONA_DASHBOARD_REFRESH_TASKS.values()),
+        key=lambda task: str(task.get("created_at") or ""),
+        reverse=True,
+    )[:100]
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps({"tasks": tasks}, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(path)
+
+
+def _load_persona_dashboard_refresh_tasks() -> None:
+    payload = _read_json_file(_persona_dashboard_refresh_tasks_file()) or {}
+    tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
+    changed = False
+    for raw in tasks:
+        if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+            continue
+        task = dict(raw)
+        if str(task.get("status") or "").lower() in {"queued", "running"}:
+            task.update({
+                "status": "failed",
+                "step": "已中断",
+                "progress": 100,
+                "message": "服务重启，上一轮热点刷新已中断，请重新点击刷新。",
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
+            changed = True
+        PERSONA_DASHBOARD_REFRESH_TASKS[str(task["id"])] = task
+    if changed:
+        _persist_persona_dashboard_refresh_tasks_unlocked()
+
+
+_load_persona_dashboard_refresh_tasks()
 PERSONA_DASHBOARD_OVERVIEW_CACHE_MAX_AGE_SECONDS = 300
 
 
@@ -19280,13 +19322,13 @@ def _persona_dashboard_refresh_worker(task_id: str, archive_id: str = "") -> Non
 
 
 def _start_persona_dashboard_refresh(archive_id: str = "", source: str = "", trigger: str = "manual") -> dict[str, Any]:
-    task_id = f"pdr_{uuid.uuid4().hex[:12]}"
+    clean_archive_id = str(archive_id or "").strip()
     requested_source = str(source or "").strip().lower()
     trigger_text = str(trigger or "manual").strip().lower()
     if trigger_text in {"manual", "page_view"}:
         refresh_source = "full"
     elif trigger_text == "auto_monitor":
-        refresh_source = "rsshub"
+        refresh_source = "full"
     else:
         refresh_source = requested_source or str(os.getenv("PERSONA_DASHBOARD_REFRESH_SOURCE") or "").strip().lower() or "full"
     if refresh_source in {"browser", "authenticated_full_profile"}:
@@ -19294,9 +19336,18 @@ def _start_persona_dashboard_refresh(archive_id: str = "", source: str = "", tri
     elif refresh_source != "rsshub":
         refresh_source = "full"
     with PERSONA_DASHBOARD_REFRESH_LOCK:
+        existing = next((
+            task for task in PERSONA_DASHBOARD_REFRESH_TASKS.values()
+            if str(task.get("archive_id") or "").strip() == clean_archive_id
+            and (bool(clean_archive_id) or str(task.get("source") or "").lower() == refresh_source)
+            and str(task.get("status") or "").lower() in {"queued", "running"}
+        ), None)
+        if existing:
+            return dict(existing)
+        task_id = f"pdr_{uuid.uuid4().hex[:12]}"
         PERSONA_DASHBOARD_REFRESH_TASKS[task_id] = {
             "id": task_id,
-            "archive_id": str(archive_id or "").strip(),
+            "archive_id": clean_archive_id,
             "source": refresh_source,
             "trigger": str(trigger or "manual"),
             "status": "queued",
@@ -19306,7 +19357,8 @@ def _start_persona_dashboard_refresh(archive_id: str = "", source: str = "", tri
             "message": "已加入刷新队列。",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-    thread = threading.Thread(target=_persona_dashboard_refresh_worker_v2, args=(task_id, str(archive_id or "").strip(), refresh_source), daemon=True)
+        _persist_persona_dashboard_refresh_tasks_unlocked()
+    thread = threading.Thread(target=_persona_dashboard_refresh_worker_v2, args=(task_id, clean_archive_id, refresh_source), daemon=True)
     thread.start()
     return PERSONA_DASHBOARD_REFRESH_TASKS[task_id]
 
@@ -19421,6 +19473,7 @@ def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "", sou
                 "stderr": stderr[-4000:],
                 "returncode": proc.returncode,
             })
+            _persist_persona_dashboard_refresh_tasks_unlocked()
     except Exception as exc:
         with PERSONA_DASHBOARD_REFRESH_LOCK:
             PERSONA_DASHBOARD_REFRESH_TASKS[task_id].update({
@@ -19431,6 +19484,7 @@ def _persona_dashboard_refresh_worker_v2(task_id: str, archive_id: str = "", sou
                 "elapsed_seconds": int(time.time() - started),
                 "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             })
+            _persist_persona_dashboard_refresh_tasks_unlocked()
 
 
 def _persona_dashboard_refresh_is_running() -> bool:
@@ -19453,7 +19507,7 @@ def _persona_dashboard_runtime_settings() -> dict[str, Any]:
 def _load_persona_dashboard_settings_payload() -> dict[str, Any]:
     runtime = _persona_dashboard_runtime_settings()
     return {
-        "refresh_interval_seconds": int(runtime.get("persona_dashboard_refresh_interval_seconds") or 300),
+        "refresh_interval_seconds": int(runtime.get("persona_dashboard_refresh_interval_seconds") or 86400),
         "cache_max_age_seconds": PERSONA_DASHBOARD_OVERVIEW_CACHE_MAX_AGE_SECONDS,
     }
 
@@ -19469,16 +19523,35 @@ def _persona_dashboard_monitor_interval_seconds() -> int:
         runtime.get("persona_dashboard_refresh_interval_seconds")
         or os.getenv("PERSONA_DASHBOARD_RSSHUB_POLL_SECONDS")
         or os.getenv("PERSONA_DASHBOARD_AUTO_REFRESH_SECONDS")
-        or "300"
+        or "86400"
     )
     try:
         return max(60, int(float(raw)))
     except Exception:
-        return 300
+        return 86400
 
 
 def _persona_dashboard_monitor_enabled() -> bool:
     return str(os.getenv("PERSONA_DASHBOARD_AUTO_REFRESH_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _persona_dashboard_auto_monitor_remaining_seconds(interval_seconds: int) -> int:
+    latest = 0.0
+    with PERSONA_DASHBOARD_REFRESH_LOCK:
+        tasks = [dict(task) for task in PERSONA_DASHBOARD_REFRESH_TASKS.values()]
+    for task in tasks:
+        if str(task.get("trigger") or "").lower() != "auto_monitor":
+            continue
+        raw = str(task.get("finished_at") or task.get("started_at") or task.get("created_at") or "").strip()
+        if not raw:
+            continue
+        try:
+            latest = max(latest, datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+        except (TypeError, ValueError):
+            continue
+    if latest <= 0:
+        return 0
+    return max(0, int(interval_seconds - (time.time() - latest)))
 
 
 def _persona_dashboard_page_view_refresh_interval_seconds() -> int:
@@ -19544,7 +19617,7 @@ def _maybe_schedule_persona_dashboard_page_view_refresh() -> None:
 
 
 def _persona_dashboard_monitor_loop() -> None:
-    source = "rsshub"
+    source = "full"
     while True:
         interval = _persona_dashboard_monitor_interval_seconds()
         if not _persona_dashboard_monitor_enabled():
@@ -19557,6 +19630,19 @@ def _persona_dashboard_monitor_loop() -> None:
                     "last_message": "后台自动监控已关闭。",
                 })
             _wait_persona_dashboard_monitor(interval)
+            continue
+        remaining = _persona_dashboard_auto_monitor_remaining_seconds(interval)
+        if remaining > 0:
+            with PERSONA_DASHBOARD_MONITOR_LOCK:
+                PERSONA_DASHBOARD_MONITOR_STATE.update({
+                    "enabled": True,
+                    "source": source,
+                    "status": "waiting",
+                    "interval_seconds": interval,
+                    "next_refresh_in_seconds": remaining,
+                    "last_message": "后台全量刷新尚未到期，等待下一次每日刷新。",
+                })
+            _wait_persona_dashboard_monitor(remaining)
             continue
         try:
             if not _persona_dashboard_refresh_is_running():
@@ -19613,7 +19699,7 @@ def _ensure_persona_dashboard_monitor_started() -> None:
         PERSONA_DASHBOARD_MONITOR_STARTED = True
         PERSONA_DASHBOARD_MONITOR_STATE.update({
             "enabled": _persona_dashboard_monitor_enabled(),
-            "source": "rsshub",
+            "source": "full",
             "status": "starting",
             "interval_seconds": _persona_dashboard_monitor_interval_seconds(),
             "last_message": "后台自动监控启动中。",
@@ -19679,6 +19765,50 @@ def _persona_dashboard_overview_cache_is_fresh(payload: Any) -> bool:
     if abs(current_archive_mtime - cached_archive_mtime) > 0.001:
         return False
     return (time.time() - updated_ts) <= PERSONA_DASHBOARD_OVERVIEW_CACHE_MAX_AGE_SECONDS
+
+
+def _persona_dashboard_archive_source_changed(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    try:
+        cached_archive_mtime = float(
+            ((payload.get("data_sources") or {}).get("archives") or {}).get("mtime") or 0
+        )
+    except (TypeError, ValueError):
+        cached_archive_mtime = 0.0
+    current_archive_mtime = 0.0
+    for filename in ("persona_archives.json", "persona_archives_cache.json"):
+        try:
+            current_archive_mtime = max(current_archive_mtime, (TOOL_R18_RUNTIME_DIR / filename).stat().st_mtime)
+        except OSError:
+            continue
+    return abs(current_archive_mtime - cached_archive_mtime) > 0.001
+
+
+def _persona_dashboard_revision_payload() -> dict[str, Any]:
+    versions: list[str] = []
+    paths = [
+        TOOL_R18_RUNTIME_DIR / "persona_archives.json",
+        TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json",
+        TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_posts.json",
+        TOOL_R18_RUNTIME_DIR / "persona_memory.json",
+        TOOL_R18_RUNTIME_DIR / "sentiment_hot_candidates.json",
+        RUNTIME_CONFIG_PATH,
+    ]
+    for path in paths:
+        filename = path.name
+        try:
+            stat = path.stat()
+            versions.append(f"{filename}:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            versions.append(f"{filename}:0:0")
+    raw = "|".join(versions)
+    return {
+        "ok": True,
+        "revision": hashlib.sha1(raw.encode("utf-8")).hexdigest(),
+        "refresh_interval_seconds": _persona_dashboard_monitor_interval_seconds(),
+        "monitor_status": str(PERSONA_DASHBOARD_MONITOR_STATE.get("status") or ""),
+    }
 
 
 def _persona_dashboard_attach_live_settings(payload: dict[str, Any]) -> dict[str, Any]:
@@ -20211,6 +20341,7 @@ def _compute_persona_dashboard_overview() -> dict[str, Any]:
     return {
         "ok": True,
         "schema_version": PERSONA_DASHBOARD_OVERVIEW_CACHE_SCHEMA_VERSION,
+        "revision": _persona_dashboard_revision_payload()["revision"],
         "deleted_posts_version": _persona_dashboard_deleted_posts_version(),
         "updated_at": now,
         "summary": {
@@ -20298,23 +20429,22 @@ def _build_persona_dashboard_overview(force_refresh: bool = False, allow_backgro
         cached = _read_persona_dashboard_overview_cache()
         if cached and not _persona_dashboard_overview_needs_refresh(cached):
             attached = _persona_dashboard_attach_live_settings(cached)
+            if _persona_dashboard_archive_source_changed(attached):
+                payload = _compute_persona_dashboard_overview()
+                _write_persona_dashboard_overview_cache(payload)
+                return _persona_dashboard_attach_live_settings(payload)
             if _persona_dashboard_overview_cache_is_fresh(attached):
                 return attached
-            if allow_background_refresh:
-                _maybe_schedule_persona_dashboard_page_view_refresh()
-            elif not _persona_dashboard_refresh_is_running():
-                try:
-                    _start_persona_dashboard_refresh("", trigger="page_view")
-                except Exception:
-                    pass
-            return attached
+            payload = _compute_persona_dashboard_overview()
+            _write_persona_dashboard_overview_cache(payload)
+            return _persona_dashboard_attach_live_settings(payload)
     payload = _compute_persona_dashboard_overview()
     _write_persona_dashboard_overview_cache(payload)
     return _persona_dashboard_attach_live_settings(payload)
 
 
 def _save_persona_dashboard_settings(refresh_interval_seconds: int) -> dict[str, Any]:
-    next_interval = min(max(int(refresh_interval_seconds or 300), 60), 86400)
+    next_interval = min(max(int(refresh_interval_seconds or 86400), 60), 86400)
     try:
         with db() as conn:
             current_runtime = _get_runtime_config(conn)
@@ -20888,6 +21018,10 @@ def create_app() -> FastAPI:
     @app.get("/api/persona_dashboard/monitor")
     def api_persona_dashboard_monitor():
         return dict(PERSONA_DASHBOARD_MONITOR_STATE)
+
+    @app.get("/api/persona_dashboard/revision")
+    def api_persona_dashboard_revision():
+        return _persona_dashboard_revision_payload()
 
     @app.post("/api/persona_dashboard/personas/{archive_id}/threads_binding")
     def api_persona_dashboard_bind_threads(archive_id: str, payload: PersonaDashboardThreadsBindingPayload):

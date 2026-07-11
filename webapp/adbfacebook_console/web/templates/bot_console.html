@@ -379,7 +379,12 @@
   const historyChannel = 'BroadcastChannel' in window
     ? new BroadcastChannel('workflow-web-bot:' + sessionId)
     : null;
+  const dataChannel = 'BroadcastChannel' in window
+    ? new BroadcastChannel('workflow-console-data')
+    : null;
   const historyClientId = Math.random().toString(36).slice(2);
+  let personaRevision = '';
+  let activePanelAction = entryAction;
   let historyReady = false;
   let historyDbPromise = null;
   let historyPersistTimer = null;
@@ -419,6 +424,8 @@
         html: log.innerHTML,
         state,
         pendingSourcePoll,
+        personaRevision,
+        activePanelAction,
         updatedAt: Date.now(),
       };
       transaction.objectStore(historyStoreName).put(snapshot);
@@ -458,6 +465,8 @@
     trimHistory();
     log.querySelectorAll('button:disabled').forEach(button => { button.disabled = false; });
     state = saved.state && typeof saved.state === 'object' ? saved.state : {};
+    personaRevision = String(saved.personaRevision || '').trim();
+    activePanelAction = String(saved.activePanelAction || entryAction).trim() || entryAction;
     pendingSourcePoll = saved.pendingSourcePoll && saved.pendingSourcePoll.poll
       ? saved.pendingSourcePoll
       : null;
@@ -491,6 +500,82 @@
       sourceFollowupTimer = null;
     }
   }
+
+  function syncPersonaRevision(revision) {
+    const next = String(revision || '').trim();
+    if (!next || next === personaRevision) return;
+    if (!personaRevision) {
+      personaRevision = next;
+      queueHistoryPersist();
+      return;
+    }
+    personaRevision = next;
+    const event = { type: 'workflow:persona-changed', revision: next };
+    if (dataChannel) dataChannel.postMessage(event);
+    if (window.parent !== window) window.parent.postMessage(event, window.location.origin);
+  }
+
+  function isPersonaPanelAction(action) {
+    return action === 'list_personas'
+      || action === 'personas'
+      || action.startsWith('list_personas')
+      || action.startsWith('personas_page:')
+      || action.startsWith('personas_bound:')
+      || action.startsWith('personas_unbound:')
+      || action.startsWith('pd:')
+      || action.startsWith('pd_')
+      || action.startsWith('shs:')
+      || action.startsWith('shs_')
+      || action.startsWith('shp:')
+      || action.startsWith('shp_');
+  }
+
+  function refreshActivePersonaPanel() {
+    if (!isPersonaPanelAction(activePanelAction) || userRequestInFlight) return;
+    return send(
+      { action: activePanelAction },
+      '',
+      { replacePanel: true, showUser: false, isFollowup: true, targetGroup: activeBotGroup }
+    );
+  }
+
+  if (dataChannel) {
+    dataChannel.addEventListener('message', event => {
+      const data = event.data;
+      if (!data || data.type !== 'workflow:persona-changed') return;
+      refreshActivePersonaPanel();
+    });
+  }
+
+  let sourcePersonaRevision = '';
+  let sourceRevisionPollInFlight = false;
+  async function pollSourcePersonaRevision() {
+    if (document.hidden || userRequestInFlight || sourceRevisionPollInFlight) return;
+    sourceRevisionPollInFlight = true;
+    try {
+      const sourceRevisionUrl = window.location.protocol + '//' + window.location.host + '/api/persona_dashboard/revision';
+      const response = await fetch(sourceRevisionUrl, { cache: 'no-store' });
+      if (!response.ok) return;
+      const data = await response.json();
+      const next = String(data && data.revision || '');
+      if (!next) return;
+      if (!sourcePersonaRevision) {
+        sourcePersonaRevision = next;
+        return;
+      }
+      if (next === sourcePersonaRevision) return;
+      const event = { type: 'workflow:persona-changed', revision: 'source:' + next };
+      if (dataChannel) dataChannel.postMessage(event);
+      await refreshActivePersonaPanel();
+      sourcePersonaRevision = next;
+    } catch (_) {
+      // Keep the console usable while the source service is temporarily unavailable.
+    } finally {
+      sourceRevisionPollInFlight = false;
+    }
+  }
+  setInterval(pollSourcePersonaRevision, 3000);
+  void pollSourcePersonaRevision();
 
   function scheduleSourcePoll(poll, targetGroup) {
     clearSourcePoll();
@@ -663,7 +748,9 @@
       });
       const data = await res.json();
       if (generation !== requestGeneration) return;
+      syncPersonaRevision(data.persona_revision);
       state = data.state || {};
+      if (payload.action && isInteractive) activePanelAction = String(payload.action);
       const messages = data.messages || [];
       const shouldReplaceResponse = replacePanel && data.replace_panel !== false;
       let responseGroup = targetGroup;
