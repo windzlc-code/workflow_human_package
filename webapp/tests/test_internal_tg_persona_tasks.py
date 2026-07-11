@@ -146,9 +146,19 @@ def test_sentiment_hot_task_result_maps_local_media_to_browser_url(tmp_path, mon
             "id": "candidate-1",
             "media": [{"type": "image", "url": "relative/candidate.jpg", "localPath": str(media_path)}],
         }],
+        "posts": [{
+            "postId": "post-1",
+            "mediaUrl": str(media_path),
+            "mediaItems": [{"type": "image", "localPath": str(media_path)}],
+        }],
     })
 
     assert result["candidates"][0]["media"] == [{
+        "url": "/persona_media/sentiment-hot-media/candidate.jpg",
+        "type": "image",
+    }]
+    assert result["posts"][0]["mediaUrl"] == "/persona_media/sentiment-hot-media/candidate.jpg"
+    assert result["posts"][0]["mediaItems"] == [{
         "url": "/persona_media/sentiment-hot-media/candidate.jpg",
         "type": "image",
     }]

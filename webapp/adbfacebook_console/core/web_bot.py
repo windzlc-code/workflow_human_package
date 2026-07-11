@@ -51,6 +51,9 @@ TOOL_R18_SKILLS_DIR = TOOL_R18_PROJECT_DIR / "scripts" / "skills"
 _PERSONA_MENU_CACHE: dict[str, Any] = {"at": 0.0, "rows": []}
 _PUBLISH_PLATFORM_CACHE: dict[str, Any] = {"at": 0.0, "values": []}
 _PERSONA_OVERVIEW_REFRESH_LOCK = threading.Lock()
+_RECENT_IMPORTED_POSTS_LOCK = threading.Lock()
+_RECENT_IMPORTED_POSTS: dict[str, dict[str, Any]] = {}
+_RECENT_IMPORTED_POSTS_TTL_SECONDS = 300.0
 _CUSTOM_PUBLISH_MEDIA_LOCK = threading.Lock()
 _CUSTOM_PUBLISH_MEDIA_CACHE: dict[str, dict[str, Any]] = {}
 _TO_TRADITIONAL_IMPL = to_traditional
@@ -2435,7 +2438,8 @@ def _sentiment_hot_submit(task_type: str, label: str, params: dict[str, Any], lo
         _message(loading_text, [[_btn("刷新本次任務", f"source_task_detail:{source_task_id}")]]),
         state={"flow": "sentiment_hot_wait", "draft": {"source_task_id": source_task_id}},
     )
-    response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+    poll_interval_ms = 750 if str(params.get("action") or "").lower() == "import" else 2000
+    response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": poll_interval_ms}
     return response
 
 
@@ -3019,10 +3023,15 @@ def _refresh_persona_overview_cache(*, force_remote: bool = False) -> None:
         _PERSONA_OVERVIEW_REFRESH_LOCK.release()
 
 
-def _schedule_persona_overview_refresh() -> None:
+def _schedule_persona_overview_refresh(*, force_remote: bool = False) -> None:
     if _PERSONA_OVERVIEW_REFRESH_LOCK.locked():
         return
-    thread = threading.Thread(target=_refresh_persona_overview_cache, name="persona-overview-refresh", daemon=True)
+    thread = threading.Thread(
+        target=_refresh_persona_overview_cache,
+        kwargs={"force_remote": force_remote},
+        name="persona-overview-refresh",
+        daemon=True,
+    )
     thread.start()
 
 
@@ -4902,7 +4911,7 @@ def _sentiment_hot_source_task_response(task_id: str, task: dict[str, Any], task
             _message(text, _rows([_btn("刷新本次任務", f"source_task_detail:{task_id}")], [_btn("返回新建推文", f"genpost_branch_{persona_id}")])),
             state={"flow": "sentiment_hot_wait", "draft": {"source_task_id": task_id}},
         )
-        response["poll"] = {"action": f"source_task_poll:{task_id}", "interval_ms": 2000}
+        response["poll"] = {"action": f"source_task_poll:{task_id}", "interval_ms": 750 if action == "import" else 2000}
         return response
     if status != "success":
         error = str(task.get("error") or "热点任务执行失败")
@@ -4924,6 +4933,15 @@ def _sentiment_hot_source_task_response(task_id: str, task: dict[str, Any], task
 
     imported_posts = [item for item in (result.get("posts") if isinstance(result.get("posts"), list) else []) if isinstance(item, dict)]
     failures = [item for item in (result.get("failures") if isinstance(result.get("failures"), list) else []) if isinstance(item, dict)]
+    imported_target_page = 0
+    if imported_posts:
+        _remember_recent_imported_posts(
+            archive_id,
+            imported_posts,
+            str(task_input.get("contentBranch") or ""),
+        )
+        imported_target_page = _sentiment_hot_import_target_page(archive_id, imported_posts)
+        _schedule_persona_overview_refresh(force_remote=True)
     imported_ids = {str(item.get("candidateId") or "") for item in imported_posts if str(item.get("candidateId") or "")}
     try:
         draft = _sentiment_hot_restore_import_draft(task_input, imported_ids)
@@ -4949,7 +4967,7 @@ def _sentiment_hot_source_task_response(task_id: str, task: dict[str, Any], task
     if failures:
         lines.extend(["", "失败:", *[f"- 第 {_num(item.get('index')) + 1} 篇：{item.get('error') or '保存失败'}" for item in failures[:5]]])
     key = str(draft.get("sentiment_action_key") or "")
-    rows = [[_btn("查看推文列表", f"posts_{archive_id}_p0")]]
+    rows = [[_btn("查看推文列表", f"posts_{archive_id}_p{imported_target_page}")]]
     if draft.get("hot_candidates") and key:
         rows.append([_btn(f"返回候选列表（剩余 {len(draft['hot_candidates'])} 篇）", f"shlist_{key}")])
     if key:
@@ -7582,9 +7600,114 @@ def _source_count(row: dict[str, Any] | None, key: str) -> int:
     return _num(value)
 
 
+def _remember_recent_imported_posts(
+    archive_id: str,
+    imported_posts: list[dict[str, Any]],
+    content_branch: str = "",
+) -> None:
+    clean_archive_id = str(archive_id or "").strip()
+    if not clean_archive_id:
+        return
+    group_type = "paid" if content_branch == "r18" else "free" if content_branch == "nonr18" else ""
+    posts: list[dict[str, Any]] = []
+    for item in imported_posts:
+        post_id = str(item.get("postId") or item.get("id") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if not post_id or not content:
+            continue
+        media_url = str(item.get("mediaUrl") or "").strip()
+        media_type = str(item.get("mediaType") or "").strip()
+        post = {
+            "id": post_id,
+            "content": content,
+            "title": str(item.get("title") or "热点").strip(),
+            "sourceMeta": {
+                "source": "sentiment_hot_import",
+                "platform": str(item.get("platform") or "").strip(),
+                "hotScore": item.get("hotScore"),
+            },
+        }
+        if group_type:
+            post["telegramGroupContentType"] = group_type
+        if media_url:
+            post.update({"mediaUrl": media_url, "mediaType": media_type or "unknown"})
+        if isinstance(item.get("mediaItems"), list):
+            post["mediaItems"] = [media for media in item["mediaItems"] if isinstance(media, dict)]
+        posts.append(post)
+    if not posts:
+        return
+    now = time.time()
+    with _RECENT_IMPORTED_POSTS_LOCK:
+        expired = [
+            key
+            for key, value in _RECENT_IMPORTED_POSTS.items()
+            if now - float(value.get("at") or 0.0) > _RECENT_IMPORTED_POSTS_TTL_SECONDS
+        ]
+        for key in expired:
+            _RECENT_IMPORTED_POSTS.pop(key, None)
+        existing = _RECENT_IMPORTED_POSTS.get(clean_archive_id, {}).get("posts", [])
+        merged = [item for item in existing if isinstance(item, dict)]
+        known_ids = {str(item.get("id") or "") for item in merged}
+        for post in posts:
+            if post["id"] not in known_ids:
+                merged.append(post)
+                known_ids.add(post["id"])
+        _RECENT_IMPORTED_POSTS[clean_archive_id] = {"at": now, "posts": merged}
+
+
+def _recent_imported_posts_for_row(row: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(row, dict):
+        return []
+    keys = {
+        str(row.get("id") or "").strip(),
+        str(row.get("source_archive_id") or "").strip(),
+    }
+    keys.discard("")
+    now = time.time()
+    result: list[dict[str, Any]] = []
+    with _RECENT_IMPORTED_POSTS_LOCK:
+        for key in list(_RECENT_IMPORTED_POSTS):
+            value = _RECENT_IMPORTED_POSTS[key]
+            if now - float(value.get("at") or 0.0) > _RECENT_IMPORTED_POSTS_TTL_SECONDS:
+                _RECENT_IMPORTED_POSTS.pop(key, None)
+                continue
+            if key in keys:
+                result.extend(item for item in value.get("posts", []) if isinstance(item, dict))
+    return result
+
+
+def _sentiment_hot_import_target_page(archive_id: str, imported_posts: list[dict[str, Any]]) -> int:
+    imported_ids = {
+        str(item.get("postId") or item.get("id") or "").strip()
+        for item in imported_posts
+        if isinstance(item, dict)
+    }
+    imported_ids.discard("")
+    if not imported_ids:
+        return 0
+    cached_rows = _PERSONA_MENU_CACHE.get("rows")
+    rows = cached_rows if isinstance(cached_rows, list) and cached_rows else _cached_remote_persona_rows()
+    clean_archive_id = str(archive_id or "").strip()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_ids = {
+            str(row.get("id") or "").strip(),
+            str(row.get("source_archive_id") or "").strip(),
+        }
+        if clean_archive_id not in row_ids:
+            continue
+        for index, post in enumerate(_source_pending_posts(row)):
+            if str(post.get("id") or "").strip() in imported_ids:
+                return index // STORED_POSTS_PAGE_SIZE
+    return 0
+
+
 def _source_pending_posts(row: dict[str, Any] | None, content_type: str = "") -> list[dict[str, Any]]:
     posts = row.get("pending_posts") if isinstance(row, dict) and isinstance(row.get("pending_posts"), list) else []
     result = [item for item in posts if isinstance(item, dict) and str(item.get("id") or "").strip()]
+    known_ids = {str(item.get("id") or "") for item in result}
+    result.extend(item for item in _recent_imported_posts_for_row(row) if str(item.get("id") or "") not in known_ids)
     if content_type in {"free", "paid"}:
         result = [
             item

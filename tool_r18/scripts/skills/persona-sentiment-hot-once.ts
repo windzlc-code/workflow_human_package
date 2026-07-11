@@ -2,7 +2,7 @@ import "@/runtime/node/browser-shim";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadPersonaArchive } from "@/lib/persona-archives";
-import { cleanSentimentCandidateContent, fetchSentimentHotCandidates } from "@/lib/sentiment-hot-importer";
+import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates } from "@/lib/sentiment-hot-importer";
 import {
   rememberSentimentHotImported,
   rememberSentimentHotSelected,
@@ -102,6 +102,16 @@ export async function importCandidates(value: Input) {
     cookieStatuses: [],
     warnings: [],
   };
+  const prefetchedMedia: SentimentHotCandidate["media"][] = new Array(items.length);
+  let nextPrefetchIndex = 0;
+  await Promise.all(Array.from({ length: Math.min(3, items.length) }, async () => {
+    while (nextPrefetchIndex < items.length) {
+      const index = nextPrefetchIndex++;
+      const item = items[index];
+      const sourceMedia = item.media !== undefined ? item.media : item.candidate.media;
+      prefetchedMedia[index] = await downloadCandidateMedia({ ...item.candidate, media: sourceMedia }).catch(() => sourceMedia);
+    }
+  }));
   const posts = [];
   const failures = [];
   for (let index = 0; index < items.length; index += 1) {
@@ -124,6 +134,8 @@ export async function importCandidates(value: Input) {
           metricLine: formatSentimentMetricLine(item.candidate),
           mediaUrl: existing.mediaUrl || existing.mediaItems?.[0]?.url || "",
           mediaType: existing.mediaType || existing.mediaItems?.[0]?.type || "",
+          mediaItems: existing.mediaItems || [],
+          hotScore: item.candidate.hotScore,
           edited: item.edited === true,
           duplicate: true,
         });
@@ -137,7 +149,7 @@ export async function importCandidates(value: Input) {
         overrideContent: item.content,
         overrideMediaUrl: item.overrideMediaUrl,
         overrideMediaType: item.overrideMediaType,
-        overrideMediaItems: item.media,
+        overrideMediaItems: prefetchedMedia[index],
         edited: item.edited === true,
       });
       rememberSentimentHotSelected(archive.id, item.candidate.id);
@@ -153,6 +165,8 @@ export async function importCandidates(value: Input) {
         metricLine: formatSentimentMetricLine(item.candidate),
         mediaUrl: saved.mediaUrl,
         mediaType: saved.mediaType || "",
+        mediaItems: saved.mediaItems,
+        hotScore: item.candidate.hotScore,
         edited: item.edited === true,
       });
     } catch (error) {
