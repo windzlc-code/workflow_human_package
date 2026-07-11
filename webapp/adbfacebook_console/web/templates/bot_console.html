@@ -357,12 +357,98 @@
   let activeBotGroup = null;
   let requestGeneration = 0;
   let userRequestInFlight = false;
+  const historyLimit = 100;
+  const historyDbName = 'workflow-web-bot-history';
+  const historyStoreName = 'sessions';
+  const historyKey = 'bot:' + window.location.pathname;
+  let historyReady = false;
+  let historyDbPromise = null;
+  let historyPersistTimer = null;
+  let pendingSourcePoll = null;
+
+  function openHistoryDb() {
+    if (!('indexedDB' in window)) return Promise.resolve(null);
+    if (historyDbPromise) return historyDbPromise;
+    historyDbPromise = new Promise(resolve => {
+      const request = indexedDB.open(historyDbName, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains(historyStoreName)) {
+          request.result.createObjectStore(historyStoreName, { keyPath: 'id' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    });
+    return historyDbPromise;
+  }
+
+  function trimHistory() {
+    const groups = Array.from(log.querySelectorAll(':scope > .msg-group'));
+    groups.slice(0, Math.max(0, groups.length - historyLimit)).forEach(group => group.remove());
+  }
+
+  async function persistHistory() {
+    if (!historyReady) return;
+    trimHistory();
+    const db = await openHistoryDb();
+    if (!db) return;
+    try {
+      const transaction = db.transaction(historyStoreName, 'readwrite');
+      transaction.objectStore(historyStoreName).put({
+        id: historyKey,
+        html: log.innerHTML,
+        state,
+        pendingSourcePoll,
+        updatedAt: Date.now(),
+      });
+    } catch (_) {
+      // Message persistence must not interrupt bot interaction.
+    }
+  }
+
+  function queueHistoryPersist() {
+    if (!historyReady) return;
+    if (historyPersistTimer !== null) clearTimeout(historyPersistTimer);
+    historyPersistTimer = setTimeout(() => {
+      historyPersistTimer = null;
+      void persistHistory();
+    }, 50);
+  }
+
+  async function restoreHistory() {
+    const db = await openHistoryDb();
+    if (!db) return false;
+    const saved = await new Promise(resolve => {
+      try {
+        const request = db.transaction(historyStoreName, 'readonly').objectStore(historyStoreName).get(historyKey);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => resolve(null);
+      } catch (_) {
+        resolve(null);
+      }
+    });
+    if (!saved || typeof saved.html !== 'string' || !saved.html.trim()) return false;
+    log.innerHTML = saved.html;
+    trimHistory();
+    log.querySelectorAll('button:disabled').forEach(button => { button.disabled = false; });
+    state = saved.state && typeof saved.state === 'object' ? saved.state : {};
+    pendingSourcePoll = saved.pendingSourcePoll && saved.pendingSourcePoll.poll
+      ? saved.pendingSourcePoll
+      : null;
+    const botGroups = log.querySelectorAll(':scope > .msg-group.bot');
+    activeBotGroup = botGroups.length ? botGroups[botGroups.length - 1] : null;
+    scrollBottom();
+    return true;
+  }
 
   function clearSourcePoll() {
     if (sourcePollTimer !== null) {
       clearTimeout(sourcePollTimer);
       sourcePollTimer = null;
     }
+    pendingSourcePoll = null;
+    queueHistoryPersist();
   }
 
   function clearSourceFollowup() {
@@ -376,8 +462,15 @@
     clearSourcePoll();
     if (!poll || !poll.action) return;
     const delay = Math.max(500, Math.min(10000, Number(poll.interval_ms) || 2000));
+    const groups = Array.from(log.querySelectorAll(':scope > .msg-group'));
+    pendingSourcePoll = {
+      poll: { action: String(poll.action), interval_ms: delay },
+      targetIndex: Math.max(0, groups.indexOf(targetGroup)),
+    };
+    queueHistoryPersist();
     sourcePollTimer = setTimeout(() => {
       sourcePollTimer = null;
+      pendingSourcePoll = null;
       send({ action: poll.action }, '', { replacePanel: true, showUser: false, isPoll: true, targetGroup });
     }, delay);
   }
@@ -427,6 +520,8 @@
     bubble.appendChild(t);
     group.appendChild(bubble);
     log.appendChild(group);
+    trimHistory();
+    queueHistoryPersist();
     scrollBottom();
   }
 
@@ -497,6 +592,8 @@
       log.appendChild(group);
     }
     if (setActive) activeBotGroup = group;
+    trimHistory();
+    queueHistoryPersist();
     scrollBottom();
     return group;
   }
@@ -541,6 +638,7 @@
       });
       scheduleSourcePoll(data.poll, responseGroup);
       scheduleSourceFollowup(data.followup);
+      queueHistoryPersist();
       if (data.open) {
         window.location.href = data.open;
         return;
@@ -618,7 +716,24 @@
     send({ action }, '', { replacePanel: true, showUser: false, targetGroup: btn.closest('.msg-group') });
   });
 
-  send({ action: 'menu' });
+  async function initialize() {
+    const restored = await restoreHistory();
+    historyReady = true;
+    subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
+    if (restored && pendingSourcePoll && pendingSourcePoll.poll) {
+      const groups = Array.from(log.querySelectorAll(':scope > .msg-group'));
+      const target = groups[pendingSourcePoll.targetIndex] || activeBotGroup;
+      scheduleSourcePoll(pendingSourcePoll.poll, target);
+      queueHistoryPersist();
+      return;
+    }
+    if (!restored) send({ action: 'menu' });
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void persistHistory();
+  });
+  void initialize();
 })();
 </script>
 </body>
