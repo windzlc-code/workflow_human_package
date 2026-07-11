@@ -18793,8 +18793,27 @@ def _safe_persona_sentiment_hot_result(output: dict[str, Any]) -> dict[str, Any]
                 **({"warning": str(source_item.get("warning"))} if str(source_item.get("warning") or "").strip() else {}),
             })
         safe_candidates[index]["media"] = safe_media
+    source_posts = output.get("posts") if isinstance(output.get("posts"), list) else []
+    safe_posts = result.get("posts") if isinstance(result.get("posts"), list) else []
+    for index, source_post in enumerate(source_posts):
+        if index >= len(safe_posts) or not isinstance(source_post, dict) or not isinstance(safe_posts[index], dict):
+            continue
+        safe_media_url = _safe_pending_post_media_url(source_post.get("mediaUrl"))
+        if safe_media_url:
+            safe_posts[index]["mediaUrl"] = safe_media_url
+        else:
+            safe_posts[index].pop("mediaUrl", None)
+        source_media = source_post.get("mediaItems") if isinstance(source_post.get("mediaItems"), list) else []
+        safe_posts[index]["mediaItems"] = [
+            {
+                "url": safe_url,
+                "type": str(item.get("type") or _guess_media_type(safe_url, "unknown")),
+            }
+            for item in source_media
+            if isinstance(item, dict)
+            and (safe_url := _safe_pending_post_media_url(item.get("localPath") or item.get("url")))
+        ]
     return result
-
 
 def _persona_reference_image_url(archive: Any) -> str:
     if not isinstance(archive, dict):
@@ -18867,26 +18886,6 @@ def _compact_pending_post_source_meta(source_meta: Any) -> dict[str, Any]:
     if original_content:
         compact["originalContent"] = original_content[:5000]
     for key in ("metrics", "engagement"):
-    source_posts = output.get("posts") if isinstance(output.get("posts"), list) else []
-    safe_posts = result.get("posts") if isinstance(result.get("posts"), list) else []
-    for index, source_post in enumerate(source_posts):
-        if index >= len(safe_posts) or not isinstance(source_post, dict) or not isinstance(safe_posts[index], dict):
-            continue
-        safe_media_url = _safe_pending_post_media_url(source_post.get("mediaUrl"))
-        if safe_media_url:
-            safe_posts[index]["mediaUrl"] = safe_media_url
-        else:
-            safe_posts[index].pop("mediaUrl", None)
-        source_media = source_post.get("mediaItems") if isinstance(source_post.get("mediaItems"), list) else []
-        safe_posts[index]["mediaItems"] = [
-            {
-                "url": safe_url,
-                "type": str(item.get("type") or _guess_media_type(safe_url, "unknown")),
-            }
-            for item in source_media
-            if isinstance(item, dict)
-            and (safe_url := _safe_pending_post_media_url(item.get("localPath") or item.get("url")))
-        ]
         if isinstance(source_meta.get(key), dict):
             compact[key] = _sanitize_dashboard_value(source_meta.get(key), key)
     warnings = source_meta.get("warnings")
