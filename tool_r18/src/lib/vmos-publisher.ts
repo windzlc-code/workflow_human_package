@@ -22010,6 +22010,37 @@ export interface ThreadsAutoReplyConfig {
   maxReplies?: number;
   maxAgeDays?: number;
   commentPersona?: WarmupCommentPersona;
+  replySuffix?: string;
+}
+
+const THREADS_REPLY_TEXT_LIMIT = 500;
+
+export function appendThreadsReplySuffix(content: string, suffix?: string): string {
+  const base = String(content || "").trim();
+  const normalizedSuffix = String(suffix || "").trim();
+  if (!normalizedSuffix) return base;
+  if (Array.from(normalizedSuffix).length > THREADS_REPLY_TEXT_LIMIT) {
+    throw new Error("链接模板超过 Threads 回复长度限制，请缩短模板后重试。");
+  }
+  if (base.endsWith(normalizedSuffix) && Array.from(base).length <= THREADS_REPLY_TEXT_LIMIT) return base;
+  const withoutDuplicate = base.split(normalizedSuffix).join("").replace(/\n{3,}/g, "\n\n").trim();
+  const separatorLength = withoutDuplicate ? 1 : 0;
+  const availableBaseLength = Math.max(
+    0,
+    THREADS_REPLY_TEXT_LIMIT - Array.from(normalizedSuffix).length - separatorLength,
+  );
+  const limitedBase = Array.from(withoutDuplicate).slice(0, availableBaseLength).join("").trimEnd();
+  return `${limitedBase}${limitedBase ? "\n" : ""}${normalizedSuffix}`.trim();
+}
+
+export function normalizeThreadsManualReplyText(content: string): string {
+  return String(content || "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
 }
 
 export interface ThreadsAutoReplyProgress {
@@ -31961,12 +31992,13 @@ export async function autoReplyThreadsAccount(
             },
           });
           report({ step: `第 ${postIndex + 1} 条回复框已打开，正在输入并发送模型回复` });
+          const finalReply = appendThreadsReplySuffix(decision.reply, cfg.replySuffix);
           const result = await withTimeout(
             warmupExecuteCommentAtPoint(
               config,
               padCode,
               commentTarget,
-              decision.reply,
+              finalReply,
               {
                 sourceScreenshotUrl: openedReply.screenshotUrl || decision.candidate.sourceScreenshotUrl || actions?.screenshotUrl || context.sourceScreenshotUrl,
                 alreadyInReplyComposer: true,
@@ -31984,7 +32016,7 @@ export async function autoReplyThreadsAccount(
             postHash: context.postHash,
             commentAuthor: decision.candidate.author,
             commentText: decision.candidate.text,
-            replyText: result.comment || decision.reply,
+            replyText: result.comment || finalReply,
           });
           if (decision.candidate.key) repliedKeys.add(decision.candidate.key);
           repliedCommentIdentityKeys.add(buildThreadsAutoReplyRecentCommentIdentityKey(
@@ -34911,11 +34943,12 @@ export async function replyOwnPublishedThreadsPosts(
     maxPosts?: number;
     maxReplies?: number;
     commentPersona?: WarmupCommentPersona;
+    replySuffix?: string;
   },
   onProgress?: (progress: ThreadsOwnPostReplyProgress) => void,
 ): Promise<ThreadsOwnPostReplyProgress> {
   const replyMode = cfg.replyMode === "manual" ? "manual" : "ai";
-  const manualReplyText = normalizeSingleLine(cfg.replyText || "");
+  const manualReplyText = normalizeThreadsManualReplyText(cfg.replyText || "");
   if (replyMode === "manual" && !manualReplyText) throw new Error("自定义回覆內容不能為空");
   const targets = Array.from(new Map(
     (cfg.targets || [])
@@ -35101,7 +35134,7 @@ export async function replyOwnPublishedThreadsPosts(
         if (!comment) {
           throw new Error(replyMode === "manual" ? "自定义回覆內容不能為空" : "模型未能基於已發布主推文生成合格留言");
         }
-        return comment;
+        return appendThreadsReplySuffix(comment, cfg.replySuffix);
       }, {
         sourceScreenshotUrl: detailShotUrl,
         openViaCommentFirst: true,

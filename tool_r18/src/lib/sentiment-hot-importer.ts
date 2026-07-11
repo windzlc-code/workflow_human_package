@@ -39,7 +39,7 @@ const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 12_000;
 const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 60_000;
-const SENTIMENT_HOT_FAST_RETURN_COUNT = 5;
+const SENTIMENT_HOT_FAST_RETURN_COUNT = 10;
 const SENTIMENT_HOT_SUPPLEMENT_MIN_REMAINING_MS = 15_000;
 const SENTIMENT_HOT_ARCHIVE_BACKFILL_MAX_AGE_MS = 72 * 60 * 60 * 1000;
 const THREADS_BROWSER_EMPTY_SHELL_LIMIT = 3;
@@ -1012,14 +1012,22 @@ export function buildSentimentHotKeywords(args: {
     archive.name,
     Array.isArray((setup as any).genres) ? (setup as any).genres.join(" ") : "",
     (setup as any).personaType,
+    (setup as any).personaDescription,
+    (setup as any).contentTheme,
+    (setup as any).customTopic,
     archive.content,
     ...(args.memorySummaries || []),
     args.prompt,
   ].map(cleanText).filter(Boolean);
-  const joined = pieces.join(" ");
+  const normalizedPieces = pieces.map((piece) => piece
+    .replace(/(?:^|[，。、；;！？?!\s])(?:是?一位|是?一名|是?一个|是?一個|一位|一名|一个|一個|某位|這位|这位)(?=[\u3400-\u9fff]{2,12})/gu, " ")
+    .trim()
+  ).filter(Boolean);
+  const searchPieces = [...pieces, ...normalizedPieces];
+  const joined = searchPieces.join(" ");
   const personaName = cleanText(archive.name);
   const extracted = [
-    ...buildSearchKeywordCandidates({ archiveName: personaName, pieces }),
+    ...buildSearchKeywordCandidates({ archiveName: personaName, pieces: searchPieces }),
     ...extractDirectHanKeywords({ archiveName: personaName, text: joined }),
   ];
   return rankSearchKeywords([...new Set(extracted.filter(Boolean))]).slice(0, SENTIMENT_MODEL_KEYWORD_TARGET);
@@ -1125,6 +1133,9 @@ async function buildSentimentHotKeywordsWithModel(args: {
   const archive = args.archive || {};
   const setup = archive.setup || {};
   const personaText = [
+    (setup as any).personaDescription ? `personaDescription: ${(setup as any).personaDescription}` : "",
+    (setup as any).contentTheme ? `contentTheme: ${(setup as any).contentTheme}` : "",
+    (setup as any).customTopic ? `customTopic: ${(setup as any).customTopic}` : "",
     archive.name ? `人設名稱：${archive.name}` : "",
     archive.content ? `人設簡介：${archive.content}` : "",
     Array.isArray((setup as any).interests) && (setup as any).interests.length ? `興趣標籤參考（只能作為參考，不能直接照抄）：${(setup as any).interests.join("、")}` : "",
@@ -1143,6 +1154,7 @@ async function buildSentimentHotKeywordsWithModel(args: {
           "Each keyword must be a searchable noun phrase, 2-12 Chinese characters.",
           "The array must include 5 exact niche terms, 5 broader same-domain high-volume terms, 5 pain/scene terms, and 5 product/policy/event/audience terms.",
           "Broader terms are required because niche terms often have too few hot posts. They must still be topics this persona can naturally post about.",
+          "If the persona is newly created or very short, infer searchable topics from its occupation, role, scene, audience, products, events, and pain points. Do not use fixed anchor keywords.",
           "Do not output personality, tone, style, biography fragments, half sentences, quoted strings, or words containing 的/在/裡/里/風格/語氣/自認.",
           "Use Taiwan Traditional Chinese terms where possible. No markdown. No explanation.",
           "Persona:",
@@ -1159,13 +1171,19 @@ async function buildSentimentHotKeywordsWithModel(args: {
       result = await callTextUnderstandingModelWithFallback(
         SENTIMENT_HOT_KEYWORD_MODEL,
         keywordContents,
-        { temperature: 0.1, maxOutputTokens: 512 },
-        AbortSignal.timeout(5_000),
+        { temperature: 0.15, maxOutputTokens: 768 },
+        AbortSignal.timeout(10_000),
         modelOptions,
       );
     } catch (primaryError) {
       args.warnings.push(`Gemini 熱點關鍵詞模型不可用，已改用人設核心領域詞補齊：${primaryError instanceof Error ? primaryError.message : String(primaryError)}`);
-      throw primaryError;
+      result = await callTextUnderstandingModelWithFallback(
+        SENTIMENT_HOT_KEYWORD_FALLBACK_MODEL,
+        keywordContents,
+        { temperature: 0.15, maxOutputTokens: 768 },
+        AbortSignal.timeout(7_000),
+        modelOptions,
+      );
     }
     const archiveName = cleanText(archive.name);
     const sourceText = personaText;
@@ -1489,26 +1507,27 @@ export async function fetchSentimentHotCandidates(args: {
   memorySummaries?: string[];
   limit?: number;
   refresh?: boolean;
+  preheat?: boolean;
 }): Promise<FetchSentimentHotCandidatesResult> {
   const startedAt = Date.now();
   const warnings: string[] = [];
   const archive = args.archive;
   const archiveId = cleanText(archive?.id) || "default";
-  const keywordResult = await measureSentimentStage(
-    warnings,
-    "keywords",
-    () => withSentimentTimeout(
-      buildSentimentHotKeywordsWithModel({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries, warnings }),
-      Math.min(18_000, remainingSentimentHotTotalBudgetMs(startedAt, 12_000)),
-      undefined,
-    ),
-  );
-  let keywords = keywordResult || [];
   const personaSeedKeywords = buildSentimentHotKeywords({
     archive,
     prompt: args.prompt,
     memorySummaries: args.memorySummaries,
   });
+  const keywordResult = await measureSentimentStage(
+    warnings,
+    "keywords",
+    () => withSentimentTimeout(
+      buildSentimentHotKeywordsWithModel({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries, warnings }),
+      Math.min(personaSeedKeywords.length > 0 ? 8_000 : 18_000, remainingSentimentHotTotalBudgetMs(startedAt, 12_000)),
+      undefined,
+    ),
+  );
+  let keywords = keywordResult || [];
   if (!keywordResult) {
     warnings.push("模型生成热点关键词超时，已改用人设核心领域词继续抓取。");
   }
@@ -1541,6 +1560,7 @@ export async function fetchSentimentHotCandidates(args: {
   const limit = args.limit || 10;
   const poolLimit = Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET);
   const hasSearchKeywords = meaningfulNeedles(keywords).length > 0;
+  const excludeShownCandidates = args.refresh === true && args.preheat !== true;
 
   let candidates = hasSearchKeywords
     ? readThreadsSearchCandidateCache(archiveId, keywords, poolLimit, args.refresh === true)
@@ -1683,7 +1703,7 @@ export async function fetchSentimentHotCandidates(args: {
   }
 
   const hasReadyCandidatesForDisplay = hasSearchKeywords
-    && finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: args.refresh === true }).length >= limit;
+    && finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: excludeShownCandidates }).length >= limit;
   const shouldRunRealtimeSupplement = shouldFetchLiveCandidates && !hasReadyCandidatesForDisplay;
   if (shouldFetchLiveCandidates && hasReadyCandidatesForDisplay) {
     channelStats.push(`即時掃描已跳過，候選已補齊 ${limit}/${limit}`);
@@ -1724,7 +1744,7 @@ export async function fetchSentimentHotCandidates(args: {
 
   if (hasSearchKeywords && candidates.length < limit) {
     const beforeDatabaseCount = candidates.length;
-    const databaseCandidates = await readCandidatesFromDatabase({ archiveId, keywords, limit: poolLimit, excludeShown: args.refresh === true });
+    const databaseCandidates = await readCandidatesFromDatabase({ archiveId, keywords, limit: poolLimit, excludeShown: excludeShownCandidates });
     let databaseAddedCount = 0;
     if (databaseCandidates.length > 0) {
       const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
@@ -1749,7 +1769,7 @@ export async function fetchSentimentHotCandidates(args: {
       keywords,
       candidates,
       limit: poolLimit,
-      excludeShown: true,
+      excludeShown: excludeShownCandidates,
     });
     if (candidates.length > beforeWaitCount) {
       channelStats.push(`即時掃描新增 ${candidates.length - beforeWaitCount}`);
@@ -1784,7 +1804,7 @@ export async function fetchSentimentHotCandidates(args: {
     pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
   }
 
-  candidates = finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: args.refresh === true });
+  candidates = finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: excludeShownCandidates });
   const channelSummary = [
     `快取初始 ${initialCacheCount}`,
     ...channelStats,
@@ -1798,9 +1818,31 @@ export async function fetchSentimentHotCandidates(args: {
   } else if (candidates.length < limit) {
     warnings.push(`\u672c\u6b21\u53ea\u627e\u5230\u0020${candidates.length}/${limit}\u0020\u7bc7\u9ad8\u71b1\u5ea6\u4e2d\u6587\u71b1\u9ede\uff0c\u5df2\u904e\u6ffe\u91cd\u8907\u3001\u975e\u4e2d\u6587\u6216\u4f4e\u71b1\u5ea6\u5167\u5bb9\u3002`);
   }
-  rememberSentimentHotShown(archiveId, candidates);
+  if (args.preheat !== true) {
+    rememberSentimentHotShown(archiveId, candidates);
+  }
   scheduleSentimentRuntimeShutdown();
   return { candidates, keywords, cookieStatuses, warnings };
+}
+
+export async function preheatSentimentHotCandidates(args: {
+  archive: PersonaArchive;
+  limit?: number;
+  refresh?: boolean;
+}): Promise<{ ok: boolean; count: number; keywords: string[]; warnings: string[] }> {
+  const result = await fetchSentimentHotCandidates({
+    archive: args.archive,
+    memorySummaries: [],
+    limit: Math.max(1, Math.min(Number(args.limit || 10), 10)),
+    refresh: args.refresh !== false,
+    preheat: true,
+  });
+  return {
+    ok: result.candidates.length > 0,
+    count: result.candidates.length,
+    keywords: result.keywords,
+    warnings: result.warnings,
+  };
 }
 
 async function fillSentimentHotCandidatesToLimit(args: {
@@ -2349,10 +2391,7 @@ async function fetchThreadsBrowserSearchCandidates(args: {
   let emptyShellCount = 0;
   try {
     const { chromium } = await import("playwright");
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-dev-shm-usage"],
-    });
+    const browser = await chromium.launch(buildLocalChromiumLaunchOptions());
     try {
       const context = await browser.newContext({
         locale: "zh-TW",

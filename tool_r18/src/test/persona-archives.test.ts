@@ -630,6 +630,60 @@ describe("persona archives migration", () => {
     expect(afterTelegram?.publishHistory?.map((record) => record.platform).sort()).toEqual(["telegram", "threads"]);
   });
 
+  it("removes only the published ID when another queued post matches the final caption", async () => {
+    const archive = await createPersonaArchive({
+      id: "platform-final-caption-dedupe",
+      name: "Published ID only",
+      content: "Test persona",
+    });
+    const episodes = await appendEpisodesToArchive(archive.id, [
+      { number: 1, title: "Source", content: "Original caption", wordCount: 16, createdAt: "2026-05-01T00:00:00.000Z" },
+      { number: 2, title: "Final caption draft", content: "Final caption", wordCount: 13, createdAt: "2026-05-01T00:01:00.000Z" },
+    ]);
+    const sourcePostId = episodes[0].archivePostId!;
+    const finalCaption = episodes[1].content;
+
+    const published = await markArchiveEpisodesPublished(
+      archive.id,
+      [sourcePostId],
+      { [sourcePostId]: finalCaption },
+      { [sourcePostId]: { platform: "telegram", padCode: "PAD-A" } },
+    );
+
+    expect(getArchivePendingPostsForPlatform(published, "telegram").map((post) => post.id)).toEqual([
+      episodes[1].archivePostId,
+    ]);
+    expect(getArchivePendingPostsForPlatform(published, "threads")).toHaveLength(2);
+    expect(published?.publishHistory).toHaveLength(1);
+    expect(published?.publishHistory?.[0].archivePostId).toBe(sourcePostId);
+  });
+
+  it("keeps workflow-persona platform queues isolated after publishing", async () => {
+    const archive = await createPersonaArchive({
+      id: "workflow-persona-publish-removal-test",
+      name: "Workflow platform isolation",
+      content: "Test persona",
+    });
+    const [episode] = await appendEpisodesToArchive(archive.id, [{
+      number: 1,
+      title: "Workflow post",
+      content: "Keep this queued on the other platform",
+      wordCount: 38,
+      createdAt: "2026-05-01T00:00:00.000Z",
+    }]);
+
+    const published = await markArchiveEpisodesPublished(
+      archive.id,
+      [episode.archivePostId!],
+      {},
+      { [episode.archivePostId!]: { platform: "telegram", padCode: "PAD-A" } },
+    );
+
+    expect(getArchivePendingPostsForPlatform(published, "telegram")).toHaveLength(0);
+    expect(getArchivePendingPostsForPlatform(published, "threads")).toHaveLength(1);
+    expect(getArchivePendingPostsForPlatform(published, "threads")[0].id).toBe(episode.archivePostId);
+  });
+
   it("can copy a published history record back into the publish queue", async () => {
     const archive = await createPersonaArchive({
       id: "publish-history-requeue",

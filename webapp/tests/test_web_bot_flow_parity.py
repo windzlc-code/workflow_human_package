@@ -7,6 +7,7 @@ BOT_CONSOLE_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "web" / "
 PERSONA_DASHBOARD_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "core" / "persona_dashboard.py"
 SERVER_PATH = Path(__file__).parents[1] / "server.py"
 GENERATOR_PATH = Path(__file__).parents[2] / "tool_r18" / "scripts" / "skills" / "persona-generate-posts-once.ts"
+PERSONA_CREATE_PATH = Path(__file__).parents[2] / "tool_r18" / "scripts" / "skills" / "persona-create-once.ts"
 SOURCE = WEB_BOT_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 
@@ -39,6 +40,131 @@ def test_compact_console_reuses_full_client_and_syncs_named_sessions() -> None:
     assert "send({ action: entryAction })" in template
 
 
+def test_console_broadcasts_persona_revisions_for_live_page_refresh() -> None:
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+    response = _function_source("_response")
+
+    assert '"persona_revision": _persona_revision()' in response
+    assert "new BroadcastChannel('workflow-console-data')" in template
+    assert "data.persona_revision" in template
+    assert "workflow:persona-changed" in template
+    assert "if (!personaRevision)" in template
+    assert "personaRevision," in template
+    assert "activePanelAction," in template
+    assert "isPersonaPanelAction(activePanelAction)" in template
+    assert "persona_dashboard_module.REMOTE_CACHE" in SOURCE
+
+
+def test_persona_hot_refresh_runs_real_dashboard_task_and_polls_to_completion() -> None:
+    start = _function_source("_dashboard_metrics_refresh_start")
+    poll = _function_source("_dashboard_metrics_refresh_poll")
+    handle = _function_source("handle")
+
+    assert '"POST",\n            "/api/persona_dashboard/refresh"' in start
+    assert 'response["poll"]' in start
+    assert '"GET", f"/api/persona_dashboard/refresh/' in poll
+    assert 'status in {"queued", "running"}' in poll
+    assert 'return _hot_metrics_summary(persona_id, force=True)' in poll
+    assert 'return _dashboard_metrics_refresh_start(' in handle
+    assert 'return _dashboard_metrics_refresh_start()' in handle
+    assert handle.index('if action.startswith("shr_")') < handle.index('if action.startswith("dashboard_metrics_refresh_poll:")')
+
+
+def test_persona_pages_poll_and_subscribe_to_shared_live_updates() -> None:
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+    dashboard_js = (Path(__file__).parents[1] / "static" / "assets" / "persona-dashboard.js").read_text(encoding="utf-8")
+    app_js = (Path(__file__).parents[1] / "static" / "assets" / "app.js").read_text(encoding="utf-8")
+
+    assert "pollSourcePersonaRevision" in template
+    assert "setInterval(pollSourcePersonaRevision, 3000)" in template
+    assert "window.location.protocol + '//' + window.location.host + '/api/persona_dashboard/revision'" in template
+    assert "action.startsWith('shs:')" in template
+    assert "workflow-console-data" in dashboard_js
+    assert "workflow-console-data" in app_js
+    assert 'pdApi("/api/persona_dashboard/revision")' in dashboard_js
+    assert 'api("/api/persona_dashboard/revision")' in app_js
+    assert "}, 3000);" in dashboard_js
+    assert "}, 3000);" in app_js
+
+
+def test_dashboard_recomputes_immediately_when_archive_file_changes() -> None:
+    server = SERVER_PATH.read_text(encoding="utf-8")
+
+    assert "def _persona_dashboard_archive_source_changed(" in server
+    build_start = server.index("def _build_persona_dashboard_overview(")
+    build_end = server.index("\ndef ", build_start + 5)
+    build = server[build_start:build_end]
+    assert "_persona_dashboard_archive_source_changed(attached)" in build
+    assert "payload = _compute_persona_dashboard_overview()" in build
+    assert build.index("_persona_dashboard_archive_source_changed(attached)") < build.index("_persona_dashboard_overview_cache_is_fresh(attached)")
+    assert '_start_persona_dashboard_refresh("", trigger="page_view")' not in build
+
+
+def test_dashboard_automatic_full_refresh_defaults_to_daily() -> None:
+    server = SERVER_PATH.read_text(encoding="utf-8")
+
+    assert '"persona_dashboard_refresh_interval_seconds": 86400' in server
+    assert 'or "86400"' in server
+    assert "def _persona_dashboard_auto_monitor_remaining_seconds(" in server
+    assert '"next_refresh_in_seconds": remaining' in server
+    assert '@app.get("/api/persona_dashboard/revision")' in server
+
+
+def test_dashboard_refresh_status_survives_service_restart() -> None:
+    server = SERVER_PATH.read_text(encoding="utf-8")
+
+    assert 'return TOOL_R18_RUNTIME_DIR / "persona_dashboard_refresh_tasks.json"' in server
+    assert "def _persist_persona_dashboard_refresh_tasks_unlocked(" in server
+    assert "def _load_persona_dashboard_refresh_tasks(" in server
+    assert '"服务重启，上一轮热点刷新已中断，请重新点击刷新。"' in server
+    assert server.count("_persist_persona_dashboard_refresh_tasks_unlocked()") >= 4
+
+
+def test_dashboard_refresh_deduplicates_active_persona_jobs() -> None:
+    server = SERVER_PATH.read_text(encoding="utf-8")
+    start = server.index("def _start_persona_dashboard_refresh(")
+    end = server.index("\ndef ", start + 5)
+    source = server[start:end]
+
+    assert 'str(task.get("archive_id") or "").strip() == clean_archive_id' in source
+    assert 'bool(clean_archive_id)' in source
+    assert 'in {"queued", "running"}' in source
+    assert "return dict(existing)" in source
+
+
+def test_persona_dashboard_prefers_archive_ids_and_hides_confirmed_device_duplicates() -> None:
+    source = PERSONA_DASHBOARD_PATH.read_text(encoding="utf-8")
+
+    assert "def visible_local_personas(" in source
+    assert '_source_archive_key(persona.source_archive_id)' in source
+    assert 'str(persona.source_archive_id or "").startswith("device:")' in source
+    assert '"raw_count": len(raw_local_personas)' in source
+    assert 'for candidate in (_source_archive_key(persona.source_archive_id), _match_key(persona.id))' in source
+    assert 'if needle == _match_key(row.get("id"))' in source
+    assert "from core.persona_dashboard import build_overview, find_persona, visible_local_personas" in SOURCE
+    assert "for persona in visible_local_personas()" in SOURCE
+
+
+def test_web_persona_merge_deduplicates_local_projection_by_source_archive_id() -> None:
+    local_row = _function_source("_local_persona_row")
+    merge = _function_source("_merge_source_and_local_rows")
+    refresh = _function_source("_refresh_persona_overview_cache")
+
+    assert '"source_archive_id": persona.source_archive_id' in local_row
+    assert 'str(row.get("source_archive_id")' in merge
+    assert 'value.startswith("source:")' in merge
+    assert "keys.isdisjoint(seen)" in merge
+    assert 'overview.get("personas", [])' in refresh
+
+
+def test_exact_source_persona_id_is_not_replaced_by_another_persona_on_the_same_pad() -> None:
+    resolver = _function_source("_resolve_persona_for_action")
+
+    assert 'exact_source_row = local is None and str(row.get("id")' in resolver
+    assert "if not exact_source_row:" in resolver
+    assert resolver.index("if not exact_source_row:") < resolver.index("_find_related_real_persona(row, local)")
+
+
 def test_console_restores_and_caps_persistent_message_history() -> None:
     template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
 
@@ -50,6 +176,13 @@ def test_console_restores_and_caps_persistent_message_history() -> None:
     assert "pendingSourcePoll," in template
     assert "const restored = await restoreHistory()" in template
     assert "if (!restored) send({ action: entryAction })" in template
+
+
+def test_source_poll_retries_transient_proxy_errors_without_breaking_the_panel() -> None:
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert "if (isPoll && payload.action)" in template
+    assert "scheduleSourcePoll({ action: payload.action, interval_ms: 3000 }, targetGroup)" in template
 
 
 def test_specific_publish_callbacks_are_routed_before_generic_pub_prefix() -> None:
@@ -82,6 +215,55 @@ def test_post_generation_delegates_to_real_tool_r18_workflow() -> None:
     assert "_generate_draft_posts(" not in words_branch
 
 
+def test_persona_create_flow_delegates_keywords_and_creation_to_tg_functions() -> None:
+    continue_flow = _function_source("_continue_create_persona")
+    keyword_submit = _function_source("_submit_create_persona_keywords")
+    finish = _function_source("_finish_create_persona")
+    task_detail = _function_source("_source_task_detail")
+    script = PERSONA_CREATE_PATH.read_text(encoding="utf-8")
+
+    assert "_derive_keywords(" not in SOURCE
+    assert "_submit_create_persona_keywords(name, text)" in continue_flow
+    assert '_source_submit_task("persona_create_keywords", params)' in keyword_submit
+    assert 'response["poll"]' in keyword_submit
+    assert '"flow": "create_persona_keywords_wait"' in keyword_submit
+    assert 'response["poll"]' in finish
+    assert 'response["replace_panel"] = False' in finish
+    assert 'derivePersonaDirectionKeywordsWithCodex' in script
+    assert 'derivePersonaSpecFromPromptSelection' in script
+    assert 'input.action === "keywords"' in script
+    assert '.then(() => process.exit(0))' in script
+    assert 'process.exit(1)' in script
+    assert 'task_type == "persona_create_keywords"' in task_detail
+    assert '"flow": "create_persona_keywords"' in task_detail
+    assert 'task_type == "persona_create" and status in {"queued", "running"}' in task_detail
+    assert 'task_type == "persona_generate_image" and status in {"queued", "running"}' in task_detail
+    assert 'status == "success" and task_type == "persona_generate_image" and preview_image' in task_detail
+    assert '"步驟 3/3：請先生成人設圖。後續生成推文配圖會優先使用人設圖鎖定人物長相。"' in task_detail
+
+
+def test_persona_create_has_one_real_finish_implementation() -> None:
+    matches = [
+        node for node in TREE.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_finish_create_persona"
+    ]
+
+    assert len(matches) == 1
+
+
+def test_persona_generation_messages_hide_internal_task_fields() -> None:
+    keyword_submit = _function_source("_submit_create_persona_keywords")
+    finish = _function_source("_finish_create_persona")
+    submit = _function_source("_submit_source_post_task")
+    detail = _function_source("_source_task_detail")
+
+    assert 'f"❌ 人設核心關鍵詞提煉失敗\\n\\n{exc}"' not in keyword_submit
+    assert 'f"❌ 新建人設任務提交失敗\\n\\n{exc}"' not in finish
+    assert '人設 ID：{archive_id}' not in submit
+    assert 'status in {"failed", "cancelled"} and task_type == "persona_generate_image"' in detail
+    assert 'lines = ["❌ 新建人設失敗，請稍後重試。"]' in detail
+
+
 def test_server_maps_post_generation_to_persona_workflow_service() -> None:
     server = SERVER_PATH.read_text(encoding="utf-8")
     generator = GENERATOR_PATH.read_text(encoding="utf-8")
@@ -102,6 +284,45 @@ def test_workflow_persona_entry_uses_tg_content_type_branches() -> None:
     assert handle.index('if action.startswith("posts_branch_"):') < handle.index('if action.startswith("posts_"):')
     assert '_persona_content_type_picker(action[len("history_branch_") :], "history")' in handle
     assert '_persona_content_type_picker(action[len("pub_branch_") :], "publish")' in handle
+
+
+def test_workflow_persona_group_settings_match_tg_contract() -> None:
+    settings = _function_source("_persona_settings")
+    workflow_gate = _function_source("_is_workflow_persona_row")
+    save_group = _function_source("_save_persona_telegram_group")
+    input_handler = _function_source("_continue_state_text")
+
+    assert 'row_has_source_groups' in settings
+    assert 'if not row_has_source_groups:' in settings
+    assert 'row = _fresh_persona_row(persona_id, local, row)' in settings
+    assert 'f"TG免費群：{free_group or \'未綁定\'}"' in settings
+    assert 'f"TG付費群：{paid_group or \'未綁定\'}"' in settings
+    assert 'f"TG通用群：{free_group or \'未綁定\'}"' in settings
+    assert 'setup.get("imageWorkflow")' in workflow_gate
+    assert 'row.get("imageWorkflow")' in workflow_gate
+    assert '"persona_set_telegram_group"' in save_group
+    assert '_source_submit_task("persona_set_telegram_group", params)' in save_group
+    assert '_save_persona_telegram_group(persona, text, "free")' in input_handler
+    assert '_save_persona_telegram_group(persona, text, "paid")' in input_handler
+
+
+def test_persona_dashboard_preserves_server_workflow_group_fields() -> None:
+    source = PERSONA_DASHBOARD_PATH.read_text(encoding="utf-8")
+
+    assert '"setup": row.get("setup")' in source
+    assert '"imageWorkflow": bool(row.get("imageWorkflow"))' in source
+    assert 'matched_telegram.get("free_group")' in source
+    assert 'matched_telegram.get("paid_group")' in source
+    assert '"bound_pad_code": remote_pad_code or persona.pad_code' in source
+    assert '"http://workflow-delivery-r18:8098/api/persona_dashboard/overview"' in source
+
+
+def test_workflow_persona_bound_pad_prefers_tool_r18_source() -> None:
+    bound_info = _function_source("_persona_bound_info")
+
+    assert 'source_pad = str(row.get("bound_pad_code")' in bound_info
+    assert 'workflow_persona = _is_workflow_persona_row' in bound_info
+    assert '(source_pad if workflow_persona else "")' in bound_info
 
 
 def test_source_post_actions_keep_real_archive_and_post_ids() -> None:
@@ -260,7 +481,9 @@ def test_publish_entry_and_custom_media_route_to_real_source_publish() -> None:
     assert '"customMediaUrl"' in custom
     assert '"generateImage"' in custom
     assert '"padCodes"' in multi
-    assert "state.flow === 'sentiment_hot_edit_input' || state.flow === 'custom_publish_content' || state.flow === 'custom_publish_ready'" in template
+    assert "function mediaUploadFlowActive()" in template
+    assert "if (mediaUploadFlowActive())" in template
+    assert "async function handleMediaFile(file)" in template
     assert 'action == "custom_publish_add_media"' in handle
     assert '"linkTemplateApplied"' in custom
     assert '"idempotencyKey"' in custom
@@ -519,12 +742,43 @@ def test_hot_media_upload_uses_web_composer_and_tg_edit_flow() -> None:
     html = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
     handle = _function_source("handle")
     media_input = _function_source("_sentiment_hot_input_media")
+    server = SERVER_PATH.read_text(encoding="utf-8")
 
     assert 'id="bot-media-input"' in html
-    assert "readAsDataURL(file)" in html
-    assert "state.flow === 'sentiment_hot_edit_input'" in html
+    assert "webBotUploadEndpoint" in html
+    assert "new FormData()" in html
+    assert "uploaded.source_url" in html
+    assert "visibleMedia" in html
+    assert "document.createElement(media.type === 'video' ? 'video' : 'img')" in html
+    assert 'card.video ? `<video' in html
+    assert "function mediaUploadFlowActive()" in html
+    assert "state.flow === 'replace_persona_image'" in html
+    assert "if (mediaUploadFlowActive())" in html
+    assert "async function handleMediaFile(file)" in html
+    assert "phone.addEventListener(eventName" in html
+    assert "event.dataTransfer.files[0]" in html
+    assert "send({ action: 'image_menu' }" in html
     assert 'state.get("flow") == "sentiment_hot_edit_input"' in handle
+    assert 'state.get("flow") == "replace_persona_image" and media' in handle
+    assert "_replace_persona_image_from_media(media, state)" in handle
+    assert 'preview_url' in media_input
     assert 'media_type not in {"image", "video"}' in media_input
+    assert '@app.post("/threads-console/api/web-bot/upload"' in server
+    assert "user: dict[str, Any] = Depends(get_current_user)" in server
+    assert 'WEB_BOT_MEDIA_MAX_BYTES = 25 * 1024 * 1024' in server
+    assert 'TOOL_R18_UPLOAD_ROOT / "web_bot"' in server
+    assert "for stale_path in uploads[200:]" in server
+
+
+def test_persona_image_upload_rejects_arbitrary_remote_urls() -> None:
+    validator = _function_source("_safe_custom_upload_image_url")
+    replace = _function_source("_replace_persona_image_from_media")
+    downloader = _function_source("_save_persona_image_from_url")
+
+    assert 'path.startswith("/tool_r18_uploads/web_bot/")' in validator
+    assert 'allowed_hosts = {"workflow-delivery-r18"' in validator
+    assert "_safe_custom_upload_image_url" in replace
+    assert "response.read(max_bytes + 1)" in downloader
 
 
 def test_console_guards_duplicate_and_stale_publish_requests() -> None:

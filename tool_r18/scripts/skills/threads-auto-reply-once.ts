@@ -11,6 +11,7 @@ type ThreadsAutoReplyOnceInput = {
   maxPosts?: number;
   maxReplies?: number;
   commentPersona?: WarmupCommentPersona;
+  replySuffix?: string;
   configPath?: string;
   dataDir?: string;
 };
@@ -41,6 +42,7 @@ async function main() {
     maxPosts: input.maxPosts,
     maxReplies: input.maxReplies,
     commentPersona: input.commentPersona,
+    replySuffix: input.replySuffix,
   };
 
   if (input.dryRun !== false) {

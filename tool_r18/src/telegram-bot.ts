@@ -19,14 +19,14 @@ import { buildRegeneratePostInstruction, calculateRegeneratedPostSimilarity, isR
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, replyOwnPublishedThreadsPosts, buildWarmupInterestKeywords, extractThreadsPublishedPostUrlFromReaderMarkdown, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress, type ThreadsOwnPostReplyProgress, type ThreadsOwnPostReplyTarget } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
-import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updateArchivePostMedia, updatePersonaArchivePostDraft, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, markFavoritePostsPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
+import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, getArchivePendingPostsForPlatform, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updateArchivePostMedia, updatePersonaArchivePostDraft, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, markFavoritePostsPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
 import { addSummariesToMemoryAsync, deletePersonaMemoryEntryAsync, getPersonaMemoryAsync, type PersonaMemoryEntry } from "@/lib/persona-memory";
 import { buildMemoryOutline, normalizeMemorySummaryForStorage } from "@/core/memory/memory-format";
 import { WORKFLOW_PERSONA_SEEDS, resolvePersonaFreeContentTargetWords, usesJinjunyaFreeContentStyle } from "@/lib/workflow-personas";
 import { buildPersonaPaidCaptionToneGuide, isMechanicalPaidCaption } from "@/lib/paid-r18-caption-style";
 import { getMediaExtension, isVideoMediaUrl, parseDataUrlMedia } from "@/lib/media-utils";
 import { callTextUnderstandingModelWithFallback, extractText, getInlineData, isTextModelFallbackError } from "@/lib/gemini-client";
-import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, fetchThreadsProfileHotMetrics, getLiveSentimentBrowserAuthProfileBinding, getSentimentBrowserAuthProfileBinding, refreshSentimentBrowserCookiesForPlatform, refreshSentimentSourceMetrics, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
+import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, fetchThreadsProfileHotMetrics, getLiveSentimentBrowserAuthProfileBinding, getSentimentBrowserAuthProfileBinding, preheatSentimentHotCandidates, refreshSentimentBrowserCookiesForPlatform, refreshSentimentSourceMetrics, type SentimentCookieStatus } from "@/lib/sentiment-hot-importer";
 import { rememberSentimentHotImported, rememberSentimentHotSelected, type SentimentHotCandidate } from "@/lib/sentiment-candidate-store";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import { buildPersonaVisualIdentityCue } from "@/lib/persona-image-search";
@@ -159,6 +159,32 @@ function formatWarmupStepForTelegram(step: string | undefined): string {
     .replace(/\s+/g, " ")
     .trim();
   return cleaned || "养号进行中...";
+}
+
+export function formatPublishStepForTelegram(step: string | undefined): string {
+  const raw = normalizeTelegramSingleLine(step || "");
+  if (!raw) return "正在执行发布流程...";
+  const exactTranslations: Record<string, string> = {
+    "Telegram cold start: reset to desktop and clear the previous screen": "冷启动 Telegram：返回智能体手机桌面并清理上一画面",
+    "Telegram cold start complete: normalize to the chat list": "Telegram 冷启动完成：正在统一回到聊天列表",
+  };
+  const translated = exactTranslations[raw] || raw;
+  const localized = translated
+    .replace(/\bcold start complete\b/gi, "冷启动完成")
+    .replace(/\bcold start\b/gi, "冷启动")
+    .replace(/\breset to desktop\b/gi, "返回智能体手机桌面")
+    .replace(/\bclear the previous screen\b/gi, "清理上一画面")
+    .replace(/\bnormalize to the chat list\b/gi, "统一回到聊天列表")
+    .replace(/\bstate=/gi, "状态=")
+    .replace(/\bdiff=/gi, "差异值=")
+    .replace(/\bbest=/gi, "最佳值=")
+    .replace(/\bApp\b/g, "应用");
+  const productNamesRemoved = localized.replace(/\b(?:Telegram|Threads|Instagram|Twitter|VMOS|Google Play|Reels?|Story|TG|ID|URL|R18|AI|X)\b/gi, "");
+  if (!/[\u3400-\u9fff]/u.test(localized) && /[A-Za-z]{2,}/.test(productNamesRemoved)) {
+    console.log(`[telegram][hidden_english_publish_step] ${raw}`);
+    return "正在执行发布流程...";
+  }
+  return localized;
 }
 
 type TelegramPublishPlatform = "threads" | "telegram";
@@ -616,10 +642,14 @@ const pendingThreadsAutoReplyDaysInputs = new Map<number, {
 
 const pendingThreadsOwnPostReplyInputs = new Map<number, {
   archiveId: string;
-  stage: "await_reply_text" | "await_min_views" | "await_days";
+  stage: "choose_reply_content" | "await_reply_text" | "await_min_views" | "await_days" | "edit_reply_text" | "edit_min_views" | "edit_days";
   replyMode?: "manual" | "ai";
   replyText?: string;
+  manualReplyText?: string;
+  linkReplyText?: string;
   minViews?: number;
+  maxAgeDays?: number;
+  editing?: boolean;
   createdAt: number;
 }>();
 
@@ -627,10 +657,42 @@ const pendingThreadsOwnPostReplyRuns = new Map<number, {
   archiveId: string;
   replyMode: "manual" | "ai";
   replyText?: string;
+  manualReplyText?: string;
+  linkReplyText?: string;
   minViews: number;
   maxAgeDays: number;
   createdAt: number;
 }>();
+
+type AutoReplyLinkTemplateFlow = "comments" | "hot" | "hot_content";
+const pendingAutoReplyLinkPresetSelections = new Map<string, string | null>();
+const pendingAutoReplyLinkSettingsReturns = new Map<number, { archiveId: string; flow: AutoReplyLinkTemplateFlow }>();
+const autoReplyLinkArchiveTokens = new Map<string, { chatId: number; archiveId: string; createdAt: number }>();
+
+function autoReplyLinkPresetSelectionKey(chatId: number, archiveId: string, flow: AutoReplyLinkTemplateFlow) {
+  return `${chatId}:${archiveId}:${flow}`;
+}
+
+function autoReplyLinkTemplateFlowCode(flow: AutoReplyLinkTemplateFlow): "c" | "h" | "m" {
+  return flow === "comments" ? "c" : flow === "hot_content" ? "m" : "h";
+}
+
+function rememberAutoReplyLinkArchiveToken(chatId: number, archiveId: string): string {
+  const now = Date.now();
+  for (const [token, state] of autoReplyLinkArchiveTokens) {
+    if (now - state.createdAt > 2 * 60 * 60 * 1000) autoReplyLinkArchiveTokens.delete(token);
+    else if (state.chatId === chatId && state.archiveId === archiveId) return token;
+  }
+  const token = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+  autoReplyLinkArchiveTokens.set(token, { chatId, archiveId, createdAt: now });
+  return token;
+}
+
+function resolveAutoReplyLinkArchiveId(chatId: number, tokenOrArchiveId: string): string {
+  const state = autoReplyLinkArchiveTokens.get(tokenOrArchiveId);
+  if (!state || state.chatId !== chatId || Date.now() - state.createdAt > 2 * 60 * 60 * 1000) return tokenOrArchiveId;
+  return state.archiveId;
+}
 
 const pendingWarmupConfigs = new Map<number, {
   platform?: TelegramWarmupPlatform;
@@ -741,6 +803,7 @@ const pendingManualPublishes = new Map<number, {
   groupContentType?: TelegramGroupContentType;
   linkEndingPresetApplied?: boolean;
   contentOverrides?: Record<string, string>;
+  postIds?: string[];
   origin?: "post_detail";
   stage: "choose_platform" | "choose_post" | "choose_count" | "preview_confirm";
 }>();
@@ -856,6 +919,7 @@ type PendingPublishPadSelection = {
   groupContentType?: TelegramGroupContentType;
   retryPostIdsByPad?: Record<string, string[]>;
   completedPadCodesByPost?: Record<string, string[]>;
+  completedPublishTargetsByPost?: Record<string, NonNullable<NonNullable<PersonaArchive["publishHistory"]>[number]["publishedTargets"]>>;
   linkEndingPresetApplied?: boolean;
   contentOverrides?: Record<string, string>;
   padPage?: number;
@@ -883,6 +947,7 @@ type StoredPostMediaItem = {
   url: string;
   type?: "image" | "video" | "unknown";
   localPath?: string;
+  sourceUrl?: string;
   warning?: string;
 };
 
@@ -2242,8 +2307,30 @@ function getStoredPostMediaUrlForList(post: StoredPostListItem) {
   return getStoredPostPrimaryMediaUrl(post);
 }
 
-export function getStoredPostPrimaryMediaUrl(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">): string {
-  return String(getStoredPostMediaItems(post)[0]?.url || "").trim();
+export function getStoredPostPrimaryMediaUrl(
+  post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">,
+  validateAvailability = false,
+): string {
+  if (!validateAvailability) return String(getStoredPostMediaItems(post)[0]?.url || "").trim();
+  const mediaItems = getStoredPostMediaItems(post);
+  for (const historyItem of [...(post.imageHistory || [])].reverse()) {
+    const imageUrl = String(historyItem?.imageUrl || "").trim();
+    if (imageUrl && !mediaItems.some((item) => item.url === imageUrl || item.sourceUrl === imageUrl)) {
+      mediaItems.push({ url: imageUrl, sourceUrl: imageUrl });
+    }
+  }
+  for (const item of mediaItems) {
+    const localPath = resolveExistingLocalMediaPath(String(item.localPath || ""));
+    if (localPath) return localPath;
+    const publicUrl = String(item.sourceUrl || "").trim();
+    if (/^https?:\/\//i.test(publicUrl)) return publicUrl;
+    if (/^data:/i.test(publicUrl) && parseDataUrlMedia(publicUrl)) return publicUrl;
+    if (/^https?:\/\//i.test(item.url)) return item.url;
+    if (/^data:/i.test(item.url) && parseDataUrlMedia(item.url)) return item.url;
+    const resolvedPath = resolveExistingLocalMediaPath(String(item.url || ""));
+    if (resolvedPath) return resolvedPath;
+  }
+  return "";
 }
 
 function resolveArchivePostCollection(archive: PersonaArchive, source?: "posts" | "favorites"): PersonaArchive["posts"] {
@@ -3078,6 +3165,15 @@ function conciseTaskFailureReason(rawMessage: string): string | null {
   return null;
 }
 
+class ArchiveSyncAfterPublishError extends Error {
+  readonly code = "ARCHIVE_SYNC_AFTER_PUBLISH_FAILED";
+}
+
+function isArchiveSyncAfterPublishError(error: unknown): error is ArchiveSyncAfterPublishError {
+  return error instanceof ArchiveSyncAfterPublishError
+    || (typeof error === "object" && error !== null && (error as { code?: string }).code === "ARCHIVE_SYNC_AFTER_PUBLISH_FAILED");
+}
+
 export function formatUserFacingError(errorOrMessage: unknown, fallback = "操作失败，请稍后重试。"): string {
   const raw = rawErrorMessage(errorOrMessage);
   const diagnosticHint = extractDiagnosticHint(raw);
@@ -3902,29 +3998,39 @@ function buildPersonaAutoReplyModeRows(archiveId: string): Array<Array<{ text: s
   ];
 }
 
-function buildPersonaOwnPostAutoReplyPlatformText(archive: PersonaArchive, run: { replyMode?: "manual" | "ai"; replyText?: string; minViews: number; maxAgeDays: number }) {
+function buildPersonaOwnPostAutoReplyPlatformText(
+  archive: PersonaArchive,
+  run: { replyMode?: "manual" | "ai"; replyText?: string; manualReplyText?: string; linkReplyText?: string; minViews: number; maxAgeDays: number },
+  linkTemplateLine?: string,
+) {
   const replyMode = run.replyMode === "manual" ? "manual" : "ai";
   return [
     "🔥 自動回覆熱點推文",
     "",
     `人設：${archive.name}`,
     `回复模式：${replyMode === "manual" ? "使用自定义内容" : "AI 根据人设和推文自动回复"}`,
-    replyMode === "manual" ? `回覆內容：${run.replyText || ""}` : "",
+    replyMode === "manual" ? `整体回复预览：\n${run.replyText || ""}` : "",
     `瀏覽量門檻：大於等於 ${formatCompactCount(run.minViews)}`,
     `查看天數：${run.maxAgeDays} 天內`,
+    linkTemplateLine || "",
     "",
     "條件：只回覆自己已發布、有真實 Threads 發布連結、符合瀏覽量和天數、且未回覆過的主推文。",
     "請選擇平台後開始執行。",
   ].filter(Boolean).join("\n");
 }
 
-function buildPersonaOwnPostAutoReplyPlatformRows(archiveId: string, replyMode: "manual" | "ai" = "ai"): Array<Array<{ text: string; callback_data: string }>> {
+function buildPersonaOwnPostAutoReplyPlatformRows(
+  archiveId: string,
+  replyMode: "manual" | "ai" = "ai",
+  linkTemplateRows: Array<Array<{ text: string; callback_data: string }>> = [],
+): Array<Array<{ text: string; callback_data: string }>> {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
     [{ text: "💬 Threads 內部評論", callback_data: `acctautoreplyhot_threads_${archiveId}` }],
   ];
   if (replyMode === "manual") {
-    rows.push([{ text: "✏️ 修改回覆內容", callback_data: `ownreply_text_${archiveId}` }]);
+    rows.push([{ text: "✏️ 修改回覆內容", callback_data: `ownreply_content_${archiveId}` }]);
   }
+  rows.push(...linkTemplateRows);
   rows.push(
     [
       { text: "👁 修改瀏覽量", callback_data: `ownreply_views_${archiveId}` },
@@ -3934,6 +4040,76 @@ function buildPersonaOwnPostAutoReplyPlatformRows(archiveId: string, replyMode: 
     [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${archiveId}` }],
   );
   return rows;
+}
+
+async function renderThreadsOwnPostAutoReplyFinal(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number | undefined,
+  archive: PersonaArchive,
+  runState: { replyMode: "manual" | "ai"; replyText?: string; manualReplyText?: string; linkReplyText?: string; minViews: number; maxAgeDays: number },
+) {
+  const usesAiReply = runState.replyMode === "ai";
+  await safeEditOrSend(bot, chatId, messageId, buildPersonaOwnPostAutoReplyPlatformText(
+    archive,
+    runState,
+    usesAiReply ? formatSelectedAutoReplyLinkPresetLine(chatId, archive, "hot") : undefined,
+  ), {
+    reply_markup: {
+      inline_keyboard: buildPersonaOwnPostAutoReplyPlatformRows(
+        archive.id,
+        runState.replyMode,
+        usesAiReply ? [buildAutoReplyLinkPresetEntryRow(chatId, archive.id, "hot")] : [],
+      ),
+    },
+  });
+}
+
+export function composeThreadsCustomReplyContent(manualText?: string, linkText?: string): string {
+  const manual = String(manualText || "").trim();
+  const link = String(linkText || "").trim();
+  if (!manual) return link;
+  if (!link || manual.endsWith(link)) return manual;
+  return `${manual}\n${link}`;
+}
+
+export function parseOwnReplyContentEditArchiveId(callbackData: string): string | null {
+  const match = String(callbackData || "").match(/^ownreply_content_(?!continue_)(.+)$/);
+  return match?.[1] || null;
+}
+
+async function renderThreadsOwnPostManualReplySourceChoice(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number | undefined,
+  archive: PersonaArchive,
+) {
+  const draft = pendingThreadsOwnPostReplyInputs.get(chatId);
+  const manualText = draft?.archiveId === archive.id ? String(draft.manualReplyText || "").trim() : "";
+  const linkText = draft?.archiveId === archive.id ? String(draft.linkReplyText || "").trim() : "";
+  const preview = composeThreadsCustomReplyContent(manualText, linkText);
+  const editing = draft?.archiveId === archive.id && draft.editing === true;
+  const archiveToken = rememberAutoReplyLinkArchiveToken(chatId, archive.id);
+  await safeEditOrSend(bot, chatId, messageId, [
+    "✍️ 设置自定义回复内容",
+    "",
+    `人设：${archive.name}`,
+    "",
+    "整体预览：",
+    preview || "（尚未设置回复内容）",
+  ].join("\n"), {
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: manualText ? "✏️ 修改手动文字" : "✍️ 添加手动文字", callback_data: `ownreply_manual_input_${archive.id}` }],
+        [{ text: linkText ? "🔗 更换链接模板" : "🔗 添加链接模板", callback_data: `arls_m_${archiveToken}` }],
+        ...(manualText ? [[{ text: "🗑 清除手动文字", callback_data: `ownreply_clear_text_${archive.id}` }]] : []),
+        ...(linkText ? [[{ text: "🗑 清除链接模板", callback_data: `ownreply_clear_link_${archive.id}` }]] : []),
+        [{ text: "✅ 确认内容并继续", callback_data: `ownreply_content_continue_${archive.id}` }],
+        [{ text: "◀️ 返回", callback_data: editing ? `arlback_m_${archiveToken}` : `persona_autoreply_hot_${archive.id}` }],
+      ],
+    },
+  });
 }
 
 function normalizeThreadsOwnPostReplyHistoryUrl(raw: unknown): string {
@@ -4132,6 +4308,7 @@ export async function runThreadsOwnPostReplyOnce(
     replyText?: string;
     minViews: number;
     maxAgeDays: number;
+    replySuffix?: string;
     dryRun?: boolean;
   },
   onProgress?: (progress: ThreadsOwnPostReplyProgress) => void,
@@ -4190,6 +4367,7 @@ export async function runThreadsOwnPostReplyOnce(
       targets,
       replyMode,
       replyText,
+      replySuffix: String(input.replySuffix || "").trim(),
       maxPosts: 5,
       maxReplies: 3,
       commentPersona: buildWarmupCommentPersonaFromArchive(resolvedTargets.archive),
@@ -4423,6 +4601,7 @@ async function runPersonaThreadsAutoReplyFromTelegram(
   runtimeOps: RuntimePadOperationHooks,
   maxAgeDays = 2,
   returnCallback = `acctautoreply_${archiveId}`,
+  replySuffix = "",
 ): Promise<void> {
   const archive = await loadPersonaArchive(archiveId).catch(() => null);
   if (!archive) {
@@ -4449,7 +4628,7 @@ async function runPersonaThreadsAutoReplyFromTelegram(
     const result = await autoReplyThreadsAccount(
       creds,
       boundPad.padCode,
-      { maxPosts: 5, maxReplies: 3, maxAgeDays, commentPersona },
+      { maxPosts: 5, maxReplies: 3, maxAgeDays, commentPersona, replySuffix },
       (p) => {
         assertPadOperationNotCancelled(padOperationKey);
         lastProgress = p;
@@ -5240,6 +5419,72 @@ export function applyLinkEndingPresetToText(content: string, active: { linkUrl?:
   return next.trim();
 }
 
+function getSelectedAutoReplyLinkPreset(chatId: number, archive: PersonaArchive, flow: AutoReplyLinkTemplateFlow): LinkEndingPreset | null {
+  const presetId = pendingAutoReplyLinkPresetSelections.get(autoReplyLinkPresetSelectionKey(chatId, archive.id, flow));
+  if (!presetId) return null;
+  return getSelectableLinkEndingPresets(archive.setup as any).find((preset) => preset.id === presetId) || null;
+}
+
+export function buildAutoReplyLinkPresetPickerRows(
+  chatId: number,
+  archive: PersonaArchive,
+  flow: AutoReplyLinkTemplateFlow,
+): Array<Array<{ text: string; callback_data: string }>> {
+  const presets = getSelectableLinkEndingPresets(archive.setup as any);
+  const selectedPresetId = pendingAutoReplyLinkPresetSelections.get(autoReplyLinkPresetSelectionKey(chatId, archive.id, flow));
+  const flowCode = autoReplyLinkTemplateFlowCode(flow);
+  const archiveToken = rememberAutoReplyLinkArchiveToken(chatId, archive.id);
+  return [
+    ...presets.map((preset, index) => [{
+      text: `${selectedPresetId === preset.id ? "✅" : "🔗"} ${preset.name || preset.endingText || preset.linkUrl || `模板 ${index + 1}`}`.slice(0, 60),
+      callback_data: `arl_${flowCode}_${index}_${archiveToken}`,
+    }]),
+    [{
+      text: `${!selectedPresetId ? "✅" : "🚫"} ${flow === "hot_content" ? "跳过链接模板" : "不添加链接模板"}`,
+      callback_data: `arl_${flowCode}_-1_${archiveToken}`,
+    }],
+    [{ text: "➕ 新建链接模板", callback_data: `arladd_${flowCode}_${archiveToken}` }],
+    [{ text: "◀️ 返回自动回复确认", callback_data: `arlback_${flowCode}_${archiveToken}` }],
+  ];
+}
+
+function buildAutoReplyLinkPresetEntryRow(chatId: number, archiveId: string, flow: AutoReplyLinkTemplateFlow) {
+  const flowCode = autoReplyLinkTemplateFlowCode(flow);
+  return [{ text: "🔗 链接模板设置", callback_data: `arls_${flowCode}_${rememberAutoReplyLinkArchiveToken(chatId, archiveId)}` }];
+}
+
+async function renderAutoReplyLinkPresetPicker(
+  bot: TelegramBot,
+  chatId: number,
+  messageId: number | undefined,
+  archive: PersonaArchive,
+  flow: AutoReplyLinkTemplateFlow,
+) {
+  const presets = getSelectableLinkEndingPresets(archive.setup as any);
+  await safeEditOrSend(bot, chatId, messageId, [
+    "🔗 自动回复链接模板设置",
+    "",
+    `人设：${archive.name}`,
+    `使用场景：${flow === "comments" ? "自动回复评论" : flow === "hot_content" ? "自定义回复内容" : "自动回复热点推文"}`,
+    "",
+    presets.length ? "请选择本次任务使用的链接模板。" : "当前还没有链接模板，可以立即新建后再选择。",
+    "此处只临时设置本次自动回复，不修改其他发布任务。",
+  ].join("\n"), {
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: buildAutoReplyLinkPresetPickerRows(chatId, archive, flow) },
+  });
+}
+
+function formatSelectedAutoReplyLinkPresetLine(chatId: number, archive: PersonaArchive, flow: AutoReplyLinkTemplateFlow) {
+  const preset = getSelectedAutoReplyLinkPreset(chatId, archive, flow);
+  return `链接模板：${preset ? preset.name || preset.endingText || preset.linkUrl || "已选择" : "不添加"}`;
+}
+
+function buildSelectedAutoReplyReplySuffix(chatId: number, archive: PersonaArchive, flow: AutoReplyLinkTemplateFlow) {
+  const preset = getSelectedAutoReplyLinkPreset(chatId, archive, flow);
+  return preset ? applyLinkEndingPresetToText("", preset) : "";
+}
+
 export function removeLinkEndingPresetFromText(content: string, active: { linkUrl?: string; endingText?: string } | null | undefined): string {
   let next = String(content || "").trim();
   if (!active) return next;
@@ -5248,6 +5493,13 @@ export function removeLinkEndingPresetFromText(content: string, active: { linkUr
   if (linkUrl) next = removeTrailingLinkEndingSegment(next, linkUrl);
   if (endingText) next = removeTrailingLinkEndingSegment(next, endingText);
   return next.trim();
+}
+
+function resolveLinkPresetReturnCallback(chatId: number, archiveId: string) {
+  const returnState = pendingAutoReplyLinkSettingsReturns.get(chatId);
+  if (!returnState || returnState.archiveId !== archiveId) return `linksettings_${archiveId}`;
+  const flowCode = autoReplyLinkTemplateFlowCode(returnState.flow);
+  return `arls_${flowCode}_${rememberAutoReplyLinkArchiveToken(chatId, archiveId)}`;
 }
 
 async function handlePendingLinkEndingPresetInput(args: {
@@ -5267,24 +5519,30 @@ async function handlePendingLinkEndingPresetInput(args: {
   const presetInput = parseLinkEndingPresetFromText(args.text || "", args.msg);
   if (!presetInput) {
     await args.bot.sendMessage(args.chatId, "❌ 沒有讀取到結尾語句或鏈接。請重新進入「鏈接設置」後再新增。", {
-      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回鏈接設置", callback_data: `linksettings_${args.archiveId}` }]] },
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回链接模板设置", callback_data: resolveLinkPresetReturnCallback(args.chatId, args.archiveId) }]] },
     });
     return;
   }
   const now = new Date().toISOString();
+  const returnState = pendingAutoReplyLinkSettingsReturns.get(args.chatId);
+  const isTemporaryAutoReplyPreset = returnState?.archiveId === args.archiveId;
   const preset: LinkEndingPreset = {
     id: `lp-${Date.now().toString(36)}`,
     ...presetInput,
-    enabled: true,
+    enabled: !isTemporaryAutoReplyPreset,
     createdAt: now,
     updatedAt: now,
   };
-  const existingPresets = getLinkEndingPresets(archive.setup as any).map((item) => ({ ...item, enabled: false }));
+  const existingPresets = getLinkEndingPresets(archive.setup as any).map((item) => (
+    isTemporaryAutoReplyPreset ? item : { ...item, enabled: false }
+  ));
   const updated = await updatePersonaArchiveProfile(args.archiveId, {
     setup: {
       ...(archive.setup || {}),
       linkEndingPresets: [...existingPresets, preset],
-      activeLinkEndingPresetId: preset.id,
+      activeLinkEndingPresetId: isTemporaryAutoReplyPreset
+        ? String((archive.setup as any)?.activeLinkEndingPresetId || "")
+        : preset.id,
     } as any,
   }).catch((error: any) => {
     console.error("[telegram][save_link_ending_preset_error]", error?.message || error);
@@ -5292,14 +5550,32 @@ async function handlePendingLinkEndingPresetInput(args: {
   });
   if (!updated) {
     await args.bot.sendMessage(args.chatId, "❌ 鏈接設置模板保存失敗，請稍後重試。", {
-      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回鏈接設置", callback_data: `linksettings_${args.archiveId}` }]] },
+      reply_markup: { inline_keyboard: [[{ text: "◀️ 返回链接模板设置", callback_data: resolveLinkPresetReturnCallback(args.chatId, args.archiveId) }]] },
     });
     return;
   }
   invalidatePersonaListCache();
-  await args.bot.sendMessage(args.chatId, "✅ 鏈接設置模板已保存並啟用。", {
+  if (returnState?.archiveId === args.archiveId) {
+    pendingAutoReplyLinkPresetSelections.set(
+      autoReplyLinkPresetSelectionKey(args.chatId, args.archiveId, returnState.flow),
+      preset.id,
+    );
+    if (returnState.flow === "hot_content") {
+      const draft = pendingThreadsOwnPostReplyInputs.get(args.chatId);
+      if (draft?.archiveId === args.archiveId) {
+        pendingThreadsOwnPostReplyInputs.set(args.chatId, {
+          ...draft,
+          linkReplyText: applyLinkEndingPresetToText("", preset),
+          createdAt: Date.now(),
+        });
+      }
+    }
+  }
+  await args.bot.sendMessage(args.chatId, isTemporaryAutoReplyPreset
+    ? "✅ 链接模板已保存并用于本次自动回复，不会修改普通发布的启用模板。"
+    : "✅ 鏈接設置模板已保存並啟用。", {
     disable_web_page_preview: true,
-    reply_markup: { inline_keyboard: [[{ text: "🔗 查看鏈接設置", callback_data: `linksettings_${args.archiveId}` }]] },
+    reply_markup: { inline_keyboard: [[{ text: "🔗 返回链接模板设置", callback_data: resolveLinkPresetReturnCallback(args.chatId, args.archiveId) }]] },
   });
 }
 
@@ -9063,6 +9339,14 @@ export async function createPersonaBySpec(
     }
   }
   invalidatePersonaListCache();
+  void loadPersonaArchive(result.archiveId)
+    .then((archive) => preheatSentimentHotCandidates({ archive, limit: 10, refresh: true }))
+    .then((preheated) => {
+      console.info(`[sentiment_hot_preheat][persona_create] archiveId=${result.archiveId} count=${preheated.count}/10`);
+    })
+    .catch((error) => {
+      console.warn("[sentiment_hot_preheat][persona_create_failed]", error instanceof Error ? error.message : String(error));
+    });
   return { archiveId: result.archiveId, name: result.name };
 }
 
@@ -9118,7 +9402,10 @@ function pickBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
-async function runCodexJsonInstruction(instruction: string): Promise<any> {
+async function runCodexJsonInstruction(
+  instruction: string,
+  options: { maxOutputTokens?: number } = {},
+): Promise<any> {
   const promptFile = createTempPromptFile(instruction);
   const outputFile = getCodexOutputPath();
   let raw = "";
@@ -9136,7 +9423,7 @@ async function runCodexJsonInstruction(instruction: string): Promise<any> {
         resolveTelegramTextModelPreference("free"),
         [{ role: "user", parts: [{ text: instruction }] }],
         {
-          maxOutputTokens: 4096,
+          maxOutputTokens: Math.max(128, Math.min(4096, Number(options.maxOutputTokens || 4096))),
           temperature: 0.35,
         },
         undefined,
@@ -9388,7 +9675,10 @@ export async function derivePersonaDirectionKeywordsWithCodex(personaName: strin
     `使用者提示詞：${aiInput}`,
   ].join("\n");
   try {
-    return normalizePersonaDirectionKeywords(await runCodexJsonInstruction(instruction), keywordContextText);
+    return normalizePersonaDirectionKeywords(
+      await runCodexJsonInstruction(instruction, { maxOutputTokens: 2048 }),
+      keywordContextText,
+    );
   } catch (error: any) {
     console.warn("[telegram][persona_keyword_fallback]", error?.message || error);
     return normalizePersonaDirectionKeywords([], keywordContextText);
@@ -9437,33 +9727,15 @@ function buildCreatePersonaPromptWithKeywords(personaName: string, userPrompt: s
   ].join("\n");
 }
 
-async function createPersonaFromPromptSelection(args: {
-  bot: TelegramBot;
-  chatId: number;
-  thinkingMessageId: number;
+export async function derivePersonaSpecFromPromptSelection(args: {
   personaName: string;
   userPrompt: string;
   selectedKeywords: string[];
-  instanceName: string;
-  defaultPadCode: string;
-}) {
-  const { bot, chatId, thinkingMessageId, personaName, userPrompt, selectedKeywords, instanceName, defaultPadCode } = args;
-  const personaPrompt = buildCreatePersonaPromptWithKeywords(personaName, userPrompt, selectedKeywords);
-  let specError = "";
-  const spec = await derivePersonaSpecWithCodex(personaPrompt).catch((error: any) => {
-    specError = error?.message || String(error);
-    console.error("[telegram][codex_create_persona_error]", error?.message || error);
-    return null;
-  });
-  if (!spec) {
-    const reason = specError ? `\n原因：${formatUserFacingAiError(specError)}` : "";
-    await bot.editMessageText(`❌ AI 未能解析這個人設，請稍後重試。${reason}`, {
-      chat_id: chatId,
-      message_id: thinkingMessageId,
-      reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
-    }).catch(() => undefined);
-    return;
-  }
+}): Promise<{ name: string; content: string; setup: DramaSetup }> {
+  const personaName = String(args.personaName || "").trim();
+  const userPrompt = String(args.userPrompt || "").trim();
+  const selectedKeywords = (args.selectedKeywords || []).map((item) => String(item || "").trim()).filter(Boolean).slice(0, CREATE_PERSONA_MAX_SELECTED_KEYWORDS);
+  const spec = await derivePersonaSpecWithCodex(buildCreatePersonaPromptWithKeywords(personaName, userPrompt, selectedKeywords));
   spec.name = personaName;
   spec.setup = {
     ...spec.setup,
@@ -9478,6 +9750,35 @@ async function createPersonaFromPromptSelection(args: {
     ...spec.setup,
     interests: [...normalizePersonaInterestTags(spec.setup.interests), ...selectedKeywords],
   }, spec.content);
+  return spec;
+}
+
+async function createPersonaFromPromptSelection(args: {
+  bot: TelegramBot;
+  chatId: number;
+  thinkingMessageId: number;
+  personaName: string;
+  userPrompt: string;
+  selectedKeywords: string[];
+  instanceName: string;
+  defaultPadCode: string;
+}) {
+  const { bot, chatId, thinkingMessageId, personaName, userPrompt, selectedKeywords, instanceName, defaultPadCode } = args;
+  let specError = "";
+  const spec = await derivePersonaSpecFromPromptSelection({ personaName, userPrompt, selectedKeywords }).catch((error: any) => {
+    specError = error?.message || String(error);
+    console.error("[telegram][codex_create_persona_error]", error?.message || error);
+    return null;
+  });
+  if (!spec) {
+    const reason = specError ? `\n原因：${formatUserFacingAiError(specError)}` : "";
+    await bot.editMessageText(`❌ AI 未能解析這個人設，請稍後重試。${reason}`, {
+      chat_id: chatId,
+      message_id: thinkingMessageId,
+      reply_markup: { inline_keyboard: [[{ text: "🏠 主選單", callback_data: "back_main" }]] },
+    }).catch(() => undefined);
+    return;
+  }
   const created = await createPersonaBySpec({
     name: spec.name,
     content: spec.content,
@@ -11353,24 +11654,57 @@ async function attachGeneratedImageToArchivePost(args: {
   }
   if (index < 0) return false;
   const post = archive.posts[index];
+  const persistedImageUrl = isWorkflowPersonaListItem(archive)
+    ? persistGeneratedPostMedia(args.archiveId, post.id, args.imageUrl)
+    : args.imageUrl;
+  if (!persistedImageUrl) {
+    console.warn("[telegram][generated_post_media_missing]", {
+      archiveId: args.archiveId,
+      postId: post.id,
+      imageUrl: args.imageUrl,
+    });
+    return false;
+  }
   const now = new Date().toISOString();
   const imageHistory = [
     ...(Array.isArray(post.imageHistory) ? post.imageHistory : []),
     {
-      imageUrl: args.imageUrl,
+      imageUrl: persistedImageUrl,
       createdAt: now,
       query: args.prompt,
       source: "generated-post-image",
     },
   ];
   const savedPost = await updateArchivePostMedia(args.archiveId, post.id, {
-    imageUrl: args.imageUrl,
+    imageUrl: persistedImageUrl,
     imageHistory,
     updatedAt: now,
   });
   if (!savedPost) return false;
   invalidatePersonaListCache();
   return true;
+}
+
+function persistGeneratedPostMedia(archiveId: string, postId: string, imageUrl: string): string | null {
+  const source = String(imageUrl || "").trim();
+  if (!source) return null;
+  if (/^https?:\/\//i.test(source)) return source;
+  if (/^data:/i.test(source)) return parseDataUrlMedia(source) ? source : null;
+  const existingPath = resolveExistingLocalMediaPath(source);
+  if (!existingPath) return null;
+  const extension = path.extname(existingPath) || ".jpg";
+  const archiveKey = archiveId.replace(/[^a-zA-Z0-9_-]/g, "_") || "archive";
+  const postKey = postId.replace(/[^a-zA-Z0-9_-]/g, "_") || crypto.randomUUID();
+  const relativeMediaPath = `persona-post-media/${archiveKey}/${postKey}-${Date.now()}${extension}`;
+  const targetPath = resolveRuntimeFile(relativeMediaPath);
+  try {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(existingPath, targetPath);
+    return relativeMediaPath;
+  } catch (error) {
+    console.warn("[telegram][persist_generated_post_media_failed]", error instanceof Error ? error.message : String(error));
+    return null;
+  }
 }
 
 async function rewriteSentimentHotImportedPostContent(args: {
@@ -11909,10 +12243,12 @@ function materializeTelegramDataUrlMedia(mediaUrl: string): { input: string | Bu
 
 function resolveExistingLocalMediaPath(mediaUrl: string): string | null {
   if (!mediaUrl || /^(https?:\/\/|data:)/i.test(mediaUrl)) return null;
+  const runtimeSuffix = mediaUrl.match(/(?:^|[\\/])(persona-post-media[\\/].+)$/i)?.[1]?.replace(/\\/g, "/");
   const candidates = [
     mediaUrl,
     path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(process.cwd(), mediaUrl),
     resolveRuntimeFile(mediaUrl),
+    runtimeSuffix ? resolveRuntimeFile(runtimeSuffix) : "",
   ];
   for (const candidate of candidates) {
     try {
@@ -12545,12 +12881,15 @@ function isTelegramPreviewableImageUrl(imageUrl: string) {
 function getStoredPostMediaItems(post: Pick<PersonaArchive["posts"][number], "imageUrl" | "mediaUrl" | "mediaItems" | "sourceMeta" | "imageHistory">): StoredPostMediaItem[] {
   const out: StoredPostMediaItem[] = [];
   const add = (url: unknown, type?: "image" | "video" | "unknown", localPath?: unknown, warning?: unknown) => {
-    const text = String(localPath || url || "").trim();
+    const publicUrl = String(url || "").trim();
+    const local = String(localPath || "").trim();
+    const text = local || publicUrl;
     if (!text || out.some((item) => item.url === text)) return;
     out.push({
       url: text,
       type,
       localPath: typeof localPath === "string" && localPath.trim() ? localPath : undefined,
+      sourceUrl: publicUrl || undefined,
       warning: typeof warning === "string" && warning.trim() ? warning : undefined,
     });
   };
@@ -13286,6 +13625,7 @@ async function sendPostImagePreviewFallback(
       const sent = await bot.sendMessage(chatId, `📎 第 ${displayIndex} 篇媒體連結：\n${imageUrl}`).catch(() => null);
       return collectTelegramMessageIds(sent);
     }
+    return [];
   }
   return [];
 }
@@ -14459,11 +14799,12 @@ async function handleStableTextCommand(
     const archive = await loadPersonaArchive(archiveMatch.id).catch(() => null);
     if (!archive || !archive.posts.length) return `❌ 人设「${archiveMatch.name}」当前没有待发布推文。`;
     const platform = parsePlatformFromText(text, defaults.publishPlatform || DEFAULT_PUBLISH_PLATFORM);
+    const platformPosts = getArchivePendingPostsForPlatform(archive, platform);
     const count = parseCountFromText(text, 1);
     const startIndex = parseStartIndexFromText(text) - 1;
-    const posts = archive.posts.slice(startIndex, startIndex + count);
+    const posts = platformPosts.slice(startIndex, startIndex + count);
     if (!posts.length) return "❌ 起始篇次超出了当前推文库范围。";
-    const selection = summarizeManualPublishSelection(archive.posts, startIndex, posts.length);
+    const selection = summarizeManualPublishSelection(platformPosts, startIndex, posts.length);
     const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, posts[0]);
     pendingManualPublishes.set(chatId, {
       archiveId: archive.id,
@@ -14471,6 +14812,7 @@ async function handleStableTextCommand(
       platform,
       startIndex,
       count: posts.length,
+      postIds: posts.map((post) => post.id),
       stage: "preview_confirm",
     });
     return `👀 已为你准备人工发布预览\n\n人設：${archive.name}\n平台：${platform}${targetGroupLine}\n起始位置：第 ${startIndex + 1} 篇\n发布數量：${posts.length} 篇\n\n${selection.hint}\n\n${selection.preview.join("\n\n")}\n\n请點擊按钮确认开始发布。`;
@@ -15678,16 +16020,18 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
               padCode,
               platform: args.platform as any,
               caption: finalCaption,
-              mediaUrl: getStoredPostPrimaryMediaUrl(post),
+              mediaUrl: getStoredPostPrimaryMediaUrl(post, true),
               telegramChatId: args.chatId,
               telegramTargetGroupName: args.platform === "telegram" ? resolveTelegramTargetGroupNameForPost(args.archive, post, args.groupContentType) : undefined,
               telegramGroupContentType: args.platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, args.groupContentType) : undefined,
             },
             (progress) => {
               assertPadOperationNotCancelled(padOperationKey);
-              logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
+              const displayStep = formatPublishStepForTelegram(progress.step);
+              logs.push(`${publishProgressIcon(progress)} ${displayStep}`);
+              console.log(`[telegram][publish_progress] chat=${args.chatId} archive=${args.archive.id} platform=${args.platform} pad=${padCode} done=${progress.done ? "1" : "0"} warning=${progress.warning ? "1" : "0"} error=${progress.error ? "1" : "0"} step=${progress.step}`);
               if (statusMessageId) {
-                void updateTelegramPublishStatus(bot, args.chatId, statusMessageId, `${args.platform}/${padCode}`, logs.slice(-8), progress.step);
+                void updateTelegramPublishStatus(bot, args.chatId, statusMessageId, `${args.platform}/${padCode}`, logs.slice(-8), displayStep);
               }
               assertPadOperationNotCancelled(padOperationKey);
             },
@@ -15907,12 +16251,13 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
               publishedTargets: [result?.publishTargetByPost?.[post.id]].filter(Boolean),
               ...(result?.publishMetaByPost?.[post.id] || {}),
             }]));
-            await (source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
+            const savedArchive = await (source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
               archive.id,
               publishedPosts.map((post) => post.id),
               Object.fromEntries(publishedPosts.map((post) => [post.id, result?.publishedContentByPost?.[post.id] || post.content])),
               meta,
-            ).catch(() => null);
+            );
+            if (!savedArchive) throw new ArchiveSyncAfterPublishError("发布已完成，但人设归档未能更新，请勿重复发布并检查归档状态。");
           }
           if (!result?.ok || publishedIds.length < selectedPosts.length) {
             const missing = selectedPosts.length - publishedIds.length;
@@ -16226,9 +16571,11 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
         },
         (progress) => {
           assertPadOperationNotCancelled(padOperationKey);
-          logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
+          const displayStep = formatPublishStepForTelegram(progress.step);
+          logs.push(`${publishProgressIcon(progress)} ${displayStep}`);
+          console.log(`[telegram][publish_progress] chat=${chatId} archive=${state.archiveId || "custom"} platform=${state.platform || effectiveDefaultPublishPlatform} pad=${padCode} done=${progress.done ? "1" : "0"} warning=${progress.warning ? "1" : "0"} error=${progress.error ? "1" : "0"} step=${progress.step}`);
           if (statusMessageId) {
-            void updateTelegramPublishStatus(bot, chatId, statusMessageId, state.platform || effectiveDefaultPublishPlatform, logs, progress.step);
+            void updateTelegramPublishStatus(bot, chatId, statusMessageId, state.platform || effectiveDefaultPublishPlatform, logs, displayStep);
           }
           assertPadOperationNotCancelled(padOperationKey);
         },
@@ -18396,6 +18743,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
       pendingThreadsOwnPostReplyInputs.delete(chatId);
       pendingThreadsOwnPostReplyRuns.delete(chatId);
       const id = data.slice("persona_autoreply_original_".length);
+      pendingAutoReplyLinkPresetSelections.delete(autoReplyLinkPresetSelectionKey(chatId, id, "comments"));
+      pendingAutoReplyLinkSettingsReturns.delete(chatId);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       await safeEditOrSend(bot, chatId, msgId, buildPersonaAutomationPlatformText(archive, "autoreply"), {
@@ -18411,6 +18760,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
       pendingThreadsOwnPostReplyInputs.delete(chatId);
       pendingThreadsOwnPostReplyRuns.delete(chatId);
       const id = data.slice("persona_autoreply_hot_".length);
+      pendingAutoReplyLinkPresetSelections.delete(autoReplyLinkPresetSelectionKey(chatId, id, "hot"));
+      pendingAutoReplyLinkPresetSelections.delete(autoReplyLinkPresetSelectionKey(chatId, id, "hot_content"));
+      pendingAutoReplyLinkSettingsReturns.delete(chatId);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const targets = filterUnrepliedThreadsOwnPostTargets(archive, collectPublishedThreadsOwnPostReplyTargets(archive));
@@ -18444,18 +18796,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       if (replyMode === "manual") {
-        pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_reply_text", replyMode, createdAt: Date.now() });
-        await safeEditOrSend(bot, chatId, msgId, [
-          "🔥 自動回覆熱點推文",
-          "",
-          `人設：${archive.name}`,
-          "回复模式：使用自定义内容",
-          "",
-          "請直接輸入要回覆到自己已發布主推文內的內容。",
-          "後續會根據瀏覽量和天數條件找目標，命中後直接發送這段內容。",
-        ].join("\n"), {
-          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回分支選擇", callback_data: `persona_autoreply_hot_${id}` }]] },
+        pendingThreadsOwnPostReplyInputs.set(chatId, {
+          archiveId: id,
+          stage: "choose_reply_content",
+          replyMode: "manual",
+          manualReplyText: "",
+          linkReplyText: "",
+          createdAt: Date.now(),
         });
+        await renderThreadsOwnPostManualReplySourceChoice(bot, chatId, msgId, archive);
         return;
       }
       pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_min_views", replyMode, createdAt: Date.now() });
@@ -18470,6 +18819,136 @@ function sendMainMenu(chatId: number, msgId?: number) {
         "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。",
       ].join("\n"), {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回分支選擇", callback_data: `persona_autoreply_hot_${id}` }]] },
+      });
+      return;
+    }
+
+    if (data.startsWith("ownreply_manual_input_")) {
+      const id = data.slice("ownreply_manual_input_".length);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const draft = pendingThreadsOwnPostReplyInputs.get(chatId);
+      pendingThreadsOwnPostReplyInputs.set(chatId, {
+        ...(draft?.archiveId === id ? draft : {}),
+        archiveId: id,
+        stage: "await_reply_text",
+        replyMode: "manual",
+        createdAt: Date.now(),
+      });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔥 自动回复热点推文",
+        "",
+        `人设：${archive.name}`,
+        "回复模式：手动输入自定义内容",
+        "",
+        "请直接输入要回复到自己已发布主推文里的内容。",
+        "后续会根据浏览量和天数条件找目标，命中后直接发送这段内容。",
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回内容设置", callback_data: `arlback_m_${rememberAutoReplyLinkArchiveToken(chatId, id)}` }]] },
+      });
+      return;
+    }
+
+    const ownReplyContentEditArchiveId = parseOwnReplyContentEditArchiveId(data);
+    if (ownReplyContentEditArchiveId) {
+      const id = ownReplyContentEditArchiveId;
+      const archive = await loadPersonaForThisBot(id);
+      const runState = pendingThreadsOwnPostReplyRuns.get(chatId);
+      if (!archive || !runState || runState.archiveId !== id || Date.now() - runState.createdAt > 30 * 60 * 1000) {
+        pendingThreadsOwnPostReplyRuns.delete(chatId);
+        await safeEditOrSend(bot, chatId, msgId, "自动回复热点推文设置已失效，请重新设置。", {
+          reply_markup: { inline_keyboard: [[{ text: "返回自动回复", callback_data: `persona_autoreply_${id}` }]] },
+        });
+        return;
+      }
+      pendingThreadsOwnPostReplyInputs.set(chatId, {
+        archiveId: id,
+        stage: "choose_reply_content",
+        replyMode: "manual",
+        manualReplyText: runState.manualReplyText ?? runState.replyText ?? "",
+        linkReplyText: runState.linkReplyText ?? "",
+        minViews: runState.minViews,
+        maxAgeDays: runState.maxAgeDays,
+        editing: true,
+        createdAt: Date.now(),
+      });
+      await renderThreadsOwnPostManualReplySourceChoice(bot, chatId, msgId, archive);
+      return;
+    }
+
+    if (data.startsWith("ownreply_clear_text_") || data.startsWith("ownreply_clear_link_")) {
+      const clearText = data.startsWith("ownreply_clear_text_");
+      const id = data.slice((clearText ? "ownreply_clear_text_" : "ownreply_clear_link_").length);
+      const archive = await loadPersonaForThisBot(id);
+      const draft = pendingThreadsOwnPostReplyInputs.get(chatId);
+      if (!archive || !draft || draft.archiveId !== id) { sendMainMenu(chatId, msgId); return; }
+      pendingThreadsOwnPostReplyInputs.set(chatId, {
+        ...draft,
+        stage: "choose_reply_content",
+        ...(clearText ? { manualReplyText: "" } : { linkReplyText: "" }),
+        createdAt: Date.now(),
+      });
+      if (!clearText) {
+        pendingAutoReplyLinkPresetSelections.set(autoReplyLinkPresetSelectionKey(chatId, id, "hot_content"), null);
+      }
+      await renderThreadsOwnPostManualReplySourceChoice(bot, chatId, msgId, archive);
+      return;
+    }
+
+    if (data.startsWith("ownreply_content_continue_")) {
+      const id = data.slice("ownreply_content_continue_".length);
+      const archive = await loadPersonaForThisBot(id);
+      const draft = pendingThreadsOwnPostReplyInputs.get(chatId);
+      if (!archive || !draft || draft.archiveId !== id) { sendMainMenu(chatId, msgId); return; }
+      const replyText = composeThreadsCustomReplyContent(draft.manualReplyText, draft.linkReplyText);
+      if (!replyText) {
+        await bot.answerCallbackQuery(query.id, { text: "手动文字和链接模板不能同时为空。", show_alert: true }).catch(() => undefined);
+        return;
+      }
+      if (Array.from(replyText).length > 500) {
+        await bot.answerCallbackQuery(query.id, { text: "整体回复超过 Threads 500 字限制，请缩短后重试。", show_alert: true }).catch(() => undefined);
+        return;
+      }
+      if (draft.editing) {
+        const runState = pendingThreadsOwnPostReplyRuns.get(chatId);
+        if (!runState || runState.archiveId !== id) {
+          pendingThreadsOwnPostReplyInputs.delete(chatId);
+          await safeEditOrSend(bot, chatId, msgId, "自动回复热点推文设置已失效，请重新设置。", {
+            reply_markup: { inline_keyboard: [[{ text: "返回自动回复", callback_data: `persona_autoreply_${id}` }]] },
+          });
+          return;
+        }
+        const nextRun = {
+          ...runState,
+          replyMode: "manual" as const,
+          replyText,
+          manualReplyText: String(draft.manualReplyText || "").trim(),
+          linkReplyText: String(draft.linkReplyText || "").trim(),
+          createdAt: Date.now(),
+        };
+        pendingThreadsOwnPostReplyInputs.delete(chatId);
+        pendingThreadsOwnPostReplyRuns.set(chatId, nextRun);
+        await renderThreadsOwnPostAutoReplyFinal(bot, chatId, msgId, archive, nextRun);
+        return;
+      }
+      pendingThreadsOwnPostReplyInputs.set(chatId, {
+        ...draft,
+        stage: "await_min_views",
+        replyText,
+        createdAt: Date.now(),
+      });
+      await safeEditOrSend(bot, chatId, msgId, [
+        "🔥 自动回复热点推文",
+        "",
+        `人设：${archive.name}`,
+        "整体回复预览：",
+        replyText,
+        "",
+        "请输入浏览量门槛。",
+        "例如：10000、1万、2.5万。输入 0 表示不限制浏览量。",
+      ].join("\n"), {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: [[{ text: "◀️ 返回修改回复内容", callback_data: `arlback_m_${rememberAutoReplyLinkArchiveToken(chatId, id)}` }]] },
       });
       return;
     }
@@ -18656,9 +19135,45 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       const inputState = pendingThreadsOwnPostReplyInputs.get(chatId);
       const runState = pendingThreadsOwnPostReplyRuns.get(chatId);
-      const replyMode: "manual" | "ai" = inputState?.replyMode || runState?.replyMode || "manual";
-      const replyText = String(inputState?.replyText || runState?.replyText || "").trim();
-      const minViews = Number(inputState?.minViews ?? runState?.minViews ?? 0);
+      const validRunState = runState?.archiveId === id && Date.now() - runState.createdAt <= 30 * 60 * 1000 ? runState : null;
+      const validInputState = inputState?.archiveId === id ? inputState : null;
+      if (validRunState) {
+        const editStage = mode === "text" ? "edit_reply_text" : mode === "views" ? "edit_min_views" : "edit_days";
+        pendingThreadsOwnPostReplyInputs.set(chatId, {
+          archiveId: id,
+          stage: editStage,
+          replyMode: validRunState.replyMode,
+          replyText: validRunState.replyText,
+          manualReplyText: validRunState.manualReplyText,
+          linkReplyText: validRunState.linkReplyText,
+          createdAt: Date.now(),
+        });
+        const currentValue = mode === "text"
+          ? validRunState.replyText || ""
+          : mode === "views"
+            ? formatCompactCount(validRunState.minViews)
+            : `${validRunState.maxAgeDays} 天`;
+        const prompt = mode === "text"
+          ? "请输入本次任务临时使用的新回复内容（1-220 字）。"
+          : mode === "views"
+            ? "请输入本次任务临时使用的浏览量门槛，输入 0 表示不限制。"
+            : "请输入本次任务临时使用的查看天数（1-7）。";
+        await safeEditOrSend(bot, chatId, msgId, [
+          "✏️ 临时修改自动回复热点推文",
+          "",
+          `人设：${archive.name}`,
+          `当前值：${currentValue || "未设置"}`,
+          "",
+          prompt,
+          "保存后会直接返回最终确认页。",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回最终确认", callback_data: `arlback_h_${id}` }]] },
+        });
+        return;
+      }
+      const replyMode: "manual" | "ai" = validInputState?.replyMode || validRunState?.replyMode || "manual";
+      const replyText = String(validInputState?.replyText || validRunState?.replyText || "").trim();
+      const minViews = Number(validInputState?.minViews ?? validRunState?.minViews ?? 0);
       if (mode !== "text" && replyMode === "manual" && !replyText) {
         pendingThreadsOwnPostReplyInputs.set(chatId, { archiveId: id, stage: "await_reply_text", replyMode: "manual", createdAt: Date.now() });
         await safeEditOrSend(bot, chatId, msgId, [
@@ -18674,6 +19189,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (mode === "text") {
         pendingThreadsOwnPostReplyInputs.set(chatId, {
+          ...(validInputState || {}),
           archiveId: id,
           stage: "await_reply_text",
           replyMode: "manual",
@@ -18694,6 +19210,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       if (mode === "views") {
         pendingThreadsOwnPostReplyInputs.set(chatId, {
+          ...(validInputState || {}),
           archiveId: id,
           stage: "await_min_views",
           replyMode,
@@ -18722,6 +19239,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const safeMinViews = Number.isFinite(minViews) ? Math.max(0, Math.floor(minViews)) : 0;
       pendingThreadsOwnPostReplyInputs.set(chatId, {
+        ...(validInputState || {}),
         archiveId: id,
         stage: "await_days",
         replyMode,
@@ -18766,6 +19284,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
+      const effectiveReplyText = runState.replyMode === "manual"
+        ? composeThreadsCustomReplyContent(runState.manualReplyText ?? runState.replyText, runState.linkReplyText)
+        : String(runState.replyText || "").trim();
+      if (runState.replyMode === "manual" && (!effectiveReplyText || Array.from(effectiveReplyText).length > 500)) {
+        await safeEditOrSend(bot, chatId, msgId, effectiveReplyText
+          ? "❌ 整体回复超过 Threads 500 字限制，请返回修改后重试。"
+          : "❌ 手动文字和链接模板不能同时为空，请返回设置回复内容。", {
+          reply_markup: { inline_keyboard: [[{ text: "✏️ 修改回复内容", callback_data: `ownreply_content_${id}` }]] },
+        });
+        return;
+      }
       const boundPad = resolvePersonaBoundPadForAccountAction(archive, await listPadsForThisBot());
       const returnCallback = `persona_autoreply_${id}`;
       if (!boundPad) {
@@ -18797,9 +19326,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
             archiveId: id,
             padCode: boundPad.padCode,
             replyMode: runState.replyMode,
-            replyText: runState.replyText || "",
+            replyText: effectiveReplyText,
             minViews: runState.minViews,
             maxAgeDays: runState.maxAgeDays,
+            replySuffix: runState.replyMode === "ai"
+              ? buildSelectedAutoReplyReplySuffix(chatId, archive, "hot")
+              : "",
             dryRun: false,
           },
           (p) => {
@@ -18868,6 +19400,123 @@ function sendMainMenu(chatId: number, msgId?: number) {
       return;
     }
 
+    const autoReplyLinkSettingsMatch = data.match(/^arls_([chm])_(.+)$/);
+    if (autoReplyLinkSettingsMatch) {
+      const flow: AutoReplyLinkTemplateFlow = autoReplyLinkSettingsMatch[1] === "c"
+        ? "comments"
+        : autoReplyLinkSettingsMatch[1] === "m"
+          ? "hot_content"
+          : "hot";
+      const id = resolveAutoReplyLinkArchiveId(chatId, autoReplyLinkSettingsMatch[2]);
+      const pendingLinkAction = pendingActions.get(chatId);
+      if (pendingLinkAction?.type === "set-persona-link-ending-preset" && pendingLinkAction.archiveId === id) {
+        pendingActions.delete(chatId);
+      }
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      await renderAutoReplyLinkPresetPicker(bot, chatId, msgId, archive, flow);
+      return;
+    }
+
+    const autoReplyLinkAddMatch = data.match(/^arladd_([chm])_(.+)$/);
+    if (autoReplyLinkAddMatch) {
+      const flow: AutoReplyLinkTemplateFlow = autoReplyLinkAddMatch[1] === "c"
+        ? "comments"
+        : autoReplyLinkAddMatch[1] === "m"
+          ? "hot_content"
+          : "hot";
+      const id = resolveAutoReplyLinkArchiveId(chatId, autoReplyLinkAddMatch[2]);
+      pendingAutoReplyLinkSettingsReturns.set(chatId, { archiveId: id, flow });
+      data = `linkpreset_add_${id}`;
+    }
+
+    const autoReplyLinkBackMatch = data.match(/^arlback_([chm])_(.+)$/);
+    if (autoReplyLinkBackMatch) {
+      const flow: AutoReplyLinkTemplateFlow = autoReplyLinkBackMatch[1] === "c"
+        ? "comments"
+        : autoReplyLinkBackMatch[1] === "m"
+          ? "hot_content"
+          : "hot";
+      const id = resolveAutoReplyLinkArchiveId(chatId, autoReplyLinkBackMatch[2]);
+      const pendingLinkAction = pendingActions.get(chatId);
+      if (pendingLinkAction?.type === "set-persona-link-ending-preset" && pendingLinkAction.archiveId === id) {
+        pendingActions.delete(chatId);
+      }
+      if (flow !== "hot_content") pendingThreadsOwnPostReplyInputs.delete(chatId);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      pendingAutoReplyLinkSettingsReturns.delete(chatId);
+      if (flow === "comments") {
+        data = `acctautoreply_${id}`;
+      } else if (flow === "hot_content") {
+        await renderThreadsOwnPostManualReplySourceChoice(bot, chatId, msgId, archive);
+        return;
+      } else {
+        const runState = pendingThreadsOwnPostReplyRuns.get(chatId);
+        if (!runState || runState.archiveId !== id) {
+          await safeEditOrSend(bot, chatId, msgId, "自动回复热点推文设置已失效，请重新设置。", {
+            reply_markup: { inline_keyboard: [[{ text: "返回自动回复", callback_data: `persona_autoreply_${id}` }]] },
+          });
+          return;
+        }
+        await renderThreadsOwnPostAutoReplyFinal(bot, chatId, msgId, archive, runState);
+        return;
+      }
+    }
+
+    const autoReplyLinkPresetMatch = data.match(/^arl_([chm])_(-?\d+)_(.+)$/);
+    if (autoReplyLinkPresetMatch) {
+      const flow: AutoReplyLinkTemplateFlow = autoReplyLinkPresetMatch[1] === "c"
+        ? "comments"
+        : autoReplyLinkPresetMatch[1] === "m"
+          ? "hot_content"
+          : "hot";
+      const presetIndex = Number(autoReplyLinkPresetMatch[2]);
+      const id = resolveAutoReplyLinkArchiveId(chatId, autoReplyLinkPresetMatch[3]);
+      const archive = await loadPersonaForThisBot(id);
+      if (!archive) { sendMainMenu(chatId, msgId); return; }
+      const presets = getSelectableLinkEndingPresets(archive.setup as any);
+      if (!Number.isInteger(presetIndex) || presetIndex < -1 || presetIndex >= presets.length) {
+        await bot.answerCallbackQuery(query.id, { text: "链接模板已失效，请重新选择。", show_alert: true }).catch(() => undefined);
+        return;
+      }
+      pendingAutoReplyLinkPresetSelections.set(
+        autoReplyLinkPresetSelectionKey(chatId, id, flow),
+        presetIndex < 0 ? null : presets[presetIndex].id,
+      );
+      pendingAutoReplyLinkSettingsReturns.delete(chatId);
+      if (flow === "comments") {
+        data = `acctautoreply_${id}`;
+      } else if (flow === "hot_content") {
+        const draft = pendingThreadsOwnPostReplyInputs.get(chatId);
+        if (!draft || draft.archiveId !== id) {
+          await safeEditOrSend(bot, chatId, msgId, "自定义回复内容设置已失效，请重新设置。", {
+            reply_markup: { inline_keyboard: [[{ text: "重新设置", callback_data: `ownreply_mode_manual_${id}` }]] },
+          });
+          return;
+        }
+        const linkReplyText = presetIndex < 0 ? "" : applyLinkEndingPresetToText("", presets[presetIndex]);
+        pendingThreadsOwnPostReplyInputs.set(chatId, {
+          ...draft,
+          stage: "choose_reply_content",
+          linkReplyText,
+          createdAt: Date.now(),
+        });
+        await renderThreadsOwnPostManualReplySourceChoice(bot, chatId, msgId, archive);
+        return;
+      } else {
+        const runState = pendingThreadsOwnPostReplyRuns.get(chatId);
+        if (!runState || runState.archiveId !== id) {
+          await safeEditOrSend(bot, chatId, msgId, "自动回复热点推文设置已失效，请重新设置。", {
+            reply_markup: { inline_keyboard: [[{ text: "返回自动回复", callback_data: `persona_autoreply_${id}` }]] },
+          });
+          return;
+        }
+        await renderThreadsOwnPostAutoReplyFinal(bot, chatId, msgId, archive, runState);
+        return;
+      }
+    }
+
     if (data.startsWith("acctautoreply_") && !data.startsWith("acctautoreply_run_") && !data.startsWith("acctautoreply_days_")) {
       pendingThreadsAutoReplyDaysInputs.delete(chatId);
       pendingThreadsOwnPostReplyInputs.delete(chatId);
@@ -18883,12 +19532,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      await safeEditOrSend(bot, chatId, msgId, `💬 *Threads 自動回覆*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n\n執行規則：\n- 預設只查看 2 天內自己發布且有評論角標的推文。\n- 可調整查看天數，最多 7 天；沒有評論會直接報告退出。\n- 先過濾廣告、辱罵、釣魚、純表情和過短留言。\n- 只挑和人設或推文內容相關的留言回覆。\n- 回覆會使用自然口語，不做客服式套話。\n\n預設最多掃描 3 篇推文，最多回覆 3 條留言。`, {
+      await safeEditOrSend(bot, chatId, msgId, `💬 *Threads 自動回覆*\n\n人設：${archive.name}\n智能體手機：${boundPad.padName}\n${formatSelectedAutoReplyLinkPresetLine(chatId, archive, "comments")}\n\n執行規則：\n- 預設只查看 2 天內自己發布且有評論角標的推文。\n- 可調整查看天數，最多 7 天；沒有評論會直接報告退出。\n- 先過濾廣告、辱罵、釣魚、純表情和過短留言。\n- 只挑和人設或推文內容相關的留言回覆。\n- 回覆會使用自然口語，不做客服式套話。\n\n預設最多掃描 3 篇推文，最多回覆 3 條留言。`, {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             [{ text: "✅ 開始（預設 2 天）", callback_data: `acctautoreply_run_d2_${id}` }],
             [{ text: "✍️ 輸入查看天數", callback_data: `acctautoreply_days_${id}` }],
+            buildAutoReplyLinkPresetEntryRow(chatId, archive.id, "comments"),
             [{ text: "◀️ 返回自動回覆", callback_data: returnCallback }],
           ],
         },
@@ -18949,10 +19599,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
         const statusMessageId = statusMessage?.message_id || msgId;
         console.log(`[telegram][acctautoreply_trace] stage=start_message_ready chat=${chatId} archive=${id} pad=${boundPad.padCode} source_msg=${msgId} status_msg=${statusMessageId}`);
         console.log(`[telegram][acctautoreply_trace] stage=core_start chat=${chatId} archive=${id} pad=${boundPad.padCode} days=${maxAgeDays}`);
+        const replySuffix = buildSelectedAutoReplyReplySuffix(chatId, archive, "comments");
         const result = await autoReplyThreadsAccount(
           creds,
           boundPad.padCode,
-          { maxPosts: 5, maxReplies: 3, maxAgeDays, commentPersona },
+          { maxPosts: 5, maxReplies: 3, maxAgeDays, commentPersona, replySuffix },
           (p) => {
             assertPadOperationNotCancelled(padOperationKey);
             lastProgress = p;
@@ -20741,6 +21392,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         archiveId: flow.archiveId,
         archiveName: flow.archiveName,
         count: 1,
+        postIds: [scopedPosts[startIndex].id],
         textOnly: false,
         contentBranch: "r18",
         selectedMemoryEntryIds: flow.selectedMemoryEntryIds,
@@ -21482,6 +22134,17 @@ function sendMainMenu(chatId: number, msgId?: number) {
             ...selectedPadCodes.filter((padCode) => publishedIdsByPad[padCode]?.has(post.id)),
           ]),
         ]));
+        const completedPublishTargetsByPost = Object.fromEntries(posts.map((post) => {
+          const targets = [
+            ...(state.completedPublishTargetsByPost?.[post.id] || []),
+            ...results.map((item) => item.publishTargetByPost?.[post.id]).filter(Boolean),
+          ];
+          const uniqueTargets = Array.from(new Map(targets.map((target) => [
+            `${target.platform}:${target.padCode}:${target.publishedUrl}`,
+            target,
+          ])).values());
+          return [post.id, uniqueTargets];
+        }));
         const fullyPublishedPosts = posts.filter((post) =>
           selectedPadCodes.every((padCode) => publishedIdsByPad[padCode]?.has(post.id)),
         );
@@ -21492,17 +22155,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
             imageUrl: getStoredPostPrimaryMediaUrl(post),
             screenshotUrl: results.find((item) => item.ok && item.screenshots?.length)?.screenshots?.[0],
             sourceMeta: post.sourceMeta,
-            publishedTargets: results
-              .map((item) => item.publishTargetByPost?.[post.id])
-              .filter(Boolean),
+            publishedTargets: completedPublishTargetsByPost[post.id],
             ...results.map((item) => item.publishMetaByPost?.[post.id]).find((item) => item?.publishedUrl),
           }]));
-          await (state.source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
+          const savedArchive = await (state.source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
             archive.id,
             fullyPublishedPosts.map((post) => post.id),
             Object.fromEntries(fullyPublishedPosts.map((post) => [post.id, results.map((item) => item.publishedContentByPost?.[post.id]).find(Boolean) || post.content])),
             meta,
-          ).catch(() => null);
+          );
+          if (!savedArchive) throw new ArchiveSyncAfterPublishError("发布已完成，但人设归档未能更新，请勿重复发布并检查归档状态。");
           invalidatePersonaListCache();
         }
         const retryPostIdsByPad = Object.fromEntries(selectedPadCodes
@@ -21527,6 +22189,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           selectedPostIds: retryPostIds,
           retryPostIdsByPad,
           completedPadCodesByPost,
+          completedPublishTargetsByPost,
           availablePadCodes: state.availablePadCodes,
           createdAt: Date.now(),
         });
@@ -21860,15 +22523,16 @@ function sendMainMenu(chatId: number, msgId?: number) {
                 padCode,
                 platform: platform as any,
                 caption: finalCaption,
-                mediaUrl: getStoredPostPrimaryMediaUrl(post) || post.imageUrl,
+                mediaUrl: getStoredPostPrimaryMediaUrl(post, true),
                 telegramChatId: chatId,
                 telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, state.groupContentType) : undefined,
                 telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, state.groupContentType) : undefined,
               },
               (progress) => {
                 assertPadOperationNotCancelled(padOperationKey);
-                logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
-                void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs.slice(-8), `第 ${i + 1}/${selectedPosts.length} 篇：${progress.step}`);
+                const displayStep = formatPublishStepForTelegram(progress.step);
+                logs.push(`${publishProgressIcon(progress)} ${displayStep}`);
+                void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs.slice(-8), `第 ${i + 1}/${selectedPosts.length} 篇：${displayStep}`);
                 assertPadOperationNotCancelled(padOperationKey);
               },
               { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
@@ -21894,7 +22558,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
             }
           }
           stopTyping();
-          await markArchiveEpisodesPublished(state.archiveId, publishedIds, publishedOriginals, publishMeta).catch(() => null);
+          const savedArchive = await markArchiveEpisodesPublished(state.archiveId, publishedIds, publishedOriginals, publishMeta);
+          if (!savedArchive) throw new ArchiveSyncAfterPublishError("发布已完成，但人设归档未能更新，请勿重复发布并检查归档状态。");
           pendingBulkPostActions.delete(chatId);
           invalidatePersonaListCache();
           await bot.sendMessage(chatId, `✅ 批量发布完成\n\n平台：${platform}\n智能體手機：${padCode}\n已发布：${publishedIds.length}/${selectedPosts.length} 篇`, {
@@ -21902,6 +22567,13 @@ function sendMainMenu(chatId: number, msgId?: number) {
           });
         } catch (error: any) {
           stopTyping();
+          if (isArchiveSyncAfterPublishError(error)) {
+            pendingBulkPostActions.delete(chatId);
+            await bot.sendMessage(chatId, `⚠️ 平台发布已完成，但人设归档更新失败。\n\n人設：${archive.name}\n平台：${platform}\n请勿重新发布，请返回人设详情核对发布历史。`, {
+              reply_markup: { inline_keyboard: [[{ text: "👤 返回人设详情", callback_data: `pd_${state.archiveId}` }], [{ text: "🏠 主菜单", callback_data: "fresh_main_menu" }]] },
+            });
+            return;
+          }
           if (publishedIds.length) {
             await markArchiveEpisodesPublished(state.archiveId, publishedIds, publishedOriginals, publishMeta).catch(() => null);
             invalidatePersonaListCache();
@@ -23125,7 +23797,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const postForPreview = buildPostWithPublishContentOverride(post, action?.contentOverride);
       if (publishPlatform && source === "posts") {
-        const scopedPosts = filterByTelegramGroupContentType(archive.posts || [], groupContentType);
+        const scopedPosts = filterByTelegramGroupContentType(getArchivePendingPostsForPlatform(archive, publishPlatform), groupContentType);
         const startIndex = scopedPosts.findIndex((item) => item.id === post.id);
         if (startIndex >= 0) {
           const contentOverrides = action?.contentOverride ? { [post.id]: action.contentOverride } : undefined;
@@ -23138,6 +23810,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             platform: publishPlatform,
             startIndex,
             count: 1,
+            postIds: [post.id],
             page: Math.floor(startIndex / 8),
             groupContentType,
             stage: "preview_confirm",
@@ -23590,6 +24263,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
     }
 
     if (data.startsWith("linksettings_")) {
+      pendingAutoReplyLinkSettingsReturns.delete(chatId);
       const id = data.slice("linksettings_".length);
       let archive = await loadPersonaForThisBot(id).catch(() => null);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
@@ -23610,6 +24284,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archive = await loadPersonaForThisBot(id).catch(() => null);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
       pendingActions.set(chatId, { type: "set-persona-link-ending-preset", archiveId: id });
+      const returnCallback = resolveLinkPresetReturnCallback(chatId, id);
       await safeEditOrSend(bot, chatId, msgId, [
         "🔗 新增链接设置模板",
         "",
@@ -23623,7 +24298,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         "这里只保存结尾语句和链接，不要发送整篇推文正文。",
       ].join("\n"), {
         disable_web_page_preview: true,
-        reply_markup: { inline_keyboard: [[{ text: "取消", callback_data: `linksettings_${id}` }]] },
+        reply_markup: { inline_keyboard: [[{ text: "取消", callback_data: returnCallback }]] },
       });
       return;
     }
@@ -24150,7 +24825,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       if (!(await ensurePlatformAllowed(chatId, msgId, platform))) return;
       const archive = archiveId ? await loadPersonaForThisBot(archiveId) : null;
       const groupContentType = prevManual?.archiveId === archiveId ? prevManual.groupContentType : undefined;
-      const scopedPosts = archive ? filterByTelegramGroupContentType(archive.posts || [], groupContentType) : [];
+      const scopedPosts = archive ? filterByTelegramGroupContentType(getArchivePendingPostsForPlatform(archive, platform), groupContentType) : [];
       if (!archive || scopedPosts.length === 0) {
         await safeEditOrSend(bot, chatId, msgId, "当前没有可人工发布的推文。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: archiveId ? buildPersonaPublishCallback(archiveId, groupContentType) : "fresh_main_menu" }]] },
@@ -24183,7 +24858,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const platform = prevManual?.platform as TelegramPublishPlatform | undefined;
       const page = Math.max(0, Number(data.slice("mpage_".length) || 0));
       const archive = archiveId ? await loadPersonaForThisBot(archiveId) : null;
-      const scopedPosts = archive ? filterByTelegramGroupContentType(archive.posts || [], prevManual?.groupContentType) : [];
+      const scopedPosts = archive ? filterByTelegramGroupContentType(getArchivePendingPostsForPlatform(archive, platform), prevManual?.groupContentType) : [];
       if (!archive || scopedPosts.length === 0 || !platform) {
         await safeEditOrSend(bot, chatId, msgId, "当前没有可人工发布的推文。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: archiveId ? buildPersonaPublishCallback(archiveId, prevManual?.groupContentType) : "fresh_main_menu" }]] },
@@ -24215,7 +24890,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const platform = prevManual?.platform as TelegramPublishPlatform | undefined;
       const startIndex = Math.max(0, Number(data.slice("mpick_".length) || 1) - 1);
       const archive = archiveId ? await loadPersonaArchive(archiveId).catch(() => null) : null;
-      const scopedPosts = archive ? filterByTelegramGroupContentType(archive.posts || [], prevManual?.groupContentType) : [];
+      const scopedPosts = archive ? filterByTelegramGroupContentType(getArchivePendingPostsForPlatform(archive, platform), prevManual?.groupContentType) : [];
       if (!archive || scopedPosts.length === 0 || !isAllowedPublishPlatformValue(platform) || startIndex >= scopedPosts.length) {
         await safeEditOrSend(bot, chatId, msgId, "当前没有可人工发布的推文。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: archiveId ? buildPersonaPublishCallback(archiveId, prevManual?.groupContentType) : "fresh_main_menu" }]] },
@@ -24251,7 +24926,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const platform = (data.startsWith("ms_") ? prevManual?.platform : parts[1]) as TelegramPublishPlatform;
       const startIndex = data.startsWith("ms_") ? Math.max(0, Number(data.slice(3) || 1) - 1) : Math.max(0, Number(parts[2] || 1) - 1);
       const archive = archiveId ? await loadPersonaArchive(archiveId).catch(() => null) : null;
-      const scopedPosts = archive ? filterByTelegramGroupContentType(archive.posts || [], prevManual?.groupContentType) : [];
+      const scopedPosts = archive ? filterByTelegramGroupContentType(getArchivePendingPostsForPlatform(archive, platform), prevManual?.groupContentType) : [];
       if (!archive || scopedPosts.length === 0 || !isAllowedPublishPlatformValue(platform) || startIndex >= scopedPosts.length) {
         await safeEditOrSend(bot, chatId, msgId, "当前没有可人工发布的推文。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: archiveId ? buildPersonaPublishCallback(archiveId, prevManual?.groupContentType) : "fresh_main_menu" }]] },
@@ -24287,7 +24962,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const startIndex = data.startsWith("mc_") ? Math.max(0, prevManual?.startIndex || 0) : Math.max(0, Number(parts[2] || 0));
       const count = data.startsWith("mc_") ? Math.max(1, Number(data.slice(3) || 1)) : Math.max(1, Number(parts[3] || 1));
       const archive = archiveId ? await loadPersonaArchive(archiveId).catch(() => null) : null;
-      const scopedPosts = archive ? filterByTelegramGroupContentType(archive.posts || [], prevManual?.groupContentType) : [];
+      const scopedPosts = archive ? filterByTelegramGroupContentType(getArchivePendingPostsForPlatform(archive, platform), prevManual?.groupContentType) : [];
       if (!archive || scopedPosts.length === 0 || !isAllowedPublishPlatformValue(platform) || startIndex >= scopedPosts.length) {
         await safeEditOrSend(bot, chatId, msgId, "当前没有可人工发布的推文。", {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: archiveId ? buildPersonaPublishCallback(archiveId, prevManual?.groupContentType) : "fresh_main_menu" }]] },
@@ -24296,12 +24971,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       const selection = summarizeManualPublishSelection(scopedPosts, startIndex, count);
       const targetGroupLine = buildTelegramPublishPreviewTargetLine(platform, archive, scopedPosts[startIndex], prevManual?.groupContentType);
+      const selectedPostIds = scopedPosts.slice(startIndex, startIndex + count).map((post) => post.id);
       pendingManualPublishes.set(chatId, {
         archiveId,
         archiveName: archive.name,
         platform,
         startIndex,
         count,
+        postIds: selectedPostIds,
         groupContentType: prevManual?.groupContentType,
         linkEndingPresetApplied: prevManual?.linkEndingPresetApplied,
         contentOverrides: prevManual?.contentOverrides,
@@ -24329,7 +25006,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       const archive = await loadPersonaArchive(state.archiveId).catch(() => null);
-      const scopedPosts = archive ? filterByTelegramGroupContentType(archive.posts || [], state.groupContentType) : [];
+      const scopedPosts = archive ? filterByTelegramGroupContentType(getArchivePendingPostsForPlatform(archive, state.platform), state.groupContentType) : [];
       const posts = scopedPosts.slice(state.startIndex, state.startIndex + Math.max(1, Math.min(state.count, scopedPosts.length - state.startIndex)));
       if (!archive || !posts.length) {
         await safeEditOrSend(bot, chatId, msgId, "当前没有可人工发布的推文。", {
@@ -24420,8 +25097,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const { archiveId, platform, startIndex, count } = confirm;
       const archive = archiveId ? await loadPersonaArchive(archiveId).catch(() => null) : null;
       const groupContentType = prevManual?.archiveId === archiveId ? prevManual.groupContentType : undefined;
-      const scopedPosts = archive ? filterByTelegramGroupContentType(archive.posts || [], groupContentType) : [];
-      if (!archive || scopedPosts.length === 0 || !isAllowedPublishPlatformValue(platform) || startIndex >= scopedPosts.length) {
+      const scopedPosts = archive ? filterByTelegramGroupContentType(getArchivePendingPostsForPlatform(archive, platform), groupContentType) : [];
+      const selectedPostIds = prevManual?.archiveId === archiveId && prevManual.platform === platform
+        ? prevManual.postIds?.filter(Boolean)
+        : undefined;
+      const postsById = new Map(scopedPosts.map((post) => [post.id, post]));
+      const postsSelectedById = selectedPostIds?.map((postId) => postsById.get(postId)).filter(Boolean) as PersonaArchive["posts"] | undefined;
+      const selectedIdsAreStale = Boolean(selectedPostIds?.length && postsSelectedById?.length !== selectedPostIds.length);
+      if (!archive || scopedPosts.length === 0 || !isAllowedPublishPlatformValue(platform) || selectedIdsAreStale || (!selectedPostIds?.length && startIndex >= scopedPosts.length)) {
         await safeEditOrSend(bot, chatId, msgId, data === "mconfirm"
           ? "这条重试按钮的临时发布状态已失效，请从推文列表重新选择要发布的编号。"
           : "当前没有可人工发布的推文。", {
@@ -24429,7 +25112,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const manualPosts = scopedPosts.slice(startIndex, startIndex + Math.max(1, Math.min(count, scopedPosts.length - startIndex)));
+      const manualPosts = selectedPostIds?.length
+        ? postsSelectedById!
+        : scopedPosts.slice(startIndex, startIndex + Math.max(1, Math.min(count, scopedPosts.length - startIndex)));
       if (multiPadManual) {
         await showPublishPadSelection(chatId, msgId, {
           mode: "manual_posts",
@@ -24437,6 +25122,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           platform,
           startIndex,
           count: manualPosts.length,
+          selectedPostIds: manualPosts.map((post) => post.id),
           groupContentType,
           linkEndingPresetApplied: prevManual?.linkEndingPresetApplied,
           contentOverrides: prevManual?.contentOverrides,
@@ -24450,7 +25136,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      const posts = scopedPosts.slice(startIndex, startIndex + Math.max(1, Math.min(count, scopedPosts.length - startIndex)));
+      const posts = manualPosts;
       const postsForPublish = applyPublishContentOverrides(posts, prevManual?.contentOverrides);
       const selection = summarizeManualPublishSelection(postsForPublish, startIndex, postsForPublish.length);
       const padCode = archive.boundPadCode || defaultPadCode;
@@ -24487,19 +25173,20 @@ function sendMainMenu(chatId: number, msgId?: number) {
               padCode,
               platform: platform as any,
               caption: finalCaption,
-              mediaUrl: getStoredPostPrimaryMediaUrl(post) || post.imageUrl,
+              mediaUrl: getStoredPostPrimaryMediaUrl(post, true),
               telegramChatId: chatId,
               telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, groupContentType) : undefined,
               telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, groupContentType) : undefined,
             },
             (progress) => {
               assertPadOperationNotCancelled(padOperationKey);
-              const line = `${publishProgressIcon(progress)} [第${startIndex + index + 1}篇/${describePostMedia(post)}] ${progress.step}`;
+              const displayStep = formatPublishStepForTelegram(progress.step);
+              const line = `${publishProgressIcon(progress)} [第${startIndex + index + 1}篇/${describePostMedia(post)}] ${displayStep}`;
               const progressLine = `[telegram][publish_progress] chat=${chatId} archive=${archiveId} platform=${platform} post=${post.id} done=${progress.done ? "1" : "0"} warning=${progress.warning ? "1" : "0"} error=${progress.error ? "1" : "0"} step=${progress.step}`;
               console.log(progressLine);
               appendPublishProgressLog(progressLine);
               logs.push(line);
-              void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs, progress.step);
+              void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs, displayStep);
               assertPadOperationNotCancelled(padOperationKey);
             },
             { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
@@ -24525,23 +25212,39 @@ function sendMainMenu(chatId: number, msgId?: number) {
           }
         }
         stopTyping();
-        await markArchiveEpisodesPublished(
+        const savedArchive = await markArchiveEpisodesPublished(
           archiveId,
           publishedIds,
           Object.fromEntries(postsForPublish.map((post) => [post.id, prevManual?.linkEndingPresetApplied ? String(post.content || "").trim() : buildPersonaPublishCaption(post.content, archive.setup)])),
           publishMeta,
-        ).catch(() => null);
+        );
+        if (!savedArchive) throw new ArchiveSyncAfterPublishError("发布已完成，但人设归档未能更新，请勿重复发布并检查归档状态。");
         invalidatePersonaListCache();
-        pendingManualPublishes.delete(chatId);
+        pendingManualPublishes.set(chatId, {
+          archiveId,
+          archiveName: archive.name,
+          platform,
+          startIndex: 0,
+          page: 0,
+          groupContentType,
+          stage: "choose_post",
+        });
         const finalTitle = publishWarnings.length
           ? `⚠️ 已提交 ${publishedIds.length} 篇推文，待人工确认`
           : `✅ 已按顺序人工发布 ${publishedIds.length} 篇推文`;
         const warningText = publishWarnings.length ? `\n\n待确认项：\n${publishWarnings.slice(-3).join("\n")}` : "";
         await bot.sendMessage(chatId, `${finalTitle}\n\n人設：${archive.name}\n平台：${platform}\n起始位置：第 ${startIndex + 1} 篇\n智能體手機：${padCode}\n\n${selection.hint}${warningText}`, {
-          reply_markup: { inline_keyboard: [[{ text: "📝 查看剩余推文", callback_data: buildStoredPostsPageCallback(archiveId, 0, groupContentType) }], [{ text: "◀️ 返回發佈方式", callback_data: buildPersonaPublishCallback(archiveId, groupContentType) }]] },
+          reply_markup: { inline_keyboard: [[{ text: "📝 查看当前平台剩余推文", callback_data: "mpage_0" }], [{ text: "◀️ 返回發佈方式", callback_data: buildPersonaPublishCallback(archiveId, groupContentType) }]] },
         });
       } catch (error: any) {
         stopTyping();
+        if (isArchiveSyncAfterPublishError(error)) {
+          pendingManualPublishes.delete(chatId);
+          await bot.sendMessage(chatId, `⚠️ 平台发布已完成，但人设归档更新失败。\n\n人設：${archive.name}\n平台：${platform}\n请勿点击重新发布，请返回推文列表核对发布历史。`, {
+            reply_markup: { inline_keyboard: [[{ text: "👤 返回人设详情", callback_data: `pd_${archiveId}` }], [{ text: "🏠 主菜单", callback_data: "fresh_main_menu" }]] },
+          });
+          return;
+        }
         if (isTelegramTaskCancelledError(error)) {
           await bot.sendMessage(chatId, `🛑 已中止人工发布任务\n\n人設：${archive.name}\n平台：${platform}\n智能體手機：${padCode}`);
           return;
@@ -24717,12 +25420,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const archiveId = data.slice("custom_publish_persona_".length);
       const archive = await loadPersonaForThisBot(archiveId);
       const prev = pendingCustomPublishes.get(chatId);
+      const manualState = pendingManualPublishes.get(chatId);
+      const inheritedGroupContentType = prev?.groupContentType
+        || (manualState?.archiveId === archiveId ? manualState.groupContentType : undefined);
       const nextState = {
         stage: "choose_platform" as const,
         archiveId,
         archiveName: archive?.name || "未命名人設",
         padCode: archive?.boundPadCode || defaultPadCode,
-        groupContentType: prev?.groupContentType,
+        groupContentType: inheritedGroupContentType,
         source: prev?.source || "persona_detail",
         sourceArchiveId: prev?.sourceArchiveId || archiveId,
         text: prev?.text,
@@ -25409,22 +26115,23 @@ function sendMainMenu(chatId: number, msgId?: number) {
             padCode,
             platform: platform as any,
             caption: finalCaption,
-            mediaUrl: getStoredPostPrimaryMediaUrl(postForPublish) || postForPublish.imageUrl,
+            mediaUrl: getStoredPostPrimaryMediaUrl(postForPublish, true),
             telegramChatId: chatId,
             telegramTargetGroupName: platform === "telegram" ? resolveTelegramTargetGroupNameForPost(archive, post, groupContentType) : undefined,
             telegramGroupContentType: platform === "telegram" ? resolveTelegramGroupContentTypeForPost(post, groupContentType) : undefined,
           },
           (progress) => {
             assertPadOperationNotCancelled(padOperationKey);
-            logs.push(`${publishProgressIcon(progress)} ${progress.step}`);
-            void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs, progress.step);
+            const displayStep = formatPublishStepForTelegram(progress.step);
+            logs.push(`${publishProgressIcon(progress)} ${displayStep}`);
+            void updateTelegramPublishStatus(bot, chatId, statusMessageId, platform, logs, displayStep);
             assertPadOperationNotCancelled(padOperationKey);
           },
           { cancellationToken: { throwIfCancelled: () => assertPadOperationNotCancelled(padOperationKey) } },
         );
         stopTyping();
         const publishScreenshotUrl = result.screenshotUrl;
-        await (source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
+        const savedArchive = await (source === "favorites" ? markFavoritePostsPublished : markArchiveEpisodesPublished)(
           archiveId,
           [postId],
           { [postId]: finalCaption },
@@ -25438,7 +26145,8 @@ function sendMainMenu(chatId: number, msgId?: number) {
               ...(await buildPublishedMetaFromResultWithInitialMetrics(platform, result)),
             },
           },
-        ).catch(() => null);
+        );
+        if (!savedArchive) throw new ArchiveSyncAfterPublishError("发布已完成，但人设归档未能更新，请勿重复发布并检查归档状态。");
         invalidatePersonaListCache();
         bot.sendMessage(chatId, `${publishFinalTitle(result)}\n\n${logs.slice(-5).join("\n")}`, {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(archiveId, source, 0, groupContentType) }]] },
@@ -25453,6 +26161,12 @@ function sendMainMenu(chatId: number, msgId?: number) {
         }
       } catch (error: any) {
         stopTyping();
+        if (isArchiveSyncAfterPublishError(error)) {
+          await bot.sendMessage(chatId, `⚠️ 平台发布已完成，但人设归档更新失败。\n\n人設：${archive.name}\n平台：${platform}\n请勿点击重新发布，请返回推文列表核对发布历史。`, {
+            reply_markup: { inline_keyboard: [[{ text: "◀️ 返回推文列表", callback_data: buildPostSourcePageCallback(archiveId, source, 0, groupContentType) }], [{ text: "🏠 主菜单", callback_data: "fresh_main_menu" }]] },
+          });
+          return;
+        }
         if (isTelegramTaskCancelledError(error)) {
           await bot.sendMessage(chatId, `🛑 已中止發佈任務\n\n人設：${archive.name}\n平台：${platform}\n智能體手機：${padCode}`);
           return;
@@ -25674,36 +26388,68 @@ function sendMainMenu(chatId: number, msgId?: number) {
         await bot.sendMessage(chatId, "❌ 找不到人設，請重新進入自動回覆。");
         return;
       }
+      if (["edit_reply_text", "edit_min_views", "edit_days"].includes(pendingOwnPostReplyInput.stage)) {
+        const currentRun = pendingThreadsOwnPostReplyRuns.get(chatId);
+        if (!currentRun || currentRun.archiveId !== archive.id || Date.now() - currentRun.createdAt > 30 * 60 * 1000) {
+          pendingThreadsOwnPostReplyInputs.delete(chatId);
+          pendingThreadsOwnPostReplyRuns.delete(chatId);
+          await bot.sendMessage(chatId, "❌ 自动回复热点推文设置已失效，请重新设置。", {
+            reply_markup: { inline_keyboard: [[{ text: "返回自动回复", callback_data: `persona_autoreply_${archive.id}` }]] },
+          });
+          return;
+        }
+        let nextRun = { ...currentRun, createdAt: Date.now() };
+        if (pendingOwnPostReplyInput.stage === "edit_reply_text") {
+          const manualReplyText = text.trim();
+          if (!manualReplyText || Array.from(manualReplyText).length > 220) {
+            await bot.sendMessage(chatId, "❌ 回复内容格式不正确，请输入 1-220 字的回复内容。");
+            return;
+          }
+          const linkReplyText = String(currentRun.linkReplyText || "").trim();
+          const replyText = composeThreadsCustomReplyContent(manualReplyText, linkReplyText);
+          if (Array.from(replyText).length > 500) {
+            await bot.sendMessage(chatId, "❌ 手动文字和链接模板合并后超过 Threads 500 字限制，请缩短文字后重试。");
+            return;
+          }
+          nextRun = { ...nextRun, replyMode: "manual", replyText, manualReplyText, linkReplyText };
+        } else if (pendingOwnPostReplyInput.stage === "edit_min_views") {
+          const minViews = parseThreadsOwnPostReplyMinViewsInput(text);
+          if (minViews === null) {
+            await bot.sendMessage(chatId, "❌ 浏览量格式不正确，请输入数字，例如 10000、1万或 0。");
+            return;
+          }
+          nextRun = { ...nextRun, minViews };
+        } else {
+          const maxAgeDays = parseThreadsAutoReplyDaysInput(text);
+          if (!maxAgeDays) {
+            await bot.sendMessage(chatId, "❌ 查看天数格式不正确，请输入 1-7 之间的数字。");
+            return;
+          }
+          nextRun = { ...nextRun, maxAgeDays };
+        }
+        pendingThreadsOwnPostReplyInputs.delete(chatId);
+        pendingThreadsOwnPostReplyRuns.set(chatId, nextRun);
+        await renderThreadsOwnPostAutoReplyFinal(bot, chatId, undefined, archive, nextRun);
+        return;
+      }
+      if (pendingOwnPostReplyInput.stage === "choose_reply_content") {
+        await bot.sendMessage(chatId, "请使用上方按钮添加或跳过手动文字和链接模板，确认整体内容后再继续。");
+        return;
+      }
       if (pendingOwnPostReplyInput.stage === "await_reply_text") {
-        const replyText = text.trim();
-        if (!replyText || replyText.length > 220) {
+        const manualReplyText = text.trim();
+        if (!manualReplyText || Array.from(manualReplyText).length > 220) {
           await bot.sendMessage(chatId, "❌ 回覆內容格式不正確，請輸入 1-220 字的回覆內容。");
           return;
         }
         pendingThreadsOwnPostReplyInputs.set(chatId, {
           ...pendingOwnPostReplyInput,
-          stage: "await_min_views",
+          stage: "choose_reply_content",
           replyMode: "manual",
-          replyText,
+          manualReplyText,
           createdAt: Date.now(),
         });
-        await bot.sendMessage(chatId, [
-          "🔥 自動回覆熱點推文",
-          "",
-          `人設：${archive.name}`,
-          `回覆內容：${replyText}`,
-          "",
-          "請輸入瀏覽量門檻。",
-          "只有已發布推文瀏覽量大於等於這個值時才會自動評論。",
-          "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。",
-        ].join("\n"), {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "✏️ 重新編輯文案", callback_data: `ownreply_text_${pendingOwnPostReplyInput.archiveId}` }],
-              [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }],
-            ],
-          },
-        });
+        await renderThreadsOwnPostManualReplySourceChoice(bot, chatId, undefined, archive);
         return;
       }
       if (pendingOwnPostReplyInput.stage === "await_min_views") {
@@ -25723,6 +26469,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           "",
           `人設：${archive.name}`,
           `回复模式：${pendingOwnPostReplyInput.replyMode === "manual" ? "使用自定义内容" : "AI 根据人设和推文自动回复"}`,
+          pendingOwnPostReplyInput.replyMode === "manual" ? `整体回复：\n${pendingOwnPostReplyInput.replyText || ""}` : "",
           `瀏覽量條件：大於等於 ${formatCompactCount(minViews)}`,
           "",
           "請輸入查看天數，規則和自動回覆評論一致。",
@@ -25731,7 +26478,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           reply_markup: {
             inline_keyboard: [
               [{ text: "👁 重新設定瀏覽量", callback_data: `ownreply_views_${pendingOwnPostReplyInput.archiveId}` }],
-              ...(pendingOwnPostReplyInput.replyMode === "manual" ? [[{ text: "✏️ 上一步：編輯文案", callback_data: `ownreply_text_${pendingOwnPostReplyInput.archiveId}` }]] : []),
+              ...(pendingOwnPostReplyInput.replyMode === "manual" ? [[{ text: "✏️ 修改整体回复", callback_data: `arlback_m_${rememberAutoReplyLinkArchiveToken(chatId, pendingOwnPostReplyInput.archiveId)}` }]] : []),
               [{ text: "◀️ 返回自動回覆", callback_data: `persona_autoreply_${pendingOwnPostReplyInput.archiveId}` }],
             ],
           },
@@ -25746,7 +26493,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       const runState = {
         archiveId: pendingOwnPostReplyInput.archiveId,
         replyMode: pendingOwnPostReplyInput.replyMode === "manual" ? "manual" as const : "ai" as const,
-        replyText: pendingOwnPostReplyInput.replyText || "",
+        replyText: pendingOwnPostReplyInput.replyMode === "manual"
+          ? composeThreadsCustomReplyContent(pendingOwnPostReplyInput.manualReplyText, pendingOwnPostReplyInput.linkReplyText)
+          : pendingOwnPostReplyInput.replyText || "",
+        manualReplyText: pendingOwnPostReplyInput.manualReplyText,
+        linkReplyText: pendingOwnPostReplyInput.linkReplyText,
         minViews: Math.max(0, Math.floor(pendingOwnPostReplyInput.minViews || 0)),
         maxAgeDays: days,
         createdAt: Date.now(),
@@ -25758,9 +26509,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
       }
       pendingThreadsOwnPostReplyInputs.delete(chatId);
       pendingThreadsOwnPostReplyRuns.set(chatId, runState);
-      await bot.sendMessage(chatId, buildPersonaOwnPostAutoReplyPlatformText(archive, runState), {
-        reply_markup: { inline_keyboard: buildPersonaOwnPostAutoReplyPlatformRows(pendingOwnPostReplyInput.archiveId, runState.replyMode) },
-      });
+      await renderThreadsOwnPostAutoReplyFinal(bot, chatId, undefined, archive, runState);
       return;
     }
 
@@ -25788,6 +26537,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         return;
       }
       if (pendingAutoReplyDays.type === "persona" && pendingAutoReplyDays.archiveId) {
+        const archive = await loadPersonaForThisBot(pendingAutoReplyDays.archiveId).catch(() => null);
         await runPersonaThreadsAutoReplyFromTelegram(
           bot,
           chatId,
@@ -25797,6 +26547,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           { acquire: acquireRuntimePadOperation, release: releaseRuntimePadOperation },
           days,
           `acctautoreply_${pendingAutoReplyDays.archiveId}`,
+          archive ? buildSelectedAutoReplyReplySuffix(chatId, archive, "comments") : "",
         );
         return;
       }

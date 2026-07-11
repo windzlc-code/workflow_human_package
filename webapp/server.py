@@ -192,6 +192,17 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 UPLOAD_CHUNK_SIZE = 1024 * 1024
+WEB_BOT_MEDIA_MAX_BYTES = 25 * 1024 * 1024
+WEB_BOT_MEDIA_EXTENSIONS = {
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".webp": "image",
+    ".gif": "image",
+    ".mp4": "video",
+    ".mov": "video",
+    ".webm": "video",
+}
 MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 MAX_ZIP_MEMBERS = 5000
 MAX_ZIP_MEMBER_BYTES = 512 * 1024 * 1024
@@ -231,6 +242,8 @@ COMFY_GPU_MAX_COMFY_PENDING = max(_env_int("COMFY_GPU_MAX_COMFY_PENDING", 4), 0)
 _TASK_QUEUE: queue.Queue[tuple[str, int, str, dict[str, Any]]] = queue.Queue(maxsize=int(TASK_QUEUE_MAXSIZE or 0))
 _WORKERS: list[threading.Thread] = []
 _WORKERS_LOCK = threading.Lock()
+_ACTIVE_TASK_PROCESSES: dict[str, tuple[subprocess.Popen, int | None]] = {}
+_ACTIVE_TASK_PROCESSES_LOCK = threading.Lock()
 _RUNTIME_CONFIG_LOCK = threading.RLock()
 _INTERNAL_TG_SUBMIT_LOCK = threading.Lock()
 _COMFY_GPU_SEMAPHORE = threading.BoundedSemaphore(int(COMFY_GPU_LOCAL_SEMAPHORE_LIMIT))
@@ -542,6 +555,26 @@ def _json_loads(text: Any, default: Any) -> Any:
 def _extract_json_from_text(text: Any) -> dict[str, Any]:
     parsed = _json_loads(text, {})
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _extract_last_json_object(text: Any) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    parsed = _json_loads(raw, {})
+    if isinstance(parsed, dict) and parsed:
+        return parsed
+    decoder = json.JSONDecoder()
+    for index in range(len(raw) - 1, -1, -1):
+        if raw[index] != "{":
+            continue
+        try:
+            candidate, end = decoder.raw_decode(raw, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and not raw[end:].strip():
+            return candidate
+    return {}
 
 
 def _guess_file_kind(path_or_name: Any) -> str:
@@ -15808,28 +15841,36 @@ def _run_tool_r18_skill_task(
         progress_path = workdir / "task-progress.jsonl"
         progress_path.unlink(missing_ok=True)
         env["WEB_TASK_PROGRESS_FILE"] = str(progress_path)
-    completed = subprocess.run(
+    timeout_seconds = max(_to_int(input_payload.get("timeout_seconds"), default_timeout), min_timeout)
+    process_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        process_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        process_kwargs["start_new_session"] = True
+    process = subprocess.Popen(
         ["node", "--import", "tsx", str(script), f"@{input_path}"],
         cwd=str(tool_dir),
         env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=max(_to_int(input_payload.get("timeout_seconds"), default_timeout), min_timeout),
+        **process_kwargs,
     )
-    raw_output = (completed.stdout or "").strip()
-    raw_error = (completed.stderr or "").strip()
-    parsed: dict[str, Any] = {}
-    if raw_output:
-        try:
-            parsed = json.loads(raw_output)
-        except Exception:
-            match = re.search(r"(\{[\s\S]*\})\s*$", raw_output)
-            if match:
-                parsed = json.loads(match.group(1))
-    if completed.returncode != 0 or parsed.get("ok") is False:
+    _register_active_task_process(task_id, process)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_active_task_process(task_id)
+        stdout, stderr = process.communicate()
+        raise RuntimeError(f"{task_type} timed out after {timeout_seconds} seconds") from exc
+    finally:
+        _unregister_active_task_process(task_id, process)
+    raw_output = (stdout or "").strip()
+    raw_error = (stderr or "").strip()
+    parsed = _extract_last_json_object(raw_output)
+    if process.returncode != 0 or parsed.get("ok") is False:
         detail = parsed.get("error") if isinstance(parsed, dict) else ""
-        raise RuntimeError(str(detail or raw_error or raw_output or f"{task_type} exited {completed.returncode}"))
+        raise RuntimeError(str(detail or raw_error or raw_output or f"{task_type} exited {process.returncode}"))
     if str(task_type or "").startswith("persona_"):
         _invalidate_persona_dashboard_overview_cache()
     return {
@@ -15945,6 +15986,17 @@ def _run_persona_create(task_id: str, payload: dict[str, Any]) -> dict[str, Any]
     )
 
 
+def _run_persona_create_keywords(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return _run_tool_r18_skill_task(
+        task_id,
+        {**dict(payload or {}), "action": "keywords"},
+        "persona_create_keywords",
+        "persona-create-once.ts",
+        "persona-create-keywords-input.json",
+        default_timeout=900,
+    )
+
+
 def _run_persona_rewrite_intro(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return _run_tool_r18_skill_task(
         task_id,
@@ -15953,6 +16005,18 @@ def _run_persona_rewrite_intro(task_id: str, payload: dict[str, Any]) -> dict[st
         "persona-rewrite-intro-once.ts",
         "persona-rewrite-intro-input.json",
     )
+
+
+def _run_persona_set_telegram_group(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    result = _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_set_telegram_group",
+        "persona-set-telegram-group-once.ts",
+        "persona-set-telegram-group-input.json",
+    )
+    _invalidate_persona_dashboard_overview_cache()
+    return result
 
 
 def _run_persona_generate_image(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -16033,8 +16097,10 @@ TASK_RUNNERS = {
     "threads_own_post_reply": _run_threads_own_post_reply,
     "persona_generate_posts": _run_persona_generate_posts,
     "persona_sentiment_hot": _run_persona_sentiment_hot,
+    "persona_create_keywords": _run_persona_create_keywords,
     "persona_create": _run_persona_create,
     "persona_rewrite_intro": _run_persona_rewrite_intro,
+    "persona_set_telegram_group": _run_persona_set_telegram_group,
     "persona_generate_image": _run_persona_generate_image,
     "persona_generate_post_image": _run_persona_generate_post_image,
     "persona_publish_post": _run_persona_publish_post,
@@ -16387,7 +16453,7 @@ def _cancel_task_record_for_user(
             }
         now = _now_ts()
         reason = f"{actor} 已强制停止此任务"
-        conn.execute(
+        cancelled = conn.execute(
             """
             UPDATE tasks
             SET status = ?, error = ?, updated_at = ?
@@ -16395,6 +16461,18 @@ def _cancel_task_record_for_user(
             """,
             ("cancelled", reason, now, tid),
         )
+        if int(cancelled.rowcount or 0) != 1:
+            current = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
+            current_status = str(current["status"] or "").strip().lower() if current is not None else "unknown"
+            return {
+                "ok": True,
+                "cancelled": False,
+                "state": "finished",
+                "id": tid,
+                "type": task.get("type"),
+                "status": current_status,
+                "message": f"任務 {tid} 已進入 {current_status} 狀態，未執行強制停止。",
+            }
         _insert_task_event(
             conn,
             task_id=tid,
@@ -16411,6 +16489,13 @@ def _cancel_task_record_for_user(
                 "cost_cents": 0,
             },
         )
+    execution_stopped = _terminate_active_task_process(tid) if status == "running" else False
+    if execution_stopped:
+        message = f"任务 {tid} 已强制停止，执行进程已终止。"
+    elif status == "queued":
+        message = f"任务 {tid} 已取消，尚未开始执行。"
+    else:
+        message = f"任务 {tid} 已标记取消，执行器将在下一次取消检查时退出。"
     return {
         "ok": True,
         "cancelled": True,
@@ -16419,7 +16504,8 @@ def _cancel_task_record_for_user(
         "type": task.get("type"),
         "status": "cancelled",
         "previous_status": status,
-        "message": f"任务 {tid} 已强制停止。",
+        "execution_stopped": execution_stopped,
+        "message": message,
     }
 
 
@@ -17053,13 +17139,18 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         payload.pop("archive_id", None)
         return payload
 
-    if typ == "persona_create":
+    if typ in {"persona_create", "persona_create_keywords"}:
         name = str(payload.get("name") or "").strip()
         prompt = str(payload.get("prompt") or "").strip()
         if not name:
-            raise HTTPException(status_code=400, detail="persona_create requires name")
+            raise HTTPException(status_code=400, detail=f"{typ} requires name")
         if not prompt:
-            raise HTTPException(status_code=400, detail="persona_create requires prompt")
+            raise HTTPException(status_code=400, detail=f"{typ} requires prompt")
+        payload["name"] = name
+        payload["prompt"] = prompt
+        if typ == "persona_create_keywords":
+            payload["action"] = "keywords"
+            return payload
         selected_keywords = payload.get("selectedKeywords", [])
         if not isinstance(selected_keywords, list):
             raise HTTPException(status_code=400, detail="selectedKeywords must be a list")
@@ -17095,6 +17186,22 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         payload.pop("archive_id", None)
         payload.pop("prompt", None)
         return payload
+
+    if typ == "persona_set_telegram_group":
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        group_name = str(payload.get("groupName") or payload.get("group_name") or "").strip()
+        group_content_type = str(payload.get("groupContentType") or payload.get("group_content_type") or "free").strip().lower()
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="persona_set_telegram_group requires archiveId")
+        if not group_name:
+            raise HTTPException(status_code=400, detail="persona_set_telegram_group requires groupName")
+        if group_content_type not in {"free", "paid"}:
+            raise HTTPException(status_code=400, detail="persona_set_telegram_group groupContentType must be free or paid")
+        return {
+            "archiveId": archive_id,
+            "groupName": group_name,
+            "groupContentType": group_content_type,
+        }
 
     if typ == "persona_post_action":
         archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
@@ -17976,6 +18083,108 @@ def _persona_archive_metric_has_resolved_views(metric: Any) -> bool:
         for row in rows
     )
 
+
+def _process_group_exists(process_group_id: int | None) -> bool:
+    if os.name == "nt" or process_group_id is None:
+        return False
+    try:
+        os.killpg(process_group_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen,
+    *,
+    process_group_id: int | None = None,
+    grace_seconds: float = 1.5,
+) -> bool:
+    if process.poll() is not None and not _process_group_exists(process_group_id):
+        return True
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            try:
+                os.killpg(process_group_id or os.getpgid(process.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                process.terminate()
+    except ProcessLookupError:
+        return True
+    except Exception as exc:
+        logger.warning("Failed to terminate task process tree pid=%s: %s", process.pid, exc)
+        try:
+            process.terminate()
+        except Exception:
+            pass
+
+    deadline = time.monotonic() + max(float(grace_seconds), 0.0)
+    while (process.poll() is None or _process_group_exists(process_group_id)) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if process.poll() is not None and not _process_group_exists(process_group_id):
+        return True
+    try:
+        if os.name == "nt":
+            process.kill()
+        else:
+            try:
+                os.killpg(process_group_id or os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+    except ProcessLookupError:
+        return True
+    except Exception as exc:
+        logger.warning("Failed to kill task process tree pid=%s: %s", process.pid, exc)
+        return False
+    deadline = time.monotonic() + 1.0
+    while (process.poll() is None or _process_group_exists(process_group_id)) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return process.poll() is not None and not _process_group_exists(process_group_id)
+
+
+def _register_active_task_process(task_id: str, process: subprocess.Popen) -> None:
+    tid = str(task_id or "").strip()
+    if not tid:
+        return
+    process_group_id: int | None = None
+    if os.name != "nt":
+        try:
+            process_group_id = os.getpgid(process.pid)
+        except (ProcessLookupError, PermissionError):
+            process_group_id = None
+    with _ACTIVE_TASK_PROCESSES_LOCK:
+        _ACTIVE_TASK_PROCESSES[tid] = (process, process_group_id)
+    if _task_status_for_payload({"_task_id": tid}) == "cancelled":
+        _terminate_active_task_process(tid)
+
+
+def _unregister_active_task_process(task_id: str, process: subprocess.Popen) -> None:
+    tid = str(task_id or "").strip()
+    with _ACTIVE_TASK_PROCESSES_LOCK:
+        active = _ACTIVE_TASK_PROCESSES.get(tid)
+        if active and active[0] is process:
+            _ACTIVE_TASK_PROCESSES.pop(tid, None)
+
+
+def _terminate_active_task_process(task_id: str) -> bool:
+    tid = str(task_id or "").strip()
+    with _ACTIVE_TASK_PROCESSES_LOCK:
+        active = _ACTIVE_TASK_PROCESSES.get(tid)
+    if active is None:
+        return False
+    process, process_group_id = active
+    stopped = _terminate_process_tree(process, process_group_id=process_group_id)
+    if stopped:
+        _unregister_active_task_process(tid, process)
+    return stopped
 
 def _persona_archive_merge_metric_rows(preferred_rows: Any, fallback_rows: Any, keep_preferred_only: bool = True) -> list[dict[str, Any]]:
     preferred = [copy.deepcopy(row) for row in preferred_rows if isinstance(row, dict)] if isinstance(preferred_rows, list) else []
@@ -21508,7 +21717,7 @@ def create_app() -> FastAPI:
                         )
                     }
                     if persona_task_type in {
-                        "persona_generate_posts", "persona_create", "persona_rewrite_intro",
+                        "persona_generate_posts", "persona_create_keywords", "persona_create", "persona_rewrite_intro", "persona_set_telegram_group",
                         "persona_generate_image", "persona_generate_post_image", "persona_publish_post", "persona_enqueue_posts",
                         "persona_post_action", "persona_sentiment_hot",
                         "threads_warmup", "threads_auto_reply", "threads_own_post_reply",
@@ -23302,6 +23511,56 @@ def create_app() -> FastAPI:
     THREADS_CONSOLE_UPSTREAM = str(
         os.getenv("THREADS_CONSOLE_UPSTREAM", "http://adbfacebook-console:8080") or ""
     ).rstrip("/")
+
+    @app.post("/threads-console/api/web-bot/upload", include_in_schema=False)
+    async def threads_console_web_bot_upload(
+        file: UploadFile = File(...),
+        user: dict[str, Any] = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        suffix = Path(str(file.filename or "")).suffix.lower()
+        media_type = WEB_BOT_MEDIA_EXTENSIONS.get(suffix, "")
+        if not media_type:
+            await file.close()
+            raise HTTPException(status_code=400, detail="只支持图片或视频文件")
+        upload_dir = TOOL_R18_UPLOAD_ROOT / "web_bot"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}{suffix}"
+        target = upload_dir / filename
+        size = 0
+        try:
+            with target.open("wb") as handle:
+                while True:
+                    chunk = await file.read(UPLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > WEB_BOT_MEDIA_MAX_BYTES:
+                        raise HTTPException(status_code=413, detail="媒体文件不能超过 25 MB")
+                    handle.write(chunk)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        finally:
+            await file.close()
+        uploads = sorted(
+            (path for path in upload_dir.iterdir() if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for stale_path in uploads[200:]:
+            stale_path.unlink(missing_ok=True)
+        public_path = f"/tool_r18_uploads/web_bot/{filename}"
+        internal_base = str(
+            os.getenv("WEB_BOT_MEDIA_INTERNAL_BASE_URL", "http://workflow-delivery-r18:8098") or ""
+        ).rstrip("/")
+        return {
+            "ok": True,
+            "name": str(file.filename or filename)[:200],
+            "type": media_type,
+            "size": size,
+            "url": public_path,
+            "source_url": internal_base + public_path,
+        }
 
     def _threads_console_rewrite(content: bytes, content_type: str) -> bytes:
         if not content_type.lower().startswith(("text/html", "application/javascript", "text/javascript", "text/css")):

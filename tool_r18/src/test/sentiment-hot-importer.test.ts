@@ -54,6 +54,21 @@ describe("sentiment hot importer", () => {
     expect(beautyKeywords.join("|")).not.toBe(techKeywords.join("|"));
   });
 
+  it("extracts searchable keywords from a sparse newly created persona", () => {
+    const keywords = buildSentimentHotKeywords({
+      archive: {
+        id: "new-singer",
+        name: "\u963f\u4e00",
+        content: "\u4e00\u4f4d\u6d41\u6d6a\u6b4c\u624b\u3002",
+        setup: { customTopic: "\u4e00\u4f4d\u6d41\u6d6a\u6b4c\u624b\u3002" },
+        posts: [],
+      } as any,
+    });
+
+    expect(keywords).toContain("\u6d41\u6d6a\u6b4c\u624b");
+    expect(keywords).not.toContain("\u4e00\u4f4d\u6d41\u6d6a\u6b4c\u624b");
+  });
+
   it("turns fictional persona descriptions into searchable Chinese topic keywords", () => {
     const keywords = buildSentimentHotKeywords({
       archive: {

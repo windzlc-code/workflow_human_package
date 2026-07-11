@@ -17,6 +17,7 @@ ROOT = Path(__file__).parents[2]
 SERVER_PATH = ROOT / "webapp" / "server.py"
 CREATE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-create-once.ts"
 REWRITE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-rewrite-intro-once.ts"
+SET_TELEGRAM_GROUP_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-set-telegram-group-once.ts"
 GENERATE_IMAGE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-generate-image-once.ts"
 GENERATE_POST_IMAGE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-generate-post-image-once.ts"
 PUBLISH_POST_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-publish-post-once.ts"
@@ -24,15 +25,19 @@ ENQUEUE_POSTS_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-
 OWN_POST_REPLY_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "threads-own-post-reply-once.ts"
 POST_ACTION_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-post-action-once.ts"
 SENTIMENT_HOT_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-sentiment-hot-once.ts"
+TELEGRAM_BOT_PATH = ROOT / "tool_r18" / "src" / "telegram-bot.ts"
 
 
 def test_persona_internal_tg_runners_are_registered() -> None:
     source = SERVER_PATH.read_text(encoding="utf-8")
 
     assert '"persona_create": _run_persona_create' in source
+    assert '"persona_create_keywords": _run_persona_create_keywords' in source
     assert '"persona_rewrite_intro": _run_persona_rewrite_intro' in source
-    assert 'if typ == "persona_create":' in source
+    assert '"persona_set_telegram_group": _run_persona_set_telegram_group' in source
+    assert 'if typ in {"persona_create", "persona_create_keywords"}:' in source
     assert 'if typ == "persona_rewrite_intro":' in source
+    assert 'if typ == "persona_set_telegram_group":' in source
     assert 'mode not in {"direct", "replace"}' in source
     assert '"persona_generate_image": _run_persona_generate_image' in source
     assert '"persona_generate_post_image": _run_persona_generate_post_image' in source
@@ -41,6 +46,19 @@ def test_persona_internal_tg_runners_are_registered() -> None:
     assert '"persona_post_action": _run_persona_post_action' in source
     assert '"persona_sentiment_hot": _run_persona_sentiment_hot' in source
     assert '"threads_own_post_reply": _run_threads_own_post_reply' in source
+
+
+def test_tool_r18_runner_extracts_final_json_after_console_logs() -> None:
+    raw = "\n".join([
+        '[telegram-group][vision_send_result] {"status":"sent"}',
+        "visual verification completed",
+        json.dumps({"ok": True, "screenshotUrl": "https://example.com/evidence.png"}, ensure_ascii=False, indent=2),
+    ])
+
+    assert server._extract_last_json_object(raw) == {
+        "ok": True,
+        "screenshotUrl": "https://example.com/evidence.png",
+    }
 
 
 def test_persona_sentiment_hot_fetch_payload_is_strictly_normalized() -> None:
@@ -256,15 +274,39 @@ def test_persona_rewrite_payload_normalizes_direct_and_replace_modes() -> None:
     assert replace["mode"] == "replace"
 
 
+def test_persona_telegram_group_payload_is_strictly_normalized() -> None:
+    payload = server._build_internal_tg_task_payload(
+        "task-group",
+        "persona_set_telegram_group",
+        {
+            "archive_id": "workflow-persona-1",
+            "group_content_type": "paid",
+            "group_name": " paid group ",
+            "ignored": "secret",
+        },
+    )
+
+    assert payload == {
+        "archiveId": "workflow-persona-1",
+        "groupName": "paid group",
+        "groupContentType": "paid",
+    }
+
+
 def test_persona_scripts_reuse_telegram_business_functions() -> None:
     create_source = CREATE_SCRIPT_PATH.read_text(encoding="utf-8")
+    telegram_source = TELEGRAM_BOT_PATH.read_text(encoding="utf-8")
     rewrite_source = REWRITE_SCRIPT_PATH.read_text(encoding="utf-8")
+    group_source = SET_TELEGRAM_GROUP_SCRIPT_PATH.read_text(encoding="utf-8")
 
-    assert "derivePersonaSpecWithCodex" in create_source
+    assert "derivePersonaSpecFromPromptSelection" in create_source
     assert "createPersonaBySpec" in create_source
-    assert "spec.name = name" in create_source
-    assert "personaName: name" in create_source
-    assert "customTopic: prompt" in create_source
+    assert "spec.name = personaName" in telegram_source
+    assert "personaName," in telegram_source
+    assert "customTopic: userPrompt" in telegram_source
+    assert "derivePersonaInterestTags" in telegram_source
+    assert "options: { maxOutputTokens?: number } = {}" in telegram_source
+    assert "runCodexJsonInstruction(instruction, { maxOutputTokens: 2048 })" in telegram_source
     assert "rewritePersonaIntroWithCodex" in rewrite_source
     assert "loadPersonaArchive" in rewrite_source
     assert "updatePersonaArchiveProfile" in rewrite_source
@@ -274,6 +316,10 @@ def test_persona_scripts_reuse_telegram_business_functions() -> None:
     assert "customTopic: direction" in rewrite_source
     assert "installNodePersonaArchiveBridge" in create_source
     assert "installNodePersonaArchiveBridge" in rewrite_source
+    assert "updatePersonaArchivePadBinding" in group_source
+    assert "telegramFreeGroupName" in group_source
+    assert "telegramPaidGroupName" in group_source
+    assert 'groupContentType = workflowPersona ? requestedType : "free"' in group_source
 
 
 def test_persona_post_action_payloads_are_strictly_normalized() -> None:

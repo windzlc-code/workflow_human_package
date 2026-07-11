@@ -6,9 +6,9 @@ import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-r
 import { resolveVmosCredentials } from "@/runtime/node/config";
 import { publishPost, type PublishCancellationToken, type PublishProgress } from "@/lib/vmos-publisher";
 import { startTelegramBot, stopTelegramPolling, type TelegramBotInstanceOptions } from "@/telegram-bot";
-import { markArchiveEpisodesPublished } from "@/lib/persona-archives";
+import { listPersonaArchives, markArchiveEpisodesPublished } from "@/lib/persona-archives";
 import { screenshot as captureVmosScreenshot } from "@/lib/vmos-client";
-import { refreshSentimentSourceMetrics } from "@/lib/sentiment-hot-importer";
+import { buildSentimentHotKeywords, preheatSentimentHotCandidates, refreshSentimentSourceMetrics } from "@/lib/sentiment-hot-importer";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import fs from "node:fs";
 import crypto from "node:crypto";
@@ -223,6 +223,12 @@ const DAEMON_HEARTBEAT_FILE = resolveRuntimeFile("daemon.heartbeat.json");
 const PROCESS_STATUS_FILE = resolveRuntimeFile("process-status.json");
 const DAEMON_HEARTBEAT_STALE_MS = 90_000;
 const TELEGRAM_BOT_CONFIG_RELOAD_MS = Math.max(Number(process.env.TELEGRAM_BOT_CONFIG_RELOAD_MS || 2000), 2000);
+const SENTIMENT_HOT_PREHEAT_DISABLED = process.env.SENTIMENT_HOT_PREHEAT_DISABLED === "1";
+const SENTIMENT_HOT_PREHEAT_INTERVAL_MS = Math.max(Number(process.env.SENTIMENT_HOT_PREHEAT_INTERVAL_MS || 10 * 60 * 1000), 60_000);
+const SENTIMENT_HOT_PREHEAT_INITIAL_DELAY_MS = Math.max(Number(process.env.SENTIMENT_HOT_PREHEAT_INITIAL_DELAY_MS || 60_000), 10_000);
+const SENTIMENT_HOT_PREHEAT_BATCH_SIZE = Math.max(1, Math.min(Number(process.env.SENTIMENT_HOT_PREHEAT_BATCH_SIZE || 2), 5));
+let sentimentHotPreheatInFlight = false;
+let sentimentHotPreheatCursor = 0;
 
 function isAllowedScheduledPublishPlatform(platform: unknown): platform is "threads" | "telegram" {
   return platform === "threads" || platform === "telegram";
@@ -506,6 +512,33 @@ function writeTelegramBotRuntimeHeartbeat() {
   writeDaemonHeartbeat({ state: "running", telegramBot: activeTelegramBotCount() > 0 ? `configured:${activeTelegramBotCount()}` : "missing-token" });
 }
 
+async function runSentimentHotPreheatOnce(reason: string) {
+  if (SENTIMENT_HOT_PREHEAT_DISABLED || sentimentHotPreheatInFlight) return;
+  sentimentHotPreheatInFlight = true;
+  try {
+    const archives = (await listPersonaArchives())
+      .filter((archive) => buildSentimentHotKeywords({ archive }).length > 0);
+    if (archives.length === 0) {
+      log(`[sentiment_hot_preheat] skip ${reason}: no searchable personas`);
+      return;
+    }
+    const batchSize = Math.min(SENTIMENT_HOT_PREHEAT_BATCH_SIZE, archives.length);
+    const selected = Array.from({ length: batchSize }, (_, index) => archives[(sentimentHotPreheatCursor + index) % archives.length]);
+    sentimentHotPreheatCursor = (sentimentHotPreheatCursor + selected.length) % archives.length;
+    for (const archive of selected) {
+      const startedAt = Date.now();
+      try {
+        const result = await preheatSentimentHotCandidates({ archive, limit: 10, refresh: true });
+        log(`[sentiment_hot_preheat] ${reason} ${archive.name || archive.id}: ${result.count}/10 in ${Date.now() - startedAt}ms`);
+      } catch (error) {
+        log(`[sentiment_hot_preheat] ${reason} ${archive.name || archive.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  } finally {
+    sentimentHotPreheatInFlight = false;
+  }
+}
+
 async function main() {
   writeDaemonHeartbeat({ state: "starting" });
   log("自動化推文營運控制台 — 後台服務啟動中...");
@@ -710,6 +743,18 @@ async function main() {
   setInterval(() => {
     writeDaemonHeartbeat({ state: "running", telegramBot: activeTelegramBotCount() > 0 ? `configured:${activeTelegramBotCount()}` : "missing-token" });
   }, 30_000);
+
+  if (!SENTIMENT_HOT_PREHEAT_DISABLED) {
+    const initialPreheatTimer = setTimeout(() => {
+      void runSentimentHotPreheatOnce("initial");
+    }, SENTIMENT_HOT_PREHEAT_INITIAL_DELAY_MS);
+    initialPreheatTimer.unref?.();
+
+    const preheatTimer = setInterval(() => {
+      void runSentimentHotPreheatOnce("scheduled");
+    }, SENTIMENT_HOT_PREHEAT_INTERVAL_MS);
+    preheatTimer.unref?.();
+  }
 
   setInterval(() => {
     queueTelegramBotRuntimeConfigApply(readLocalTelegramBotConfigs(), "配置热更新").catch((error: any) => {

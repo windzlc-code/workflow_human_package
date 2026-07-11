@@ -30,12 +30,16 @@ vi.mock("@/lib/vmos-client", () => ({
   waitTask: vi.fn(async (_config, taskId: number) => ({ taskStatus: 3, taskResult: mockState.taskResults.get(taskId) || "" })),
   inputText: vi.fn(async (_config, _padCode, text: string) => {
     mockState.input.push(text);
+    const escaped = text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    mockState.sharePickerXml += `<node text="${escaped}" editable="false"/>`;
     return "input-task";
   }),
   screenshot: vi.fn(async () => "https://example.test/screenshot.jpg"),
 }));
 
 vi.mock("@/lib/gemini-client", () => ({
+  callGemini: vi.fn(async () => ({})),
+  extractText: vi.fn(() => ""),
   getInlineData: vi.fn(async () => ({
     mimeType: "image/png",
     data: mockState.screenshotBase64,
@@ -43,6 +47,8 @@ vi.mock("@/lib/gemini-client", () => ({
 }));
 
 describe("VMOS Telegram group publisher", () => {
+  const targetGroupXml = '<node text="输入消息" bounds="[0,1450][720,1600]"/><node text="TG群測試" bounds="[90,62][430,128]"/>';
+
   beforeEach(() => {
     mockState.commands = [];
     mockState.input = [];
@@ -77,7 +83,7 @@ describe("VMOS Telegram group publisher", () => {
     });
     expect(mockState.input).toEqual(["Test1 VMOS Telegram 自动化发推文验证"]);
     expect(mockState.commands.join("\n")).toContain("input tap 170 1518");
-    expect(mockState.commands.join("\n")).toContain("input tap 655 1000");
+    expect(mockState.commands.join("\n")).toContain("input tap 640 1535");
     expect(progress.at(-1)).toEqual({ step: "Telegram 群组发布完成", done: true });
   });
 
@@ -105,19 +111,16 @@ describe("VMOS Telegram group publisher", () => {
   });
 
   it("uses a safe search keyword then clicks the exact Chinese free group result", async () => {
-    const chatListXml = '<node text="Telegram" content-desc="Search" bounds="[0,0][720,1600]"/>';
     mockState.uiXmlQueue = [
-      "",
-      "",
-      chatListXml,
-      chatListXml,
-      chatListXml,
-      chatListXml,
+      '<node text="输入消息"/><node text="其他群"/>',
+      '<node text="输入消息"/><node text="其他群"/>',
       [
         '<node text="AG-TG群測試" bounds="[40,300][500,380]" clickable="true"/>',
         '<node text="TG群測試" bounds="[40,520][500,600]" clickable="true"/>',
       ].join(""),
-      '<node text="输入消息" bounds="[0,1450][720,1600]"/><node text="TG群測試" bounds="[40,60][500,130]"/>',
+      targetGroupXml,
+      targetGroupXml,
+      `${targetGroupXml}<node text="free route" editable="false"/>`,
     ];
 
     await publishTelegramGroupPost(
@@ -132,8 +135,10 @@ describe("VMOS Telegram group publisher", () => {
       () => undefined,
     );
 
-    expect(mockState.input).toEqual(["TG", "free route"]);
-    expect(mockState.input).not.toContain("TG群測試");
+    expect(mockState.input).toEqual(["TG群測試", "free route"]);
+    expect(mockState.commands.join("\n")).toContain("tg://openmessage?chat_id=-1003812332642");
+    expect(mockState.commands.join("\n")).toContain("https://t.me/c/3812332642");
+    expect(mockState.commands.join("\n")).toContain("input tap 555 115");
     expect(mockState.commands.join("\n")).toContain("input tap 270 560");
   });
 
@@ -161,19 +166,20 @@ describe("VMOS Telegram group publisher", () => {
     expect(commands).toContain("android.intent.action.SEND");
     expect(commands).toContain("org.telegram.messenger");
     expect(commands).toContain("content://media/external/images/media/123");
-    expect(commands).toContain("input tap 230 665");
-    expect(commands).toContain("input tap 650 1515");
+    expect(commands).not.toContain("android.intent.extra.TEXT");
+    expect(mockState.input.filter((item) => item === "media")).toHaveLength(1);
+    expect(commands).toContain("input tap 640 1535");
   });
 
-  it("still advances when Telegram share opens the media preview without UI XML", async () => {
+  it("does not verify media when the post-send Telegram UI is empty", async () => {
     mockState.uiXmlQueue = [
+      targetGroupXml,
+      targetGroupXml,
       "",
-      '<node text="输入消息"/><node text="TG群測試"/>',
-      '<node text="test"/><node text="Telegram Image"/>',
     ];
     mockState.sharePickerXml = '<node text="test"/><node text="Telegram Image"/>';
 
-    const result = await publishTelegramGroupPost(
+    await expect(publishTelegramGroupPost(
       {},
       {
         padCode: "ACP250322677KIRJ",
@@ -186,13 +192,9 @@ describe("VMOS Telegram group publisher", () => {
         telegramGroupContentType: "free",
       },
       () => undefined,
-    );
-
-    expect(result.state).toBe("warning");
-    expect(result.detail).toContain("未提供可读群组消息确认");
+    )).rejects.toThrow("媒體發送後未能確認目前群組");
     const commands = mockState.commands.join("\n");
-    expect(commands).toContain("input tap 230 665");
-    expect(commands).toContain("input tap 650 1515");
+    expect(commands).toContain("input tap 640 1535");
   });
 
   it("does not mark media as sent when Telegram remains on the share picker", async () => {
@@ -221,7 +223,50 @@ describe("VMOS Telegram group publisher", () => {
         telegramGroupContentType: "free",
       },
       () => undefined,
-    )).rejects.toThrow("Telegram 分享页没有选中目标群组");
+    )).rejects.toThrow("Telegram 分享頁未能選中目標群");
+  });
+
+  it("rejects text success when the post-send UI shows a different group", async () => {
+    mockState.uiXmlQueue = [
+      targetGroupXml,
+      targetGroupXml,
+      '<node text="输入消息"/><node text="其他群"/>',
+    ];
+
+    await expect(publishTelegramGroupPost(
+      {},
+      {
+        padCode: "ACP250322677KIRJ",
+        caption: "must stay in target",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
+      },
+      () => undefined,
+    )).rejects.toThrow("發送後未能確認目前群組是");
+  });
+
+  it("does not verify media when the post-send UI shows a different group", async () => {
+    mockState.uiXmlQueue = [
+      targetGroupXml,
+      targetGroupXml,
+      '<node text="输入消息"/><node text="其他群"/>',
+    ];
+
+    await expect(publishTelegramGroupPost(
+      {},
+      {
+        padCode: "ACP250322677KIRJ",
+        caption: "media",
+        mediaUrl: "https://example.test/a.jpg",
+        mediaContentUri: "content://media/external/images/media/123",
+        mediaMimeType: "image/jpeg",
+        telegramTargetGroupName: "TG群測試",
+        telegramTargetChatId: "-1003812332642",
+        telegramGroupContentType: "free",
+      },
+      () => undefined,
+    )).rejects.toThrow("媒體發送後未能確認目前群組");
   });
 
   it("requires staged content uri for media posting", async () => {

@@ -119,6 +119,12 @@ def _decode_response(resp: requests.Response) -> dict[str, Any]:
     return {}
 
 
+def _remote_overview_urls() -> list[str]:
+    configured = str(os.getenv("PERSONA_DASHBOARD_REMOTE_URL") or "").strip()
+    values = [configured, "http://workflow-delivery-r18:8098/api/persona_dashboard/overview", REMOTE_OVERVIEW_URL]
+    return list(dict.fromkeys(value for value in values if value))
+
+
 def _load_remote_overview(force: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
     meta = {
         "url": REMOTE_OVERVIEW_URL,
@@ -133,10 +139,10 @@ def _load_remote_overview(force: bool = False) -> tuple[dict[str, Any], dict[str
         if isinstance(cached, dict) and cached.get("ok") and age <= REMOTE_CACHE_TTL_SECONDS:
             meta.update({"ok": True, "source": "cache", "cached": True})
             return cached, meta
-    if REMOTE_OVERVIEW_URL:
+    for remote_url in _remote_overview_urls():
         try:
             resp = requests.get(
-                REMOTE_OVERVIEW_URL,
+                remote_url,
                 params={"force_refresh": "true"} if force else None,
                 timeout=12,
             )
@@ -144,10 +150,10 @@ def _load_remote_overview(force: bool = False) -> tuple[dict[str, Any], dict[str
             payload = _decode_response(resp)
             if payload.get("ok"):
                 _write_json(REMOTE_CACHE, payload)
-                meta.update({"ok": True, "source": "remote"})
+                meta.update({"ok": True, "source": "remote", "url": remote_url, "error": ""})
                 return payload, meta
         except Exception as exc:
-            meta["error"] = str(exc)
+            meta.update({"url": remote_url, "error": str(exc)})
     cached = _read_json(REMOTE_CACHE)
     if isinstance(cached, dict) and cached.get("ok"):
         meta.update({"ok": True, "source": "stale-cache", "cached": True})
@@ -190,6 +196,9 @@ def _normalize_remote_persona(row: dict[str, Any]) -> dict[str, Any]:
         "account_username": str((row.get("threads_account") or {}).get("handle") or "").strip(),
         "threads_account": row.get("threads_account") if isinstance(row.get("threads_account"), dict) else {},
         "telegram": row.get("telegram") if isinstance(row.get("telegram"), dict) else {},
+        "setup": row.get("setup") if isinstance(row.get("setup"), dict) else {},
+        "imageWorkflow": bool(row.get("imageWorkflow")),
+        "workflow": row.get("workflow"),
         "counts": row.get("counts") if isinstance(row.get("counts"), dict) else {},
         "hot": normalized_hot,
         "hot_platforms": row.get("hot_platforms") if isinstance(row.get("hot_platforms"), list) else [],
@@ -231,6 +240,12 @@ def _local_persona_row(persona: Persona, remote_match: dict[str, Any] | None = N
         account_username=persona.account_username,
         prefer_remote=_is_placeholder_persona_name(persona.name, persona.pad_code),
     )
+    matched_telegram = matched.get("telegram") if isinstance(matched.get("telegram"), dict) else {}
+    remote_pad_code = str(matched.get("bound_pad_code") or "").strip()
+    remote_pad_name = str(matched.get("bound_pad_name") or "").strip()
+    remote_account = str(matched.get("account_username") or "").strip()
+    free_group = str(matched_telegram.get("free_group") or "").strip() or persona.tg_free_group_name or persona.tg_free_group_id
+    paid_group = str(matched_telegram.get("paid_group") or "").strip() or persona.tg_paid_group_name or persona.tg_paid_group_id
     return {
         "id": persona.id,
         "name": name,
@@ -240,18 +255,21 @@ def _local_persona_row(persona: Persona, remote_match: dict[str, Any] | None = N
         "reference_image_url": str(matched.get("reference_image_url") or ""),
         "created_at": datetime.fromtimestamp(persona.created_at).isoformat() if persona.created_at else "",
         "updated_at": datetime.fromtimestamp(persona.updated_at).isoformat() if persona.updated_at else "",
-        "bound_pad_code": persona.pad_code,
-        "bound_pad_name": device.alias if device and device.alias else persona.pad_code,
+        "bound_pad_code": remote_pad_code or persona.pad_code,
+        "bound_pad_name": remote_pad_name or (device.alias if device and device.alias else persona.pad_code),
         "bound_vmos_account_name": device.vmos_account if device else "",
-        "account_username": persona.account_username,
+        "account_username": remote_account or persona.account_username,
         "threads_account": {
-            "handle": persona.account_username or (account.username if account else ""),
-            "bound": bool(persona.account_username),
+            "handle": remote_account or persona.account_username or (account.username if account else ""),
+            "bound": bool(remote_account or persona.account_username),
         },
         "telegram": {
-            "free_group": persona.tg_free_group_name or persona.tg_free_group_id,
-            "paid_group": persona.tg_paid_group_name or persona.tg_paid_group_id,
+            "free_group": free_group,
+            "paid_group": paid_group,
         },
+        "setup": matched.get("setup") if isinstance(matched.get("setup"), dict) else {},
+        "imageWorkflow": bool(matched.get("imageWorkflow")),
+        "workflow": matched.get("workflow"),
         "counts": matched.get("counts") if isinstance(matched.get("counts"), dict) else {"posts": 0, "published": 0, "images": 0},
         "hot": hot,
         "hot_platforms": matched.get("hot_platforms") if isinstance(matched.get("hot_platforms"), list) else [],
@@ -271,6 +289,32 @@ def _match_key(value: Any) -> str:
 
 def _name_match_key(value: Any, pad_code: str = "") -> str:
     return _clean_persona_name(value, pad_code).lower()
+
+
+def _source_archive_key(value: Any) -> str:
+    raw = _match_key(value)
+    return raw[len("source:") :] if raw.startswith("source:") else ""
+
+
+def _persona_identity_key(persona: Persona) -> tuple[str, str]:
+    return (_name_match_key(persona.name, persona.pad_code), _match_key(persona.pad_code))
+
+
+def visible_local_personas(personas: list[Persona] | None = None) -> list[Persona]:
+    source = personas if personas is not None else PersonaRepo.list_all(limit=10000)
+    canonical = {
+        _persona_identity_key(persona)
+        for persona in source
+        if not str(persona.source_archive_id or "").startswith("device:")
+    }
+    return [
+        persona
+        for persona in source
+        if not (
+            str(persona.source_archive_id or "").startswith("device:")
+            and _persona_identity_key(persona) in canonical
+        )
+    ]
 
 
 def _remote_index_keys(row: dict[str, Any]) -> list[str]:
@@ -296,6 +340,7 @@ def _remote_index_keys(row: dict[str, Any]) -> list[str]:
 def _local_candidate_keys(persona: Persona) -> list[str]:
     device = DeviceRepo.get(persona.pad_code) if persona.pad_code else None
     values = [
+        _source_archive_key(persona.source_archive_id),
         persona.id,
         persona.name,
         device.alias if device else "",
@@ -327,10 +372,12 @@ def _build_remote_indexes(remote_personas: list[dict[str, Any]]) -> tuple[dict[s
 
 
 def _find_remote_match(persona: Persona, index: dict[str, dict[str, Any]], used: set[str]) -> dict[str, Any] | None:
-    for candidate in _local_candidate_keys(persona):
+    for candidate in (_source_archive_key(persona.source_archive_id), _match_key(persona.id)):
+        if not candidate:
+            continue
         row = index.get(candidate)
-        if row and str(row.get("id") or id(row)) not in used:
-            used.add(str(row.get("id") or id(row)))
+        if row and _match_key(row.get("id")) == candidate and candidate not in used:
+            used.add(candidate)
             return row
     return None
 
@@ -373,9 +420,14 @@ def build_overview(force_remote: bool = False) -> dict[str, Any]:
     remote_index, used_remote = _build_remote_indexes(remote_rows)
 
     rows: list[dict[str, Any]] = []
-    local_personas = PersonaRepo.list_all(limit=10000)
+    raw_local_personas = PersonaRepo.list_all(limit=10000)
+    local_personas = visible_local_personas(raw_local_personas)
+    matched_remote: dict[str, dict[str, Any] | None] = {}
+    match_order = sorted(local_personas, key=lambda persona: 0 if _source_archive_key(persona.source_archive_id) else 1)
+    for persona in match_order:
+        matched_remote[persona.id] = _find_remote_match(persona, remote_index, used_remote)
     for persona in local_personas:
-        rows.append(_local_persona_row(persona, _find_remote_match(persona, remote_index, used_remote)))
+        rows.append(_local_persona_row(persona, matched_remote.get(persona.id)))
 
     for remote in remote_rows:
         rid = str(remote.get("id") or id(remote))
@@ -400,7 +452,7 @@ def build_overview(force_remote: bool = False) -> dict[str, Any]:
         },
         "personas": rows,
         "data_sources": {
-            "local_personas": {"count": len(local_personas)},
+            "local_personas": {"count": len(local_personas), "raw_count": len(raw_local_personas)},
             "remote_persona_dashboard": remote_meta,
         },
         "settings": {
@@ -433,30 +485,30 @@ def _pad_distribution(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 def metrics_for_personas(personas: list[Persona], overview: dict[str, Any]) -> dict[str, dict[str, Any]]:
     rows = overview.get("personas") if isinstance(overview.get("personas"), list) else []
-    by_key: dict[str, dict[str, Any]] = {}
+    by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
-        for key in (row.get("id"), row.get("name"), row.get("bound_pad_code"), row.get("account_username")):
-            normalized = _match_key(key)
-            if normalized:
-                by_key[normalized] = row
+        row_id = _match_key(row.get("id"))
+        if row_id:
+            by_id[row_id] = row
     result: dict[str, dict[str, Any]] = {}
     for persona in personas:
-        for key in (persona.id, persona.name, persona.pad_code, persona.account_username):
-            row = by_key.get(_match_key(key))
-            if row:
-                result[persona.id] = row
-                break
-        result.setdefault(persona.id, _local_persona_row(persona, None))
+        row = by_id.get(_match_key(persona.id))
+        if not row:
+            row = by_id.get(_source_archive_key(persona.source_archive_id))
+        if row:
+            result[persona.id] = row
+        else:
+            result[persona.id] = _local_persona_row(persona, None)
     return result
 
 
 def find_persona(overview: dict[str, Any], persona_id: str) -> dict[str, Any] | None:
     needle = _match_key(persona_id)
-    for row in overview.get("personas", []):
-        if not isinstance(row, dict):
-            continue
-        if needle in {_match_key(row.get("id")), _match_key(row.get("name")), _match_key(row.get("bound_pad_code"))}:
+    rows = [row for row in overview.get("personas", []) if isinstance(row, dict)]
+    for row in rows:
+        source_id = _source_archive_key(row.get("source_archive_id")) or _match_key(row.get("source_archive_id"))
+        if needle == _match_key(row.get("id")) or needle == source_id:
             return row
     return None

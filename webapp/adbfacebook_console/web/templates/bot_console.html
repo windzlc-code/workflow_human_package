@@ -43,6 +43,10 @@
     flex-direction: column;
     border: 1px solid rgba(15, 23, 42, .08);
   }
+  .phone.drag-active {
+    outline: 3px solid rgba(34, 158, 217, .75);
+    outline-offset: -3px;
+  }
   .ios {
     height: 32px;
     background: linear-gradient(180deg, #eef4e7, #dcebd1);
@@ -182,7 +186,7 @@
     font-size: 11px;
     white-space: nowrap;
   }
-  .bubble img {
+  .bubble img, .bubble video {
     display: block;
     width: 100%;
     max-height: 360px;
@@ -191,6 +195,7 @@
     border-radius: 10px;
     margin-top: 8px;
   }
+  .bubble video { min-height: 180px; }
   .cardlet {
     margin-top: 8px;
     border-top: 1px solid rgba(0,0,0,.08);
@@ -199,6 +204,31 @@
   }
   .cardlet strong { display: block; margin-bottom: 3px; }
   .cardlet .metric { display: inline-block; margin: 3px 4px 0 0; padding: 2px 6px; border-radius: 5px; background: #f1f5f9; }
+  .bubble img, .cardlet img { cursor: zoom-in; }
+  .media-preview {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    background: rgba(5, 10, 20, .92);
+  }
+  .media-preview[hidden] { display: none; }
+  .media-preview img { max-width: 96vw; max-height: 94vh; object-fit: contain; border-radius: 8px; }
+  .media-preview button {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    width: 38px;
+    height: 38px;
+    border: 1px solid rgba(255,255,255,.3);
+    border-radius: 50%;
+    background: rgba(15,23,42,.76);
+    color: #fff;
+    font-size: 23px;
+    cursor: pointer;
+  }
   .keyboard {
     width: min(86%, 360px);
     margin-top: 2px;
@@ -350,6 +380,11 @@
   </section>
 </main>
 
+<div class="media-preview" id="media-preview" hidden role="dialog" aria-modal="true" aria-label="图片预览">
+  <button type="button" aria-label="关闭图片预览">×</button>
+  <img alt="智能体图片预览">
+</div>
+
 <script>
 (function(){
   const log = document.getElementById('chat-log');
@@ -357,8 +392,12 @@
   const input = document.getElementById('bot-input');
   const attach = document.getElementById('bot-attach');
   const mediaInput = document.getElementById('bot-media-input');
+  const phone = document.querySelector('.phone');
   const subtitle = document.getElementById('bot-subtitle');
   const timeEl = document.getElementById('ios-time');
+  const mediaPreview = document.getElementById('media-preview');
+  const mediaPreviewImage = mediaPreview.querySelector('img');
+  const mediaPreviewClose = mediaPreview.querySelector('button');
   const query = new URLSearchParams(window.location.search);
   const entryAction = String(query.get('entry') || 'menu').trim() || 'menu';
   const sessionId = String(query.get('session') || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 80) || 'default';
@@ -366,6 +405,9 @@
   const webBotEndpoint = window.location.pathname.startsWith('/threads-console')
     ? '/threads-console/api/web-bot/message'
     : '/api/web-bot/message';
+  const webBotUploadEndpoint = window.location.pathname.startsWith('/threads-console')
+    ? '/threads-console/api/web-bot/upload'
+    : '/api/web-bot/upload';
   let state = {};
   let sourcePollTimer = null;
   let sourceFollowupTimer = null;
@@ -628,11 +670,22 @@
     return group;
   }
 
-  function appendUser(text) {
+  function appendUser(text, media = null) {
     const group = makeGroup('user');
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
+    if (media && media.url) {
+      const preview = document.createElement(media.type === 'video' ? 'video' : 'img');
+      preview.src = media.url;
+      if (media.type === 'video') {
+        preview.controls = true;
+        preview.preload = 'metadata';
+      } else {
+        preview.alt = media.name || 'uploaded image';
+      }
+      bubble.appendChild(preview);
+    }
     const t = document.createElement('span');
     t.className = 'time';
     t.textContent = nowText() + ' ✓✓';
@@ -656,8 +709,27 @@
       <div>${metrics}</div>
       ${card.url ? `<div><a href="${escapeHtml(card.url)}" target="_blank" rel="noreferrer">打开链接</a></div>` : ''}
       ${card.image ? `<img src="${escapeHtml(card.image)}" alt="preview">` : ''}
+      ${card.video ? `<video src="${escapeHtml(card.video)}" controls preload="metadata"></video>` : ''}
     `;
     return box;
+  }
+
+  function closeMediaPreview() {
+    mediaPreview.hidden = true;
+    mediaPreviewImage.removeAttribute('src');
+  }
+
+  function openMediaPreview(image) {
+    const url = String(image.currentSrc || image.src || '').trim();
+    if (!url) return;
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: 'workflow:media-preview', url, alt: image.alt || '智能体图片预览' }, window.location.origin);
+      return;
+    }
+    mediaPreviewImage.src = url;
+    mediaPreviewImage.alt = image.alt || '智能体图片预览';
+    mediaPreview.hidden = false;
+    mediaPreviewClose.focus();
   }
 
   function renderKeyboard(keyboard) {
@@ -737,7 +809,7 @@
     }
     if (visibleText && showUser) {
       clearSourcePoll();
-      appendUser(visibleText);
+      appendUser(visibleText, options.visibleMedia || null);
     }
     subtitle.textContent = '正在输入...';
     try {
@@ -766,6 +838,10 @@
       }
     } catch (err) {
       if (generation !== requestGeneration) return;
+      if (isPoll && payload.action) {
+        scheduleSourcePoll({ action: payload.action, interval_ms: 3000 }, targetGroup);
+        return;
+      }
       appendBot({
         text: '操作失败：' + err,
         keyboard: [[{ label: '返回主选单', action: 'menu' }]]
@@ -790,17 +866,7 @@
     send({ message: text }, text);
   });
 
-  attach.addEventListener('click', () => {
-    if (state.flow === 'sentiment_hot_edit_input' || state.flow === 'custom_publish_content' || state.flow === 'custom_publish_ready') {
-      mediaInput.click();
-      return;
-    }
-    send({ action: 'image_menu' }, '', { replacePanel: true, showUser: false });
-  });
-
-  mediaInput.addEventListener('change', async () => {
-    const file = mediaInput.files && mediaInput.files[0];
-    mediaInput.value = '';
+  async function handleMediaFile(file) {
     if (!file) return;
     const type = file.type.startsWith('video/') ? 'video' : file.type.startsWith('image/') ? 'image' : '';
     if (!type) {
@@ -811,23 +877,86 @@
       appendBot({ text: '媒体文件不能超过 25 MB。', keyboard: [] });
       return;
     }
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    subtitle.textContent = '正在上传...';
+    let uploaded;
+    try {
+      const response = await fetch(webBotUploadEndpoint, { method: 'POST', body: formData });
+      uploaded = await response.json();
+      if (!response.ok || !uploaded.ok) throw new Error(uploaded.detail || uploaded.err || '上传失败');
+    } catch (err) {
+      appendBot({ text: '上传媒体失败：' + err, keyboard: [] });
+      subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
+      return;
+    }
     const caption = input.value.trim();
     input.value = '';
-    const url = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(reader.error || new Error('读取媒体失败'));
-      reader.readAsDataURL(file);
-    }).catch(err => {
-      appendBot({ text: '读取媒体失败：' + err, keyboard: [] });
-      return '';
-    });
-    if (!url) return;
+    const previewUrl = new URL(uploaded.url, window.location.origin).href;
+    const media = {
+      type: uploaded.type || type,
+      url: uploaded.source_url || previewUrl,
+      preview_url: previewUrl,
+      name: uploaded.name || file.name,
+    };
     send(
-      { message: caption, media: [{ type, url, name: file.name }] },
-      '📎 ' + file.name + (caption ? '\n' + caption : '')
+      { message: caption, media: [media] },
+      '📎 ' + media.name + (caption ? '\n' + caption : ''),
+      { visibleMedia: { type: media.type, url: previewUrl, name: media.name } }
     );
+  }
+
+  function mediaUploadFlowActive() {
+    return state.flow === 'sentiment_hot_edit_input'
+      || state.flow === 'custom_publish_content'
+      || state.flow === 'custom_publish_ready'
+      || state.flow === 'replace_persona_image';
+  }
+
+  attach.addEventListener('click', () => {
+    if (mediaUploadFlowActive()) {
+      mediaInput.click();
+      return;
+    }
+    send({ action: 'image_menu' }, '', { replacePanel: true, showUser: false });
   });
+
+  mediaInput.addEventListener('change', () => {
+    const file = mediaInput.files && mediaInput.files[0];
+    mediaInput.value = '';
+    void handleMediaFile(file);
+  });
+
+  if (phone) {
+    ['dragenter', 'dragover'].forEach(eventName => {
+      phone.addEventListener(eventName, event => {
+        if (!mediaUploadFlowActive()) return;
+        if (!event.dataTransfer || !event.dataTransfer.types.includes('Files')) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        phone.classList.add('drag-active');
+      });
+    });
+    ['dragleave', 'drop'].forEach(eventName => {
+      phone.addEventListener(eventName, event => {
+        if (!mediaUploadFlowActive()) return;
+        if (eventName === 'drop') event.preventDefault();
+        phone.classList.remove('drag-active');
+        if (eventName === 'drop') {
+          const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+          void handleMediaFile(file);
+        }
+      });
+    });
+  }
+
+  log.addEventListener('click', e => {
+    const image = e.target.closest('.bubble img, .cardlet img');
+    if (image) openMediaPreview(image);
+  });
+  mediaPreview.addEventListener('click', e => { if (e.target === mediaPreview) closeMediaPreview(); });
+  mediaPreviewClose.addEventListener('click', closeMediaPreview);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !mediaPreview.hidden) closeMediaPreview(); });
 
   document.addEventListener('click', e => {
     const btn = e.target.closest('[data-bot-action]');

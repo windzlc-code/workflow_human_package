@@ -25,10 +25,10 @@ from typing import Any
 
 from core import vmos_client
 from core import persona_dashboard as persona_dashboard_module
-from core.persona_dashboard import build_overview, find_persona
+from core.persona_dashboard import build_overview, find_persona, visible_local_personas
 from core.runtime_paths import DATA_DIR
 from core.traditional import to_traditional, traditionalize_task_entries
-from db.repo import AccountRepo, Device, DeviceRepo, OperatorRepo, Persona, PersonaRepo, PostMemory, PostMemoryRepo, SourceWorkflowJobRepo, TaskRepo
+from db.repo import AccountRepo, Device, DeviceRepo, Persona, PersonaRepo, PostMemory, PostMemoryRepo, SourceWorkflowJobRepo, TaskRepo
 
 
 SOURCE_ROOT = r"D:\workflow_delivery_package_source"
@@ -72,7 +72,13 @@ def _store_custom_publish_media(item: dict[str, str]) -> str:
         while len(_CUSTOM_PUBLISH_MEDIA_CACHE) >= 5:
             oldest = min(_CUSTOM_PUBLISH_MEDIA_CACHE, key=lambda key: float(_CUSTOM_PUBLISH_MEDIA_CACHE[key].get("at") or 0.0))
             _CUSTOM_PUBLISH_MEDIA_CACHE.pop(oldest, None)
-        _CUSTOM_PUBLISH_MEDIA_CACHE[token] = {"at": now, "url": url, "type": str(item.get("type") or ""), "name": str(item.get("name") or "")}
+        _CUSTOM_PUBLISH_MEDIA_CACHE[token] = {
+            "at": now,
+            "url": url,
+            "preview_url": str(item.get("preview_url") or ""),
+            "type": str(item.get("type") or ""),
+            "name": str(item.get("name") or ""),
+        }
     return token
 
 
@@ -84,12 +90,18 @@ def _custom_publish_media(draft: dict[str, Any]) -> dict[str, Any]:
             if item and time.time() - float(item.get("at") or 0.0) <= 1800:
                 return dict(item)
     legacy_url = str(draft.get("custom_media_url") or "").strip()
-    return {"url": legacy_url, "type": str(draft.get("custom_media_type") or ""), "name": str(draft.get("custom_media_name") or "")} if legacy_url else {}
+    return {
+        "url": legacy_url,
+        "preview_url": str(draft.get("custom_media_preview_url") or legacy_url),
+        "type": str(draft.get("custom_media_type") or ""),
+        "name": str(draft.get("custom_media_name") or ""),
+    } if legacy_url else {}
 
 
 def _drop_custom_publish_media(draft: dict[str, Any]) -> None:
     token = str(draft.pop("custom_media_token", "") or "")
     draft.pop("custom_media_url", None)
+    draft.pop("custom_media_preview_url", None)
     draft.pop("custom_media_type", None)
     draft.pop("custom_media_name", None)
     if token:
@@ -794,7 +806,7 @@ def _safe_web_media_url(value: Any) -> str:
     if re.match(r"^data:(?:image|video)/[a-z0-9.+-]+;base64,[a-z0-9+/=\r\n]+$", text, re.I):
         return text
     if (
-        text.startswith(("/persona_media/", "/tool_r18_uploads/"))
+        text.startswith(("/persona_media/", "/tool_r18_uploads/", "/threads-console/tool_r18_uploads/"))
         and not text.startswith("//")
         and "\\" not in text
         and ".." not in text.split("/")
@@ -804,6 +816,25 @@ def _safe_web_media_url(value: Any) -> str:
         return ""
     parsed = urllib.parse.urlsplit(text)
     if not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    return text
+
+
+def _safe_custom_upload_image_url(value: Any) -> str:
+    text = _safe_web_media_url(value)
+    if not text or text.startswith("data:image/"):
+        return text
+    parsed = urllib.parse.urlsplit(text)
+    path = parsed.path if parsed.scheme else text
+    if not path.startswith("/tool_r18_uploads/web_bot/"):
+        return ""
+    if not parsed.scheme:
+        return text
+    configured = urllib.parse.urlsplit(
+        os.getenv("WEB_BOT_MEDIA_INTERNAL_BASE_URL", "http://workflow-delivery-r18:8098")
+    )
+    allowed_hosts = {"workflow-delivery-r18", str(configured.hostname or "").lower()}
+    if str(parsed.hostname or "").lower() not in allowed_hosts:
         return ""
     return text
 
@@ -1194,9 +1225,12 @@ def _save_persona_image_from_url(persona: Persona, image_url: str, *, variant: i
         return str(dest)
 
     request = urllib.request.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+    max_bytes = max(1, _env_int("PERSONA_IMAGE_DOWNLOAD_MAX_BYTES", 25 * 1024 * 1024))
     with urllib.request.urlopen(request, timeout=max(30, _env_int("PERSONA_IMAGE_DOWNLOAD_TIMEOUT", 90))) as response:
-        content = response.read()
+        content = response.read(max_bytes + 1)
         content_type = str(response.headers.get("Content-Type") or "").lower()
+    if len(content) > max_bytes:
+        raise RuntimeError("image download exceeds size limit")
     parsed_suffix = Path(urllib.parse.urlparse(image_url).path).suffix.lower()
     if parsed_suffix not in LOCAL_IMAGE_EXTS:
         if "jpeg" in content_type or "jpg" in content_type:
@@ -1688,6 +1722,30 @@ def _replace_persona_image_from_text(text: str, state: dict[str, Any]) -> dict[s
     PERSONA_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     dest = PERSONA_IMAGE_DIR / f"{_safe_filename(persona.id)}_custom_{int(time.time())}{source.suffix.lower()}"
     shutil.copy2(source, dest)
+    PersonaRepo.upsert(_persona_payload(persona, avatar_path=str(dest)))
+    updated = PersonaRepo.get(persona_id) or persona
+    return _response(
+        [
+            _message(f"✅ 已替换「{updated.name}」的人设图。", kind="status"),
+            _persona_image_message(updated, dest),
+        ],
+        state={"flow": ""},
+    )
+
+
+def _replace_persona_image_from_media(media: dict[str, str], state: dict[str, Any]) -> dict[str, Any]:
+    draft = state.get("draft") if isinstance(state.get("draft"), dict) else {}
+    persona_id = str(draft.get("persona_id") or "")
+    persona = PersonaRepo.get(persona_id)
+    if not persona:
+        return _response(_message("没有找到这个本地人设。", [[_btn("◀️ 返回人设列表", "list_personas")]]), state={"flow": ""})
+    media_url = _safe_custom_upload_image_url(media.get("url"))
+    if str(media.get("type") or "") != "image" or not media_url:
+        return _response(_message("请上传 png、jpg、jpeg 或 webp 图片。", [[_btn("❌ 取消", f"viewimg:{persona_id}")]]), state=state)
+    try:
+        dest = _save_persona_image_from_url(persona, media_url, source_label="custom_upload")
+    except Exception as exc:
+        return _response(_message(f"读取上传图片失败：{exc}", [[_btn("❌ 取消", f"viewimg:{persona_id}")]]), state=state)
     PersonaRepo.upsert(_persona_payload(persona, avatar_path=str(dest)))
     updated = PersonaRepo.get(persona_id) or persona
     return _response(
@@ -2374,7 +2432,12 @@ def _sentiment_hot_input_media(payload: Any) -> list[dict[str, str]]:
         media_type = str(item.get("type") or "").strip().lower()
         if not url or media_type not in {"image", "video"}:
             continue
-        result.append({"url": url, "type": media_type, "name": str(item.get("name") or "").strip()[:160]})
+        result.append({
+            "url": url,
+            "preview_url": _safe_web_media_url(item.get("preview_url") or url),
+            "type": media_type,
+            "name": str(item.get("name") or "").strip()[:160],
+        })
     return result
 
 
@@ -2826,6 +2889,23 @@ def _traditionalize_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [convert(card) for card in cards]
 
 
+def _persona_revision() -> str:
+    try:
+        personas = PersonaRepo.list_all(limit=10000)
+    except Exception:
+        return ""
+    latest = max((float(persona.updated_at or 0) for persona in personas), default=0)
+    remote_revision = ""
+    try:
+        remote_cache = persona_dashboard_module.REMOTE_CACHE
+        if remote_cache.exists():
+            stat = remote_cache.stat()
+            remote_revision = f":{stat.st_mtime_ns}:{stat.st_size}"
+    except Exception:
+        pass
+    return f"{len(personas)}:{int(latest * 1000)}{remote_revision}"
+
+
 def _response(
     messages: list[dict[str, Any]] | dict[str, Any],
     *,
@@ -2834,7 +2914,11 @@ def _response(
 ) -> dict[str, Any]:
     if isinstance(messages, dict):
         messages = [messages]
-    out = {"messages": messages, "state": state or {"flow": ""}}
+    out = {
+        "messages": messages,
+        "state": state or {"flow": ""},
+        "persona_revision": _persona_revision(),
+    }
     if open_url:
         out["open"] = open_url
     return out
@@ -2960,6 +3044,7 @@ def _local_persona_row(persona: Persona) -> dict[str, Any]:
     device = DeviceRepo.get(persona.pad_code) if persona.pad_code else None
     return {
         "id": persona.id,
+        "source_archive_id": persona.source_archive_id,
         "name": _local_persona_display_name(persona),
         "description": persona.description,
         "content": persona.description,
@@ -2972,7 +3057,7 @@ def _local_persona_row(persona: Persona) -> dict[str, Any]:
 
 
 def _local_persona_rows() -> list[dict[str, Any]]:
-    return [_local_persona_row(persona) for persona in PersonaRepo.list_all(limit=500)]
+    return [_local_persona_row(persona) for persona in visible_local_personas()]
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -2999,12 +3084,22 @@ def _cached_remote_persona_rows() -> list[dict[str, Any]]:
 
 def _merge_source_and_local_rows(source_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = list(source_rows)
-    seen = {str(row.get("id") or "").strip() for row in rows if str(row.get("id") or "").strip()}
+    def identity_keys(row: dict[str, Any]) -> set[str]:
+        values = {
+            str(row.get("id") or "").strip(),
+            str(row.get("source_archive_id") or "").strip(),
+        }
+        values.update(value[7:] for value in list(values) if value.startswith("source:"))
+        return {value for value in values if value}
+
+    seen: set[str] = set()
+    for row in rows:
+        seen.update(identity_keys(row))
     for row in _local_persona_rows():
-        rid = str(row.get("id") or "").strip()
-        if rid and rid not in seen:
+        keys = identity_keys(row)
+        if keys and keys.isdisjoint(seen):
             rows.append(row)
-            seen.add(rid)
+            seen.update(keys)
     return rows
 
 
@@ -3012,9 +3107,11 @@ def _refresh_persona_overview_cache(*, force_remote: bool = False) -> None:
     if not _PERSONA_OVERVIEW_REFRESH_LOCK.acquire(blocking=False):
         return
     try:
-        build_overview(force_remote=force_remote)
-        source_rows = _cached_remote_persona_rows()
-        rows = _merge_source_and_local_rows(source_rows) if source_rows else _local_persona_rows()
+        overview = build_overview(force_remote=force_remote)
+        rows = [row for row in overview.get("personas", []) if isinstance(row, dict)]
+        if not rows:
+            source_rows = _cached_remote_persona_rows()
+            rows = _merge_source_and_local_rows(source_rows) if source_rows else _local_persona_rows()
         if rows:
             _PERSONA_MENU_CACHE.update({"at": time.time(), "rows": rows})
     except Exception:
@@ -3162,10 +3259,13 @@ def _ensure_local_persona_from_row(row: dict[str, Any] | None, local: Persona | 
 def _persona_bound_info(row: dict[str, Any] | None, local: Persona | None = None) -> tuple[str, str]:
     row = row or {}
     account_pad = _account_pad_for_persona(local)
+    source_pad = str(row.get("bound_pad_code") or row.get("pad_code") or "").strip()
+    workflow_persona = _is_workflow_persona_row(row, str(row.get("id") or ""))
     pad_code = (
-        account_pad
+        (source_pad if workflow_persona else "")
+        or account_pad
         or (local.pad_code if local else "")
-        or str(row.get("bound_pad_code") or row.get("pad_code") or "")
+        or source_pad
     ).strip()
     if not pad_code:
         return "", ""
@@ -3288,9 +3388,11 @@ def _resolve_persona_for_action(persona_id: str) -> tuple[Persona | None, dict[s
     local, row = _find_persona_any(persona_id)
     local = _align_persona_to_account_pad(local)
     if row:
-        related = _find_related_real_persona(row, local)
-        if related and (not _persona_has_real_name(local) or str(local.source_archive_id or "").startswith("device:")):
-            return related, row
+        exact_source_row = local is None and str(row.get("id") or "").strip() == str(persona_id or "").strip()
+        if not exact_source_row:
+            related = _find_related_real_persona(row, local)
+            if related and (not _persona_has_real_name(local) or str(local.source_archive_id or "").startswith("device:")):
+                return related, row
         local = _ensure_local_persona_from_row(row, local)
     return local, row
 
@@ -3366,7 +3468,8 @@ def _persona_settings(persona_id: str) -> dict[str, Any]:
         )
     if local:
         persona_id = local.id
-    if not ((local and _avatar_exists(local)) or _persona_reference_image_url(row)):
+    row_has_source_groups = isinstance(row, dict) and isinstance(row.get("telegram"), dict) and row.get("source") != "local"
+    if not row_has_source_groups:
         row = _fresh_persona_row(persona_id, local, row)
     pad_name, pad_code = _persona_bound_info(row, local)
     if local:
@@ -3377,17 +3480,29 @@ def _persona_settings(persona_id: str) -> dict[str, Any]:
         name = _persona_row_name(row or {})
     bound_name = pad_name or "未绑定"
     account = (
-        (local.account_username if local else "")
-        or str((row or {}).get("account_username") or "")
+        str((row or {}).get("account_username") or "")
+        or (local.account_username if local else "")
         or "未设置"
     )
     counts = (row or {}).get("counts") if isinstance((row or {}).get("counts"), dict) else {}
+    is_workflow = _is_workflow_persona_row(row, persona_id)
+    telegram = (row or {}).get("telegram") if isinstance((row or {}).get("telegram"), dict) else {}
+    free_group = str(telegram.get("free_group") or "").strip()
+    paid_group = str(telegram.get("paid_group") or "").strip()
+    if local:
+        free_group = free_group or local.tg_free_group_name or local.tg_free_group_id
+        paid_group = paid_group or local.tg_paid_group_name or local.tg_paid_group_id
+    group_lines = (
+        [f"TG免費群：{free_group or '未綁定'}", f"TG付費群：{paid_group or '未綁定'}"]
+        if is_workflow
+        else [f"TG通用群：{free_group or '未綁定'}"]
+    )
     lines = [
         "⚙️ 人設設定",
         "",
         f"人设：{name}",
         f"绑定智能体手机：{bound_name}",
-        f"TG 通用群：{(local.tg_free_group_name or local.tg_free_group_id) if local else '未绑定'}" if local else "TG 通用群：未绑定",
+        *group_lines,
         f"账号管理：Threads：{account}；Telegram：未设置",
         f"Threads：{_persona_hot_status(row)}",
         f"待发布推文：{_num(counts.get('posts'))} 篇",
@@ -3398,7 +3513,6 @@ def _persona_settings(persona_id: str) -> dict[str, Any]:
         lines.insert(4, f"PAD_CODE：{pad_code}")
     else:
         lines[3] = "绑定状态：未绑定云机"
-    is_workflow = bool(row and (str((row or {}).get("id") or "").startswith("workflow-persona-") or (row or {}).get("imageWorkflow") or (row or {}).get("workflow")))
     buttons = [
         _btn("✏️ 改名稱", f"editname_{persona_id}"),
         _btn("🧾 推文風格", f"tweetstyle_{persona_id}"),
@@ -3509,6 +3623,43 @@ def _persona_settings_flow(persona_id: str, flow: str, prompt: str) -> dict[str,
     )
 
 
+def _save_persona_telegram_group(persona: Persona, group_name: str, group_content_type: str) -> dict[str, Any]:
+    local, row = _resolve_persona_for_action(persona.id)
+    archive_id = _tool_r18_archive_id(persona.id, local, row)
+    if not archive_id:
+        return _response(
+            _message("這個 Web 人設尚未同步到 Tool R18 人設庫，不能綁定 TG 群。", [[_btn("◀️ 返回設定", f"settings_{persona.id}")]]),
+            state={"flow": ""},
+        )
+    effective_type = "paid" if group_content_type == "paid" and _is_workflow_persona_row(row, archive_id) else "free"
+    params = {"archiveId": archive_id, "groupContentType": effective_type, "groupName": group_name}
+    label = "TG付費群" if effective_type == "paid" else "TG免費群" if _is_workflow_persona_row(row, archive_id) else "TG通用群"
+    job = SourceWorkflowJobRepo.create("persona_set_telegram_group", f"綁定{label}：{persona.name}", params, status="submitting")
+    try:
+        base, data = _source_submit_task("persona_set_telegram_group", params)
+        source_task_id = str(data.get("id") or "")
+        SourceWorkflowJobRepo.update(job.id, status="submitted", result=data, source_task_id=source_task_id, source_base_url=base)
+    except Exception as exc:
+        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+        return _response(_message(f"❌ {label}綁定任務提交失敗\n\n{exc}", [[_btn("◀️ 返回設定", f"settings_{persona.id}")]]), state={"flow": ""})
+
+    if effective_type == "paid":
+        PersonaRepo.upsert(_persona_payload(persona, tg_paid_group_name=group_name))
+    else:
+        PersonaRepo.upsert(_persona_payload(persona, tg_free_group_name=group_name))
+    _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": []})
+    response = _response(
+        _message(
+            f"⏳ 正在綁定{label}...\n\n人設：{persona.name}\n群組：{group_name}\n來源任務 ID：{source_task_id or '-'}",
+            _rows([_btn("🔄 刷新本次任務", f"source_task_detail:{source_task_id}")], [_btn("◀️ 返回設定", f"settings_{persona.id}")]),
+        ),
+        state={"flow": ""},
+    )
+    if source_task_id:
+        response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 1000}
+    return response
+
+
 def _persona_payload(persona: Persona, **updates: Any) -> dict[str, Any]:
     data = {
         "id": persona.id,
@@ -3612,9 +3763,9 @@ def _start_create_persona() -> dict[str, Any]:
         _message(
             "\n".join(
                 [
-                    "⭐ 新建人设",
+                    "⭐ 新建人設",
                     "",
-                    "步骤 1/3：请先输入角色名称。",
+                    "步驟 1/3：請先輸入角色名稱。",
                     "",
                     "例如：林一",
                 ]
@@ -3625,49 +3776,23 @@ def _start_create_persona() -> dict[str, Any]:
     )
 
 
-def _derive_keywords(name: str, prompt: str) -> list[str]:
-    prompt_lower = prompt.lower()
-    candidates: list[str] = []
-    if any(token in prompt for token in ("股", "金融", "理财", "看盘", "ETF")):
-        candidates.extend(["穿紧身包臀裙的股民", "穿 Cos 服看盘的辣妹", "满房手办的温柔姐姐"])
-    if any(token in prompt for token in ("游戏", "电竞", "二次元", "宅", "动漫")):
-        candidates.extend(["戴猫耳耳机的电竞娘", "满房手办的温柔姐姐", "穿 Cos 服看盘的辣妹"])
-    if any(token in prompt for token in ("温柔", "软", "可爱", "甜", "小姐姐")):
-        candidates.extend(["穿蓬松大毛衣的软妹", "个性温柔的日常系姐姐", "午后咖啡厅里的邻家感"])
-    if any(token in prompt_lower for token in ("fitness", "sport", "gym")) or any(token in prompt for token in ("健身", "运动", "瑜伽")):
-        candidates.extend(["运动背心的健身教练", "清晨跑步的活力女孩", "瑜伽课后的自然笑容"])
-    candidates.extend(
-        [
-            f"{name} 的标志性穿搭",
-            "有镜头感的生活方式博主",
-            "自然真实的 Threads 口吻",
-            "日常感强的手机随拍风格",
-            "高互动话题型表达",
-        ]
-    )
-    out: list[str] = []
-    for item in candidates:
-        if item and item not in out:
-            out.append(item)
-        if len(out) >= 5:
-            break
-    return out
-
-
 def _create_keyword_text(name: str, prompt: str, options: list[str], selected: list[str]) -> str:
-    selected_text = "、".join(selected) if selected else "尚未选择"
+    selected_text = "、".join(selected) if selected else "尚未選擇"
+    prompt_preview = re.sub(r"\s+", " ", prompt).strip()
+    if len(prompt_preview) > 180:
+        prompt_preview = f"{prompt_preview[:180]}..."
     return "\n".join(
         [
-            "✍️ 新建人设",
+            "✍️ 新建人設",
             "",
-            f"人设：{name}",
+            f"人設：{name}",
             "",
-            "请先选择本次人设走向的核心关键词。",
-            f"最多可选 {CREATE_PERSONA_MAX_SELECTED_KEYWORDS} 个；选好后再生成完整人设。",
+            "請先選擇本次人設走向的核心關鍵詞。",
+            f"最多可選 {CREATE_PERSONA_MAX_SELECTED_KEYWORDS} 個；選好後再生成完整人設。",
             "",
-            f"目前已选：{selected_text}",
+            f"目前已選：{selected_text}",
             "",
-            f"原始提示：{prompt}",
+            f"原始提示：{prompt_preview}",
         ]
     )
 
@@ -3682,11 +3807,41 @@ def _create_keyword_keyboard(options: list[str], selected: list[str]) -> list[li
         rows.append(row)
     rows.extend(
         _rows(
-            [_btn("✅ 确认并生成人设", "cpk_done")],
-            [_btn("🧹 清空选择", "cpk_clear"), _btn("◀️ 返回修改提示词", "cpk_back")],
+            [_btn("✅ 確認並生成人設", "cpk_done")],
+            [_btn("🧹 清空選擇", "cpk_clear"), _btn("◀️ 返回修改提示詞", "cpk_back")],
         )
     )
     return rows
+
+
+def _submit_create_persona_keywords(name: str, prompt: str) -> dict[str, Any]:
+    params = {"name": name, "prompt": prompt, "chatId": SOURCE_WEB_BOT_CHAT_ID}
+    job = SourceWorkflowJobRepo.create("persona_create_keywords", f"提煉人設關鍵詞：{name}", params, status="submitting")
+    try:
+        base, data = _source_submit_task("persona_create_keywords", params)
+        source_task_id = str(data.get("id") or "")
+        SourceWorkflowJobRepo.update(
+            job.id,
+            status="submitted",
+            result=data,
+            source_task_id=source_task_id,
+            source_base_url=base,
+        )
+    except Exception as exc:
+        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+        return _response(
+            _message(
+                "❌ 人設核心關鍵詞提煉失敗，請稍後重試。",
+                [[_btn("◀️ 返回重新輸入名稱", "create_persona_entry")]],
+            ),
+            state={"flow": "create_persona_prompt", "draft": {"name": name}},
+        )
+    response = _response(
+        _message("🧠 正在提煉人設核心關鍵詞..."),
+        state={"flow": "create_persona_keywords_wait", "draft": {"name": name, "prompt": prompt}},
+    )
+    response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+    return response
 
 
 def _continue_create_persona(message: str, state: dict[str, Any]) -> dict[str, Any]:
@@ -3696,51 +3851,46 @@ def _continue_create_persona(message: str, state: dict[str, Any]) -> dict[str, A
         return _response(_message("请直接输入内容。", [[_btn("◀️ 返回", "list_personas")]]), state=state)
 
     if state.get("flow") == "create_persona_name":
-        if len(text) < 2:
+        name = re.sub(r"\s+", " ", text).strip()[:40]
+        if len(name) < 2:
             return _response(
-                _message("角色名称太短，请重新输入 2 个字以上的名称。", [[_btn("◀️ 返回人设列表", "list_personas")]]),
+                _message("❌ 角色名稱太短，請重新輸入 2 個字以上的名稱。", [[_btn("◀️ 返回人設列表", "list_personas")]]),
                 state=state,
             )
-        name = text[:40]
         return _response(
             _message(
                 "\n".join(
                     [
-                        "⭐ 新建人设",
+                        "⭐ 新建人設",
                         "",
                         f"角色名称：{name}",
                         "",
-                        "步骤 2/3：请输入人设提示词。",
-                        "我会沿用原来正常的人设生成流程，根据你的提示词生成人设卡片与后续推文设置。",
+                        "步驟 2/3：請輸入人設提示詞。",
+                        "我會沿用原來正常的人設生成流程，根據你的提示詞生成人設卡片與後續推文設定。",
                         "",
-                        "可以描述身份、性格、内容方向、语气、受众、图片风格等。",
+                        "可以描述身份、性格、內容方向、語氣、受眾、圖片風格等。",
                     ]
                 ),
-                [[_btn("◀️ 返回重新输入名称", "create_persona_entry")]],
+                [[_btn("◀️ 返回重新輸入名稱", "create_persona_entry")]],
             ),
             state={"flow": "create_persona_prompt", "draft": {"name": name}},
         )
 
     if state.get("flow") == "create_persona_prompt":
         name = str(draft.get("name") or "新人设")
-        options = _derive_keywords(name, text)
-        next_state = {
-            "flow": "create_persona_keywords",
-            "draft": {"name": name, "prompt": text, "options": options, "selected": []},
-        }
+        return _submit_create_persona_keywords(name, text)
+
+    if state.get("flow") == "create_persona_keywords_wait":
         return _response(
-            [
-                _message("🧠 正在提炼人设核心关键词...", kind="status"),
-                _message(_create_keyword_text(name, text, options, []), _create_keyword_keyboard(options, [])),
-            ],
-            state=next_state,
+            _message("🧠 正在提煉人設核心關鍵詞..."),
+            state=state,
         )
 
     if state.get("flow") == "create_persona_keywords":
         return _response(
             _message(
-                "请先点击上方按钮选择核心关键词；最多选 2 个，选好后点「确认并生成人设」。",
-                [[_btn("◀️ 返回修改提示词", "cpk_back")]],
+                "請先點擊上方按鈕選擇核心關鍵詞；最多選 2 個，選好後點「確認並生成人設」。",
+                [[_btn("◀️ 返回修改提示詞", "cpk_back")]],
             ),
             state=state,
         )
@@ -3759,8 +3909,8 @@ def _create_persona_keyword_action(action: str, state: dict[str, Any]) -> dict[s
     if action == "cpk_back":
         return _response(
             _message(
-                "\n".join(["✍️ 新建人设", "", f"角色名称：{name}", "", "请重新输入人设提示词。"]),
-                [[_btn("◀️ 返回重新输入名称", "create_persona_entry")]],
+                "\n".join(["✍️ 新建人設", "", f"角色名稱：{name}", "", "請重新輸入人設提示詞。"]),
+                [[_btn("◀️ 返回重新輸入名稱", "create_persona_entry")]],
             ),
             state={"flow": "create_persona_prompt", "draft": {"name": name}},
         )
@@ -3788,49 +3938,6 @@ def _create_persona_keyword_action(action: str, state: dict[str, Any]) -> dict[s
 def _finish_create_persona(name: str, prompt: str, selected: list[str]) -> dict[str, Any]:
     devices = _active_devices()
     pad_code = devices[0].pad_code if devices else ""
-    account = next((item for item in _active_accounts() if item.pad_code == pad_code), None) if pad_code else None
-    description = "\n".join(
-        [
-            prompt,
-            "",
-            f"核心关键词：{'、'.join(selected) if selected else '沿用原始提示'}",
-        ]
-    ).strip()
-    persona_id, _ = PersonaRepo.upsert(
-        {
-            "name": name,
-            "description": description,
-            "style_prompt": "；".join(selected),
-            "pad_code": pad_code,
-            "account_username": account.username if account else "",
-            "source_archive_id": "web-bot:telegram-create-persona",
-        }
-    )
-    messages = [
-        _message(f"🧠 正在根据「{'、'.join(selected) or '原始提示'}」生成人设...", kind="status"),
-        _message(f"✅ 已新建人设：{name}\n\n{description}", kind="status"),
-        _message(f"🎨 正在为人设「{name}」直接生成参考图...", kind="status"),
-        _message("正在抓取 Threads / Instagram 热点，请稍候...", kind="status"),
-    ]
-    persona = PersonaRepo.get(persona_id)
-    if persona:
-        try:
-            path = _generate_persona_reference_image(persona)
-            updated = PersonaRepo.get(persona_id) or persona
-            messages.append(_persona_image_message(updated, path))
-        except Exception as exc:
-            messages.append(
-                _message(
-                    f"人设已建立，但人设图生成失败：{exc}",
-                    _rows([_btn("🔄 重新生成人设图", f"regenimg:{persona_id}")], [_btn("✍️ 新建推文", f"genpost:{persona_id}")]),
-                )
-            )
-    return _response(messages, state={"flow": ""})
-
-
-def _finish_create_persona(name: str, prompt: str, selected: list[str]) -> dict[str, Any]:
-    devices = _active_devices()
-    pad_code = devices[0].pad_code if devices else ""
     params = {
         "name": name,
         "prompt": prompt,
@@ -3853,31 +3960,24 @@ def _finish_create_persona(name: str, prompt: str, selected: list[str]) -> dict[
         SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
         return _response(
             _message(
-                f"❌ 新建人設任務提交失敗\n\n{exc}",
+                "❌ 新建人設任務提交失敗，請稍後重試。",
                 _rows([_btn("➕ 重新新建人設", "create_persona_entry")], [_btn("◀️ 返回人設列表", "list_personas")]),
             ),
             state={"flow": ""},
         )
     source_task_id = str(data.get("id") or "")
-    return _response(
+    response = _response(
         _message(
-            "\n".join(
-                [
-                    f"🧠 正在根據「{'、'.join(selected) or '原始提示'}」生成人設...",
-                    "",
-                    f"角色名稱：{name}",
-                    f"來源任務 ID：{source_task_id or '-'}",
-                    "",
-                    "已交給 TG Bot 使用的 AI 人設生成與 Tool R18 人設存儲流程。完成後請查看任務結果，再生成人設圖。",
-                ]
-            ),
-            _rows(
-                [_btn("📊 查看本次任務", f"source_task_detail:{source_task_id}") if source_task_id else _btn("📊 查看任務列表", "source_tasks")],
-                [_btn("◀️ 返回人設列表", "list_personas")],
-            ),
+            f"🧠 正在根據「{'、'.join(selected)}」生成人設..."
+            if selected
+            else "🧠 正在根據原始提示生成人設..."
         ),
         state={"flow": ""},
     )
+    if source_task_id:
+        response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+    response["replace_panel"] = False
+    return response
 
 
 def _sync_personas() -> dict[str, Any]:
@@ -4243,6 +4343,103 @@ def _hot_metrics_summary(persona_id: str, *, force: bool = False) -> dict[str, A
         ]
     )
     return _response(_message(text, keyboard), state={"flow": ""})
+
+
+def _dashboard_metrics_refresh_start(persona_id: str = "") -> dict[str, Any]:
+    local, source_row = _resolve_persona_for_action(persona_id) if persona_id else (None, None)
+    archive_id = _tool_r18_archive_id(persona_id, local, source_row) if persona_id else ""
+    back_action = f"pd:{persona_id}" if persona_id else "dashboard"
+    retry_action = f"shr:{persona_id}" if persona_id else "dashboard_refresh"
+    if persona_id and not archive_id:
+        return _response(
+            _message("⚠️ 找不到這個人設對應的來源資料，無法刷新熱點數據。", [[_btn("◀️ 返回人設設定", f"pd:{persona_id}")]]),
+            state={"flow": ""},
+        )
+    try:
+        _base, task = _source_http_request(
+            "POST",
+            "/api/persona_dashboard/refresh",
+            payload={"archive_id": archive_id},
+            timeout=30,
+        )
+    except Exception as exc:
+        return _response(
+            _message(
+                f"⚠️ 熱點刷新未開始\n\n原因：{exc}",
+                [[_btn("🔄 重新刷新", retry_action)], [_btn("◀️ 返回", back_action)]],
+            ),
+            state={"flow": ""},
+        )
+    task_id = str(task.get("id") or "").strip()
+    if not task_id:
+        return _response(
+            _message("⚠️ 熱點刷新任務沒有返回任務編號。", [[_btn("🔄 重新刷新", retry_action)]]),
+            state={"flow": ""},
+        )
+    response = _response(
+        _message(
+            "\n".join([
+                "🔥 正在刷新熱點資料...",
+                "",
+                f"人設：{_persona_row_name(source_row) if source_row else '全部已綁定人設'}",
+                "平台：Threads",
+                "",
+                "正在刷新瀏覽器授權並抓取完整帳號與逐篇推文數據。",
+            ]),
+            [[_btn("◀️ 返回", back_action)]],
+            kind="status",
+        ),
+        state={"flow": ""},
+    )
+    response["poll"] = {"action": f"dashboard_metrics_refresh_poll:{task_id}:{urllib.parse.quote(persona_id, safe='')}", "interval_ms": 2000}
+    return response
+
+
+def _dashboard_metrics_refresh_poll(action: str) -> dict[str, Any]:
+    rest = action[len("dashboard_metrics_refresh_poll:") :]
+    task_id, separator, encoded_persona_id = rest.partition(":")
+    persona_id = urllib.parse.unquote(encoded_persona_id) if separator else ""
+    back_action = f"pd:{persona_id}" if persona_id else "dashboard"
+    retry_action = f"shr:{persona_id}" if persona_id else "dashboard_refresh"
+    if not task_id:
+        return _response(_message("⚠️ 熱點刷新狀態已失效。", [[_btn("返回主選單", "menu")]]), state={"flow": ""})
+    try:
+        _base, task = _source_http_request("GET", f"/api/persona_dashboard/refresh/{urllib.parse.quote(task_id, safe='')}", timeout=20)
+    except Exception as exc:
+        return _response(
+            _message(f"⚠️ 查詢熱點刷新狀態失敗\n\n原因：{exc}", [[_btn("🔄 重新查詢", action)], [_btn("◀️ 返回", back_action)]]),
+            state={"flow": ""},
+        )
+    status = str(task.get("status") or "").lower()
+    if status in {"queued", "running"}:
+        progress = max(0, min(100, _num(task.get("progress"))))
+        step = str(task.get("step") or "刷新中")
+        message = str(task.get("message") or "正在刷新 Threads 全量熱點數據...")
+        response = _response(
+            _message(
+                f"🔥 正在刷新熱點資料...\n\n步驟：{step}\n進度：{progress}%\n{message}",
+                [[_btn("◀️ 返回", back_action)]],
+                kind="status",
+            ),
+            state={"flow": ""},
+        )
+        response["poll"] = {"action": action, "interval_ms": 2000}
+        return response
+    if status == "success":
+        try:
+            persona_dashboard_module.REMOTE_CACHE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _PERSONA_MENU_CACHE.clear()
+        return _hot_metrics_summary(persona_id, force=True) if persona_id else _dashboard_menu(force=True)
+    error = str(task.get("message") or task.get("stderr") or "請檢查 Threads 授權或人設帳號綁定。")
+    return _response(
+        _message(
+            f"⚠️ 熱點刷新未完成\n\n人設：{persona_id}\n平台：Threads\n原因：{error}",
+            [[_btn("🔄 重新刷新", retry_action)], [_btn("◀️ 返回", back_action)]],
+        ),
+        state={"flow": ""},
+    )
 
 
 def _hot_metrics_posts(action: str) -> dict[str, Any]:
@@ -5168,6 +5365,41 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     task_page = max(0, _num(task_input.get("uiPage")))
     task_content_suffix = f"_ct_{task_content_type}" if task_content_type in {"free", "paid"} else ""
     is_custom_publish_task = task_type == "persona_publish_post" and bool(task_input.get("customContent") or task_input.get("customMediaUrl") or result.get("customPublish"))
+    response_state: dict[str, Any] = {"flow": ""}
+    if task_type == "persona_create_keywords":
+        name = str(task_input.get("name") or result.get("name") or "新人設").strip()
+        prompt = str(task_input.get("prompt") or result.get("prompt") or "").strip()
+        options = [str(item).strip() for item in (result.get("keywords") if isinstance(result.get("keywords"), list) else []) if str(item).strip()][:5]
+        if status == "success" and options:
+            lines = _create_keyword_text(name, prompt, options, []).splitlines()
+            result_rows.extend(_create_keyword_keyboard(options, []))
+            response_state = {
+                "flow": "create_persona_keywords",
+                "draft": {"name": name, "prompt": prompt, "options": options, "selected": []},
+            }
+        elif status == "failed":
+            lines = ["❌ 人設核心關鍵詞提煉失敗，請稍後重試。"]
+            result_rows.extend(_rows([_btn("◀️ 返回重新輸入名稱", "create_persona_entry")]))
+            response_state = {"flow": "create_persona_prompt", "draft": {"name": name}}
+        else:
+            lines = ["🧠 正在提煉人設核心關鍵詞..."]
+            response_state = {
+                "flow": "create_persona_keywords_wait",
+                "draft": {"name": name, "prompt": prompt},
+            }
+    if task_type == "persona_create" and status in {"queued", "running"}:
+        selected_keywords = [
+            str(item).strip()
+            for item in (task_input.get("selectedKeywords") if isinstance(task_input.get("selectedKeywords"), list) else [])
+            if str(item).strip()
+        ][:CREATE_PERSONA_MAX_SELECTED_KEYWORDS]
+        lines = [
+            f"🧠 正在根據「{'、'.join(selected_keywords)}」生成人設..."
+            if selected_keywords
+            else "🧠 正在根據原始提示生成人設..."
+        ]
+    if task_type == "persona_generate_image" and status in {"queued", "running"}:
+        lines = ["🎨 正在為人設生成圖片..."]
     if task_type in threads_automation_task_types and status not in {"queued", "running"}:
         result_rows.extend(_rows([_btn("◀️ 返回自動化", automation_back_action)]))
     if status == "success" and archive_id:
@@ -5175,8 +5407,24 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": []})
             _refresh_persona_overview_cache(force_remote=True)
         if task_type == "persona_create":
+            name = str(result.get("name") or task_input.get("name") or "新人設").strip()
+            content = str(result.get("content") or "").strip()
+            lines = [
+                f"✅ 已新建人設：{name}",
+                "",
+                content,
+                "",
+                "步驟 3/3：請先生成人設圖。後續生成推文配圖會優先使用人設圖鎖定人物長相。",
+            ]
             result_rows.extend(_rows([_btn("🎨 生成人設圖", f"genimg_{archive_id}")], [_btn("🧾 查看人設詳情", f"pd_{archive_id}")]))
         elif task_type == "persona_rewrite_intro":
+            result_rows.extend(_rows([_btn("⚙️ 返回人設設定", f"settings_{archive_id}")]))
+        elif task_type == "persona_set_telegram_group":
+            if str(result.get("groupContentType") or task_input.get("groupContentType")) == "paid":
+                group_label = "TG付費群"
+            else:
+                group_label = "TG免費群" if result.get("workflowPersona") else "TG通用群"
+            lines = [f"✅ {group_label}綁定完成", "", f"群組：{result.get('groupName') or task_input.get('groupName') or '-'}"]
             result_rows.extend(_rows([_btn("⚙️ 返回人設設定", f"settings_{archive_id}")]))
         elif task_type == "persona_generate_posts":
             generated_count = _num(result.get("generatedCount")) or len(generated_posts)
@@ -5276,6 +5524,8 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             result_rows.extend(_rows([_btn("🏠 主選單", "back_main")]))
         elif task_type in threads_automation_task_types:
             result_rows.extend(_rows([_btn("◀️ 返回自動化", automation_back_action)]))
+        elif task_type in {"persona_create_keywords", "persona_create"}:
+            pass
         else:
             result_rows.extend(_rows([_btn("🔄 刷新本次任務", f"source_task_detail:{task_id}")]))
             if archive_id:
@@ -5285,7 +5535,18 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
                     result_rows.extend(_rows([_btn("◀️ 返回發布方式" if is_custom_publish_task else "◀️ 返回設定", f"pub_{archive_id}{task_content_suffix}" if is_custom_publish_task else f"settings_{archive_id}")]))
     if status == "failed" and task_type == "persona_publish_post":
         result_rows.extend(_rows([_btn("🔄 只重試失敗/未完成項", f"source_rerun_task:{task_id}")], [_btn("◀️ 返回發布方式", f"pub_{archive_id}{task_content_suffix}")]))
-    if task_type not in threads_automation_task_types and not (status == "success" and task_type.startswith("persona_")) and not (task_type == "persona_publish_post" and status in {"queued", "running"}):
+    if status == "failed" and task_type == "persona_create":
+        lines = ["❌ 新建人設失敗，請稍後重試。"]
+        result_rows = _rows([_btn("🏠 主選單", "back_main")])
+        response_state = {"flow": ""}
+    if status in {"failed", "cancelled"} and task_type == "persona_generate_image":
+        lines = ["❌ 生成人設圖失敗，請稍後重試。" if status == "failed" else "⏹ 人設圖生成已停止。"]
+        result_rows = _rows(
+            [_btn("◀️ 返回人設詳情", f"pd_{archive_id}")],
+            [_btn("◀️ 返回設定", f"settings_{archive_id}")],
+        )
+        response_state = {"flow": ""}
+    if task_type not in threads_automation_task_types and task_type not in {"persona_create_keywords", "persona_create"} and not (status == "success" and task_type.startswith("persona_")) and not (task_type == "persona_publish_post" and status in {"queued", "running"}):
         result_rows.extend(_rows([_btn("任務列表", "source_tasks"), _btn("返回主選單", "back_main")]))
     message_preview_image = "" if status == "success" and task_type == "persona_publish_post" else preview_image
     response = _response(
@@ -5295,7 +5556,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             image=message_preview_image,
             cards=[{"title": f"候選圖 {index + 1}", "image": url} for index, url in enumerate(candidate_images)],
         ),
-        state={"flow": ""},
+        state=response_state,
     )
     if status in {"queued", "running"}:
         response["poll"] = {"action": f"source_task_poll:{task_id}", "interval_ms": 2000}
@@ -5331,6 +5592,8 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             response["messages"].append(_message("本次没有可发送的回复截图。"))
     elif status == "success" and task_type == "persona_generate_posts" and task_input.get("uiTextOnly") is False and generated_posts:
         response["followup"] = {"action": f"source_genpost_image_start:{task_id}", "delay_ms": 700}
+    elif status == "success" and task_type == "persona_generate_image" and preview_image:
+        response["replace_panel"] = False
     return response
 
 
@@ -5420,13 +5683,14 @@ def _source_cancel_latest() -> dict[str, Any]:
     if data.get("cancelled") is True:
         task_id = str(data.get("id") or data.get("task_id") or "").strip()
         typ = str(data.get("type") or data.get("task_type") or "来源任务").strip()
+        execution_stopped = data.get("execution_stopped") is True
         text = "\n".join(
             [
-                "🛑 已强制停止来源后台任务。",
+                "🛑 已实时终止来源后台任务。" if execution_stopped else "🛑 已提交来源任务取消。",
                 "",
                 f"工作流：{typ}",
                 f"任务编号：{task_id or '-'}",
-                "如果远端已经开始推理，远端可能仍会跑完，但本地不会再把结果当作完成任务推送。",
+                str(data.get("message") or "").strip(),
             ]
         )
     else:
@@ -5774,7 +6038,7 @@ TG_CAPABILITY_GROUPS: list[tuple[str, list[str]]] = [
     ("一、人設管理", ["新建人設", "查看人設圖", "AI 重新生成人設圖", "刪除人設", "矩陣多機分發", "修改名稱（60 天冷卻提示）", "修改人設簡介", "推文風格配置", "連結模板設定", "綁定智能體手機", "R18 既有人設免費/付費通道"]),
     ("二、推文內容管理", ["待發布推文", "收藏推文/收藏記憶", "查看推文", "查看/收藏推文", "發布歷史", "重新回庫", "純文字推文", "推文+配圖", "自訂圖文/影片素材", "熱點抓取推文", "生成記憶", "自訂記憶", "不指定記憶"]),
     ("三、多媒體素材生成", ["文生圖：2:3、3:4、9:16、3:2、4:3、16:9、1:1", "單圖編輯", "圖片通用編輯", "人物換臉", "圖生視頻 720p", "圖生視頻 1080p"]),
-    ("四、帳號管理", ["綁定/更換雲機", "切換 VMOS 登入帳號提示", "Threads 資料維護", "Telegram 登入憑證", "清除 TG 本地憑證", "TG 通用群組綁定", "子帳號/操作員權限"]),
+    ("四、帳號管理", ["綁定/更換雲機", "切換 VMOS 登入帳號提示", "Threads 資料維護", "Telegram 登入憑證", "清除 TG 本地憑證", "TG 通用群組綁定"]),
     ("五、自動化運營", ["自動回覆評論", "自動回覆熱點推文", "固定文案回覆", "AI 依人設回覆", "養號：滑動瀏覽", "養號：滑動+點讚", "養號：滑動+留言", "養號：全套操作"]),
     ("六、矩陣發布", ["多台雲機批量發布", "單條推文一鍵發布", "R18 免費/付費素材分流"]),
 ]
@@ -5919,6 +6183,13 @@ def _is_workflow_persona_row(row: dict[str, Any] | None, persona_id: str = "") -
         return True
     if not isinstance(row, dict):
         return False
+    setup = row.get("setup") if isinstance(row.get("setup"), dict) else {}
+    if setup.get("imageWorkflow") or row.get("imageWorkflow") or row.get("workflow"):
+        return True
+    if str(row.get("id") or "").startswith("workflow-persona-"):
+        return True
+    if str(row.get("name") or "").strip().endswith(("工作流人设", "工作流人設")):
+        return True
     for key in ("source", "kind", "type", "runtime_type"):
         if "workflow" in str(row.get(key) or "").lower():
             return True
@@ -8964,12 +9235,12 @@ def _submit_source_post_task(task_type: str, archive_id: str, post_id: str, para
     except Exception as exc:
         SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
         return _response(
-            _message(f"❌ {label}提交失敗\n\n{exc}", [[_btn(back_label, back_action)]]),
+            _message(f"❌ {label}提交失敗，請稍後重試。", [[_btn(back_label, back_action)]]),
             state={"flow": "source_post_task", "draft": {"archive_id": archive_id, "persona_id": archive_id, "post_id": post_id, "source": task_source, "group_content_type": task_content_type, "post_page": task_page}},
         )
     source_task_id = str(data.get("id") or "")
     if task_type == "persona_generate_image":
-        pending_text = f"🎨 正在為人設生成图片...\n\n人設 ID：{archive_id}"
+        pending_text = "🎨 正在為人設生成圖片..."
         pending_rows = _rows([_btn("◀️ 返回", f"settings_{archive_id}")])
     elif task_type == "persona_generate_post_image":
         pending_text = "⏳ 正在生成推文配圖，完成後會直接寫回同一篇推文。"
@@ -10349,36 +10620,6 @@ def _local_jobs_menu() -> dict[str, Any]:
     )
 
 
-def _operator_console_menu() -> dict[str, Any]:
-    operators = OperatorRepo.list_all()
-    accounts = vmos_client.configured_accounts()
-    active = vmos_client.active_account_name()
-    lines = [
-        "👥 子帳號 / VMOS 帳號",
-        "",
-        f"目前 VMOS 帳號：{active or '-'}",
-        f"已配置 VMOS 帳號：{len(accounts)} 組",
-        f"操作員：{len(operators)} 個",
-        "",
-        "子帳號建立與權限分配已在 /operators 頁面，可指定允許操作的 VMOS 帳號。",
-    ]
-    if operators:
-        lines.append("操作員列表：")
-        for operator in operators[:10]:
-            allowed = "、".join(operator.allowed_accounts) if operator.allowed_accounts else "全部"
-            lines.append(f"- {operator.username}｜{operator.role}｜VMOS：{allowed}")
-    return _response(
-        _message(
-            "\n".join(lines),
-            _rows(
-                [_btn("打開子帳號管理", "open:/operators"), _btn("打開帳號管理", "open:/accounts")],
-                [_btn("刷新 VMOS 雲機", "pad_mgmt_refresh"), _btn("返回主選單", "menu")],
-            ),
-        ),
-        state={"flow": ""},
-    )
-
-
 def _publish_direct_start(persona_id: str) -> dict[str, Any]:
     return _custom_publish_start(f"custom_publish_persona:{persona_id}")
 
@@ -10445,9 +10686,15 @@ def _continue_custom_publish(message: str, media: list[dict[str, str]], state: d
         draft["custom_content"] = message.strip()
     if media:
         _drop_custom_publish_media(draft)
-        draft["custom_media_token"] = _store_custom_publish_media(media[0])
-        draft["custom_media_type"] = str(media[0].get("type") or "").strip()
-        draft["custom_media_name"] = str(media[0].get("name") or "").strip()
+        item = media[0]
+        media_url = str(item.get("url") or "").strip()
+        draft["custom_media_type"] = str(item.get("type") or "").strip()
+        draft["custom_media_name"] = str(item.get("name") or "").strip()
+        if media_url.startswith("data:"):
+            draft["custom_media_token"] = _store_custom_publish_media(item)
+        else:
+            draft["custom_media_url"] = media_url
+            draft["custom_media_preview_url"] = str(item.get("preview_url") or media_url).strip()
     draft.pop("publish_request_id", None)
     custom_media = _custom_publish_media(draft)
     if not draft.get("custom_content") and not custom_media:
@@ -10467,6 +10714,15 @@ def _custom_publish_confirmation(state: dict[str, Any]) -> dict[str, Any]:
     content = str(draft.get("custom_content") or "").strip()
     custom_media = _custom_publish_media(draft)
     media_line = f"媒體：{custom_media.get('name') or custom_media.get('type') or '已附加'}" if custom_media else "媒體：無"
+    media_preview = _safe_web_media_url(custom_media.get("preview_url") or custom_media.get("url")) if custom_media else ""
+    media_cards = []
+    if media_preview:
+        media_cards = [{
+            "title": str(custom_media.get("name") or "已上传媒体"),
+            "subtitle": "视频" if custom_media.get("type") == "video" else "图片",
+            "video": media_preview if custom_media.get("type") == "video" else "",
+            "image": media_preview if custom_media.get("type") == "image" else "",
+        }]
     rows: list[list[dict[str, str]]] = []
     if pad_code:
         rows.append([_btn(f"✅ 發布到綁定智能體手機 {pad_code}", "custom_publish_publish_now")])
@@ -10479,7 +10735,7 @@ def _custom_publish_confirmation(state: dict[str, Any]) -> dict[str, Any]:
         [_btn("◀️ 返回發布方式", f"custom_publish_platform:{draft.get('platform')}")],
     ))
     return _response(
-        _message(f"請選擇發布方式\n\n文字：{content[:300] or '無'}\n{media_line}", rows),
+        _message(f"請選擇發布方式\n\n文字：{content[:300] or '無'}\n{media_line}", rows, cards=media_cards),
         state={"flow": "custom_publish_ready", "draft": draft},
     )
 
@@ -11228,11 +11484,9 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
         )
         return _response(_message("✅ 推文風格已保存，後續生成會優先參考這個語氣、格式與行文邏輯。", [[_btn("◀️ 返回設定", f"settings_{persona_id}"), _btn("✍️ 生成推文", f"genpost_branch_{persona_id}")]]), state={"flow": ""})
     if flow == "bind_tg_group" and persona:
-        PersonaRepo.upsert(_persona_payload(persona, tg_free_group_name=text))
-        return _response(_message(f"✅ 已保存 TG 通用群：{text}", [[_btn("◀️ 返回设置", f"settings_{persona_id}")]]), state={"flow": ""})
+        return _save_persona_telegram_group(persona, text, "free")
     if flow == "bindtg_paid" and persona:
-        PersonaRepo.upsert(_persona_payload(persona, tg_paid_group_name=text))
-        return _response(_message(f"✅ 已保存 TG 付費群：{text}", [[_btn("◀️ 返回設定", f"settings_{persona_id}")]]), state={"flow": ""})
+        return _save_persona_telegram_group(persona, text, "paid")
     if flow == "acct_threads_handle" and persona:
         handle = text.replace("@", "").strip()
         AccountRepo.upsert_many([(handle, persona.name, persona.name)])
@@ -11804,6 +12058,8 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _continue_sentiment_hot_edit(message, media, state)
     if not action and state.get("flow") in {"custom_publish_content", "custom_publish_ready"} and (message or media):
         return _continue_custom_publish(message, media, state)
+    if not action and state.get("flow") == "replace_persona_image" and media:
+        return _replace_persona_image_from_media(media, state)
     if not action and state.get("flow") and message:
         return _continue_state_text(message, state)
     if not action and message:
@@ -11840,8 +12096,6 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _automation_run(action)
     if action == "local_jobs":
         return _local_jobs_menu()
-    if action == "operator_console":
-        return _operator_console_menu()
     if action.startswith("tg_credentials_set_") or action.startswith("tg_credentials_set:"):
         return _tg_credentials_prompt(action[len("tg_credentials_set_") :] if action.startswith("tg_credentials_set_") else action.split(":", 1)[1])
     if action.startswith("tg_credentials_clear_") or action.startswith("tg_credentials_clear:"):
@@ -12340,8 +12594,10 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         local = PersonaRepo.get(pid)
         if not local:
             return _response(_message("只能为本地人设绑定 TG 群。", [[_btn("◀️ 返回", f"settings_{pid}")]]))
+        _local, row = _resolve_persona_for_action(pid)
+        label = "TG免費群" if _is_workflow_persona_row(row, pid) else "TG通用群"
         return _response(
-            _message(f"请输入「{local.name}」的 TG 通用群组名称。", [[_btn("❌ 取消", f"settings_{pid}")]]),
+            _message(f"請輸入「{local.name}」的 {label}名稱或群 ID。", [[_btn("❌ 取消", f"settings_{pid}")]]),
             state={"flow": "bind_tg_group", "draft": {"persona_id": pid}},
         )
     if action.startswith("bindtg_paid_") or action.startswith("bindtg_paid:"):
@@ -12411,7 +12667,9 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     if action.startswith("shs_") or action.startswith("shs:"):
         return _hot_metrics_summary(action.split("_", 1)[1] if action.startswith("shs_") else action.split(":", 1)[1])
     if action.startswith("shr_") or action.startswith("shr:"):
-        return _hot_metrics_summary(action.split("_", 1)[1] if action.startswith("shr_") else action.split(":", 1)[1], force=True)
+        return _dashboard_metrics_refresh_start(action.split("_", 1)[1] if action.startswith("shr_") else action.split(":", 1)[1])
+    if action.startswith("dashboard_metrics_refresh_poll:"):
+        return _dashboard_metrics_refresh_poll(action)
     if action.startswith("shp:"):
         return _hot_metrics_posts(action)
     if action.startswith("viewimg_") or action.startswith("viewimg:"):
@@ -12482,7 +12740,7 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     if action == "dashboard":
         return _dashboard_menu()
     if action == "dashboard_refresh":
-        return _dashboard_menu(force=True)
+        return _dashboard_metrics_refresh_start()
     if action in {"stop", "force_stop_current_task"}:
         return _source_cancel_latest()
 

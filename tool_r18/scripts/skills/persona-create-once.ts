@@ -3,12 +3,14 @@ import fs from "node:fs";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 import {
   createPersonaBySpec,
-  derivePersonaSpecWithCodex,
+  derivePersonaDirectionKeywordsWithCodex,
+  derivePersonaSpecFromPromptSelection,
 } from "@/telegram-bot";
 
 installNodePersonaArchiveBridge();
 
 type PersonaCreateInput = {
+  action?: "keywords" | "create";
   name: string;
   prompt: string;
   selectedKeywords?: string[];
@@ -17,8 +19,13 @@ type PersonaCreateInput = {
   defaultPadCode?: string;
 };
 
-function printJson(value: unknown) {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+function printJson(value: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(`${JSON.stringify(value, null, 2)}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 function readInput(): PersonaCreateInput {
@@ -36,18 +43,6 @@ function normalizeKeywords(value: unknown): string[] {
     .slice(0, 2);
 }
 
-function buildPersonaPrompt(name: string, prompt: string, selectedKeywords: string[]): string {
-  return [
-    `角色名稱：${name}`,
-    "",
-    prompt,
-    "",
-    selectedKeywords.length
-      ? `使用者已選擇的人設走向核心關鍵詞：${selectedKeywords.join("、")}。請把這些方向作為最高優先級，生成完整人設。`
-      : "使用者未額外選擇核心關鍵詞，請根據原始提示詞自主判斷最合理的人設走向。",
-  ].join("\n");
-}
-
 async function main() {
   const input = readInput();
   const name = String(input.name || "").trim();
@@ -55,26 +50,25 @@ async function main() {
   if (!name) throw new Error("missing name");
   if (!prompt) throw new Error("missing prompt");
 
+  if (input.action === "keywords") {
+    const keywords = await derivePersonaDirectionKeywordsWithCodex(name, prompt);
+    await printJson({ ok: true, name, prompt, keywords });
+    return;
+  }
+
   const selectedKeywords = normalizeKeywords(input.selectedKeywords ?? []);
-  const combinedPrompt = buildPersonaPrompt(name, prompt, selectedKeywords);
-  const spec = await derivePersonaSpecWithCodex(combinedPrompt);
-  spec.name = name;
-  spec.setup = {
-    ...spec.setup,
+  const spec = await derivePersonaSpecFromPromptSelection({
     personaName: name,
-    customTopic: prompt,
-    contentTheme: [
-      spec.setup.contentTheme,
-      selectedKeywords.length ? `核心走向：${selectedKeywords.join("、")}` : "",
-    ].filter(Boolean).join("\n"),
-  };
+    userPrompt: prompt,
+    selectedKeywords,
+  });
 
   const created = await createPersonaBySpec(spec, {
     ownerBotName: String(input.ownerBotName || "").trim() || undefined,
     chatId: Number.isFinite(Number(input.chatId)) && Number(input.chatId) > 0 ? Number(input.chatId) : undefined,
     defaultPadCode: String(input.defaultPadCode || "").trim() || undefined,
   });
-  printJson({
+  await printJson({
     ok: true,
     archiveId: created.archiveId,
     name: created.name,
@@ -83,7 +77,9 @@ async function main() {
   });
 }
 
-main().catch((error) => {
-  printJson({ ok: false, error: error instanceof Error ? error.message : String(error) });
-  process.exitCode = 1;
-});
+main()
+  .then(() => process.exit(0))
+  .catch(async (error) => {
+    await printJson({ ok: false, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
+    process.exit(1);
+  });

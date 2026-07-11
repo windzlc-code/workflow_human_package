@@ -17,6 +17,8 @@ const ARCHIVE_ID = process.env.TELEGRAM_CUSTOM_PUBLISH_ARCHIVE_ID || "workflow-p
 const PLATFORM = (process.env.TELEGRAM_CUSTOM_PUBLISH_PLATFORM
   || process.argv.find((arg) => arg.startsWith("--platform="))?.split("=")[1]
   || "threads") as "threads" | "telegram";
+const GROUP_CONTENT_TYPE = (process.env.TELEGRAM_CUSTOM_PUBLISH_GROUP_CONTENT_TYPE || "free") as "free" | "paid";
+const TEST_TEXT = process.env.TELEGRAM_CUSTOM_PUBLISH_TEXT || `custom text selftest ${new Date().toISOString()}`;
 const REQUEST_TIMEOUT_MS = Number(process.env.TELEGRAM_SELFTEST_REQUEST_TIMEOUT_MS || 900_000);
 const STEP_DELAY_MS = Number(process.env.TELEGRAM_SELFTEST_STEP_DELAY_MS || 1200);
 
@@ -135,6 +137,7 @@ async function sendVideoUpdate(fileId: string, caption: string) {
 }
 
 async function chooseDirectPublishEntry(archiveId: string) {
+  if (PLATFORM === "telegram") await sendCallback(`pub_${archiveId}_ct_${GROUP_CONTENT_TYPE}`);
   await sendCallback(`custom_publish_persona_${archiveId}`);
   await sendCallback(`custom_publish_platform_${PLATFORM}`);
   await sendCallback("custom_publish_confirm_pad");
@@ -195,7 +198,7 @@ async function main() {
   const results: Array<{ mode: string; ok: boolean; caption: string }> = [];
 
   if (mode === "text" || mode === "all") {
-    const caption = `custom text selftest ${new Date().toISOString()}`;
+    const caption = TEST_TEXT;
     await chooseDirectPublishEntry(archiveId);
     await sendText(caption);
     await sendCallback("custom_publish_publish_now");

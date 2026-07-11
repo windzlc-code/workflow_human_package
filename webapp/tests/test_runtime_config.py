@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1347,6 +1349,35 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(result["latest"]["status"], "success")
         self.assertIn("目前狀態為已完成", result["message"])
 
+    def test_cancel_does_not_terminate_when_task_finishes_during_atomic_update(self):
+        task_id = "task_finish_during_cancel"
+        server._create_task_record(task_id, 1, "persona_publish_post", {"tg_chat_id": 8100401093})
+        with db_module.db() as conn:
+            conn.execute("UPDATE tasks SET status = ? WHERE id = ?", ("running", task_id))
+            conn.execute(
+                f"""
+                CREATE TRIGGER finish_before_cancel
+                BEFORE UPDATE OF status ON tasks
+                WHEN OLD.id = '{task_id}' AND NEW.status = 'cancelled'
+                BEGIN
+                    UPDATE tasks SET status = 'success' WHERE id = OLD.id;
+                    SELECT RAISE(IGNORE);
+                END
+                """
+            )
+
+        with patch.object(server, "_terminate_active_task_process") as terminate:
+            result = server._cancel_task_record_for_user(
+                task_id=task_id,
+                user_id=1,
+                requested_by="TG-8100401093",
+                expected_chat_id=8100401093,
+            )
+
+        terminate.assert_not_called()
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(result["status"], "success")
+
     def test_internal_tg_tasks_include_workflow_meta(self):
         get_tasks = self._route_endpoint("/api/internal/tg/tasks", "GET")
         workflow_path = "__converted__/轉化TG機器人/firered图像编辑.api.json"
@@ -1461,6 +1492,89 @@ class RuntimeConfigStoreTests(unittest.TestCase):
         self.assertEqual(task["runninghub_task_id"], "")
         self.assertEqual(task["cost_cents"], 0)
         self.assertIsNotNone(late_event)
+
+    def test_running_webapp_cancel_terminates_registered_process_tree(self):
+        task_id = "task_cancel_process_tree"
+        server._create_task_record(task_id, 1, "persona_publish_post", {"tg_chat_id": 8100401093})
+        with db_module.db() as conn:
+            conn.execute("UPDATE tasks SET status = ? WHERE id = ?", ("running", task_id))
+
+        process_kwargs = {"start_new_session": True} if os.name != "nt" else {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        }
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **process_kwargs,
+        )
+        try:
+            server._register_active_task_process(task_id, process)
+            result = server._cancel_task_record_for_user(
+                task_id=task_id,
+                user_id=1,
+                requested_by="TG-8100401093",
+                expected_chat_id=8100401093,
+            )
+            process.wait(timeout=5)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            server._unregister_active_task_process(task_id, process)
+
+        self.assertTrue(result["cancelled"])
+        self.assertTrue(result["execution_stopped"])
+        self.assertIsNotNone(process.returncode)
+
+    def test_cancel_before_process_registration_terminates_late_process(self):
+        task_id = "task_cancel_before_register"
+        server._create_task_record(task_id, 1, "persona_publish_post", {"tg_chat_id": 8100401093})
+        server._cancel_task_record_for_user(
+            task_id=task_id,
+            user_id=1,
+            requested_by="TG-8100401093",
+            expected_chat_id=8100401093,
+        )
+        process_kwargs = {"start_new_session": True} if os.name != "nt" else {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        }
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **process_kwargs,
+        )
+        try:
+            server._register_active_task_process(task_id, process)
+            process.wait(timeout=5)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            server._unregister_active_task_process(task_id, process)
+
+        self.assertIsNotNone(process.returncode)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group behavior")
+    def test_cancel_terminates_orphaned_child_after_parent_exits(self):
+        task_id = "task_cancel_orphaned_child"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); time.sleep(0.3)",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        server._register_active_task_process(task_id, process)
+        process.wait(timeout=5)
+        try:
+            stopped = server._terminate_active_task_process(task_id)
+        finally:
+            server._unregister_active_task_process(task_id, process)
+
+        self.assertTrue(stopped)
 
     def test_comfy_gpu_gate_serializes_remote_workflow_submits(self):
         server._write_runtime_config_file({"comfy_gpu_queue_enabled": True, "comfy_gpu_max_concurrency": 1})

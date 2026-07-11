@@ -42,6 +42,8 @@ export interface TelegramGroupIdentifyResult {
 }
 
 const TELEGRAM_PACKAGE = "org.telegram.messenger";
+const VMOS_TOOLBOX_PACKAGE = "com.android.expansiontools";
+const GOOGLE_PLAY_PACKAGE = "com.android.vending";
 const TELEGRAM_LAUNCH_ACTIVITY = `${TELEGRAM_PACKAGE}/org.telegram.ui.LaunchActivity`;
 const TELEGRAM_FALLBACK_LAUNCH_ACTIVITIES = [
   `${TELEGRAM_PACKAGE}/.DefaultIcon`,
@@ -55,6 +57,7 @@ const TELEGRAM_CHAT_LIST_FIRST_POINT = { x: 250, y: 365 };
 const TELEGRAM_CHAT_LIST_FREE_FALLBACK_POINT = { x: 250, y: 660 };
 const TELEGRAM_SHARE_TARGET_CHAT_POINT = { x: 230, y: 665 };
 const TELEGRAM_SHARE_SEND_POINT = { x: 640, y: 1535 };
+const TELEGRAM_KEYBOARD_LANGUAGE_POINT = { x: 215, y: 1535 };
 const TELEGRAM_CLEAR_DRAFT_KEY_EVENTS = 80;
 const TELEGRAM_GROUP_VISION_MODEL = "xai/grok-4.3";
 let lastTelegramTargetGroupName = "";
@@ -64,6 +67,11 @@ function delay(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, 1));
   }
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function freshScreenshotUrl(url: string): string {
+  if (!url) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}codexTs=${Date.now()}`;
 }
 
 async function runAdb(
@@ -119,13 +127,51 @@ async function ensureTelegramForeground(config: VmosConfig, padCode: string) {
 }
 
 async function clearTelegramDraft(config: VmosConfig, padCode: string) {
-  const deleteEvents = Array.from({ length: TELEGRAM_CLEAR_DRAFT_KEY_EVENTS }, () => "input keyevent 67").join("; ");
+  const deleteEvents = `input keyevent ${Array.from({ length: TELEGRAM_CLEAR_DRAFT_KEY_EVENTS }, () => "67").join(" ")}`;
   await runAdb(
     config,
     padCode,
     `input keyevent 123; ${deleteEvents}; sleep 0.3`,
     20_000,
   ).catch(() => undefined);
+}
+
+async function inputTelegramText(config: VmosConfig, padCode: string, text: string) {
+  const taskId = await inputText(config, padCode, text);
+  const result = await waitTask(config, Number(taskId), 30_000, 1_000);
+  if (result.taskStatus !== 3) {
+    throw new Error(result.errorMsg || result.taskResult || `VMOS inputText task ${taskId} failed`);
+  }
+}
+
+async function inputTelegramSearchText(config: VmosConfig, padCode: string, text: string) {
+  if (/^[A-Za-z0-9_. -]+$/.test(text)) {
+    const adbText = text.replace(/ /g, "%s");
+    await runAdb(config, padCode, `input text ${adbText}; sleep 0.8`, 12_000);
+    return;
+  }
+  await inputTelegramText(config, padCode, text);
+}
+
+async function resetAndInputTelegramSearchText(config: VmosConfig, padCode: string, text: string) {
+  if (/^[A-Za-z0-9_. -]+$/.test(text)) {
+    const adbText = text.replace(/ /g, "%s");
+    await runAdb(
+      config,
+      padCode,
+      `input tap ${TELEGRAM_SEARCH_POINT.x} ${TELEGRAM_SEARCH_POINT.y}; sleep 1; input text ${adbText}; sleep 2`,
+      20_000,
+    );
+    return;
+  }
+  await runAdb(
+    config,
+    padCode,
+    `input tap ${TELEGRAM_SEARCH_POINT.x} ${TELEGRAM_SEARCH_POINT.y}; sleep 1`,
+    12_000,
+  );
+  await clearTelegramDraft(config, padCode);
+  await inputTelegramSearchText(config, padCode, text);
 }
 
 function normalizeTelegramTargetChatId(value?: string): string {
@@ -194,7 +240,7 @@ async function identifyCurrentTelegramGroupByVision(
 ): Promise<TelegramGroupIdentifyResult | null> {
   const shotUrl = await screenshot(config, padCode).catch(() => "");
   if (!shotUrl) return null;
-  const inline = await getInlineData(shotUrl).catch(() => null);
+  const inline = await getInlineData(freshScreenshotUrl(shotUrl)).catch(() => null);
   if (!inline?.data) return null;
   const data = await callGemini(
     TELEGRAM_GROUP_VISION_MODEL,
@@ -217,7 +263,8 @@ async function identifyCurrentTelegramGroupByVision(
     { temperature: 0, maxOutputTokens: 512 },
   );
   const text = extractText(data).trim();
-  onProgress?.({ step: `Telegram 群名視覺識別：${text.slice(0, 240) || "空"}`, done: false });
+  console.log(`[telegram-group][vision_group_name] ${text.slice(0, 500) || "empty"}`);
+  onProgress?.({ step: "Telegram 群名視覺識別完成", done: false });
   const parsed = parseModelJson(text);
   if (!parsed?.found) return null;
   const groupName = String(parsed.groupName || parsed.title || parsed.matchedName || "").trim();
@@ -238,7 +285,12 @@ export async function identifyTelegramGroupById(
     internalId ? `https://t.me/c/${internalId}` : "",
   ].filter(Boolean);
 
-  await runAdb(config, task.padCode, `am force-stop ${TELEGRAM_PACKAGE}; sleep 0.8`, 12_000).catch(() => undefined);
+  await runAdb(
+    config,
+    task.padCode,
+    `am force-stop ${VMOS_TOOLBOX_PACKAGE}; am force-stop ${GOOGLE_PLAY_PACKAGE}; am force-stop ${TELEGRAM_PACKAGE}; sleep 0.8`,
+    12_000,
+  ).catch(() => undefined);
   onProgress({ step: `使用智能體手機 Telegram 帳號識別群 ID：${chatId}`, done: false });
 
   for (const link of links) {
@@ -278,24 +330,50 @@ async function ensureTelegramTargetGroupOpen(
   }
   const groupLabel = targetChatId ? `${groupName || "Telegram 群"}（${targetChatId}）` : groupName;
   onProgress({ step: `定位 Telegram 目标群：${groupLabel}`, done: false });
-  await runAdb(config, task.padCode, `am force-stop ${TELEGRAM_PACKAGE}; sleep 0.8`, 12_000).catch(() => undefined);
+  onProgress({ step: "冷启动 Telegram：返回智能体手机桌面并清理上一画面", done: false });
+  await runAdb(
+    config,
+    task.padCode,
+    `input keyevent KEYCODE_HOME; am force-stop ${VMOS_TOOLBOX_PACKAGE}; am force-stop ${GOOGLE_PLAY_PACKAGE}; am force-stop ${TELEGRAM_PACKAGE}; sleep 1; am start -W -n ${TELEGRAM_LAUNCH_ACTIVITY} 2>&1; sleep 2`,
+    20_000,
+  );
   await ensureTelegramForeground(config, task.padCode);
-  let currentUiXml = await dumpTelegramUiXml(config, task.padCode);
-  if (isCurrentTelegramTargetGroup(currentUiXml, groupName)
-    || await isCurrentTelegramTargetGroupByVision(config, task.padCode, groupName, onProgress).catch(() => false)) {
-    lastTelegramTargetGroupName = groupName || targetChatId;
-    return;
+  onProgress({ step: "Telegram 冷启动完成：正在统一回到聊天列表", done: false });
+  // Telegram may restore its last chat after a process restart. One BACK either
+  // reaches the chat list or exits an already-open list; the foreground guard
+  // then reopens the list from the launcher entry point.
+  await runAdb(config, task.padCode, "input keyevent KEYCODE_BACK; sleep 1", 10_000).catch(() => undefined);
+  await ensureTelegramForeground(config, task.padCode);
+  if (targetChatId) {
+    const internalId = telegramSupergroupInternalId(targetChatId);
+    const links = [
+      `tg://openmessage?chat_id=${encodeURIComponent(targetChatId)}`,
+      internalId ? `https://t.me/c/${internalId}` : "",
+    ].filter(Boolean);
+    for (const link of links) {
+      onProgress({ step: `使用 Telegram 群 ID 定位目标群：${targetChatId}`, done: false });
+      await runAdb(
+        config,
+        task.padCode,
+        `am start -W -a android.intent.action.VIEW -d ${shellSingleQuote(link)} -p ${TELEGRAM_PACKAGE} 2>&1; sleep 3`,
+        20_000,
+      ).catch(() => "");
+      const uiXml = await dumpTelegramUiXml(config, task.padCode);
+      const confirmedByUi = groupName
+        ? isCurrentTelegramTargetGroup(uiXml, groupName)
+        : Boolean(extractTelegramChatTitleFromUiXml(uiXml));
+      const confirmedByVision = groupName
+        ? await isCurrentTelegramTargetGroupByVision(config, task.padCode, groupName, onProgress).catch(() => false)
+        : false;
+      if (confirmedByUi || confirmedByVision) {
+        lastTelegramTargetGroupName = groupName || extractTelegramChatTitleFromUiXml(uiXml) || targetChatId;
+        return;
+      }
+    }
   }
   if (!groupName) {
     throw new Error(`無法使用 Telegram 群 ID 打開目標群：${targetChatId}`);
   }
-  await runAdb(
-    config,
-    task.padCode,
-    `input tap ${TELEGRAM_TOP_LEFT_POINT.x} ${TELEGRAM_TOP_LEFT_POINT.y}; sleep 0.8`,
-    10_000,
-  ).catch(() => undefined);
-  await ensureTelegramChatList(config, task.padCode);
   let currentFocus = await getCurrentFocus(config, task.padCode);
   if (!currentFocus.includes(TELEGRAM_PACKAGE)) {
     await ensureTelegramForeground(config, task.padCode);
@@ -304,25 +382,16 @@ async function ensureTelegramTargetGroupOpen(
   if (/PopupWindow/i.test(currentFocus)) {
     await runAdb(config, task.padCode, "input keyevent KEYCODE_BACK; sleep 0.6", 10_000).catch(() => undefined);
   }
-  if (await openVisibleTelegramTargetGroup(config, task.padCode, groupName, onProgress)) {
-    lastTelegramTargetGroupName = groupName;
-    return;
-  }
   const searchText = telegramSearchTextForTarget(groupName, groupContentType);
-  await runAdb(
-    config,
-    task.padCode,
-    `input tap ${TELEGRAM_SEARCH_POINT.x} ${TELEGRAM_SEARCH_POINT.y}; sleep 0.7; input keyevent 123; input keyevent 67; input keyevent 67; input keyevent 67; sleep 0.2`,
-    12_000,
-  ).catch(() => undefined);
-  await inputText(config, task.padCode, searchText).catch((error) => {
+  await resetAndInputTelegramSearchText(config, task.padCode, searchText).catch((error) => {
     throw new Error(`Telegram 目标群搜索输入失败：${error instanceof Error ? error.message : String(error)}`);
   });
   await delay(3000);
-  const searchUiXml = await dumpTelegramUiXml(config, task.padCode);
-  const resultPoint = findTelegramTargetGroupPoint(searchUiXml, groupName)
+  let searchUiXml = await dumpTelegramUiXml(config, task.padCode);
+  let resultPoint = findTelegramTargetGroupPoint(searchUiXml, groupName)
     || await findTelegramTargetGroupPointByVision(config, task.padCode, groupName, "搜索結果", onProgress).catch((error) => {
-      onProgress({ step: `Telegram 視覺識別失敗：${error instanceof Error ? error.message : String(error)}`, done: false, warning: "vision-fallback-failed" });
+      console.warn("[telegram-group][vision_target_failed]", error instanceof Error ? error.message : String(error));
+      onProgress({ step: "Telegram 目標群視覺識別失敗，正在停止本次錯誤發布", done: false, warning: "vision-fallback-failed" });
       return null;
     });
   if (!resultPoint) {
@@ -389,12 +458,24 @@ async function openVisibleTelegramTargetGroup(
     const uiXml = await dumpTelegramUiXml(config, padCode);
     const point = findTelegramTargetGroupPoint(uiXml, groupName)
       || await findTelegramTargetGroupPointByVision(config, padCode, groupName, "聊天列表", onProgress).catch((error) => {
-        onProgress({ step: `Telegram 列表視覺識別失敗：${error instanceof Error ? error.message : String(error)}`, done: false, warning: "visible-list-vision-failed" });
+        console.warn("[telegram-group][vision_chat_list_failed]", error instanceof Error ? error.message : String(error));
+        onProgress({ step: "Telegram 聊天列表視覺識別失敗，正在重新定位", done: false, warning: "visible-list-vision-failed" });
         return null;
       });
     if (point) {
       onProgress({ step: `已在 Telegram 列表中識別目標群：${groupName}`, done: false });
       await runAdb(config, padCode, `input tap ${point.x} ${point.y}; sleep 2.5`, 12_000);
+      const focus = await getCurrentFocus(config, padCode);
+      if (!focus.includes(TELEGRAM_PACKAGE)) {
+        onProgress({ step: "點擊後離開 Telegram，正在恢復聊天列表...", done: false, warning: "telegram-external-app-recovery" });
+        await runAdb(
+          config,
+          padCode,
+          `am force-stop ${VMOS_TOOLBOX_PACKAGE}; am force-stop ${GOOGLE_PLAY_PACKAGE}; am start -W -n ${TELEGRAM_LAUNCH_ACTIVITY} 2>&1; sleep 1.5`,
+          15_000,
+        ).catch(() => undefined);
+        continue;
+      }
       const openedUiXml = await dumpTelegramUiXml(config, padCode);
       if (isCurrentTelegramTargetGroup(openedUiXml, groupName)
         || await isCurrentTelegramTargetGroupByVision(config, padCode, groupName, onProgress).catch(() => false)) return true;
@@ -415,7 +496,7 @@ async function isCurrentTelegramTargetGroupByVision(
 ): Promise<boolean> {
   const shotUrl = await screenshot(config, padCode).catch(() => "");
   if (!shotUrl) return false;
-  const inline = await getInlineData(shotUrl).catch(() => null);
+  const inline = await getInlineData(freshScreenshotUrl(shotUrl)).catch(() => null);
   if (!inline?.data) return false;
   const data = await callGemini(
     TELEGRAM_GROUP_VISION_MODEL,
@@ -437,7 +518,8 @@ async function isCurrentTelegramTargetGroupByVision(
     { temperature: 0, maxOutputTokens: 512 },
   );
   const text = extractText(data).trim();
-  onProgress?.({ step: `Telegram 群標題視覺確認：${text.slice(0, 240) || "空"}`, done: false });
+  console.log(`[telegram-group][vision_header_check] ${text.slice(0, 500) || "empty"}`);
+  onProgress?.({ step: "Telegram 群標題視覺確認完成", done: false });
   const parsed = parseModelJson(text);
   if (!parsed?.found) return false;
   const matchedName = String(parsed.matchedName || "").trim();
@@ -452,7 +534,7 @@ async function isTelegramMediaShareComposerForTargetByVision(
 ): Promise<boolean> {
   const shotUrl = await screenshot(config, padCode).catch(() => "");
   if (!shotUrl) return false;
-  const inline = await getInlineData(shotUrl).catch(() => null);
+  const inline = await getInlineData(freshScreenshotUrl(shotUrl)).catch(() => null);
   if (!inline?.data) return false;
   const data = await callGemini(
     TELEGRAM_GROUP_VISION_MODEL,
@@ -475,7 +557,8 @@ async function isTelegramMediaShareComposerForTargetByVision(
     { temperature: 0, maxOutputTokens: 512 },
   );
   const text = extractText(data).trim();
-  onProgress?.({ step: `Telegram 媒體分享頁確認：${text.slice(0, 240) || "空"}`, done: false });
+  console.log(`[telegram-group][vision_media_share_check] ${text.slice(0, 500) || "empty"}`);
+  onProgress?.({ step: "Telegram 媒體分享頁視覺確認完成", done: false });
   const parsed = parseModelJson(text);
   if (!parsed?.found) return false;
   const matchedName = String(parsed.matchedName || "").trim();
@@ -490,7 +573,7 @@ async function isTelegramShareRecipientPickerForTargetByVision(
 ): Promise<boolean> {
   const shotUrl = await screenshot(config, padCode).catch(() => "");
   if (!shotUrl) return false;
-  const inline = await getInlineData(shotUrl).catch(() => null);
+  const inline = await getInlineData(freshScreenshotUrl(shotUrl)).catch(() => null);
   if (!inline?.data) return false;
   const data = await callGemini(
     TELEGRAM_GROUP_VISION_MODEL,
@@ -512,7 +595,8 @@ async function isTelegramShareRecipientPickerForTargetByVision(
     { temperature: 0, maxOutputTokens: 512 },
   );
   const text = extractText(data).trim();
-  onProgress?.({ step: `Telegram 分享接收者確認：${text.slice(0, 240) || "空"}`, done: false });
+  console.log(`[telegram-group][vision_recipient_check] ${text.slice(0, 500) || "empty"}`);
+  onProgress?.({ step: "Telegram 分享接收者視覺確認完成", done: false });
   const parsed = parseModelJson(text);
   if (!parsed?.found) return false;
   const matchedName = String(parsed.matchedName || "").trim();
@@ -528,7 +612,7 @@ async function findTelegramTargetGroupPointByVision(
 ): Promise<{ x: number; y: number } | null> {
   const shotUrl = await screenshot(config, padCode).catch(() => "");
   if (!shotUrl) return null;
-  const inline = await getInlineData(shotUrl).catch(() => null);
+  const inline = await getInlineData(freshScreenshotUrl(shotUrl)).catch(() => null);
   if (!inline?.data) return null;
   const data = await callGemini(
     TELEGRAM_GROUP_VISION_MODEL,
@@ -543,12 +627,13 @@ async function findTelegramTargetGroupPointByVision(
             `Screen context: ${screenContext}`,
             "Count only clickable chat/group rows. Do not count the search input, section titles, or plain message preview text.",
             "Do not prefer Recent visits. Choose the row whose visible title is exactly the target group name.",
-            "Return the visible row number of the clickable row containing the exact target group. Include x/y only if you are confident.",
+            "Return the center x/y coordinates of the exact clickable row whenever it is visible. Also return its visible row number as fallback.",
             "If there are similar names, choose only the exact group name. Do not choose AG- prefixed or otherwise longer fake names.",
             "Do not choose any visible row whose title is not exactly the target group, even if it appears above the target row.",
             "matchedName is required and must be the exact visible title you chose.",
+            "On a search screen, queryText is required and must be the exact text visibly present in the search input.",
             "If the exact group is not visible, return {\"found\":false}.",
-            "Return one short minified JSON line only. Example: {\"found\":true,\"matchedName\":\"TG fufei qun\",\"row\":1}",
+            "Return one short minified JSON line only. Example: {\"found\":true,\"queryText\":\"TG fufei qun\",\"matchedName\":\"TG fufei qun\",\"x\":270,\"y\":430,\"row\":1}",
           ].join("\n"),
         },
         { inlineData: { mimeType: inline.mimeType || "image/png", data: inline.data } },
@@ -557,16 +642,21 @@ async function findTelegramTargetGroupPointByVision(
     { temperature: 0, maxOutputTokens: 512 },
   );
   const text = extractText(data).trim();
-  onProgress?.({ step: `Telegram 視覺識別返回：${text.slice(0, 420) || "空"}`, done: false });
+  console.log(`[telegram-group][vision_target_point] ${text.slice(0, 500) || "empty"}`);
+  onProgress?.({ step: "Telegram 目標群位置視覺識別完成", done: false });
   const parsed = parseTelegramVisionPointJson(text);
   if (!parsed?.found) return null;
   const matchedName = String(parsed.matchedName || "").trim();
   if (!matchedName || normalizeTelegramGroupLabel(matchedName) !== normalizeTelegramGroupLabel(groupName)) return null;
+  const isSearchScreen = /搜索|search/i.test(screenContext);
+  if (isSearchScreen) {
+    const queryText = String(parsed.queryText || "").trim();
+    if (normalizeTelegramGroupLabel(queryText) !== normalizeTelegramGroupLabel(groupName)) return null;
+  }
   const row = Number(parsed.row ?? parsed.rowIndex);
   if (Number.isFinite(row) && row >= 1 && row <= 8) {
     const rowIndex = Math.floor(row);
-    const isSearchScreen = /搜索|search/i.test(screenContext);
-    const baseY = isSearchScreen ? 320 : 365;
+    const baseY = isSearchScreen ? 430 : 365;
     const rowGap = isSearchScreen ? 205 : 160;
     return { x: 270, y: Math.min(1420, baseY + (rowIndex - 1) * rowGap) };
   }
@@ -632,7 +722,7 @@ function isCurrentTelegramTargetGroup(uiXml: string, groupName: string): boolean
 async function looksLikeTelegramSharePickerScreen(config: VmosConfig, padCode: string): Promise<boolean> {
   try {
     const shotUrl = await screenshot(config, padCode);
-    const inline = await getInlineData(shotUrl);
+    const inline = await getInlineData(freshScreenshotUrl(shotUrl));
     const { data, info } = await sharp(Buffer.from(inline.data, "base64"))
       .ensureAlpha()
       .raw()
@@ -660,16 +750,8 @@ async function looksLikeTelegramSharePickerScreen(config: VmosConfig, padCode: s
   }
 }
 
-function encodeBase64Utf8(text: string): string {
-  return Buffer.from(text, "utf8").toString("base64");
-}
-
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function shellDecodedTextArg(text: string): string {
-  return `"$(printf %s ${shellSingleQuote(encodeBase64Utf8(text))} | base64 -d)"`;
 }
 
 function telegramSearchTextForTarget(groupName: string, groupContentType?: "free" | "paid"): string {
@@ -718,6 +800,92 @@ function parseBoundsCenter(bounds: string): { x: number; y: number } | null {
   return { x: Math.round((left + right) / 2), y: Math.round((top + bottom) / 2) };
 }
 
+function findTelegramSendButtonPoint(uiXml: string): { x: number; y: number } | null {
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  for (const node of nodes) {
+    const text = decodeXmlAttr(getXmlAttr(node, "text")).trim();
+    const desc = decodeXmlAttr(getXmlAttr(node, "content-desc")).trim();
+    const resourceId = getXmlAttr(node, "resource-id");
+    if (!/(?:^|\b)(?:send|發送|发送|傳送)(?:\b|$)/i.test(`${text} ${desc} ${resourceId}`)) continue;
+    const center = parseBoundsCenter(getXmlAttr(node, "bounds"));
+    if (center && center.x >= 520) return center;
+  }
+  return null;
+}
+
+function telegramDraftStillContains(uiXml: string, caption: string): boolean {
+  if (!caption || !uiXml.trim()) return false;
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  return nodes.some((node) => {
+    if (!/true/i.test(getXmlAttr(node, "editable"))) return false;
+    const value = decodeXmlAttr(getXmlAttr(node, "text"));
+    return value.includes(caption);
+  });
+}
+
+function telegramSentMessageVisible(uiXml: string, caption: string): boolean {
+  if (!caption || !uiXml.trim()) return false;
+  const expected = caption.replace(/\s+/g, " ").trim();
+  const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
+  return nodes.some((node) => {
+    if (/true/i.test(getXmlAttr(node, "editable"))) return false;
+    const value = decodeXmlAttr(getXmlAttr(node, "text")).replace(/\s+/g, " ").trim();
+    return value === expected || (expected.length > 40 && value.includes(expected.slice(0, 40)));
+  });
+}
+
+async function isLatestTelegramMessageSentByVision(
+  config: VmosConfig,
+  padCode: string,
+  groupName: string,
+  caption: string,
+  onProgress?: (p: TelegramGroupPublishProgress) => void,
+): Promise<boolean> {
+  const shotUrl = await screenshot(config, padCode).catch(() => "");
+  if (!shotUrl) return false;
+  const inline = await getInlineData(freshScreenshotUrl(shotUrl)).catch(() => null);
+  if (!inline?.data) return false;
+  const data = await callGemini(
+    TELEGRAM_GROUP_VISION_MODEL,
+    [{
+      role: "user",
+      parts: [
+        {
+          text: [
+            "You are looking at a Telegram chat screenshot after a send action.",
+            `Target group name: ${groupName}`,
+            `Expected sent message: ${caption}`,
+            "Return found=true only when the target group title is visible and the newest outgoing message bubble visibly contains the expected message.",
+            "Do not use text in the composer/input field as evidence.",
+            "Return one minified JSON line only: {\"found\":true} or {\"found\":false}.",
+          ].join("\n"),
+        },
+        { inlineData: { mimeType: inline.mimeType || "image/png", data: inline.data } },
+      ],
+    }],
+    { temperature: 0, maxOutputTokens: 256 },
+  );
+  const text = extractText(data).trim();
+  console.log(`[telegram-group][vision_send_result] ${text.slice(0, 500) || "empty"}`);
+  onProgress?.({ step: "Telegram 發送結果視覺確認完成", done: false });
+  return Boolean(parseModelJson(text)?.found);
+}
+
+async function tapTelegramTextSendButton(config: VmosConfig, padCode: string) {
+  const uiXml = await dumpTelegramUiXml(config, padCode);
+  const sendPoint = findTelegramSendButtonPoint(uiXml);
+  if (sendPoint) {
+    await runAdb(config, padCode, `input tap ${sendPoint.x} ${sendPoint.y}; sleep 2`, 12_000);
+    return;
+  }
+  await runAdb(
+    config,
+    padCode,
+    `input keyevent KEYCODE_BACK; sleep 0.6; input tap ${TELEGRAM_SHARE_SEND_POINT.x} ${TELEGRAM_SHARE_SEND_POINT.y}; sleep 2`,
+    12_000,
+  );
+}
+
 function normalizeTelegramGroupLabel(value: string): string {
   return value.replace(/\s+/g, "").toLowerCase();
 }
@@ -749,7 +917,6 @@ function findTelegramTargetGroupPoint(uiXml: string, groupName: string): { x: nu
 }
 
 function buildTelegramShareIntentCommand(input: {
-  caption?: string;
   contentUri: string;
   mimeType: string;
 }) {
@@ -760,7 +927,6 @@ function buildTelegramShareIntentCommand(input: {
     `-p ${TELEGRAM_PACKAGE}`,
     "--grant-read-uri-permission",
     `--eu android.intent.extra.STREAM ${shellSingleQuote(input.contentUri)}`,
-    input.caption ? `--es android.intent.extra.TEXT ${shellDecodedTextArg(input.caption)}` : "",
     "2>&1",
   ].filter(Boolean).join(" ");
 }
@@ -768,7 +934,6 @@ function buildTelegramShareIntentCommand(input: {
 async function launchTelegramShareIntent(
   config: VmosConfig,
   task: TelegramGroupPublishTask,
-  caption: string,
   onProgress: (p: TelegramGroupPublishProgress) => void,
 ) {
   if (!task.mediaContentUri) throw new Error("图片或视频没有成功写入智能體手機，请重新上传媒体后再发布。");
@@ -778,7 +943,7 @@ async function launchTelegramShareIntent(
   const output = await runAdb(
     config,
     task.padCode,
-    buildTelegramShareIntentCommand({ caption, contentUri: task.mediaContentUri, mimeType }),
+    buildTelegramShareIntentCommand({ contentUri: task.mediaContentUri, mimeType }),
     60_000,
   );
   if (/Exception|Error|Unknown option|Permission Denial/i.test(output)) {
@@ -812,9 +977,13 @@ async function ensureTelegramShareTargetSelected(
     }
 
     const uiXml = await dumpTelegramUiXml(config, task.padCode);
+    if (isCurrentTelegramTargetGroup(uiXml, groupName)) {
+      return "composer";
+    }
     const point = findTelegramTargetGroupPoint(uiXml, groupName)
       || await findTelegramTargetGroupPointByVision(config, task.padCode, groupName, "分享選擇聊天", onProgress).catch((error) => {
-        onProgress({ step: `Telegram 分享頁視覺識別失敗：${error instanceof Error ? error.message : String(error)}`, done: false, warning: "share-target-vision-failed" });
+        console.warn("[telegram-group][vision_share_target_failed]", error instanceof Error ? error.message : String(error));
+        onProgress({ step: "Telegram 分享頁視覺識別失敗，正在重新定位", done: false, warning: "share-target-vision-failed" });
         return null;
       });
 
@@ -822,6 +991,10 @@ async function ensureTelegramShareTargetSelected(
       onProgress({ step: `選擇 Telegram 分享目標群：${groupName}`, done: false });
       await runAdb(config, task.padCode, `input tap ${point.x} ${point.y}; sleep 4.5`, 15_000);
       for (let confirmAttempt = 0; confirmAttempt < 3; confirmAttempt += 1) {
+        const confirmedUiXml = await dumpTelegramUiXml(config, task.padCode);
+        if (isCurrentTelegramTargetGroup(confirmedUiXml, groupName)) {
+          return "composer";
+        }
         if (await isTelegramMediaShareComposerForTargetByVision(config, task.padCode, groupName, onProgress).catch(() => false)) {
           return "composer";
         }
@@ -845,10 +1018,11 @@ async function confirmTelegramSharedMediaSend(
 ): Promise<TelegramGroupPublishResult["state"]> {
   onProgress({ step: "确认 Telegram 分享发送...", done: false });
   const shareMode = await ensureTelegramShareTargetSelected(config, task, onProgress);
-  if (shareMode === "recipient-picker" && task.caption.trim()) {
+  if (task.caption.trim()) {
     onProgress({ step: "輸入 Telegram 分享附言...", done: false });
     await runAdb(config, task.padCode, `input tap ${TELEGRAM_INPUT_POINT.x} ${TELEGRAM_INPUT_POINT.y}; sleep 0.8`, 10_000);
-    await inputText(config, task.padCode, task.caption.trim()).catch((error) => {
+    await clearTelegramDraft(config, task.padCode);
+    await inputTelegramText(config, task.padCode, task.caption.trim()).catch((error) => {
       throw new Error(`Telegram 分享附言輸入失敗：${error instanceof Error ? error.message : String(error)}`);
     });
     await delay(1200);
@@ -905,15 +1079,13 @@ async function confirmTelegramSharedMediaSend(
     throw new Error("Telegram 分享頁仍停留在選擇聊天，已停止發送，避免發錯群。");
   }
 
-  const uiXml = await dumpTelegramUiXml(config, task.padCode);
-  if (looksLikeTelegramGroupChat(uiXml)) return "verified";
   const groupName = String(task.telegramTargetGroupName || lastTelegramTargetGroupName || "").trim();
+  const uiXml = await dumpTelegramUiXml(config, task.padCode);
+  if (groupName && isCurrentTelegramTargetGroup(uiXml, groupName)) return "verified";
   if (groupName && await isCurrentTelegramTargetGroupByVision(config, task.padCode, groupName, onProgress).catch(() => false)) {
     return "verified";
   }
-  const focus = await getCurrentFocus(config, task.padCode);
-  if (!uiXml.trim() && focus.includes(TELEGRAM_PACKAGE)) return "verified";
-  return "warning";
+  throw new Error(`Telegram 媒體發送後未能確認目前群組是「${groupName || "目標群"}」，已停止且不會寫入發布歷史。`);
 }
 
 export async function publishTelegramGroupPost(
@@ -926,7 +1098,7 @@ export async function publishTelegramGroupPost(
   if (task.mediaUrl && !task.mediaContentUri) throw new Error("图片或视频没有成功写入智能體手機，请重新上传媒体后再发布。");
   await ensureTelegramTargetGroupOpen(config, task, onProgress);
   if (task.mediaUrl) {
-    await launchTelegramShareIntent(config, task, caption, onProgress);
+    await launchTelegramShareIntent(config, task, onProgress);
     const state = await confirmTelegramSharedMediaSend(config, task, onProgress);
 
     const screenshotUrl = await screenshot(config, task.padCode).catch(() => undefined);
@@ -952,18 +1124,35 @@ export async function publishTelegramGroupPost(
   await clearTelegramDraft(config, task.padCode);
 
   onProgress({ step: "输入群组推文...", done: false });
-  await inputText(config, task.padCode, caption).catch((error) => {
+  await inputTelegramText(config, task.padCode, caption).catch((error) => {
     throw new Error(`Telegram 群组输入失败：${error instanceof Error ? error.message : String(error)}`);
   });
   await delay(1200);
 
   onProgress({ step: "点击 Telegram 发送按钮...", done: false });
-  await runAdb(
-    config,
-    task.padCode,
-    `input tap ${TELEGRAM_SEND_WITH_KEYBOARD_POINT.x} ${TELEGRAM_SEND_WITH_KEYBOARD_POINT.y}; sleep 2`,
-    12_000,
+  await tapTelegramTextSendButton(config, task.padCode);
+  let sentUiXml = await dumpTelegramUiXml(config, task.padCode);
+  if (telegramDraftStillContains(sentUiXml, caption)) {
+    onProgress({ step: "Telegram 文案仍在輸入框，正在重試發送...", done: false, warning: "telegram-draft-not-sent" });
+    await tapTelegramTextSendButton(config, task.padCode);
+    sentUiXml = await dumpTelegramUiXml(config, task.padCode);
+  }
+  if (telegramDraftStillContains(sentUiXml, caption)) {
+    throw new Error("Telegram 文案仍停留在輸入框，未確認發送成功，已停止並保留現場。");
+  }
+  const groupName = String(task.telegramTargetGroupName || lastTelegramTargetGroupName || "").trim();
+  const targetConfirmed = groupName && (
+    isCurrentTelegramTargetGroup(sentUiXml, groupName)
+    || await isCurrentTelegramTargetGroupByVision(config, task.padCode, groupName, onProgress).catch(() => false)
   );
+  if (!targetConfirmed) {
+    throw new Error(`Telegram 發送後未能確認目前群組是「${groupName || "目標群"}」，已停止並保留現場。`);
+  }
+  const messageConfirmed = telegramSentMessageVisible(sentUiXml, caption)
+    || await isLatestTelegramMessageSentByVision(config, task.padCode, groupName, caption, onProgress).catch(() => false);
+  if (!messageConfirmed) {
+    throw new Error("Telegram 發送後未能確認最新消息氣泡包含本次文案，已停止且不會寫入發布歷史。");
+  }
 
   const screenshotUrl = await screenshot(config, task.padCode).catch(() => undefined);
   onProgress({ step: "Telegram 群组发布完成", done: true });
