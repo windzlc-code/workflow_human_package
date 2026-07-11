@@ -293,6 +293,17 @@
   .typing {
     opacity: .85;
   }
+  body.compact .page { padding: 0; }
+  body.compact .phone {
+    width: 100%;
+    height: 100vh;
+    min-height: 100vh;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  body.compact .ios { display: none; }
+  body.compact .chat-head { height: 50px; }
   @media (max-width: 520px) {
     .page { padding: 0; }
     .phone {
@@ -348,6 +359,10 @@
   const mediaInput = document.getElementById('bot-media-input');
   const subtitle = document.getElementById('bot-subtitle');
   const timeEl = document.getElementById('ios-time');
+  const query = new URLSearchParams(window.location.search);
+  const entryAction = String(query.get('entry') || 'menu').trim() || 'menu';
+  const sessionId = String(query.get('session') || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 80) || 'default';
+  document.body.classList.toggle('compact', query.get('compact') === '1');
   const webBotEndpoint = window.location.pathname.startsWith('/threads-console')
     ? '/threads-console/api/web-bot/message'
     : '/api/web-bot/message';
@@ -360,7 +375,11 @@
   const historyLimit = 100;
   const historyDbName = 'workflow-web-bot-history';
   const historyStoreName = 'sessions';
-  const historyKey = 'bot:' + window.location.pathname;
+  const historyKey = 'bot:' + window.location.pathname + ':' + sessionId;
+  const historyChannel = 'BroadcastChannel' in window
+    ? new BroadcastChannel('workflow-web-bot:' + sessionId)
+    : null;
+  const historyClientId = Math.random().toString(36).slice(2);
   let historyReady = false;
   let historyDbPromise = null;
   let historyPersistTimer = null;
@@ -395,13 +414,15 @@
     if (!db) return;
     try {
       const transaction = db.transaction(historyStoreName, 'readwrite');
-      transaction.objectStore(historyStoreName).put({
+      const snapshot = {
         id: historyKey,
         html: log.innerHTML,
         state,
         pendingSourcePoll,
         updatedAt: Date.now(),
-      });
+      };
+      transaction.objectStore(historyStoreName).put(snapshot);
+      if (historyChannel) historyChannel.postMessage({ ...snapshot, clientId: historyClientId });
     } catch (_) {
       // Message persistence must not interrupt bot interaction.
     }
@@ -428,6 +449,10 @@
         resolve(null);
       }
     });
+    return applyHistorySnapshot(saved);
+  }
+
+  function applyHistorySnapshot(saved) {
     if (!saved || typeof saved.html !== 'string' || !saved.html.trim()) return false;
     log.innerHTML = saved.html;
     trimHistory();
@@ -440,6 +465,15 @@
     activeBotGroup = botGroups.length ? botGroups[botGroups.length - 1] : null;
     scrollBottom();
     return true;
+  }
+
+  if (historyChannel) {
+    historyChannel.addEventListener('message', event => {
+      const saved = event.data;
+      if (!saved || saved.clientId === historyClientId || saved.id !== historyKey) return;
+      applyHistorySnapshot(saved);
+      subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
+    });
   }
 
   function clearSourcePoll() {
@@ -727,7 +761,7 @@
       queueHistoryPersist();
       return;
     }
-    if (!restored) send({ action: 'menu' });
+    if (!restored) send({ action: entryAction });
   }
 
   document.addEventListener('visibilitychange', () => {

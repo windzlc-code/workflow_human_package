@@ -29,6 +29,16 @@ def test_console_uses_8098_proxy_prefix_when_served_under_threads_console() -> N
     assert "fetch(webBotEndpoint" in template
 
 
+def test_compact_console_reuses_full_client_and_syncs_named_sessions() -> None:
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert "query.get('compact') === '1'" in template
+    assert "query.get('entry')" in template
+    assert "query.get('session')" in template
+    assert "new BroadcastChannel('workflow-web-bot:' + sessionId)" in template
+    assert "send({ action: entryAction })" in template
+
+
 def test_console_restores_and_caps_persistent_message_history() -> None:
     template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
 
@@ -39,7 +49,7 @@ def test_console_restores_and_caps_persistent_message_history() -> None:
     assert "state," in template
     assert "pendingSourcePoll," in template
     assert "const restored = await restoreHistory()" in template
-    assert "if (!restored) send({ action: 'menu' })" in template
+    assert "if (!restored) send({ action: entryAction })" in template
 
 
 def test_specific_publish_callbacks_are_routed_before_generic_pub_prefix() -> None:
