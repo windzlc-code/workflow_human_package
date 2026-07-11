@@ -223,7 +223,7 @@ def _source_api_candidates() -> list[str]:
         "http://127.0.0.1:8000",
         "http://127.0.0.1:8091",
     ]
-    for item in [*preferred, *configured, *fallback]:
+    for item in [*configured, *preferred, *fallback]:
         value = str(item or "").strip().rstrip("/")
         if value and value not in candidates:
             candidates.append(value)
@@ -9712,6 +9712,8 @@ def _telegram_login_check(persona_id: str) -> dict[str, Any]:
 
 
 def _automation_menu(persona_id: str = "") -> dict[str, Any]:
+    if persona_id:
+        return _persona_autoreply_mode_menu(persona_id)
     if not persona_id:
         personas = PersonaRepo.list_all(limit=12)
         lines = ["🤖 自動化運營", "", "請先選擇要執行自動回覆或養號的人設。"]
@@ -9743,6 +9745,297 @@ def _automation_menu(persona_id: str = "") -> dict[str, Any]:
             ),
         ),
         state={"flow": ""},
+    )
+
+
+def _auto_reply_flow_code(flow: str) -> str:
+    return {"comments": "c", "hot": "h", "hot_content": "m"}.get(str(flow or ""), "h")
+
+
+def _auto_reply_link_presets(persona_id: str) -> list[dict[str, Any]]:
+    _persona, row = _resolve_persona_for_action(persona_id)
+    setup = row.get("setup") if isinstance((row or {}).get("setup"), dict) else {}
+    source_presets = setup.get("linkEndingPresets")
+    if isinstance(source_presets, list):
+        raw_presets = source_presets
+    elif isinstance(source_presets, dict) and isinstance(source_presets.get("sample"), list):
+        raw_presets = source_presets["sample"]
+    else:
+        raw_presets = []
+    if not raw_presets:
+        raw_presets = _link_ending_settings(persona_id).get("linkEndingPresets", [])
+    presets: list[dict[str, Any]] = []
+    for raw in raw_presets:
+        if not isinstance(raw, dict):
+            continue
+        preset = {
+            "id": re.sub(r"[^a-zA-Z0-9-]", "", str(raw.get("id") or ""))[:40],
+            "name": str(raw.get("name") or "").strip()[:40],
+            "endingText": str(raw.get("endingText") or "").strip()[:240],
+            "linkUrl": _normalize_link_url(str(raw.get("linkUrl") or "")),
+            "enabled": raw.get("enabled") is not False,
+            "createdAt": str(raw.get("createdAt") or ""),
+            "updatedAt": str(raw.get("updatedAt") or ""),
+        }
+        if preset["id"] and (preset["endingText"] or preset["linkUrl"]):
+            presets.append(preset)
+    return presets
+
+
+def _auto_reply_selected_link_preset(persona_id: str, draft: dict[str, Any]) -> dict[str, Any] | None:
+    selected_id = str(draft.get("selected_link_preset_id") or "").strip()
+    if not selected_id:
+        return None
+    return next((item for item in _auto_reply_link_presets(persona_id) if item.get("id") == selected_id), None)
+
+
+def _auto_reply_link_suffix(persona_id: str, draft: dict[str, Any]) -> str:
+    return _apply_link_ending_to_text("", _auto_reply_selected_link_preset(persona_id, draft))
+
+
+def _auto_reply_link_line(persona_id: str, draft: dict[str, Any]) -> str:
+    preset = _auto_reply_selected_link_preset(persona_id, draft)
+    return f"链接模板：{preset.get('name') or preset.get('endingText') or preset.get('linkUrl') or '已选择'}" if preset else "链接模板：不添加"
+
+
+def _auto_reply_link_picker(persona_id: str, flow: str, state: dict[str, Any]) -> dict[str, Any]:
+    persona, _row = _resolve_persona_for_action(persona_id)
+    if not persona:
+        return _response(_message("没有找到本地人设。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    draft.update({"persona_id": persona.id, "auto_reply_flow": flow})
+    presets = _auto_reply_link_presets(persona.id)
+    selected_id = str(draft.get("selected_link_preset_id") or "")
+    flow_code = _auto_reply_flow_code(flow)
+    rows = [
+        [_btn(f"{'✅' if selected_id == str(preset.get('id') or '') else '🔗'} {preset.get('name') or preset.get('endingText') or preset.get('linkUrl') or f'模板 {index + 1}'}"[:60], f"arl_{flow_code}_{index}_{persona.id}")]
+        for index, preset in enumerate(presets)
+    ]
+    rows.extend([
+        [_btn(f"{'✅' if not selected_id else '🚫'} {'跳过链接模板' if flow == 'hot_content' else '不添加链接模板'}", f"arl_{flow_code}_-1_{persona.id}")],
+        [_btn("➕ 新建链接模板", f"arladd_{flow_code}_{persona.id}")],
+        [_btn("◀️ 返回自动回复确认", f"arlback_{flow_code}_{persona.id}")],
+    ])
+    scene = "自动回复评论" if flow == "comments" else "自定义回复内容" if flow == "hot_content" else "自动回复热点推文"
+    return _response(
+        _message(
+            "\n".join([
+                "🔗 自动回复链接模板设置",
+                "",
+                f"人设：{persona.name}",
+                f"使用场景：{scene}",
+                "",
+                "请选择本次任务使用的链接模板。" if presets else "当前还没有链接模板，可以立即新建后再选择。",
+                "此处只临时设置本次自动回复，不修改其他发布任务。",
+            ]),
+            rows,
+        ),
+        state={"flow": "auto_reply_link_picker", "draft": draft},
+    )
+
+
+def _auto_reply_link_return(persona_id: str, flow: str, state: dict[str, Any]) -> dict[str, Any]:
+    if flow == "comments":
+        return _threads_auto_reply_settings(persona_id, state)
+    if flow == "hot_content":
+        return _own_reply_manual_content_menu(state)
+    return _own_reply_confirmation(dict(state.get("draft") if isinstance(state.get("draft"), dict) else {}))
+
+
+def _auto_reply_link_select(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    match = re.match(r"^arl_([chm])_(-?\d+)_(.+)$", action)
+    if not match:
+        return _response(_message("自动回复链接模板状态已失效。", [[_btn("◀️ 返回自动回复", "list_personas")]]), state={"flow": ""})
+    flow = {"c": "comments", "h": "hot", "m": "hot_content"}[match.group(1)]
+    index = int(match.group(2))
+    persona_id = str((state.get("draft") if isinstance(state.get("draft"), dict) else {}).get("persona_id") or match.group(3))
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    draft.update({"persona_id": persona_id, "auto_reply_flow": flow})
+    presets = _auto_reply_link_presets(persona_id)
+    if index < 0:
+        draft["selected_link_preset_id"] = ""
+    elif index >= len(presets):
+        return _auto_reply_link_picker(persona_id, flow, {"draft": draft})
+    else:
+        draft["selected_link_preset_id"] = str(presets[index].get("id") or "")
+    if flow == "hot_content":
+        draft["link_reply_text"] = _auto_reply_link_suffix(persona_id, draft)
+    return _auto_reply_link_return(persona_id, flow, {"flow": "", "draft": draft})
+
+
+def _auto_reply_link_add_prompt(persona_id: str, flow: str, state: dict[str, Any]) -> dict[str, Any]:
+    persona, _row = _resolve_persona_for_action(persona_id)
+    if not persona:
+        return _response(_message("没有找到本地人设。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    draft.update({"persona_id": persona.id, "auto_reply_flow": flow})
+    flow_code = _auto_reply_flow_code(flow)
+    return _response(
+        _message(
+            "\n".join([
+                "🔗 新建自动回复链接模板",
+                "",
+                f"人设：{persona.name}",
+                "",
+                "请发送结尾语句和链接。",
+                "格式示例：",
+                "想看更多整理，我放这里",
+                "https://example.com/more",
+                "",
+                "保存后只用于本次自动回复，不会修改普通发布正在启用的模板。",
+            ]),
+            [[_btn("◀️ 返回链接模板设置", f"arls_{flow_code}_{persona.id}")]],
+        ),
+        state={"flow": "auto_reply_link_add", "draft": draft},
+    )
+
+
+def _auto_reply_link_add_submit(text: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    persona_id = str(draft.get("persona_id") or "")
+    flow = str(draft.get("auto_reply_flow") or "hot")
+    parsed = _parse_link_ending_preset(text)
+    persona, row = _resolve_persona_for_action(persona_id)
+    archive_id = _tool_r18_archive_id(persona_id, persona, row)
+    if not parsed:
+        return _response(_message("❌ 没有读取到结尾语句或链接。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state=state)
+    suffix = "\n".join(part for part in (str(parsed.get("endingText") or "").strip(), str(parsed.get("linkUrl") or "").strip()) if part)
+    if len(suffix) > 500:
+        return _response(_message("❌ 链接模板超过 Threads 500 字回复长度限制，请缩短后重试。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state=state)
+    if not archive_id:
+        return _response(_message("❌ 当前人设没有可写入的来源归档。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state=state)
+    params = {"archiveId": archive_id, **parsed}
+    try:
+        _base, data = _source_submit_task("persona_set_link_ending", params)
+        task_id = str(data.get("id") or "")
+    except Exception as exc:
+        return _response(_message(f"❌ 链接模板保存失败\n\n{exc}", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state=state)
+    draft.update({"source_task_id": task_id, "pending_link_preset": parsed})
+    response = _response(_message("🔗 正在保存自动回复链接模板..."), state={"flow": "auto_reply_link_add_wait", "draft": draft})
+    response["poll"] = {"action": f"auto_reply_link_add_poll:{task_id}", "interval_ms": 750}
+    return response
+
+
+def _auto_reply_link_add_poll(task_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    persona_id = str(draft.get("persona_id") or "")
+    flow = str(draft.get("auto_reply_flow") or "hot")
+    expected_task_id = str(draft.get("source_task_id") or "")
+    if not expected_task_id or task_id != expected_task_id:
+        return _response(_message("❌ 链接模板任务已失效，请重新提交。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state={"flow": "", "draft": draft})
+    try:
+        _base, data = _source_task_detail_data(task_id)
+    except Exception as exc:
+        response = _response(_message(f"🔗 链接模板保存状态读取失败，正在重试...\n\n{exc}"), state=state)
+        response["poll"] = {"action": f"auto_reply_link_add_poll:{task_id}", "interval_ms": 1500}
+        return response
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    task_type = str(task.get("type") or "")
+    status = str(task.get("status") or "").lower()
+    task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
+    persona, row = _resolve_persona_for_action(persona_id)
+    expected_archive_id = _tool_r18_archive_id(persona_id, persona, row)
+    if expected_archive_id and str(task_input.get("archiveId") or "") != expected_archive_id:
+        return _response(_message("❌ 链接模板任务与当前人设不一致，请重新提交。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state={"flow": "", "draft": draft})
+    if task_type == "persona_set_link_ending" and status in {"queued", "running"}:
+        response = _response(_message("🔗 正在保存自动回复链接模板..."), state=state)
+        response["poll"] = {"action": f"auto_reply_link_add_poll:{task_id}", "interval_ms": 750}
+        return response
+    if task_type != "persona_set_link_ending" or status != "success":
+        return _response(_message("❌ 链接模板保存失败，请重新输入。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state=state)
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    if expected_archive_id and str(result.get("archiveId") or "") != expected_archive_id:
+        return _response(_message("❌ 链接模板结果与当前人设不一致，请重新提交。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state={"flow": "", "draft": draft})
+    preset = result.get("preset") if isinstance(result.get("preset"), dict) else {}
+    preset_id = str(preset.get("id") or "")
+    if not preset_id:
+        return _response(_message("❌ 来源任务没有返回链接模板。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state=state)
+    settings = _link_ending_settings(persona_id)
+    local_presets = list(settings.get("linkEndingPresets", []))
+    if not any(str(item.get("id") or "") == preset_id for item in local_presets):
+        local_presets.append(preset)
+        _save_link_ending_settings(persona_id, {**settings, "linkEndingPresets": local_presets}, "自动回复链接模板")
+    draft.update({"selected_link_preset_id": preset_id, "source_task_id": ""})
+    if flow == "hot_content":
+        draft["link_reply_text"] = _apply_link_ending_to_text("", preset)
+    _refresh_persona_overview_cache(force_remote=True)
+    return _auto_reply_link_return(persona_id, flow, {"flow": "", "draft": draft})
+
+
+def _threads_auto_reply_settings(persona_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    persona, _row = _resolve_persona_for_action(persona_id)
+    if not persona:
+        return _response(_message("没有找到本地人设。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+    if not persona.pad_code:
+        return _response(
+            _message(
+                f"❌ 这个人设还没有可用的绑定智能体手机。\n\n人设：{persona.name}\n平台：Threads\n\n请先绑定智能体手机，再执行 Threads 自动回复。",
+                _rows([_btn("📱 绑定智能体手机", f"bindpad_{persona.id}")], [_btn("◀️ 返回自动回复", f"persona_autoreply_{persona.id}")]),
+            ),
+            state={"flow": ""},
+        )
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    draft.update({"persona_id": persona.id, "auto_reply_flow": "comments"})
+    return _response(
+        _message(
+            "\n".join([
+                "💬 Threads 自动回复",
+                "",
+                f"人设：{persona.name}",
+                f"智能体手机：{persona.pad_code}",
+                _auto_reply_link_line(persona.id, draft),
+                "",
+                "执行规则：",
+                "- 默认只查看 2 天内自己发布且有评论角标的推文。",
+                "- 可调整查看天数，最多 7 天；没有评论会直接报告退出。",
+                "- 先过滤广告、辱骂、钓鱼、纯表情和过短留言。",
+                "- 只挑和人设或推文内容相关的留言回复。",
+                "- 回复会使用自然口语，不做客服式套话。",
+                "",
+                "默认最多扫描 5 篇推文，最多回复 3 条留言。",
+            ]),
+            _rows(
+                [_btn("✅ 开始（默认 2 天）", f"acctautoreply_run_d2_{persona.id}")],
+                [_btn("✍️ 输入查看天数", f"acctautoreply_days_{persona.id}")],
+                [_btn("🔗 链接模板设置", f"arls_c_{persona.id}")],
+                [_btn("◀️ 返回自动回复", f"persona_autoreply_{persona.id}")],
+            ),
+        ),
+        state={"flow": "auto_reply_comments_ready", "draft": draft},
+    )
+
+
+def _threads_auto_reply_days_prompt(persona_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    persona, _row = _resolve_persona_for_action(persona_id)
+    if not persona or not persona.pad_code:
+        return _threads_auto_reply_settings(persona_id, state)
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    draft.update({"persona_id": persona.id, "auto_reply_flow": "comments"})
+    return _response(
+        _message(
+            "\n".join([
+                "✍️ 请输入 Threads 自动回复要查看的天数。",
+                "",
+                f"人设：{persona.name}",
+                f"智能体手机：{persona.pad_code}",
+                "默认：2 天",
+                "可输入：1-7",
+                "",
+                "例如：2",
+            ]),
+            [[_btn("◀️ 返回 Threads 自动回复", f"acctautoreply_{persona.id}")]],
+        ),
+        state={"flow": "auto_reply_comments_days", "draft": draft},
+    )
+
+
+def _threads_auto_reply_submit(persona_id: str, max_age_days: int, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    draft.update({"persona_id": persona_id, "auto_reply_flow": "comments"})
+    return _automation_run(
+        f"automation_run:auto_reply_comments:ai:{persona_id}",
+        max_age_days=max(1, min(int(max_age_days or 2), 7)),
+        reply_suffix=_auto_reply_link_suffix(persona_id, draft),
     )
 
 
@@ -9794,6 +10087,24 @@ def _own_reply_mode_menu(persona_id: str) -> dict[str, Any]:
         persona_id = persona.id
     name = persona.name if persona else _persona_row_name(row or {})
     history = row.get("publish_history") if isinstance((row or {}).get("publish_history"), list) else []
+    pad_code = str(persona.pad_code if persona else "").strip()
+    replyable_history = []
+    for record in history:
+        if not isinstance(record, dict) or str(record.get("platform") or "").strip().lower() != "threads":
+            continue
+        record_pad_code = str(record.get("padCode") or record.get("pad_code") or "").strip()
+        if pad_code and record_pad_code and record_pad_code != pad_code:
+            continue
+        urls = [record.get("publishedUrl"), record.get("published_url")]
+        published_meta = record.get("publishedMeta") if isinstance(record.get("publishedMeta"), dict) else {}
+        urls.append(published_meta.get("sourceUrl"))
+        for target in record.get("publishedTargets") if isinstance(record.get("publishedTargets"), list) else []:
+            if isinstance(target, dict):
+                urls.append(target.get("publishedUrl"))
+                target_meta = target.get("publishedMeta") if isinstance(target.get("publishedMeta"), dict) else {}
+                urls.append(target_meta.get("sourceUrl"))
+        if any(re.match(r"^https://www\.threads\.net/@[^/\s]+/post/[^?\s#)]+", str(url or ""), re.I) for url in urls):
+            replyable_history.append(record)
     return _response(
         _message(
             "\n".join(
@@ -9801,7 +10112,7 @@ def _own_reply_mode_menu(persona_id: str) -> dict[str, Any]:
                     "🔥 自動回覆熱點推文",
                     "",
                     f"人設：{name}",
-                    f"可回覆推文：{len(history)} 篇",
+                    f"可回覆推文：{len(replyable_history)} 篇",
                     "",
                     "請選擇回覆分支：",
                     "1. 自定義內容回覆：找到符合條件的自己主推文後，直接發送你輸入的內容。",
@@ -9825,16 +10136,47 @@ def _own_reply_mode_start(action: str) -> dict[str, Any]:
     persona, _row = _resolve_persona_for_action(persona_id)
     if not persona:
         return _response(_message("沒有找到本地人設。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
-    draft = {"persona_id": persona.id, "reply_mode": "manual" if manual else "ai"}
+    draft = {"persona_id": persona.id, "reply_mode": "manual" if manual else "ai", "created_at": time.time()}
     if manual:
-        return _response(
-            _message(
-                f"🔥 自動回覆熱點推文\n\n人設：{persona.name}\n回覆模式：使用自定義內容\n\n請直接輸入要回覆到自己已發布主推文內的內容。",
-                [[_btn("◀️ 返回分支選擇", f"persona_autoreply_hot_{persona.id}")]],
-            ),
-            state={"flow": "ownreply_reply_text", "draft": draft},
-        )
+        return _own_reply_manual_content_menu({"flow": "", "draft": draft})
     return _own_reply_views_prompt(draft)
+
+
+def _compose_own_reply_content(draft: dict[str, Any]) -> str:
+    manual = str(draft.get("manual_reply_text") or "").strip()
+    link = str(draft.get("link_reply_text") or "").strip()
+    if not manual:
+        return link
+    if not link or manual.endswith(link):
+        return manual
+    return f"{manual}\n{link}".strip()
+
+
+def _own_reply_manual_content_menu(state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    persona_id = str(draft.get("persona_id") or "")
+    persona = PersonaRepo.get(persona_id)
+    if not persona:
+        return _response(_message("沒有找到本地人設。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+    manual_text = str(draft.get("manual_reply_text") or "").strip()
+    link_text = str(draft.get("link_reply_text") or "").strip()
+    preview = _compose_own_reply_content(draft)
+    rows = [
+        [_btn("✏️ 修改手动文字" if manual_text else "✍️ 添加手动文字", f"ownreply_manual_input_{persona.id}")],
+        [_btn("🔗 更换链接模板" if link_text else "🔗 添加链接模板", f"arls_m_{persona.id}")],
+    ]
+    if manual_text:
+        rows.append([_btn("🗑 清除手动文字", f"ownreply_clear_text_{persona.id}")])
+    if link_text:
+        rows.append([_btn("🗑 清除链接模板", f"ownreply_clear_link_{persona.id}")])
+    rows.extend([
+        [_btn("✅ 确认内容并继续", f"ownreply_content_continue_{persona.id}")],
+        [_btn("◀️ 返回", f"persona_autoreply_hot_{persona.id}")],
+    ])
+    return _response(
+        _message("\n".join(["✍️ 设置自定义回复内容", "", f"人设：{persona.name}", "", "整体预览：", preview or "（尚未设置回复内容）"]), rows),
+        state={"flow": "ownreply_content_ready", "draft": draft},
+    )
 
 
 def _own_reply_views_prompt(draft: dict[str, Any]) -> dict[str, Any]:
@@ -9842,13 +10184,14 @@ def _own_reply_views_prompt(draft: dict[str, Any]) -> dict[str, Any]:
     persona = PersonaRepo.get(persona_id)
     mode = "使用自定義內容" if draft.get("reply_mode") == "manual" else "AI 根據人設和推文自動回覆"
     lines = ["🔥 自動回覆熱點推文", "", f"人設：{persona.name if persona else persona_id}", f"回覆模式：{mode}"]
-    if draft.get("reply_text"):
-        lines.append(f"回覆內容：{draft.get('reply_text')}")
+    reply_preview = _compose_own_reply_content(draft) if draft.get("reply_mode") == "manual" else str(draft.get("reply_text") or "")
+    if reply_preview:
+        lines.append(f"回覆內容：{reply_preview}")
     lines.extend(["", "請輸入瀏覽量門檻。", "只有已發布推文瀏覽量大於等於這個值時才會自動評論。", "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。"])
     rows = []
     if draft.get("reply_mode") == "manual":
-        rows.append([_btn("✏️ 重新編輯文案", f"ownreply_text_{persona_id}")])
-    rows.append([_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")])
+        rows.append([_btn("✏️ 修改整体回复", f"arlback_m_{persona_id}")])
+    rows.append([_btn("◀️ 返回分支选择", f"persona_autoreply_hot_{persona_id}")])
     return _response(_message("\n".join(lines), rows), state={"flow": "ownreply_views", "draft": draft})
 
 
@@ -9891,24 +10234,40 @@ def _own_reply_days_prompt(draft: dict[str, Any]) -> dict[str, Any]:
 def _own_reply_confirmation(draft: dict[str, Any]) -> dict[str, Any]:
     persona_id = str(draft.get("persona_id") or "")
     persona = PersonaRepo.get(persona_id)
+    reply_mode = "manual" if draft.get("reply_mode") == "manual" else "ai"
+    reply_text = _compose_own_reply_content(draft) if reply_mode == "manual" else ""
+    rows = [[_btn("💬 Threads 内部评论", f"acctautoreplyhot_threads_{persona_id}")]]
+    if reply_mode == "manual":
+        rows.append([_btn("✏️ 修改回复内容", f"ownreply_content_{persona_id}")])
+    else:
+        rows.append([_btn("🔗 链接模板设置", f"arls_h_{persona_id}")])
+    rows.extend([
+        [_btn("👁 修改浏览量", f"ownreply_views_{persona_id}"), _btn("📅 修改天数", f"ownreply_days_{persona_id}")],
+        [_btn("✍️ 重新设置条件", f"persona_autoreply_hot_{persona_id}")],
+        [_btn("◀️ 返回自动回复", f"persona_autoreply_{persona_id}")],
+    ])
+    lines = [
+        "🔥 自动回复热点推文",
+        "",
+        f"人设：{persona.name if persona else persona_id}",
+        f"回复模式：{'使用自定义内容' if reply_mode == 'manual' else 'AI 根据人设和推文自动回复'}",
+    ]
+    if reply_text:
+        lines.extend(["整体回复预览：", reply_text])
+    lines.extend([
+        f"浏览量门槛：大于等于 {_compact(draft.get('min_views'))}",
+        f"查看天数：{draft.get('max_age_days')} 天内",
+        *([_auto_reply_link_line(persona_id, draft)] if reply_mode == "ai" else []),
+        "",
+        "条件：只回复自己已发布、有真实 Threads 发布链接、符合浏览量和天数、且未回复过的主推文。",
+        "请选择平台后开始执行。",
+    ])
     return _response(
         _message(
-            "\n".join(
-                [
-                    "🔥 自動回覆熱點推文確認",
-                    "",
-                    f"人設：{persona.name if persona else persona_id}",
-                    "平台：Threads",
-                    f"回覆模式：{'使用自定義內容' if draft.get('reply_mode') == 'manual' else 'AI 根據人設和推文自動回覆'}",
-                    f"瀏覽量條件：大於等於 {_compact(draft.get('min_views'))}",
-                    f"查看天數：{draft.get('max_age_days')} 天",
-                    "",
-                    "確認後才會建立真實回覆任務。",
-                ]
-            ),
-            _rows([_btn("✅ 開始自動回覆", "ownreply_run")], [_btn("◀️ 返回設定天數", f"ownreply_days_{persona_id}")]),
+            "\n".join(lines),
+            rows,
         ),
-        state={"flow": "ownreply_confirm", "draft": draft},
+        state={"flow": "ownreply_confirm", "draft": {**draft, "reply_text": reply_text}},
     )
 
 
@@ -9919,11 +10278,18 @@ def _own_reply_submit(state: dict[str, Any]) -> dict[str, Any]:
     archive_id = _tool_r18_archive_id(persona_id, persona, row)
     if not persona or not archive_id or not persona.pad_code:
         return _response(_message("人設、來源歸檔或綁定智能體手機已失效，請重新設定。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]), state={"flow": ""})
+    if time.time() - float(draft.get("created_at") or time.time()) > 30 * 60:
+        return _response(_message("❌ 自动回复热点推文设置已失效，请重新设置。", [[_btn("✍️ 重新设置", f"persona_autoreply_hot_{persona_id}")]]), state={"flow": ""})
+    reply_mode = "manual" if draft.get("reply_mode") == "manual" else "ai"
+    reply_text = _compose_own_reply_content(draft) if reply_mode == "manual" else ""
+    if reply_mode == "manual" and (not reply_text or len(reply_text) > 500):
+        return _response(_message("❌ 手动文字和链接模板不能同时为空，且整体回复不能超过 500 字。", [[_btn("✏️ 修改回复内容", f"ownreply_content_{persona_id}")]]), state=state)
     params = {
         "archiveId": archive_id,
         "padCode": persona.pad_code,
-        "replyMode": str(draft.get("reply_mode") or "ai"),
-        "replyText": str(draft.get("reply_text") or ""),
+        "replyMode": reply_mode,
+        "replyText": reply_text,
+        "replySuffix": _auto_reply_link_suffix(persona_id, draft) if reply_mode == "ai" else "",
         "minViews": max(0, _num(draft.get("min_views"))),
         "maxAgeDays": max(1, min(_num(draft.get("max_age_days")), 7)),
         "dryRun": False,
@@ -10158,7 +10524,7 @@ def _automation_fixed_prompt(action: str) -> dict[str, Any]:
     )
 
 
-def _automation_run(action: str, *, custom_content: str = "") -> dict[str, Any]:
+def _automation_run(action: str, *, custom_content: str = "", max_age_days: int | None = None, reply_suffix: str = "") -> dict[str, Any]:
     parts = action.split(":")
     group = parts[1] if len(parts) > 1 else ""
     mode = parts[2] if len(parts) > 2 else ""
@@ -10220,14 +10586,17 @@ def _automation_run(action: str, *, custom_content: str = "") -> dict[str, Any]:
         payload = {
             "padCode": persona.pad_code,
             "dryRun": False,
-            "maxAgeDays": 2 if group == "auto_reply_hot_posts" else 7,
-            "maxPosts": 6 if group == "auto_reply_hot_posts" else 3,
+            "maxAgeDays": max_age_days if max_age_days is not None else 2 if group == "auto_reply_hot_posts" else 7,
+            "maxPosts": 6 if group == "auto_reply_hot_posts" else 5,
             "maxReplies": 3,
+            "replySuffix": str(reply_suffix or "")[:1000],
             "commentPersona": {
                 "name": persona.name,
-                "profile": persona.description[:1200],
-                "replyMode": reply_mode,
-                "customContent": custom_content,
+                "description": persona.description[:1200],
+                "style": persona.style_prompt[:1200],
+                "personality": persona.description[:1200],
+                "language": "繁體中文",
+                "interests": [],
             },
         }
         label = f"自動回覆｜{persona.name}｜{'固定文案' if custom_content else 'AI 人設'}"
@@ -10276,7 +10645,7 @@ def _automation_run(action: str, *, custom_content: str = "") -> dict[str, Any]:
     )
 
 
-def _automation_run(action: str, *, custom_content: str = "") -> dict[str, Any]:
+def _automation_run(action: str, *, custom_content: str = "", max_age_days: int | None = None, reply_suffix: str = "") -> dict[str, Any]:
     parts = action.split(":")
     group = parts[1] if len(parts) > 1 else ""
     mode = parts[2] if len(parts) > 2 else ""
@@ -10325,14 +10694,17 @@ def _automation_run(action: str, *, custom_content: str = "") -> dict[str, Any]:
         payload = {
             "padCode": persona.pad_code,
             "dryRun": False,
-            "maxAgeDays": 2 if group == "auto_reply_hot_posts" else 7,
-            "maxPosts": 6 if group == "auto_reply_hot_posts" else 3,
+            "maxAgeDays": max_age_days if max_age_days is not None else 2 if group == "auto_reply_hot_posts" else 7,
+            "maxPosts": 6 if group == "auto_reply_hot_posts" else 5,
             "maxReplies": 3,
+            "replySuffix": str(reply_suffix or "")[:1000],
             "commentPersona": {
                 "name": persona.name,
-                "profile": persona.description[:1200],
-                "replyMode": reply_mode,
-                "customContent": custom_content,
+                "description": persona.description[:1200],
+                "style": persona.style_prompt[:1200],
+                "personality": persona.description[:1200],
+                "language": "繁體中文",
+                "interests": [],
             },
             "uiPersonaId": persona.id,
             "uiPersonaName": persona.name,
@@ -11404,12 +11776,19 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
     if flow == "automation_fixed_reply" and persona:
         kind = str(draft.get("kind") or "auto_reply_comments")
         return _automation_run(f"automation_run:{kind}:fixed:{persona_id}", custom_content=text)
+    if flow == "auto_reply_link_add":
+        return _auto_reply_link_add_submit(text, state)
+    if flow == "auto_reply_comments_days" and persona:
+        days = _num(text)
+        if not 1 <= days <= 7:
+            return _response(_message("❌ 查看天数格式不正确。\n\n请输入 1-7 之间的数字，例如：2。", [[_btn("◀️ 返回 Threads 自动回复", f"acctautoreply_{persona_id}")]]), state=state)
+        return _threads_auto_reply_submit(persona_id, days, state)
     if flow == "ownreply_reply_text" and persona:
         if not text or len(text) > 220:
             return _response(_message("❌ 回覆內容格式不正確，請輸入 1-220 字的回覆內容。", [[_btn("◀️ 返回分支選擇", f"persona_autoreply_hot_{persona_id}")]]), state=state)
-        draft["reply_text"] = text
+        draft["manual_reply_text"] = text
         draft["reply_mode"] = "manual"
-        return _own_reply_views_prompt(draft)
+        return _own_reply_manual_content_menu({"flow": "", "draft": draft})
     if flow == "ownreply_views" and persona:
         min_views = _parse_own_reply_views(text)
         if min_views is None:
@@ -11421,6 +11800,7 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
         if not 1 <= days <= 7:
             return _response(_message("❌ 查看天數格式不正確。\n\n請輸入 1-7 之間的數字，例如：2。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]), state=state)
         draft["max_age_days"] = days
+        draft["created_at"] = float(draft.get("created_at") or time.time())
         return _own_reply_confirmation(draft)
     if flow == "threads_profile_update" and persona:
         return _threads_profile_submit(persona_id, str(draft.get("kind") or ""), text)
@@ -12474,16 +12854,50 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
             persona_id, page = rest, 0
         return _publish_posts_list(f"pub_posts:{page}:{persona_id}", source="favorites")
     if action.startswith("persona_autoreply_original_"):
-        return _automation_run(f"automation_run:auto_reply_comments:ai:{action[len('persona_autoreply_original_'):]}")
+        return _persona_autoreply_menu(action[len("persona_autoreply_original_") :])
     if action.startswith("persona_autoreply_hot_"):
         return _own_reply_mode_menu(action[len("persona_autoreply_hot_") :])
     if action.startswith("ownreply_mode_manual_") or action.startswith("ownreply_mode_ai_"):
         return _own_reply_mode_start(action)
+    if action.startswith("ownreply_manual_input_"):
+        pid = action[len("ownreply_manual_input_") :]
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft.update({"persona_id": pid, "reply_mode": "manual", "created_at": float(draft.get("created_at") or time.time())})
+        return _response(
+            _message(
+                "请直接输入要回复到自己已发布主推文里的内容。\n后续会根据浏览量和天数条件找目标，命中后直接发送这段内容。",
+                [[_btn("◀️ 返回内容设置", f"arlback_m_{pid}")]],
+            ),
+            state={"flow": "ownreply_reply_text", "draft": draft},
+        )
+    if action.startswith("ownreply_clear_text_") or action.startswith("ownreply_clear_link_"):
+        clear_text = action.startswith("ownreply_clear_text_")
+        pid = action[len("ownreply_clear_text_" if clear_text else "ownreply_clear_link_") :]
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft.update({"persona_id": pid, "reply_mode": "manual"})
+        draft["manual_reply_text" if clear_text else "link_reply_text"] = ""
+        if not clear_text:
+            draft["selected_link_preset_id"] = ""
+        return _own_reply_manual_content_menu({"flow": "", "draft": draft})
+    if action.startswith("ownreply_content_continue_"):
+        pid = action[len("ownreply_content_continue_") :]
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft.update({"persona_id": pid, "reply_mode": "manual"})
+        reply_text = _compose_own_reply_content(draft)
+        if not reply_text or len(reply_text) > 500:
+            return _response(_message("❌ 手动文字和链接模板不能同时为空，且整体回复不能超过 500 字。", [[_btn("◀️ 返回内容设置", f"arlback_m_{pid}")]]), state={"flow": "ownreply_content_ready", "draft": draft})
+        draft["reply_text"] = reply_text
+        return _own_reply_views_prompt(draft)
+    if action.startswith("ownreply_content_"):
+        pid = action[len("ownreply_content_") :]
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft.update({"persona_id": pid, "reply_mode": "manual"})
+        return _own_reply_manual_content_menu({"flow": "", "draft": draft})
     if action.startswith("ownreply_text_"):
         pid = action[len("ownreply_text_") :]
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
         draft.update({"persona_id": pid, "reply_mode": "manual"})
-        return _response(_message("請重新輸入要回覆的內容。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{pid}")]]), state={"flow": "ownreply_reply_text", "draft": draft})
+        return _own_reply_manual_content_menu({"flow": "", "draft": draft})
     if action.startswith("ownreply_views_"):
         pid = action[len("ownreply_views_") :]
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
@@ -12494,12 +12908,38 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
         draft["persona_id"] = pid
         return _own_reply_days_prompt(draft)
-    if action == "ownreply_run":
+    if action == "ownreply_run" or action.startswith("acctautoreplyhot_threads_"):
         return _own_reply_submit(state)
+    if action.startswith("acctautoreply_run_"):
+        match = re.match(r"^acctautoreply_run_d([1-7])_(.+)$", action)
+        if not match:
+            return _response(_message("自动回复设置已失效。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+        return _threads_auto_reply_submit(match.group(2), int(match.group(1)), state)
+    if action.startswith("acctautoreply_days_"):
+        return _threads_auto_reply_days_prompt(action[len("acctautoreply_days_") :], state)
+    if action.startswith("arls_"):
+        match = re.match(r"^arls_([chm])_(.+)$", action)
+        if match:
+            flow = {"c": "comments", "h": "hot", "m": "hot_content"}[match.group(1)]
+            return _auto_reply_link_picker(match.group(2), flow, state)
+    if action.startswith("arladd_"):
+        match = re.match(r"^arladd_([chm])_(.+)$", action)
+        if match:
+            flow = {"c": "comments", "h": "hot", "m": "hot_content"}[match.group(1)]
+            return _auto_reply_link_add_prompt(match.group(2), flow, state)
+    if action.startswith("arlback_"):
+        match = re.match(r"^arlback_([chm])_(.+)$", action)
+        if match:
+            flow = {"c": "comments", "h": "hot", "m": "hot_content"}[match.group(1)]
+            return _auto_reply_link_return(match.group(2), flow, state)
+    if action.startswith("arl_"):
+        return _auto_reply_link_select(action, state)
+    if action.startswith("auto_reply_link_add_poll:"):
+        return _auto_reply_link_add_poll(action.split(":", 1)[1], state)
     if action.startswith("acctautoreply_"):
-        return _persona_autoreply_mode_menu(action[len("acctautoreply_") :])
+        return _threads_auto_reply_settings(action[len("acctautoreply_") :], state)
     if action.startswith("persona_autoreply_"):
-        return _persona_autoreply_menu(action[len("persona_autoreply_") :])
+        return _persona_autoreply_mode_menu(action[len("persona_autoreply_") :])
     if action.startswith("warmup_engage_threads_"):
         return _warmup_engage_threads(action)
     if action.startswith("warmup_run_threads_"):

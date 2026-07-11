@@ -30,6 +30,12 @@ def test_console_uses_8098_proxy_prefix_when_served_under_threads_console() -> N
     assert "fetch(webBotEndpoint" in template
 
 
+def test_configured_source_api_precedes_legacy_container_fallbacks() -> None:
+    candidates = _function_source("_source_api_candidates")
+
+    assert 'for item in [*configured, *preferred, *fallback]:' in candidates
+
+
 def test_compact_console_reuses_full_client_and_syncs_named_sessions() -> None:
     template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
 
@@ -182,6 +188,7 @@ def test_source_poll_retries_transient_proxy_errors_without_breaking_the_panel()
     template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
 
     assert "if (isPoll && payload.action)" in template
+    assert "if (!res.ok) throw new Error" in template
     assert "scheduleSourcePoll({ action: payload.action, interval_ms: 3000 }, targetGroup)" in template
 
 
@@ -559,14 +566,73 @@ def test_web_generation_uses_tool_r18_memory_and_mode_labels() -> None:
 def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
     handle = _function_source("handle")
     continuation = _function_source("_continue_state_text")
+    mode_menu = _function_source("_persona_autoreply_mode_menu")
+    platform_menu = _function_source("_persona_autoreply_menu")
+    comments_menu = _function_source("_threads_auto_reply_settings")
+    link_picker = _function_source("_auto_reply_link_picker")
+    confirmation = _function_source("_own_reply_confirmation")
 
+    assert '_persona_autoreply_mode_menu(action[len("persona_autoreply_") :])' in handle
+    assert '_persona_autoreply_menu(action[len("persona_autoreply_original_") :])' in handle
+    assert '_threads_auto_reply_settings(action[len("acctautoreply_") :], state)' in handle
+    assert "persona_autoreply_original_" in mode_menu
+    assert "persona_autoreply_hot_" in mode_menu
+    assert "acctautoreply_" in platform_menu
+    assert "acctautoreply_run_d2_" in comments_menu
+    assert "acctautoreply_days_" in comments_menu
+    assert "arls_c_" in comments_menu
+    assert "arl_{flow_code}_" in link_picker
+    assert "arladd_{flow_code}_" in link_picker
+    assert "arlback_{flow_code}_" in link_picker
     assert '_own_reply_mode_menu(action[len("persona_autoreply_hot_") :])' in handle
     assert "ownreply_mode_manual_" in handle
     assert "ownreply_mode_ai_" in handle
+    assert "ownreply_manual_input_" in handle
+    assert "ownreply_clear_text_" in handle
+    assert "ownreply_clear_link_" in handle
+    assert "ownreply_content_continue_" in handle
+    assert "acctautoreplyhot_threads_" in handle
+    assert "arls_h_" in confirmation
     assert 'flow == "ownreply_reply_text"' in continuation
     assert 'flow == "ownreply_views"' in continuation
     assert 'flow == "ownreply_days"' in continuation
+    assert 'flow == "auto_reply_link_add"' in continuation
+    assert 'flow == "auto_reply_comments_days"' in continuation
     assert '"threads_own_post_reply"' in _function_source("_own_reply_submit")
+    assert '"replySuffix"' in _function_source("_own_reply_submit")
+
+
+def test_auto_reply_link_templates_use_source_persona_setup() -> None:
+    presets = _function_source("_auto_reply_link_presets")
+    add_submit = _function_source("_auto_reply_link_add_submit")
+    poll = _function_source("_auto_reply_link_add_poll")
+
+    assert '_resolve_persona_for_action(persona_id)' in presets
+    assert 'setup.get("linkEndingPresets")' in presets
+    assert '"persona_set_link_ending"' in add_submit
+    assert 'response["poll"]' in add_submit
+    assert 'task_type == "persona_set_link_ending"' in poll
+    assert 'task_id != expected_task_id' in poll
+    assert 'task_input.get("archiveId")' in poll
+    assert 'result.get("archiveId")' in poll
+    assert '_auto_reply_link_return' in poll
+
+
+def test_visible_automation_entry_uses_tg_auto_reply_flow() -> None:
+    legacy_entry = _function_source("_automation_menu")
+    comments_menu = _function_source("_threads_auto_reply_settings")
+
+    assert "return _persona_autoreply_mode_menu(persona_id)" in legacy_entry
+    assert "默认最多扫描 5 篇推文，最多回复 3 条留言。" in comments_menu
+
+
+def test_hot_reply_count_only_includes_real_threads_urls_for_current_pad() -> None:
+    mode_menu = _function_source("_own_reply_mode_menu")
+
+    assert 'record.get("platform")' in mode_menu
+    assert 'record_pad_code != pad_code' in mode_menu
+    assert 'r"^https://www\\.threads\\.net/' in mode_menu
+    assert 'len(replyable_history)' in mode_menu
 
 
 def test_matrix_and_schedule_use_real_tool_r18_posts() -> None:

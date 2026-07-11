@@ -16019,6 +16019,18 @@ def _run_persona_set_telegram_group(task_id: str, payload: dict[str, Any]) -> di
     return result
 
 
+def _run_persona_set_link_ending(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    result = _run_tool_r18_skill_task(
+        task_id,
+        payload,
+        "persona_set_link_ending",
+        "persona-set-link-ending-once.ts",
+        "persona-set-link-ending-input.json",
+    )
+    _invalidate_persona_dashboard_overview_cache()
+    return result
+
+
 def _run_persona_generate_image(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return _run_tool_r18_skill_task(
         task_id,
@@ -16101,6 +16113,7 @@ TASK_RUNNERS = {
     "persona_create": _run_persona_create,
     "persona_rewrite_intro": _run_persona_rewrite_intro,
     "persona_set_telegram_group": _run_persona_set_telegram_group,
+    "persona_set_link_ending": _run_persona_set_link_ending,
     "persona_generate_image": _run_persona_generate_image,
     "persona_generate_post_image": _run_persona_generate_post_image,
     "persona_publish_post": _run_persona_publish_post,
@@ -17502,7 +17515,26 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
             raise HTTPException(status_code=400, detail="threads_own_post_reply replyMode must be manual or ai")
         if reply_mode == "manual" and not reply_text:
             raise HTTPException(status_code=400, detail="threads_own_post_reply manual mode requires replyText")
-        return {"archiveId": archive_id, "padCode": pad_code, "replyMode": reply_mode, "replyText": reply_text, "minViews": min_views, "maxAgeDays": max_age_days}
+        reply_suffix = str(payload.get("replySuffix") or payload.get("reply_suffix") or "").strip()
+        if len(reply_suffix) > 500:
+            raise HTTPException(status_code=400, detail="threads_own_post_reply replySuffix exceeds Threads 500 character limit")
+        return {"archiveId": archive_id, "padCode": pad_code, "replyMode": reply_mode, "replyText": reply_text, "replySuffix": reply_suffix, "minViews": min_views, "maxAgeDays": max_age_days}
+
+    if typ == "persona_set_link_ending":
+        archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        ending_text = str(payload.get("endingText") or payload.get("ending_text") or "").strip()[:240]
+        link_url = str(payload.get("linkUrl") or payload.get("link_url") or "").strip()
+        name = str(payload.get("name") or ending_text or link_url).strip()[:40]
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="persona_set_link_ending requires archiveId")
+        if not ending_text and not link_url:
+            raise HTTPException(status_code=400, detail="persona_set_link_ending requires endingText or linkUrl")
+        if link_url and not re.match(r"^https?://[^\s]+$", link_url, re.I):
+            raise HTTPException(status_code=400, detail="persona_set_link_ending linkUrl is invalid")
+        suffix = "\n".join(part for part in (ending_text, link_url) if part)
+        if len(suffix) > 500:
+            raise HTTPException(status_code=400, detail="persona_set_link_ending exceeds Threads 500 character limit")
+        return {"archiveId": archive_id, "name": name, "endingText": ending_text, "linkUrl": link_url}
 
     if typ == "threads_profile_update":
         pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
@@ -17555,10 +17587,15 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         persona = payload.get("commentPersona") if isinstance(payload.get("commentPersona"), dict) else {}
         payload["commentPersona"] = {
             "name": str(persona.get("name") or "").strip(),
-            "profile": str(persona.get("profile") or "")[:4000],
-            "replyMode": str(persona.get("replyMode") or "ai_persona").strip() or "ai_persona",
-            "customContent": str(persona.get("customContent") or "")[:4000],
+            "description": str(persona.get("description") or persona.get("profile") or "")[:4000],
+            "style": str(persona.get("style") or "")[:2000],
+            "personality": str(persona.get("personality") or persona.get("description") or persona.get("profile") or "")[:4000],
+            "language": str(persona.get("language") or "繁體中文")[:80],
+            "interests": [str(item).strip()[:120] for item in (persona.get("interests") if isinstance(persona.get("interests"), list) else [])[:20] if str(item).strip()],
         }
+        payload["replySuffix"] = str(payload.get("replySuffix") or payload.get("reply_suffix") or "").strip()
+        if len(payload["replySuffix"]) > 500:
+            raise HTTPException(status_code=400, detail="threads_auto_reply replySuffix exceeds Threads 500 character limit")
         payload["timeout_seconds"] = max(_to_int(payload.get("timeout_seconds"), 1800), 60)
         return payload
 
@@ -18845,6 +18882,12 @@ def _compact_dashboard_setup(setup: dict[str, Any]) -> dict[str, Any]:
             continue
         if isinstance(raw_value, (str, int, float, bool)) or raw_value is None:
             compact[key] = _sanitize_dashboard_value(raw_value, key)
+        elif key == "linkEndingPresets" and isinstance(raw_value, list):
+            compact[key] = [
+                _sanitize_dashboard_value(item, key)
+                for item in raw_value[:20]
+                if isinstance(item, dict)
+            ]
         elif isinstance(raw_value, list):
             compact[key] = {
                 "count": len(raw_value),
@@ -21669,6 +21712,11 @@ def create_app() -> FastAPI:
             for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "publishedCount", "customPublish", "mode")
             if key in output_payload
         }
+        if persona_task_type == "persona_set_link_ending" and isinstance(output_payload.get("preset"), dict):
+            safe_persona_result["preset"] = {
+                key: output_payload["preset"].get(key)
+                for key in ("id", "name", "endingText", "linkUrl", "enabled", "createdAt", "updatedAt")
+            }
         if persona_task_type == "persona_publish_post" and isinstance(output_payload.get("postIds"), list):
             safe_persona_result["postIds"] = [str(item)[:200] for item in output_payload.get("postIds", [])[:200] if str(item).strip()]
         if persona_task_type == "persona_generate_post_image":
@@ -21718,7 +21766,7 @@ def create_app() -> FastAPI:
                     }
                     if persona_task_type in {
                         "persona_generate_posts", "persona_create_keywords", "persona_create", "persona_rewrite_intro", "persona_set_telegram_group",
-                        "persona_generate_image", "persona_generate_post_image", "persona_publish_post", "persona_enqueue_posts",
+                        "persona_generate_image", "persona_generate_post_image", "persona_publish_post", "persona_enqueue_posts", "persona_set_link_ending",
                         "persona_post_action", "persona_sentiment_hot",
                         "threads_warmup", "threads_auto_reply", "threads_own_post_reply",
                     }

@@ -4141,7 +4141,18 @@ function extractThreadsOwnPostViewCount(meta?: PersonaArchive["posts"][number]["
     ?? pickMetricNumber((meta as any).metrics, ["view_count", "views", "play_count", "plays", "impression_count", "seenCount"]);
 }
 
-function collectPublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): ThreadsOwnPostReplyTarget[] {
+export function publishHistoryMatchesThreadsPad(record: PersonaArchive["publishHistory"][number], padCode: string): boolean {
+  const expectedPadCode = String(padCode || "").trim();
+  if (!expectedPadCode) return true;
+  const directPadCode = String((record as any)?.padCode || "").trim();
+  if (directPadCode) return directPadCode === expectedPadCode;
+  const targetPadCodes = (Array.isArray((record as any)?.publishedTargets) ? (record as any).publishedTargets : [])
+    .map((target: any) => String(target?.padCode || "").trim())
+    .filter(Boolean);
+  return targetPadCodes.includes(expectedPadCode);
+}
+
+function collectPublishedThreadsOwnPostReplyTargets(archive: PersonaArchive, padCode = ""): ThreadsOwnPostReplyTarget[] {
   const seen = new Set<string>();
   const targets: ThreadsOwnPostReplyTarget[] = [];
   const add = (url: unknown, label: string, expectedText?: string, meta?: PersonaArchive["posts"][number]["sourceMeta"], publishedAt?: string) => {
@@ -4159,6 +4170,7 @@ function collectPublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): Th
   };
   for (const record of archive.publishHistory || []) {
     if (String(record.platform || "").toLowerCase() !== "threads") continue;
+    if (!publishHistoryMatchesThreadsPad(record, padCode)) continue;
     const expectedText = record.content || record.title || "";
     const aggregateMeta = aggregatePublishedTargets(record);
     add(isPublishHistoryOriginalSourceUrl(record, record.publishedUrl) ? "" : record.publishedUrl, record.title || record.id || "published", expectedText, aggregateMeta, record.publishedAt);
@@ -4185,12 +4197,12 @@ function collectPublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): Th
   return targets;
 }
 
-async function resolvePublishedThreadsOwnPostReplyTargets(archive: PersonaArchive): Promise<{
+async function resolvePublishedThreadsOwnPostReplyTargets(archive: PersonaArchive, padCode = ""): Promise<{
   archive: PersonaArchive;
   targets: ThreadsOwnPostReplyTarget[];
   recovered: number;
 }> {
-  const initialTargets = collectPublishedThreadsOwnPostReplyTargets(archive);
+  const initialTargets = collectPublishedThreadsOwnPostReplyTargets(archive, padCode);
   if (initialTargets.length) return { archive, targets: initialTargets, recovered: 0 };
 
   const publishHistory = Array.isArray(archive.publishHistory) ? archive.publishHistory : [];
@@ -4198,6 +4210,7 @@ async function resolvePublishedThreadsOwnPostReplyTargets(archive: PersonaArchiv
     .map((record, index) => ({ record, index }))
     .filter(({ record }) => (
       String(record.platform || "").toLowerCase() === "threads"
+      && publishHistoryMatchesThreadsPad(record, padCode)
       && !hasPublishHistorySourceUrl(record)
       && hasPublishHistoryPadLookup(record)
       && String(record.content || "").trim()
@@ -4225,7 +4238,7 @@ async function resolvePublishedThreadsOwnPostReplyTargets(archive: PersonaArchiv
   await savePersonaArchive(nextArchive);
   return {
     archive: nextArchive,
-    targets: collectPublishedThreadsOwnPostReplyTargets(nextArchive),
+    targets: collectPublishedThreadsOwnPostReplyTargets(nextArchive, padCode),
     recovered,
   };
 }
@@ -4329,7 +4342,29 @@ export async function runThreadsOwnPostReplyOnce(
 
   const archive = await loadPersonaArchive(archiveId);
   if (!archive) throw new Error("persona archive not found");
-  const resolvedTargets = await resolvePublishedThreadsOwnPostReplyTargets(archive);
+  if (dryRun) {
+    const localTargets = collectPublishedThreadsOwnPostReplyTargets(archive, padCode);
+    return {
+      archiveId,
+      padCode,
+      dryRun: true,
+      recovered: 0,
+      scanned: localTargets.length,
+      matched: filterUnrepliedThreadsOwnPostTargets(archive, localTargets, {
+        minViews: Math.floor(minViews),
+        maxAgeDays: Math.floor(maxAgeDays),
+      }).length,
+      executionScanned: 0,
+      replied: 0,
+      skipped: 0,
+      targetReplies: 0,
+      repliedUrls: [] as string[],
+      repliedComments: [] as Array<{ url: string; comment: string }>,
+      replyScreenshots: [] as string[],
+      error: localTargets.length ? undefined : "no locally recorded Threads post URLs for this PAD",
+    };
+  }
+  const resolvedTargets = await resolvePublishedThreadsOwnPostReplyTargets(archive, padCode);
   const allTargets = await refreshThreadsOwnPostReplyTargetViewCounts(resolvedTargets.targets, {
     enabled: minViews > 0,
     limit: 5,
@@ -4346,7 +4381,7 @@ export async function runThreadsOwnPostReplyOnce(
     scanned: allTargets.length,
     matched: targets.length,
   };
-  if (dryRun || !targets.length) {
+  if (!targets.length) {
     return {
       ...base,
       executionScanned: 0,
@@ -18765,7 +18800,10 @@ function sendMainMenu(chatId: number, msgId?: number) {
       pendingAutoReplyLinkSettingsReturns.delete(chatId);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      const targets = filterUnrepliedThreadsOwnPostTargets(archive, collectPublishedThreadsOwnPostReplyTargets(archive));
+      const targets = filterUnrepliedThreadsOwnPostTargets(
+        archive,
+        collectPublishedThreadsOwnPostReplyTargets(archive, String(archive.boundPadCode || "")),
+      );
       await safeEditOrSend(bot, chatId, msgId, [
         "🔥 自動回覆熱點推文",
         "",

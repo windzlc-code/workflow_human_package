@@ -23,6 +23,7 @@ GENERATE_POST_IMAGE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "pe
 PUBLISH_POST_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-publish-post-once.ts"
 ENQUEUE_POSTS_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-enqueue-posts-once.ts"
 OWN_POST_REPLY_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "threads-own-post-reply-once.ts"
+SET_LINK_ENDING_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-set-link-ending-once.ts"
 POST_ACTION_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-post-action-once.ts"
 SENTIMENT_HOT_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-sentiment-hot-once.ts"
 TELEGRAM_BOT_PATH = ROOT / "tool_r18" / "src" / "telegram-bot.ts"
@@ -46,6 +47,83 @@ def test_persona_internal_tg_runners_are_registered() -> None:
     assert '"persona_post_action": _run_persona_post_action' in source
     assert '"persona_sentiment_hot": _run_persona_sentiment_hot' in source
     assert '"threads_own_post_reply": _run_threads_own_post_reply' in source
+    assert '"persona_set_link_ending": _run_persona_set_link_ending' in source
+
+
+def test_auto_reply_link_suffix_survives_internal_task_normalization() -> None:
+    comments = server._build_internal_tg_task_payload(
+        "task-comments",
+        "threads_auto_reply",
+        {"padCode": "PAD-1", "replySuffix": "查看更多\nhttps://example.com"},
+    )
+    hot = server._build_internal_tg_task_payload(
+        "task-hot",
+        "threads_own_post_reply",
+        {
+            "archiveId": "archive-1",
+            "padCode": "PAD-1",
+            "replyMode": "ai",
+            "replySuffix": "查看更多\nhttps://example.com",
+        },
+    )
+
+    assert comments["replySuffix"] == "查看更多\nhttps://example.com"
+    assert hot["replySuffix"] == "查看更多\nhttps://example.com"
+    assert "replySuffix?: string" in OWN_POST_REPLY_SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "updatePersonaArchiveProfile" in SET_LINK_ENDING_SCRIPT_PATH.read_text(encoding="utf-8")
+
+
+def test_dashboard_setup_preserves_auto_reply_link_presets() -> None:
+    setup = {
+        "linkEndingPresets": [
+            {
+                "id": f"preset-{index}",
+                "name": f"template {index}",
+                "endingText": "read more",
+                "linkUrl": f"https://example.com/{index}",
+                "enabled": True,
+            }
+            for index in range(5)
+        ],
+        "history": [{"secret": "not returned"}],
+    }
+
+    compact = server._compact_dashboard_setup(setup)
+
+    assert isinstance(compact["linkEndingPresets"], list)
+    assert len(compact["linkEndingPresets"]) == 5
+    assert compact["linkEndingPresets"][4]["id"] == "preset-4"
+    assert "history" not in compact
+
+
+def test_auto_reply_suffix_length_is_rejected_before_execution() -> None:
+    with pytest.raises(Exception, match="500 character limit"):
+        server._build_internal_tg_task_payload(
+            "task-comments-long-suffix",
+            "threads_auto_reply",
+            {"padCode": "PAD-1", "replySuffix": "x" * 501},
+        )
+    with pytest.raises(Exception, match="500 character limit"):
+        server._build_internal_tg_task_payload(
+            "task-hot-long-suffix",
+            "threads_own_post_reply",
+            {
+                "archiveId": "archive-1",
+                "padCode": "PAD-1",
+                "replyMode": "ai",
+                "replySuffix": "x" * 501,
+            },
+        )
+
+
+def test_own_post_reply_dry_run_skips_remote_url_recovery() -> None:
+    source = TELEGRAM_BOT_PATH.read_text(encoding="utf-8")
+    function_start = source.index("export async function runThreadsOwnPostReplyOnce")
+    function_source = source[function_start:]
+
+    assert "collectPublishedThreadsOwnPostReplyTargets(archive, padCode)" in function_source
+    assert "resolvePublishedThreadsOwnPostReplyTargets(archive, padCode)" in function_source
+    assert function_source.index("if (dryRun) {") < function_source.index("resolvePublishedThreadsOwnPostReplyTargets(archive, padCode)")
 
 
 def test_tool_r18_runner_extracts_final_json_after_console_logs() -> None:

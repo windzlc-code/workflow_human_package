@@ -8,6 +8,7 @@ type Input = {
   padCode: string;
   replyMode: "manual" | "ai";
   replyText?: string;
+  replySuffix?: string;
   minViews: number;
   maxAgeDays: number;
   dryRun?: boolean;

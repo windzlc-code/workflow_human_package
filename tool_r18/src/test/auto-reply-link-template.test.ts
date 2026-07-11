@@ -3,6 +3,7 @@ import {
   buildAutoReplyLinkPresetPickerRows,
   composeThreadsCustomReplyContent,
   parseOwnReplyContentEditArchiveId,
+  publishHistoryMatchesThreadsPad,
 } from "@/telegram-bot";
 import { appendThreadsReplySuffix, normalizeThreadsManualReplyText } from "@/lib/vmos-publisher";
 
@@ -112,5 +113,14 @@ describe("auto reply link templates", () => {
   it("does not route the continue callback into the generic content editor", () => {
     expect(parseOwnReplyContentEditArchiveId("ownreply_content_persona-1")).toBe("persona-1");
     expect(parseOwnReplyContentEditArchiveId("ownreply_content_continue_persona-1")).toBeNull();
+  });
+});
+
+describe("own-post auto reply PAD isolation", () => {
+  it("accepts only publish history belonging to the selected PAD", () => {
+    expect(publishHistoryMatchesThreadsPad({ padCode: "PAD-A" } as any, "PAD-A")).toBe(true);
+    expect(publishHistoryMatchesThreadsPad({ padCode: "PAD-A" } as any, "PAD-B")).toBe(false);
+    expect(publishHistoryMatchesThreadsPad({ publishedTargets: [{ padCode: "PAD-B" }] } as any, "PAD-B")).toBe(true);
+    expect(publishHistoryMatchesThreadsPad({} as any, "PAD-A")).toBe(false);
   });
 });
