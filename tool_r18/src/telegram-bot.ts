@@ -14992,6 +14992,20 @@ async function safeEditOrSend(
         console.log(`[telegram][safe_edit_fallback_send] chat=${chatId} msg=${messageId} reason=${editErrorText}`);
       } else {
         console.warn(`[telegram][safe_edit_error] chat=${chatId} msg=${messageId} error=${editErrorText}`);
+        if (isTelegramParseEntityError(editErrorText) && options.parse_mode) {
+          const plainOptions = withoutTelegramParseMode(options);
+          try {
+            const edited = await telegramBestEffort("editMessageTextPlain", bot.editMessageText(text, {
+              chat_id: chatId,
+              message_id: messageId,
+              ...plainOptions,
+            }), TELEGRAM_API_TIMEOUT_MS, { rethrow: true });
+            rememberTelegramEditPayload(editKey, payloadKey);
+            return typeof edited === "object" && edited ? edited as TelegramBot.Message : undefined;
+          } catch (plainError: any) {
+            console.warn(`[telegram][safe_edit_plain_error] chat=${chatId} msg=${messageId} error=${plainError?.message || plainError}`);
+          }
+        }
         await bot.deleteMessage(chatId, messageId).catch(() => undefined);
       }
     }
@@ -15007,9 +15021,29 @@ async function safeEditOrSend(
     if (elapsed >= 900) console.log(`[telegram][menu_send_slow] chat=${chatId} ms=${elapsed}`);
     return sent;
   } catch (error: any) {
+    if (isTelegramParseEntityError(error?.message || error) && options.parse_mode) {
+      try {
+        const plainOptions = withoutTelegramParseMode(options);
+        const sent = await telegramBestEffort("sendMessagePlain", bot.sendMessage(chatId, text, plainOptions));
+        rememberTelegramSendPayload(`${chatId}:${payloadKey}`, sent);
+        return sent;
+      } catch (plainError: any) {
+        console.error(`[telegram][safe_send_plain_error] chat=${chatId} error=${plainError?.message || plainError}`);
+      }
+    }
     console.error(`[telegram][safe_send_error] chat=${chatId} error=${error?.message || error}`);
     return undefined;
   }
+}
+
+function isTelegramParseEntityError(errorText: unknown): boolean {
+  return /can't parse entities|entity starting at byte offset|can't find end of the entity|parse entities/i.test(String(errorText || ""));
+}
+
+function withoutTelegramParseMode<T extends Record<string, any>>(options: T): T {
+  const clone = { ...options };
+  delete clone.parse_mode;
+  return clone;
 }
 
 async function sendTemporaryLoadingMessage(
