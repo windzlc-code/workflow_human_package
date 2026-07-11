@@ -4543,15 +4543,21 @@ function isLikelyInstagramAuthor(value: string) {
 
 async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: number): Promise<{ text: string; url: string }> {
   const encodedQuery = encodeURIComponent(query);
-  const primarySearchUrl = `https://www.threads.com/search?q=${encodedQuery}`;
-  const searchUrl = "https://www.threads.com/search";
-  const directSearchUrl = `https://www.threads.com/search?q=${encodedQuery}&serp_type=default`;
+  const primarySearchUrl = `https://www.threads.net/search?q=${encodedQuery}`;
+  const searchUrl = "https://www.threads.net/search";
+  const directSearchUrl = `https://www.threads.net/search?q=${encodedQuery}&serp_type=default`;
+  const fallbackSearchUrl = `https://www.threads.com/search?q=${encodedQuery}`;
   await page.goto(primarySearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(8_000, remainingSentimentDeadlineMs(deadlineAt, 8_000)) }).catch(() => undefined);
   await page.waitForTimeout(Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)));
   if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || primarySearchUrl };
   const primaryText = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
-  if (primaryText && primaryText.trim().length > 120) {
+  if (primaryText && primaryText.trim().length > 120 && !detectThreadsProfileLoginWall(primaryText)) {
     return { text: primaryText, url: page.url() || primarySearchUrl };
+  }
+  await page.goto(fallbackSearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(6_000, remainingSentimentDeadlineMs(deadlineAt, 6_000)) }).catch(() => undefined);
+  const fallbackDomainText = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
+  if (fallbackDomainText && fallbackDomainText.trim().length > 120 && !detectThreadsProfileLoginWall(fallbackDomainText)) {
+    return { text: fallbackDomainText, url: page.url() || fallbackSearchUrl };
   }
   await page.goto(directSearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(6_000, remainingSentimentDeadlineMs(deadlineAt, 6_000)) }).catch(async () => {
     await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(4_000, remainingSentimentDeadlineMs(deadlineAt, 4_000)) }).catch(() => undefined);
