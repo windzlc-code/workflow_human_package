@@ -2,6 +2,7 @@ import "@/runtime/node/browser-shim";
 import fs from "node:fs";
 import { autoReplyThreadsAccount, type WarmupCommentPersona } from "@/lib/vmos-publisher";
 import { resolveVmosCredentials } from "@/runtime/node/config";
+import { emitWebTaskProgress } from "./_web-task-progress";
 
 type ThreadsAutoReplyOnceInput = {
   padCode: string;
@@ -59,7 +60,21 @@ async function main() {
     credentials,
     input.padCode,
     options,
-    (progress) => logs.push({ ...progress, elapsedMs: Date.now() - startedAt }),
+    (progress) => {
+      logs.push({ ...progress, elapsedMs: Date.now() - startedAt });
+      emitWebTaskProgress({
+        step: progress.step,
+        line: `💬 ${progress.step}｜已掃描推文 ${progress.scannedPosts}｜候選留言 ${progress.scannedComments}｜已回覆 ${progress.replied}｜已跳過 ${progress.skipped}`,
+        padCode: input.padCode,
+        scannedPosts: progress.scannedPosts,
+        scannedComments: progress.scannedComments,
+        replied: progress.replied,
+        skipped: progress.skipped,
+        targetReplies: progress.targetReplies,
+        done: progress.done,
+        error: Boolean(progress.error),
+      });
+    },
   );
 
   printJson({

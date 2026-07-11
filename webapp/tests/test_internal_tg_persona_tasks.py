@@ -465,6 +465,49 @@ def test_persona_publish_progress_reader_keeps_safe_ordered_events(tmp_path, mon
     ]
 
 
+def test_threads_automation_progress_reader_and_result_are_safe(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "_build_task_workdir", lambda *_args, **_kwargs: tmp_path)
+    (tmp_path / "task-progress.jsonl").write_text(
+        json.dumps({
+            "step": "正在瀏覽",
+            "line": "🌱 正在瀏覽｜已瀏覽 3 條",
+            "browsed": 3,
+            "liked": 1,
+            "private": "ignored",
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    assert server._read_tool_r18_task_progress("task-1", "threads_warmup") == [{
+        "step": "正在瀏覽",
+        "line": "🌱 正在瀏覽｜已瀏覽 3 條",
+        "browsed": 3,
+        "liked": 1,
+    }]
+    assert server._safe_threads_automation_result("threads_warmup", {
+        "ok": True,
+        "result": {
+            "step": "養號完成",
+            "browsed": 10,
+            "liked": 2,
+            "commented": 1,
+            "likeScreenshots": ["https://cdn.example.com/like.jpg", "C:\\private\\shot.jpg"],
+            "commentScreenshots": ["https://cdn.example.com/comment.jpg"],
+            "done": True,
+        },
+        "stdout": "secret",
+    }) == {
+        "ok": True,
+        "step": "養號完成",
+        "browsed": 10,
+        "liked": 2,
+        "commented": 1,
+        "likeScreenshots": ["https://cdn.example.com/like.jpg"],
+        "commentScreenshots": ["https://cdn.example.com/comment.jpg"],
+        "done": True,
+    }
+
+
 def test_persona_publish_payload_accepts_custom_media_and_content_overrides() -> None:
     custom = server._build_internal_tg_task_payload(
         "task-custom",

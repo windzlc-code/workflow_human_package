@@ -1,6 +1,7 @@
 import "@/runtime/node/browser-shim";
 import fs from "node:fs";
 import { runThreadsOwnPostReplyOnce } from "@/telegram-bot";
+import { emitWebTaskProgress } from "./_web-task-progress";
 
 type Input = {
   archiveId: string;
@@ -34,8 +35,34 @@ async function main() {
       ...input,
       dryRun: input.dryRun === true,
     },
-    (progress) => logs.push({ ...progress, elapsedMs: Date.now() - startedAt }),
+    (progress) => {
+      logs.push({ ...progress, elapsedMs: Date.now() - startedAt });
+      emitWebTaskProgress({
+        step: progress.step,
+        line: `🔥 ${progress.step}｜已掃描 ${progress.scannedPosts}｜已回覆 ${progress.replied}｜已跳過 ${progress.skipped}`,
+        padCode: input.padCode,
+        scannedPosts: progress.scannedPosts,
+        replied: progress.replied,
+        skipped: progress.skipped,
+        targetReplies: progress.targetReplies,
+        done: progress.done,
+        error: Boolean(progress.error),
+      });
+    },
   );
+  if (!logs.length) {
+    emitWebTaskProgress({
+      step: result.error || "Threads 自動回覆熱點推文完成",
+      line: result.error ? `ℹ️ ${result.error}` : "✅ Threads 自動回覆熱點推文完成",
+      padCode: input.padCode,
+      scannedPosts: result.executionScanned,
+      matched: result.matched,
+      replied: result.replied,
+      skipped: result.skipped,
+      done: true,
+      error: false,
+    });
+  }
   printJson({
     ok: true,
     ...result,

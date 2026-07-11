@@ -15804,6 +15804,10 @@ def _run_tool_r18_skill_task(
         progress_path = workdir / "publish-progress.jsonl"
         progress_path.unlink(missing_ok=True)
         env["WEB_PUBLISH_PROGRESS_FILE"] = str(progress_path)
+    if task_type in {"threads_warmup", "threads_auto_reply", "threads_own_post_reply"}:
+        progress_path = workdir / "task-progress.jsonl"
+        progress_path.unlink(missing_ok=True)
+        env["WEB_TASK_PROGRESS_FILE"] = str(progress_path)
     completed = subprocess.run(
         ["node", "--import", "tsx", str(script), f"@{input_path}"],
         cwd=str(tool_dir),
@@ -16540,6 +16544,76 @@ def _read_persona_publish_progress(task_id: str, limit: int = 80) -> list[dict[s
         if event.get("step") or event.get("line"):
             events.append(event)
     return events
+
+
+def _read_tool_r18_task_progress(task_id: str, task_type: str, limit: int = 80) -> list[dict[str, Any]]:
+    if str(task_type or "") == "persona_publish_post":
+        return _read_persona_publish_progress(task_id, limit)
+    path = _build_task_workdir(str(task_id or "").strip(), fallback_username="telegram") / "task-progress.jsonl"
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as handle:
+            size = path.stat().st_size
+            if size > 512 * 1024:
+                handle.seek(size - 512 * 1024)
+            text = handle.read().decode("utf-8", "replace")
+    except Exception:
+        return []
+    events: list[dict[str, Any]] = []
+    for raw_line in text.splitlines()[-max(1, min(int(limit or 80), 200)) :]:
+        try:
+            raw = json.loads(raw_line)
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        event: dict[str, Any] = {}
+        for key in ("step", "line", "padCode"):
+            value = str(raw.get(key) or "").strip()
+            if value:
+                event[key] = value[:500]
+        for key in (
+            "browsed", "liked", "commented", "scannedPosts", "scannedComments",
+            "matched", "executionScanned", "replied", "skipped", "targetReplies",
+        ):
+            if isinstance(raw.get(key), int) and not isinstance(raw.get(key), bool):
+                event[key] = max(0, int(raw[key]))
+        for key in ("done", "error"):
+            if key in raw:
+                event[key] = bool(raw.get(key))
+        if event.get("step") or event.get("line"):
+            events.append(event)
+    return events
+
+
+def _safe_threads_automation_result(task_type: str, output_payload: dict[str, Any]) -> dict[str, Any]:
+    nested = output_payload.get("result") if isinstance(output_payload.get("result"), dict) else output_payload
+    result: dict[str, Any] = {"ok": bool(output_payload.get("ok", True))}
+    for key in ("archiveId", "step", "completionStatus", "completionReason", "error"):
+        value = str(nested.get(key) or output_payload.get(key) or "").strip()
+        if value:
+            result[key] = value[:2000]
+    for key in (
+        "browsed", "liked", "commented", "scannedPosts", "scannedComments", "scanned",
+        "matched", "executionScanned", "replied", "skipped", "targetReplies",
+    ):
+        value = nested.get(key, output_payload.get(key))
+        if isinstance(value, int) and not isinstance(value, bool):
+            result[key] = max(0, int(value))
+    if "done" in nested:
+        result["done"] = bool(nested.get("done"))
+    screenshot_keys = (
+        ("likeScreenshots", "commentScreenshots")
+        if task_type == "threads_warmup"
+        else ("replyScreenshots",)
+    )
+    for key in screenshot_keys:
+        values = nested.get(key) if isinstance(nested.get(key), list) else []
+        safe_values = [safe for value in values if (safe := _safe_pending_post_media_url(value))][:20]
+        if safe_values:
+            result[key] = safe_values
+    return result
 
 
 def _emit_stage(
@@ -18814,6 +18888,7 @@ def _safe_persona_sentiment_hot_result(output: dict[str, Any]) -> dict[str, Any]
             and (safe_url := _safe_pending_post_media_url(item.get("localPath") or item.get("url")))
         ]
     return result
+
 
 def _persona_reference_image_url(archive: Any) -> str:
     if not isinstance(archive, dict):
@@ -21245,6 +21320,7 @@ def create_app() -> FastAPI:
         if str(batch_summary.get("first_error") or "").strip():
             batch_summary["first_error"] = _format_user_visible_task_error(str(batch_summary.get("first_error") or ""))
         persona_task_type = str(row["type"] or "")
+        threads_automation_task_types = {"threads_warmup", "threads_auto_reply", "threads_own_post_reply"}
         safe_persona_result = {
             key: output_payload.get(key)
             for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "publishedCount", "customPublish", "mode")
@@ -21278,7 +21354,11 @@ def create_app() -> FastAPI:
                 "image_paths": _extract_existing_file_paths(output_payload.get("image_paths")) if isinstance(output_payload.get("image_paths"), list) else [],
                 "batch_summary": batch_summary,
                 "latest_event": _latest_user_visible_task_event(str(row["id"] or "")),
-                "progress_logs": _read_persona_publish_progress(str(row["id"] or "")) if persona_task_type == "persona_publish_post" else [],
+                "progress_logs": (
+                    _read_tool_r18_task_progress(str(row["id"] or ""), persona_task_type)
+                    if persona_task_type == "persona_publish_post" or persona_task_type in threads_automation_task_types
+                    else []
+                ),
                 **(
                     {
                         "result": (
@@ -21286,6 +21366,8 @@ def create_app() -> FastAPI:
                             if persona_task_type == "persona_post_action"
                             else safe_persona_result
                             if persona_task_type in {"persona_generate_image", "persona_generate_post_image", "persona_publish_post"}
+                            else _safe_threads_automation_result(persona_task_type, output_payload)
+                            if persona_task_type in threads_automation_task_types
                             else _safe_persona_sentiment_hot_result(output_payload)
                             if persona_task_type == "persona_sentiment_hot"
                             else _sanitize_payload(output_payload)
@@ -21295,6 +21377,7 @@ def create_app() -> FastAPI:
                         "persona_generate_posts", "persona_create", "persona_rewrite_intro",
                         "persona_generate_image", "persona_generate_post_image", "persona_publish_post", "persona_enqueue_posts",
                         "persona_post_action", "persona_sentiment_hot",
+                        "threads_warmup", "threads_auto_reply", "threads_own_post_reply",
                     }
                     else {}
                 ),

@@ -5026,6 +5026,115 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
         ]
         if status in {"queued", "running"}:
             lines = publish_status_lines
+    threads_automation_task_types = {"threads_warmup", "threads_auto_reply", "threads_own_post_reply"}
+    automation_progress = publish_progress if task_type in threads_automation_task_types else []
+    automation_status_lines: list[str] = []
+    automation_screenshots: list[tuple[str, str]] = []
+    automation_persona_id = str(task_input.get("uiPersonaId") or "").strip()
+    automation_back_action = (
+        f"persona_warmup_{automation_persona_id}"
+        if task_type == "threads_warmup"
+        else f"persona_autoreply_{automation_persona_id}"
+    ) if automation_persona_id else "list_personas"
+    if task_type in threads_automation_task_types:
+        fallback_step = "準備開始" if status in {"queued", "running"} else "執行完成" if status == "success" else "執行失敗"
+        latest = automation_progress[-1] if automation_progress else {}
+        current_step = str(latest.get("step") or event_line or result.get("step") or fallback_step).strip()
+        metric_source = latest or result
+        persona_name = str(task_input.get("uiPersonaName") or automation_persona_id or "").strip()
+        pad_name = str(task_input.get("padCode") or "").strip()
+        if task_type == "threads_warmup":
+            automation_status_lines = [
+                f"🌱 养号進度：{current_step}",
+                f"已浏览：{_num(metric_source.get('browsed'))} 條",
+                f"已點讚：{_num(metric_source.get('liked'))} 个",
+                f"已留言：{_num(metric_source.get('commented'))} 个",
+            ]
+        elif task_type == "threads_auto_reply":
+            max_age_days = max(1, _num(task_input.get("maxAgeDays")))
+            automation_status_lines = [
+                "💬 Threads 自动回复任务",
+                f"当前状态：{current_step}",
+                f"运行指标：{max_age_days} 天内 / 扫描 3-5 篇 / 最多回复 3 条",
+                *([f"人设：{persona_name}"] if persona_name else []),
+                *([f"智能體手機：{pad_name}"] if pad_name else []),
+                f"已扫描推文：{_num(metric_source.get('scannedPosts'))}",
+                f"候选评论：{_num(metric_source.get('scannedComments'))}",
+                f"已回复：{_num(metric_source.get('replied'))}",
+                f"已跳过：{_num(metric_source.get('skipped'))}",
+            ]
+        else:
+            automation_status_lines = [
+                "🔥 正在自動回覆熱點推文...",
+                *([f"人設：{persona_name}"] if persona_name else []),
+                *([f"智能體手機：{pad_name}"] if pad_name else []),
+                f"狀態：{current_step}",
+                f"已掃描：{_num(metric_source.get('scannedPosts'))}",
+                f"已回覆：{_num(metric_source.get('replied'))}",
+                f"已跳過：{_num(metric_source.get('skipped'))}",
+            ]
+        if status in {"queued", "running"}:
+            lines = automation_status_lines
+        elif status == "success":
+            summary_titles = {
+                "threads_warmup": "✅ 養號完成",
+                "threads_auto_reply": "✅ Threads 自動回覆完成",
+                "threads_own_post_reply": "✅ Threads 自動回覆熱點推文完成",
+            }
+            lines = [summary_titles[task_type]]
+            if task_type == "threads_warmup":
+                lines.extend([
+                    "",
+                    *([f"智能體手機：{pad_name}"] if pad_name else []),
+                    "平台：Threads",
+                    str(result.get("step") or current_step),
+                    f"已浏览：{_num(result.get('browsed'))} 條",
+                    f"已點讚：{_num(result.get('liked'))} 个",
+                    f"已留言：{_num(result.get('commented'))} 个",
+                    "",
+                    "已按所选目标完成。",
+                ])
+            elif task_type == "threads_auto_reply":
+                lines.extend([
+                    "",
+                    *([f"人設：{persona_name}"] if persona_name else []),
+                    *([f"智能體手機：{pad_name}"] if pad_name else []),
+                    f"已掃描推文：{_num(result.get('scannedPosts'))}",
+                    f"候選留言：{_num(result.get('scannedComments'))}",
+                    f"已回覆：{_num(result.get('replied'))}",
+                    f"已跳過：{_num(result.get('skipped'))}",
+                ])
+            else:
+                scanned = _num(result.get("executionScanned")) or _num(result.get("scanned"))
+                if not _num(result.get("matched")):
+                    lines = [
+                        "ℹ️ 沒有符合條件的已發布 Threads 推文。",
+                        "",
+                        *([f"人設：{persona_name}"] if persona_name else []),
+                        f"已發布連結：{_num(result.get('scanned'))} 篇",
+                        f"瀏覽量條件：大於等於 {_compact(task_input.get('minViews'))}",
+                        f"查看天數：{max(1, _num(task_input.get('maxAgeDays')))} 天內",
+                        "",
+                        "可能原因：沒有真實發布連結、瀏覽量不足、超出天數、或已回覆過。",
+                    ]
+                else:
+                    lines.extend([
+                        "",
+                        *([f"人設：{persona_name}"] if persona_name else []),
+                        *([f"智能體手機：{pad_name}"] if pad_name else []),
+                        f"已掃描：{scanned}",
+                        f"已回覆：{_num(result.get('replied'))}",
+                        f"已跳過：{_num(result.get('skipped'))}",
+                    ])
+            completion_reason = str(result.get("completionReason") or "").strip()
+            if completion_reason:
+                lines.extend(["", f"完成原因：{completion_reason}"])
+        else:
+            lines = [
+                "❌ 養號失敗" if task_type == "threads_warmup" else "❌ Threads 自動回覆失敗",
+                "",
+                str(task.get("error") or result.get("error") or "任務未完成"),
+            ]
     if task_type == "persona_sentiment_hot":
         return _sentiment_hot_source_task_response(task_id, task, task_input, result)
     generated_image = _safe_web_media_url(result.get("imageUrl") or result.get("image_url"))
@@ -5033,6 +5142,15 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     preview_image = publish_screenshot if task_type == "persona_publish_post" and publish_screenshot else generated_image
     published_url = _safe_web_media_url(result.get("publishedUrl") or result.get("published_url"))
     candidate_images = [url for value in (result.get("imageUrls") if isinstance(result.get("imageUrls"), list) else []) if (url := _safe_web_media_url(value))]
+    if task_type == "threads_warmup":
+        like_screenshots = [url for value in (result.get("likeScreenshots") if isinstance(result.get("likeScreenshots"), list) else []) if (url := _safe_web_media_url(value))]
+        comment_screenshots = [url for value in (result.get("commentScreenshots") if isinstance(result.get("commentScreenshots"), list) else []) if (url := _safe_web_media_url(value))]
+        automation_screenshots.extend((f"📸 點讚截图 {index + 1}/{len(like_screenshots)}", url) for index, url in enumerate(like_screenshots))
+        automation_screenshots.extend((f"📸 留言截图 {index + 1}/{len(comment_screenshots)}", url) for index, url in enumerate(comment_screenshots))
+    elif task_type in {"threads_auto_reply", "threads_own_post_reply"}:
+        reply_screenshots = [url for value in (result.get("replyScreenshots") if isinstance(result.get("replyScreenshots"), list) else []) if (url := _safe_web_media_url(value))]
+        caption = "📳 Threads 自動回覆熱點推文證據" if task_type == "threads_own_post_reply" else "📳 Threads 自動回覆證據"
+        automation_screenshots.extend((f"{caption} {index + 1}/{len(reply_screenshots)}", url) for index, url in enumerate(reply_screenshots))
     generated_posts = [post for post in (result.get("posts") if isinstance(result.get("posts"), list) else []) if isinstance(post, dict)]
     if not preview_image and candidate_images:
         preview_image = candidate_images[0]
@@ -5050,6 +5168,8 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     task_page = max(0, _num(task_input.get("uiPage")))
     task_content_suffix = f"_ct_{task_content_type}" if task_content_type in {"free", "paid"} else ""
     is_custom_publish_task = task_type == "persona_publish_post" and bool(task_input.get("customContent") or task_input.get("customMediaUrl") or result.get("customPublish"))
+    if task_type in threads_automation_task_types and status not in {"queued", "running"}:
+        result_rows.extend(_rows([_btn("◀️ 返回自動化", automation_back_action)]))
     if status == "success" and archive_id:
         if task_type.startswith("persona_"):
             _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": []})
@@ -5154,6 +5274,8 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     if status in {"queued", "running"}:
         if task_type == "persona_publish_post":
             result_rows.extend(_rows([_btn("🏠 主選單", "back_main")]))
+        elif task_type in threads_automation_task_types:
+            result_rows.extend(_rows([_btn("◀️ 返回自動化", automation_back_action)]))
         else:
             result_rows.extend(_rows([_btn("🔄 刷新本次任務", f"source_task_detail:{task_id}")]))
             if archive_id:
@@ -5163,7 +5285,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
                     result_rows.extend(_rows([_btn("◀️ 返回發布方式" if is_custom_publish_task else "◀️ 返回設定", f"pub_{archive_id}{task_content_suffix}" if is_custom_publish_task else f"settings_{archive_id}")]))
     if status == "failed" and task_type == "persona_publish_post":
         result_rows.extend(_rows([_btn("🔄 只重試失敗/未完成項", f"source_rerun_task:{task_id}")], [_btn("◀️ 返回發布方式", f"pub_{archive_id}{task_content_suffix}")]))
-    if not (status == "success" and task_type.startswith("persona_")) and not (task_type == "persona_publish_post" and status in {"queued", "running"}):
+    if task_type not in threads_automation_task_types and not (status == "success" and task_type.startswith("persona_")) and not (task_type == "persona_publish_post" and status in {"queued", "running"}):
         result_rows.extend(_rows([_btn("任務列表", "source_tasks"), _btn("返回主選單", "back_main")]))
     message_preview_image = "" if status == "success" and task_type == "persona_publish_post" else preview_image
     response = _response(
@@ -5192,6 +5314,19 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             response["messages"].append(
                 _message(f"📸 發佈驗證截圖（{platform_label}）", image=publish_screenshot)
             )
+    elif task_type in threads_automation_task_types and status in {"success", "failed", "cancelled"}:
+        own_reply_no_match = task_type == "threads_own_post_reply" and status == "success" and not _num(result.get("matched"))
+        if automation_progress and not own_reply_no_match:
+            response["messages"].insert(
+                0,
+                _message("\n".join(automation_status_lines), [[_btn("◀️ 返回自動化", automation_back_action)]])
+            )
+        else:
+            response["replace_panel"] = False
+        for caption, screenshot_url in automation_screenshots:
+            response["messages"].append(_message(caption, image=screenshot_url))
+        if task_type == "threads_auto_reply" and status == "success" and not automation_screenshots:
+            response["messages"].append(_message("本次没有可发送的回复截图。"))
     elif status == "success" and task_type == "persona_generate_posts" and task_input.get("uiTextOnly") is False and generated_posts:
         response["followup"] = {"action": f"source_genpost_image_start:{task_id}", "delay_ms": 700}
     return response
@@ -9519,13 +9654,38 @@ def _own_reply_submit(state: dict[str, Any]) -> dict[str, Any]:
         "minViews": max(0, _num(draft.get("min_views"))),
         "maxAgeDays": max(1, min(_num(draft.get("max_age_days")), 7)),
         "dryRun": False,
+        "uiPersonaId": persona.id,
+        "uiPersonaName": persona.name,
     }
     job = SourceWorkflowJobRepo.create("threads_own_post_reply", f"熱點推文自動回覆：{persona.name}", params, status="submitting")
-    _submit_source_task_job_async(job.id, "threads_own_post_reply", params)
-    return _response(
-        _message("✅ 已提交真實熱點推文回覆任務。", _rows([_btn("📊 查看來源任務", "source_tasks")], [_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")])),
-        state={"flow": ""},
+    try:
+        base, data = _source_submit_task("threads_own_post_reply", params)
+        source_task_id = str(data.get("id") or "")
+        SourceWorkflowJobRepo.update(job.id, status="submitted", result=data, source_task_id=source_task_id, source_base_url=base)
+    except Exception as exc:
+        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+        return _response(
+            _message(f"❌ 自動回覆熱點推文任務提交失敗\n\n{exc}", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]),
+            state={"flow": ""},
+        )
+    response = _response(
+        _message(
+            "\n".join([
+                "🔥 Threads 自動回覆熱點推文執行中...",
+                "",
+                f"人設：{persona.name}",
+                f"智能體手機：{persona.pad_code}",
+                f"瀏覽量條件：大於等於 {_compact(params['minViews'])}",
+                f"查看天數：{params['maxAgeDays']} 天內",
+                "",
+                "目前狀態：準備開始",
+            ]),
+            [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]],
+        ),
+        state={"flow": "source_automation_task", "draft": {"source_task_id": source_task_id}},
     )
+    response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+    return response
 
 
 def _persona_warmup_platform_menu(persona_id: str) -> dict[str, Any]:
@@ -9881,6 +10041,8 @@ def _automation_run(action: str, *, custom_content: str = "") -> dict[str, Any]:
             "stopOnRiskLimit": True,
             "allowEngagement": warm_mode in {"like", "comment", "both"},
             "commentPersona": {"name": persona.name, "profile": persona.description[:1200], "replyMode": "ai_persona"},
+            "uiPersonaId": persona.id,
+            "uiPersonaName": persona.name,
         }
         label = f"養號自動化：{persona.name} / {warm_mode}"
         task_type = "threads_warmup"
@@ -9899,35 +10061,51 @@ def _automation_run(action: str, *, custom_content: str = "") -> dict[str, Any]:
                 "replyMode": reply_mode,
                 "customContent": custom_content,
             },
+            "uiPersonaId": persona.id,
+            "uiPersonaName": persona.name,
         }
         label = f"自動回覆：{persona.name} / {'固定文案' if custom_content else 'AI 人設'}"
         task_type = "threads_auto_reply"
         back_action = f"acctautoreply_{persona_id}"
 
     job = SourceWorkflowJobRepo.create(task_type, label, payload, status="submitting")
-    _submit_source_task_job_async(job.id, task_type, payload)
-    return _response(
+    try:
+        base, data = _source_submit_task(task_type, payload)
+        source_task_id = str(data.get("id") or "")
+        SourceWorkflowJobRepo.update(
+            job.id,
+            status="submitted",
+            result=data,
+            source_task_id=source_task_id,
+            source_base_url=base,
+        )
+    except Exception as exc:
+        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
+        title = "養號" if task_type == "threads_warmup" else "自動回覆"
+        return _response(
+            _message(f"❌ {title}任務提交失敗\n\n{exc}", [[_btn("◀️ 返回自動化", back_action)]]),
+            state={"flow": ""},
+        )
+
+    title = "🌱 養號執行中..." if task_type == "threads_warmup" else "💬 Threads 自動回覆執行中..."
+    response = _response(
         _message(
             "\n".join(
                 [
-                    "✅ 已加入背景自動化任務",
+                    title,
                     "",
-                    f"任務：{job.label}",
-                    f"Job ID：{job.id}",
-                    "來源任務：提交中",
                     f"人設：{persona.name}",
-                    f"PAD_CODE：{persona.pad_code}",
+                    f"智能體手機：{persona.pad_code}",
                     "",
-                    "已送入 Web 後台提交器；來源任務 ID 生成後會寫回本地任務狀態。",
+                    "目前狀態：準備開始",
                 ]
             ),
-            _rows(
-                [_btn("來源任務狀態", "source_tasks")],
-                [_btn("📊 腳本任務狀態", "local_jobs"), _btn("◀️ 返回自動化", back_action)],
-            ),
+            [[_btn("◀️ 返回自動化", back_action)]],
         ),
-        state={"flow": ""},
+        state={"flow": "source_automation_task", "draft": {"source_task_id": source_task_id}},
     )
+    response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+    return response
 
 
 def _threads_profile_prompt(persona_id: str, kind: str) -> dict[str, Any]:

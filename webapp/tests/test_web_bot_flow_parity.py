@@ -536,6 +536,7 @@ def test_hot_task_result_restores_candidates_media_and_closed_loop_buttons() -> 
     assert '"hot_edited_contents"' in restore
     assert '"hot_deleted_media_indexes"' in restore
 
+
 def test_hot_import_is_visible_immediately_and_polls_without_two_second_lag() -> None:
     task_result = _function_source("_sentiment_hot_source_task_response")
     pending_posts = _function_source("_source_pending_posts")
@@ -549,3 +550,23 @@ def test_hot_import_is_visible_immediately_and_polls_without_two_second_lag() ->
     assert '750 if str(params.get("action") or "").lower() == "import" else 2000' in submit
     assert "await Promise.all(" in adapter
     assert "prefetchedMedia[index]" in adapter
+
+
+def test_threads_automation_matches_tg_progress_and_evidence_lifecycle() -> None:
+    automation = _function_source("_automation_run")
+    own_reply = _function_source("_own_reply_submit")
+    detail = _function_source("_source_task_detail")
+    warmup_cli = (WEB_BOT_PATH.parents[3] / "tool_r18" / "scripts" / "skills" / "threads-warmup-once.ts").read_text(encoding="utf-8")
+    auto_reply_cli = (WEB_BOT_PATH.parents[3] / "tool_r18" / "scripts" / "skills" / "threads-auto-reply-once.ts").read_text(encoding="utf-8")
+    own_reply_cli = (WEB_BOT_PATH.parents[3] / "tool_r18" / "scripts" / "skills" / "threads-own-post-reply-once.ts").read_text(encoding="utf-8")
+
+    assert "_source_submit_task" in automation
+    assert 'response["poll"]' in automation
+    assert "_source_submit_task" in own_reply
+    assert 'response["poll"]' in own_reply
+    for task_type in ("threads_warmup", "threads_auto_reply", "threads_own_post_reply"):
+        assert task_type in detail
+    assert "automation_screenshots" in detail
+    assert 'response["messages"].append(' in detail
+    for source in (warmup_cli, auto_reply_cli, own_reply_cli):
+        assert "emitWebTaskProgress" in source

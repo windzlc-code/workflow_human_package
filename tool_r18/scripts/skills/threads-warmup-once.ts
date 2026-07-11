@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import { warmupThreadsAccount, buildWarmupInterestKeywords, type WarmupCommentPersona } from "@/lib/vmos-publisher";
 import { resolveVmosCredentials } from "@/runtime/node/config";
+import { emitWebTaskProgress } from "./_web-task-progress";
 
 type ThreadsWarmupMode = "browse" | "like" | "comment" | "both";
 
@@ -102,7 +103,19 @@ async function main() {
     credentials,
     input.padCode,
     options,
-    (progress) => logs.push({ ...progress, elapsedMs: Date.now() - startedAt }),
+    (progress) => {
+      logs.push({ ...progress, elapsedMs: Date.now() - startedAt });
+      emitWebTaskProgress({
+        step: progress.step,
+        line: `🌱 ${progress.step}｜已瀏覽 ${progress.browsed} 條｜已點讚 ${progress.liked} 個｜已留言 ${progress.commented} 個`,
+        padCode: input.padCode,
+        browsed: progress.browsed,
+        liked: progress.liked,
+        commented: progress.commented,
+        done: progress.done,
+        error: Boolean(progress.error),
+      });
+    },
   );
 
   printJson({
