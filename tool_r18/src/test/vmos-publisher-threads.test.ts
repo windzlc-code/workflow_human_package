@@ -32,7 +32,6 @@ import {
   extractThreadsProfileUsernameFromUiXml,
   extractThreadsPublishedPostUrlFromReaderMarkdown,
   findThreadsHomeFeedActionTargetsFromUiXml,
-  findThreadsOwnProfilePostBodyTargetFromUiXml,
   findThreadsComposerInputTarget,
   findThreadsComposerPublishButtonTarget,
   findThreadsBottomSearchTabTarget,
@@ -117,37 +116,6 @@ describe("extractThreadsOwnPostViewCountFromUiXml", () => {
 
   it("returns undefined when the detail page exposes no view label", () => {
     expect(extractThreadsOwnPostViewCountFromUiXml('<node text="123" content-desc="likes" />')).toBeUndefined();
-  });
-});
-
-describe("findThreadsOwnProfilePostBodyTargetFromUiXml", () => {
-  it("locates the post body next to its profile timestamp instead of setup cards", () => {
-    const uiXml = [
-      "<hierarchy>",
-      '<node text="完成個人檔案" bounds="[30,400][300,450]" clickable="false" />',
-      '<node text="追蹤 10 個個人檔案" bounds="[70,520][360,570]" clickable="true" />',
-      '<node text="sen54_088 38分鐘" bounds="[80,780][310,830]" clickable="false" />',
-      '<node text="你好 快點我看更多吧" bounds="[85,840][520,910]" clickable="true" />',
-      "</hierarchy>",
-    ].join("\n");
-
-    expect(findThreadsOwnProfilePostBodyTargetFromUiXml(uiXml)).toEqual({
-      x: 303,
-      y: 875,
-      text: "你好 快點我看更多吧",
-    });
-  });
-
-  it("does not treat profile setup card copy as a post body", () => {
-    const uiXml = [
-      "<hierarchy>",
-      '<node text="完成個人檔案" bounds="[30,400][300,450]" clickable="false" />',
-      '<node text="追蹤 10 個個人檔案" bounds="[70,520][360,570]" clickable="true" />',
-      '<node text="查看個人檔案" bounds="[100,650][400,710]" clickable="true" />',
-      "</hierarchy>",
-    ].join("\n");
-
-    expect(findThreadsOwnProfilePostBodyTargetFromUiXml(uiXml)).toBeNull();
   });
 });
 
@@ -716,6 +684,39 @@ describe("Threads publish verification", () => {
       maxAgeDays: 5,
     })).resolves.toBeNull();
   });
+
+  it("opens an own-profile post body through the shared profile scanner", async () => {
+    const samplePath = path.resolve(
+      "src",
+      "test",
+      "fixtures",
+      "threads-publish-samples",
+      "samples",
+      "threads-auto-reply-profile-setup-card-false-comment-row.jpg",
+    );
+    const dataUrl = "data:image/jpeg;base64," + fs.readFileSync(samplePath).toString("base64");
+    const uiXml = [
+      "<hierarchy>",
+      '<node text="\u4e32\u6587" bounds="[74,720][146,760]" clickable="true" />',
+      '<node text="\u56de\u8986" bounds="[243,720][315,760]" clickable="true" />',
+      '<node text="\u5f71\u97f3\u5167\u5bb9" bounds="[397,720][525,760]" clickable="true" />',
+      '<node text="\u8f49\u767c" bounds="[598,720][670,760]" clickable="true" />',
+      '<node text="rick_y54088 38\u5206\u9418" bounds="[80,780][310,830]" clickable="false" />',
+      '<node text="\u4f60\u597d \u5feb\u9ede\u6211\u770b\u66f4\u591a\u5427" bounds="[85,840][520,910]" clickable="true" />',
+      '<node text="\u5b8c\u6210\u500b\u4eba\u6a94\u6848" bounds="[30,1000][300,1050]" clickable="false" />',
+      "</hierarchy>",
+    ].join("\n");
+
+    await expect(locateThreadsVisibleOwnPostContentTarget(dataUrl, uiXml, {
+      requireCommentBadge: false,
+      maxAgeDays: 1,
+    })).resolves.toEqual({
+      x: 252,
+      y: 875,
+      postPreview: "\u4f60\u597d \u5feb\u9ede\u6211\u770b\u66f4\u591a\u5427",
+    });
+  });
+
   it("does not classify captured fullscreen media viewer samples as gallery picker", async () => {
     const samplePath = path.resolve(
       ".runtime",

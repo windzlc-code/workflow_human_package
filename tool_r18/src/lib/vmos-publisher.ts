@@ -1829,43 +1829,6 @@ export function findThreadsHomeFeedActionTargetsFromUiXml(uiXml: string): { like
   };
 }
 
-export function findThreadsOwnProfilePostBodyTargetFromUiXml(
-  uiXml: string,
-): { x: number; y: number; text: string } | null {
-  const nodes = (uiXml.match(/<node\b[^>]*>/g) ?? [])
-    .map((node) => ({
-      text: normalizeSingleLine(decodeXmlAttr(`${getXmlAttr(node, "text")} ${getXmlAttr(node, "content-desc")}`)),
-      center: parseBoundsCenter(getXmlAttr(node, "bounds")),
-      clickable: /true/i.test(getXmlAttr(node, "clickable")),
-    }))
-    .filter((node): node is { text: string; center: { x: number; y: number }; clickable: boolean } => Boolean(node.text && node.center));
-  const timeNodes = nodes.filter((node) => (
-    /(?:^|\s)(?:剛剛|刚刚|昨天|yesterday|\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周|minutes?|hours?|days?|weeks?|[mhdw]))(?:\s|$)/i.test(node.text)
-  ));
-  const ignored = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|追蹤\s*\d+|追踪\s*\d+|查看個人檔案|查看个人档案|新增個人檔案|新增个人档案|編輯個人檔案|编辑个人档案|分享個人檔案|分享个人档案|^串文$|^回覆$|影音內容|影音内容|^轉發$|^转发$/;
-  const candidates = nodes
-    .filter((node) => node.text.length >= 4 && !ignored.test(node.text))
-    .filter((node) => !timeNodes.includes(node))
-    .map((node) => {
-      const anchor = timeNodes
-        .filter((timeNode) => timeNode.center.y <= node.center.y + 50 && node.center.y - timeNode.center.y <= 260)
-        .sort((a, b) => Math.abs(node.center.y - a.center.y) - Math.abs(node.center.y - b.center.y))[0];
-      if (!anchor) return null;
-      const distance = Math.abs(node.center.y - anchor.center.y);
-      return {
-        x: node.center.x,
-        y: node.center.y,
-        text: node.text,
-        score: 20 - Math.min(15, Math.round(distance / 18)) + (node.clickable ? 2 : 0) + Math.min(5, Math.floor(node.text.length / 12)),
-      };
-    })
-    .filter((item): item is { x: number; y: number; text: string; score: number } => Boolean(item))
-    .filter((item) => item.y >= 280 && item.y <= 1420)
-    .sort((a, b) => b.score - a.score || a.y - b.y);
-  const best = candidates[0];
-  return best ? { x: best.x, y: best.y, text: best.text } : null;
-}
-
 export function findThreadsReplyComposerInputTarget(uiXml: string): { x: number; y: number } | null {
   if (looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml)) return null;
   const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
@@ -28286,15 +28249,47 @@ async function decideThreadsAutoRepliesByModel(
   });
 }
 
+async function ensureThreadsOwnProfileBeforeScan(
+  config: VmosConfig,
+  padCode: string,
+  currentShotUrl: string,
+  attemptLabel: string,
+): Promise<{ ok: true; screenshotUrl: string; uiXml: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  let shotUrl = currentShotUrl;
+  let uiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
+  if (shotUrl && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+    return { ok: true, screenshotUrl: shotUrl, uiXml };
+  }
+
+  saveThreadsAutoReplySampleStep({
+    padCode,
+    step: "profile-scan-preflight-not-profile",
+    screenshotUrl: shotUrl,
+    meta: { attemptLabel, skippedReason: "current_page_not_profile_before_scan" },
+  });
+  const recovered = await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
+  if (recovered.ok !== true) return recovered;
+  shotUrl = recovered.screenshotUrl;
+  await threadsAdbInputNoWait(config, padCode, "input swipe 360 1180 360 520 460", 1200);
+  shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+  shotUrl = shotUrl ? await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl) : shotUrl;
+  uiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
+  if (!shotUrl || !await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
+    return {
+      ok: false,
+      error: "扫描前未能回到 Threads 个人页，已停止以避免误点首页或发帖页",
+      screenshotUrl: shotUrl || recovered.screenshotUrl,
+    };
+  }
+  return { ok: true, screenshotUrl: shotUrl, uiXml };
+}
+
 async function openThreadsLatestOwnPostFromProfile(
   config: VmosConfig,
   padCode: string,
   maxAgeDays?: number,
   requireCommentBadge = true,
 ): Promise<{ ok: true; screenshotUrl: string; postPreview?: string } | { ok: false; error: string; screenshotUrl?: string }> {
-  if (!requireCommentBadge) {
-    return openThreadsOwnHotPostFromProfile(config, padCode, maxAgeDays, true);
-  }
   let initialShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   let profile = initialShotUrl && await detectThreadsProfilePageLocally(initialShotUrl).catch(() => false)
     ? { ok: true as const, screenshotUrl: initialShotUrl }
@@ -28359,7 +28354,7 @@ async function openThreadsLatestOwnPostFromProfile(
       shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
     }
     let target = await withTimeout(
-      locateThreadsVisibleOwnPostContentTarget(shotUrl, "", {
+      locateThreadsVisibleOwnPostContentTarget(shotUrl, requireCommentBadge ? "" : profileUiXml, {
         requireCommentBadge,
         padCode,
         sampleStep: "profile-comment-badge-scan-fast",
@@ -28368,7 +28363,7 @@ async function openThreadsLatestOwnPostFromProfile(
       3_000,
       "threadsAutoReply locate visible post fast timeout",
     ).catch(() => null);
-    if (target) {
+    if (target && requireCommentBadge) {
       profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
@@ -28525,11 +28520,13 @@ async function openThreadsLatestOwnPostFromProfile(
       target = stableTarget;
     }
     for (let guardAttempt = 0; target && guardAttempt < 2; guardAttempt += 1) {
-      const preview = await extractThreadsProfilePostPreviewAboveActionRowByVision(
-        shotUrl,
-        target,
-        { timeoutMs: 5_500 },
-      ).catch(() => ({ postPreview: "", postAuthor: "" }));
+      const preview = target.postPreview
+        ? { postPreview: target.postPreview, postAuthor: "", abnormalPreview: false }
+        : await extractThreadsProfilePostPreviewAboveActionRowByVision(
+          shotUrl,
+          target,
+          { timeoutMs: 5_500 },
+        ).catch(() => ({ postPreview: "", postAuthor: "", abnormalPreview: false }));
       if (!preview.abnormalPreview && (!preview.postPreview || isThreadsAutoReplyUsablePostPreview(preview.postPreview))) {
         selectedPostPreview = preview.postPreview;
         break;
@@ -28548,7 +28545,7 @@ async function openThreadsLatestOwnPostFromProfile(
       await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 380 650", 1100);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
       shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
-      const retryPreflight = await ensureProfileBeforeScan(shotUrl, `abnormal_visual_skip_${guardAttempt + 1}`);
+      const retryPreflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, `abnormal_visual_skip_${guardAttempt + 1}`);
       if (!retryPreflight.ok) return retryPreflight;
       shotUrl = retryPreflight.screenshotUrl;
       profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
@@ -28715,46 +28712,6 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   maxAgeDays?: number,
   requireCommentBadge = true,
 ): Promise<{ ok: true; screenshotUrl: string; postPreview?: string } | { ok: false; error: string; screenshotUrl?: string }> {
-  if (!requireCommentBadge) {
-    return openThreadsOwnHotPostFromProfile(config, padCode, maxAgeDays, false);
-  }
-  const ensureProfileBeforeScan = async (
-    currentShotUrl: string,
-    attemptLabel: string,
-  ): Promise<{ ok: true; screenshotUrl: string; uiXml: string } | { ok: false; error: string; screenshotUrl?: string }> => {
-    let shotUrl = currentShotUrl;
-    let uiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
-    const onProfile = Boolean(shotUrl && await detectThreadsProfilePageLocally(shotUrl).catch(() => false));
-    if (onProfile) return { ok: true, screenshotUrl: shotUrl, uiXml };
-
-    saveThreadsAutoReplySampleStep({
-      padCode,
-      step: "profile-next-preflight-not-profile",
-      screenshotUrl: shotUrl,
-      meta: {
-        attemptLabel,
-        skippedReason: "current_page_not_profile_before_next_scan",
-      },
-    });
-
-    const recovered = await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
-    if (!recovered.ok) return recovered;
-    shotUrl = recovered.screenshotUrl;
-    await threadsAdbInputNoWait(config, padCode, "input swipe 360 1180 360 520 460", 1200);
-    shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-    shotUrl = shotUrl ? await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl) : shotUrl;
-    uiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
-    const recoveredOnProfile = Boolean(shotUrl && await detectThreadsProfilePageLocally(shotUrl).catch(() => false));
-    if (!recoveredOnProfile) {
-      return {
-        ok: false,
-        error: "下一帖扫描前未能回到 Threads 个人页，已停止以避免误点首页或发帖页",
-        screenshotUrl: shotUrl || recovered.screenshotUrl,
-      };
-    }
-    return { ok: true, screenshotUrl: shotUrl, uiXml };
-  };
-
   let page = await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
   if (!page.ok) return page;
   page = await leaveThreadsReplyComposerBeforeProfileScan(
@@ -28768,7 +28725,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => page.screenshotUrl || "");
   shotUrl = shotUrl ? await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl) : shotUrl;
   if (!shotUrl) return { ok: false, error: "未能取得 Threads 个人主页截图" };
-  const preflight = await ensureProfileBeforeScan(shotUrl, "initial");
+  const preflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, "next_initial");
   if (!preflight.ok) return preflight;
   shotUrl = preflight.screenshotUrl;
   let profileUiXml = preflight.uiXml;
@@ -28782,7 +28739,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
   }
   let target = await withTimeout(
-    locateThreadsVisibleOwnPostContentTarget(shotUrl, "", {
+    locateThreadsVisibleOwnPostContentTarget(shotUrl, requireCommentBadge ? "" : profileUiXml, {
       requireCommentBadge,
       padCode,
       sampleStep: "profile-next-comment-badge-scan-fast",
@@ -28793,7 +28750,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   ).catch(() => null);
   if (!target) {
     profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
-  } else {
+  } else if (requireCommentBadge) {
     profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
@@ -28834,7 +28791,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     await delay(450);
     shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
-    const revealPreflight = await ensureProfileBeforeScan(shotUrl, "bottom_partial_comment_badge_reveal");
+    const revealPreflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, "bottom_partial_comment_badge_reveal");
     if (!revealPreflight.ok) return revealPreflight;
     shotUrl = revealPreflight.screenshotUrl;
     profileUiXml = revealPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
@@ -28870,7 +28827,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 380 650", 1100);
     shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
-    const retryPreflight = await ensureProfileBeforeScan(shotUrl, `retry_${attempt + 1}`);
+    const retryPreflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, `retry_${attempt + 1}`);
     if (!retryPreflight.ok) return retryPreflight;
     shotUrl = retryPreflight.screenshotUrl;
     profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
@@ -28898,11 +28855,13 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     if (!target && isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(profileUiXml, maxAgeDays)) break;
   }
   for (let guardAttempt = 0; target && guardAttempt < 4; guardAttempt += 1) {
-    const preview = await extractThreadsProfilePostPreviewAboveActionRowByVision(
-      shotUrl,
-      target,
-      { timeoutMs: 5_500 },
-    ).catch(() => ({ postPreview: "", postAuthor: "" }));
+    const preview = target.postPreview
+      ? { postPreview: target.postPreview, postAuthor: "", abnormalPreview: false }
+      : await extractThreadsProfilePostPreviewAboveActionRowByVision(
+        shotUrl,
+        target,
+        { timeoutMs: 5_500 },
+      ).catch(() => ({ postPreview: "", postAuthor: "", abnormalPreview: false }));
     if (!preview.abnormalPreview && (!preview.postPreview || isThreadsAutoReplyUsablePostPreview(preview.postPreview))) {
       selectedPostPreview = preview.postPreview;
       break;
@@ -28921,7 +28880,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 380 650", 1100);
     shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
-    const retryPreflight = await ensureProfileBeforeScan(shotUrl, `abnormal_visual_skip_${guardAttempt + 1}`);
+    const retryPreflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, `next_abnormal_visual_skip_${guardAttempt + 1}`);
     if (!retryPreflight.ok) return retryPreflight;
     shotUrl = retryPreflight.screenshotUrl;
     profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
@@ -29105,226 +29064,6 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   }
   if (detail.ok !== true) return detail as { ok: false; error: string; screenshotUrl?: string };
   return { ok: true, screenshotUrl: openedPage?.screenshotUrl || shotUrl, postPreview: selectedPostPreview || undefined };
-}
-
-async function openThreadsOwnHotPostFromProfile(
-  config: VmosConfig,
-  padCode: string,
-  maxAgeDays: number | undefined,
-  firstPost: boolean,
-): Promise<{ ok: true; screenshotUrl: string; postPreview?: string } | { ok: false; error: string; screenshotUrl?: string }> {
-  const startedAt = Date.now();
-  const trace = (stage: string) => {
-    console.log(`[threads][own-post-profile] pad=${padCode} first=${firstPost ? 1 : 0} elapsed=${Date.now() - startedAt}ms stage=${stage}`);
-  };
-  trace("start");
-  const currentShotUrl = firstPost
-    ? await withTimeout(
-      screenshot(config, padCode),
-      12_000,
-      "threadsOwnPostReply current profile screenshot timeout",
-    ).then((url) => freezeScreenshotUrl(url)).catch(() => "")
-    : "";
-  let profile: { ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string };
-  if (firstPost) {
-    profile = currentShotUrl && await withTimeout(
-      detectThreadsProfilePageLocally(currentShotUrl),
-      3_000,
-      "threadsOwnPostReply current profile detect timeout",
-    ).catch(() => false)
-      ? { ok: true, screenshotUrl: currentShotUrl }
-      : await openThreadsProfileForAccountQuery(config, padCode);
-  } else {
-    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
-    await delay(800);
-    const backShotUrl = await withTimeout(
-      screenshot(config, padCode),
-      12_000,
-      "threadsOwnPostReply back-to-profile screenshot timeout",
-    ).then((url) => freezeScreenshotUrl(url)).catch(() => "");
-    profile = backShotUrl && await withTimeout(
-      detectThreadsProfilePageLocally(backShotUrl),
-      3_000,
-      "threadsOwnPostReply back-to-profile detect timeout",
-    ).catch(() => false)
-      ? { ok: true, screenshotUrl: backShotUrl }
-      : await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
-  }
-  trace(profile.ok ? "profile-ready" : "profile-failed");
-  if (!profile.ok) return profile;
-  if (!firstPost) {
-    profile = await leaveThreadsReplyComposerBeforeProfileScan(
-      config,
-      padCode,
-      profile.screenshotUrl,
-      "hot-profile-next-left-reply-editor",
-    );
-    if (!profile.ok) return profile;
-  }
-
-  if (firstPost) {
-    for (let resetAttempt = 0; resetAttempt < 3; resetAttempt += 1) {
-      await threadsAdbInputNoWait(config, padCode, "input swipe 360 520 360 1320 480", 850).catch(() => undefined);
-      await delay(300);
-    }
-    trace("top-reset-done");
-  }
-  const initialRevealSwipes = firstPost ? 2 : 1;
-  for (let revealAttempt = 0; revealAttempt < initialRevealSwipes; revealAttempt += 1) {
-    await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 520", 1000).catch(() => undefined);
-    await delay(350);
-  }
-  trace("initial-reveal-done");
-
-  let shotUrl = await withTimeout(
-    screenshot(config, padCode),
-    12_000,
-    "threadsOwnPostReply profile screenshot timeout",
-  ).then((url) => freezeScreenshotUrl(url)).catch(() => profile.screenshotUrl || "");
-  trace(shotUrl ? "initial-screenshot-ready" : "initial-screenshot-missing");
-  let lastUiXml = "";
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    trace(`attempt-${attempt + 1}-start`);
-    if (!shotUrl) return { ok: false, error: "未能取得 Threads 個人主頁截圖" };
-    lastUiXml = await dumpUiXmlQuick(config, padCode, 3_500).catch(() => "");
-    trace(`attempt-${attempt + 1}-ui-${lastUiXml ? "ready" : "missing"}`);
-    const xmlTarget = findThreadsOwnProfilePostBodyTargetFromUiXml(lastUiXml);
-    const target = xmlTarget && isThreadsProfilePostTargetWithinAutoReplyAge(lastUiXml, xmlTarget, maxAgeDays)
-      ? xmlTarget
-      : await withTimeout(
-        locateThreadsVisibleOwnPostContentTarget(shotUrl, lastUiXml, {
-          requireCommentBadge: false,
-          maxAgeDays,
-        }),
-        6_000,
-        "threadsOwnPostReply local profile post locate timeout",
-      ).catch(() => null);
-    if (target) {
-      trace(`attempt-${attempt + 1}-target-ready`);
-      const tapTarget = xmlTarget && target === xmlTarget
-        ? target
-        : {
-          x: target.x,
-          y: Math.max(320, target.y - 260),
-        };
-      const preview = xmlTarget && target === xmlTarget
-        ? { postPreview: xmlTarget.text, postAuthor: "", abnormalPreview: false }
-        : await extractThreadsProfilePostPreviewAboveActionRowByVision(
-          shotUrl,
-          target,
-          { timeoutMs: 5_500 },
-        ).catch(() => ({ postPreview: "", postAuthor: "", abnormalPreview: false }));
-      if (preview.abnormalPreview) {
-        await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 600", 1000).catch(() => undefined);
-        shotUrl = await withTimeout(
-          screenshot(config, padCode),
-          12_000,
-          "threadsOwnPostReply abnormal profile screenshot timeout",
-        ).then((url) => freezeScreenshotUrl(url)).catch(() => shotUrl);
-        continue;
-      }
-      const profileShotUrl = shotUrl;
-      await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, tapTarget, 2200).catch(async () => {
-        const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-        const image = await getImageDimensions(shotUrl).catch(() => null);
-        await tapViaAdbAbsolute(
-          config,
-          padCode,
-          Math.round(tapTarget.x * (screen.width / (image?.width || BASE_SCREEN.width))),
-          Math.round(tapTarget.y * (screen.height / (image?.height || BASE_SCREEN.height))),
-          2200,
-        );
-      });
-      await delay(900);
-      if (!await waitForThreadsForegroundOrVisible(config, padCode, 3_000).catch(() => false)) {
-        trace("foreground-left-threads");
-        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
-        return {
-          ok: false,
-          error: "主帖定位離開 Threads，已返回個人主頁並停止本次掃描",
-          screenshotUrl: shotUrl,
-        };
-      }
-      shotUrl = await withTimeout(
-        screenshot(config, padCode),
-        12_000,
-        "threadsOwnPostReply opened detail screenshot timeout",
-      ).then((url) => freezeScreenshotUrl(url)).catch(() => shotUrl);
-      trace("detail-screenshot-ready");
-      saveThreadsAutoReplySampleStep({
-        padCode,
-        step: "hot-profile-after-post-tap",
-        screenshotUrl: shotUrl,
-        meta: { target, tapTarget, postPreview: preview.postPreview.slice(0, 160) },
-      });
-      if (
-        await detectThreadsInAppBrowserLocally(shotUrl).catch(() => false)
-        || await detectThreadsExternalWebViewLocally(shotUrl).catch(() => false)
-      ) {
-        trace("external-page-rejected");
-        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
-        return {
-          ok: false,
-          error: "主帖定位誤入外部連結，已返回個人主頁並停止本次掃描",
-          screenshotUrl: shotUrl,
-        };
-      }
-      if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
-        trace("detail-shell-confirmed");
-        return {
-          ok: true,
-          screenshotUrl: shotUrl,
-          postPreview: preview.postPreview || undefined,
-        };
-      }
-      const detail = await withTimeout(
-        validateThreadsAutoReplyDetailReady(config, padCode, shotUrl),
-        8_000,
-        "threadsOwnPostReply validate profile post detail timeout",
-      ).catch((error) => ({
-        ok: false as const,
-        error: error instanceof Error ? error.message : String(error),
-        screenshotUrl: shotUrl,
-      }));
-      if (detail.ok) {
-        trace("detail-validated");
-        return {
-          ok: true,
-          screenshotUrl: detail.screenshotUrl,
-          postPreview: preview.postPreview || undefined,
-        };
-      }
-      if (await detectThreadsProfilePageLocally(detail.screenshotUrl || "").catch(() => false)) {
-        const fallback = await openThreadsProfilePostByTextFallback(
-          config,
-          padCode,
-          profileShotUrl,
-          lastUiXml,
-          target,
-          "hot-profile-post-text-fallback",
-        );
-        if (fallback.ok) {
-          return { ...fallback, postPreview: preview.postPreview || undefined };
-        }
-      }
-      return detail;
-    }
-    if (isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(lastUiXml, maxAgeDays)) break;
-    await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 600", 1000).catch(() => undefined);
-    await delay(350);
-    shotUrl = await withTimeout(
-      screenshot(config, padCode),
-      12_000,
-      "threadsOwnPostReply next profile screenshot timeout",
-    ).then((url) => freezeScreenshotUrl(url)).catch(() => shotUrl);
-    trace(`attempt-${attempt + 1}-next-screenshot-ready`);
-  }
-  trace("no-profile-post-found");
-  return {
-    ok: false,
-    error: `${maxAgeDays || 2} 天內未找到可掃描的本人推文`,
-    screenshotUrl: shotUrl,
-  };
 }
 
 async function openThreadsProfilePostByTextFallback(
@@ -29555,6 +29294,43 @@ async function detectThreadsProfileSuggestionOverlayLocally(screenshotUrl: strin
     && darkBottomDone > 0.16;
 }
 
+function findThreadsOwnProfilePostBodyTargetFromUiXml(
+  uiXml: string,
+): { x: number; y: number; text: string } | null {
+  const nodes = (uiXml.match(/<node\b[^>]*>/g) ?? [])
+    .map((node) => ({
+      text: normalizeSingleLine(decodeXmlAttr(`${getXmlAttr(node, "text")} ${getXmlAttr(node, "content-desc")}`)),
+      center: parseBoundsCenter(getXmlAttr(node, "bounds")),
+      clickable: /true/i.test(getXmlAttr(node, "clickable")),
+    }))
+    .filter((node): node is { text: string; center: { x: number; y: number }; clickable: boolean } => Boolean(node.text && node.center));
+  const timeNodes = nodes.filter((node) => (
+    /(?:^|\s)(?:剛剛|刚刚|昨天|yesterday|\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周|minutes?|hours?|days?|weeks?|[mhdw]))(?:\s|$)/i.test(node.text)
+  ));
+  const ignored = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|追蹤\s*\d+|追踪\s*\d+|查看個人檔案|查看个人档案|新增個人檔案|新增个人档案|編輯個人檔案|编辑个人档案|分享個人檔案|分享个人档案|^串文$|^回覆$|影音內容|影音内容|^轉發$|^转发$/;
+  const candidates = nodes
+    .filter((node) => node.text.length >= 4 && !ignored.test(node.text))
+    .filter((node) => !timeNodes.includes(node))
+    .map((node) => {
+      const anchor = timeNodes
+        .filter((timeNode) => timeNode.center.y <= node.center.y + 50 && node.center.y - timeNode.center.y <= 260)
+        .sort((a, b) => Math.abs(node.center.y - a.center.y) - Math.abs(node.center.y - b.center.y))[0];
+      if (!anchor) return null;
+      const distance = Math.abs(node.center.y - anchor.center.y);
+      return {
+        x: node.center.x,
+        y: node.center.y,
+        text: node.text,
+        score: 20 - Math.min(15, Math.round(distance / 18)) + (node.clickable ? 2 : 0) + Math.min(5, Math.floor(node.text.length / 12)),
+      };
+    })
+    .filter((item): item is { x: number; y: number; text: string; score: number } => Boolean(item))
+    .filter((item) => item.y >= 280 && item.y <= 1420)
+    .sort((a, b) => b.score - a.score || a.y - b.y);
+  const best = candidates[0];
+  return best ? { x: best.x, y: best.y, text: best.text } : null;
+}
+
 export async function locateThreadsVisibleOwnPostContentTarget(
   screenshotUrl: string,
   uiXml = "",
@@ -29564,7 +29340,7 @@ export async function locateThreadsVisibleOwnPostContentTarget(
     sampleStep?: string;
     maxAgeDays?: number;
   } = {},
-): Promise<{ x: number; y: number } | null> {
+): Promise<{ x: number; y: number; postPreview?: string } | null> {
   const screenshotLooksProfile = await detectThreadsProfilePageLocally(screenshotUrl).catch(() => false);
   if (
     (uiXml && (findThreadsReplyComposerInputTarget(uiXml) || looksLikeThreadsReplyComposerUiXml(uiXml)))
@@ -29712,6 +29488,26 @@ export async function locateThreadsVisibleOwnPostContentTarget(
   }
   if (countedCommentTarget) return countedCommentTarget;
   if (options.requireCommentBadge) return null;
+  const bodyTarget = findThreadsOwnProfilePostBodyTargetFromUiXml(uiXml);
+  if (
+    bodyTarget
+    && isThreadsProfilePostTargetWithinAutoReplyAge(uiXml, bodyTarget, options.maxAgeDays)
+  ) {
+    const safeBodyTarget = {
+      x: Math.min(bodyTarget.x, Math.round(width * 0.35)),
+      y: bodyTarget.y,
+      postPreview: bodyTarget.text,
+    };
+    if (options.padCode) {
+      saveThreadsAutoReplySampleStep({
+        padCode: options.padCode,
+        step: options.sampleStep || "profile-post-body-scan",
+        screenshotUrl,
+        meta: { targetFound: true, target: safeBodyTarget, mode: "own_post_body", preview: bodyTarget.text.slice(0, 160) },
+      });
+    }
+    return safeBodyTarget;
+  }
   const actions = await locateThreadsWarmupActionsWithFallback(
     screenshotUrl,
     undefined,
@@ -29726,14 +29522,22 @@ export async function locateThreadsVisibleOwnPostContentTarget(
     && !/messages|composer|media_viewer|fallback_comment_missing|side_drawer/i.test(debug)
   ) {
     const fallbackTarget = {
-      x: Math.round(width * 0.50),
+      x: Math.round(width * 0.22),
       y: Math.max(
         Math.round(height * 0.22),
-        Math.round(actionY - (actionY > height * 0.50 ? Math.min(360, height * 0.23) : Math.min(180, height * 0.12))),
+        Math.round(actionY - (actionY > height * 0.50 ? Math.min(560, height * 0.34) : Math.min(180, height * 0.12))),
       ),
     };
     if (uiXml && !isThreadsProfilePostTargetWithinAutoReplyAge(uiXml, fallbackTarget, options.maxAgeDays)) {
       return null;
+    }
+    if (options.padCode) {
+      saveThreadsAutoReplySampleStep({
+        padCode: options.padCode,
+        step: options.sampleStep || "profile-post-body-scan",
+        screenshotUrl,
+        meta: { targetFound: true, target: fallbackTarget, actionY, mode: "own_post_body_from_shared_action_row" },
+      });
     }
     return fallbackTarget;
   }
@@ -31749,6 +31553,69 @@ async function collectThreadsAutoReplyPostContext(
   };
 }
 
+async function prepareThreadsOwnProfileScan(
+  config: VmosConfig,
+  padCode: string,
+  options: {
+    operationLabel: string;
+    sampleStep: string;
+    onStep?: (step: string) => void;
+    onWarning?: (warning: string) => void;
+  },
+): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  options.onStep?.(`${options.operationLabel}预检：正在冷启动 Threads`);
+  await relaunchThreads(config, padCode, 3_500).catch((error) => {
+    options.onWarning?.(`Threads 启动恢复失败：${error instanceof Error ? error.message : String(error)}`);
+  });
+  options.onStep?.(`${options.operationLabel}预检：冷启动完成，准备打开个人页`);
+  let currentShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  if (currentShotUrl && await detectThreadsInAppBrowserLocally(currentShotUrl).catch(() => false)) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: `${options.sampleStep}-cold-start-inapp-browser`,
+      screenshotUrl: currentShotUrl,
+      meta: { reason: "LOCAL_THREADS_INAPP_BROWSER" },
+    });
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
+    await delay(1200);
+  }
+
+  options.onStep?.(`${options.operationLabel}预检：正在打开个人页`);
+  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+  const profileTapError = await withTimeout(
+    tapViaAdbAbsoluteQuick(
+      config,
+      padCode,
+      Math.round(screen.width * 0.86),
+      Math.round(screen.height * 0.96),
+      2_000,
+    ),
+    8_000,
+    `${options.sampleStep} profile tab tap timeout`,
+  ).then(() => "").catch((error) => (error instanceof Error ? error.message : String(error)));
+  if (profileTapError) return { ok: false, error: profileTapError, screenshotUrl: currentShotUrl || undefined };
+
+  options.onStep?.(`${options.operationLabel}预检：正在截取个人页`);
+  const rawProfileShot = await withTimeout(
+    screenshot(config, padCode),
+    12_000,
+    `${options.sampleStep} profile screenshot timeout`,
+  ).catch(() => null);
+  currentShotUrl = rawProfileShot
+    ? await freezeScreenshotUrl(rawProfileShot).catch(() => "")
+    : "";
+  if (!currentShotUrl) {
+    return { ok: false, error: `${options.operationLabel}截取个人页超时，已停止以释放任务锁` };
+  }
+  saveThreadsAutoReplySampleStep({
+    padCode,
+    step: `${options.sampleStep}-preflight-profile-tab`,
+    screenshotUrl: currentShotUrl,
+    meta: { reason: "cold_relaunch_before_profile_scan" },
+  });
+  return { ok: true, screenshotUrl: currentShotUrl };
+}
+
 export async function autoReplyThreadsAccount(
   config: VmosConfig,
   padCode: string,
@@ -31785,63 +31652,14 @@ export async function autoReplyThreadsAccount(
   const replyScreenshots: string[] = [];
   const errors: string[] = [];
   const { repliedKeys, repliedCommentIdentityKeys, repliedCommentTextKeys } = loadThreadsAutoReplyRepliedSets(padCode);
-  report({ step: "Threads 自动回复预检：正在冷启动 Threads" });
-  await relaunchThreads(config, padCode, 3_500).catch((error) => {
-    errors.push(`Threads 启动恢复失败：${error instanceof Error ? error.message : String(error)}`);
+  const profilePreflight = await prepareThreadsOwnProfileScan(config, padCode, {
+    operationLabel: "Threads 自动回复",
+    sampleStep: "auto-reply",
+    onStep: (step) => report({ step }),
+    onWarning: (warning) => errors.push(warning),
   });
-  report({ step: "Threads 自动回复预检：冷启动完成，准备打开个人页" });
-  const coldStartShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-  if (coldStartShotUrl && await detectThreadsInAppBrowserLocally(coldStartShotUrl).catch(() => false)) {
-    saveThreadsAutoReplySampleStep({
-      padCode,
-      step: "auto-reply-cold-start-inapp-browser",
-      screenshotUrl: coldStartShotUrl,
-      meta: { reason: "LOCAL_THREADS_INAPP_BROWSER" },
-    });
-    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 650).catch(() => "");
-    await delay(1200);
-  }
-  report({ step: "Threads 自动回复预检：正在打开个人页" });
-  const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-  const profileTapError = await withTimeout(
-    tapViaAdbAbsoluteQuick(
-      config,
-      padCode,
-      Math.round(screen.width * 0.86),
-      Math.round(screen.height * 0.96),
-      2_000,
-    ),
-    8_000,
-    "threadsAutoReply profile tab tap timeout",
-  ).then(() => "").catch((error) => (error instanceof Error ? error.message : String(error)));
-  if (profileTapError) {
-    const result: ThreadsAutoReplyProgress = {
-      step: "Threads 自动回复失败",
-      scannedPosts,
-      scannedComments,
-      replied,
-      skipped,
-      targetReplies,
-      completionStatus: "failed",
-      completionReason: profileTapError,
-      replyScreenshots,
-      done: true,
-      error: profileTapError,
-    };
-    onProgress?.(result);
-    return result;
-  }
-  report({ step: "Threads 自动回复预检：正在截取个人页" });
-  const rawPreflightProfileShot = await withTimeout(
-    screenshot(config, padCode),
-    12_000,
-    "threadsAutoReply profile screenshot timeout",
-  ).catch(() => null);
-  const preflightProfileShotUrl = rawPreflightProfileShot
-    ? await freezeScreenshotUrl(rawPreflightProfileShot).catch(() => "")
-    : "";
-  if (!preflightProfileShotUrl) {
-    const completionReason = "Threads 自动回复截取个人页超时，已停止以释放任务锁";
+  if (profilePreflight.ok !== true) {
+    const completionReason = profilePreflight.error;
     const result: ThreadsAutoReplyProgress = {
       step: "Threads 自动回复失败",
       scannedPosts,
@@ -31858,12 +31676,7 @@ export async function autoReplyThreadsAccount(
     onProgress?.(result);
     return result;
   }
-  saveThreadsAutoReplySampleStep({
-    padCode,
-    step: "auto-reply-preflight-profile-tab",
-    screenshotUrl: preflightProfileShotUrl || undefined,
-    meta: { reason: "cold_relaunch_before_profile_scan" },
-  });
+  const preflightProfileShotUrl = profilePreflight.screenshotUrl;
   const processedPostHashes = new Set<string>();
   const accountInfo = process.env.THREADS_AUTO_REPLY_ENABLE_ACCOUNT_MANAGER_QUERY
     ? await withTimeout(
@@ -35271,6 +35084,31 @@ async function verifyThreadsOwnPostReplyTargetOnScreen(
   return { ok: false, reason: `當前頁面內容與目標推文不匹配：${preview.slice(0, 60)}` };
 }
 
+async function buildThreadsOwnPostScreenshotIdentity(
+  padCode: string,
+  screenshotUrl: string,
+): Promise<string> {
+  const inline = await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null);
+  if (!inline) return "";
+  const input = Buffer.from(inline.data, "base64");
+  const metadata = await sharp(input).metadata().catch(() => null);
+  const width = Math.max(1, metadata?.width || BASE_SCREEN.width);
+  const height = Math.max(1, metadata?.height || BASE_SCREEN.height);
+  const top = Math.min(height - 1, Math.round(height * 0.10));
+  const cropHeight = Math.max(1, Math.min(height - top, Math.round(height * 0.66)));
+  const pixels = await sharp(input)
+    .extract({ left: 0, top, width, height: cropHeight })
+    .resize(16, 16, { fit: "fill" })
+    .grayscale()
+    .raw()
+    .toBuffer()
+    .catch(() => null);
+  if (!pixels?.length) return "";
+  const average = pixels.reduce((sum, value) => sum + value, 0) / pixels.length;
+  const perceptualBits = Array.from(pixels, (value) => value >= average ? "1" : "0").join("");
+  return `threads-profile-image:${padCode}:${hashString(perceptualBits, 32)}`;
+}
+
 export async function replyOwnPublishedThreadsPosts(
   config: VmosConfig,
   padCode: string,
@@ -35432,31 +35270,32 @@ export async function replyOwnPublishedThreadsPosts(
       (cfg.profileScan.repliedPostKeys || []).map((item) => String(item || "").trim()).filter(Boolean),
     );
     const seenPostKeys = new Set<string>();
-    report({ step: "Threads 自動回覆熱點推文預檢：正在冷啟動 Threads" });
-    await relaunchThreads(config, padCode, 3_500);
-    report({ step: "Threads 自動回覆熱點推文預檢：正在打開個人主頁" });
-    const profileScreen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-    await withTimeout(
-      tapViaAdbAbsoluteQuick(
-        config,
-        padCode,
-        Math.round(profileScreen.width * 0.86),
-        Math.round(profileScreen.height * 0.96),
-        2_000,
-      ),
-      8_000,
-      "threadsOwnPostReply profile tab tap timeout",
-    );
+    const profilePreflight = await prepareThreadsOwnProfileScan(config, padCode, {
+      operationLabel: "Threads 自動回覆熱點推文",
+      sampleStep: "own-post-auto-reply",
+      onStep: (step) => report({ step }),
+      onWarning: (warning) => errors.push(warning),
+    });
     report({ step: `正在從個人主頁查找 ${maxAgeDays} 天內的本人推文` });
-    let opened = await withTimeout(
-      openThreadsLatestOwnPostFromProfile(config, padCode, maxAgeDays, false),
-      90_000,
-      "threadsOwnPostReply open latest profile post timeout",
-    ).catch((error) => ({
-      ok: false as const,
-      error: error instanceof Error ? error.message : String(error),
-    }));
-    if (!opened.ok) {
+    let opened: Awaited<ReturnType<typeof openThreadsLatestOwnPostFromProfile>>;
+    if (profilePreflight.ok === true) {
+      opened = await withTimeout(
+        openThreadsLatestOwnPostFromProfile(config, padCode, maxAgeDays, false),
+        180_000,
+        "threadsOwnPostReply open latest profile post timeout",
+      ).catch((error) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    } else {
+      opened = {
+        ok: false,
+        error: profilePreflight.error,
+        screenshotUrl: profilePreflight.screenshotUrl,
+      };
+    }
+    if (opened.ok !== true) {
+      console.warn(`[threads][own-post-reply][profile-open-failed] pad=${padCode} error=${opened.error}`.slice(0, 320));
       const result: ThreadsOwnPostReplyProgress = {
         step: "Threads 自動回覆熱點推文完成：範圍內沒有可掃描推文",
         scannedPosts,
@@ -35484,12 +35323,14 @@ export async function replyOwnPublishedThreadsPosts(
         detailShotUrl = await screenshot(config, padCode)
           .then((url) => freezeScreenshotUrl(url))
           .catch(() => opened.screenshotUrl);
-        const visualPreview = await extractThreadsAutoReplyPostPreviewByVision(
-          detailShotUrl,
-          [],
-          { timeoutMs: 5_500 },
-        ).catch(() => ({ postPreview: "", postAuthor: "" }));
-        postPreview = normalizeSingleLine(visualPreview.postPreview);
+        if (replyMode === "ai") {
+          const visualPreview = await extractThreadsAutoReplyPostPreviewByVision(
+            detailShotUrl,
+            [],
+            { timeoutMs: 5_500 },
+          ).catch(() => ({ postPreview: "", postAuthor: "" }));
+          postPreview = normalizeSingleLine(visualPreview.postPreview);
+        }
       }
       let viewCount = extractThreadsOwnPostViewCountFromUiXml(uiXml);
       if (typeof viewCount !== "number" && minViews > 0) {
@@ -35497,7 +35338,9 @@ export async function replyOwnPublishedThreadsPosts(
       }
       const postKey = postPreview
         ? `threads-profile:${buildThreadsAutoReplyPostHash(padCode, postPreview)}`
-        : "";
+        : replyMode === "manual"
+          ? await buildThreadsOwnPostScreenshotIdentity(padCode, detailShotUrl || opened.screenshotUrl)
+          : "";
 
       if (!postKey || seenPostKeys.has(postKey)) {
         skipped += 1;
@@ -35566,13 +35409,13 @@ export async function replyOwnPublishedThreadsPosts(
       report({ step: "正在返回個人主頁並查找下一篇本人推文" });
       opened = await withTimeout(
         openThreadsNextVisibleOwnPostFromCurrentProfile(config, padCode, maxAgeDays, false),
-        70_000,
+        140_000,
         "threadsOwnPostReply open next profile post timeout",
       ).catch((error) => ({
         ok: false as const,
         error: error instanceof Error ? error.message : String(error),
       }));
-      if (!opened.ok) {
+      if (opened.ok !== true) {
         errors.push(opened.error);
         break;
       }
@@ -35629,7 +35472,7 @@ export async function replyOwnPublishedThreadsPosts(
       );
       await waitForThreadsForegroundOrVisible(config, padCode, 8_000).catch(() => false);
       const screenCheck = await verifyThreadsOwnPostReplyTargetOnScreen(config, padCode, target);
-      if (!screenCheck.ok) {
+      if (screenCheck.ok !== true) {
         skipped += 1;
         errors.push(`${target.label || target.url}: ${screenCheck.reason}`);
         report({ step: "未確認目標推文，已跳過", error: screenCheck.reason });

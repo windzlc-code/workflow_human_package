@@ -4014,7 +4014,7 @@ function buildPersonaOwnPostAutoReplyPlatformText(
     `查看天數：${run.maxAgeDays} 天內`,
     linkTemplateLine || "",
     "",
-    "條件：只回覆自己已發布、有真實 Threads 發布連結、符合瀏覽量和天數、且未回覆過的主推文。",
+    "條件：從 Threads 本人主頁掃描，回覆符合瀏覽量和天數、且未回覆過的主推文。",
     "請選擇平台後開始執行。",
   ].filter(Boolean).join("\n");
 }
@@ -18780,15 +18780,11 @@ function sendMainMenu(chatId: number, msgId?: number) {
       pendingAutoReplyLinkSettingsReturns.delete(chatId);
       const archive = await loadPersonaForThisBot(id);
       if (!archive) { sendMainMenu(chatId, msgId); return; }
-      const targets = filterUnrepliedThreadsOwnPostTargets(
-        archive,
-        collectPublishedThreadsOwnPostReplyTargets(archive, String(archive.boundPadCode || "")),
-      );
       await safeEditOrSend(bot, chatId, msgId, [
         "🔥 自動回覆熱點推文",
         "",
         `人設：${archive.name}`,
-        `可回覆推文：${targets.length} 篇`,
+        "掃描來源：Threads 本人主頁",
         "",
         "請選擇回覆分支：",
         "1. 自定义内容回复：找到符合條件的自己主推文後，直接發送你輸入的內容。",
@@ -18833,7 +18829,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
         "回复模式：AI 根据人设和推文自动回复",
         "",
         "請輸入瀏覽量門檻。",
-        "只有已發布推文瀏覽量大於等於這個值時才會自動評論。",
+        "只有本人主頁推文瀏覽量大於等於這個值時才會自動評論。",
         "例如：10000、1萬、2.5萬。輸入 0 表示不限制瀏覽量。",
       ].join("\n"), {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回分支選擇", callback_data: `persona_autoreply_hot_${id}` }]] },
@@ -19335,7 +19331,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
           `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
           `查看天數：${runState.maxAgeDays} 天內`,
           "",
-          "正在打開已發布推文。",
+          "正在打開 Threads 本人主頁並掃描推文。",
         ].join("\n"), {
           reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
         });
@@ -19366,14 +19362,14 @@ function sendMainMenu(chatId: number, msgId?: number) {
         if (!result.matched) {
           pendingThreadsOwnPostReplyRuns.delete(chatId);
           await safeEditOrSend(bot, chatId, msgId, [
-            "ℹ️ 沒有符合條件的已發布 Threads 推文。",
+            "ℹ️ 沒有符合條件的 Threads 本人主頁推文。",
             "",
             `人設：${archive.name}`,
-            `已發布連結：${result.scanned} 篇`,
+            `已掃描：${result.scanned} 篇`,
             `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
             `查看天數：${runState.maxAgeDays} 天內`,
             "",
-            "可能原因：沒有真實發布連結、瀏覽量不足、超出天數、或已回覆過。",
+            "可能原因：本人主頁沒有符合條件的推文、瀏覽量不足、超出天數、或已回覆過。",
           ].join("\n"), {
             reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
           });
