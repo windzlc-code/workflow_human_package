@@ -145,6 +145,7 @@ def test_own_post_reply_uses_local_dry_run_and_profile_scan_in_production() -> N
     assert "resolvePublishedThreadsOwnPostReplyTargets(archive, padCode)" not in function_source
     assert "profileScan:" in function_source
     assert function_source.index("if (dryRun) {") < function_source.index("profileScan:")
+    assert "const repliedPostKeys: string[] = [];" in function_source
 
 
 def test_auto_reply_production_clis_resolve_and_execute(tmp_path: Path) -> None:

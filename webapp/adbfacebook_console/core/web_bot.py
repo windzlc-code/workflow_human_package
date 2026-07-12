@@ -10329,7 +10329,7 @@ def _persona_autoreply_mode_menu(persona_id: str) -> dict[str, Any]:
                     "",
                     "請先選擇自動回覆方式。",
                     "自動回覆評論：沿用原本路線，掃描自己推文下方留言並自然回覆。",
-                    "自動回覆熱點推文：只在自己已發布、符合瀏覽量和天數條件、且未回覆過的 Threads 推文內，使用你自訂的內容回覆。",
+                    "自動回覆熱點推文：只在自己已發布、符合瀏覽量和天數條件的 Threads 推文內回覆，並允許後續任務再次回覆。",
                 ]
             ),
             _rows(
@@ -10527,7 +10527,7 @@ def _own_reply_confirmation(draft: dict[str, Any]) -> dict[str, Any]:
         f"查看天数：{draft.get('max_age_days')} 天内",
         *([_auto_reply_link_line(persona_id, draft)] if reply_mode == "ai" else []),
         "",
-        "条件：只回复自己已发布、有真实 Threads 发布链接、符合浏览量和天数、且未回复过的主推文。",
+        "条件：只回复自己已发布、有真实 Threads 发布链接、符合浏览量和天数的主推文；此功能允许后续任务再次回复。",
         "请选择平台后开始执行。",
     ])
     return _response(

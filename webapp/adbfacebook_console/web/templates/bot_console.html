@@ -408,6 +408,9 @@
   const webBotUploadEndpoint = window.location.pathname.startsWith('/threads-console')
     ? '/threads-console/api/web-bot/upload'
     : '/api/web-bot/upload';
+  const webBotJobsEndpoint = window.location.pathname.startsWith('/threads-console')
+    ? '/threads-console/api/web-bot/jobs'
+    : '/api/web-bot/jobs';
   let state = {};
   let sourcePollTimer = null;
   let sourceFollowupTimer = null;
@@ -432,6 +435,9 @@
   let historyPersistTimer = null;
   let pendingSourcePoll = null;
   let historyUpdatedAt = 0;
+  const serverCallbackStartedAt = Date.now() / 1000;
+  const seenServerCallbackJobs = new Set();
+  let serverCallbackPollInFlight = false;
 
   function openHistoryDb() {
     if (!('indexedDB' in window)) return Promise.resolve(null);
@@ -932,6 +938,43 @@
     }
   }
 
+  async function pollServerCallbackJobs() {
+    if (document.hidden || serverCallbackPollInFlight) return;
+    serverCallbackPollInFlight = true;
+    try {
+      const response = await fetch(webBotJobsEndpoint + '?limit=60', { cache: 'no-store' });
+      if (!response.ok) return;
+      const data = await response.json();
+      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+      for (const job of jobs.slice().reverse()) {
+        const jobId = String(job && job.id || '');
+        if (!jobId || String(job.session_id || '') !== sessionId || seenServerCallbackJobs.has(jobId)) continue;
+        if (Number(job.created_at || 0) < serverCallbackStartedAt - 2) {
+          seenServerCallbackJobs.add(jobId);
+          continue;
+        }
+        if (!job.result_ready) continue;
+        const detailResponse = await fetch(webBotJobsEndpoint + '/' + encodeURIComponent(jobId), { cache: 'no-store' });
+        if (!detailResponse.ok) continue;
+        const detail = await detailResponse.json();
+        const result = detail && detail.job && detail.job.result;
+        if (!result || typeof result !== 'object') continue;
+        seenServerCallbackJobs.add(jobId);
+        state = result.state && typeof result.state === 'object' ? result.state : state;
+        const messages = Array.isArray(result.messages) ? result.messages : [];
+        let responseGroup = null;
+        messages.forEach(message => { responseGroup = appendBot(message); });
+        scheduleSourcePoll(result.poll, responseGroup || activeBotGroup);
+        scheduleSourceFollowup(result.followup);
+        queueHistoryPersist();
+      }
+    } catch (_) {
+      // Direct callback display must not interrupt normal bot interaction.
+    } finally {
+      serverCallbackPollInFlight = false;
+    }
+  }
+
   form.addEventListener('submit', e => {
     e.preventDefault();
     const text = input.value.trim();
@@ -1056,6 +1099,8 @@
     if (document.visibilityState === 'hidden') void persistHistory();
   });
   void initialize();
+  setInterval(pollServerCallbackJobs, 1500);
+  void pollServerCallbackJobs();
 })();
 </script>
 </body>

@@ -8262,9 +8262,20 @@ async function typeWarmupCommentText(
   waitMs = 900,
 ) {
   if (/[^\x20-\x7E]/.test(text)) {
-    // inputText can apply text before its acknowledgement times out. A fallback
-    // after that timeout appends the same Unicode content a second time.
-    await typeTextViaAdbBase64Broadcast(config, padCode, text, Math.max(waitMs, 1800), 10_000);
+    // Use VMOS inputText exactly once. This PAD does not accept ADB keyboard
+    // broadcasts, and retrying through a second input channel can append the
+    // same short reply twice after a late acknowledgement.
+    await ensureVmosPlainTextInputMethod(config, padCode).catch(() => undefined);
+    const taskId = await withTimeout(
+      inputText(config, padCode, text),
+      15_000,
+      "warmup VMOS unicode input timeout",
+    );
+    const numericTaskId = Number(taskId);
+    if (Number.isFinite(numericTaskId) && numericTaskId > 0) {
+      await waitTask(config, numericTaskId, 30_000, 1_500).catch(() => undefined);
+    }
+    await delay(Math.max(waitMs, 1_400));
     return;
   }
   await typeAsciiTextViaAndroidInput(config, padCode, text, waitMs);
@@ -33418,6 +33429,7 @@ async function warmupExecuteCommentAtPoint(
   if (!isTrustedWarmupCommentDebugReason(options.debugReason, padCode)) {
     throw new Error(`留言目标不够可靠，已跳过：${options.debugReason || "unknown"}`);
   }
+  const forceVisibleReplyUntilSuccess = process.env.THREADS_AUTO_REPLY_FORCE_VISIBLE_REPLY === "1";
   const dumpReplyUiFast = () => withTimeout(
     dumpUiXml(config, padCode),
     2_500,
@@ -33857,7 +33869,7 @@ async function warmupExecuteCommentAtPoint(
     ).catch(() => "");
     await withTimeout(
       typeWarmupCommentText(config, padCode, comment, 900),
-      14_000,
+      50_000,
       "warmup comment type timeout",
     );
     logAcpCommentStage("after-type-before-screenshot");

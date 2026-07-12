@@ -3986,7 +3986,7 @@ function buildPersonaAutoReplyModeText(archive: PersonaArchive) {
     "",
     "請先選擇自動回覆方式。",
     "自動回覆評論：沿用原本鏈路，掃描自己推文下方留言並自然回覆。",
-    "自動回覆熱點推文：只在自己已發布、符合瀏覽量和天數條件、且未回覆過的 Threads 推文內，使用你自訂的內容回覆。",
+    "自動回覆熱點推文：只在自己已發布、符合瀏覽量和天數條件的 Threads 推文內回覆，並允許後續任務再次回覆。",
   ].join("\n");
 }
 
@@ -4014,7 +4014,7 @@ function buildPersonaOwnPostAutoReplyPlatformText(
     `查看天數：${run.maxAgeDays} 天內`,
     linkTemplateLine || "",
     "",
-    "條件：從 Threads 本人主頁掃描，回覆符合瀏覽量和天數、且未回覆過的主推文。",
+    "條件：從 Threads 本人主頁掃描，回覆符合瀏覽量和天數的主推文；此功能允許後續任務再次回覆。",
     "請選擇平台後開始執行。",
   ].filter(Boolean).join("\n");
 }
@@ -4364,7 +4364,9 @@ export async function runThreadsOwnPostReplyOnce(
       error: localTargets.length ? undefined : "no locally recorded Threads post URLs for this PAD",
     };
   }
-  const repliedPostKeys = getThreadsOwnPostReplyHistory(archive).map((item) => item.url);
+  // Hot-post auto reply intentionally permits later tasks to reply again.
+  // The publisher still keeps its per-run seenPostKeys guard.
+  const repliedPostKeys: string[] = [];
   const result = await replyOwnPublishedThreadsPosts(
     resolveVmosCredentials(),
     padCode,
@@ -4396,7 +4398,6 @@ export async function runThreadsOwnPostReplyOnce(
   if (result.repliedUrls?.length) {
     const latestArchive = await loadPersonaArchive(archiveId).catch(() => archive) || archive;
     const existing = getThreadsOwnPostReplyHistory(latestArchive);
-    const existingUrls = new Set(existing.map((item) => item.url));
     const nowIso = new Date().toISOString();
     const commentsByUrl = new Map((result.repliedComments || []).map((item) => [
       normalizeThreadsOwnPostReplyHistoryUrl(item.url),
@@ -4409,7 +4410,7 @@ export async function runThreadsOwnPostReplyOnce(
         replyText: commentsByUrl.get(normalizeThreadsOwnPostReplyHistoryUrl(url)) || replyText,
         repliedAt: nowIso,
       }))
-      .filter((item) => item.url && !existingUrls.has(item.url));
+      .filter((item) => item.url);
     const existingKnownTargets = Array.isArray((latestArchive.setup as any)?.threadsOwnPostAutoReply?.knownPostTargets)
       ? (latestArchive.setup as any).threadsOwnPostAutoReply.knownPostTargets
       : [];

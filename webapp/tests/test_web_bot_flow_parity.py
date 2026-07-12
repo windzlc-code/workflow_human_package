@@ -86,6 +86,8 @@ def test_compact_console_reuses_full_client_and_syncs_named_sessions() -> None:
     assert "query.get('entry')" in template
     assert "query.get('session')" in template
     assert "new BroadcastChannel('workflow-web-bot:' + sessionId)" in template
+    assert "pollServerCallbackJobs" in template
+    assert "String(job.session_id || '') !== sessionId" in template
     assert "send({ action: entryAction })" in template
 
 
