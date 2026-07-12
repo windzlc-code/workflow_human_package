@@ -28,9 +28,11 @@ import {
   detectThreadsSideDrawerLocally,
   detectThreadsWarmupCommentPostedCueFromUiXml,
   extractWarmupPostPreviewFromUiXml,
+  extractThreadsOwnPostViewCountFromUiXml,
   extractThreadsProfileUsernameFromUiXml,
   extractThreadsPublishedPostUrlFromReaderMarkdown,
   findThreadsHomeFeedActionTargetsFromUiXml,
+  findThreadsOwnProfilePostBodyTargetFromUiXml,
   findThreadsComposerInputTarget,
   findThreadsComposerPublishButtonTarget,
   findThreadsBottomSearchTabTarget,
@@ -71,6 +73,83 @@ import {
   scaleScreenshotPointToAdbPointForSizes,
   shouldUseThreadsShareIntentPath,
 } from "@/lib/vmos-publisher";
+
+describe("extractThreadsOwnPostViewCountFromUiXml", () => {
+  it("reads compact Traditional Chinese view counts from post details", () => {
+    const uiXml = [
+      "<hierarchy>",
+      '<node text="1.2萬次瀏覽" content-desc="" />',
+      "</hierarchy>",
+    ].join("\n");
+
+    expect(extractThreadsOwnPostViewCountFromUiXml(uiXml)).toBe(12_000);
+  });
+
+  it("reads split English labels but ignores unrelated bare numbers", () => {
+    const uiXml = [
+      "<hierarchy>",
+      '<node text="42" content-desc="" />',
+      '<node text="1.5K" content-desc="" />',
+      '<node text="views" content-desc="" />',
+      "</hierarchy>",
+    ].join("\n");
+
+    expect(extractThreadsOwnPostViewCountFromUiXml(uiXml)).toBe(1_500);
+  });
+
+  it("prefers the value after a standalone view label over an unrelated previous number", () => {
+    const uiXml = [
+      "<hierarchy>",
+      '<node text="42" content-desc="" />',
+      '<node text="views" content-desc="" />',
+      '<node text="1.5K" content-desc="" />',
+      "</hierarchy>",
+    ].join("\n");
+
+    expect(extractThreadsOwnPostViewCountFromUiXml(uiXml)).toBe(1_500);
+  });
+
+  it("reads label-first view counts from content descriptions", () => {
+    const uiXml = '<node text="" content-desc="瀏覽次數：2.3K" />';
+
+    expect(extractThreadsOwnPostViewCountFromUiXml(uiXml)).toBe(2_300);
+  });
+
+  it("returns undefined when the detail page exposes no view label", () => {
+    expect(extractThreadsOwnPostViewCountFromUiXml('<node text="123" content-desc="likes" />')).toBeUndefined();
+  });
+});
+
+describe("findThreadsOwnProfilePostBodyTargetFromUiXml", () => {
+  it("locates the post body next to its profile timestamp instead of setup cards", () => {
+    const uiXml = [
+      "<hierarchy>",
+      '<node text="完成個人檔案" bounds="[30,400][300,450]" clickable="false" />',
+      '<node text="追蹤 10 個個人檔案" bounds="[70,520][360,570]" clickable="true" />',
+      '<node text="sen54_088 38分鐘" bounds="[80,780][310,830]" clickable="false" />',
+      '<node text="你好 快點我看更多吧" bounds="[85,840][520,910]" clickable="true" />',
+      "</hierarchy>",
+    ].join("\n");
+
+    expect(findThreadsOwnProfilePostBodyTargetFromUiXml(uiXml)).toEqual({
+      x: 303,
+      y: 875,
+      text: "你好 快點我看更多吧",
+    });
+  });
+
+  it("does not treat profile setup card copy as a post body", () => {
+    const uiXml = [
+      "<hierarchy>",
+      '<node text="完成個人檔案" bounds="[30,400][300,450]" clickable="false" />',
+      '<node text="追蹤 10 個個人檔案" bounds="[70,520][360,570]" clickable="true" />',
+      '<node text="查看個人檔案" bounds="[100,650][400,710]" clickable="true" />',
+      "</hierarchy>",
+    ].join("\n");
+
+    expect(findThreadsOwnProfilePostBodyTargetFromUiXml(uiXml)).toBeNull();
+  });
+});
 
 describe("normalizeThreadsPublishCaptionForInput", () => {
   it("keeps legacy 500-character truncation when there is no URL", () => {
@@ -630,6 +709,10 @@ describe("Threads publish verification", () => {
     ].join("\n");
     await expect(locateThreadsVisibleOwnPostContentTarget(dataUrl, uiXml, {
       requireCommentBadge: true,
+      maxAgeDays: 5,
+    })).resolves.toBeNull();
+    await expect(locateThreadsVisibleOwnPostContentTarget(dataUrl, uiXml, {
+      requireCommentBadge: false,
       maxAgeDays: 5,
     })).resolves.toBeNull();
   });

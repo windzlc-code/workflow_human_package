@@ -4364,54 +4364,37 @@ export async function runThreadsOwnPostReplyOnce(
       error: localTargets.length ? undefined : "no locally recorded Threads post URLs for this PAD",
     };
   }
-  const resolvedTargets = await resolvePublishedThreadsOwnPostReplyTargets(archive, padCode);
-  const allTargets = await refreshThreadsOwnPostReplyTargetViewCounts(resolvedTargets.targets, {
-    enabled: minViews > 0,
-    limit: 5,
-  });
-  const targets = filterUnrepliedThreadsOwnPostTargets(resolvedTargets.archive, allTargets, {
-    minViews: Math.floor(minViews),
-    maxAgeDays: Math.floor(maxAgeDays),
-  }).slice(0, 5);
-  const base = {
-    archiveId,
-    padCode,
-    dryRun,
-    recovered: resolvedTargets.recovered,
-    scanned: allTargets.length,
-    matched: targets.length,
-  };
-  if (!targets.length) {
-    return {
-      ...base,
-      executionScanned: 0,
-      replied: 0,
-      skipped: 0,
-      targetReplies: 0,
-      repliedUrls: [] as string[],
-      repliedComments: [] as Array<{ url: string; comment: string }>,
-      replyScreenshots: [] as string[],
-      error: targets.length ? undefined : "no matching unreplied published Threads posts",
-    };
-  }
-
+  const repliedPostKeys = getThreadsOwnPostReplyHistory(archive).map((item) => item.url);
   const result = await replyOwnPublishedThreadsPosts(
     resolveVmosCredentials(),
     padCode,
     {
-      targets,
+      targets: [],
       replyMode,
       replyText,
       replySuffix: String(input.replySuffix || "").trim(),
       maxPosts: 5,
       maxReplies: 3,
-      commentPersona: buildWarmupCommentPersonaFromArchive(resolvedTargets.archive),
+      commentPersona: buildWarmupCommentPersonaFromArchive(archive),
+      profileScan: {
+        minViews: Math.floor(minViews),
+        maxAgeDays: Math.floor(maxAgeDays),
+        repliedPostKeys,
+      },
     },
     onProgress,
   );
+  const base = {
+    archiveId,
+    padCode,
+    dryRun,
+    recovered: 0,
+    scanned: result.scannedPosts,
+    matched: result.matchedPosts || 0,
+  };
 
   if (result.repliedUrls?.length) {
-    const latestArchive = await loadPersonaArchive(archiveId).catch(() => resolvedTargets.archive) || resolvedTargets.archive;
+    const latestArchive = await loadPersonaArchive(archiveId).catch(() => archive) || archive;
     const existing = getThreadsOwnPostReplyHistory(latestArchive);
     const existingUrls = new Set(existing.map((item) => item.url));
     const nowIso = new Date().toISOString();
@@ -4419,10 +4402,7 @@ export async function runThreadsOwnPostReplyOnce(
       normalizeThreadsOwnPostReplyHistoryUrl(item.url),
       item.comment,
     ]));
-    const targetByUrl = new Map(targets.map((target) => [
-      normalizeThreadsOwnPostReplyHistoryUrl(target.url),
-      target,
-    ]));
+    const targetByUrl = new Map<string, ThreadsOwnPostReplyTarget>();
     const appended = result.repliedUrls
       .map((url) => ({
         url: normalizeThreadsOwnPostReplyHistoryUrl(url),
@@ -4438,7 +4418,7 @@ export async function runThreadsOwnPostReplyOnce(
       .filter(([url]) => Boolean(url)));
     for (const url of result.repliedUrls) {
       const normalizedUrl = normalizeThreadsOwnPostReplyHistoryUrl(url);
-      if (!normalizedUrl || knownTargetByUrl.has(normalizedUrl)) continue;
+      if (!/^https:\/\/www\.threads\.net\/@[^/\s]+\/post\//i.test(normalizedUrl) || knownTargetByUrl.has(normalizedUrl)) continue;
       const target = targetByUrl.get(normalizedUrl);
       knownTargetByUrl.set(normalizedUrl, {
         url: normalizedUrl,

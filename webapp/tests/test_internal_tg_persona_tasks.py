@@ -136,14 +136,15 @@ def test_auto_reply_suffix_length_is_rejected_before_execution() -> None:
         )
 
 
-def test_own_post_reply_dry_run_skips_remote_url_recovery() -> None:
+def test_own_post_reply_uses_local_dry_run_and_profile_scan_in_production() -> None:
     source = TELEGRAM_BOT_PATH.read_text(encoding="utf-8")
     function_start = source.index("export async function runThreadsOwnPostReplyOnce")
     function_source = source[function_start:]
 
     assert "collectPublishedThreadsOwnPostReplyTargets(archive, padCode)" in function_source
-    assert "resolvePublishedThreadsOwnPostReplyTargets(archive, padCode)" in function_source
-    assert function_source.index("if (dryRun) {") < function_source.index("resolvePublishedThreadsOwnPostReplyTargets(archive, padCode)")
+    assert "resolvePublishedThreadsOwnPostReplyTargets(archive, padCode)" not in function_source
+    assert "profileScan:" in function_source
+    assert function_source.index("if (dryRun) {") < function_source.index("profileScan:")
 
 
 def test_auto_reply_production_clis_resolve_and_execute(tmp_path: Path) -> None:

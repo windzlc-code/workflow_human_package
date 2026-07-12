@@ -1829,6 +1829,43 @@ export function findThreadsHomeFeedActionTargetsFromUiXml(uiXml: string): { like
   };
 }
 
+export function findThreadsOwnProfilePostBodyTargetFromUiXml(
+  uiXml: string,
+): { x: number; y: number; text: string } | null {
+  const nodes = (uiXml.match(/<node\b[^>]*>/g) ?? [])
+    .map((node) => ({
+      text: normalizeSingleLine(decodeXmlAttr(`${getXmlAttr(node, "text")} ${getXmlAttr(node, "content-desc")}`)),
+      center: parseBoundsCenter(getXmlAttr(node, "bounds")),
+      clickable: /true/i.test(getXmlAttr(node, "clickable")),
+    }))
+    .filter((node): node is { text: string; center: { x: number; y: number }; clickable: boolean } => Boolean(node.text && node.center));
+  const timeNodes = nodes.filter((node) => (
+    /(?:^|\s)(?:剛剛|刚刚|昨天|yesterday|\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周|minutes?|hours?|days?|weeks?|[mhdw]))(?:\s|$)/i.test(node.text)
+  ));
+  const ignored = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|追蹤\s*\d+|追踪\s*\d+|查看個人檔案|查看个人档案|新增個人檔案|新增个人档案|編輯個人檔案|编辑个人档案|分享個人檔案|分享个人档案|^串文$|^回覆$|影音內容|影音内容|^轉發$|^转发$/;
+  const candidates = nodes
+    .filter((node) => node.text.length >= 4 && !ignored.test(node.text))
+    .filter((node) => !timeNodes.includes(node))
+    .map((node) => {
+      const anchor = timeNodes
+        .filter((timeNode) => timeNode.center.y <= node.center.y + 50 && node.center.y - timeNode.center.y <= 260)
+        .sort((a, b) => Math.abs(node.center.y - a.center.y) - Math.abs(node.center.y - b.center.y))[0];
+      if (!anchor) return null;
+      const distance = Math.abs(node.center.y - anchor.center.y);
+      return {
+        x: node.center.x,
+        y: node.center.y,
+        text: node.text,
+        score: 20 - Math.min(15, Math.round(distance / 18)) + (node.clickable ? 2 : 0) + Math.min(5, Math.floor(node.text.length / 12)),
+      };
+    })
+    .filter((item): item is { x: number; y: number; text: string; score: number } => Boolean(item))
+    .filter((item) => item.y >= 280 && item.y <= 1420)
+    .sort((a, b) => b.score - a.score || a.y - b.y);
+  const best = candidates[0];
+  return best ? { x: best.x, y: best.y, text: best.text } : null;
+}
+
 export function findThreadsReplyComposerInputTarget(uiXml: string): { x: number; y: number } | null {
   if (looksLikeThreadsRestrictedReplyNoticeUiXml(uiXml)) return null;
   const nodes = uiXml.match(/<node\b[^>]*>/g) ?? [];
@@ -21797,6 +21834,68 @@ function extractThreadsAccountHotMetricsFromTexts(texts: string[]): Partial<Thre
   return out;
 }
 
+export function extractThreadsOwnPostViewCountFromUiXml(uiXml: string): number | undefined {
+  if (!uiXml) return undefined;
+  const texts = (uiXml.match(/<node\b[^>]*>/g) ?? [])
+    .flatMap((node) => [
+      decodeXmlAttr(getXmlAttr(node, "text")),
+      decodeXmlAttr(getXmlAttr(node, "content-desc")),
+    ])
+    .map((text) => normalizeSingleLine(text))
+    .map((text) => text.replace(/次(?=瀏覽|浏览|觀看|观看)/g, ""))
+    .filter(Boolean);
+  const viewLabel = "(?:瀏覽|浏览|觀看|观看|views?|plays?|impressions?)";
+  const compactValue = "(\\d+(?:[.,]\\d+)?\\s*(?:[kKmM万萬億亿])?)";
+  for (let index = 0; index < texts.length; index += 1) {
+    const text = texts[index];
+    const labelFirst = text.match(new RegExp(`${viewLabel}\\s*(?:次數|次数|count)?\\s*[:：]?\\s*${compactValue}`, "i"));
+    const valueFirst = text.match(new RegExp(`${compactValue}\\s*(?:次)?\\s*${viewLabel}`, "i"));
+    let value = parseThreadsCompactMetricValue(labelFirst?.[1] || valueFirst?.[1] || "");
+    if (typeof value === "number") return value;
+    if (!new RegExp(`^(?:${viewLabel})(?:次數|次数|count)?$`, "i").test(text.replace(/[\s:：]/g, ""))) continue;
+    value = parseThreadsCompactMetricValue(texts[index + 1] || "")
+      ?? parseThreadsCompactMetricValue(texts[index - 1] || "");
+    if (typeof value === "number") return value;
+  }
+  return undefined;
+}
+
+async function extractThreadsOwnPostViewCountFromScreenshot(screenshotUrl: string): Promise<number | undefined> {
+  const inlineData = await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null);
+  if (!inlineData) return undefined;
+  const request = createTimeoutSignal(6_000);
+  try {
+    const prompt = `讀取這張 Threads 主帖詳情截圖，只返回單行 JSON：{"views":"可見瀏覽量原文或空字串"}。
+只讀取主帖的瀏覽/觀看/views 數字，支援 K、M、萬、億；不要把讚、回覆、轉發或時間當成瀏覽量。看不到就返回空字串。`;
+    const raw = await callThreadsAutoReplyDirectMultimodalModel(
+      prompt,
+      inlineData,
+      request.signal,
+      { maxTokens: 60 },
+    );
+    const text = extractText(raw);
+    const jsonText = text.match(/\{[\s\S]*?\}/)?.[0] || "";
+    let value = "";
+    if (jsonText) {
+      try {
+        const parsed = JSON.parse(jsonText);
+        value = String(parsed?.views || parsed?.viewCount || parsed?.view_count || "");
+      } catch {
+        value = "";
+      }
+    }
+    if (!value) {
+      const match = text.match(/(\d+(?:[.,]\d+)?\s*(?:[kKmM万萬億亿])?)\s*(?:次)?\s*(?:瀏覽|浏览|觀看|观看|views?)/i);
+      value = match?.[1] || "";
+    }
+    return parseThreadsCompactMetricValue(value);
+  } catch {
+    return undefined;
+  } finally {
+    request.cleanup();
+  }
+}
+
 export async function queryThreadsAccountHotMetrics(
   config: VmosConfig,
   padCode: string,
@@ -22068,6 +22167,7 @@ export interface ThreadsOwnPostReplyTarget {
 export interface ThreadsOwnPostReplyProgress {
   step: string;
   scannedPosts: number;
+  matchedPosts?: number;
   replied: number;
   skipped: number;
   targetReplies?: number;
@@ -28191,7 +28291,10 @@ async function openThreadsLatestOwnPostFromProfile(
   padCode: string,
   maxAgeDays?: number,
   requireCommentBadge = true,
-): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
+): Promise<{ ok: true; screenshotUrl: string; postPreview?: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  if (!requireCommentBadge) {
+    return openThreadsOwnHotPostFromProfile(config, padCode, maxAgeDays, true);
+  }
   let initialShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   let profile = initialShotUrl && await detectThreadsProfilePageLocally(initialShotUrl).catch(() => false)
     ? { ok: true as const, screenshotUrl: initialShotUrl }
@@ -28218,6 +28321,7 @@ async function openThreadsLatestOwnPostFromProfile(
   });
 
   let lastOpenError: { ok: false; error: string; screenshotUrl?: string } | null = null;
+  let selectedPostPreview = "";
   for (let openAttempt = 0; openAttempt < 2; openAttempt += 1) {
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
     let profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
@@ -28426,7 +28530,10 @@ async function openThreadsLatestOwnPostFromProfile(
         target,
         { timeoutMs: 5_500 },
       ).catch(() => ({ postPreview: "", postAuthor: "" }));
-      if (!preview.abnormalPreview && (!preview.postPreview || isThreadsAutoReplyUsablePostPreview(preview.postPreview))) break;
+      if (!preview.abnormalPreview && (!preview.postPreview || isThreadsAutoReplyUsablePostPreview(preview.postPreview))) {
+        selectedPostPreview = preview.postPreview;
+        break;
+      }
       saveThreadsAutoReplySampleStep({
         padCode,
         step: "profile-skip-abnormal-visual-preview",
@@ -28505,7 +28612,7 @@ async function openThreadsLatestOwnPostFromProfile(
       };
     }
     if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
-      return { ok: true, screenshotUrl: shotUrl };
+      return { ok: true, screenshotUrl: shotUrl, postPreview: selectedPostPreview || undefined };
     }
     const stillSuggestionAfterTap = await detectThreadsProfileSuggestionOverlayLocally(shotUrl).catch(() => false);
     if (stillSuggestionAfterTap) {
@@ -28519,7 +28626,7 @@ async function openThreadsLatestOwnPostFromProfile(
       3_500,
       "threadsAutoReply validate opened post quick timeout",
     ).catch(() => null);
-    if (earlyDetail?.ok) return { ok: true, screenshotUrl: earlyDetail.screenshotUrl };
+    if (earlyDetail?.ok) return { ok: true, screenshotUrl: earlyDetail.screenshotUrl, postPreview: selectedPostPreview || undefined };
     if (earlyDetail && /回复编辑器|回覆編輯器|reply editor|回复|回覆/.test(earlyDetail.error)) {
       const fallback = await openThreadsProfilePostByTextFallback(
         config,
@@ -28529,7 +28636,7 @@ async function openThreadsLatestOwnPostFromProfile(
         target,
         "profile-comment-badge-text-fallback",
       );
-      if (fallback.ok === true) return fallback;
+      if (fallback.ok === true) return { ...fallback, postPreview: selectedPostPreview || undefined };
       const fallbackError = fallback as { ok: false; error: string; screenshotUrl?: string };
       lastOpenError = { ok: false, error: fallbackError.error, screenshotUrl: fallbackError.screenshotUrl };
       shotUrl = fallbackError.screenshotUrl || shotUrl;
@@ -28566,7 +28673,7 @@ async function openThreadsLatestOwnPostFromProfile(
       error: error instanceof Error ? error.message : String(error),
       screenshotUrl: shotUrl,
     }));
-    if (detail.ok === true) return { ok: true, screenshotUrl: detail.screenshotUrl };
+    if (detail.ok === true) return { ok: true, screenshotUrl: detail.screenshotUrl, postPreview: selectedPostPreview || undefined };
     const detailError = detail as { ok: false; error: string; screenshotUrl?: string };
     lastOpenError = detailError;
     if (detailError.screenshotUrl && await detectThreadsProfilePageLocally(detailError.screenshotUrl).catch(() => false)) {
@@ -28583,7 +28690,7 @@ async function openThreadsLatestOwnPostFromProfile(
         target,
         "profile-comment-badge-text-fallback-late",
       );
-      if (fallback.ok === true) return fallback;
+      if (fallback.ok === true) return { ...fallback, postPreview: selectedPostPreview || undefined };
       const fallbackError = fallback as { ok: false; error: string; screenshotUrl?: string };
       lastOpenError = { ok: false, error: fallbackError.error, screenshotUrl: fallbackError.screenshotUrl };
       shotUrl = fallbackError.screenshotUrl || shotUrl;
@@ -28606,7 +28713,11 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   config: VmosConfig,
   padCode: string,
   maxAgeDays?: number,
-): Promise<{ ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  requireCommentBadge = true,
+): Promise<{ ok: true; screenshotUrl: string; postPreview?: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  if (!requireCommentBadge) {
+    return openThreadsOwnHotPostFromProfile(config, padCode, maxAgeDays, false);
+  }
   const ensureProfileBeforeScan = async (
     currentShotUrl: string,
     attemptLabel: string,
@@ -28661,6 +28772,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   if (!preflight.ok) return preflight;
   shotUrl = preflight.screenshotUrl;
   let profileUiXml = preflight.uiXml;
+  let selectedPostPreview = "";
   for (let setupRevealAttempt = 0; setupRevealAttempt < 2; setupRevealAttempt += 1) {
     const setupCardVisible = await detectThreadsProfileSetupCardLocally(shotUrl).catch(() => false);
     if (!setupCardVisible) break;
@@ -28671,7 +28783,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
   }
   let target = await withTimeout(
     locateThreadsVisibleOwnPostContentTarget(shotUrl, "", {
-      requireCommentBadge: true,
+      requireCommentBadge,
       padCode,
       sampleStep: "profile-next-comment-badge-scan-fast",
       maxAgeDays,
@@ -28685,7 +28797,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
-        requireCommentBadge: true,
+        requireCommentBadge,
         padCode,
         sampleStep: "profile-next-comment-badge-scan-fast-verify",
         maxAgeDays,
@@ -28698,7 +28810,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
-      requireCommentBadge: true,
+      requireCommentBadge,
       padCode,
       sampleStep: "profile-next-comment-badge-scan",
       maxAgeDays,
@@ -28728,7 +28840,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     profileUiXml = revealPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
-        requireCommentBadge: true,
+        requireCommentBadge,
         padCode,
         sampleStep: "profile-next-comment-badge-scan-bottom-reveal",
         maxAgeDays,
@@ -28764,7 +28876,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
-        requireCommentBadge: true,
+        requireCommentBadge,
         padCode,
         sampleStep: "profile-next-comment-badge-scan-retry",
         maxAgeDays,
@@ -28791,7 +28903,10 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
       target,
       { timeoutMs: 5_500 },
     ).catch(() => ({ postPreview: "", postAuthor: "" }));
-    if (!preview.abnormalPreview && (!preview.postPreview || isThreadsAutoReplyUsablePostPreview(preview.postPreview))) break;
+    if (!preview.abnormalPreview && (!preview.postPreview || isThreadsAutoReplyUsablePostPreview(preview.postPreview))) {
+      selectedPostPreview = preview.postPreview;
+      break;
+    }
     saveThreadsAutoReplySampleStep({
       padCode,
       step: "profile-next-skip-abnormal-visual-preview",
@@ -28812,7 +28927,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
-        requireCommentBadge: true,
+        requireCommentBadge,
         padCode,
         sampleStep: "profile-next-comment-badge-scan-after-abnormal-skip",
         maxAgeDays,
@@ -28863,7 +28978,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     3_500,
     "threadsAutoReply validate next opened post quick timeout",
   ).catch(() => null);
-  if (earlyDetail?.ok) return { ok: true, screenshotUrl: earlyDetail.screenshotUrl };
+  if (earlyDetail?.ok) return { ok: true, screenshotUrl: earlyDetail.screenshotUrl, postPreview: selectedPostPreview || undefined };
   if (earlyDetail && /回复编辑器|回覆編輯器|reply editor|回复|回覆/.test(earlyDetail.error)) {
     const fallback = await openThreadsProfilePostByTextFallback(
       config,
@@ -28873,7 +28988,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
       target,
       "profile-next-comment-badge-text-fallback",
     );
-    if (fallback.ok === true) return fallback;
+    if (fallback.ok === true) return { ...fallback, postPreview: selectedPostPreview || undefined };
     return fallback as { ok: false; error: string; screenshotUrl?: string };
   }
   const openedPage = await classifyThreadsPageOnDevice(config, padCode).catch(() => null);
@@ -28900,7 +29015,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     const currentProfileUiXml = await dumpUiXmlQuick(config, padCode, 3_500).catch(() => "");
     const currentTarget = currentProfileShotUrl
       ? await locateThreadsVisibleOwnPostContentTarget(currentProfileShotUrl, currentProfileUiXml, {
-        requireCommentBadge: true,
+        requireCommentBadge,
         padCode,
         sampleStep: "profile-next-open-self-correct-current-badge",
         maxAgeDays,
@@ -28971,7 +29086,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
         error: error instanceof Error ? error.message : String(error),
         screenshotUrl: retryOverlayShotUrl || retryShotUrl || shotUrl,
       }));
-      if (retryDetail.ok === true) return { ok: true, screenshotUrl: retryDetail.screenshotUrl };
+      if (retryDetail.ok === true) return { ok: true, screenshotUrl: retryDetail.screenshotUrl, postPreview: selectedPostPreview || undefined };
       detail = retryDetail;
       if (!await detectThreadsProfilePageLocally(retryDetail.screenshotUrl || "").catch(() => false)) break;
     }
@@ -28985,11 +29100,231 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
       target,
       "profile-next-comment-badge-text-fallback-late",
     );
-    if (fallback.ok === true) return fallback;
+    if (fallback.ok === true) return { ...fallback, postPreview: selectedPostPreview || undefined };
     return fallback as { ok: false; error: string; screenshotUrl?: string };
   }
   if (detail.ok !== true) return detail as { ok: false; error: string; screenshotUrl?: string };
-  return { ok: true, screenshotUrl: openedPage?.screenshotUrl || shotUrl };
+  return { ok: true, screenshotUrl: openedPage?.screenshotUrl || shotUrl, postPreview: selectedPostPreview || undefined };
+}
+
+async function openThreadsOwnHotPostFromProfile(
+  config: VmosConfig,
+  padCode: string,
+  maxAgeDays: number | undefined,
+  firstPost: boolean,
+): Promise<{ ok: true; screenshotUrl: string; postPreview?: string } | { ok: false; error: string; screenshotUrl?: string }> {
+  const startedAt = Date.now();
+  const trace = (stage: string) => {
+    console.log(`[threads][own-post-profile] pad=${padCode} first=${firstPost ? 1 : 0} elapsed=${Date.now() - startedAt}ms stage=${stage}`);
+  };
+  trace("start");
+  const currentShotUrl = firstPost
+    ? await withTimeout(
+      screenshot(config, padCode),
+      12_000,
+      "threadsOwnPostReply current profile screenshot timeout",
+    ).then((url) => freezeScreenshotUrl(url)).catch(() => "")
+    : "";
+  let profile: { ok: true; screenshotUrl: string } | { ok: false; error: string; screenshotUrl?: string };
+  if (firstPost) {
+    profile = currentShotUrl && await withTimeout(
+      detectThreadsProfilePageLocally(currentShotUrl),
+      3_000,
+      "threadsOwnPostReply current profile detect timeout",
+    ).catch(() => false)
+      ? { ok: true, screenshotUrl: currentShotUrl }
+      : await openThreadsProfileForAccountQuery(config, padCode);
+  } else {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+    await delay(800);
+    const backShotUrl = await withTimeout(
+      screenshot(config, padCode),
+      12_000,
+      "threadsOwnPostReply back-to-profile screenshot timeout",
+    ).then((url) => freezeScreenshotUrl(url)).catch(() => "");
+    profile = backShotUrl && await withTimeout(
+      detectThreadsProfilePageLocally(backShotUrl),
+      3_000,
+      "threadsOwnPostReply back-to-profile detect timeout",
+    ).catch(() => false)
+      ? { ok: true, screenshotUrl: backShotUrl }
+      : await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
+  }
+  trace(profile.ok ? "profile-ready" : "profile-failed");
+  if (!profile.ok) return profile;
+  if (!firstPost) {
+    profile = await leaveThreadsReplyComposerBeforeProfileScan(
+      config,
+      padCode,
+      profile.screenshotUrl,
+      "hot-profile-next-left-reply-editor",
+    );
+    if (!profile.ok) return profile;
+  }
+
+  if (firstPost) {
+    for (let resetAttempt = 0; resetAttempt < 3; resetAttempt += 1) {
+      await threadsAdbInputNoWait(config, padCode, "input swipe 360 520 360 1320 480", 850).catch(() => undefined);
+      await delay(300);
+    }
+    trace("top-reset-done");
+  }
+  const initialRevealSwipes = firstPost ? 2 : 1;
+  for (let revealAttempt = 0; revealAttempt < initialRevealSwipes; revealAttempt += 1) {
+    await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 520", 1000).catch(() => undefined);
+    await delay(350);
+  }
+  trace("initial-reveal-done");
+
+  let shotUrl = await withTimeout(
+    screenshot(config, padCode),
+    12_000,
+    "threadsOwnPostReply profile screenshot timeout",
+  ).then((url) => freezeScreenshotUrl(url)).catch(() => profile.screenshotUrl || "");
+  trace(shotUrl ? "initial-screenshot-ready" : "initial-screenshot-missing");
+  let lastUiXml = "";
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    trace(`attempt-${attempt + 1}-start`);
+    if (!shotUrl) return { ok: false, error: "未能取得 Threads 個人主頁截圖" };
+    lastUiXml = await dumpUiXmlQuick(config, padCode, 3_500).catch(() => "");
+    trace(`attempt-${attempt + 1}-ui-${lastUiXml ? "ready" : "missing"}`);
+    const xmlTarget = findThreadsOwnProfilePostBodyTargetFromUiXml(lastUiXml);
+    const target = xmlTarget && isThreadsProfilePostTargetWithinAutoReplyAge(lastUiXml, xmlTarget, maxAgeDays)
+      ? xmlTarget
+      : await withTimeout(
+        locateThreadsVisibleOwnPostContentTarget(shotUrl, lastUiXml, {
+          requireCommentBadge: false,
+          maxAgeDays,
+        }),
+        6_000,
+        "threadsOwnPostReply local profile post locate timeout",
+      ).catch(() => null);
+    if (target) {
+      trace(`attempt-${attempt + 1}-target-ready`);
+      const tapTarget = xmlTarget && target === xmlTarget
+        ? target
+        : {
+          x: target.x,
+          y: Math.max(320, target.y - 260),
+        };
+      const preview = xmlTarget && target === xmlTarget
+        ? { postPreview: xmlTarget.text, postAuthor: "", abnormalPreview: false }
+        : await extractThreadsProfilePostPreviewAboveActionRowByVision(
+          shotUrl,
+          target,
+          { timeoutMs: 5_500 },
+        ).catch(() => ({ postPreview: "", postAuthor: "", abnormalPreview: false }));
+      if (preview.abnormalPreview) {
+        await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 600", 1000).catch(() => undefined);
+        shotUrl = await withTimeout(
+          screenshot(config, padCode),
+          12_000,
+          "threadsOwnPostReply abnormal profile screenshot timeout",
+        ).then((url) => freezeScreenshotUrl(url)).catch(() => shotUrl);
+        continue;
+      }
+      const profileShotUrl = shotUrl;
+      await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, tapTarget, 2200).catch(async () => {
+        const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+        const image = await getImageDimensions(shotUrl).catch(() => null);
+        await tapViaAdbAbsolute(
+          config,
+          padCode,
+          Math.round(tapTarget.x * (screen.width / (image?.width || BASE_SCREEN.width))),
+          Math.round(tapTarget.y * (screen.height / (image?.height || BASE_SCREEN.height))),
+          2200,
+        );
+      });
+      await delay(900);
+      if (!await waitForThreadsForegroundOrVisible(config, padCode, 3_000).catch(() => false)) {
+        trace("foreground-left-threads");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+        return {
+          ok: false,
+          error: "主帖定位離開 Threads，已返回個人主頁並停止本次掃描",
+          screenshotUrl: shotUrl,
+        };
+      }
+      shotUrl = await withTimeout(
+        screenshot(config, padCode),
+        12_000,
+        "threadsOwnPostReply opened detail screenshot timeout",
+      ).then((url) => freezeScreenshotUrl(url)).catch(() => shotUrl);
+      trace("detail-screenshot-ready");
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "hot-profile-after-post-tap",
+        screenshotUrl: shotUrl,
+        meta: { target, tapTarget, postPreview: preview.postPreview.slice(0, 160) },
+      });
+      if (
+        await detectThreadsInAppBrowserLocally(shotUrl).catch(() => false)
+        || await detectThreadsExternalWebViewLocally(shotUrl).catch(() => false)
+      ) {
+        trace("external-page-rejected");
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+        return {
+          ok: false,
+          error: "主帖定位誤入外部連結，已返回個人主頁並停止本次掃描",
+          screenshotUrl: shotUrl,
+        };
+      }
+      if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
+        trace("detail-shell-confirmed");
+        return {
+          ok: true,
+          screenshotUrl: shotUrl,
+          postPreview: preview.postPreview || undefined,
+        };
+      }
+      const detail = await withTimeout(
+        validateThreadsAutoReplyDetailReady(config, padCode, shotUrl),
+        8_000,
+        "threadsOwnPostReply validate profile post detail timeout",
+      ).catch((error) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+        screenshotUrl: shotUrl,
+      }));
+      if (detail.ok) {
+        trace("detail-validated");
+        return {
+          ok: true,
+          screenshotUrl: detail.screenshotUrl,
+          postPreview: preview.postPreview || undefined,
+        };
+      }
+      if (await detectThreadsProfilePageLocally(detail.screenshotUrl || "").catch(() => false)) {
+        const fallback = await openThreadsProfilePostByTextFallback(
+          config,
+          padCode,
+          profileShotUrl,
+          lastUiXml,
+          target,
+          "hot-profile-post-text-fallback",
+        );
+        if (fallback.ok) {
+          return { ...fallback, postPreview: preview.postPreview || undefined };
+        }
+      }
+      return detail;
+    }
+    if (isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(lastUiXml, maxAgeDays)) break;
+    await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 600", 1000).catch(() => undefined);
+    await delay(350);
+    shotUrl = await withTimeout(
+      screenshot(config, padCode),
+      12_000,
+      "threadsOwnPostReply next profile screenshot timeout",
+    ).then((url) => freezeScreenshotUrl(url)).catch(() => shotUrl);
+    trace(`attempt-${attempt + 1}-next-screenshot-ready`);
+  }
+  trace("no-profile-post-found");
+  return {
+    ok: false,
+    error: `${maxAgeDays || 2} 天內未找到可掃描的本人推文`,
+    screenshotUrl: shotUrl,
+  };
 }
 
 async function openThreadsProfilePostByTextFallback(
@@ -29287,7 +29622,8 @@ export async function locateThreadsVisibleOwnPostContentTarget(
   const profileLooksReadable = line && looksLikeThreadsProfileUiXml(uiXml);
   const hasProfileChrome = /串文.*(?:回覆|回复|影音內容|影音内容|轉發|转发)|查看個人檔案|查看个人档案|編輯個人檔案|编辑个人资料/.test(line);
   const hasProfileSetupCardByPixels = await detectThreadsProfileSetupCardLocally(screenshotUrl).catch(() => false);
-  const countedCommentTarget = await locateThreadsProfileTopCountedCommentTargetLocally(screenshotUrl).catch((error) => {
+  const countedCommentTarget = options.requireCommentBadge
+    ? await locateThreadsProfileTopCountedCommentTargetLocally(screenshotUrl).catch((error) => {
     if (options.padCode && options.requireCommentBadge) {
       saveThreadsAutoReplySampleStep({
         padCode: options.padCode,
@@ -29301,7 +29637,8 @@ export async function locateThreadsVisibleOwnPostContentTarget(
       });
     }
     return null;
-  });
+      })
+    : null;
   const setupCardBlocksCountedTarget = Boolean(
     countedCommentTarget
     && (hasProfileSetupCard || hasProfileSetupCardByPixels)
@@ -29388,27 +29725,28 @@ export async function locateThreadsVisibleOwnPostContentTarget(
     && (!hasProfileSetupCard || actionY > height * 0.72)
     && !/messages|composer|media_viewer|fallback_comment_missing|side_drawer/i.test(debug)
   ) {
-    if (actions?.comment) {
-      return {
-        x: Math.round(actions.comment.x),
-        y: Math.round(actions.comment.y),
-      };
-    }
-    const offset = actionY > height * 0.70
-      ? Math.min(380, height * 0.24)
-      : Math.min(180, height * 0.12);
-    return {
+    const fallbackTarget = {
       x: Math.round(width * 0.50),
-      y: Math.max(Math.round(height * 0.22), Math.round(actionY - offset)),
+      y: Math.max(
+        Math.round(height * 0.22),
+        Math.round(actionY - (actionY > height * 0.50 ? Math.min(360, height * 0.23) : Math.min(180, height * 0.12))),
+      ),
     };
+    if (uiXml && !isThreadsProfilePostTargetWithinAutoReplyAge(uiXml, fallbackTarget, options.maxAgeDays)) {
+      return null;
+    }
+    return fallbackTarget;
   }
   const isSuggestionOnly = /讓動態消息保持新意|让动态消息保持新意|追蹤一些新的個人檔案|追踪一些新的个人档案/.test(line)
     && !hasVisiblePostText;
   if (profileLooksReadable && hasProfileChrome && hasVisiblePostText && !isSuggestionOnly && !hasProfileSetupCard) {
-    return {
+    const fallbackTarget = {
       x: Math.round(width * 0.50),
       y: Math.round(height * 0.36),
     };
+    return !uiXml || isThreadsProfilePostTargetWithinAutoReplyAge(uiXml, fallbackTarget, options.maxAgeDays)
+      ? fallbackTarget
+      : null;
   }
   return null;
 }
@@ -34944,6 +35282,11 @@ export async function replyOwnPublishedThreadsPosts(
     maxReplies?: number;
     commentPersona?: WarmupCommentPersona;
     replySuffix?: string;
+    profileScan?: {
+      maxAgeDays: number;
+      minViews: number;
+      repliedPostKeys?: string[];
+    };
   },
   onProgress?: (progress: ThreadsOwnPostReplyProgress) => void,
 ): Promise<ThreadsOwnPostReplyProgress> {
@@ -34964,6 +35307,7 @@ export async function replyOwnPublishedThreadsPosts(
     : 1;
   const executionTargets = targets.slice(0, maxPosts);
   let scannedPosts = 0;
+  let matchedPosts = 0;
   let replied = 0;
   let skipped = 0;
   const replyScreenshots: string[] = [];
@@ -35069,6 +35413,7 @@ export async function replyOwnPublishedThreadsPosts(
     onProgress?.({
       step: progress.step || "Threads 自動回覆熱點推文進行中",
       scannedPosts: progress.scannedPosts ?? scannedPosts,
+      matchedPosts: progress.matchedPosts ?? matchedPosts,
       replied: progress.replied ?? replied,
       skipped: progress.skipped ?? skipped,
       targetReplies: progress.targetReplies ?? targetReplies,
@@ -35079,6 +35424,179 @@ export async function replyOwnPublishedThreadsPosts(
       error: progress.error,
     });
   };
+
+  if (cfg.profileScan) {
+    const maxAgeDays = Math.max(1, Math.min(7, Math.floor(cfg.profileScan.maxAgeDays || 2)));
+    const minViews = Math.max(0, Math.floor(cfg.profileScan.minViews || 0));
+    const repliedPostKeys = new Set(
+      (cfg.profileScan.repliedPostKeys || []).map((item) => String(item || "").trim()).filter(Boolean),
+    );
+    const seenPostKeys = new Set<string>();
+    report({ step: "Threads 自動回覆熱點推文預檢：正在冷啟動 Threads" });
+    await relaunchThreads(config, padCode, 3_500);
+    report({ step: "Threads 自動回覆熱點推文預檢：正在打開個人主頁" });
+    const profileScreen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+    await withTimeout(
+      tapViaAdbAbsoluteQuick(
+        config,
+        padCode,
+        Math.round(profileScreen.width * 0.86),
+        Math.round(profileScreen.height * 0.96),
+        2_000,
+      ),
+      8_000,
+      "threadsOwnPostReply profile tab tap timeout",
+    );
+    report({ step: `正在從個人主頁查找 ${maxAgeDays} 天內的本人推文` });
+    let opened = await withTimeout(
+      openThreadsLatestOwnPostFromProfile(config, padCode, maxAgeDays, false),
+      90_000,
+      "threadsOwnPostReply open latest profile post timeout",
+    ).catch((error) => ({
+      ok: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    if (!opened.ok) {
+      const result: ThreadsOwnPostReplyProgress = {
+        step: "Threads 自動回覆熱點推文完成：範圍內沒有可掃描推文",
+        scannedPosts,
+        matchedPosts,
+        replied,
+        skipped,
+        targetReplies,
+        replyScreenshots,
+        repliedUrls,
+        repliedComments,
+        done: true,
+        error: opened.error,
+      };
+      onProgress?.(result);
+      return result;
+    }
+
+    for (let postIndex = 0; postIndex < maxPosts && replied < targetReplies; postIndex += 1) {
+      scannedPosts += 1;
+      report({ step: `正在讀取個人主頁第 ${postIndex + 1} 篇推文` });
+      const uiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+      let detailShotUrl = "";
+      let postPreview = normalizeSingleLine(opened.postPreview || "");
+      if (!postPreview) {
+        detailShotUrl = await screenshot(config, padCode)
+          .then((url) => freezeScreenshotUrl(url))
+          .catch(() => opened.screenshotUrl);
+        const visualPreview = await extractThreadsAutoReplyPostPreviewByVision(
+          detailShotUrl,
+          [],
+          { timeoutMs: 5_500 },
+        ).catch(() => ({ postPreview: "", postAuthor: "" }));
+        postPreview = normalizeSingleLine(visualPreview.postPreview);
+      }
+      let viewCount = extractThreadsOwnPostViewCountFromUiXml(uiXml);
+      if (typeof viewCount !== "number" && minViews > 0) {
+        viewCount = await extractThreadsOwnPostViewCountFromScreenshot(opened.screenshotUrl);
+      }
+      const postKey = postPreview
+        ? `threads-profile:${buildThreadsAutoReplyPostHash(padCode, postPreview)}`
+        : "";
+
+      if (!postKey || seenPostKeys.has(postKey)) {
+        skipped += 1;
+        errors.push(postKey ? "個人主頁出現重複推文，已跳過" : "未能讀取主推文正文，已跳過避免誤回覆");
+        report({ step: postKey ? "已跳過重複推文" : "未能識別主推文正文，已跳過" });
+      } else if (repliedPostKeys.has(postKey)) {
+        seenPostKeys.add(postKey);
+        skipped += 1;
+        report({ step: "這篇推文已回覆過，已跳過" });
+      } else if (minViews > 0 && typeof viewCount !== "number") {
+        seenPostKeys.add(postKey);
+        skipped += 1;
+        errors.push(`第 ${postIndex + 1} 篇未能讀取瀏覽量`);
+        report({ step: "未能讀取這篇推文的瀏覽量，已跳過" });
+      } else if (typeof viewCount === "number" && viewCount < minViews) {
+        seenPostKeys.add(postKey);
+        skipped += 1;
+        report({ step: `瀏覽量 ${viewCount} 未達門檻 ${minViews}，已跳過` });
+      } else {
+        seenPostKeys.add(postKey);
+        matchedPosts += 1;
+        report({
+          step: typeof viewCount === "number"
+            ? `瀏覽量 ${viewCount} 已達門檻，正在回覆主推文`
+            : "正在回覆主推文",
+        });
+        try {
+          detailShotUrl = detailShotUrl || await screenshot(config, padCode)
+            .then((url) => freezeScreenshotUrl(url))
+            .catch(() => opened.screenshotUrl);
+          const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
+          const bottomReplyPoint = {
+            x: Math.round((screen.width || BASE_SCREEN.width) * 0.44),
+            y: Math.round((screen.height || BASE_SCREEN.height) * 0.955),
+          };
+          const result = await warmupExecuteCommentAtPoint(config, padCode, bottomReplyPoint, async () => {
+            const comment = replyMode === "manual"
+              ? manualReplyText
+              : await generateOwnPostComment(postPreview, detailShotUrl);
+            if (!comment) {
+              throw new Error(replyMode === "manual" ? "自定义回覆內容不能為空" : "模型未能基於主推文生成合格留言");
+            }
+            return appendThreadsReplySuffix(comment, cfg.replySuffix);
+          }, {
+            sourceScreenshotUrl: detailShotUrl,
+            openViaCommentFirst: true,
+            alreadyInReplyComposer: true,
+            preferBottomReplyInput: true,
+            debugReason: "acp_search_reply_composer_comment_allowed | auto_reply_own_profile_post",
+          });
+          replied += 1;
+          repliedPostKeys.add(postKey);
+          repliedUrls.push(postKey);
+          repliedComments.push({ url: postKey, comment: result.comment });
+          if (result.screenshotUrl) replyScreenshots.push(result.screenshotUrl);
+          report({ step: "已完成一篇本人主推文回覆" });
+        } catch (error) {
+          skipped += 1;
+          const message = error instanceof Error ? error.message : String(error);
+          errors.push(`第 ${postIndex + 1} 篇回覆失敗：${message}`);
+          report({ step: "回覆失敗，已跳過", error: message });
+        }
+      }
+
+      if (replied >= targetReplies || postIndex >= maxPosts - 1) break;
+      report({ step: "正在返回個人主頁並查找下一篇本人推文" });
+      opened = await withTimeout(
+        openThreadsNextVisibleOwnPostFromCurrentProfile(config, padCode, maxAgeDays, false),
+        70_000,
+        "threadsOwnPostReply open next profile post timeout",
+      ).catch((error) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      if (!opened.ok) {
+        errors.push(opened.error);
+        break;
+      }
+    }
+
+    const finalError = replied > 0
+      ? errors.slice(-2).join("；") || undefined
+      : errors.slice(-3).join("；") || "沒有成功回覆任何推文";
+    const result: ThreadsOwnPostReplyProgress = {
+      step: replied > 0 ? "Threads 自動回覆熱點推文完成" : "Threads 自動回覆熱點推文完成：無成功回覆",
+      scannedPosts,
+      matchedPosts,
+      replied,
+      skipped,
+      targetReplies,
+      replyScreenshots,
+      repliedUrls,
+      repliedComments,
+      done: true,
+      error: finalError,
+    };
+    onProgress?.(result);
+    return result;
+  }
 
   if (!targets.length) {
     const result: ThreadsOwnPostReplyProgress = {
