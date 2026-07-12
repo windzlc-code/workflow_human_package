@@ -17522,11 +17522,19 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
 
     if typ == "persona_set_link_ending":
         archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
+        action = str(payload.get("action") or "add").strip().lower()
+        preset_id = str(payload.get("presetId") or payload.get("preset_id") or "").strip()
+        if not archive_id:
+            raise HTTPException(status_code=400, detail="persona_set_link_ending requires archiveId")
+        if action == "delete":
+            if not preset_id:
+                raise HTTPException(status_code=400, detail="persona_set_link_ending delete requires presetId")
+            return {"archiveId": archive_id, "action": "delete", "presetId": preset_id}
+        if action != "add":
+            raise HTTPException(status_code=400, detail="persona_set_link_ending action is invalid")
         ending_text = str(payload.get("endingText") or payload.get("ending_text") or "").strip()[:240]
         link_url = str(payload.get("linkUrl") or payload.get("link_url") or "").strip()
         name = str(payload.get("name") or ending_text or link_url).strip()[:40]
-        if not archive_id:
-            raise HTTPException(status_code=400, detail="persona_set_link_ending requires archiveId")
         if not ending_text and not link_url:
             raise HTTPException(status_code=400, detail="persona_set_link_ending requires endingText or linkUrl")
         if link_url and not re.match(r"^https?://[^\s]+$", link_url, re.I):
@@ -21709,7 +21717,7 @@ def create_app() -> FastAPI:
         threads_automation_task_types = {"threads_warmup", "threads_auto_reply", "threads_own_post_reply"}
         safe_persona_result = {
             key: output_payload.get(key)
-            for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "publishedCount", "customPublish", "mode")
+            for key in ("ok", "archiveId", "postId", "imageUrl", "screenshotUrl", "publishedUrl", "publishedCount", "customPublish", "mode", "deletedPresetId")
             if key in output_payload
         }
         if persona_task_type == "persona_set_link_ending" and isinstance(output_payload.get("preset"), dict):

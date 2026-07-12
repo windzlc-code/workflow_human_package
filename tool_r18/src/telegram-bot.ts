@@ -5446,14 +5446,20 @@ export function buildAutoReplyLinkPresetPickerRows(
   flow: AutoReplyLinkTemplateFlow,
 ): Array<Array<{ text: string; callback_data: string }>> {
   const presets = getSelectableLinkEndingPresets(archive.setup as any);
+  const persistedPresetCount = getLinkEndingPresets(archive.setup as any).length;
   const selectedPresetId = pendingAutoReplyLinkPresetSelections.get(autoReplyLinkPresetSelectionKey(chatId, archive.id, flow));
   const flowCode = autoReplyLinkTemplateFlowCode(flow);
   const archiveToken = rememberAutoReplyLinkArchiveToken(chatId, archive.id);
   return [
-    ...presets.map((preset, index) => [{
-      text: `${selectedPresetId === preset.id ? "✅" : "🔗"} ${preset.name || preset.endingText || preset.linkUrl || `模板 ${index + 1}`}`.slice(0, 60),
-      callback_data: `arl_${flowCode}_${index}_${archiveToken}`,
-    }]),
+    ...presets.map((preset, index) => [
+      {
+        text: `${selectedPresetId === preset.id ? "✅" : "🔗"} ${preset.name || preset.endingText || preset.linkUrl || `模板 ${index + 1}`}`.slice(0, 48),
+        callback_data: `arl_${flowCode}_${index}_${archiveToken}`,
+      },
+      ...(index < persistedPresetCount
+        ? [{ text: "🗑 删除", callback_data: `arld_${flowCode}_${index}_${archiveToken}` }]
+        : []),
+    ]),
     [{
       text: `${!selectedPresetId ? "✅" : "🚫"} ${flow === "hot_content" ? "跳过链接模板" : "不添加链接模板"}`,
       callback_data: `arl_${flowCode}_-1_${archiveToken}`,
@@ -5477,12 +5483,12 @@ async function renderAutoReplyLinkPresetPicker(
 ) {
   const presets = getSelectableLinkEndingPresets(archive.setup as any);
   await safeEditOrSend(bot, chatId, messageId, [
-    "🔗 自动回复链接模板设置",
+    "🔗 临时链接模板设置",
     "",
     `人设：${archive.name}`,
     `使用场景：${flow === "comments" ? "自动回复评论" : flow === "hot_content" ? "自定义回复内容" : "自动回复热点推文"}`,
     "",
-    presets.length ? "请选择本次任务使用的链接模板。" : "当前还没有链接模板，可以立即新建后再选择。",
+    presets.length ? "请选择本次任务使用的链接模板，也可以新增或删除模板。" : "当前还没有链接模板，可以立即新建后再选择。",
     "此处只临时设置本次自动回复，不修改其他发布任务。",
   ].join("\n"), {
     disable_web_page_preview: true,
@@ -19444,6 +19450,19 @@ function sendMainMenu(chatId: number, msgId?: number) {
       data = `linkpreset_add_${id}`;
     }
 
+    const autoReplyLinkDeleteMatch = data.match(/^arld_([chm])_(\d+)_(.+)$/);
+    if (autoReplyLinkDeleteMatch) {
+      const flow: AutoReplyLinkTemplateFlow = autoReplyLinkDeleteMatch[1] === "c"
+        ? "comments"
+        : autoReplyLinkDeleteMatch[1] === "m"
+          ? "hot_content"
+          : "hot";
+      const presetIndex = Number.parseInt(autoReplyLinkDeleteMatch[2], 10);
+      const id = resolveAutoReplyLinkArchiveId(chatId, autoReplyLinkDeleteMatch[3]);
+      pendingAutoReplyLinkSettingsReturns.set(chatId, { archiveId: id, flow });
+      data = `lpd_${id}_${presetIndex}`;
+    }
+
     const autoReplyLinkBackMatch = data.match(/^arlback_([chm])_(.+)$/);
     if (autoReplyLinkBackMatch) {
       const flow: AutoReplyLinkTemplateFlow = autoReplyLinkBackMatch[1] === "c"
@@ -24326,7 +24345,28 @@ function sendMainMenu(chatId: number, msgId?: number) {
         setup: { ...(archive.setup || {}), linkEndingPresets: presets, activeLinkEndingPresetId: "" } as any,
       }).catch(() => null);
       invalidatePersonaListCache();
+      const autoReplyReturn = pendingAutoReplyLinkSettingsReturns.get(chatId);
+      if (data.startsWith("lpd_") && autoReplyReturn?.archiveId === id && !updated) {
+        await safeEditOrSend(bot, chatId, msgId, "❌ 链接模板删除失败，请稍后重试。", {
+          reply_markup: { inline_keyboard: buildAutoReplyLinkPresetPickerRows(chatId, archive, autoReplyReturn.flow) },
+        });
+        return;
+      }
       const latest = updated || archive;
+      if (data.startsWith("lpd_") && autoReplyReturn?.archiveId === id) {
+        const selectionKey = autoReplyLinkPresetSelectionKey(chatId, id, autoReplyReturn.flow);
+        if (pendingAutoReplyLinkPresetSelections.get(selectionKey) === targetPreset.id) {
+          pendingAutoReplyLinkPresetSelections.set(selectionKey, null);
+          if (autoReplyReturn.flow === "hot_content") {
+            const draft = pendingThreadsOwnPostReplyInputs.get(chatId);
+            if (draft?.archiveId === id) {
+              pendingThreadsOwnPostReplyInputs.set(chatId, { ...draft, linkReplyText: "", createdAt: Date.now() });
+            }
+          }
+        }
+        await renderAutoReplyLinkPresetPicker(bot, chatId, msgId, latest, autoReplyReturn.flow);
+        return;
+      }
       await safeEditOrSend(bot, chatId, msgId, buildLinkEndingSettingsText(latest), {
         disable_web_page_preview: true,
         reply_markup: { inline_keyboard: buildLinkEndingSettingsRows(id, latest.setup as any) },

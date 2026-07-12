@@ -624,6 +624,8 @@ def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
     platform_menu = _function_source("_persona_autoreply_menu")
     comments_menu = _function_source("_threads_auto_reply_settings")
     link_picker = _function_source("_auto_reply_link_picker")
+    link_delete = _function_source("_auto_reply_link_delete_submit")
+    link_delete_poll = _function_source("_auto_reply_link_delete_poll")
     confirmation = _function_source("_own_reply_confirmation")
 
     assert '_persona_autoreply_mode_menu(action[len("persona_autoreply_") :])' in handle
@@ -636,6 +638,7 @@ def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
     assert "acctautoreply_days_" in comments_menu
     assert "arls_c_" in comments_menu
     assert "arl_{flow_code}_" in link_picker
+    assert "arld_{flow_code}_" in link_picker
     assert "arladd_{flow_code}_" in link_picker
     assert "arlback_{flow_code}_" in link_picker
     assert '_own_reply_mode_menu(action[len("persona_autoreply_hot_") :])' in handle
@@ -651,6 +654,10 @@ def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
     assert 'flow == "ownreply_views"' in continuation
     assert 'flow == "ownreply_days"' in continuation
     assert 'flow == "auto_reply_link_add"' in continuation
+    assert '"action": "delete"' in link_delete
+    assert '"presetId": preset_id' in link_delete
+    assert 'result.get("deletedPresetId")' in link_delete_poll
+    assert 'deleted_link_preset_ids' in link_delete_poll
     assert 'flow == "auto_reply_comments_days"' in continuation
     assert '"threads_own_post_reply"' in _function_source("_own_reply_submit")
     assert '"replySuffix"' in _function_source("_own_reply_submit")
@@ -670,6 +677,27 @@ def test_auto_reply_link_templates_use_source_persona_setup() -> None:
     assert 'task_input.get("archiveId")' in poll
     assert 'result.get("archiveId")' in poll
     assert '_auto_reply_link_return' in poll
+
+
+def test_auto_reply_link_template_delete_uses_source_archive_task() -> None:
+    picker = _function_source("_auto_reply_link_picker")
+    presets = _function_source("_auto_reply_link_presets")
+    delete_submit = _function_source("_auto_reply_link_delete_submit")
+    delete_poll = _function_source("_auto_reply_link_delete_poll")
+    server_source = SERVER_PATH.read_text(encoding="utf-8")
+    skill_source = (WEB_BOT_PATH.parents[3] / "tool_r18" / "scripts" / "skills" / "persona-set-link-ending-once.ts").read_text(encoding="utf-8")
+
+    assert "arld_{flow_code}_{index}_" in picker
+    assert "has_source_presets" in presets
+    assert "pending_link_preset" in presets
+    assert '_source_submit_task("persona_set_link_ending"' in delete_submit
+    assert '"action": "delete"' in delete_submit
+    assert 'task_input.get("presetId")' in delete_poll
+    assert 'result.get("deletedPresetId")' in delete_poll
+    assert 'if action == "delete"' in server_source
+    assert 'deletedPresetId' in server_source
+    assert 'input.action === "delete"' in skill_source
+    assert 'activeId === presetId ? "" : activeId' in skill_source
 
 
 def test_visible_automation_entry_uses_tg_auto_reply_flow() -> None:

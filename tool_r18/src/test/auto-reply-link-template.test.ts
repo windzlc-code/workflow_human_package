@@ -54,7 +54,9 @@ describe("auto reply link templates", () => {
     const commentRows = buildAutoReplyLinkPresetPickerRows(8100401093, archive, "comments");
     const hotRows = buildAutoReplyLinkPresetPickerRows(8100401093, archive, "hot");
     expect(commentRows[0][0].callback_data).toMatch(/^arl_c_0_[a-f0-9]{10}$/);
+    expect(commentRows[0][1].callback_data).toMatch(/^arld_c_0_[a-f0-9]{10}$/);
     expect(hotRows[0][0].callback_data).toMatch(/^arl_h_0_[a-f0-9]{10}$/);
+    expect(hotRows[0][1].callback_data).toMatch(/^arld_h_0_[a-f0-9]{10}$/);
     expect(commentRows.flat().some((button) => button.text.includes("不添加链接模板"))).toBe(true);
   });
 
@@ -85,6 +87,7 @@ describe("auto reply link templates", () => {
     const buttons = rows.flat();
 
     expect(buttons[0].callback_data).toMatch(/^arl_m_0_[a-f0-9]{10}$/);
+    expect(buttons.some((button) => /^arld_m_0_[a-f0-9]{10}$/.test(button.callback_data))).toBe(true);
     expect(buttons.some((button) => button.text.includes("跳过链接模板"))).toBe(true);
     expect(buttons.some((button) => /^arladd_m_[a-f0-9]{10}$/.test(button.callback_data))).toBe(true);
     expect(buttons.some((button) => /^arlback_m_[a-f0-9]{10}$/.test(button.callback_data))).toBe(true);

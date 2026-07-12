@@ -9760,17 +9760,20 @@ def _auto_reply_flow_code(flow: str) -> str:
     return {"comments": "c", "hot": "h", "hot_content": "m"}.get(str(flow or ""), "h")
 
 
-def _auto_reply_link_presets(persona_id: str) -> list[dict[str, Any]]:
+def _auto_reply_link_presets(persona_id: str, draft: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     _persona, row = _resolve_persona_for_action(persona_id)
     setup = row.get("setup") if isinstance((row or {}).get("setup"), dict) else {}
     source_presets = setup.get("linkEndingPresets")
+    has_source_presets = False
     if isinstance(source_presets, list):
         raw_presets = source_presets
+        has_source_presets = True
     elif isinstance(source_presets, dict) and isinstance(source_presets.get("sample"), list):
         raw_presets = source_presets["sample"]
+        has_source_presets = True
     else:
         raw_presets = []
-    if not raw_presets:
+    if not has_source_presets:
         raw_presets = _link_ending_settings(persona_id).get("linkEndingPresets", [])
     presets: list[dict[str, Any]] = []
     for raw in raw_presets:
@@ -9787,14 +9790,24 @@ def _auto_reply_link_presets(persona_id: str) -> list[dict[str, Any]]:
         }
         if preset["id"] and (preset["endingText"] or preset["linkUrl"]):
             presets.append(preset)
-    return presets
+    pending_preset = (draft or {}).get("pending_link_preset")
+    if isinstance(pending_preset, dict):
+        pending_id = str(pending_preset.get("id") or "")
+        if pending_id and not any(str(item.get("id") or "") == pending_id for item in presets):
+            presets.append(dict(pending_preset))
+    deleted_ids = {
+        str(item).strip()
+        for item in ((draft or {}).get("deleted_link_preset_ids") or [])
+        if str(item).strip()
+    }
+    return [preset for preset in presets if str(preset.get("id") or "") not in deleted_ids]
 
 
 def _auto_reply_selected_link_preset(persona_id: str, draft: dict[str, Any]) -> dict[str, Any] | None:
     selected_id = str(draft.get("selected_link_preset_id") or "").strip()
     if not selected_id:
         return None
-    return next((item for item in _auto_reply_link_presets(persona_id) if item.get("id") == selected_id), None)
+    return next((item for item in _auto_reply_link_presets(persona_id, draft) if item.get("id") == selected_id), None)
 
 
 def _auto_reply_link_suffix(persona_id: str, draft: dict[str, Any]) -> str:
@@ -9812,11 +9825,14 @@ def _auto_reply_link_picker(persona_id: str, flow: str, state: dict[str, Any]) -
         return _response(_message("没有找到本地人设。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     draft.update({"persona_id": persona.id, "auto_reply_flow": flow})
-    presets = _auto_reply_link_presets(persona.id)
+    presets = _auto_reply_link_presets(persona.id, draft)
     selected_id = str(draft.get("selected_link_preset_id") or "")
     flow_code = _auto_reply_flow_code(flow)
     rows = [
-        [_btn(f"{'✅' if selected_id == str(preset.get('id') or '') else '🔗'} {preset.get('name') or preset.get('endingText') or preset.get('linkUrl') or f'模板 {index + 1}'}"[:60], f"arl_{flow_code}_{index}_{persona.id}")]
+        [
+            _btn(f"{'✅' if selected_id == str(preset.get('id') or '') else '🔗'} {preset.get('name') or preset.get('endingText') or preset.get('linkUrl') or f'模板 {index + 1}'}"[:48], f"arl_{flow_code}_{index}_{persona.id}"),
+            _btn("🗑 删除", f"arld_{flow_code}_{index}_{persona.id}"),
+        ]
         for index, preset in enumerate(presets)
     ]
     rows.extend([
@@ -9828,12 +9844,12 @@ def _auto_reply_link_picker(persona_id: str, flow: str, state: dict[str, Any]) -
     return _response(
         _message(
             "\n".join([
-                "🔗 自动回复链接模板设置",
+                "🔗 临时链接模板设置",
                 "",
                 f"人设：{persona.name}",
                 f"使用场景：{scene}",
                 "",
-                "请选择本次任务使用的链接模板。" if presets else "当前还没有链接模板，可以立即新建后再选择。",
+                "请选择本次任务使用的链接模板，也可以新增或删除模板。" if presets else "当前还没有链接模板，可以立即新建后再选择。",
                 "此处只临时设置本次自动回复，不修改其他发布任务。",
             ]),
             rows,
@@ -9859,7 +9875,7 @@ def _auto_reply_link_select(action: str, state: dict[str, Any]) -> dict[str, Any
     persona_id = str((state.get("draft") if isinstance(state.get("draft"), dict) else {}).get("persona_id") or match.group(3))
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     draft.update({"persona_id": persona_id, "auto_reply_flow": flow})
-    presets = _auto_reply_link_presets(persona_id)
+    presets = _auto_reply_link_presets(persona_id, draft)
     if index < 0:
         draft["selected_link_preset_id"] = ""
     elif index >= len(presets):
@@ -9963,11 +9979,109 @@ def _auto_reply_link_add_poll(task_id: str, state: dict[str, Any]) -> dict[str, 
     if not any(str(item.get("id") or "") == preset_id for item in local_presets):
         local_presets.append(preset)
         _save_link_ending_settings(persona_id, {**settings, "linkEndingPresets": local_presets}, "自动回复链接模板")
-    draft.update({"selected_link_preset_id": preset_id, "source_task_id": ""})
+    draft.update({"selected_link_preset_id": preset_id, "source_task_id": "", "pending_link_preset": preset})
     if flow == "hot_content":
         draft["link_reply_text"] = _apply_link_ending_to_text("", preset)
     _schedule_persona_overview_refresh(force_remote=True)
     return _auto_reply_link_return(persona_id, flow, {"flow": "", "draft": draft})
+
+
+def _auto_reply_link_delete_submit(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    match = re.match(r"^arld_([chm])_(\d+)_(.+)$", action)
+    if not match:
+        return _response(_message("❌ 链接模板删除操作已失效。", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+    flow = {"c": "comments", "h": "hot", "m": "hot_content"}[match.group(1)]
+    index = int(match.group(2))
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    persona_id = str(match.group(3))
+    draft_persona_id = str(draft.get("persona_id") or "")
+    if draft_persona_id and draft_persona_id != persona_id:
+        return _response(_message("❌ 链接模板删除页面与当前人设不一致，请重新进入。", [[_btn("◀️ 返回", f"persona_autoreply_{persona_id}")]]), state={"flow": ""})
+    draft.update({"persona_id": persona_id, "auto_reply_flow": flow})
+    presets = _auto_reply_link_presets(persona_id, draft)
+    if index < 0 or index >= len(presets):
+        return _auto_reply_link_picker(persona_id, flow, {"flow": "", "draft": draft})
+    preset = presets[index]
+    preset_id = str(preset.get("id") or "")
+    persona, row = _resolve_persona_for_action(persona_id)
+    archive_id = _tool_r18_archive_id(persona_id, persona, row)
+    if not archive_id or not preset_id:
+        return _response(_message("❌ 当前链接模板没有可写入的来源归档。", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state={"flow": "", "draft": draft})
+    try:
+        _base, data = _source_submit_task("persona_set_link_ending", {
+            "archiveId": archive_id,
+            "action": "delete",
+            "presetId": preset_id,
+        })
+        task_id = str(data.get("id") or "")
+    except Exception as exc:
+        return _response(_message(f"❌ 链接模板删除失败\n\n{exc}", [[_btn("◀️ 返回链接模板设置", f"arls_{_auto_reply_flow_code(flow)}_{persona_id}")]]), state={"flow": "", "draft": draft})
+    draft.update({
+        "source_task_id": task_id,
+        "pending_delete_link_preset_id": preset_id,
+        "pending_delete_link_preset_name": str(preset.get("name") or preset.get("endingText") or preset.get("linkUrl") or "模板"),
+    })
+    response = _response(_message("🗑 正在删除自动回复链接模板..."), state={"flow": "auto_reply_link_delete_wait", "draft": draft})
+    response["poll"] = {"action": f"auto_reply_link_delete_poll:{task_id}", "interval_ms": 750}
+    return response
+
+
+def _auto_reply_link_delete_poll(task_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    persona_id = str(draft.get("persona_id") or "")
+    flow = str(draft.get("auto_reply_flow") or "hot")
+    preset_id = str(draft.get("pending_delete_link_preset_id") or "")
+    expected_task_id = str(draft.get("source_task_id") or "")
+    back_callback = f"arls_{_auto_reply_flow_code(flow)}_{persona_id}"
+    if not expected_task_id or task_id != expected_task_id or not preset_id:
+        return _response(_message("❌ 链接模板删除任务已失效，请重新操作。", [[_btn("◀️ 返回链接模板设置", back_callback)]]), state={"flow": "", "draft": draft})
+    try:
+        _base, data = _source_task_detail_data(task_id)
+    except Exception as exc:
+        response = _response(_message(f"🗑 链接模板删除状态读取失败，正在重试...\n\n{exc}"), state=state)
+        response["poll"] = {"action": f"auto_reply_link_delete_poll:{task_id}", "interval_ms": 1500}
+        return response
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    task_type = str(task.get("type") or "")
+    status = str(task.get("status") or "").lower()
+    task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
+    persona, row = _resolve_persona_for_action(persona_id)
+    expected_archive_id = _tool_r18_archive_id(persona_id, persona, row)
+    if expected_archive_id and str(task_input.get("archiveId") or "") != expected_archive_id:
+        return _response(_message("❌ 链接模板删除任务与当前人设不一致。", [[_btn("◀️ 返回链接模板设置", back_callback)]]), state={"flow": "", "draft": draft})
+    if str(task_input.get("action") or "") != "delete" or str(task_input.get("presetId") or "") != preset_id:
+        return _response(_message("❌ 链接模板删除参数不一致。", [[_btn("◀️ 返回链接模板设置", back_callback)]]), state={"flow": "", "draft": draft})
+    if task_type == "persona_set_link_ending" and status in {"queued", "running"}:
+        response = _response(_message("🗑 正在删除自动回复链接模板..."), state=state)
+        response["poll"] = {"action": f"auto_reply_link_delete_poll:{task_id}", "interval_ms": 750}
+        return response
+    if task_type != "persona_set_link_ending" or status != "success":
+        return _response(_message("❌ 链接模板删除失败，请重试。", [[_btn("◀️ 返回链接模板设置", back_callback)]]), state={"flow": "", "draft": draft})
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    if expected_archive_id and str(result.get("archiveId") or "") != expected_archive_id:
+        return _response(_message("❌ 链接模板删除结果与当前人设不一致。", [[_btn("◀️ 返回链接模板设置", back_callback)]]), state={"flow": "", "draft": draft})
+    if str(result.get("deletedPresetId") or "") != preset_id:
+        return _response(_message("❌ 来源任务没有确认已删除的链接模板。", [[_btn("◀️ 返回链接模板设置", back_callback)]]), state={"flow": "", "draft": draft})
+
+    settings = _link_ending_settings(persona_id)
+    local_presets = [item for item in settings.get("linkEndingPresets", []) if str(item.get("id") or "") != preset_id]
+    active_id = "" if str(settings.get("activeLinkEndingPresetId") or "") == preset_id else str(settings.get("activeLinkEndingPresetId") or "")
+    _save_link_ending_settings(persona_id, {"linkEndingPresets": local_presets, "activeLinkEndingPresetId": active_id}, "自动回复链接模板")
+    deleted_ids = [str(item) for item in (draft.get("deleted_link_preset_ids") or []) if str(item)]
+    if preset_id not in deleted_ids:
+        deleted_ids.append(preset_id)
+    draft.update({
+        "deleted_link_preset_ids": deleted_ids,
+        "source_task_id": "",
+        "pending_delete_link_preset_id": "",
+        "pending_delete_link_preset_name": "",
+    })
+    if str(draft.get("selected_link_preset_id") or "") == preset_id:
+        draft["selected_link_preset_id"] = ""
+        if flow == "hot_content":
+            draft["link_reply_text"] = ""
+    _schedule_persona_overview_refresh(force_remote=True)
+    return _auto_reply_link_picker(persona_id, flow, {"flow": "", "draft": draft})
 
 
 def _threads_auto_reply_settings(persona_id: str, state: dict[str, Any]) -> dict[str, Any]:
@@ -12930,6 +13044,8 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         if match:
             flow = {"c": "comments", "h": "hot", "m": "hot_content"}[match.group(1)]
             return _auto_reply_link_picker(match.group(2), flow, state)
+    if action.startswith("arld_"):
+        return _auto_reply_link_delete_submit(action, state)
     if action.startswith("arladd_"):
         match = re.match(r"^arladd_([chm])_(.+)$", action)
         if match:
@@ -12944,6 +13060,8 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _auto_reply_link_select(action, state)
     if action.startswith("auto_reply_link_add_poll:"):
         return _auto_reply_link_add_poll(action.split(":", 1)[1], state)
+    if action.startswith("auto_reply_link_delete_poll:"):
+        return _auto_reply_link_delete_poll(action.split(":", 1)[1], state)
     if action.startswith("acctautoreply_"):
         return _threads_auto_reply_settings(action[len("acctautoreply_") :], state)
     if action.startswith("persona_autoreply_"):
