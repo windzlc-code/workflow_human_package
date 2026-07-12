@@ -52,6 +52,7 @@ import {
   getThreadsLauncherIconFallbackPoints,
   getThreadsLauncherIconTapCandidates,
   hasRepeatedWarmupCommentText,
+  isThreadsOwnPostReplyHistoryMatch,
   isUnsafeWarmupEngagementText,
   hasThreadsReplyComposerText,
   hasExplicitSuccessCue,
@@ -1400,6 +1401,25 @@ describe("Threads publish verification", () => {
       .toBe(true);
     expect(hasRepeatedWarmupCommentText("這種小細節才真實", "這種小細節才真實"))
       .toBe(false);
+    expect(hasRepeatedWarmupCommentText("\u4f60\u597d\u4f60\u597d", "\u4f60\u597d"))
+      .toBe(true);
+  });
+
+  it("matches persisted own-post image identities across small visual drift", () => {
+    const history = ["threads-profile-image:ACP250322677KIRJ:8cff327c90d6527c6ffe014d28b91de6"];
+    expect(isThreadsOwnPostReplyHistoryMatch(history[0], history)).toBe(true);
+    expect(isThreadsOwnPostReplyHistoryMatch(
+      "threads-profile-image:ACP250322677KIRJ:8cff327c90d6527c6ffe014d28b91de0",
+      history,
+    )).toBe(true);
+    expect(isThreadsOwnPostReplyHistoryMatch(
+      "threads-profile-image:ACP250322677KIRJ:69f10a430fae30fe3d4b2d63a91b7f0c",
+      history,
+    )).toBe(false);
+    expect(isThreadsOwnPostReplyHistoryMatch(
+      "threads-profile-image:OTHERPAD:8cff327c90d6527c6ffe014d28b91de6",
+      history,
+    )).toBe(false);
   });
 
   it("detects near duplicate warmup comments in one run", () => {

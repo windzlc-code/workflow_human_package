@@ -8190,6 +8190,16 @@ async function clearFocusedTextInput(
     600,
   ).then(() => true).catch(() => false);
   if (cleared) {
+    // Some ADB keyboards acknowledge ADB_CLEAR_TEXT without clearing the
+    // focused editor. Follow it with idempotent key deletion so a retry cannot
+    // append the same comment to the existing draft.
+    await execAdbForText(
+      config,
+      padCode,
+      "input keyevent KEYCODE_MOVE_END; for i in $(seq 1 90); do input keyevent KEYCODE_DEL; done",
+      12_000,
+      800,
+    ).catch(() => undefined);
     await delay(waitMs);
     return;
   }
@@ -8252,13 +8262,10 @@ async function typeWarmupCommentText(
   waitMs = 900,
 ) {
   if (/[^\x20-\x7E]/.test(text)) {
-    try {
-      await typeText(config, padCode, text, Math.max(waitMs, 1400));
-      return;
-    } catch {
-      await typeTextViaAdbBase64Broadcast(config, padCode, text, Math.max(waitMs, 1800), 10_000);
-      return;
-    }
+    // inputText can apply text before its acknowledgement times out. A fallback
+    // after that timeout appends the same Unicode content a second time.
+    await typeTextViaAdbBase64Broadcast(config, padCode, text, Math.max(waitMs, 1800), 10_000);
+    return;
   }
   await typeAsciiTextViaAndroidInput(config, padCode, text, waitMs);
 }
@@ -24678,7 +24685,7 @@ export function sanitizeWarmupComment(text: string): string {
 export function hasRepeatedWarmupCommentText(text: string, comment: string): boolean {
   const normalizedText = normalizeSingleLine(text).replace(/\s+/g, "");
   const normalizedComment = normalizeSingleLine(comment).replace(/\s+/g, "");
-  if (!normalizedText || !normalizedComment || normalizedComment.length < 3) return false;
+  if (!normalizedText || !normalizedComment) return false;
   return normalizedText.includes(`${normalizedComment}${normalizedComment}`);
 }
 
@@ -34002,7 +34009,7 @@ async function warmupExecuteCommentAtPoint(
       await tapAcpReplyEditorInput(typedShotUrl, retryInputTarget, 1200);
       await clearFocusedTextInput(config, padCode, 300);
       await withTimeout(
-        typeText(config, padCode, comment, 1400),
+        typeWarmupCommentText(config, padCode, comment, 1400),
         16_000,
         "warmup comment direct unicode type timeout",
       ).catch(() => undefined);
@@ -34030,7 +34037,7 @@ async function warmupExecuteCommentAtPoint(
         await tapAcpReplyEditorInput(typedShotUrl, retryInputTarget, 500);
         await clearFocusedTextInput(config, padCode, 300);
         await withTimeout(
-          typeText(config, padCode, comment, 1400),
+          typeWarmupCommentText(config, padCode, comment, 1400),
           16_000,
           "warmup comment direct unicode duplicate cleanup timeout",
         ).catch(() => undefined);
@@ -35131,6 +35138,26 @@ async function buildThreadsOwnPostScreenshotIdentity(
   return `threads-profile-image:${padCode}:${hashString(perceptualBits, 32)}`;
 }
 
+export function isThreadsOwnPostReplyHistoryMatch(postKey: string, repliedPostKeys: Iterable<string>): boolean {
+  const normalizedKey = String(postKey || "").trim();
+  if (!normalizedKey) return false;
+  const currentImageKey = normalizedKey.match(/^threads-profile-image:([^:]+):([a-f0-9]{32})$/i);
+  for (const rawHistoryKey of repliedPostKeys) {
+    const historyKey = String(rawHistoryKey || "").trim();
+    if (historyKey === normalizedKey) return true;
+    if (!currentImageKey) continue;
+    const historyImageKey = historyKey.match(/^threads-profile-image:([^:]+):([a-f0-9]{32})$/i);
+    if (!historyImageKey || historyImageKey[1] !== currentImageKey[1]) continue;
+    let distance = 0;
+    for (let index = 0; index < currentImageKey[2].length; index += 1) {
+      const xor = Number.parseInt(currentImageKey[2][index], 16) ^ Number.parseInt(historyImageKey[2][index], 16);
+      distance += ((xor >> 0) & 1) + ((xor >> 1) & 1) + ((xor >> 2) & 1) + ((xor >> 3) & 1);
+    }
+    if (distance <= 24) return true;
+  }
+  return false;
+}
+
 export async function replyOwnPublishedThreadsPosts(
   config: VmosConfig,
   padCode: string,
@@ -35317,9 +35344,9 @@ export async function replyOwnPublishedThreadsPosts(
   if (cfg.profileScan) {
     const maxAgeDays = Math.max(1, Math.min(7, Math.floor(cfg.profileScan.maxAgeDays || 2)));
     const minViews = Math.max(0, Math.floor(cfg.profileScan.minViews || 0));
-    const repliedPostKeys = new Set(
-      (cfg.profileScan.repliedPostKeys || []).map((item) => String(item || "").trim()).filter(Boolean),
-    );
+    const repliedPostKeys = (cfg.profileScan.repliedPostKeys || [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
     const seenPostKeys = new Set<string>();
     const profilePreflight = await prepareThreadsOwnProfileScan(config, padCode, {
       operationLabel: "Threads 自動回覆熱點推文",
@@ -35397,7 +35424,7 @@ export async function replyOwnPublishedThreadsPosts(
         skipped += 1;
         errors.push(postKey ? "個人主頁出現重複推文，已跳過" : "未能讀取主推文正文，已跳過避免誤回覆");
         report({ step: postKey ? "已跳過重複推文" : "未能識別主推文正文，已跳過" });
-      } else if (repliedPostKeys.has(postKey)) {
+      } else if (isThreadsOwnPostReplyHistoryMatch(postKey, repliedPostKeys)) {
         seenPostKeys.add(postKey);
         skipped += 1;
         report({ step: "這篇推文已回覆過，已跳過" });
@@ -35439,7 +35466,7 @@ export async function replyOwnPublishedThreadsPosts(
             debugReason: `${replyComposer.debugReason} | auto_reply_own_profile_post`,
           });
           replied += 1;
-          repliedPostKeys.add(postKey);
+          repliedPostKeys.push(postKey);
           repliedUrls.push(postKey);
           repliedComments.push({ url: postKey, comment: result.comment });
           if (result.screenshotUrl) replyScreenshots.push(result.screenshotUrl);
