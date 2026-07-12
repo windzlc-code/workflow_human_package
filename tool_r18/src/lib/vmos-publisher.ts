@@ -27458,7 +27458,7 @@ async function extractThreadsAutoReplyPostPreviewByVision(
   const inlineData = previewInline || await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null);
   if (!inlineData) return { postPreview: "", postAuthor: "" };
 
-  const totalTimeoutMs = Math.max(3_500, Math.min(10_000, Math.round(options.timeoutMs || 5_500)));
+  const totalTimeoutMs = Math.max(3_500, Math.min(18_000, Math.round(options.timeoutMs || 5_500)));
   const request = createTimeoutSignal(totalTimeoutMs);
   try {
     const prompt = `讀取這張 Threads 主帖截圖，只返回單行緊湊 JSON，不要解釋，不要 markdown。
@@ -27482,7 +27482,7 @@ async function extractThreadsAutoReplyPostPreviewByVision(
       ));
       return { postPreview, postAuthor };
     };
-    const primaryTimeoutMs = Math.max(3_200, Math.min(6_500, totalTimeoutMs - 900));
+    const primaryTimeoutMs = Math.max(3_200, Math.min(10_000, totalTimeoutMs - 1_500));
     const primaryRequest = createTimeoutSignal(primaryTimeoutMs);
     try {
       const raw = await callThreadsAutoReplyDirectMultimodalModel(
@@ -35408,7 +35408,9 @@ export async function replyOwnPublishedThreadsPosts(
       report({ step: `正在讀取個人主頁第 ${postIndex + 1} 篇推文` });
       const uiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
       let detailShotUrl = "";
-      let postPreview = normalizeSingleLine(opened.postPreview || "");
+      let postPreview = normalizeSingleLine(
+        opened.postPreview || extractWarmupPostPreviewFromUiXml(uiXml),
+      );
       if (!postPreview) {
         detailShotUrl = await screenshot(config, padCode)
           .then((url) => freezeScreenshotUrl(url))
@@ -35417,7 +35419,7 @@ export async function replyOwnPublishedThreadsPosts(
           const visualPreview = await extractThreadsAutoReplyPostPreviewByVision(
             detailShotUrl,
             [],
-            { timeoutMs: 5_500 },
+            { timeoutMs: 14_000 },
           ).catch(() => ({ postPreview: "", postAuthor: "" }));
           postPreview = normalizeSingleLine(visualPreview.postPreview);
         }
