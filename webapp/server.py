@@ -29,6 +29,7 @@ from typing import Any, Iterable
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import requests
+import aiohttp
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.responses import StreamingResponse
@@ -17518,7 +17519,17 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
         reply_suffix = str(payload.get("replySuffix") or payload.get("reply_suffix") or "").strip()
         if len(reply_suffix) > 500:
             raise HTTPException(status_code=400, detail="threads_own_post_reply replySuffix exceeds Threads 500 character limit")
-        return {"archiveId": archive_id, "padCode": pad_code, "replyMode": reply_mode, "replyText": reply_text, "replySuffix": reply_suffix, "minViews": min_views, "maxAgeDays": max_age_days}
+        return {
+            "archiveId": archive_id,
+            "padCode": pad_code,
+            "replyMode": reply_mode,
+            "replyText": reply_text,
+            "replySuffix": reply_suffix,
+            "minViews": min_views,
+            "maxAgeDays": max_age_days,
+            "uiPersonaId": str(payload.get("uiPersonaId") or payload.get("ui_persona_id") or "").strip()[:160],
+            "uiPersonaName": str(payload.get("uiPersonaName") or payload.get("ui_persona_name") or "").strip()[:160],
+        }
 
     if typ == "persona_set_link_ending":
         archive_id = str(payload.get("archiveId") or payload.get("archive_id") or "").strip()
@@ -18488,6 +18499,8 @@ def _persona_archive_source_for_write() -> tuple[Path, Any, list[dict[str, Any]]
     for path in (primary, fallback):
         raw = _read_json_file(path)
         archives = _extract_persona_archive_list(raw)
+        deleted_ids = set(_read_json_file(TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_personas.json") or [])
+        archives = [item for item in archives if str(item.get("id") or "").strip() not in deleted_ids]
         if archives:
             return path, raw, archives
     return primary, [], []
@@ -18687,6 +18700,30 @@ def _delete_persona_dashboard_post(archive_id: str, post_key: str) -> dict[str, 
     return {"ok": True, "archive_id": clean_id, "post_key": clean_key, "deleted": deleted, "path": path.name}
 
 
+def _delete_persona_dashboard_archive(archive_id: str) -> dict[str, Any]:
+    clean_id = str(archive_id or "").strip()
+    if not clean_id:
+        raise HTTPException(status_code=400, detail="缺少人设 ID。")
+    changed_paths: list[str] = []
+    for path in (
+        TOOL_R18_RUNTIME_DIR / "persona_archives.json",
+        TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json",
+    ):
+        raw = _read_json_file(path)
+        archives = _extract_persona_archive_list(raw)
+        filtered = [item for item in archives if str(item.get("id") or "").strip() != clean_id]
+        if len(filtered) == len(archives):
+            continue
+        _write_persona_archives_preserving_shape(path, raw, filtered)
+        changed_paths.append(path.name)
+    tombstone_path = TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_personas.json"
+    deleted_ids = set(_read_json_file(tombstone_path) or [])
+    deleted_ids.add(clean_id)
+    tombstone_path.write_text(json.dumps(sorted(deleted_ids), ensure_ascii=False, indent=2), encoding="utf-8")
+    _invalidate_persona_dashboard_overview_cache()
+    return {"ok": True, "archive_id": clean_id, "paths": changed_paths}
+
+
 def _read_tool_r18_persona_archives() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     primary = TOOL_R18_RUNTIME_DIR / "persona_archives.json"
     fallback = TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json"
@@ -18694,6 +18731,8 @@ def _read_tool_r18_persona_archives() -> tuple[list[dict[str, Any]], dict[str, A
     for path in (primary, fallback):
         raw = _read_json_file(path)
         archives = _extract_persona_archive_list(raw)
+        deleted_ids = set(_read_json_file(TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_personas.json") or [])
+        archives = [item for item in archives if str(item.get("id") or "").strip() not in deleted_ids]
         if archives:
             try:
                 mtime = path.stat().st_mtime
@@ -20051,6 +20090,7 @@ def _persona_dashboard_revision_payload() -> dict[str, Any]:
         TOOL_R18_RUNTIME_DIR / "persona_archives.json",
         TOOL_R18_RUNTIME_DIR / "persona_archives_cache.json",
         TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_posts.json",
+        TOOL_R18_RUNTIME_DIR / "persona_dashboard_deleted_personas.json",
         TOOL_R18_RUNTIME_DIR / "persona_memory.json",
         TOOL_R18_RUNTIME_DIR / "sentiment_hot_candidates.json",
         RUNTIME_CONFIG_PATH,
@@ -20733,9 +20773,13 @@ def create_app() -> FastAPI:
     _ensure_default_pricing()
     _ensure_default_runtime_config()
     _ensure_admin_seed()
-    _resume_pending_tasks()
-    _start_task_workers()
-    _start_cleanup_worker()
+    background_workers_enabled = _to_bool(os.getenv("WEBAPP_BACKGROUND_WORKERS_ENABLED"), True)
+    task_workers_enabled = _to_bool(os.getenv("WEBAPP_TASK_WORKERS_ENABLED"), background_workers_enabled)
+    if task_workers_enabled:
+        _resume_pending_tasks()
+        _start_task_workers()
+    if background_workers_enabled:
+        _start_cleanup_worker()
 
     app = FastAPI(title="Workflow WebApp", version="1.0.0")
     app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -20749,6 +20793,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def start_tool_r18_stop_responder() -> None:
+        if not background_workers_enabled:
+            logger.info("Web background workers are disabled for this API-only instance")
+            return
         _ensure_tool_r18_stop_responder_started()
         _ensure_persona_dashboard_monitor_started()
 
@@ -21290,6 +21337,10 @@ def create_app() -> FastAPI:
     @app.delete("/api/persona_dashboard/personas/{archive_id}/threads_binding")
     def api_persona_dashboard_unbind_threads(archive_id: str):
         return _unbind_persona_threads_username(archive_id)
+
+    @app.delete("/api/persona_dashboard/personas/{archive_id}")
+    def api_persona_dashboard_delete_persona(archive_id: str):
+        return _delete_persona_dashboard_archive(archive_id)
 
     @app.delete("/api/persona_dashboard/personas/{archive_id}/posts/{post_key}")
     def api_persona_dashboard_delete_post(archive_id: str, post_key: str):
@@ -23646,6 +23697,9 @@ def create_app() -> FastAPI:
     def _threads_console_headers(resp: requests.Response) -> dict[str, str]:
         excluded = {"content-length", "transfer-encoding", "connection", "content-encoding"}
         headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
+        if str(resp.headers.get("content-type") or "").lower().startswith("text/html"):
+            headers["cache-control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            headers["pragma"] = "no-cache"
         location = headers.get("location") or headers.get("Location")
         if location:
             upstream = THREADS_CONSOLE_UPSTREAM
@@ -23677,25 +23731,27 @@ def create_app() -> FastAPI:
                 pass
         inbound_headers["x-forwarded-prefix"] = THREADS_CONSOLE_PREFIX
         try:
-            resp = await asyncio.to_thread(
-                requests.request,
-                request.method,
-                url,
-                params=list(request.query_params.multi_items()),
-                data=body,
-                headers=inbound_headers,
-                allow_redirects=False,
-                timeout=120,
-            )
-        except requests.RequestException as exc:
+            timeout = aiohttp.ClientTimeout(total=120)
+            async with aiohttp.ClientSession(timeout=timeout, auto_decompress=True) as session:
+                async with session.request(
+                    request.method,
+                    url,
+                    params=list(request.query_params.multi_items()),
+                    data=body,
+                    headers=inbound_headers,
+                    allow_redirects=False,
+                ) as resp:
+                    content_type = str(resp.headers.get("content-type") or "")
+                    content = _threads_console_rewrite(await resp.read(), content_type)
+                    status_code = resp.status
+                    response_headers = _threads_console_headers(resp)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.warning("Threads console proxy failed: %s", exc)
             raise HTTPException(status_code=502, detail="Threads console is unavailable") from exc
-        content_type = resp.headers.get("content-type", "")
-        content = _threads_console_rewrite(resp.content, content_type)
         return Response(
             content=content,
-            status_code=resp.status_code,
-            headers=_threads_console_headers(resp),
+            status_code=status_code,
+            headers=response_headers,
             media_type=content_type or None,
         )
 

@@ -30713,8 +30713,8 @@ async function openThreadsCommentReplyComposerAtPoint(
   let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
   let line = normalizeSingleLine(decodeXmlAttr(uiXml));
   const hasExpectedReplyPrompt = (text: string) => {
-    if (!expectedNormalizedAuthor) return true;
     const compact = normalizeSingleLine(text).toLowerCase();
+    if (!expectedNormalizedAuthor) return /(回覆|回复|Reply)/i.test(compact);
     return /(回覆|回复|Reply)/i.test(compact) && compact.includes(expectedNormalizedAuthor.toLowerCase());
   };
   const isAddThreadOnlyLine = (text: string) =>
@@ -32315,6 +32315,7 @@ function detectAcpThreadDetailExpectedSlotRow(
   width: number,
   height: number,
   isDarkPixel: (index: number) => boolean,
+  preferTopRow = false,
 ): { like: { x: number; y: number }; comment: { x: number; y: number }; debugRaw: string } | null {
   const countSlot = (x1Ratio: number, x2Ratio: number, centerY: number) => {
     const left = Math.max(0, Math.floor(width * x1Ratio));
@@ -32342,7 +32343,9 @@ function detectAcpThreadDetailExpectedSlotRow(
   };
 
   let best: { score: number; like: { x: number; y: number }; comment: { x: number; y: number }; debugRaw: string } | null = null;
-  for (let y = Math.floor(height * 0.59); y <= Math.floor(height * 0.84); y += 4) {
+  const scanStartRatio = preferTopRow ? 0.405 : 0.59;
+  const scanEndRatio = preferTopRow ? 0.50 : 0.84;
+  for (let y = Math.floor(height * scanStartRatio); y <= Math.floor(height * scanEndRatio); y += 4) {
     const like = countSlot(0.025, 0.145, y);
     const comment = countSlot(0.165, 0.345, y);
     const repost = countSlot(0.36, 0.53, y);
@@ -32363,12 +32366,12 @@ function detectAcpThreadDetailExpectedSlotRow(
     const lowerRowBonus = (rowY / height) * 220;
     const oversizedTextPenalty = Math.max(0, like.count - 520) * 0.16 + Math.max(0, comment.count - 620) * 0.14;
     const score = cappedLike * 1.3 + cappedComment * 1.2 + cappedRepost + cappedShare + lowerRowBonus - oversizedTextPenalty;
-    if (!best || score > best.score) {
+    if (!best || (preferTopRow ? rowY < best.like.y : score > best.score)) {
       best = {
         score,
         like: likePoint,
         comment: commentPoint,
-        debugRaw: `slot_row_score=${Math.round(score)};rowY=${rowY};like=${like.x},${like.y},c${like.count};comment=${comment.x},${comment.y},c${comment.count};repost_c=${repost.count};share_c=${share.count}`,
+        debugRaw: `${preferTopRow ? "top_main_" : ""}slot_row_score=${Math.round(score)};rowY=${rowY};like=${like.x},${like.y},c${like.count};comment=${comment.x},${comment.y},c${comment.count};repost_c=${repost.count};share_c=${share.count}`,
       };
     }
   }
@@ -32379,6 +32382,7 @@ function detectAcpThreadDetailExpectedSlotRow(
 
 export async function detectThreadsDetailActionRowLocally(
   screenshotUrl: string,
+  options: { preferTopRow?: boolean } = {},
 ): Promise<{ like?: { x: number; y: number }; comment?: { x: number; y: number }; debugRaw?: string } | null> {
   try {
     if (await detectThreadsFullscreenMediaViewerLocally(screenshotUrl).catch(() => false)) return null;
@@ -32403,6 +32407,14 @@ export async function detectThreadsDetailActionRowLocally(
       const spread = Math.max(r, g, b) - Math.min(r, g, b);
       return value < 125 && (spread < 70 || value < 75);
     };
+
+    // Own-post replies must target the main post's first action row. Run the
+    // constrained slot detector before the generic component detector so a
+    // lower reply/comment row cannot win merely because its icons are clearer.
+    if (options.preferTopRow) {
+      const mainRow = detectAcpThreadDetailExpectedSlotRow(data, width, height, isDarkPixel, true);
+      if (mainRow) return mainRow;
+    }
 
     const components: Array<{ x: number; y: number; width: number; height: number; count: number; score: number }> = [];
     for (let y = startY; y <= endY; y += 1) {
@@ -32491,8 +32503,18 @@ export async function detectThreadsDetailActionRowLocally(
       return { y: rowY, icons: deduped, score };
     }).filter(Boolean) as Array<{ y: number; icons: typeof components; score: number }>;
 
-    const best = rows.sort((a, b) => b.score - a.score || a.y - b.y)[0];
-    if (!best || best.score < 120) return detectAcpThreadDetailExpectedSlotRow(data, width, height, isDarkPixel);
+    const eligibleRows = rows.filter((row) => {
+      if (row.score < 120) return false;
+      if (!options.preferTopRow) return true;
+      return row.y >= height * 0.405 && row.y <= height * 0.50;
+    });
+    const best = options.preferTopRow
+      ? eligibleRows.sort((a, b) => a.y - b.y || b.score - a.score)[0]
+      : eligibleRows.sort((a, b) => b.score - a.score || a.y - b.y)[0];
+    if (!best) {
+      if (options.preferTopRow) return null;
+      return detectAcpThreadDetailExpectedSlotRow(data, width, height, isDarkPixel, false);
+    }
     const preview = best.icons.slice(0, 5).map((item) => `${item.x},${item.y},${item.width}x${item.height},c${item.count}`).join(";");
     const likeIcon = best.icons[0];
     const commentIcon = best.icons[1];
@@ -35247,6 +35269,35 @@ export async function replyOwnPublishedThreadsPosts(
     }
     return "";
   };
+  const openOwnPostReplyComposer = async (detailShotUrl: string) => {
+    const existingComposerReason = await detectThreadsReplyComposerLocally(detailShotUrl).catch(() => null);
+    const existingReplyEditor = existingComposerReason
+      ? true
+      : await detectThreadsCommentReplyEditorLocally(detailShotUrl).catch(() => false);
+    if (existingReplyEditor) {
+      const image = await getImageDimensions(detailShotUrl).catch(() => null);
+      return {
+        commentPoint: {
+          x: Math.round((image?.width || BASE_SCREEN.width) * 0.31),
+          y: Math.round((image?.height || BASE_SCREEN.height) * 0.285),
+        },
+        screenshotUrl: detailShotUrl,
+        debugReason: `acp_search_reply_composer_comment_allowed | ${existingComposerReason || "LOCAL_COMMENT_REPLY_EDITOR"}`,
+      };
+    }
+    const actions = await detectThreadsDetailActionRowLocally(detailShotUrl, { preferTopRow: true }).catch(() => null);
+    if (!actions?.comment) {
+      throw new Error(`未能定位主推文评论入口${actions?.debugRaw ? `：${actions.debugRaw}` : ""}`);
+    }
+    const commentPoint = { x: Math.round(actions.comment.x), y: Math.round(actions.comment.y) };
+    const openedReply = await openThreadsCommentReplyComposerAtPoint(config, padCode, commentPoint);
+    if (!openedReply.ok) throw new Error(openedReply.error);
+    return {
+      commentPoint,
+      screenshotUrl: openedReply.screenshotUrl,
+      debugReason: openedReply.debugReason,
+    };
+  };
   const report = (progress: Partial<ThreadsOwnPostReplyProgress>) => {
     onProgress?.({
       step: progress.step || "Threads 自動回覆熱點推文進行中",
@@ -35371,12 +35422,8 @@ export async function replyOwnPublishedThreadsPosts(
           detailShotUrl = detailShotUrl || await screenshot(config, padCode)
             .then((url) => freezeScreenshotUrl(url))
             .catch(() => opened.screenshotUrl);
-          const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-          const bottomReplyPoint = {
-            x: Math.round((screen.width || BASE_SCREEN.width) * 0.44),
-            y: Math.round((screen.height || BASE_SCREEN.height) * 0.955),
-          };
-          const result = await warmupExecuteCommentAtPoint(config, padCode, bottomReplyPoint, async () => {
+          const replyComposer = await openOwnPostReplyComposer(detailShotUrl);
+          const result = await warmupExecuteCommentAtPoint(config, padCode, replyComposer.commentPoint, async () => {
             const comment = replyMode === "manual"
               ? manualReplyText
               : await generateOwnPostComment(postPreview, detailShotUrl);
@@ -35385,11 +35432,11 @@ export async function replyOwnPublishedThreadsPosts(
             }
             return appendThreadsReplySuffix(comment, cfg.replySuffix);
           }, {
-            sourceScreenshotUrl: detailShotUrl,
-            openViaCommentFirst: true,
+            sourceScreenshotUrl: replyComposer.screenshotUrl,
             alreadyInReplyComposer: true,
             preferBottomReplyInput: true,
-            debugReason: "acp_search_reply_composer_comment_allowed | auto_reply_own_profile_post",
+            skipAbsoluteOpenRetry: true,
+            debugReason: `${replyComposer.debugReason} | auto_reply_own_profile_post`,
           });
           replied += 1;
           repliedPostKeys.add(postKey);
@@ -35482,12 +35529,9 @@ export async function replyOwnPublishedThreadsPosts(
       const detailShotUrl = await screenshot(config, padCode)
         .then((url) => freezeScreenshotUrl(url))
         .catch(() => undefined);
-      const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
-      const bottomReplyPoint = {
-        x: Math.round((screen.width || BASE_SCREEN.width) * 0.44),
-        y: Math.round((screen.height || BASE_SCREEN.height) * 0.955),
-      };
-      const result = await warmupExecuteCommentAtPoint(config, padCode, bottomReplyPoint, async () => {
+      if (!detailShotUrl) throw new Error("未能取得主推文详情截图");
+      const replyComposer = await openOwnPostReplyComposer(detailShotUrl);
+      const result = await warmupExecuteCommentAtPoint(config, padCode, replyComposer.commentPoint, async () => {
         const postPreview = normalizeSingleLine(target.expectedText || target.label || "");
         const comment = replyMode === "manual"
           ? manualReplyText
@@ -35497,11 +35541,11 @@ export async function replyOwnPublishedThreadsPosts(
         }
         return appendThreadsReplySuffix(comment, cfg.replySuffix);
       }, {
-        sourceScreenshotUrl: detailShotUrl,
-        openViaCommentFirst: true,
+        sourceScreenshotUrl: replyComposer.screenshotUrl,
         alreadyInReplyComposer: true,
         preferBottomReplyInput: true,
-        debugReason: "acp_search_reply_composer_comment_allowed | auto_reply_own_published_post",
+        skipAbsoluteOpenRetry: true,
+        debugReason: `${replyComposer.debugReason} | auto_reply_own_published_post`,
       });
       replied += 1;
       repliedUrls.push(target.url);

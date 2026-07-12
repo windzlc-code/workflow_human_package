@@ -46,8 +46,10 @@ async function main() {
         replied: progress.replied,
         skipped: progress.skipped,
         targetReplies: progress.targetReplies,
+        replyScreenshots: progress.replyScreenshots,
         done: progress.done,
         error: Boolean(progress.error),
+        errorMessage: progress.error || "",
       });
     },
   );
@@ -64,12 +66,14 @@ async function main() {
       error: false,
     });
   }
+  const semanticFailure = result.replied <= 0 && result.matched > 0 && Boolean(result.error);
   printJson({
-    ok: true,
+    ok: !semanticFailure,
     ...result,
     elapsedMs: Date.now() - startedAt,
     logs,
   });
+  if (semanticFailure) process.exitCode = 1;
 }
 
 main().catch((error) => {

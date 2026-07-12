@@ -25,7 +25,7 @@ from typing import Any
 
 from core import vmos_client
 from core import persona_dashboard as persona_dashboard_module
-from core.persona_dashboard import build_overview, find_persona, visible_local_personas
+from core.persona_dashboard import build_overview, find_persona
 from core.runtime_paths import DATA_DIR
 from core.traditional import to_traditional, traditionalize_task_entries
 from db.repo import AccountRepo, Device, DeviceRepo, Persona, PersonaRepo, PostMemory, PostMemoryRepo, SourceWorkflowJobRepo, TaskRepo
@@ -51,6 +51,7 @@ TOOL_R18_SKILLS_DIR = TOOL_R18_PROJECT_DIR / "scripts" / "skills"
 _PERSONA_MENU_CACHE: dict[str, Any] = {"at": 0.0, "rows": []}
 _PUBLISH_PLATFORM_CACHE: dict[str, Any] = {"at": 0.0, "values": []}
 _PERSONA_OVERVIEW_REFRESH_LOCK = threading.Lock()
+_PERSONA_OVERVIEW_LAST_CHECKED_AT = 0.0
 _RECENT_IMPORTED_POSTS_LOCK = threading.Lock()
 _RECENT_IMPORTED_POSTS: dict[str, dict[str, Any]] = {}
 _RECENT_IMPORTED_POSTS_TTL_SECONDS = 300.0
@@ -199,21 +200,6 @@ def _source_api_candidates() -> list[str]:
         os.getenv("TG_INTERNAL_WEBAPP_BASE_URL"),
     ]
     candidates: list[str] = []
-    for item in [*configured, "http://workflow-delivery-r18:8098", "http://127.0.0.1:8000", "http://127.0.0.1:8091"]:
-        value = str(item or "").strip().rstrip("/")
-        if value and value not in candidates:
-            candidates.append(value)
-    return candidates
-
-
-def _source_api_candidates() -> list[str]:
-    configured = [
-        os.getenv("SOURCE_WEBAPP_URL"),
-        os.getenv("TOOL_R18_SOURCE_WEBAPP_URL"),
-        os.getenv("TOOL_R18_INTERNAL_WEBAPP_BASE_URL"),
-        os.getenv("TG_INTERNAL_WEBAPP_BASE_URL"),
-    ]
-    candidates: list[str] = []
     preferred = [
         "http://workflow-delivery-r18:8098",
         "http://172.17.0.1:8098",
@@ -237,6 +223,7 @@ def _source_http_request(
     payload: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
     timeout: int = SOURCE_API_TIMEOUT,
+    candidate_bases: list[str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     headers = {"Accept": "application/json"}
     token = str(os.getenv("TG_INTERNAL_API_TOKEN") or "").strip()
@@ -249,30 +236,41 @@ def _source_http_request(
     clean_path = "/" + str(path or "").lstrip("/")
     last_error = ""
     deadline = time.monotonic() + max(1, timeout)
-    for base in _source_api_candidates():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        url = f"{base}{clean_path}"
-        if query:
-            url = f"{url}?{urllib.parse.urlencode(query)}"
-        request = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
-        try:
-            with urllib.request.urlopen(request, timeout=max(0.5, remaining)) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-            data = json.loads(raw or "{}")
-            if not isinstance(data, dict):
-                raise RuntimeError(f"来源 API 返回不是 JSON 对象：{raw[:200]}")
-            return base, data
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if exc.code in {404, 405}:
-                last_error = f"{base} HTTP {exc.code}: {detail[:300]}"
+    candidates = [str(item or "").strip().rstrip("/") for item in (candidate_bases or _source_api_candidates()) if str(item or "").strip()]
+    candidates = list(dict.fromkeys(candidates))
+    request_method = method.upper()
+    retry_rounds = request_method in {"GET", "HEAD", "DELETE"}
+    while candidates and time.monotonic() < deadline:
+        for base in candidates:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            url = f"{base}{clean_path}"
+            if query:
+                url = f"{url}?{urllib.parse.urlencode(query)}"
+            request = urllib.request.Request(url, data=body, headers=headers, method=request_method)
+            attempt_limit = 3.0 if request_method == "DELETE" else 1.0 if retry_rounds else remaining
+            try:
+                with urllib.request.urlopen(request, timeout=max(0.05, min(attempt_limit, remaining))) as response:
+                    raw = response.read().decode("utf-8", errors="replace")
+                data = json.loads(raw or "{}")
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"来源 API 返回不是 JSON 对象：{raw[:200]}")
+                return base, data
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                if exc.code in {404, 405}:
+                    last_error = f"{base} HTTP {exc.code}: {detail[:300]}"
+                    continue
+                raise RuntimeError(f"{base} HTTP {exc.code}: {_source_error_detail(detail)}") from exc
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+                last_error = f"{base}: {exc}"
                 continue
-            raise RuntimeError(f"{base} HTTP {exc.code}: {_source_error_detail(detail)}") from exc
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-            last_error = f"{base}: {exc}"
-            continue
+        if not retry_rounds:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.2, remaining))
     raise RuntimeError(last_error or "无法连接来源工作流 API")
 
 
@@ -355,11 +353,17 @@ def _ensure_publish_request_id(draft: dict[str, Any]) -> str:
 
 
 def _source_submit_task(task_type: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    worker_candidates = [
+        str(os.getenv("SOURCE_TASK_WORKER_WEBAPP_URL") or "").strip(),
+        "http://workflow-delivery-r18:8098",
+        *_source_api_candidates(),
+    ]
     return _source_http_request(
         "POST",
         "/api/internal/tg/submit",
         payload={"task_type": str(task_type), "tg_chat_id": SOURCE_WEB_BOT_CHAT_ID, "params": params or {}},
         timeout=45,
+        candidate_bases=worker_candidates,
     )
 
 
@@ -534,7 +538,7 @@ def _source_cancel_latest_data() -> tuple[str, dict[str, Any]]:
 
 
 def _source_task_detail_data(task_id: str) -> tuple[str, dict[str, Any]]:
-    return _source_http_request("GET", f"/api/internal/tg/tasks/{task_id}", query={"chat_id": SOURCE_WEB_BOT_CHAT_ID})
+    return _source_http_request("GET", f"/api/internal/tg/tasks/{task_id}", query={"chat_id": SOURCE_WEB_BOT_CHAT_ID}, timeout=3)
 
 
 def _split_path_list(value: str) -> list[str]:
@@ -3057,10 +3061,6 @@ def _local_persona_row(persona: Persona) -> dict[str, Any]:
     }
 
 
-def _local_persona_rows() -> list[dict[str, Any]]:
-    return [_local_persona_row(persona) for persona in visible_local_personas()]
-
-
 def _read_json_file(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8-sig")
@@ -3071,50 +3071,34 @@ def _read_json_file(path: Path) -> dict[str, Any]:
 
 
 def _cached_remote_persona_rows() -> list[dict[str, Any]]:
-    for attr in ("REMOTE_CACHE", "REMOTE_SAMPLE"):
-        path = getattr(persona_dashboard_module, attr, None)
-        if not isinstance(path, Path) or not path.exists():
-            continue
+    path = getattr(persona_dashboard_module, "REMOTE_CACHE", None)
+    if isinstance(path, Path) and path.exists():
         data = _read_json_file(path)
         rows = data.get("personas") if isinstance(data.get("personas"), list) else []
-        clean_rows = [row for row in rows if isinstance(row, dict)]
-        if data.get("ok") and clean_rows:
-            return clean_rows
+        if data.get("ok"):
+            return [row for row in rows if isinstance(row, dict)]
     return []
 
 
-def _merge_source_and_local_rows(source_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows = list(source_rows)
-    def identity_keys(row: dict[str, Any]) -> set[str]:
-        values = {
-            str(row.get("id") or "").strip(),
-            str(row.get("source_archive_id") or "").strip(),
-        }
-        values.update(value[7:] for value in list(values) if value.startswith("source:"))
-        return {value for value in values if value}
-
-    seen: set[str] = set()
-    for row in rows:
-        seen.update(identity_keys(row))
-    for row in _local_persona_rows():
-        keys = identity_keys(row)
-        if keys and keys.isdisjoint(seen):
-            rows.append(row)
-            seen.update(keys)
-    return rows
-
-
 def _refresh_persona_overview_cache(*, force_remote: bool = False) -> None:
+    global _PERSONA_OVERVIEW_LAST_CHECKED_AT
     if not _PERSONA_OVERVIEW_REFRESH_LOCK.acquire(blocking=False):
         return
     try:
-        overview = build_overview(force_remote=force_remote)
+        query = {"force_refresh": "true"} if force_remote else None
+        _base, overview = _source_http_request("GET", "/api/persona_dashboard/overview", query=query, timeout=5)
         rows = [row for row in overview.get("personas", []) if isinstance(row, dict)]
-        if not rows:
-            source_rows = _cached_remote_persona_rows()
-            rows = _merge_source_and_local_rows(source_rows) if source_rows else _local_persona_rows()
-        if rows:
+        if overview.get("ok"):
+            remote_cache = persona_dashboard_module.REMOTE_CACHE
+            current = _read_json_file(remote_cache) if remote_cache.exists() else {}
+            current_rows = current.get("personas") if isinstance(current.get("personas"), list) else []
+            if current_rows != rows:
+                remote_cache.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = remote_cache.with_suffix(f"{remote_cache.suffix}.tmp")
+                temp_path.write_text(json.dumps(overview, ensure_ascii=False), encoding="utf-8")
+                temp_path.replace(remote_cache)
             _PERSONA_MENU_CACHE.update({"at": time.time(), "rows": rows})
+            _PERSONA_OVERVIEW_LAST_CHECKED_AT = time.time()
     except Exception:
         pass
     finally:
@@ -3133,6 +3117,28 @@ def _schedule_persona_overview_refresh(*, force_remote: bool = False) -> None:
     thread.start()
 
 
+def _source_submit_poll(action: str) -> dict[str, Any]:
+    parts = action.split(":", 2)
+    kind = parts[1] if len(parts) > 1 else "task"
+    job_id = parts[2] if len(parts) > 2 else ""
+    job = next((item for item in SourceWorkflowJobRepo.list_all(limit=1000) if item.id == job_id), None)
+    if not job:
+        return _response(_message("❌ 提交狀態已失效，請重新操作。", [[_btn("◀️ 返回人設列表", "list_personas")]]), state={"flow": ""})
+    if job.status == "failed":
+        if kind == "keywords":
+            return _response(_message("❌ 人設核心關鍵詞提煉失敗，請稍後重試。", [[_btn("◀️ 返回重新輸入名稱", "create_persona_entry")]]), state={"flow": ""})
+        return _response(_message("❌ 新建人設任務提交失敗，請稍後重試。", _rows([_btn("➕ 重新新建人設", "create_persona_entry")], [_btn("◀️ 返回人設列表", "list_personas")])), state={"flow": ""})
+    source_task_id = str(getattr(job, "source_task_id", "") or "")
+    if job.status == "submitted" and source_task_id:
+        return _source_task_poll(source_task_id)
+    response = _response(
+        _message("🧠 正在提交人設生成任務..." if kind == "persona" else "🧠 正在提交關鍵詞提煉任務..."),
+        state={"flow": ""},
+    )
+    response["poll"] = {"action": action, "interval_ms": 750}
+    return response
+
+
 def _persona_menu_rows() -> list[dict[str, Any]]:
     now = time.time()
     cached_rows = _PERSONA_MENU_CACHE.get("rows")
@@ -3140,14 +3146,16 @@ def _persona_menu_rows() -> list[dict[str, Any]]:
         return cached_rows
     source_rows = _cached_remote_persona_rows()
     source_cache_has_pending_schema = bool(source_rows) and any("pending_posts" in row for row in source_rows)
-    if not source_rows or not source_cache_has_pending_schema:
-        _schedule_persona_overview_refresh(force_remote=True)
-        stale_rows = _PERSONA_MENU_CACHE.get("rows")
-        if not source_rows and isinstance(stale_rows, list):
-            source_rows = stale_rows
-    rows = _merge_source_and_local_rows(source_rows) if source_rows else []
+    last_checked = _PERSONA_OVERVIEW_LAST_CHECKED_AT
+    if not last_checked:
+        try:
+            last_checked = persona_dashboard_module.REMOTE_CACHE.stat().st_mtime
+        except OSError:
+            last_checked = 0.0
+    if not source_rows or not source_cache_has_pending_schema or now - last_checked >= PERSONA_MENU_CACHE_TTL_SECONDS:
+        _schedule_persona_overview_refresh(force_remote=not source_cache_has_pending_schema)
+    rows = source_rows
     _PERSONA_MENU_CACHE.update({"at": now, "rows": rows})
-    _schedule_persona_overview_refresh()
     return rows
 
 
@@ -3379,9 +3387,7 @@ def _find_persona_any(persona_id: str) -> tuple[Persona | None, dict[str, Any] |
             return local, row
     if local:
         return local, _local_persona_row(local)
-    overview = build_overview()
-    row = find_persona(overview, persona_id)
-    return local, row
+    return None, None
 
 
 def _resolve_persona_for_action(persona_id: str) -> tuple[Persona | None, dict[str, Any] | None]:
@@ -3817,30 +3823,12 @@ def _create_keyword_keyboard(options: list[str], selected: list[str]) -> list[li
 def _submit_create_persona_keywords(name: str, prompt: str) -> dict[str, Any]:
     params = {"name": name, "prompt": prompt, "chatId": SOURCE_WEB_BOT_CHAT_ID}
     job = SourceWorkflowJobRepo.create("persona_create_keywords", f"提煉人設關鍵詞：{name}", params, status="submitting")
-    try:
-        base, data = _source_submit_task("persona_create_keywords", params)
-        source_task_id = str(data.get("id") or "")
-        SourceWorkflowJobRepo.update(
-            job.id,
-            status="submitted",
-            result=data,
-            source_task_id=source_task_id,
-            source_base_url=base,
-        )
-    except Exception as exc:
-        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
-        return _response(
-            _message(
-                "❌ 人設核心關鍵詞提煉失敗，請稍後重試。",
-                [[_btn("◀️ 返回重新輸入名稱", "create_persona_entry")]],
-            ),
-            state={"flow": "create_persona_prompt", "draft": {"name": name}},
-        )
+    _submit_source_task_job_async(job.id, "persona_create_keywords", params)
     response = _response(
-        _message("🧠 正在提煉人設核心關鍵詞..."),
+        _message("🧠 正在提交關鍵詞提煉任務..."),
         state={"flow": "create_persona_keywords_wait", "draft": {"name": name, "prompt": prompt}},
     )
-    response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+    response["poll"] = {"action": f"source_submit_poll:keywords:{job.id}", "interval_ms": 750}
     return response
 
 
@@ -3947,35 +3935,16 @@ def _finish_create_persona(name: str, prompt: str, selected: list[str]) -> dict[
         "defaultPadCode": pad_code,
     }
     job = SourceWorkflowJobRepo.create("persona_create", f"新建人設：{name}", params, status="submitting")
-    try:
-        base, data = _source_submit_task("persona_create", params)
-        SourceWorkflowJobRepo.update(
-            job.id,
-            status="submitted",
-            result=data,
-            source_task_id=str(data.get("id") or ""),
-            source_base_url=base,
-        )
-    except Exception as exc:
-        SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
-        return _response(
-            _message(
-                "❌ 新建人設任務提交失敗，請稍後重試。",
-                _rows([_btn("➕ 重新新建人設", "create_persona_entry")], [_btn("◀️ 返回人設列表", "list_personas")]),
-            ),
-            state={"flow": ""},
-        )
-    source_task_id = str(data.get("id") or "")
+    _submit_source_task_job_async(job.id, "persona_create", params)
     response = _response(
         _message(
-            f"🧠 正在根據「{'、'.join(selected)}」生成人設..."
+            f"🧠 正在提交「{'、'.join(selected)}」人設生成任務..."
             if selected
-            else "🧠 正在根據原始提示生成人設..."
+            else "🧠 正在提交人設生成任務..."
         ),
         state={"flow": ""},
     )
-    if source_task_id:
-        response["poll"] = {"action": f"source_task_poll:{source_task_id}", "interval_ms": 2000}
+    response["poll"] = {"action": f"source_submit_poll:persona:{job.id}", "interval_ms": 750}
     response["replace_panel"] = False
     return response
 
@@ -4716,7 +4685,7 @@ SOURCE_TASK_USER_LABELS = {
     "persona_set_telegram_group": "绑定 Telegram 群组",
     "persona_post_action": "处理推文",
     "threads_auto_reply": "执行自动回复",
-    "threads_own_post_reply": "回复评论",
+    "threads_own_post_reply": "自动回复热点推文",
 }
 
 
@@ -5335,10 +5304,16 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             if completion_reason:
                 lines.extend(["", f"完成原因：{completion_reason}"])
         else:
+            failure_titles = {
+                "threads_warmup": "❌ 養號失敗",
+                "threads_auto_reply": "❌ Threads 自動回覆失敗",
+                "threads_own_post_reply": "❌ Threads 自動回覆熱點推文失敗",
+            }
+            failure_detail = str(task.get("error") or "").strip()
             lines = [
-                "❌ 養號失敗" if task_type == "threads_warmup" else "❌ Threads 自動回覆失敗",
+                failure_titles[task_type],
                 "",
-                "请稍后重试。",
+                failure_detail or "請稍後重試。",
             ]
     if task_type == "persona_sentiment_hot":
         return _sentiment_hot_source_task_response(task_id, task, task_input, result)
@@ -5354,6 +5329,12 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
         automation_screenshots.extend((f"📸 留言截图 {index + 1}/{len(comment_screenshots)}", url) for index, url in enumerate(comment_screenshots))
     elif task_type in {"threads_auto_reply", "threads_own_post_reply"}:
         reply_screenshots = [url for value in (result.get("replyScreenshots") if isinstance(result.get("replyScreenshots"), list) else []) if (url := _safe_web_media_url(value))]
+        if not reply_screenshots:
+            for progress in reversed(automation_progress):
+                progress_screenshots = progress.get("replyScreenshots") if isinstance(progress.get("replyScreenshots"), list) else []
+                reply_screenshots = [url for value in progress_screenshots if (url := _safe_web_media_url(value))]
+                if reply_screenshots:
+                    break
         caption = "📳 Threads 自動回覆熱點推文證據" if task_type == "threads_own_post_reply" else "📳 Threads 自動回覆證據"
         automation_screenshots.extend((f"{caption} {index + 1}/{len(reply_screenshots)}", url) for index, url in enumerate(reply_screenshots))
     generated_posts = [post for post in (result.get("posts") if isinstance(result.get("posts"), list) else []) if isinstance(post, dict)]
@@ -6249,6 +6230,100 @@ def _tool_r18_archive_id(persona_id: str, local: Persona | None, row: dict[str, 
     return ""
 
 
+def _invalidate_persona_list_caches(deleted_archive_id: str = "") -> None:
+    clean_id = str(deleted_archive_id or "").strip()
+
+    def keep(row: Any) -> bool:
+        if not isinstance(row, dict) or not clean_id:
+            return isinstance(row, dict)
+        values = {
+            str(row.get("id") or "").strip(),
+            str(row.get("source_archive_id") or "").strip(),
+        }
+        values.update(value[len("source:") :] for value in list(values) if value.startswith("source:"))
+        return clean_id not in values
+
+    cached_rows = _PERSONA_MENU_CACHE.get("rows")
+    filtered_rows = [row for row in cached_rows if keep(row)] if isinstance(cached_rows, list) else []
+    _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": filtered_rows})
+
+    remote_cache = persona_dashboard_module.REMOTE_CACHE
+    data = _read_json_file(remote_cache) if clean_id else {}
+    rows = data.get("personas") if isinstance(data.get("personas"), list) else []
+    if data and rows:
+        data["personas"] = [row for row in rows if keep(row)]
+        try:
+            temp_path = remote_cache.with_suffix(f"{remote_cache.suffix}.tmp")
+            temp_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            temp_path.replace(remote_cache)
+            return
+        except OSError:
+            pass
+    try:
+        remote_cache.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _delete_local_persona_projections(persona_id: str, archive_id: str) -> None:
+    target_ids = {str(persona_id or "").strip()}
+    clean_archive_id = str(archive_id or "").strip()
+    for candidate in PersonaRepo.list_all(limit=10000):
+        source_id = str(candidate.source_archive_id or "").strip()
+        if source_id.startswith("source:"):
+            source_id = source_id[len("source:") :].strip()
+        if clean_archive_id and (candidate.id == clean_archive_id or source_id == clean_archive_id):
+            target_ids.add(candidate.id)
+    for target_id in target_ids:
+        if target_id:
+            PersonaRepo.delete(target_id)
+
+
+def _delete_persona_response(persona_id: str) -> dict[str, Any]:
+    local = PersonaRepo.get(persona_id)
+    row = next(
+        (item for item in _persona_menu_rows() if str(item.get("id") or "").strip() == str(persona_id or "").strip()),
+        None,
+    )
+    archive_id = _tool_r18_archive_id(persona_id, local, row)
+    if not archive_id and local is None:
+        archive_id = str(persona_id or "").strip()
+
+    if archive_id:
+        try:
+            _base, result = _source_http_request(
+                "DELETE",
+                f"/api/persona_dashboard/personas/{urllib.parse.quote(archive_id, safe='')}",
+                timeout=20,
+            )
+        except Exception as exc:
+            return _response(
+                _message(
+                    "❌ 暫時無法確認刪除結果。\n\n伺服器正在切換，請返回人設列表刷新；如果人設仍存在，再點擊重新刪除。",
+                    [[_btn("重新刪除", f"delete_persona:{persona_id}", "danger")], [_btn("◀️ 返回人設設定", f"settings_{persona_id}")]],
+                ),
+                state={"flow": ""},
+            )
+        if not result.get("ok"):
+            error = str(result.get("detail") or result.get("error") or "來源人設刪除失敗")
+            return _response(
+                _message(
+                    f"❌ 人設刪除失敗，來源資料未變更。\n\n原因：{error}",
+                    [[_btn("重新刪除", f"delete_persona:{persona_id}", "danger")], [_btn("◀️ 返回人設設定", f"settings_{persona_id}")]],
+                ),
+                state={"flow": ""},
+            )
+
+    _delete_local_persona_projections(persona_id, archive_id)
+    _invalidate_persona_list_caches(archive_id or persona_id)
+    if archive_id:
+        _schedule_persona_overview_refresh(force_remote=True)
+    return _response(
+        _message("🗑 已刪除人設，Web 與 TG 共用資料已同步更新。", [[_btn("◀️ 返回人設列表", "list_personas")]]),
+        state={"flow": ""},
+    )
+
+
 def _genpost_content_counts(row: dict[str, Any] | None) -> tuple[int, int]:
     counts = row.get("counts") if isinstance(row, dict) and isinstance(row.get("counts"), dict) else {}
     free = _num(counts.get("free") or counts.get("nonr18") or counts.get("free_posts") or counts.get("freePostCount"))
@@ -6411,9 +6486,23 @@ def _genpost_memory_selection(draft: dict[str, Any]) -> dict[str, Any]:
 def _genpost_time_slot_picker(draft: dict[str, Any]) -> dict[str, Any]:
     persona_id = str(draft.get("persona_id") or "")
     name = str(draft.get("name") or persona_id or "人設")
+    selected = draft.get("selected_memory_entry_ids") if isinstance(draft.get("selected_memory_entry_ids"), list) else []
+    content_branch = str(draft.get("content_branch") or "")
+    mode_label = _genpost_branch_label(content_branch) + ("（不配圖）" if draft.get("text_only") else "+配圖/視頻")
     return _response(
         _message(
-            "\n".join(["✍️ 新建推文", "", f"人設：{name}", "內容類型：免費群內容", "", "請選擇本次要生成早上文案還是晚上文案。"]),
+            "\n".join(
+                [
+                    "✍️ 新建推文",
+                    "",
+                    f"人設：{name}",
+                    f"內容類型：{_genpost_branch_label(content_branch)}",
+                    f"模式：{mode_label}",
+                    f"指定記憶：{f'{len(selected)} 條' if selected else '不指定'}",
+                    "",
+                    "請選擇早上或晚上文案，二選一：",
+                ]
+            ),
             _rows(
                 [_btn("早上文案", "genmem_time_morning"), _btn("晚上文案", "genmem_time_night")],
                 [_btn("◀️ 返回群內容類型", "genmem_time_back")],
@@ -6465,6 +6554,7 @@ def _genpost_tg_count_prompt(draft: dict[str, Any]) -> dict[str, Any]:
 def _genpost_tg_prompt_input(draft: dict[str, Any]) -> dict[str, Any]:
     name = str(draft.get("name") or draft.get("persona_id") or "人設")
     mode_label = "只生成推文（不配圖）" if draft.get("text_only") else "生成推文+配圖/視頻"
+    back_action = f"genpost_mode_{draft.get('persona_id')}_{'textonly' if draft.get('text_only') else 'withimage'}"
     ratio_line = f"\n畫面比例：{draft.get('imageAspectRatio')}（{draft.get('imageRatioLabel')}）" if draft.get("imageAspectRatio") else ""
     text = (
         f"✍️ 新建推文\n\n人設：{name}\n模式：{mode_label}\n數量：{draft.get('count') or 0} 篇{ratio_line}"
@@ -6472,7 +6562,7 @@ def _genpost_tg_prompt_input(draft: dict[str, Any]) -> dict[str, Any]:
         "\n\n例如：圍繞教師生活，寫得像群內早安日常。"
     )
     return _response(
-        _message(text, _rows([_btn("⏭ 跳過提示詞，讓 AI 自由發展", "genpost_prompt_skip")], [_btn("◀️ 返回生成數量", "genpost_count_back")])),
+        _message(text, _rows([_btn("⏭ 跳過提示詞，讓 AI 自由發展", "genpost_prompt_skip")], [_btn("◀️ 返回生成數量", back_action)])),
         state={"flow": "genpost_prompt", "draft": draft},
     )
 
@@ -6985,6 +7075,51 @@ def _continue_no_reference_generate(state: dict[str, Any]) -> dict[str, Any]:
     return _continue_generate_posts(words, {"flow": "genpost_words", "draft": draft})
 
 
+def _uses_jinjunya_free_content_style(draft: dict[str, Any]) -> bool:
+    if str(draft.get("content_branch") or "") != "nonr18":
+        return False
+    persona_id = str(draft.get("source_archive_id") or draft.get("persona_id") or "").strip()
+    local, row = _resolve_persona_for_action(persona_id)
+    setup = row.get("setup") if isinstance(row, dict) and isinstance(row.get("setup"), dict) else {}
+    explicit = str(setup.get("freePostTemplate") or "").strip().lower()
+    if explicit:
+        return explicit == "jinjunya-hook"
+    image_workflow = setup.get("imageWorkflow") if isinstance(setup.get("imageWorkflow"), dict) else {}
+    markers = " ".join(
+        str(value or "")
+        for value in (
+            setup.get("personaName"),
+            setup.get("personaDescription"),
+            setup.get("contentTheme"),
+            setup.get("tweetStyleLinkUrl"),
+            image_workflow.get("personaKey"),
+            image_workflow.get("workflowFile"),
+            persona_id,
+            row.get("name") if isinstance(row, dict) else "",
+            local.name if local else "",
+        )
+    )
+    normalized = markers.lower()
+    return "金君雅" in markers or "jinjunya" in normalized or "gy_night_flight_bot" in normalized
+
+
+def _continue_jinjunya_free_generate(draft: dict[str, Any], prompt: str) -> dict[str, Any]:
+    next_draft = dict(draft)
+    next_draft["prompt"] = to_traditional(str(prompt or "").strip()[:1200])
+    response = _continue_generate_posts("20", {"flow": "genpost_words", "draft": next_draft})
+    messages = response.get("messages") if isinstance(response.get("messages"), list) else []
+    persona_id = str(next_draft.get("source_archive_id") or next_draft.get("persona_id") or "").strip()
+    response["messages"] = [
+        _message(
+            "✅ 已收到提示詞，將按 10-20 個中文字的群內內容規則直接生成。",
+            [[_btn("◀️ 返回人設詳情", f"pd_{persona_id}")]],
+            kind="status",
+        ),
+        *messages,
+    ]
+    return response
+
+
 def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
     persona_id = str(draft.get("persona_id") or "")
@@ -7116,6 +7251,8 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
 
     if flow == "genpost_prompt":
         draft["prompt"] = to_traditional(text[:1200])
+        if _uses_jinjunya_free_content_style(draft):
+            return _continue_jinjunya_free_generate(draft, draft["prompt"])
         return _genpost_tg_words_prompt(draft, draft["prompt"])
 
     if flow == "genpost_words":
@@ -7138,10 +7275,14 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
         count = min(int(draft.get("count") or 3), GENPOST_MAX_COUNT)
         memory = str(draft.get("memory") or "").strip()
         hot_context = str(draft.get("hot_context") or "").strip()
+        use_jinjunya_free_style = _uses_jinjunya_free_content_style(draft)
+        time_slot = str(draft.get("content_time_slot") or "")
+        fixed_opening = "哥哥們～早安安❤️" if time_slot == "早上文案" else "深夜福利來了㊙️" if time_slot == "晚上文案" else ""
         instruction_parts = [
             str(draft.get("prompt") or "").strip(),
-            f"每篇目標約 {words} 字。",
-            f"文案時段：{draft.get('content_time_slot')}" if draft.get("content_time_slot") else "",
+            "每篇中間文案由 AI 生成，口語化，10-20 個中文字即可。" if use_jinjunya_free_style else f"每篇目標約 {words} 字。",
+            f"每篇開頭必須固定使用：{fixed_opening}" if use_jinjunya_free_style and fixed_opening else "",
+            f"文案時段：{time_slot}" if time_slot else "",
             hot_context,
         ]
         selected_ids = [str(item) for item in draft.get("selected_memory_entry_ids", []) if str(item).strip()]
@@ -7199,7 +7340,7 @@ def _continue_generate_posts(message: str, state: dict[str, Any]) -> dict[str, A
                         f"⏳ 正在為人設「{name}」生成 {count} 篇推文{' + 配圖' if not bool(draft.get('text_only')) else ''}，請稍候...",
                         "",
                         f"指定記憶：{f'{len(selected_ids)} 條' if selected_ids else '不指定'}",
-                        f"目標字數：約 {words} 字/篇",
+                        "群內內容規則：10-20 個中文字/篇" if use_jinjunya_free_style else f"目標字數：約 {words} 字/篇",
                     ]
                 ),
                 [[_btn("◀️ 返回人設詳情", f"pd_{persona_id}")]],
@@ -10209,7 +10350,7 @@ def _own_reply_mode_menu(persona_id: str) -> dict[str, Any]:
         persona_id = persona.id
     name = persona.name if persona else _persona_row_name(row or {})
     history = row.get("publish_history") if isinstance((row or {}).get("publish_history"), list) else []
-    pad_code = str(persona.pad_code if persona else "").strip()
+    _pad_name, pad_code = _persona_bound_info(row, persona)
     replyable_history = []
     for record in history:
         if not isinstance(record, dict) or str(record.get("platform") or "").strip().lower() != "threads":
@@ -10291,9 +10432,10 @@ def _own_reply_manual_content_menu(state: dict[str, Any]) -> dict[str, Any]:
         rows.append([_btn("🗑 清除手动文字", f"ownreply_clear_text_{persona.id}")])
     if link_text:
         rows.append([_btn("🗑 清除链接模板", f"ownreply_clear_link_{persona.id}")])
+    back_action = f"ownreply_confirm_{persona.id}" if draft.get("editing_field") else f"persona_autoreply_hot_{persona.id}"
     rows.extend([
         [_btn("✅ 确认内容并继续", f"ownreply_content_continue_{persona.id}")],
-        [_btn("◀️ 返回", f"persona_autoreply_hot_{persona.id}")],
+        [_btn("◀️ 返回", back_action)],
     ])
     return _response(
         _message("\n".join(["✍️ 设置自定义回复内容", "", f"人设：{persona.name}", "", "整体预览：", preview or "（尚未设置回复内容）"]), rows),
@@ -10313,7 +10455,8 @@ def _own_reply_views_prompt(draft: dict[str, Any]) -> dict[str, Any]:
     rows = []
     if draft.get("reply_mode") == "manual":
         rows.append([_btn("✏️ 修改整体回复", f"arlback_m_{persona_id}")])
-    rows.append([_btn("◀️ 返回分支选择", f"persona_autoreply_hot_{persona_id}")])
+    back_action = f"ownreply_confirm_{persona_id}" if draft.get("editing_field") else f"persona_autoreply_hot_{persona_id}"
+    rows.append([_btn("◀️ 返回", back_action)])
     return _response(_message("\n".join(lines), rows), state={"flow": "ownreply_views", "draft": draft})
 
 
@@ -10347,7 +10490,10 @@ def _own_reply_days_prompt(draft: dict[str, Any]) -> dict[str, Any]:
                     "可輸入：1-7，例如：2。",
                 ]
             ),
-            _rows([_btn("👁 重新設定瀏覽量", f"ownreply_views_{persona_id}")], [_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]),
+            _rows(
+                [_btn("👁 重新設定瀏覽量", f"ownreply_views_{persona_id}")],
+                [_btn("◀️ 返回確認", f"ownreply_confirm_{persona_id}")] if draft.get("editing_field") else [_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")],
+            ),
         ),
         state={"flow": "ownreply_days", "draft": draft},
     )
@@ -10398,7 +10544,8 @@ def _own_reply_submit(state: dict[str, Any]) -> dict[str, Any]:
     persona_id = str(draft.get("persona_id") or "")
     persona, row = _resolve_persona_for_action(persona_id)
     archive_id = _tool_r18_archive_id(persona_id, persona, row)
-    if not persona or not archive_id or not persona.pad_code:
+    _pad_name, pad_code = _persona_bound_info(row, persona)
+    if not persona or not archive_id or not pad_code:
         return _response(_message("人設、來源歸檔或綁定智能體手機已失效，請重新設定。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]), state={"flow": ""})
     if time.time() - float(draft.get("created_at") or time.time()) > 30 * 60:
         return _response(_message("❌ 自动回复热点推文设置已失效，请重新设置。", [[_btn("✍️ 重新设置", f"persona_autoreply_hot_{persona_id}")]]), state={"flow": ""})
@@ -10408,7 +10555,7 @@ def _own_reply_submit(state: dict[str, Any]) -> dict[str, Any]:
         return _response(_message("❌ 手动文字和链接模板不能同时为空，且整体回复不能超过 500 字。", [[_btn("✏️ 修改回复内容", f"ownreply_content_{persona_id}")]]), state=state)
     params = {
         "archiveId": archive_id,
-        "padCode": persona.pad_code,
+        "padCode": pad_code,
         "replyMode": reply_mode,
         "replyText": reply_text,
         "replySuffix": _auto_reply_link_suffix(persona_id, draft) if reply_mode == "ai" else "",
@@ -10435,7 +10582,7 @@ def _own_reply_submit(state: dict[str, Any]) -> dict[str, Any]:
                 "🔥 Threads 自動回覆熱點推文執行中...",
                 "",
                 f"人設：{persona.name}",
-                f"智能體手機：{persona.pad_code}",
+                f"智能體手機：{pad_code}",
                 f"瀏覽量條件：大於等於 {_compact(params['minViews'])}",
                 f"查看天數：{params['maxAgeDays']} 天內",
                 "",
@@ -11916,6 +12063,8 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
         if min_views is None:
             return _response(_message("❌ 瀏覽量格式不正確，請輸入數字，例如：10000、1萬、2.5萬。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]), state=state)
         draft["min_views"] = min_views
+        if draft.pop("editing_field", "") == "min_views":
+            return _own_reply_confirmation(draft)
         return _own_reply_days_prompt(draft)
     if flow == "ownreply_days" and persona:
         days = _num(text)
@@ -11923,6 +12072,7 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
             return _response(_message("❌ 查看天數格式不正確。\n\n請輸入 1-7 之間的數字，例如：2。", [[_btn("◀️ 返回自動回覆", f"persona_autoreply_{persona_id}")]]), state=state)
         draft["max_age_days"] = days
         draft["created_at"] = float(draft.get("created_at") or time.time())
+        draft.pop("editing_field", None)
         return _own_reply_confirmation(draft)
     if flow == "threads_profile_update" and persona:
         return _threads_profile_submit(persona_id, str(draft.get("kind") or ""), text)
@@ -12554,6 +12704,11 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
     state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
     media = _sentiment_hot_input_media(payload.get("media"))
 
+    if payload.get("refresh_persona_source") and action.startswith(
+        ("list_personas", "personas", "pd:", "pd_", "shs:", "shs_", "shp:", "shp_")
+    ):
+        _refresh_persona_overview_cache(force_remote=True)
+
     if action.startswith("open:"):
         return _open(action.split(":", 1)[1], state)
     if not action and state.get("flow") == "sentiment_hot_edit_input" and (message or media):
@@ -12792,6 +12947,13 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         draft["content_time_slot"] = "付費圖片內容" if action == "paidr18_group_image" else "付費圖生視頻"
         return _genpost_tg_count_prompt(draft)
     if action == "genpost_count_back":
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        if str(state.get("flow") or "") == "genpost_ratio":
+            return _genpost_tg_count_prompt(draft)
+        if str(draft.get("content_branch") or "") == "nonr18":
+            return _genpost_time_slot_picker(draft)
+        return _genpost_memory_selection(draft)
+    if action.startswith("genpost_mode_"):
         return _genpost_memory_selection(dict(state.get("draft") if isinstance(state.get("draft"), dict) else {}))
     if action == "genpost_prompt_skip":
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
@@ -12801,6 +12963,8 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
                 state={"flow": ""},
             )
         draft["prompt"] = ""
+        if _uses_jinjunya_free_content_style(draft):
+            return _continue_jinjunya_free_generate(draft, "")
         return _genpost_tg_words_prompt(draft)
     if action == "genpost_prompt_back":
         return _genpost_tg_prompt_input(dict(state.get("draft") if isinstance(state.get("draft"), dict) else {}))
@@ -13009,11 +13173,13 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         if not reply_text or len(reply_text) > 500:
             return _response(_message("❌ 手动文字和链接模板不能同时为空，且整体回复不能超过 500 字。", [[_btn("◀️ 返回内容设置", f"arlback_m_{pid}")]]), state={"flow": "ownreply_content_ready", "draft": draft})
         draft["reply_text"] = reply_text
+        if draft.pop("editing_field", "") == "reply_text":
+            return _own_reply_confirmation(draft)
         return _own_reply_views_prompt(draft)
     if action.startswith("ownreply_content_"):
         pid = action[len("ownreply_content_") :]
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
-        draft.update({"persona_id": pid, "reply_mode": "manual"})
+        draft.update({"persona_id": pid, "reply_mode": "manual", "editing_field": "reply_text"})
         return _own_reply_manual_content_menu({"flow": "", "draft": draft})
     if action.startswith("ownreply_text_"):
         pid = action[len("ownreply_text_") :]
@@ -13024,12 +13190,21 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         pid = action[len("ownreply_views_") :]
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
         draft["persona_id"] = pid
+        if str(state.get("flow") or "") == "ownreply_confirm":
+            draft["editing_field"] = "min_views"
         return _own_reply_views_prompt(draft)
     if action.startswith("ownreply_days_"):
         pid = action[len("ownreply_days_") :]
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
         draft["persona_id"] = pid
+        if str(state.get("flow") or "") == "ownreply_confirm":
+            draft["editing_field"] = "max_age_days"
         return _own_reply_days_prompt(draft)
+    if action.startswith("ownreply_confirm_"):
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft["persona_id"] = action[len("ownreply_confirm_") :]
+        draft.pop("editing_field", None)
+        return _own_reply_confirmation(draft)
     if action == "ownreply_run" or action.startswith("acctautoreplyhot_threads_"):
         return _own_reply_submit(state)
     if action.startswith("acctautoreply_run_"):
@@ -13263,8 +13438,7 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _response(_message("确认删除这个人设？", [[_btn("确认删除", f"delete_persona:{pid}", "danger")], [_btn("取消", f"settings_{pid}")]]))
     if action.startswith("delete_persona:"):
         pid = action.split(":", 1)[1]
-        PersonaRepo.delete(pid)
-        return _response(_message("🗑 已删除人设", [[_btn("◀️ 返回", "list_personas")]]), state={"flow": ""})
+        return _delete_persona_response(pid)
 
     if action in {"pad_mgmt", "devices"}:
         return _devices_menu()
@@ -13407,6 +13581,8 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _source_post_publish_execute(state)
     if action.startswith("source_task_detail:"):
         return _source_task_detail(action.split(":", 1)[1])
+    if action.startswith("source_submit_poll:"):
+        return _source_submit_poll(action)
     if action.startswith("source_task_poll:"):
         return _source_task_poll(action.split(":", 1)[1])
     if action.startswith("source_genpost_image_start:"):

@@ -8,6 +8,7 @@ PERSONA_DASHBOARD_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "co
 SERVER_PATH = Path(__file__).parents[1] / "server.py"
 GENERATOR_PATH = Path(__file__).parents[2] / "tool_r18" / "scripts" / "skills" / "persona-generate-posts-once.ts"
 PERSONA_CREATE_PATH = Path(__file__).parents[2] / "tool_r18" / "scripts" / "skills" / "persona-create-once.ts"
+VMOS_PUBLISHER_PATH = Path(__file__).parents[2] / "tool_r18" / "src" / "lib" / "vmos-publisher.ts"
 SOURCE = WEB_BOT_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 
@@ -30,6 +31,25 @@ def test_console_uses_8098_proxy_prefix_when_served_under_threads_console() -> N
     assert "fetch(webBotEndpoint" in template
 
 
+def test_compact_console_avoids_unrelated_revision_and_history_work() -> None:
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert "const historyLimit = 100;" in template
+    assert "if (userRequestInFlight) return false;" in template
+    assert "!isPersonaPanelAction(activePanelAction)" in template
+
+
+def test_threads_console_proxy_does_not_queue_on_default_thread_pool() -> None:
+    server = SERVER_PATH.read_text(encoding="utf-8")
+    start = server.index("async def _threads_console_request")
+    end = server.index("@app.api_route", start)
+    proxy = server[start:end]
+
+    assert "aiohttp.ClientSession" in proxy
+    assert "asyncio.to_thread" not in proxy
+    assert "requests.request" not in proxy
+
+
 def test_create_persona_progress_keeps_the_tg_selector_then_polls_in_place() -> None:
     finish = _function_source("_finish_create_persona")
     template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
@@ -50,8 +70,13 @@ def test_create_persona_progress_keeps_the_tg_selector_then_polls_in_place() -> 
 
 def test_configured_source_api_precedes_legacy_container_fallbacks() -> None:
     candidates = _function_source("_source_api_candidates")
+    submit = _function_source("_source_submit_task")
+    request = _function_source("_source_http_request")
 
     assert 'for item in [*configured, *preferred, *fallback]:' in candidates
+    assert 'candidate_bases=worker_candidates' in submit
+    assert '"http://workflow-delivery-r18:8098"' in submit
+    assert 'candidate_bases: list[str] | None = None' in request
 
 
 def test_compact_console_reuses_full_client_and_syncs_named_sessions() -> None:
@@ -100,7 +125,10 @@ def test_persona_pages_poll_and_subscribe_to_shared_live_updates() -> None:
     app_js = (Path(__file__).parents[1] / "static" / "assets" / "app.js").read_text(encoding="utf-8")
 
     assert "pollSourcePersonaRevision" in template
-    assert "setInterval(pollSourcePersonaRevision, 3000)" in template
+    assert "setInterval(pollSourcePersonaRevision, 10000)" in template
+    assert "setTimeout(() => controller.abort(), 5000)" in template
+    assert "panelRefreshInFlight" in template
+    assert "refreshActivePersonaPanel(true)" in template
     assert "window.location.protocol + '//' + window.location.host + '/api/persona_dashboard/revision'" in template
     assert "action.startsWith('shs:')" in template
     assert "workflow-console-data" in dashboard_js
@@ -165,20 +193,23 @@ def test_persona_dashboard_prefers_archive_ids_and_hides_confirmed_device_duplic
     assert '"raw_count": len(raw_local_personas)' in source
     assert 'for candidate in (_source_archive_key(persona.source_archive_id), _match_key(persona.id))' in source
     assert 'if needle == _match_key(row.get("id"))' in source
-    assert "from core.persona_dashboard import build_overview, find_persona, visible_local_personas" in SOURCE
-    assert "for persona in visible_local_personas()" in SOURCE
+    assert "from core.persona_dashboard import build_overview, find_persona" in SOURCE
+    assert "visible_local_personas" not in SOURCE
 
 
-def test_web_persona_merge_deduplicates_local_projection_by_source_archive_id() -> None:
+def test_web_persona_menu_uses_server_archive_rows_only() -> None:
     local_row = _function_source("_local_persona_row")
-    merge = _function_source("_merge_source_and_local_rows")
     refresh = _function_source("_refresh_persona_overview_cache")
+    cached = _function_source("_cached_remote_persona_rows")
+    menu = _function_source("_persona_menu_rows")
 
     assert '"source_archive_id": persona.source_archive_id' in local_row
-    assert 'str(row.get("source_archive_id")' in merge
-    assert 'value.startswith("source:")' in merge
-    assert "keys.isdisjoint(seen)" in merge
-    assert 'overview.get("personas", [])' in refresh
+    assert '_source_http_request("GET", "/api/persona_dashboard/overview"' in refresh
+    assert "build_overview" not in refresh
+    assert "_local_persona_rows" not in refresh
+    assert 'getattr(persona_dashboard_module, "REMOTE_CACHE", None)' in cached
+    assert "REMOTE_SAMPLE" not in cached
+    assert "rows = source_rows" in menu
 
 
 def test_exact_source_persona_id_is_not_replaced_by_another_persona_on_the_same_pad() -> None:
@@ -244,12 +275,19 @@ def test_persona_create_flow_delegates_keywords_and_creation_to_tg_functions() -
     continue_flow = _function_source("_continue_create_persona")
     keyword_submit = _function_source("_submit_create_persona_keywords")
     finish = _function_source("_finish_create_persona")
+    submit_worker = _function_source("_submit_source_task_job")
+    submit_poll = _function_source("_source_submit_poll")
     task_detail = _function_source("_source_task_detail")
     script = PERSONA_CREATE_PATH.read_text(encoding="utf-8")
 
     assert "_derive_keywords(" not in SOURCE
     assert "_submit_create_persona_keywords(name, text)" in continue_flow
-    assert '_source_submit_task("persona_create_keywords", params)' in keyword_submit
+    assert '_submit_source_task_job_async(job.id, "persona_create_keywords", params)' in keyword_submit
+    assert '_submit_source_task_job_async(job.id, "persona_create", params)' in finish
+    assert "_source_submit_task(task_type, params)" in submit_worker
+    assert "_source_task_poll(source_task_id)" in submit_poll
+    assert "source_submit_poll:keywords:" in keyword_submit
+    assert "source_submit_poll:persona:" in finish
     assert 'response["poll"]' in keyword_submit
     assert '"flow": "create_persona_keywords_wait"' in keyword_submit
     assert 'response["poll"]' in finish
@@ -317,12 +355,53 @@ def test_web_bot_slow_dependencies_do_not_block_interaction_path() -> None:
     task_detail = _function_source("_source_task_detail")
 
     assert "deadline = time.monotonic()" in source_request
-    assert "timeout=max(0.5, remaining)" in source_request
+    assert "while candidates and time.monotonic() < deadline" in source_request
+    assert 'retry_rounds = request_method in {"GET", "HEAD", "DELETE"}' in source_request
+    assert 'attempt_limit = 3.0 if request_method == "DELETE" else 1.0 if retry_rounds else remaining' in source_request
+    assert "max(0.05, min(attempt_limit, remaining))" in source_request
     assert "build_overview(force_remote=True)" not in persona_rows
-    assert "_schedule_persona_overview_refresh(force_remote=True)" in persona_rows
+    assert "_schedule_persona_overview_refresh(force_remote=not source_cache_has_pending_schema)" in persona_rows
     assert "build_overview(force_remote=True)" not in fresh_persona
     assert "_schedule_persona_overview_refresh(force_remote=True)" in fresh_persona
     assert "_refresh_persona_overview_cache(force_remote=True)" not in task_detail
+    assert "timeout=3" in _function_source("_source_task_detail_data")
+
+
+def test_persona_sync_does_not_create_a_revision_feedback_loop() -> None:
+    refresh = _function_source("_refresh_persona_overview_cache")
+    menu = _function_source("_persona_menu_rows")
+    finder = _function_source("_find_persona_any")
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert '{"force_refresh": "true"}' in refresh
+    assert "if current_rows != rows:" in refresh
+    assert "_PERSONA_OVERVIEW_LAST_CHECKED_AT = time.time()" in refresh
+    assert "_schedule_persona_overview_refresh()" not in menu
+    assert "build_overview()" not in finder
+    assert "new AbortController()" in template
+    assert "isInteractive ? 20000 : 8000" in template
+    assert "if (isInteractive) subtitle.textContent = '正在输入...'" in template
+
+
+def test_web_persona_delete_uses_shared_source_before_local_projection_cleanup() -> None:
+    delete_response = _function_source("_delete_persona_response")
+    delete_local = _function_source("_delete_local_persona_projections")
+    invalidate = _function_source("_invalidate_persona_list_caches")
+    handle = _function_source("handle")
+
+    source_delete = '_source_http_request(\n                "DELETE",\n                f"/api/persona_dashboard/personas/'
+    assert source_delete in delete_response
+    assert "_find_persona_any" not in delete_response
+    assert delete_response.index("_source_http_request(") < delete_response.index("_delete_local_persona_projections(")
+    assert "來源資料未變更" in delete_response
+    assert "if not result.get(\"ok\")" in delete_response
+    assert "PersonaRepo.delete(target_id)" in delete_local
+    assert "candidate.source_archive_id" in delete_local
+    assert "data[\"personas\"] = [row for row in rows if keep(row)]" in invalidate
+    assert '_PERSONA_MENU_CACHE.update({"at": 0.0, "rows": filtered_rows})' in invalidate
+    assert "_schedule_persona_overview_refresh(force_remote=True)" in delete_response
+    assert "_refresh_persona_overview_cache(force_remote=True)" not in delete_response
+    assert "return _delete_persona_response(pid)" in handle
 
 
 def test_server_maps_post_generation_to_persona_workflow_service() -> None:
@@ -456,10 +535,10 @@ def test_source_archive_id_wins_over_local_projection_id() -> None:
 def test_background_persona_refresh_keeps_remote_callback_ids() -> None:
     refresh = _function_source("_refresh_persona_overview_cache")
 
-    assert "build_overview(force_remote=force_remote)" in refresh
-    assert "source_rows = _cached_remote_persona_rows()" in refresh
-    assert "_merge_source_and_local_rows(source_rows)" in refresh
-    assert 'overview.get("personas")' not in refresh
+    assert '_source_http_request("GET", "/api/persona_dashboard/overview"' in refresh
+    assert 'overview.get("personas", [])' in refresh
+    assert "persona_dashboard_module.REMOTE_CACHE" in refresh
+    assert "_local_persona_rows" not in refresh
 
 
 def test_persona_detail_and_post_context_keep_tool_r18_archive_id() -> None:
@@ -592,6 +671,31 @@ def test_post_generation_text_steps_match_tg_input_contract() -> None:
     assert "genpost_words_20" not in words_prompt
 
 
+def test_jinjunya_free_prompt_submission_matches_tg_fixed_word_branch() -> None:
+    detector = _function_source("_uses_jinjunya_free_content_style")
+    fixed_flow = _function_source("_continue_jinjunya_free_generate")
+    prompt = _function_source("_genpost_tg_prompt_input")
+    continuation = _function_source("_continue_generate_posts")
+    time_slot = _function_source("_genpost_time_slot_picker")
+    handle = _function_source("handle")
+
+    assert 'freePostTemplate' in detector
+    assert '"jinjunya-hook"' in detector
+    assert 'draft.get("content_branch") or ""' in detector
+    assert '"nonr18"' in detector
+    assert "✅ 已收到提示詞，將按 10-20 個中文字的群內內容規則直接生成。" in fixed_flow
+    assert '_continue_generate_posts("20"' in fixed_flow
+    assert "群內內容規則：10-20 個中文字/篇" in continuation
+    assert '_continue_jinjunya_free_generate(draft, draft["prompt"])' in continuation
+    assert '_continue_jinjunya_free_generate(draft, "")' in handle
+    assert 'genpost_mode_{draft.get(\'persona_id\')}_{\'textonly\' if draft.get(\'text_only\') else \'withimage\'}' in prompt
+    assert 'if action.startswith("genpost_mode_"):' in handle
+    assert 'f"模式：{mode_label}"' in time_slot
+    assert 'f"指定記憶：{f\'{len(selected)} 條\' if selected else \'不指定\'}"' in time_slot
+    assert 'if str(draft.get("content_branch") or "") == "nonr18":' in handle
+    assert "return _genpost_time_slot_picker(draft)" in handle
+
+
 def test_web_generation_uses_tool_r18_memory_and_mode_labels() -> None:
     memory_options = _function_source("_genpost_memory_options")
     hot_filter = _function_source("_is_auto_imported_hot_memory")
@@ -661,6 +765,23 @@ def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
     assert 'flow == "auto_reply_comments_days"' in continuation
     assert '"threads_own_post_reply"' in _function_source("_own_reply_submit")
     assert '"replySuffix"' in _function_source("_own_reply_submit")
+    assert 'draft["editing_field"] = "min_views"' in handle
+    assert 'draft["editing_field"] = "max_age_days"' in handle
+    assert '"editing_field": "reply_text"' in handle
+    assert 'draft.pop("editing_field", "") == "min_views"' in continuation
+    assert '_persona_bound_info(row, persona)' in _function_source("_own_reply_submit")
+
+
+def test_hot_post_reply_opens_composer_before_typing() -> None:
+    source = VMOS_PUBLISHER_PATH.read_text(encoding="utf-8")
+    own_reply_start = source.index("export async function replyOwnPublishedThreadsPosts")
+    own_reply_source = source[own_reply_start:]
+
+    assert 'detectThreadsDetailActionRowLocally(detailShotUrl, { preferTopRow: true })' in own_reply_source
+    assert 'openThreadsCommentReplyComposerAtPoint(config, padCode, commentPoint)' in own_reply_source
+    assert 'sourceScreenshotUrl: replyComposer.screenshotUrl' in own_reply_source
+    assert 'alreadyInReplyComposer: true' in own_reply_source
+    assert 'openViaCommentFirst: true' not in own_reply_source
 
 
 def test_auto_reply_link_templates_use_source_persona_setup() -> None:

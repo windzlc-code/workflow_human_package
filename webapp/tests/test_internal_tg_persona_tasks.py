@@ -242,6 +242,42 @@ def test_persona_sentiment_hot_fetch_payload_is_strictly_normalized() -> None:
     }
 
 
+def test_threads_own_post_reply_keeps_web_persona_metadata() -> None:
+    payload = server._build_internal_tg_task_payload(
+        "task-own-reply",
+        "threads_own_post_reply",
+        {
+            "archiveId": "workflow-persona-jinjunya",
+            "padCode": "ATP64K6RON7LCGMR",
+            "replyMode": "manual",
+            "replyText": "你好",
+            "minViews": 0,
+            "maxAgeDays": 1,
+            "uiPersonaId": "web-persona-jinjunya",
+            "uiPersonaName": "金君雅",
+        },
+    )
+
+    assert payload["uiPersonaId"] == "web-persona-jinjunya"
+    assert payload["uiPersonaName"] == "金君雅"
+
+
+def test_own_post_reply_cli_reports_semantic_failure_and_progress_screenshots() -> None:
+    source = OWN_POST_REPLY_SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "result.replied <= 0 && result.matched > 0" in source
+    assert "replyScreenshots: progress.replyScreenshots" in source
+    assert "if (semanticFailure) process.exitCode = 1" in source
+
+
+def test_api_sidecar_can_enable_task_workers_without_other_background_workers() -> None:
+    source = inspect.getsource(server.create_app)
+
+    assert 'WEBAPP_TASK_WORKERS_ENABLED' in source
+    assert "if task_workers_enabled:" in source
+    assert "if background_workers_enabled:" in source
+
+
 def test_persona_sentiment_hot_import_payload_is_a_thin_candidate_mapping(monkeypatch) -> None:
     source = inspect.getsource(server._sentiment_hot_import_items)
     candidate = {
