@@ -27,6 +27,26 @@ SET_LINK_ENDING_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "person
 POST_ACTION_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-post-action-once.ts"
 SENTIMENT_HOT_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-sentiment-hot-once.ts"
 TELEGRAM_BOT_PATH = ROOT / "tool_r18" / "src" / "telegram-bot.ts"
+WEB_TASK_PROGRESS_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "_web-task-progress.ts"
+
+
+def _run_tool_r18_cli(script_path: Path, payload: dict, runtime_dir: Path) -> dict:
+    env = os.environ.copy()
+    env["TOOL_R18_RUNTIME_DIR"] = str(runtime_dir)
+    completed = subprocess.run(
+        ["node", "--import", "tsx", str(script_path), json.dumps(payload, ensure_ascii=False)],
+        cwd=ROOT / "tool_r18",
+        env=env,
+        text=True,
+        encoding="utf-8",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    result = server._extract_last_json_object(completed.stdout)
+    assert isinstance(result, dict), completed.stdout
+    return result
 
 
 def test_persona_internal_tg_runners_are_registered() -> None:
@@ -124,6 +144,59 @@ def test_own_post_reply_dry_run_skips_remote_url_recovery() -> None:
     assert "collectPublishedThreadsOwnPostReplyTargets(archive, padCode)" in function_source
     assert "resolvePublishedThreadsOwnPostReplyTargets(archive, padCode)" in function_source
     assert function_source.index("if (dryRun) {") < function_source.index("resolvePublishedThreadsOwnPostReplyTargets(archive, padCode)")
+
+
+def test_auto_reply_production_clis_resolve_and_execute(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    archive_path = runtime_dir / "persona_archives.json"
+    archive_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "archive-auto-reply-smoke",
+                    "name": "Auto Reply Smoke",
+                    "content": "Runtime dependency smoke test persona",
+                    "createdAt": "2026-07-12T00:00:00Z",
+                    "updatedAt": "2026-07-12T00:00:00Z",
+                    "setup": {},
+                    "posts": [],
+                    "publishHistory": [],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    own_reply = _run_tool_r18_cli(
+        OWN_POST_REPLY_SCRIPT_PATH,
+        {
+            "archiveId": "archive-auto-reply-smoke",
+            "padCode": "PAD-SMOKE",
+            "replyMode": "ai",
+            "minViews": 999999999,
+            "maxAgeDays": 1,
+            "dryRun": True,
+        },
+        runtime_dir,
+    )
+    link_ending = _run_tool_r18_cli(
+        SET_LINK_ENDING_SCRIPT_PATH,
+        {
+            "archiveId": "archive-auto-reply-smoke",
+            "name": "Smoke template",
+            "endingText": "Read more",
+            "linkUrl": "https://example.com/smoke",
+        },
+        runtime_dir,
+    )
+
+    assert WEB_TASK_PROGRESS_PATH.is_file()
+    assert own_reply["ok"] is True
+    assert own_reply["dryRun"] is True
+    assert link_ending["ok"] is True
+    stored = json.loads(archive_path.read_text(encoding="utf-8"))[0]
+    assert stored["setup"]["linkEndingPresets"][0]["name"] == "Smoke template"
 
 
 def test_tool_r18_runner_extracts_final_json_after_console_logs() -> None:
