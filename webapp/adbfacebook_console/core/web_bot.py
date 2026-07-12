@@ -248,13 +248,17 @@ def _source_http_request(
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     clean_path = "/" + str(path or "").lstrip("/")
     last_error = ""
+    deadline = time.monotonic() + max(1, timeout)
     for base in _source_api_candidates():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         url = f"{base}{clean_path}"
         if query:
             url = f"{url}?{urllib.parse.urlencode(query)}"
         request = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=max(0.5, remaining)) as response:
                 raw = response.read().decode("utf-8", errors="replace")
             data = json.loads(raw or "{}")
             if not isinstance(data, dict):
@@ -857,13 +861,10 @@ def _fresh_persona_row(persona_id: str, local: Persona | None, row: dict[str, An
     target_id = _tool_r18_archive_id(persona_id, local, row) or str(persona_id or "").strip()
     if not target_id:
         return row
-    try:
-        overview = build_overview(force_remote=True)
-        fresh = find_persona(overview, target_id)
-        if fresh:
-            return fresh
-    except Exception:
-        pass
+    fresh = find_persona({"personas": _cached_remote_persona_rows()}, target_id)
+    _schedule_persona_overview_refresh(force_remote=True)
+    if fresh:
+        return fresh
     return row
 
 
@@ -3140,12 +3141,11 @@ def _persona_menu_rows() -> list[dict[str, Any]]:
     source_rows = _cached_remote_persona_rows()
     source_cache_has_pending_schema = bool(source_rows) and any("pending_posts" in row for row in source_rows)
     if not source_rows or not source_cache_has_pending_schema:
-        try:
-            overview = build_overview(force_remote=True)
-            source_rows = [row for row in overview.get("personas", []) if isinstance(row, dict)]
-        except Exception:
-            source_rows = []
-    rows = _merge_source_and_local_rows(source_rows) if source_rows else _local_persona_rows()
+        _schedule_persona_overview_refresh(force_remote=True)
+        stale_rows = _PERSONA_MENU_CACHE.get("rows")
+        if not source_rows and isinstance(stale_rows, list):
+            source_rows = stale_rows
+    rows = _merge_source_and_local_rows(source_rows) if source_rows else []
     _PERSONA_MENU_CACHE.update({"at": now, "rows": rows})
     _schedule_persona_overview_refresh()
     return rows
@@ -4705,6 +4705,39 @@ SOURCE_STATUS_LABELS = {
 }
 
 
+SOURCE_TASK_USER_LABELS = {
+    "persona_create_keywords": "提炼人设关键词",
+    "persona_create": "生成人设",
+    "persona_generate_posts": "生成推文",
+    "persona_generate_image": "生成人设图",
+    "persona_generate_post_image": "生成推文配图",
+    "persona_publish_post": "发布推文",
+    "persona_rewrite_intro": "更新人设简介",
+    "persona_set_telegram_group": "绑定 Telegram 群组",
+    "persona_post_action": "处理推文",
+    "threads_auto_reply": "执行自动回复",
+    "threads_own_post_reply": "回复评论",
+}
+
+
+def _source_task_user_lines(task: dict[str, Any]) -> list[str]:
+    """Build the concise status shown to users; technical details stay in server logs."""
+    task_type = str(task.get("type") or "").strip()
+    status = str(task.get("status") or "").strip().lower()
+    action = SOURCE_TASK_USER_LABELS.get(task_type, "处理任务")
+    event_line = _source_event_line(task)
+    if status in {"queued", "running"}:
+        lines = [f"⏳ 正在{action}，请稍候..."]
+        if event_line:
+            lines.append(f"当前进度：{event_line}")
+        return lines
+    if status == "success":
+        return [f"✅ {action}已完成"]
+    if status == "cancelled":
+        return [f"⏹ {action}已停止。"]
+    return [f"❌ {action}失败，请稍后重试。"]
+
+
 def _source_clean_workflow_id(value: Any) -> str:
     text = str(value or "").strip().replace("\\", "/")
     if not text:
@@ -4744,6 +4777,12 @@ def _source_workflow_line(item: dict[str, Any]) -> str:
 def _source_event_line(item: dict[str, Any]) -> str:
     event = item.get("latest_event") if isinstance(item.get("latest_event"), dict) else {}
     message = str(event.get("message") or "").strip()
+    if message and (
+        len(message) > 100
+        or re.search(r"https?://|file://|[A-Za-z]:[\\/]|/app/|task[_ ]?id|traceback|json|stderr|api\b", message, re.IGNORECASE)
+        or (message.startswith("{") and message.endswith("}"))
+    ):
+        message = "任务进行中"
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
     parts: list[str] = []
     if isinstance(data, dict):
@@ -4947,7 +4986,7 @@ def _source_submit_from_draft(draft: dict[str, Any]) -> dict[str, Any]:
         SourceWorkflowJobRepo.update(job.id, status="failed", error=str(exc))
         return _response(
             _message(
-                f"❌ 来源任务提交失败\n\n{exc}",
+                "❌ 任务提交失败，请稍后重试。",
                 _rows([_btn("重新填写", f"source_task_start:{key}")], [_btn("查看来源状态", "source_status"), _btn("返回主选单", "menu")]),
             ),
             state={"flow": ""},
@@ -4955,10 +4994,6 @@ def _source_submit_from_draft(draft: dict[str, Any]) -> dict[str, Any]:
     text = "\n".join(
         [
             f"✅ 已提交：{label}",
-            "",
-            f"来源 API：{base}",
-            f"来源任务 ID：{data.get('id') or '-'}",
-            f"任务类型：{data.get('task_type') or task_type}",
             "",
             str(data.get("prompt_preview") or "").strip()[:600],
         ]
@@ -4977,17 +5012,15 @@ def _source_submit_from_draft(draft: dict[str, Any]) -> dict[str, Any]:
 
 def _source_status_menu() -> dict[str, Any]:
     try:
-        base, data = _source_status_data()
-    except Exception as exc:
-        return _response(_message(f"❌ 读取来源状态失败\n\n{exc}", [[_btn("返回主选单", "menu")]]), state={"flow": ""})
+        _base, data = _source_status_data()
+    except Exception:
+        return _response(_message("❌ 暂时无法读取任务状态，请稍后重试。", [[_btn("返回主选单", "menu")]]), state={"flow": ""})
     counts = data.get("counts") if isinstance(data.get("counts"), dict) else {}
     latest = data.get("latest_task") if isinstance(data.get("latest_task"), dict) else {}
     active = data.get("active_task") if isinstance(data.get("active_task"), dict) else {}
     lines = [
-        "来源工作流状态",
+        "任务状态",
         "",
-        f"API：{base}",
-        f"chat_id：{data.get('chat_id') or SOURCE_WEB_BOT_CHAT_ID}",
         f"排队：{counts.get('queued', 0)}",
         f"运行中：{counts.get('running', 0)}",
         f"成功：{counts.get('success', 0)}",
@@ -4995,20 +5028,16 @@ def _source_status_menu() -> dict[str, Any]:
         f"取消：{counts.get('cancelled', 0)}",
     ]
     if active:
-        lines.extend(["", f"当前任务：{active.get('type') or '-'} / {active.get('id') or '-'} / {_source_task_label(active)}"])
-        workflow_line = _source_workflow_line(active)
+        action = SOURCE_TASK_USER_LABELS.get(str(active.get("type") or ""), "处理任务")
+        lines.extend(["", f"当前任务：{action}（{_source_task_label(active)}）"])
         event_line = _source_event_line(active)
-        if workflow_line:
-            lines.append(workflow_line)
         if event_line:
             lines.append(f"当前进度：{event_line}")
     else:
         lines.extend(["", "当前任务：无，来源工作台可立即使用"])
     if latest:
-        lines.extend(["", f"最近任务：{latest.get('type') or '-'} / {latest.get('id') or '-'} / {_source_task_label(latest)}"])
-        workflow_line = _source_workflow_line(latest)
-        if workflow_line:
-            lines.append(workflow_line)
+        action = SOURCE_TASK_USER_LABELS.get(str(latest.get("type") or ""), "处理任务")
+        lines.extend(["", f"最近任务：{action}（{_source_task_label(latest)}）"])
     return _response(
         _message(
             "\n".join(lines),
@@ -5024,25 +5053,22 @@ def _source_status_menu() -> dict[str, Any]:
 
 def _source_tasks_menu() -> dict[str, Any]:
     try:
-        base, tasks = _source_tasks(limit=10)
-    except Exception as exc:
-        return _response(_message(f"❌ 读取来源任务失败\n\n{exc}", [[_btn("返回主选单", "menu")]]), state={"flow": ""})
-    lines = ["来源任务列表", "", f"API：{base}", ""]
+        _base, tasks = _source_tasks(limit=10)
+    except Exception:
+        return _response(_message("❌ 暂时无法读取任务列表，请稍后重试。", [[_btn("返回主选单", "menu")]]), state={"flow": ""})
+    lines = ["任务列表", ""]
     keyboard: list[list[dict[str, str]]] = []
     if not tasks:
         lines.append("暂无这个 Web 操作台提交的来源任务。")
     for index, task in enumerate(tasks, start=1):
         tid = str(task.get("id") or "")
-        lines.append(f"{index}. {task.get('type') or '-'}：{_source_task_label(task)}（{tid or '-'}）")
-        workflow_line = _source_workflow_line(task)
+        action = SOURCE_TASK_USER_LABELS.get(str(task.get("type") or ""), "处理任务")
+        lines.append(f"{index}. {action}：{_source_task_label(task)}")
         event_line = _source_event_line(task)
-        if workflow_line:
-            lines.append(f"   {workflow_line}")
         if event_line and str(task.get("status") or "").lower() in {"queued", "running"}:
             lines.append(f"   进度：{event_line}")
-        error = str(task.get("error") or "").strip()
-        if error and str(task.get("status") or "").lower() == "failed":
-            lines.append(f"   错误：{error[:120]}")
+        if str(task.get("status") or "").lower() == "failed":
+            lines.append("   请稍后重试。")
         if tid:
             keyboard.append([_btn(f"查看 {index}", f"source_task_detail:{tid}")])
     keyboard.extend(_rows([_btn("刷新", "source_tasks"), _btn("来源状态", "source_status")], [_btn("返回主选单", "menu")]))
@@ -5175,30 +5201,12 @@ def _sentiment_hot_source_task_response(task_id: str, task: dict[str, Any], task
 
 def _source_task_detail(task_id: str) -> dict[str, Any]:
     try:
-        base, data = _source_task_detail_data(task_id)
-    except Exception as exc:
-        return _response(_message(f"❌ 读取来源任务详情失败\n\n{exc}", [[_btn("任务列表", "source_tasks")]]), state={"flow": ""})
+        _base, data = _source_task_detail_data(task_id)
+    except Exception:
+        return _response(_message("❌ 暂时无法读取任务状态，请稍后重试。", [[_btn("任务列表", "source_tasks")]]), state={"flow": ""})
     task = data.get("task") if isinstance(data.get("task"), dict) else {}
-    lines = [
-        "来源任务详情",
-        "",
-        f"API：{base}",
-        f"ID：{task.get('id') or task_id}",
-        f"类型：{task.get('type') or '-'}",
-        f"状态：{_source_task_label(task)}",
-        f"RunningHub：{task.get('runninghub_task_id') or '-'}",
-        f"下载：{task.get('download_path') or '-'}",
-    ]
-    workflow_line = _source_workflow_line(task)
+    lines = _source_task_user_lines(task)
     event_line = _source_event_line(task)
-    if workflow_line:
-        lines.append(workflow_line)
-    if event_line:
-        lines.append(f"进度：{event_line}")
-    if task.get("error"):
-        lines.extend(["", f"错误：{task.get('error')}"])
-    if task.get("batch_summary"):
-        lines.extend(["", f"批次：{json.dumps(task.get('batch_summary'), ensure_ascii=False)[:500]}"])
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
     task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
     archive_id = str(result.get("archiveId") or result.get("archive_id") or task_input.get("archiveId") or task_input.get("archive_id") or "").strip()
@@ -5330,7 +5338,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
             lines = [
                 "❌ 養號失敗" if task_type == "threads_warmup" else "❌ Threads 自動回覆失敗",
                 "",
-                str(task.get("error") or result.get("error") or "任務未完成"),
+                "请稍后重试。",
             ]
     if task_type == "persona_sentiment_hot":
         return _sentiment_hot_source_task_response(task_id, task, task_input, result)
@@ -5405,7 +5413,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     if status == "success" and archive_id:
         if task_type.startswith("persona_"):
             _PERSONA_MENU_CACHE.update({"at": 0.0, "rows": []})
-            _refresh_persona_overview_cache(force_remote=True)
+            _schedule_persona_overview_refresh(force_remote=True)
         if task_type == "persona_create":
             name = str(result.get("name") or task_input.get("name") or "新人設").strip()
             content = str(result.get("content") or "").strip()
@@ -9958,7 +9966,7 @@ def _auto_reply_link_add_poll(task_id: str, state: dict[str, Any]) -> dict[str, 
     draft.update({"selected_link_preset_id": preset_id, "source_task_id": ""})
     if flow == "hot_content":
         draft["link_reply_text"] = _apply_link_ending_to_text("", preset)
-    _refresh_persona_overview_cache(force_remote=True)
+    _schedule_persona_overview_refresh(force_remote=True)
     return _auto_reply_link_return(persona_id, flow, {"flow": "", "draft": draft})
 
 

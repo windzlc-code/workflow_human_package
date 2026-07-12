@@ -30,6 +30,24 @@ def test_console_uses_8098_proxy_prefix_when_served_under_threads_console() -> N
     assert "fetch(webBotEndpoint" in template
 
 
+def test_create_persona_progress_keeps_the_tg_selector_then_polls_in_place() -> None:
+    finish = _function_source("_finish_create_persona")
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
+
+    assert 'response["replace_panel"] = False' in finish
+    assert "const targetIndex = Math.max(0, groups.indexOf(targetGroup));" in template
+    assert "targetGroup && targetGroup.isConnected" in template
+    assert "currentGroups[targetIndex] || activeBotGroup" in template
+    assert "incomingUpdatedAt < historyUpdatedAt" in template
+    assert "currentPollAction !== incomingPollAction" in template
+    assert "'workflow-source-poll:' + sessionId" in template
+    assert "{ ifAvailable: true }" in template
+    assert "ownerClientId: historyClientId" in template
+    assert "leaseUntil: Date.now() + Math.max(15000, delay * 5)" in template
+    assert "incomingPollOwner && incomingPollOwner !== historyClientId" in template
+    assert "resumeSourcePoll(pendingSourcePoll)" in template
+
+
 def test_configured_source_api_precedes_legacy_container_fallbacks() -> None:
     candidates = _function_source("_source_api_candidates")
 
@@ -269,6 +287,42 @@ def test_persona_generation_messages_hide_internal_task_fields() -> None:
     assert '人設 ID：{archive_id}' not in submit
     assert 'status in {"failed", "cancelled"} and task_type == "persona_generate_image"' in detail
     assert 'lines = ["❌ 新建人設失敗，請稍後重試。"]' in detail
+
+
+def test_source_task_messages_never_expose_backend_debug_fields() -> None:
+    detail = _function_source("_source_task_detail")
+    user_lines = _function_source("_source_task_user_lines")
+    status_menu = _function_source("_source_status_menu")
+    tasks_menu = _function_source("_source_tasks_menu")
+
+    assert "lines = _source_task_user_lines(task)" in detail
+    assert "API：" not in detail
+    assert "RunningHub：" not in detail
+    assert "批次：" not in detail
+    assert "task.get('error')" not in detail
+    assert "json.dumps(task.get('batch_summary')" not in detail
+    assert "请稍后重试" in user_lines
+    assert "当前进度" in user_lines
+    assert "API：" not in status_menu
+    assert "chat_id：" not in status_menu
+    assert "_source_workflow_line" not in status_menu
+    assert "API：" not in tasks_menu
+    assert "task.get('error')" not in tasks_menu
+
+
+def test_web_bot_slow_dependencies_do_not_block_interaction_path() -> None:
+    source_request = _function_source("_source_http_request")
+    persona_rows = _function_source("_persona_menu_rows")
+    fresh_persona = _function_source("_fresh_persona_row")
+    task_detail = _function_source("_source_task_detail")
+
+    assert "deadline = time.monotonic()" in source_request
+    assert "timeout=max(0.5, remaining)" in source_request
+    assert "build_overview(force_remote=True)" not in persona_rows
+    assert "_schedule_persona_overview_refresh(force_remote=True)" in persona_rows
+    assert "build_overview(force_remote=True)" not in fresh_persona
+    assert "_schedule_persona_overview_refresh(force_remote=True)" in fresh_persona
+    assert "_refresh_persona_overview_cache(force_remote=True)" not in task_detail
 
 
 def test_server_maps_post_generation_to_persona_workflow_service() -> None:

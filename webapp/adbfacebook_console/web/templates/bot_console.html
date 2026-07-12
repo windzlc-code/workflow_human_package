@@ -431,6 +431,7 @@
   let historyDbPromise = null;
   let historyPersistTimer = null;
   let pendingSourcePoll = null;
+  let historyUpdatedAt = 0;
 
   function openHistoryDb() {
     if (!('indexedDB' in window)) return Promise.resolve(null);
@@ -461,6 +462,8 @@
     if (!db) return;
     try {
       const transaction = db.transaction(historyStoreName, 'readwrite');
+      const updatedAt = Math.max(Date.now(), historyUpdatedAt + 1);
+      historyUpdatedAt = updatedAt;
       const snapshot = {
         id: historyKey,
         html: log.innerHTML,
@@ -468,7 +471,7 @@
         pendingSourcePoll,
         personaRevision,
         activePanelAction,
-        updatedAt: Date.now(),
+        updatedAt,
       };
       transaction.objectStore(historyStoreName).put(snapshot);
       if (historyChannel) historyChannel.postMessage({ ...snapshot, clientId: historyClientId });
@@ -503,18 +506,40 @@
 
   function applyHistorySnapshot(saved) {
     if (!saved || typeof saved.html !== 'string' || !saved.html.trim()) return false;
+    const incomingUpdatedAt = Number(saved.updatedAt) || 0;
+    if (incomingUpdatedAt && incomingUpdatedAt < historyUpdatedAt) return false;
+    historyUpdatedAt = Math.max(historyUpdatedAt, incomingUpdatedAt);
+    const incomingSourcePoll = saved.pendingSourcePoll && saved.pendingSourcePoll.poll
+      ? saved.pendingSourcePoll
+      : null;
+    const currentPollAction = pendingSourcePoll && pendingSourcePoll.poll
+      ? String(pendingSourcePoll.poll.action || '')
+      : '';
+    const incomingPollAction = incomingSourcePoll && incomingSourcePoll.poll
+      ? String(incomingSourcePoll.poll.action || '')
+      : '';
+    const incomingPollOwner = incomingSourcePoll
+      ? String(incomingSourcePoll.ownerClientId || '')
+      : '';
+    if (sourcePollTimer !== null && (
+      currentPollAction !== incomingPollAction
+      || !incomingSourcePoll
+      || (incomingPollOwner && incomingPollOwner !== historyClientId)
+    )) {
+      clearTimeout(sourcePollTimer);
+      sourcePollTimer = null;
+    }
     log.innerHTML = saved.html;
     trimHistory();
     log.querySelectorAll('button:disabled').forEach(button => { button.disabled = false; });
     state = saved.state && typeof saved.state === 'object' ? saved.state : {};
     personaRevision = String(saved.personaRevision || '').trim();
     activePanelAction = String(saved.activePanelAction || entryAction).trim() || entryAction;
-    pendingSourcePoll = saved.pendingSourcePoll && saved.pendingSourcePoll.poll
-      ? saved.pendingSourcePoll
-      : null;
+    pendingSourcePoll = incomingSourcePoll;
     const botGroups = log.querySelectorAll(':scope > .msg-group.bot');
     activeBotGroup = botGroups.length ? botGroups[botGroups.length - 1] : null;
     scrollBottom();
+    if (historyReady && pendingSourcePoll) resumeSourcePoll(pendingSourcePoll);
     return true;
   }
 
@@ -624,16 +649,64 @@
     if (!poll || !poll.action) return;
     const delay = Math.max(500, Math.min(10000, Number(poll.interval_ms) || 2000));
     const groups = Array.from(log.querySelectorAll(':scope > .msg-group'));
+    const targetIndex = Math.max(0, groups.indexOf(targetGroup));
     pendingSourcePoll = {
       poll: { action: String(poll.action), interval_ms: delay },
-      targetIndex: Math.max(0, groups.indexOf(targetGroup)),
+      targetIndex,
+      ownerClientId: historyClientId,
+      leaseUntil: Date.now() + Math.max(15000, delay * 5),
     };
     queueHistoryPersist();
+    sourcePollTimer = setTimeout(async () => {
+      sourcePollTimer = null;
+      const currentGroups = Array.from(log.querySelectorAll(':scope > .msg-group'));
+      const liveTarget = targetGroup && targetGroup.isConnected
+        ? targetGroup
+        : (currentGroups[targetIndex] || activeBotGroup);
+      const executePoll = async () => {
+        pendingSourcePoll = null;
+        await send({ action: poll.action }, '', { replacePanel: true, showUser: false, isPoll: true, targetGroup: liveTarget });
+      };
+      if (!navigator.locks || typeof navigator.locks.request !== 'function') {
+        await executePoll();
+        return;
+      }
+      await navigator.locks.request(
+        'workflow-source-poll:' + sessionId + ':' + String(poll.action),
+        { ifAvailable: true },
+        async lock => {
+          if (!lock) return;
+          await executePoll();
+        }
+      );
+    }, delay);
+  }
+
+  function resumeSourcePoll(savedPoll) {
+    if (!savedPoll || !savedPoll.poll || !savedPoll.poll.action) return;
+    const ownerClientId = String(savedPoll.ownerClientId || '');
+    const leaseUntil = Number(savedPoll.leaseUntil) || 0;
+    const groups = Array.from(log.querySelectorAll(':scope > .msg-group'));
+    const targetIndex = Math.max(0, Number(savedPoll.targetIndex) || 0);
+    const target = groups[targetIndex] || activeBotGroup;
+    if (!ownerClientId || ownerClientId === historyClientId || leaseUntil <= Date.now()) {
+      if (ownerClientId === historyClientId && sourcePollTimer !== null) return;
+      scheduleSourcePoll(savedPoll.poll, target);
+      return;
+    }
+    if (sourcePollTimer !== null) clearTimeout(sourcePollTimer);
+    const expectedAction = String(savedPoll.poll.action);
     sourcePollTimer = setTimeout(() => {
       sourcePollTimer = null;
-      pendingSourcePoll = null;
-      send({ action: poll.action }, '', { replacePanel: true, showUser: false, isPoll: true, targetGroup });
-    }, delay);
+      const current = pendingSourcePoll;
+      if (!current || !current.poll || String(current.poll.action) !== expectedAction) return;
+      if (Number(current.leaseUntil) > Date.now()) {
+        resumeSourcePoll(current);
+        return;
+      }
+      const currentGroups = Array.from(log.querySelectorAll(':scope > .msg-group'));
+      scheduleSourcePoll(current.poll, currentGroups[targetIndex] || activeBotGroup);
+    }, Math.max(500, leaseUntil - Date.now() + 100));
   }
 
   function scheduleSourceFollowup(followup) {
@@ -972,9 +1045,7 @@
     historyReady = true;
     subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
     if (restored && pendingSourcePoll && pendingSourcePoll.poll) {
-      const groups = Array.from(log.querySelectorAll(':scope > .msg-group'));
-      const target = groups[pendingSourcePoll.targetIndex] || activeBotGroup;
-      scheduleSourcePoll(pendingSourcePoll.poll, target);
+      resumeSourcePoll(pendingSourcePoll);
       queueHistoryPersist();
       return;
     }
