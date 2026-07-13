@@ -31181,8 +31181,19 @@ async function collectThreadsAutoReplyPostContext(
     ) {
       // A media post can fill almost the entire first detail screen. Reveal the
       // action row and comment list before spending the vision-model budget.
-      const revealCommentsCommand = "input swipe 700 1250 700 500 520";
-      await execAdbForText(config, padCode, revealCommentsCommand, 8_000, 500).catch(() => "");
+      const firstRetryDimensions = await getImageDimensions(firstShotUrl).catch(() => null);
+      const firstMainActionRow = await detectThreadsDetailActionRowLocally(firstShotUrl).catch(() => null);
+      const firstRevealStartX = Math.round((firstRetryDimensions?.width || BASE_SCREEN.width) * 0.70);
+      const firstRevealStartY = Math.round(
+        firstMainActionRow?.comment.y
+        || (firstRetryDimensions?.height || BASE_SCREEN.height) * 0.72,
+      );
+      const firstRevealEndY = Math.max(
+        180,
+        firstRevealStartY - Math.round((firstRetryDimensions?.height || BASE_SCREEN.height) * 0.48),
+      );
+      const revealCommentsCommand = `input swipe ${firstRevealStartX} ${firstRevealStartY} ${firstRevealStartX} ${firstRevealEndY} 520`;
+      await threadsAdbInputNoWait(config, padCode, revealCommentsCommand, 500).catch(() => undefined);
       await delay(800);
       let retryShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => firstShotUrl);
       throwIfDeadlineExceeded(deadlineAt);
@@ -31204,8 +31215,14 @@ async function collectThreadsAutoReplyPostContext(
           || mainActionRow.comment.y < retryDimensions.height * 0.60
           || !canSpendBudget(17_000, 1_000)
         ) break;
-        const additionalRevealCommand = "input swipe 700 1250 700 500 520";
-        await execAdbForText(config, padCode, additionalRevealCommand, 8_000, 500).catch(() => "");
+        const additionalRevealStartX = Math.round(retryDimensions.width * 0.70);
+        const additionalRevealStartY = Math.round(mainActionRow.comment.y);
+        const additionalRevealEndY = Math.max(
+          180,
+          additionalRevealStartY - Math.round(retryDimensions.height * 0.48),
+        );
+        const additionalRevealCommand = `input swipe ${additionalRevealStartX} ${additionalRevealStartY} ${additionalRevealStartX} ${additionalRevealEndY} 520`;
+        await threadsAdbInputNoWait(config, padCode, additionalRevealCommand, 500).catch(() => undefined);
         await delay(800);
         retryShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => retryShotUrl);
         throwIfDeadlineExceeded(deadlineAt);
