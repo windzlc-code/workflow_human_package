@@ -77,7 +77,7 @@ class AdminLogTests(unittest.TestCase):
                 ("task_1",),
             ).fetchone()
         payload = json.loads(str(row["data_json"]))
-        self.assertEqual(payload["workflow_name"], "替换模特（原版工作流）")
+        self.assertEqual(payload["workflow_name"], "视频模特替换（原版工作流）")
         self.assertEqual(payload["workflow_id"], "rm_123")
         self.assertEqual(payload["runninghub_task_id"], "rh_777")
         self.assertEqual(payload["task_type"], "replace_model")
@@ -191,26 +191,33 @@ class AdminLogTests(unittest.TestCase):
 
         task_payload = json.loads(str(task_row["input_json"]))
         event_payload = json.loads(str(event_row["data_json"]))
-        self.assertEqual(task_payload["app_id"], "1977000000000000001")
-        self.assertEqual(task_payload["workflow_id"], "1977000000000000001")
-        self.assertEqual(task_payload["workflow_ids"], ["1977000000000000001"])
-        self.assertEqual(event_payload["workflow_id"], "1977000000000000001")
-        self.assertEqual(event_payload["workflow_ids"], ["1977000000000000001"])
+        expected_workflow_id = server.replace_model.LEGACY_DEFAULT_APP_ID
+        self.assertEqual(task_payload["app_id"], expected_workflow_id)
+        self.assertEqual(task_payload["workflow_id"], expected_workflow_id)
+        self.assertEqual(task_payload["workflow_ids"], [expected_workflow_id])
+        self.assertEqual(event_payload["workflow_id"], expected_workflow_id)
+        self.assertEqual(event_payload["workflow_ids"], [expected_workflow_id])
 
     @patch("webapp.server.get_gemini.request_gemini3_pro", return_value="请求失败: upstream 401")
     def test_task_worker_marks_gemini_failure_when_result_is_error_string(self, _mock_gemini):
+        task_input = {
+            "llm_api_key_gpt": "g-secret",
+            "llm_base_url": "http://202.90.21.53:3008",
+            "llm_default_model_gpt": "gpt-5",
+            "user_input": "hi",
+        }
         server._create_task_record(
             "task_gemini_fail",
             2,
             "get_gemini",
-            {"gemini_api_key": "g-secret", "gemini_host": "202.90.21.53", "user_input": "hi"},
+            task_input,
         )
 
         server._task_worker(
             "task_gemini_fail",
             2,
             "get_gemini",
-            {"gemini_api_key": "g-secret", "gemini_host": "202.90.21.53", "user_input": "hi"},
+            task_input,
         )
 
         with db_module.db() as conn:
@@ -279,7 +286,7 @@ class AdminLogTests(unittest.TestCase):
         self.assertEqual(payload["first_error"], "上传失败")
         self.assertGreaterEqual(len(payload["logs"]), 2)
         self.assertEqual(payload["logs"][-1]["data"]["item_index"], 2)
-        self.assertEqual(payload["logs"][-1]["data"]["gemini_api_key"], "secr***-key")
+        self.assertEqual(payload["logs"][-1]["data"]["gemini_api_key"], "secr••••••••-key")
 
     def test_task_worker_writes_final_output_snapshot_event(self):
         output_file = Path(self._tmpdir.name) / "final.mp4"
@@ -333,7 +340,13 @@ class AdminLogTests(unittest.TestCase):
         },
     )
     def test_analyze_error_endpoint_persists_analysis_event(self, _mock_gemini):
-        server._write_runtime_config_file({"gemini_api_key": "g-key-001", "gemini_host": "202.90.21.53"})
+        server._write_runtime_config_file(
+            {
+                "llm_api_key_gpt": "g-key-001",
+                "llm_base_url": "http://202.90.21.53:3008",
+                "llm_default_model_gpt": "gpt-5",
+            }
+        )
         server._create_task_record("task_analysis", 2, "replace_model", {"app_id": "rm_123"})
         with db_module.db() as conn:
             conn.execute(

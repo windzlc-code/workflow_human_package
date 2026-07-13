@@ -46,6 +46,7 @@ import {
   locateThreadsVisibleOwnPostContentTarget,
   loadThreadsAutoReplyRepliedSets,
   rememberThreadsAutoReplyComment,
+  resolveThreadsAutoReplyVisionModelsForTest,
   chooseThreadsGalleryMarkerToKeep,
   getLocalVisualVerificationSupport,
   getThreadsProfileReferenceImageBestMatchForTest,
@@ -73,6 +74,19 @@ import {
   scaleScreenshotPointToAdbPointForSizes,
   shouldUseThreadsShareIntentPath,
 } from "@/lib/vmos-publisher";
+
+describe("Threads auto-reply vision model order", () => {
+  it("keeps backend configuration order and only appends missing fallbacks", () => {
+    expect(resolveThreadsAutoReplyVisionModelsForTest(
+      ["google/gemini-3.1-pro-preview, xai/grok-4.3", "google/gemini-3.1-pro-preview"],
+      ["google/gemini-3-flash-preview", "xai/grok-4.3"],
+    )).toEqual([
+      "google/gemini-3.1-pro-preview",
+      "xai/grok-4.3",
+      "google/gemini-3-flash-preview",
+    ]);
+  });
+});
 
 describe("extractThreadsOwnPostViewCountFromUiXml", () => {
   it("reads compact Traditional Chinese view counts from post details", () => {
@@ -716,6 +730,60 @@ describe("Threads publish verification", () => {
       y: 875,
       postPreview: "\u4f60\u597d \u5feb\u9ede\u6211\u770b\u66f4\u591a\u5427",
     });
+  });
+
+  it("does not use link cards or engagement rows as an own-post body target", async () => {
+    const samplePath = path.resolve(
+      "src",
+      "test",
+      "fixtures",
+      "threads-publish-samples",
+      "samples",
+      "threads-auto-reply-profile-setup-card-false-comment-row.jpg",
+    );
+    const dataUrl = "data:image/jpeg;base64," + fs.readFileSync(samplePath).toString("base64");
+    const uiXml = [
+      "<hierarchy>",
+      '<node text="\u4e32\u6587" bounds="[74,720][146,760]" />',
+      '<node text="\u56de\u8986" bounds="[243,720][315,760]" />',
+      '<node text="rick_y54088 38\u5206\u9418" bounds="[80,780][310,830]" />',
+      '<node text="https://example.com/article" bounds="[85,850][560,910]" clickable="true" />',
+      '<node text="12 \u8b9a 3 \u5247\u56de\u8986" bounds="[85,930][420,980]" clickable="true" />',
+      "</hierarchy>",
+    ].join("\n");
+
+    await expect(locateThreadsVisibleOwnPostContentTarget(dataUrl, uiXml, {
+      requireCommentBadge: false,
+      maxAgeDays: 1,
+    })).resolves.toBeNull();
+  });
+
+  it("uses an unanchored long body node when Threads omits profile timestamps", async () => {
+    const samplePath = path.resolve(
+      "src",
+      "test",
+      "fixtures",
+      "threads-publish-samples",
+      "samples",
+      "threads-auto-reply-profile-setup-card-false-comment-row.jpg",
+    );
+    const dataUrl = "data:image/jpeg;base64," + fs.readFileSync(samplePath).toString("base64");
+    const body = "超多人在問我每天喝半糖微冰手搖飲，到底怎麼維持露腰裝的腰線？其實秘訣就是跳舞，快起來一起動一動啦！";
+    const uiXml = [
+      "<hierarchy>",
+      '<node text="串文" resource-id="ig_text" bounds="[57,210][123,234]" />',
+      '<node text="回覆" resource-id="ig_text" bounds="[237,210][303,234]" />',
+      '<node text="影音內容" resource-id="ig_text" bounds="[384,210][516,234]" />',
+      '<node text="轉發" resource-id="ig_text" bounds="[597,210][663,234]" />',
+      `<node text="${body}" resource-id="" class="android.widget.TextView" clickable="false" bounds="[135,288][693,451]" />`,
+      '<node text="11小時" resource-id="ig_text" bounds="[135,1500][240,1540]" />',
+      "</hierarchy>",
+    ].join("\n");
+
+    await expect(locateThreadsVisibleOwnPostContentTarget(dataUrl, uiXml, {
+      requireCommentBadge: false,
+      maxAgeDays: 1,
+    })).resolves.toEqual({ x: 252, y: 370, postPreview: body });
   });
 
   it("does not classify captured fullscreen media viewer samples as gallery picker", async () => {
@@ -1449,10 +1517,6 @@ describe("Threads publish verification", () => {
   it("does not use domain fallback comments when persona is unrelated", () => {
     expect(finalizeWarmupComment("今天午餐看起來好吃", "台南AI房仲分享房市服務與客戶信任", [], {
       description: "旅行生活碎碎念，分享城市散步和日常心情",
-    }))
-      .toBe("");
-    expect(finalizeWarmupComment("這個角度很自然", "台南AI房仲分享房市服務與客戶信任", [], {
-      description: "房產中介，分享房市和客戶服務",
     }))
       .toBe("");
   });

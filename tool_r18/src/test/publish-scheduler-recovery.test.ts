@@ -266,4 +266,59 @@ describe("publish scheduler recovery", () => {
     expect(repo.getTask(task.id)?.status).toBe("failed");
     expect(repo.isPadLocked("PAD-CANCEL")).toBe(false);
   });
+
+  it("does not publish a task that was rescheduled after the due-list snapshot", async () => {
+    const repo = createNodePublishQueueRepository(tempDbPath());
+    const originalScheduledAt = new Date(Date.now() - 60_000).toISOString();
+    const rescheduledAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const task = repo.enqueueTask({
+      pad_code: "PAD-RACE",
+      platform: "threads",
+      caption: "rescheduled while claiming",
+      scheduled_at: originalScheduledAt,
+    });
+    const originalAcquirePadLock = repo.acquirePadLock.bind(repo);
+    repo.acquirePadLock = (padCode, taskId) => {
+      const acquired = originalAcquirePadLock(padCode, taskId);
+      if (acquired) {
+        repo.updateTaskStatusIfCurrent(taskId, ["pending"], "pending", {
+          scheduled_at: rescheduledAt,
+        });
+      }
+      return acquired;
+    };
+    let runCount = 0;
+    const scheduler = new PublishSchedulerService(repo, async () => {
+      runCount += 1;
+      return { status: "done" };
+    });
+
+    await scheduler.pollOnce();
+    await scheduler.waitForIdle();
+
+    expect(runCount).toBe(0);
+    expect(repo.getTask(task.id)?.status).toBe("pending");
+    expect(repo.getTask(task.id)?.scheduled_at).toBe(rescheduledAt);
+    expect(repo.isPadLocked(task.pad_code)).toBe(false);
+  });
+
+  it("deduplicates enqueue requests by idempotency key", () => {
+    const repo = createNodePublishQueueRepository(tempDbPath());
+    const first = repo.enqueueTask({
+      pad_code: "PAD-IDEMPOTENT",
+      platform: "threads",
+      caption: "first",
+      idempotency_key: "web-schedule-request-1",
+    });
+    const repeated = repo.enqueueTask({
+      pad_code: "PAD-IDEMPOTENT",
+      platform: "threads",
+      caption: "must not create another task",
+      idempotency_key: "web-schedule-request-1",
+    });
+
+    expect(repeated.id).toBe(first.id);
+    expect(repeated.caption).toBe("first");
+    expect(repo.listTasks()).toHaveLength(1);
+  });
 });

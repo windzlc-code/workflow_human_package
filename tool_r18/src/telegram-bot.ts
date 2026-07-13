@@ -17,6 +17,7 @@ import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-
 import { planPersonaPostGenerationBatches, runPersonaWorkflow } from "@/core/persona/persona-workflow-service";
 import { buildRegeneratePostInstruction, calculateRegeneratedPostSimilarity, isRegeneratedPostTooSimilar } from "@/core/persona/regenerate-post-instruction";
 import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
+import { addScheduleCalendarDays, createScheduledDate, formatScheduledDate, getScheduleTimeParts } from "@/core/publish/schedule-time";
 import { publishPost, queryThreadsAccount, loginThreadsAccount, clearThreadsAccountSession, queryTelegramAccountSession, clearTelegramAccountSession, startTelegramAccountLoginSession, updateThreadsProfileLink, updateThreadsProfileBio, updateThreadsProfileName, updateThreadsProfileAvatar, warmupThreadsAccount, executeWarmupCandidate, autoReplyThreadsAccount, replyOwnPublishedThreadsPosts, buildWarmupInterestKeywords, extractThreadsPublishedPostUrlFromReaderMarkdown, type PublishProgress, type PublishResult, type WarmupConfig, type WarmupCandidate, type WarmupCommentPersona, type ThreadsAutoReplyProgress, type ThreadsOwnPostReplyProgress, type ThreadsOwnPostReplyTarget } from "@/lib/vmos-publisher";
 import { execAdb, listPads, getPadInfo, screenshot } from "@/lib/vmos-client";
 import { loadPersonaArchive, listPersonaArchives, getCachedPersonaArchives, getArchivePendingPostsForPlatform, savePersonaArchive, deleteArchiveEpisode, deleteArchiveEpisodes, updateArchiveEpisode, updateArchivePostMedia, updatePersonaArchivePostDraft, updatePersonaArchiveProfile, deletePersonaArchive, updatePersonaArchivePadBinding, requeuePublishRecord, markArchiveEpisodesPublished, markFavoritePostsPublished, appendCustomPersonaArchivePost, markPersonaArchivePostTelegramGroupContentType, savePersonaReferenceSheet, appendPersonaArchiveImage } from "@/lib/persona-archives";
@@ -4025,7 +4026,7 @@ function buildPersonaOwnPostAutoReplyPlatformRows(
   linkTemplateRows: Array<Array<{ text: string; callback_data: string }>> = [],
 ): Array<Array<{ text: string; callback_data: string }>> {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [
-    [{ text: "💬 Threads 內部評論", callback_data: `acctautoreplyhot_threads_${archiveId}` }],
+    [{ text: "▶️ 開始執行", callback_data: `acctautoreplyhot_threads_${archiveId}` }],
   ];
   if (replyMode === "manual") {
     rows.push([{ text: "✏️ 修改回覆內容", callback_data: `ownreply_content_${archiveId}` }]);
@@ -4311,6 +4312,24 @@ async function refreshThreadsOwnPostReplyTargetViewCounts(
     }
   }
   return out;
+}
+
+const THREADS_OWN_POST_REPLY_NO_MATCH_ERRORS = new Set([
+  "沒有成功回覆任何推文",
+  "没有成功回复任何推文",
+  "沒有找到未回覆且有真實發布連結的 Threads 推文",
+  "没有找到未回复且有真实发布链接的 Threads 推文",
+]);
+
+export function isThreadsOwnPostReplyExecutionFailure(result: {
+  dryRun?: boolean;
+  matched?: number;
+  replied?: number;
+  error?: unknown;
+}): boolean {
+  const error = String(result.error || "").trim();
+  if (result.dryRun === true || Number(result.replied || 0) > 0 || !error) return false;
+  return Number(result.matched || 0) > 0 || !THREADS_OWN_POST_REPLY_NO_MATCH_ERRORS.has(error);
 }
 
 export async function runThreadsOwnPostReplyOnce(
@@ -5753,6 +5772,7 @@ function getPersonaStoreMtimeMs() {
   const files = [
     path.join(RUNTIME_DIR, "persona_archives.json"),
     path.join(RUNTIME_DIR, "persona_archives_cache.json"),
+    path.join(RUNTIME_DIR, "persona_dashboard_deleted_personas.json"),
   ];
   return files.reduce((latest, file) => {
     try {
@@ -5823,10 +5843,6 @@ function writePersonaListSummaryCache(mtimeMs: number, list: PersonaListSummary[
 
 async function listPersonasCached(options: { force?: boolean } = {}): Promise<PersonaListSummary[]> {
   const now = Date.now();
-  if (!options.force && _personaListCache && now - _personaListCache.at < PERSONA_LIST_CACHE_TTL_MS) {
-    return _personaListCache.list;
-  }
-
   const mtimeMs = getPersonaStoreMtimeMs();
   if (
     !options.force &&
@@ -15731,10 +15747,37 @@ function normalizeAllowedPublishPlatforms(input?: TelegramPublishPlatform[]): Te
   return Array.from(new Set(platforms));
 }
 
+export function formatQueueTaskActionId(taskId: string) {
+  return String(taskId || "").slice(0, 8);
+}
+
+export function buildTaskActionRows(taskId: string, status: "pending" | "failed") {
+  const shortTaskId = formatQueueTaskActionId(taskId);
+  return [
+    [
+      ...(status === "failed" ? [{ text: `🔄 重試 ${shortTaskId}`, callback_data: `retrytask_${taskId}` }] : []),
+      { text: `✏️ 改時間 ${shortTaskId}`, callback_data: `edittasktime_${taskId}` },
+    ],
+    [{ text: `🗑 取消 ${shortTaskId}`, callback_data: `canceltask_${taskId}` }],
+  ];
+}
+
+export function createTelegramBotRuntimeKey(token: string): string {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex").slice(0, 16);
+}
+
+export function createTelegramNotificationClient(token: string): TelegramBot {
+  return new TelegramBot(token, {
+    request: buildTelegramProxyRequestOptions() as any,
+    polling: false,
+  });
+}
+
 export function startTelegramBot(token: string, options: TelegramBotInstanceOptions = {}): TelegramBot {
   const instanceName = (options.name || "primary").trim() || "primary";
   const personaDataScope = options.personaDataScope === "isolated" ? "isolated" : "shared";
   const defaultPadCode = (options.defaultPadCode || DEFAULT_PAD_CODE).trim() || DEFAULT_PAD_CODE;
+  const telegramBotKey = createTelegramBotRuntimeKey(token);
   const defaultPublishPlatform = options.defaultPublishPlatform || DEFAULT_PUBLISH_PLATFORM;
   const defaultWarmupPlatform = options.defaultWarmupPlatform || DEFAULT_WARMUP_PLATFORM;
   const allowedPublishPlatforms = normalizeAllowedPublishPlatforms(options.allowedPublishPlatforms);
@@ -16743,14 +16786,11 @@ export function startTelegramBot(token: string, options: TelegramBotInstanceOpti
   // ─── 主菜单（按钮） ─────────────────────────────────────────────────────────
 
   function formatScheduledTaskTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  const dd = String(date.getDate()).padStart(2, "0");
-  const hh = String(date.getHours()).padStart(2, "0");
-  const mi = String(date.getMinutes()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+  try {
+    return formatScheduledDate(value);
+  } catch {
+    return value;
+  }
 }
 
 function parseScheduledTimeInput(input: string) {
@@ -16758,17 +16798,22 @@ function parseScheduledTimeInput(input: string) {
   if (!text) return null;
 
   const now = new Date();
+  const nowParts = getScheduleTimeParts(now);
   const lower = text.toLowerCase();
   let date: Date | null = null;
 
   if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}$/.test(text)) {
-    date = new Date(text.replace(" ", "T") + ":00");
+    const [datePart, timePart] = text.split(/\s+/);
+    const [year, month, day] = datePart.split("-").map(Number);
+    const [hour, minute] = timePart.split(":").map(Number);
+    date = createScheduledDate({ year, month, day, hour, minute });
   } else if (/^\d{1,2}:\d{2}$/.test(text)) {
     const [hour, minute] = text.split(":").map(Number);
-    date = new Date(now);
-    date.setSeconds(0, 0);
-    date.setHours(hour, minute, 0, 0);
-    if (date.getTime() <= now.getTime()) date.setDate(date.getDate() + 1);
+    const today = { year: nowParts.year, month: nowParts.month, day: nowParts.day };
+    date = createScheduledDate({ ...today, hour, minute });
+    if (date.getTime() <= now.getTime()) {
+      date = createScheduledDate({ ...addScheduleCalendarDays(today, 1), hour, minute });
+    }
   } else {
     const minuteMatch = lower.match(/^(\d{1,3})\s*(分鐘|分鐘|min|mins|minute|minutes)$/i);
     if (minuteMatch) {
@@ -16782,17 +16827,14 @@ function parseScheduledTimeInput(input: string) {
       const [, timePart] = text.match(/^明天\s*(\d{1,2}:\d{2})$/) || [];
       if (timePart) {
         const [hour, minute] = timePart.split(":").map(Number);
-        date = new Date(now);
-        date.setDate(date.getDate() + 1);
-        date.setHours(hour, minute, 0, 0);
+        date = createScheduledDate({ ...addScheduleCalendarDays(nowParts, 1), hour, minute });
       }
     }
     if (!date && /^今天\s*\d{1,2}:\d{2}$/.test(text)) {
       const [, timePart] = text.match(/^今天\s*(\d{1,2}:\d{2})$/) || [];
       if (timePart) {
         const [hour, minute] = timePart.split(":").map(Number);
-        date = new Date(now);
-        date.setHours(hour, minute, 0, 0);
+        date = createScheduledDate({ year: nowParts.year, month: nowParts.month, day: nowParts.day, hour, minute });
       }
     }
   }
@@ -16845,6 +16887,7 @@ function enqueueScheduledArchivePost(args: {
       media_url: post.imageUrl,
       scheduled_at: args.scheduledAt,
       telegram_chat_id: String(args.telegramChatId),
+      telegram_bot_key: telegramBotKey,
     });
   });
 }
@@ -16857,24 +16900,24 @@ function isScheduledTimeStage(stage?: string) {
   return stage === "choose_time" || stage === "edit_task_time" || stage === "batch_edit_time";
 }
 
-function formatScheduleDateKey(date: Date) {
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  const dd = String(date.getDate()).padStart(2, "0");
+function formatScheduleDateKey(date: { year: number; month: number; day: number }) {
+  const yyyy = date.year;
+  const mm = String(date.month).padStart(2, "0");
+  const dd = String(date.day).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function formatScheduleDateLabel(date: Date, offsetDays: number) {
-  const weekday = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"][date.getDay()];
+function formatScheduleDateLabel(date: { year: number; month: number; day: number }, offsetDays: number) {
+  const weekday = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"][new Date(Date.UTC(date.year, date.month - 1, date.day)).getUTCDay()];
   const prefix = offsetDays === 0 ? "今天" : offsetDays === 1 ? "明天" : weekday;
-  return `${prefix} ${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+  return `${prefix} ${String(date.month).padStart(2, "0")}/${String(date.day).padStart(2, "0")}`;
 }
 
 function buildDateFromScheduledSelection(state: { selectedDate?: string; selectedHour?: number; selectedMinute?: number }) {
   if (!state.selectedDate || state.selectedHour === undefined || state.selectedMinute === undefined) return null;
   const [year, month, day] = state.selectedDate.split("-").map(Number);
   if (!year || !month || !day) return null;
-  const date = new Date(year, month - 1, day, state.selectedHour, state.selectedMinute, 0, 0);
+  const date = createScheduledDate({ year, month, day, hour: state.selectedHour, minute: state.selectedMinute });
   if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) return null;
   return date;
 }
@@ -16922,10 +16965,9 @@ function buildScheduledTimePickerKeyboard(state: {
 }) {
   const rows: TelegramBot.InlineKeyboardButton[][] = [];
   if (!state.selectedDate) {
-    const now = new Date();
+    const now = getScheduleTimeParts(new Date());
     for (let offset = 0; offset < 7; offset += 1) {
-      const date = new Date(now);
-      date.setDate(now.getDate() + offset);
+      const date = addScheduleCalendarDays(now, offset);
       rows.push([{ text: formatScheduleDateLabel(date, offset), callback_data: `schedpick_date_${formatScheduleDateKey(date)}` }]);
     }
   } else if (state.selectedHour === undefined) {
@@ -17254,12 +17296,13 @@ async function listArchivesMap() {
 }
 
 function buildTaskActionRows(taskId: string, status: "pending" | "failed") {
+  const shortTaskId = formatQueueTaskActionId(taskId);
   return [
     [
-      ...(status === "failed" ? [{ text: `🔄 重試 ${taskId.slice(0, 6)}`, callback_data: `retrytask_${taskId}` }] : []),
-      { text: `✏️ 改時間 ${taskId.slice(0, 6)}`, callback_data: `edittasktime_${taskId}` },
+      ...(status === "failed" ? [{ text: `🔄 重試 ${shortTaskId}`, callback_data: `retrytask_${taskId}` }] : []),
+      { text: `✏️ 改時間 ${shortTaskId}`, callback_data: `edittasktime_${taskId}` },
     ],
-    [{ text: `🗑 取消 ${taskId.slice(0, 6)}`, callback_data: `canceltask_${taskId}` }],
+    [{ text: `🗑 取消 ${shortTaskId}`, callback_data: `canceltask_${taskId}` }],
   ];
 }
 
@@ -19366,6 +19409,9 @@ function sendMainMenu(chatId: number, msgId?: number) {
         );
         assertPadOperationNotCancelled(padOperationKey);
         stopTyping();
+        if (isThreadsOwnPostReplyExecutionFailure(result)) {
+          throw new Error(result.error);
+        }
         if (!result.matched) {
           pendingThreadsOwnPostReplyRuns.delete(chatId);
           await safeEditOrSend(bot, chatId, msgId, [
@@ -19376,7 +19422,7 @@ function sendMainMenu(chatId: number, msgId?: number) {
             `瀏覽量條件：大於等於 ${formatCompactCount(runState.minViews)}`,
             `查看天數：${runState.maxAgeDays} 天內`,
             "",
-            "可能原因：本人主頁沒有符合條件的推文、瀏覽量不足、超出天數、或已回覆過。",
+            "可能原因：本人主頁沒有符合條件的推文、瀏覽量不足或超出查看天數。",
           ].join("\n"), {
             reply_markup: { inline_keyboard: [[{ text: "◀️ 返回自動回覆", callback_data: returnCallback }]] },
           });
@@ -24244,7 +24290,15 @@ function sendMainMenu(chatId: number, msgId?: number) {
         });
         return;
       }
-      await deletePersonaArchive(id).catch(() => {});
+      try {
+        await deletePersonaArchive(id);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error || "删除失败");
+        await safeEditOrSend(bot, chatId, msgId, `❌ 人设删除失败，请稍后重试。\n\n原因：${detail}`, {
+          reply_markup: { inline_keyboard: [[{ text: "◀️ 返回设置", callback_data: `settings_${id}` }]] },
+        });
+        return;
+      }
       invalidatePersonaListCache();
       await safeEditOrSend(bot, chatId, msgId, "🗑 已删除人设", {
         reply_markup: { inline_keyboard: [[{ text: "◀️ 返回", callback_data: "list_personas" }]] },

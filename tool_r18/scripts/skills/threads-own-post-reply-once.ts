@@ -1,6 +1,6 @@
 import "@/runtime/node/browser-shim";
 import fs from "node:fs";
-import { runThreadsOwnPostReplyOnce } from "@/telegram-bot";
+import { isThreadsOwnPostReplyExecutionFailure, runThreadsOwnPostReplyOnce } from "@/telegram-bot";
 import { emitWebTaskProgress } from "./_web-task-progress";
 
 type Input = {
@@ -53,6 +53,7 @@ async function main() {
       });
     },
   );
+  const semanticFailure = isThreadsOwnPostReplyExecutionFailure(result);
   if (!logs.length) {
     emitWebTaskProgress({
       step: result.error || "Threads 自動回覆熱點推文完成",
@@ -63,10 +64,10 @@ async function main() {
       replied: result.replied,
       skipped: result.skipped,
       done: true,
-      error: false,
+      error: semanticFailure,
+      errorMessage: semanticFailure ? result.error : "",
     });
   }
-  const semanticFailure = result.replied <= 0 && result.matched > 0 && Boolean(result.error);
   printJson({
     ok: !semanticFailure,
     ...result,

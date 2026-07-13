@@ -13,6 +13,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AUTO_TWEET_RUNTIME_DIR=/data/tool_r18_runtime \
     TOOL_R18_TELEGRAM_BOT_TOKEN_FILE=/data/tool_r18_runtime/telegram_bot_token.txt \
     TOOL_R18_LOCAL_BOT_ENV_PATH=/data/tool_r18_runtime/local-bot.env \
+    TZ=Asia/Shanghai \
+    TOOL_R18_SCHEDULE_TIME_ZONE=Asia/Shanghai \
     TOOL_R18_INTERNAL_WEBAPP_BASE_URL=http://127.0.0.1:8098 \
     TELEGRAM_WEBHOOK_PORT=8788 \
     TELEGRAM_PROXY_URL=direct
@@ -22,7 +24,9 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates curl ffmpeg libgl1 libglib2.0-0 libgomp1 \
-       python3 python3-pip python3-venv build-essential sqlite3 \
+       python3 python3-pip python3-venv build-essential sqlite3 tzdata \
+    && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo Asia/Shanghai > /etc/timezone \
     && python3 -m venv /opt/venv \
     && rm -rf /var/lib/apt/lists/*
 

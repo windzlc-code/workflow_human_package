@@ -10,7 +10,7 @@ export interface PublishTask {
   platform: string;
   caption: string;
   media_url?: string;
-  status: "pending" | "publishing" | "done" | "failed" | "paused";
+  status: "pending" | "publishing" | "done" | "failed" | "paused" | "cancelled";
   pause_type?: string;
   pause_expires_at?: string;
   attempts: number;
@@ -24,9 +24,11 @@ export interface PublishTask {
   finished_at?: string;
   created_at: string;
   telegram_chat_id?: string;
+  telegram_bot_key?: string;
   telegram_target_chat_id?: string;
   telegram_target_group_name?: string;
   telegram_group_content_type?: "free" | "paid";
+  idempotency_key?: string;
 }
 
 export interface EnqueueTaskInput {
@@ -38,9 +40,11 @@ export interface EnqueueTaskInput {
   media_url?: string;
   scheduled_at?: string;
   telegram_chat_id?: string;
+  telegram_bot_key?: string;
   telegram_target_chat_id?: string;
   telegram_target_group_name?: string;
   telegram_group_content_type?: "free" | "paid";
+  idempotency_key?: string;
 }
 
 export interface TaskFilter {
@@ -77,9 +81,11 @@ CREATE TABLE IF NOT EXISTS publish_tasks (
   finished_at      TEXT,
   created_at       TEXT NOT NULL,
   telegram_chat_id TEXT,
+  telegram_bot_key TEXT,
   telegram_target_chat_id TEXT,
   telegram_target_group_name TEXT,
-  telegram_group_content_type TEXT
+  telegram_group_content_type TEXT,
+  idempotency_key TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pad_locks (
@@ -121,6 +127,13 @@ export interface NodePublishQueueRepository {
       scheduled_at?: string;
     },
   ): void;
+  updateTaskStatusIfCurrent(
+    id: string,
+    expectedStatuses: PublishTask["status"][],
+    status: PublishTask["status"],
+    opts?: Parameters<NodePublishQueueRepository["updateTaskStatus"]>[2],
+  ): boolean;
+  claimPendingTask(id: string, expectedScheduledAt: string, startedAt: string, attempts: number): boolean;
   acquirePadLock(padCode: string, taskId: string): boolean;
   releasePadLock(padCode: string, taskId: string): void;
   releaseAllPadLocks(): number;
@@ -135,6 +148,9 @@ export function createNodePublishQueueRepository(dbPath = resolveRuntimeFile("pu
   db.exec(SCHEMA_SQL);
   try {
     db.prepare("ALTER TABLE publish_tasks ADD COLUMN telegram_target_chat_id TEXT").run();
+  } catch {}
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN telegram_bot_key TEXT").run();
   } catch {}
   try {
     db.prepare("ALTER TABLE publish_tasks ADD COLUMN telegram_target_group_name TEXT").run();
@@ -154,12 +170,21 @@ export function createNodePublishQueueRepository(dbPath = resolveRuntimeFile("pu
   try {
     db.prepare("ALTER TABLE publish_tasks ADD COLUMN manual_intervention_required INTEGER NOT NULL DEFAULT 0").run();
   } catch {}
+  try {
+    db.prepare("ALTER TABLE publish_tasks ADD COLUMN idempotency_key TEXT").run();
+  } catch {}
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency_key ON publish_tasks(idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''");
 
   return {
     enqueueTask(input: EnqueueTaskInput): PublishTask {
       const now = new Date().toISOString();
       const id = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const platform = normalizeAllowedTaskPlatform(input.platform);
+      const idempotencyKey = String(input.idempotency_key || "").trim() || undefined;
+      if (idempotencyKey) {
+        const existing = db.prepare("SELECT * FROM publish_tasks WHERE idempotency_key = ?").get(idempotencyKey) as PublishTask | undefined;
+        if (existing) return existing;
+      }
       const task: PublishTask = {
         id,
         archive_id: input.archive_id,
@@ -173,18 +198,25 @@ export function createNodePublishQueueRepository(dbPath = resolveRuntimeFile("pu
         scheduled_at: input.scheduled_at || now,
         created_at: now,
         telegram_chat_id: input.telegram_chat_id,
+        telegram_bot_key: input.telegram_bot_key,
         telegram_target_chat_id: input.telegram_target_chat_id,
         telegram_target_group_name: input.telegram_target_group_name,
         telegram_group_content_type: input.telegram_group_content_type === "paid" ? "paid" : input.telegram_group_content_type === "free" ? "free" : undefined,
+        idempotency_key: idempotencyKey,
       };
-      db.prepare(`
-        INSERT INTO publish_tasks
+      const inserted = db.prepare(`
+        INSERT OR IGNORE INTO publish_tasks
           (id, archive_id, archive_post_id, pad_code, platform, caption, media_url,
-           status, attempts, scheduled_at, created_at, telegram_chat_id, telegram_target_chat_id, telegram_target_group_name, telegram_group_content_type)
+           status, attempts, scheduled_at, created_at, telegram_chat_id, telegram_bot_key, telegram_target_chat_id, telegram_target_group_name, telegram_group_content_type, idempotency_key)
         VALUES
           (@id, @archive_id, @archive_post_id, @pad_code, @platform, @caption, @media_url,
-           @status, @attempts, @scheduled_at, @created_at, @telegram_chat_id, @telegram_target_chat_id, @telegram_target_group_name, @telegram_group_content_type)
+           @status, @attempts, @scheduled_at, @created_at, @telegram_chat_id, @telegram_bot_key, @telegram_target_chat_id, @telegram_target_group_name, @telegram_group_content_type, @idempotency_key)
       `).run(task);
+      if (inserted.changes === 0 && idempotencyKey) {
+        const existing = db.prepare("SELECT * FROM publish_tasks WHERE idempotency_key = ?").get(idempotencyKey) as PublishTask | undefined;
+        if (existing) return existing;
+      }
+      if (inserted.changes === 0) throw new Error("Failed to enqueue publish task");
       return task;
     },
     getTask(id: string) {
@@ -233,6 +265,46 @@ export function createNodePublishQueueRepository(dbPath = resolveRuntimeFile("pu
       if (opts.attempts !== undefined) { sets.push("attempts = @attempts"); params.attempts = opts.attempts; }
       if (opts.scheduled_at !== undefined) { sets.push("scheduled_at = @scheduled_at"); params.scheduled_at = opts.scheduled_at; }
       db.prepare(`UPDATE publish_tasks SET ${sets.join(", ")} WHERE id = @id`).run(params);
+    },
+    updateTaskStatusIfCurrent(id, expectedStatuses, status, opts = {}) {
+      if (!expectedStatuses.length) return false;
+      const sets: string[] = ["status = @status"];
+      const params: any = { id, status };
+      if (opts.last_error !== undefined) { sets.push("last_error = @last_error"); params.last_error = opts.last_error; }
+      if (opts.failure_step !== undefined) { sets.push("failure_step = @failure_step"); params.failure_step = opts.failure_step; }
+      if (opts.failure_screenshot_url !== undefined) { sets.push("failure_screenshot_url = @failure_screenshot_url"); params.failure_screenshot_url = opts.failure_screenshot_url; }
+      if (opts.failure_sample_path !== undefined) { sets.push("failure_sample_path = @failure_sample_path"); params.failure_sample_path = opts.failure_sample_path; }
+      if (opts.manual_intervention_required !== undefined) { sets.push("manual_intervention_required = @manual_intervention_required"); params.manual_intervention_required = opts.manual_intervention_required; }
+      if (opts.started_at !== undefined) { sets.push("started_at = @started_at"); params.started_at = opts.started_at; }
+      if (opts.finished_at !== undefined) { sets.push("finished_at = @finished_at"); params.finished_at = opts.finished_at; }
+      if (opts.pause_type !== undefined) { sets.push("pause_type = @pause_type"); params.pause_type = opts.pause_type; }
+      if (opts.pause_expires_at !== undefined) { sets.push("pause_expires_at = @pause_expires_at"); params.pause_expires_at = opts.pause_expires_at; }
+      if (opts.attempts !== undefined) { sets.push("attempts = @attempts"); params.attempts = opts.attempts; }
+      if (opts.scheduled_at !== undefined) { sets.push("scheduled_at = @scheduled_at"); params.scheduled_at = opts.scheduled_at; }
+      const placeholders = expectedStatuses.map((expected, index) => {
+        const key = `expected_${index}`;
+        params[key] = expected;
+        return `@${key}`;
+      }).join(",");
+      const result = db.prepare(`UPDATE publish_tasks SET ${sets.join(", ")} WHERE id = @id AND status IN (${placeholders})`)
+        .run(params);
+      return result.changes > 0;
+    },
+    claimPendingTask(id, expectedScheduledAt, startedAt, attempts) {
+      const result = db.prepare(`
+        UPDATE publish_tasks
+        SET status = 'publishing', started_at = @started_at, attempts = @attempts
+        WHERE id = @id
+          AND status = 'pending'
+          AND scheduled_at = @expected_scheduled_at
+          AND scheduled_at <= @started_at
+      `).run({
+        id,
+        expected_scheduled_at: expectedScheduledAt,
+        started_at: startedAt,
+        attempts,
+      });
+      return result.changes > 0;
     },
     acquirePadLock(padCode, taskId) {
       try {

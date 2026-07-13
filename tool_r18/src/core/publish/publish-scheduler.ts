@@ -176,10 +176,11 @@ export class PublishSchedulerService {
         if (!this.repo.acquirePadLock(task.pad_code, task.id)) continue;
         selectedPads.add(task.pad_code);
 
-        this.repo.updateTaskStatus(task.id, "publishing", {
-          started_at: new Date().toISOString(),
-          attempts: task.attempts + 1,
-        });
+        const startedAt = new Date().toISOString();
+        if (!this.repo.claimPendingTask(task.id, task.scheduled_at, startedAt, task.attempts + 1)) {
+          this.repo.releasePadLock(task.pad_code, task.id);
+          continue;
+        }
         this.hooks.onTaskStatusChange?.(task.id, "publishing");
 
         const latestTask = this.repo.getTask(task.id) || { ...task, attempts: task.attempts + 1, status: "publishing" } as PublishTask;

@@ -103,6 +103,14 @@ describe("node persona archive bridge", () => {
       updatedAt: "2026-07-10T00:07:00.000Z",
     }, { baseUpdatedAt: deletedArchiveStale.updatedAt })).rejects.toThrow("was deleted");
     expect(JSON.parse(fs.readFileSync(storePath, "utf8")).some((item: any) => item.id === "persona-4")).toBe(false);
+
+    expect((await api.list()).some((item: any) => item.id === "persona-2")).toBe(true);
+    const deletedIdsPath = path.join(runtimeDir, "persona_dashboard_deleted_personas.json");
+    fs.writeFileSync(deletedIdsPath, JSON.stringify(["persona-2"]), "utf8");
+    const tombstoneTime = new Date(Date.now() + 8000);
+    fs.utimesSync(deletedIdsPath, tombstoneTime, tombstoneTime);
+    expect((await api.list()).some((item: any) => item.id === "persona-2")).toBe(false);
+
     fs.rmSync(runtimeDir, { recursive: true, force: true });
   });
 });

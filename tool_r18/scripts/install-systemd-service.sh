@@ -33,6 +33,8 @@ Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${PROJECT_ROOT}
 Environment=NODE_ENV=production
+Environment=TZ=Asia/Shanghai
+Environment=TOOL_R18_SCHEDULE_TIME_ZONE=Asia/Shanghai
 Environment=TELEGRAM_PROXY_URL=
 Environment=NODE_OPTIONS=--max-old-space-size=512
 ExecStart=${NODE_BIN} --import tsx src/daemon.ts

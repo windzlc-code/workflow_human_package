@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 WEB_BOT_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "core" / "web_bot.py"
+TRADITIONAL_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "core" / "traditional.py"
 
 
 def test_main_keyboard_matches_telegram_bot() -> None:
@@ -33,7 +34,7 @@ def test_main_keyboard_matches_telegram_bot() -> None:
     ]
 
 
-def test_web_bot_ui_does_not_rewrite_telegram_wording() -> None:
+def test_web_bot_ui_normalizes_all_visible_wording_to_traditional_chinese() -> None:
     tree = ast.parse(WEB_BOT_PATH.read_text(encoding="utf-8"))
     functions = {
         node.name: node
@@ -49,4 +50,13 @@ def test_web_bot_ui_does_not_rewrite_telegram_wording() -> None:
             and isinstance(node.func, ast.Name)
             and node.func.id == "to_traditional"
         ]
-        assert not rewritten_calls, f"{name} must preserve the exact Telegram Bot wording"
+        assert rewritten_calls, f"{name} must normalize visible Web Bot wording to Traditional Chinese"
+
+
+def test_traditional_wording_matches_telegram_vocabulary() -> None:
+    namespace: dict[str, object] = {}
+    exec(TRADITIONAL_PATH.read_text(encoding="utf-8"), namespace)
+    convert = namespace["to_traditional"]
+
+    assert callable(convert)
+    assert convert("账号设置：发布失败，请重新点击。") == "帳號設定：發布失敗，請重新點擊。"

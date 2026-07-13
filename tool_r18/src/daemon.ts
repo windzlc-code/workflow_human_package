@@ -2,13 +2,14 @@ import "@/runtime/node/browser-shim";
 import { ensureRuntimeApiConfig } from "@/runtime/node/ensure-runtime-config";
 import { ensureRuntimeSecrets } from "@/runtime/node/ensure-runtime-secrets";
 import { PublishSchedulerService, recoverInterruptedPublishQueue, type PublishTaskRunResult } from "@/core/publish/publish-scheduler";
-import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
+import { createNodePublishQueueRepository, type PublishTask } from "@/runtime/node/publish-queue-repository";
 import { resolveVmosCredentials } from "@/runtime/node/config";
 import { publishPost, type PublishCancellationToken, type PublishProgress } from "@/lib/vmos-publisher";
-import { startTelegramBot, stopTelegramPolling, type TelegramBotInstanceOptions } from "@/telegram-bot";
+import { createTelegramBotRuntimeKey, createTelegramNotificationClient, formatPublishStepForTelegram, startTelegramBot, stopTelegramPolling, type TelegramBotInstanceOptions } from "@/telegram-bot";
+import { TelegramPublishProgressReporter } from "@/core/publish/telegram-publish-progress-reporter";
 import { listPersonaArchives, markArchiveEpisodesPublished } from "@/lib/persona-archives";
 import { screenshot as captureVmosScreenshot } from "@/lib/vmos-client";
-import { buildSentimentHotKeywords, preheatSentimentHotCandidates, refreshSentimentSourceMetrics } from "@/lib/sentiment-hot-importer";
+import { buildSentimentHotKeywords, refreshSentimentSourceMetrics } from "@/lib/sentiment-hot-importer";
 import { stopSentimentRuntime } from "@/lib/sentiment-runtime-manager";
 import fs from "node:fs";
 import crypto from "node:crypto";
@@ -133,12 +134,15 @@ function readLocalTelegramBotConfigs(): TelegramBotRuntimeConfig[] {
 }
 
 let activeTelegramBots: Array<{ config: TelegramBotRuntimeConfig; bot: ReturnType<typeof startTelegramBot> }> = [];
+let activeTelegramBotConfigs: TelegramBotRuntimeConfig[] = [];
 let activeTelegramBotSignature = "";
 let telegramBotLockClaimed = false;
 let telegramBotConfigApplyInFlight = false;
 let pendingTelegramBotConfigApply: { configs: TelegramBotRuntimeConfig[]; reason: string } | null = null;
 const activeTelegramBotWorkers = new Map<string, { config: TelegramBotRuntimeConfig; signature: string; child: ChildProcess }>();
 const manualInterventionNotifiedTaskIds = new Set<string>();
+const scheduledPublishNotificationClients = new Map<string, ReturnType<typeof createTelegramNotificationClient>>();
+const scheduledPublishProgressReporters = new Map<string, TelegramPublishProgressReporter>();
 
 interface PublishFailureEvidence {
   failureStep?: string;
@@ -149,6 +153,71 @@ interface PublishFailureEvidence {
 
 function normalizeErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || "Unknown error");
+}
+
+function resolveScheduledPublishNotificationClient(task: Pick<PublishTask, "id" | "telegram_chat_id" | "telegram_bot_key">) {
+  if (!task.telegram_chat_id) return null;
+  const taskBotKey = String(task.telegram_bot_key || "").trim();
+  let config = taskBotKey
+    ? activeTelegramBotConfigs.find((item) => createTelegramBotRuntimeKey(item.token) === taskBotKey)
+    : undefined;
+  if (!config && !taskBotKey && activeTelegramBotConfigs.length === 1) {
+    config = activeTelegramBotConfigs[0];
+  }
+  if (!config) {
+    log(`scheduled publish notification skipped task=${task.id}: source Bot is unavailable`);
+    return null;
+  }
+  const key = createTelegramBotRuntimeKey(config.token);
+  const active = activeTelegramBots.find((item) => createTelegramBotRuntimeKey(item.config.token) === key);
+  if (active) return active.bot;
+  let client = scheduledPublishNotificationClients.get(key);
+  if (!client) {
+    client = createTelegramNotificationClient(config.token);
+    scheduledPublishNotificationClients.set(key, client);
+  }
+  return client;
+}
+
+async function startScheduledPublishProgressReporter(task: PublishTask): Promise<TelegramPublishProgressReporter | undefined> {
+  const existing = scheduledPublishProgressReporters.get(task.id);
+  const chatId = Number(task.telegram_chat_id);
+  if (!Number.isFinite(chatId)) return existing;
+  const client = resolveScheduledPublishNotificationClient(task);
+  if (!client) return existing;
+  const reporter = existing || new TelegramPublishProgressReporter(client, chatId, {
+    taskId: task.id,
+    platform: task.platform,
+    padCode: task.pad_code,
+  });
+  scheduledPublishProgressReporters.set(task.id, reporter);
+  try {
+    await reporter.start();
+  } catch (error) {
+    log(`scheduled publish status message failed task=${task.id}: ${normalizeErrorMessage(error)}`);
+  }
+  return reporter;
+}
+
+async function finishScheduledPublishProgressReporter(taskId: string, status: PublishTask["status"], detail?: string): Promise<void> {
+  const reporter = scheduledPublishProgressReporters.get(taskId);
+  if (!reporter) return;
+  const reporterStatus = status === "done"
+    ? "done"
+    : status === "paused"
+      ? "paused"
+      : status === "pending"
+        ? "retrying"
+        : "failed";
+  try {
+    await reporter.finish(reporterStatus, detail);
+  } catch (error) {
+    log(`scheduled publish status finalize failed task=${taskId}: ${normalizeErrorMessage(error)}`);
+  } finally {
+    if (status !== "pending" && status !== "publishing") {
+      scheduledPublishProgressReporters.delete(taskId);
+    }
+  }
 }
 
 function extractEvidencePathFromMessage(message: string, key: "sample" | "debug"): string | undefined {
@@ -192,7 +261,7 @@ async function buildPublishFailureEvidence(
 async function notifyPublishManualIntervention(task: any, error: unknown, evidence: PublishFailureEvidence): Promise<void> {
   const chatId = task.telegram_chat_id;
   if (!chatId || manualInterventionNotifiedTaskIds.has(task.id)) return;
-  const bot = activeTelegramBots[0]?.bot;
+  const bot = resolveScheduledPublishNotificationClient(task);
   if (!bot) return;
   manualInterventionNotifiedTaskIds.add(task.id);
 
@@ -224,11 +293,13 @@ const PROCESS_STATUS_FILE = resolveRuntimeFile("process-status.json");
 const DAEMON_HEARTBEAT_STALE_MS = 90_000;
 const TELEGRAM_BOT_CONFIG_RELOAD_MS = Math.max(Number(process.env.TELEGRAM_BOT_CONFIG_RELOAD_MS || 2000), 2000);
 const SENTIMENT_HOT_PREHEAT_DISABLED = process.env.SENTIMENT_HOT_PREHEAT_DISABLED === "1";
-const SENTIMENT_HOT_PREHEAT_INTERVAL_MS = Math.max(Number(process.env.SENTIMENT_HOT_PREHEAT_INTERVAL_MS || 10 * 60 * 1000), 60_000);
-const SENTIMENT_HOT_PREHEAT_INITIAL_DELAY_MS = Math.max(Number(process.env.SENTIMENT_HOT_PREHEAT_INITIAL_DELAY_MS || 60_000), 10_000);
+const SENTIMENT_HOT_PREHEAT_INTERVAL_MS = Math.max(Number(process.env.SENTIMENT_HOT_PREHEAT_INTERVAL_MS || 24 * 60 * 60 * 1000), 60_000);
+const SENTIMENT_HOT_PREHEAT_INITIAL_DELAY_MS = Math.max(Number(process.env.SENTIMENT_HOT_PREHEAT_INITIAL_DELAY_MS || SENTIMENT_HOT_PREHEAT_INTERVAL_MS), 10_000);
 const SENTIMENT_HOT_PREHEAT_BATCH_SIZE = Math.max(1, Math.min(Number(process.env.SENTIMENT_HOT_PREHEAT_BATCH_SIZE || 2), 5));
+const SENTIMENT_HOT_PREHEAT_CHILD_TIMEOUT_MS = Math.max(Number(process.env.SENTIMENT_HOT_PREHEAT_CHILD_TIMEOUT_MS || 120_000), 30_000);
 let sentimentHotPreheatInFlight = false;
 let sentimentHotPreheatCursor = 0;
+let sentimentHotPreheatChild: ChildProcess | null = null;
 
 function isAllowedScheduledPublishPlatform(platform: unknown): platform is "threads" | "telegram" {
   return platform === "threads" || platform === "telegram";
@@ -436,6 +507,7 @@ async function stopActiveTelegramBots(): Promise<void> {
 }
 
 async function applyTelegramBotRuntimeConfig(configs: TelegramBotRuntimeConfig[], reason: string): Promise<void> {
+  activeTelegramBotConfigs = configs.slice();
   const mainConfigs = configs.slice(0, 1);
   const workerConfigs = configs.slice(1);
   syncTelegramBotWorkers(workerConfigs, reason);
@@ -512,6 +584,65 @@ function writeTelegramBotRuntimeHeartbeat() {
   writeDaemonHeartbeat({ state: "running", telegramBot: activeTelegramBotCount() > 0 ? `configured:${activeTelegramBotCount()}` : "missing-token" });
 }
 
+function stopSentimentHotPreheatChild() {
+  const child = sentimentHotPreheatChild;
+  sentimentHotPreheatChild = null;
+  if (!child || child.killed) return;
+  try {
+    child.kill("SIGTERM");
+  } catch {}
+}
+
+function runSentimentHotPreheatChild(archiveId: string): Promise<{ count: number }> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({ action: "preheat", archiveId, limit: 10, refresh: true });
+    const child = spawn(process.execPath, ["--import", "tsx", "scripts/skills/persona-sentiment-hot-once.ts", payload], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
+    });
+    sentimentHotPreheatChild = child;
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout?.on("data", (chunk) => {
+      stdout = `${stdout}${String(chunk)}`.slice(-200_000);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = `${stderr}${String(chunk)}`.slice(-50_000);
+    });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {}
+    }, SENTIMENT_HOT_PREHEAT_CHILD_TIMEOUT_MS);
+    timeout.unref?.();
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      if (sentimentHotPreheatChild === child) sentimentHotPreheatChild = null;
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      if (sentimentHotPreheatChild === child) sentimentHotPreheatChild = null;
+      if (timedOut) {
+        reject(new Error(`preheat child timed out after ${SENTIMENT_HOT_PREHEAT_CHILD_TIMEOUT_MS}ms`));
+        return;
+      }
+      const parsed = stdout.trim().split(/\r?\n/).reverse().map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).find((item) => item && typeof item === "object");
+      if (code !== 0 || !parsed?.ok) {
+        reject(new Error(String(parsed?.error || stderr.trim() || `preheat child exited code=${code ?? "-"} signal=${signal ?? "-"}`)));
+        return;
+      }
+      resolve({ count: Number(parsed.count || 0) });
+    });
+  });
+}
+
 async function runSentimentHotPreheatOnce(reason: string) {
   if (SENTIMENT_HOT_PREHEAT_DISABLED || sentimentHotPreheatInFlight) return;
   sentimentHotPreheatInFlight = true;
@@ -528,7 +659,7 @@ async function runSentimentHotPreheatOnce(reason: string) {
     for (const archive of selected) {
       const startedAt = Date.now();
       try {
-        const result = await preheatSentimentHotCandidates({ archive, limit: 10, refresh: true });
+        const result = await runSentimentHotPreheatChild(archive.id);
         log(`[sentiment_hot_preheat] ${reason} ${archive.name || archive.id}: ${result.count}/10 in ${Date.now() - startedAt}ms`);
       } catch (error) {
         log(`[sentiment_hot_preheat] ${reason} ${archive.name || archive.id} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -561,7 +692,8 @@ async function main() {
     log(`↻ 重启恢复：publishing=${recovered.interrupted} paused_expired=${recovered.expiredPaused} requeued=${recovered.requeued} post_publish_paused=${recovered.postPublishPaused} failed=${recovered.failed} locks_cleared=${recovered.clearedLocks}`);
   }
 
-  const runner = async (task: any): Promise<PublishTaskRunResult> => {
+  const runner = async (task: PublishTask): Promise<PublishTaskRunResult> => {
+    const progressReporter = await startScheduledPublishProgressReporter(task);
     if (!credentials.ak || !credentials.sk) {
       const error = "VMOS 凭据未配置";
       const evidence = { failureStep: "启动前检查", manualInterventionRequired: true };
@@ -601,6 +733,9 @@ async function main() {
         (progress) => {
           cancellationToken.throwIfCancelled?.();
           lastProgressStep = progress.step || lastProgressStep;
+          void progressReporter?.progress(formatPublishStepForTelegram(progress.step || lastProgressStep)).catch((error) => {
+            log(`scheduled publish progress update failed task=${task.id}: ${normalizeErrorMessage(error)}`);
+          });
           if (progress.error || progress.warning || progress.manualIntervention) {
             progressEvidence = {
               failureStep: progress.step || lastProgressStep,
@@ -704,6 +839,9 @@ async function main() {
     onTaskStatusChange: (taskId, status, extra) => {
       const detail = extra?.error ? ` (${extra.error})` : "";
       log(`📋 任务 ${taskId} → ${status}${detail}`);
+      if (status !== "publishing") {
+        void finishScheduledPublishProgressReporter(taskId, status, typeof extra?.error === "string" ? extra.error : undefined);
+      }
     },
   });
 
@@ -727,6 +865,7 @@ async function main() {
   const shutdown = () => {
     log("\n正在关闭...");
     scheduler.stop();
+    stopSentimentHotPreheatChild();
     stopSentimentRuntime();
     void stopActiveTelegramBots().catch(() => undefined);
     stopAllTelegramBotWorkers();

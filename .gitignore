@@ -22,10 +22,15 @@ logs/
 *.log
 .codex-run-logs/
 .codex_tmp_py/
+.codex-tmp/
 .playwright-mcp/
+.playwright-cli/
 .serena/
 .gstack/
 .claude/
+
+node_modules/
+output/
 
 build/
 dist/

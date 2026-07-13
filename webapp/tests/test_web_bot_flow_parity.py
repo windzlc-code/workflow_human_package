@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+from typing import Any
 
 
 WEB_BOT_PATH = Path(__file__).parents[1] / "adbfacebook_console" / "core" / "web_bot.py"
@@ -21,6 +22,41 @@ def _function_source(name: str) -> str:
     ]
     assert matches, f"missing function: {name}"
     return ast.get_source_segment(SOURCE, matches[-1]) or ""
+
+
+def _runtime_handle_with_route_spies() -> tuple[Any, list[tuple[str, tuple[Any, ...]]]]:
+    handle_node = next(
+        node
+        for node in TREE.body
+        if isinstance(node, ast.FunctionDef) and node.name == "handle"
+    )
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def route_spy(name: str) -> Any:
+        def route(*args: Any) -> dict[str, str]:
+            calls.append((name, args))
+            return {"route": name}
+
+        return route
+
+    namespace: dict[str, Any] = {
+        "Any": Any,
+        "_sentiment_hot_input_media": lambda _media: [],
+    }
+    for name in (
+        "_source_post_pad_action",
+        "_source_post_pad_menu",
+        "_source_post_multi_publish_execute",
+        "_schedule_time_picker",
+        "_matrix_update_pads",
+        "_enqueue_matrix_posts",
+    ):
+        namespace[name] = route_spy(name)
+    exec(
+        compile(ast.Module(body=[handle_node], type_ignores=[]), str(WEB_BOT_PATH), "exec"),
+        namespace,
+    )
+    return namespace["handle"], calls
 
 
 def test_console_uses_8098_proxy_prefix_when_served_under_threads_console() -> None:
@@ -382,7 +418,7 @@ def test_persona_sync_does_not_create_a_revision_feedback_loop() -> None:
     assert "build_overview()" not in finder
     assert "new AbortController()" in template
     assert "isInteractive ? 20000 : 8000" in template
-    assert "if (isInteractive) subtitle.textContent = '正在输入...'" in template
+    assert "if (isInteractive) subtitle.textContent = '正在輸入...'" in template
 
 
 def test_web_persona_delete_uses_shared_source_before_local_projection_cleanup() -> None:
@@ -724,6 +760,7 @@ def test_web_generation_uses_tool_r18_memory_and_mode_labels() -> None:
 
 
 def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
+    template = BOT_CONSOLE_PATH.read_text(encoding="utf-8")
     handle = _function_source("handle")
     continuation = _function_source("_continue_state_text")
     mode_menu = _function_source("_persona_autoreply_mode_menu")
@@ -755,6 +792,8 @@ def test_hot_post_auto_reply_keeps_all_tg_steps() -> None:
     assert "ownreply_clear_link_" in handle
     assert "ownreply_content_continue_" in handle
     assert "acctautoreplyhot_threads_" in handle
+    assert '▶️ 开始执行' in confirmation
+    assert "startsWith('acctautoreplyhot_threads_')" in template
     assert "arls_h_" in confirmation
     assert 'flow == "ownreply_reply_text"' in continuation
     assert 'flow == "ownreply_views"' in continuation
@@ -848,6 +887,94 @@ def test_matrix_and_schedule_use_real_tool_r18_posts() -> None:
     assert "TaskRepo.add_many" not in matrix
     assert '"persona_enqueue_posts"' in schedule
     assert "TaskRepo.add_many" not in schedule
+
+
+def test_schedule_creation_matches_tg_selector_platform_and_time_steps() -> None:
+    start = _function_source("_schedule_publish_start")
+    persona = _function_source("_schedule_persona_posts")
+    picker = _function_source("_schedule_time_picker")
+    pads = _function_source("_source_post_pad_menu")
+    handle = _function_source("handle")
+
+    assert 'schedule_publish_p' in start
+    assert 'posts[0]' in persona
+    assert '_publish_platform_buttons("sched_platform_")' in persona
+    assert 'sched_multi_platform_' in persona
+    assert 'pubpad_toggle_' in pads
+    assert 'pubpad_confirm' in pads
+    assert 'schedpick_date_' in picker
+    assert 'schedpick_hour_' in picker
+    assert 'schedpick_minute_' in picker
+    assert 'schedpick_confirm' in picker
+    assert 'schedtime_manual' in picker
+    assert 'if action.startswith("schedpick_"):' in handle
+
+
+def test_handle_routes_shared_pubpad_selection_actions_by_flow() -> None:
+    handle, calls = _runtime_handle_with_route_spies()
+    actions = (
+        "pubpad_select_page",
+        "pubpad_clear_page",
+        "pubpad_select_all",
+        "pubpad_clear_all",
+    )
+
+    for action in actions:
+        calls.clear()
+        response = handle({"action": action, "state": {"flow": "matrix_pads", "draft": {}}})
+        assert response == {"route": "_matrix_update_pads"}
+        assert calls == [("_matrix_update_pads", (action, {"flow": "matrix_pads", "draft": {}}))]
+
+        calls.clear()
+        schedule_state = {"flow": "schedule_pads", "draft": {"publish_origin": "schedule"}}
+        response = handle({"action": action, "state": schedule_state})
+        assert response == {"route": "_source_post_pad_action"}
+        assert calls == [("_source_post_pad_action", (action, schedule_state))]
+
+        calls.clear()
+        schedule_origin_state = {"flow": "matrix_pads", "draft": {"publish_origin": "schedule"}}
+        response = handle({"action": action, "state": schedule_origin_state})
+        assert response == {"route": "_source_post_pad_action"}
+        assert calls == [("_source_post_pad_action", (action, schedule_origin_state))]
+
+
+def test_handle_routes_pubpad_confirm_by_flow() -> None:
+    handle, calls = _runtime_handle_with_route_spies()
+
+    matrix_state = {"flow": "matrix_pads", "draft": {"selected_pads": ["pad-1"]}}
+    response = handle({"action": "pubpad_confirm", "state": matrix_state})
+    assert response == {"route": "_enqueue_matrix_posts"}
+    assert calls == [("_enqueue_matrix_posts", (matrix_state,))]
+
+    calls.clear()
+    schedule_states = (
+        {"flow": "schedule_pads", "draft": {"selected_pad_codes": ["pad-1"]}},
+        {"flow": "", "draft": {"publish_origin": "schedule", "selected_pad_codes": ["pad-1"]}},
+    )
+    for schedule_state in schedule_states:
+        calls.clear()
+        response = handle({"action": "pubpad_confirm", "state": schedule_state})
+        assert response == {"route": "_schedule_time_picker"}
+        assert calls == [("_schedule_time_picker", ({"draft": schedule_state["draft"]},))]
+
+
+def test_schedule_status_uses_shared_tool_r18_queue_and_real_actions() -> None:
+    status = _function_source("_status_menu")
+    queue = _function_source("_schedule_queue_view")
+    action = _function_source("_schedule_queue_action")
+
+    assert "_source_publish_queue_data" in status
+    assert "📋 查看待發佈" in status
+    assert "⏰ 僅看定時任務" in status
+    assert "queueview_pending_all_all_all_0" in status
+    assert "queueview_failed_all_all_all_0" in status
+    assert "queueview_pending_all_scheduled_all_0" in status
+    assert "queue_filter_platform" in status
+    assert "queue_filter_persona" in status
+    assert "edittasktime_" in queue
+    assert "canceltask_" in queue
+    assert "retrytask_" in queue
+    assert "_source_publish_queue_action" in action
 
 
 def test_view_posts_uses_real_archive_state_and_tg_layout() -> None:
@@ -1118,5 +1245,11 @@ def test_threads_automation_matches_tg_progress_and_evidence_lifecycle() -> None
     assert 'response["messages"].append(' in detail
     assert "own_reply_no_match" in detail
     assert "if own_reply_no_match:" in detail
+    assert "_threads_own_reply_execution_error(result)" in detail
+    assert 'task.get("error") or own_reply_error' in detail
+    assert "或已回覆過" not in detail
+    execution_error = _function_source("_threads_own_reply_execution_error")
+    assert '"沒有成功回覆任何推文"' in execution_error
+    assert 'return ""' in execution_error
     for source in (warmup_cli, auto_reply_cli, own_reply_cli):
         assert "emitWebTaskProgress" in source

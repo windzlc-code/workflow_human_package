@@ -1,5 +1,6 @@
 import type { DramaProject } from "@/types/drama";
 import fs from "node:fs";
+import path from "node:path";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 import { addPostToMemory, buildMemoryOutline, deleteMemory } from "./persona-memory-v2";
 import { WORKFLOW_PERSONA_SEEDS } from "./workflow-personas";
@@ -24,6 +25,7 @@ const LEGACY_PROJECTS_KEY = "storyforge_drama_projects";
 const WORKFLOW_PERSONAS_SEEDED_KEY = "workflow_persona_archives_seeded_v1";
 const buildArchiveMemoryOutline = buildMemoryOutline;
 const WORKFLOW_PERSONA_ID_PREFIX = "workflow-persona-";
+const DELETED_PERSONA_IDS_FILE = resolveRuntimeFile("persona_dashboard_deleted_personas.json");
 const PUBLISH_PLATFORMS = ["threads", "telegram"] as const;
 type PublishPlatformQueue = typeof PUBLISH_PLATFORMS[number];
 
@@ -35,6 +37,24 @@ interface LegacyPersonaPreset {
   content: string;
   createdAt: string;
   setup?: ArchiveSetup;
+}
+
+function deletedPersonaIds(): Set<string> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(DELETED_PERSONA_IDS_FILE, "utf-8"));
+    return new Set(Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function addDeletedPersonaId(id: string): void {
+  const ids = deletedPersonaIds();
+  ids.add(id);
+  fs.mkdirSync(path.dirname(DELETED_PERSONA_IDS_FILE), { recursive: true });
+  const tempPath = `${DELETED_PERSONA_IDS_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify([...ids].sort(), null, 2), "utf-8");
+  fs.renameSync(tempPath, DELETED_PERSONA_IDS_FILE);
 }
 
 
@@ -617,6 +637,7 @@ function getLocalArchives(): PersonaArchive[] {
   const cached = safeArray<PersonaArchive>(storageShim.getItem(ARCHIVES_KEY));
   const normalizedCached = normalizeArchives(cached);
   const workflowSeeds = createWorkflowPersonaArchives(normalizedCached);
+  const deletedIds = deletedPersonaIds();
   const merged = syncWorkflowPersonaArchives(mergeArchives(
     normalizedCached,
     [
@@ -624,7 +645,7 @@ function getLocalArchives(): PersonaArchive[] {
       ...migrateLegacyProjects(),
       ...workflowSeeds,
     ],
-  ));
+  )).filter((archive) => !deletedIds.has(archive.id));
   if (archivesChanged(cached, merged)) {
     saveLocalArchives(merged, Boolean(archiveAPI()));
   }
@@ -635,6 +656,7 @@ function getLocalArchives(): PersonaArchive[] {
 }
 
 function getLocalArchiveById(id: string): PersonaArchive | null {
+  if (deletedPersonaIds().has(id)) return null;
   const raw = storageShim.getItem(ARCHIVES_KEY);
   if (raw) {
     const objectJson = extractArchiveObjectJsonById(raw, id);
@@ -720,6 +742,9 @@ function mergeArchives(localArchives: PersonaArchive[], remoteArchives: PersonaA
 
 async function persistArchive(archive: PersonaArchive, baseUpdatedAt?: string): Promise<PersonaArchive> {
   const normalized = normalizeArchive(archive);
+  if (deletedPersonaIds().has(normalized.id)) {
+    throw new Error("persona archive was deleted on the server");
+  }
   const local = getLocalArchives();
   const api = archiveAPI();
   const persisted = api ? await saveElectronArchive(normalized, baseUpdatedAt) : normalized;
@@ -743,13 +768,15 @@ export function getCachedPersonaArchive(id: string): PersonaArchive | null {
 }
 
 export async function listPersonaArchives(): Promise<PersonaArchive[]> {
+  const deletedIds = deletedPersonaIds();
   const local = getLocalArchives();
   const api = archiveAPI();
   if (!api) return local;
 
   const remoteRaw = await api.list().catch(() => []);
-  const remote = normalizeArchives(remoteRaw);
-  const merged = syncWorkflowPersonaArchives(mergeArchives(local, remote));
+  const remote = normalizeArchives(remoteRaw).filter((archive) => !deletedIds.has(archive.id));
+  const merged = syncWorkflowPersonaArchives(mergeArchives(local, remote))
+    .filter((archive) => !deletedIds.has(archive.id));
   try {
     saveLocalArchives(merged, true);
   } catch {
@@ -768,6 +795,7 @@ export async function listPersonaArchives(): Promise<PersonaArchive[]> {
 }
 
 export async function loadPersonaArchive(id: string): Promise<PersonaArchive | null> {
+  if (deletedPersonaIds().has(id)) return null;
   const api = archiveAPI();
   const cached = getLocalArchiveById(id);
   if (!api) return cached;
@@ -913,6 +941,13 @@ export async function savePersonaReferenceSheet(
 }
 
 export async function deletePersonaArchive(id: string): Promise<void> {
+  const api = archiveAPI();
+  if (api) {
+    const result = await api.delete(id);
+    if (result?.ok === false) throw new Error(result.error || "服务器人设删除失败");
+  } else {
+    addDeletedPersonaId(id);
+  }
   const next = getLocalArchives().filter((archive) => archive.id !== id);
   saveLocalArchives(next);
   const nextPresets = safeArray<LegacyPersonaPreset>(storageShim.getItem(LEGACY_PRESETS_KEY))
@@ -921,9 +956,6 @@ export async function deletePersonaArchive(id: string): Promise<void> {
   const nextProjects = safeArray<DramaProject>(storageShim.getItem(LEGACY_PROJECTS_KEY))
     .filter((project) => project.id !== id);
   storageShim.setItem(LEGACY_PROJECTS_KEY, JSON.stringify(nextProjects));
-  if (archiveAPI()) {
-    await archiveAPI().delete(id).catch(() => {});
-  }
   await deleteMemory(id).catch(() => {});
 }
 

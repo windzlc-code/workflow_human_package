@@ -9233,10 +9233,11 @@ async function dumpUiXml(
   return sdcardXml;
 }
 
-async function dumpUiXmlQuick(
+export async function dumpUiXmlQuick(
   config: VmosConfig,
   padCode: string,
   timeoutMs = 6_000,
+  compactTextNodes = false,
 ): Promise<string> {
   const targetPath = "/sdcard/vmos_window_quick.xml";
   await execAdbForText(
@@ -9246,15 +9247,17 @@ async function dumpUiXmlQuick(
     timeoutMs,
     500,
   ).catch(() => "");
+  const compactCommand = `grep -o '<node[^>]*>' ${targetPath} | grep -E 'text="[^"]+"' | sed -E 's#<node[^>]*text="([^"]*)"[^>]*resource-id="([^"]*)"[^>]*content-desc="([^"]*)"[^>]*clickable="([^"]*)"[^>]*bounds="([^"]*)".*#<node text="\\1" resource-id="\\2" content-desc="\\3" clickable="\\4" bounds="\\5" />#' | head -c 6000`;
   const output = await execAdbForText(
     config,
     padCode,
-    `cat ${targetPath} 2>&1 | head -c 60000`,
+    compactTextNodes ? compactCommand : `cat ${targetPath} 2>&1 | head -c 60000`,
     timeoutMs,
     500,
   ).catch(() => "");
   const xmlStart = output.indexOf("<?xml");
   if (xmlStart >= 0) return output.slice(xmlStart);
+  if (compactTextNodes && /<node\b/.test(output)) return output;
   const compact = normalizeSingleLine(output);
   if (
     !compact
@@ -24949,24 +24952,35 @@ function extractGenericWarmupKeywordCandidates(
   const sources = [
     ...explicitKeywords,
     ...(persona?.interests || []),
+    persona?.description || "",
   ];
   const candidates: string[] = [];
   for (const source of sources) {
     const text = normalizeSingleLine(String(source || ""));
     if (!text) continue;
     for (const piece of text.split(/[，,。.!！？?、；;：:\s/|｜與与和及跟]+/u)) {
-      const cleaned = normalizeWarmupSearchKeywordLiteral(piece);
+      const cleaned = normalizeWarmupSearchKeywordCandidate(piece, persona);
       if (cleaned) candidates.push(cleaned);
     }
+    for (const match of text.match(/[\p{Script=Han}]{2,8}/gu) || []) {
+      const cleaned = normalizeWarmupSearchKeywordCandidate(match, persona);
+      if (cleaned) candidates.push(cleaned);
+      for (let size = 2; size <= Math.min(4, cleaned.length); size += 1) {
+        for (let index = 0; index <= cleaned.length - size; index += 1) {
+          const gram = normalizeWarmupSearchKeywordCandidate(cleaned.slice(index, index + size), persona);
+          if (gram) candidates.push(gram);
+        }
+      }
+    }
   }
-  const personaNameCore = normalizeWarmupSearchKeywordLiteral(personaName);
+  const personaNameCore = normalizeWarmupSearchKeywordCandidate(personaName, persona);
   if (personaNameCore && personaNameCore !== personaName) candidates.push(personaNameCore);
 
   const seen = new Set<string>();
   return candidates
-    .map((item) => normalizeWarmupSearchKeywordLiteral(item))
+    .map((item) => normalizeWarmupSearchKeywordCandidate(item, persona))
     .filter((item) => item.length >= 2 && item.length <= 12)
-    .filter((item) => isUsableWarmupSearchKeywordToken(item))
+    .filter((item) => isCleanWarmupSearchKeywordToken(item))
     .filter((item) => !personaName || item !== personaName)
     .filter((item) => {
       const key = item.toLowerCase();
@@ -24981,24 +24995,7 @@ export function buildWarmupInterestKeywords(
   persona?: WarmupCommentPersona,
   explicitKeywords: string[] = [],
 ): string[] {
-  const seen = new Set<string>();
-  const keywords: string[] = [];
-  for (const source of [...explicitKeywords, ...(persona?.interests || [])]) {
-    const text = normalizeSingleLine(String(source || ""));
-    if (!text) continue;
-    for (const piece of text.split(/[，,。.!！？?、；;：:\s/|｜與与和及跟]+/u)) {
-      const cleaned = normalizeWarmupSearchKeywordLiteral(piece);
-      if (cleaned.length < 2 || cleaned.length > 10) continue;
-      if (!/[\u3400-\u9fff]/.test(cleaned)) continue;
-      if (/[A-Za-z0-9，。,.!?！？、：:；;（）()[\]{}]/.test(cleaned)) continue;
-      if (isBannedWarmupSearchKeyword(cleaned)) continue;
-      const key = cleaned.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      keywords.push(cleaned);
-    }
-  }
-  return keywords.slice(0, 8);
+  return extractGenericWarmupKeywordCandidates(persona, explicitKeywords).slice(0, 8);
 }
 
 function isBannedWarmupSearchKeyword(item: string): boolean {
@@ -25804,8 +25801,13 @@ function fallbackWarmupComment(
     return shortDefaults[warmupRandomInt(0, shortDefaults.length - 1)];
   }
   const personaText = warmupCommentPersonaText(persona);
-  if (personaText && !scoreWarmupPostRelevance(postPreview, persona, []).relevant) return "";
-  if (personaText) return "";
+  if (personaText) {
+    const relevance = scoreWarmupPostRelevance(postPreview, persona, []);
+    if (!relevance.relevant) return "";
+    const normalizedPreview = normalizeWarmupRelevanceText(postPreview).replace(/\s+/g, "");
+    const matchedKeyword = relevance.matched.find((item) => normalizedPreview.includes(item));
+    return matchedKeyword ? `${matchedKeyword}這點值得繼續看` : "";
+  }
   const topic = postPreview
     .replace(/https?:\/\/\S+/g, "")
     .replace(/[#@][^\s，。,.!?！？]+/g, "")
@@ -26711,41 +26713,42 @@ function extractThreadsAutoReplyVisibleComments(
   return comments;
 }
 
+function orderedUniqueThreadsAutoReplyModels(values: Array<unknown>): string[] {
+  const seen = new Set<string>();
+  return values
+    .flatMap((value) => String(value || "").split(/[,\n]/))
+    .map((model) => normalizeSingleLine(model))
+    .filter((model) => {
+      const key = model.toLowerCase();
+      if (!model || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+export function resolveThreadsAutoReplyVisionModelsForTest(
+  configuredModels: Array<unknown>,
+  fallbackModels: string[] = [],
+): string[] {
+  return orderedUniqueThreadsAutoReplyModels([...configuredModels, ...fallbackModels]);
+}
+
 function resolveThreadsAutoReplyVisionModels(): string[] {
   const config = readRuntimeApiConfig();
   const rawValues = [
-    config.llmFreeModelPriorityOrder,
-    config.llm_free_model_priority_order,
     config.llmModelPriorityOrder,
     config.llm_model_priority_order,
-    config.llmPaidModelPriorityOrder,
-    config.llm_paid_model_priority_order,
     config.llmDefaultModel,
     config.llm_default_model,
     config.llmDefaultModelGpt,
     config.llm_default_model_gpt,
+    config.llmFreeModelPriorityOrder,
+    config.llm_free_model_priority_order,
+    config.llmPaidModelPriorityOrder,
+    config.llm_paid_model_priority_order,
   ];
-  const parsed = rawValues
-    .flatMap((value) => String(value || "").split(/[,\n]/))
-    .map((model) => normalizeSingleLine(model))
-    .filter(Boolean);
   const defaults = ["google/gemini-3-flash-preview", "google/gemini-3.5-flash", "gemini-3-flash-preview", "gemini-3.5-flash", "xai/grok-4.3"];
-  const seen = new Set<string>();
-  const unique = [...parsed, ...defaults].filter((model) => {
-    const key = model.toLowerCase();
-    if (!model || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  const score = (model: string) => {
-    const lower = model.toLowerCase();
-    if (/gemini.*flash/.test(lower)) return 0;
-    if (/gemini/.test(lower)) return 1;
-    if (/vision|vl|ocr/.test(lower)) return 2;
-    if (/grok|xai/.test(lower)) return 4;
-    return 3;
-  };
-  return unique.sort((a, b) => score(a) - score(b));
+  return orderedUniqueThreadsAutoReplyModels([...rawValues, ...defaults]);
 }
 
 async function callThreadsAutoReplyVisionOcrModel(
@@ -26830,74 +26833,72 @@ async function callThreadsAutoReplyDirectMultimodalModel(
   const apiKey = normalizeSingleLine(config.gptKey || config.geminiTextKey || "");
   const baseUrl = normalizeSingleLine(config.gptEndpoint || config.geminiTextEndpoint || "");
   if (!apiKey || !baseUrl) throw new Error("OpenAI 兼容多模態端點未設定");
-  const modelCandidates = [
-    ...String(options.model || config.llmModelPriorityOrder || config.llm_model_priority_order || resolvePublishVerifyModel() || "")
-    .split(/[,\n]/)
-    .map((item) => normalizeSingleLine(item))
-      .filter(Boolean),
+  const modelCandidates = orderedUniqueThreadsAutoReplyModels([
+    options.model,
+    config.llmModelPriorityOrder,
+    config.llm_model_priority_order,
+    config.llmDefaultModel,
+    config.llm_default_model,
+    config.llmDefaultModelGpt,
+    config.llm_default_model_gpt,
+    resolvePublishVerifyModel(),
     "google/gemini-3.5-flash",
     "google/gemini-3-flash-preview",
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
     "xai/grok-4.3",
-  ];
-  const modelScore = (candidate: string) => {
-    const lower = candidate.toLowerCase();
-    if (/grok|xai/.test(lower)) return 0;
-    if (/gemini-3\.1-pro/.test(lower)) return 1;
-    if (/gemini.*flash/.test(lower) && !/gemini-3\.5-flash/.test(lower)) return 2;
-    if (/gemini-3\.5-flash/.test(lower)) return 5;
-    return 3;
-  };
-  const seenModels = new Set<string>();
-  const model = [...modelCandidates]
-    .filter((candidate) => {
-      const key = candidate.toLowerCase();
-      if (!candidate || seenModels.has(key)) return false;
-      seenModels.add(key);
-      return true;
-    })
-    .sort((a, b) => modelScore(a) - modelScore(b))[0] || "xai/grok-4.3";
-  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "text", text: prompt },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:${inlineData.mimeType || "image/jpeg"};base64,${inlineData.data}`,
-            },
-          },
-        ],
-      }],
-      temperature: 0,
-      max_tokens: Math.max(80, Math.min(600, Math.round(options.maxTokens || 220))),
-    }),
-    signal,
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`direct-multimodal ${response.status}: ${text.slice(0, 200)}`);
+  ]);
+  let lastError: unknown;
+  for (const model of modelCandidates) {
+    if (signal?.aborted) throw new Error("direct-multimodal aborted");
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${inlineData.mimeType || "image/jpeg"};base64,${inlineData.data}`,
+                },
+              },
+            ],
+          }],
+          temperature: 0,
+          max_tokens: Math.max(80, Math.min(600, Math.round(options.maxTokens || 220))),
+        }),
+        signal,
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(`direct-multimodal ${model} ${response.status}: ${text.slice(0, 200)}`);
+      }
+      const data = await response.json().catch(() => null);
+      const content = data?.choices?.[0]?.message?.content;
+      const output = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content.map((item: any) => {
+            if (typeof item === "string") return item;
+            if (item?.type === "text") return String(item.text || "");
+            return "";
+          }).join("")
+          : "";
+      if (normalizeSingleLine(output)) return output;
+      throw new Error(`direct-multimodal ${model} empty response`);
+    } catch (error) {
+      lastError = error;
+    }
   }
-  const data = await response.json().catch(() => null);
-  const content = data?.choices?.[0]?.message?.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content.map((item: any) => {
-      if (typeof item === "string") return item;
-      if (item?.type === "text") return String(item.text || "");
-      return "";
-    }).join("");
-  }
-  return "";
+  throw lastError instanceof Error ? lastError : new Error("direct-multimodal failed");
 }
 
 async function getInlineDataFromUrlOrLocalFile(input: string): Promise<{ mimeType: string; data: string } | null> {
@@ -26943,7 +26944,7 @@ Rules:
     }
     return normalizeThreadsProfileUsername(normalizeSingleLine(text));
   };
-  const request = createTimeoutSignal(9_000);
+  const request = createTimeoutSignal(22_000);
   try {
     const raw = await callThreadsAutoReplyDirectMultimodalModel(
       prompt,
@@ -26956,7 +26957,7 @@ Rules:
     try {
       const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, request.signal, {
         maxTokens: 80,
-        perModelTimeoutMs: 4_500,
+        perModelTimeoutMs: 12_000,
       });
       return parseUsername(raw) || null;
     } catch {
@@ -26992,7 +26993,7 @@ Rules:
     }
     return normalizeThreadsProfileUsername(normalizeSingleLine(text));
   };
-  const request = createTimeoutSignal(9_000);
+  const request = createTimeoutSignal(22_000);
   try {
     const raw = await callThreadsAutoReplyDirectMultimodalModel(
       prompt,
@@ -27011,7 +27012,7 @@ Rules:
 async function extractThreadsAutoReplyVisibleCommentsByVision(
   screenshotUrl: string,
   persona?: WarmupCommentPersona,
-  ownIdentifiers: string[] = [],
+  _ownIdentifiers: string[] = [],
   options: { timeoutMs?: number; forceVisibleValidation?: boolean } = {},
 ): Promise<ThreadsAutoReplyCandidate[]> {
   if (!screenshotUrl) return [];
@@ -27055,7 +27056,7 @@ async function extractThreadsAutoReplyVisibleCommentsByVision(
   ].filter((item): item is NonNullable<typeof item> => Boolean(item));
   if (!inlineDataCandidates.length) return [];
 
-  const totalTimeoutMs = Math.max(4_500, Math.min(14_000, Math.round(options.timeoutMs || 11_500)));
+  const totalTimeoutMs = Math.max(4_500, Math.min(30_000, Math.round(options.timeoutMs || 11_500)));
   const request = createTimeoutSignal(totalTimeoutMs);
   try {
     const prompt = forceVisibleValidation
@@ -27099,21 +27100,6 @@ Rules:
         || "";
       if (!jsonText) return [];
       const parsed = JSON.parse(jsonText);
-      const postAuthor = normalizeThreadsAutoReplyAuthor(normalizeSingleLine(String(
-        parsed?.postAuthor
-        || parsed?.post_author
-        || parsed?.threadAuthor
-        || parsed?.thread_author
-        || parsed?.作者
-        || parsed?.主作者
-        || parsed?.串文作者
-        || "",
-      )));
-      const trustedPostAuthorAsOwn = postAuthor || "";
-      const ignoredAuthors = mergeThreadsAutoReplyOwnIdentifiers(
-        ownIdentifiers,
-        trustedPostAuthorAsOwn ? [trustedPostAuthorAsOwn] : [],
-      );
       const comments = Array.isArray(parsed)
         ? parsed
         : Array.isArray(parsed?.comments)
@@ -27199,9 +27185,10 @@ Rules:
           };
         })
         .filter((item) => !isThreadsAutoReplyIgnoredText(item.text));
-      const normalized = normalizedRows
-        .filter((item) => !isThreadsAutoReplyOwnAuthor(item.author, ignoredAuthors));
-      return normalized
+      // Keep own-author rows as extraction evidence. The shared finalizer below
+      // filters them before selection, while still allowing the collector to
+      // distinguish "comments loaded but all are mine" from vision failure.
+      return normalizedRows
         .filter((item) => {
           const key = buildThreadsAutoReplyCandidateIdentity(item.author, item.text);
           if (seen.has(key)) return false;
@@ -27219,8 +27206,8 @@ Rules:
         }));
     };
     const primaryTimeoutMs = forceVisibleValidation
-      ? Math.max(7_500, Math.min(12_000, totalTimeoutMs))
-      : Math.max(5_000, Math.min(10_000, totalTimeoutMs - 1_200));
+      ? Math.max(7_500, Math.min(28_000, totalTimeoutMs))
+      : Math.max(5_000, Math.min(28_000, totalTimeoutMs - 1_200));
     const mergedCandidates: ThreadsAutoReplyCandidate[] = [];
     const seenMergedCandidates = new Set<string>();
     const addParsedCandidates = (items: ThreadsAutoReplyCandidate[]) => {
@@ -27256,7 +27243,7 @@ Rules:
       try {
         const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, request.signal, {
           maxTokens: 220,
-          perModelTimeoutMs: Math.max(3_500, Math.min(6_500, totalTimeoutMs - 1_000)),
+          perModelTimeoutMs: Math.max(3_500, Math.min(13_000, totalTimeoutMs - 1_000)),
         });
         const parsed = parseRawComments(raw, `thread_detail_vision_ocr:auto_reply_comment_target:region_${inlineIndex + 1}`);
         if (parsed.length) addParsedCandidates(parsed);
@@ -27340,7 +27327,8 @@ Task:
       }
     }
     return mergedCandidates.slice(0, 12);
-  } catch {
+  } catch (error) {
+    console.warn(`[threads][auto-reply][vision] ${error instanceof Error ? error.message : String(error)}`);
     return [];
   } finally {
     request.cleanup();
@@ -28274,7 +28262,7 @@ async function ensureThreadsOwnProfileBeforeScan(
   attemptLabel: string,
 ): Promise<{ ok: true; screenshotUrl: string; uiXml: string } | { ok: false; error: string; screenshotUrl?: string }> {
   let shotUrl = currentShotUrl;
-  let uiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
+  let uiXml = await dumpUiXmlQuick(config, padCode, 2_500, true).catch(() => "");
   if (shotUrl && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
     return { ok: true, screenshotUrl: shotUrl, uiXml };
   }
@@ -28291,7 +28279,7 @@ async function ensureThreadsOwnProfileBeforeScan(
   await threadsAdbInputNoWait(config, padCode, "input swipe 360 1180 360 520 460", 1200);
   shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
   shotUrl = shotUrl ? await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl) : shotUrl;
-  uiXml = await dumpUiXmlQuick(config, padCode, 2_500).catch(() => "");
+  uiXml = await dumpUiXmlQuick(config, padCode, 2_500, true).catch(() => "");
   if (!shotUrl || !await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
     return {
       ok: false,
@@ -28337,7 +28325,7 @@ async function openThreadsLatestOwnPostFromProfile(
   let selectedPostPreview = "";
   for (let openAttempt = 0; openAttempt < 2; openAttempt += 1) {
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
-    let profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
+    let profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000, true).catch(() => "");
     let profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
     let hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
     let hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?\s+ago|minutes?\s+ago|快點我看更多吧|快点我看更多吧|apple video|codex|(?:LIKE|Like)\s+\d+|\d+\s*(?:則|条|個|个)?\s*(?:回覆|回复|讚|赞|like|likes|轉發|转发|repost|reposts))/i.test(profileUiText);
@@ -28351,7 +28339,7 @@ async function openThreadsLatestOwnPostFromProfile(
       await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 430 520", 1000).catch(() => undefined);
       await delay(450);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-      profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000).catch(() => "");
+      profileUiXml = await dumpUiXmlQuick(config, padCode, 2_000, true).catch(() => "");
       profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
       hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
       hasVisiblePostOrActionRow = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?\s+ago|minutes?\s+ago|快點我看更多吧|快点我看更多吧|apple video|codex|(?:LIKE|Like)\s+\d+|\d+\s*(?:則|条|個|个)?\s*(?:回覆|回复|讚|赞|like|likes|轉發|转发|repost|reposts))/i.test(profileUiText);
@@ -28382,7 +28370,7 @@ async function openThreadsLatestOwnPostFromProfile(
       "threadsAutoReply locate visible post fast timeout",
     ).catch(() => null);
     if (target && requireCommentBadge) {
-      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
           requireCommentBadge,
@@ -28396,7 +28384,7 @@ async function openThreadsLatestOwnPostFromProfile(
     }
     if (!target) {
       for (let setupScrollAttempt = 0; setupScrollAttempt < 3; setupScrollAttempt += 1) {
-        profileUiXml = await dumpUiXmlQuick(config, padCode, 3_000).catch(() => "");
+        profileUiXml = await dumpUiXmlQuick(config, padCode, 3_000, true).catch(() => "");
         profileUiText = normalizeSingleLine(decodeXmlAttr(profileUiXml));
         hasProfileSetupCard = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|查看個人檔案|查看个人档案|追蹤\s*\d+\s*個個人檔案|追踪\s*\d+\s*个个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(profileUiText);
         const hasProfileSetupCardByPixels = await detectThreadsProfileSetupCardLocally(shotUrl).catch(() => false);
@@ -28412,7 +28400,7 @@ async function openThreadsLatestOwnPostFromProfile(
         shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
         shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
       }
-      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
           requireCommentBadge,
@@ -28447,7 +28435,7 @@ async function openThreadsLatestOwnPostFromProfile(
       await threadsAdbInputNoWait(config, padCode, "input swipe 360 1320 360 380 650", 1100);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
       shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
-      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
           requireCommentBadge,
@@ -28477,7 +28465,7 @@ async function openThreadsLatestOwnPostFromProfile(
       await delay(500);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
       shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl);
-      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+      profileUiXml = await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
           requireCommentBadge,
@@ -28511,7 +28499,7 @@ async function openThreadsLatestOwnPostFromProfile(
     }
     await delay(750);
     const stableShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
-    const stableUiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => profileUiXml);
+    const stableUiXml = await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => profileUiXml);
     const stableTarget = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(stableShotUrl, stableUiXml, {
         requireCommentBadge,
@@ -28522,6 +28510,18 @@ async function openThreadsLatestOwnPostFromProfile(
       6_000,
       "threadsAutoReply stable pre-tap locate timeout",
     ).catch(() => null);
+    if (!stableTarget) {
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-comment-badge-pre-tap-target-lost",
+        screenshotUrl: stableShotUrl,
+        meta: { originalTarget: target, openAttempt, reason: "stable_relocation_failed" },
+      });
+      await threadsAdbInputNoWait(config, padCode, "input swipe 360 1180 360 520 460", 1200).catch(() => undefined);
+      await delay(500);
+      shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => stableShotUrl);
+      continue;
+    }
     if (stableTarget) {
       saveThreadsAutoReplySampleStep({
         padCode,
@@ -28566,7 +28566,7 @@ async function openThreadsLatestOwnPostFromProfile(
       const retryPreflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, `abnormal_visual_skip_${guardAttempt + 1}`);
       if (!retryPreflight.ok) return retryPreflight;
       shotUrl = retryPreflight.screenshotUrl;
-      profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+      profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
       target = await withTimeout(
         locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
           requireCommentBadge,
@@ -28619,11 +28619,18 @@ async function openThreadsLatestOwnPostFromProfile(
           reason: "LOCAL_THREADS_INAPP_BROWSER",
         },
       });
-      await restoreThreadsAutoReplyProfileForNextScan(config, padCode).catch(() => undefined);
+      const recovered = await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
+      if (!recovered.ok) return recovered;
+      if (openAttempt === 0) {
+        await threadsAdbInputNoWait(config, padCode, "input swipe 360 1180 360 520 460", 1200).catch(() => undefined);
+        await delay(500);
+        shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => recovered.screenshotUrl);
+        continue;
+      }
       return {
         ok: false,
-        error: "定位结果打开了 Threads 内置网页，已恢复个人页并停止当前扫描，避免误点外链",
-        screenshotUrl: shotUrl,
+        error: "连续定位到 Threads 内置网页，已恢复个人页并停止当前扫描，避免误点外链",
+        screenshotUrl: recovered.screenshotUrl,
       };
     }
     if (await detectThreadsThreadDetailShellLocally(shotUrl).catch(() => false)) {
@@ -28693,7 +28700,15 @@ async function openThreadsLatestOwnPostFromProfile(
     lastOpenError = detailError;
     if (detailError.screenshotUrl && await detectThreadsProfilePageLocally(detailError.screenshotUrl).catch(() => false)) {
       shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, detailError.screenshotUrl);
+      saveThreadsAutoReplySampleStep({
+        padCode,
+        step: "profile-post-tap-stayed-on-profile",
+        screenshotUrl: shotUrl,
+        meta: { openAttempt, target, reason: "possible_action_row_tap" },
+      });
+      await threadsAdbInputNoWait(config, padCode, "input swipe 360 1180 360 520 460", 1200).catch(() => undefined);
       await delay(500);
+      shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
       continue;
     }
     if (/回复编辑器|回覆編輯器|reply editor|回复|回覆/.test(detailError.error)) {
@@ -28767,9 +28782,9 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     "threadsAutoReply locate next visible post fast timeout",
   ).catch(() => null);
   if (!target) {
-    profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+    profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
   } else if (requireCommentBadge) {
-    profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+    profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
         requireCommentBadge,
@@ -28782,7 +28797,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     ).catch(() => null);
   }
   if (!target) {
-    profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+    profileUiXml = profileUiXml || await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
       requireCommentBadge,
@@ -28812,7 +28827,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     const revealPreflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, "bottom_partial_comment_badge_reveal");
     if (!revealPreflight.ok) return revealPreflight;
     shotUrl = revealPreflight.screenshotUrl;
-    profileUiXml = revealPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+    profileUiXml = revealPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
         requireCommentBadge,
@@ -28848,7 +28863,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     const retryPreflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, `retry_${attempt + 1}`);
     if (!retryPreflight.ok) return retryPreflight;
     shotUrl = retryPreflight.screenshotUrl;
-    profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+    profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
         requireCommentBadge,
@@ -28901,7 +28916,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     const retryPreflight = await ensureThreadsOwnProfileBeforeScan(config, padCode, shotUrl, `next_abnormal_visual_skip_${guardAttempt + 1}`);
     if (!retryPreflight.ok) return retryPreflight;
     shotUrl = retryPreflight.screenshotUrl;
-    profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+    profileUiXml = retryPreflight.uiXml || await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
     target = await withTimeout(
       locateThreadsVisibleOwnPostContentTarget(shotUrl, profileUiXml, {
         requireCommentBadge,
@@ -28989,7 +29004,7 @@ async function openThreadsNextVisibleOwnPostFromCurrentProfile(
     const imageWidth = image?.width || BASE_SCREEN.width;
     const imageHeight = image?.height || BASE_SCREEN.height;
     const currentProfileShotUrl = detail.screenshotUrl || openedPage?.screenshotUrl || shotUrl;
-    const currentProfileUiXml = await dumpUiXmlQuick(config, padCode, 3_500).catch(() => "");
+    const currentProfileUiXml = await dumpUiXmlQuick(config, padCode, 3_500, true).catch(() => "");
     const currentTarget = currentProfileShotUrl
       ? await locateThreadsVisibleOwnPostContentTarget(currentProfileShotUrl, currentProfileUiXml, {
         requireCommentBadge,
@@ -29236,7 +29251,7 @@ async function dismissThreadsProfileSuggestionOverlay(
 ): Promise<string> {
   let currentShotUrl = shotUrl;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const uiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
+    const uiXml = await dumpUiXmlQuick(config, padCode, 4_000, true).catch(() => "");
     const line = normalizeSingleLine(decodeXmlAttr(uiXml));
     const hasProfileSetupCard = /完成個人檔案|完成个人档案|建立串文|追蹤個人檔案|追踪个人档案|新增個人檔案|新增个人档案|介紹一下自己|介绍一下自己/.test(line);
     if (hasProfileSetupCard) {
@@ -29320,26 +29335,36 @@ function findThreadsOwnProfilePostBodyTargetFromUiXml(
       text: normalizeSingleLine(decodeXmlAttr(`${getXmlAttr(node, "text")} ${getXmlAttr(node, "content-desc")}`)),
       center: parseBoundsCenter(getXmlAttr(node, "bounds")),
       clickable: /true/i.test(getXmlAttr(node, "clickable")),
+      resourceId: getXmlAttr(node, "resource-id"),
     }))
-    .filter((node): node is { text: string; center: { x: number; y: number }; clickable: boolean } => Boolean(node.text && node.center));
+    .filter((node): node is { text: string; center: { x: number; y: number }; clickable: boolean; resourceId: string } => Boolean(node.text && node.center));
   const timeNodes = nodes.filter((node) => (
     /(?:^|\s)(?:剛剛|刚刚|昨天|yesterday|\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周|minutes?|hours?|days?|weeks?|[mhdw]))(?:\s|$)/i.test(node.text)
   ));
-  const ignored = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|追蹤\s*\d+|追踪\s*\d+|查看個人檔案|查看个人档案|新增個人檔案|新增个人档案|編輯個人檔案|编辑个人档案|分享個人檔案|分享个人档案|^串文$|^回覆$|影音內容|影音内容|^轉發$|^转发$/;
+  const ignored = /完成個人檔案|完成个人档案|剩\s*\d+\s*項|剩\s*\d+\s*项|追蹤\s*\d+|追踪\s*\d+|查看個人檔案|查看个人档案|新增個人檔案|新增个人档案|編輯個人檔案|编辑个人档案|分享個人檔案|分享个人档案|^串文$|^回覆$|影音內容|影音内容|^轉發$|^转发$|(?:^|\s)\d+\s*(?:讚|赞|likes?|回覆|回复|reposts?|轉發|转发)(?:\s|$)/i;
   const candidates = nodes
     .filter((node) => node.text.length >= 4 && !ignored.test(node.text))
+    .filter((node) => !/(?:https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|co|cn|tw)\b)/i.test(node.text))
     .filter((node) => !timeNodes.includes(node))
     .map((node) => {
       const anchor = timeNodes
-        .filter((timeNode) => timeNode.center.y <= node.center.y + 50 && node.center.y - timeNode.center.y <= 260)
+        .filter((timeNode) => node.center.y - timeNode.center.y >= 18 && node.center.y - timeNode.center.y <= 260)
         .sort((a, b) => Math.abs(node.center.y - a.center.y) - Math.abs(node.center.y - b.center.y))[0];
-      if (!anchor) return null;
-      const distance = Math.abs(node.center.y - anchor.center.y);
+      const unanchoredBody = !anchor
+        && !node.resourceId
+        && node.center.y >= 260
+        && node.center.y <= 1420
+        && node.text.length >= 32
+        && (node.text.length >= 72 || /[，。！？!?；;]/.test(node.text));
+      if (!anchor && !unanchoredBody) return null;
+      const distance = anchor ? Math.abs(node.center.y - anchor.center.y) : 0;
       return {
         x: node.center.x,
         y: node.center.y,
         text: node.text,
-        score: 20 - Math.min(15, Math.round(distance / 18)) + (node.clickable ? 2 : 0) + Math.min(5, Math.floor(node.text.length / 12)),
+        score: anchor
+          ? 20 - Math.min(15, Math.round(distance / 18)) + (node.clickable ? 2 : 0) + Math.min(5, Math.floor(node.text.length / 12))
+          : 12 + Math.min(8, Math.floor(node.text.length / 24)),
       };
     })
     .filter((item): item is { x: number; y: number; text: string; score: number } => Boolean(item))
@@ -29526,50 +29551,15 @@ export async function locateThreadsVisibleOwnPostContentTarget(
     }
     return safeBodyTarget;
   }
-  const actions = await locateThreadsWarmupActionsWithFallback(
-    screenshotUrl,
-    undefined,
-    { allowRemoteVision: false },
-  ).catch(() => null);
-  const actionY = actions?.comment?.y || actions?.like?.y || 0;
-  const debug = normalizeSingleLine(`${actions?.debugReason || ""} ${actions?.debugRaw || ""}`);
-  if (
-    actionY > height * 0.30
-    && actionY < height * 0.94
-    && (!hasProfileSetupCard || actionY > height * 0.72)
-    && !/messages|composer|media_viewer|fallback_comment_missing|side_drawer/i.test(debug)
-  ) {
-    const fallbackTarget = {
-      x: Math.round(width * 0.22),
-      y: Math.max(
-        Math.round(height * 0.22),
-        Math.round(actionY - (actionY > height * 0.50 ? Math.min(560, height * 0.34) : Math.min(180, height * 0.12))),
-      ),
-    };
-    if (uiXml && !isThreadsProfilePostTargetWithinAutoReplyAge(uiXml, fallbackTarget, options.maxAgeDays)) {
-      return null;
-    }
-    if (options.padCode) {
-      saveThreadsAutoReplySampleStep({
-        padCode: options.padCode,
-        step: options.sampleStep || "profile-post-body-scan",
-        screenshotUrl,
-        meta: { targetFound: true, target: fallbackTarget, actionY, mode: "own_post_body_from_shared_action_row" },
-      });
-    }
-    return fallbackTarget;
-  }
   const isSuggestionOnly = /讓動態消息保持新意|让动态消息保持新意|追蹤一些新的個人檔案|追踪一些新的个人档案/.test(line)
     && !hasVisiblePostText;
-  if (profileLooksReadable && hasProfileChrome && hasVisiblePostText && !isSuggestionOnly && !hasProfileSetupCard) {
-    const fallbackTarget = {
-      x: Math.round(width * 0.50),
-      y: Math.round(height * 0.36),
-    };
-    return !uiXml || isThreadsProfilePostTargetWithinAutoReplyAge(uiXml, fallbackTarget, options.maxAgeDays)
-      ? fallbackTarget
-      : null;
-  }
+  // A fixed screen-centre fallback can land on a link preview or an adjacent
+  // action row. Without a body node or a confirmed action row there is no safe
+  // target, so fail closed and let the caller scroll to another visible post.
+  void profileLooksReadable;
+  void hasProfileChrome;
+  void hasVisiblePostText;
+  void isSuggestionOnly;
   return null;
 }
 
@@ -29753,14 +29743,17 @@ async function locateThreadsProfileTopCountedCommentTargetLocally(
     }
     return total ? light / total : 0;
   };
-  const rowTarget = process.env.THREADS_AUTO_REPLY_DISABLE_COUNT_DIGIT_LOCATOR === "1"
-    ? null
-    : locateThreadsProfileCommentCountDigitTargetByPixels();
-  if (rowTarget) return rowTarget;
   const iconTarget = locateThreadsProfileCommentIconWithCountByPixels();
   if (iconTarget) return iconTarget;
   const fixedRowTarget = locateThreadsProfileFixedCountedCommentRowByPixels();
   if (fixedRowTarget) return fixedRowTarget;
+  // This detector only proves that a glyph looks numeric; it cannot distinguish
+  // a real positive comment count from "0" or carousel/body digits.
+  const rowTarget = process.env.THREADS_AUTO_REPLY_ENABLE_COUNT_DIGIT_LOCATOR === "1"
+    && process.env.THREADS_AUTO_REPLY_DISABLE_COUNT_DIGIT_LOCATOR !== "1"
+    ? locateThreadsProfileCommentCountDigitTargetByPixels()
+    : null;
+  if (rowTarget) return rowTarget;
   if (!process.env.THREADS_AUTO_REPLY_SLOW_PIXEL_SCAN) return null;
 
   const candidates: Array<{ x: number; y: number; score: number }> = [];
@@ -31164,36 +31157,86 @@ async function collectThreadsAutoReplyPostContext(
         sourceScreenshotUrl: firstShotUrl || undefined,
       };
     }
-    let visualCandidates = firstShotUrl
+    const shouldRevealCommentsBeforeVision = Boolean(
+      firstShotUrl
+      && await detectThreadsThreadDetailShellLocally(firstShotUrl).catch(() => false),
+    );
+    let visualCandidates = firstShotUrl && !shouldRevealCommentsBeforeVision
       ? await extractThreadsAutoReplyVisibleCommentsByVision(
         firstShotUrl,
         persona,
         postOwnIdentifiers,
-        { timeoutMs: budgetedTimeout(6_500, 5_500, 3_500) },
+        {
+          timeoutMs: budgetedTimeout(28_000, 5_500, 18_000),
+          forceVisibleValidation: true,
+        },
       ).catch(() => [])
       : [];
     throwIfDeadlineExceeded(deadlineAt);
     if (
       !visualCandidates.length
       && firstShotUrl
-      && canSpendBudget(2_500, 1_000)
-      && await detectThreadsThreadDetailShellLocally(firstShotUrl).catch(() => false)
+      && canSpendBudget(20_000, 1_000)
+      && shouldRevealCommentsBeforeVision
     ) {
-      await execAdbForText(config, padCode, "input swipe 360 1180 360 930 260", 8_000, 500).catch(() => "");
-      await delay(700);
-      const retryShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => firstShotUrl);
+      // A media post can fill almost the entire first detail screen. Reveal the
+      // action row and comment list before spending the vision-model budget.
+      const revealCommentsCommand = "input swipe 700 1250 700 500 520";
+      await execAdbForText(config, padCode, revealCommentsCommand, 8_000, 500).catch(() => "");
+      await delay(800);
+      let retryShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => firstShotUrl);
       throwIfDeadlineExceeded(deadlineAt);
       saveThreadsAutoReplySampleStep({
         padCode,
         step: "collect-no-ui-visual-probe",
         screenshotUrl: retryShotUrl || firstShotUrl || undefined,
-        meta: { swipe: "input swipe 360 1180 360 930 260" },
+        meta: { swipe: revealCommentsCommand },
       });
-      const retryUiXml = await dumpUiXmlQuick(config, padCode, budgetedTimeout(1_800, 900, 900)).catch(() => "");
+      for (let revealAttempt = 2; revealAttempt <= 3; revealAttempt += 1) {
+        const retryDimensions = retryShotUrl ? await getImageDimensions(retryShotUrl).catch(() => null) : null;
+        const mainActionRow = retryShotUrl
+          ? await detectThreadsDetailActionRowLocally(retryShotUrl).catch(() => null)
+          : null;
+        if (
+          !retryShotUrl
+          || !retryDimensions
+          || !mainActionRow?.comment
+          || mainActionRow.comment.y < retryDimensions.height * 0.60
+          || !canSpendBudget(17_000, 1_000)
+        ) break;
+        const additionalRevealCommand = "input swipe 700 1250 700 500 520";
+        await execAdbForText(config, padCode, additionalRevealCommand, 8_000, 500).catch(() => "");
+        await delay(800);
+        retryShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => retryShotUrl);
+        throwIfDeadlineExceeded(deadlineAt);
+        saveThreadsAutoReplySampleStep({
+          padCode,
+          step: `collect-no-ui-visual-probe-${revealAttempt}`,
+          screenshotUrl: retryShotUrl || firstShotUrl || undefined,
+          meta: {
+            swipe: additionalRevealCommand,
+            priorMainActionRowY: mainActionRow.comment.y,
+            screenHeight: retryDimensions.height,
+          },
+        });
+      }
+      const retryVisualCandidates = retryShotUrl
+        ? await extractThreadsAutoReplyVisibleCommentsByVision(
+          retryShotUrl,
+          persona,
+          postOwnIdentifiers,
+          {
+            timeoutMs: budgetedTimeout(18_000, 1_000, 15_000),
+            forceVisibleValidation: true,
+          },
+        ).catch(() => [])
+        : [];
+      const retryUiXml = !retryVisualCandidates.length
+        ? await dumpUiXmlQuick(config, padCode, budgetedTimeout(1_800, 900, 900)).catch(() => "")
+        : "";
       const retryUiCandidates = retryUiXml && retryShotUrl
         ? extractThreadsAutoReplyVisibleComments(retryUiXml, retryShotUrl, postOwnIdentifiers)
         : [];
-      const retryVisualCandidates: ThreadsAutoReplyCandidate[] = [];
       throwIfDeadlineExceeded(deadlineAt);
       const retryCandidates = retryUiCandidates.length ? retryUiCandidates : retryVisualCandidates;
       if (retryCandidates.length) {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>数字人短视频-R18 机器人</title>
+<title>數字人短視頻-R18 機器人</title>
 <style>
   :root {
     --tg-green-1: rgba(83, 172, 80, .88);
@@ -360,8 +360,8 @@
     <div class="chat-head">
       <button class="back-pill" type="button" data-bot-action="menu">‹ <span>5</span></button>
       <div class="head-title">
-        <strong>数字人短视频-R18</strong>
-        <span id="bot-subtitle">机器人</span>
+        <strong>數字人短視頻-R18</strong>
+        <span id="bot-subtitle">機器人</span>
       </div>
       <div class="avatar"></div>
     </div>
@@ -369,20 +369,20 @@
       <div class="day">今天</div>
     </div>
     <form class="composer" id="bot-form">
-      <button class="menu-btn" type="button" data-bot-action="menu">☰ 菜单</button>
-      <button class="round" id="bot-attach" type="button" title="发送图片或视频">📎</button>
+      <button class="menu-btn" type="button" data-bot-action="menu">☰ 菜單</button>
+      <button class="round" id="bot-attach" type="button" title="發送圖片或影片">📎</button>
       <input id="bot-media-input" type="file" accept="image/*,video/*" hidden>
       <div class="input-wrap">
-        <input id="bot-input" type="text" autocomplete="off" placeholder="输入消息">
+        <input id="bot-input" type="text" autocomplete="off" placeholder="輸入消息">
       </div>
-      <button class="send" type="submit">发送</button>
+      <button class="send" type="submit">發送</button>
     </form>
   </section>
 </main>
 
-<div class="media-preview" id="media-preview" hidden role="dialog" aria-modal="true" aria-label="图片预览">
-  <button type="button" aria-label="关闭图片预览">×</button>
-  <img alt="智能体图片预览">
+<div class="media-preview" id="media-preview" hidden role="dialog" aria-modal="true" aria-label="圖片預覽">
+  <button type="button" aria-label="關閉圖片預覽">×</button>
+  <img alt="智能體圖片預覽">
 </div>
 
 <script>
@@ -438,6 +438,57 @@
   const serverCallbackStartedAt = Date.now() / 1000;
   const seenServerCallbackJobs = new Set();
   let serverCallbackPollInFlight = false;
+
+  const traditionalPhrases = new Map([
+    ['人设', '人設'], ['账号', '帳號'], ['帐号', '帳號'], ['云机', '雲機'],
+    ['智能体', '智能體'], ['后台', '後台'], ['发布', '發布'], ['发送', '發送'],
+    ['上传', '上傳'], ['下载', '下載'], ['数据', '資料'], ['热点', '熱點'],
+    ['状态', '狀態'], ['绑定', '綁定'], ['选择', '選擇'], ['确认', '確認'],
+    ['图片', '圖片'], ['视频', '影片'], ['任务', '任務'], ['来源', '來源'],
+    ['删除', '刪除'], ['设置', '設定'], ['保存', '儲存'], ['刷新', '重新整理'],
+    ['执行', '執行'], ['显示', '顯示'], ['列表', '清單'], ['详情', '詳情'],
+    ['请输入', '請輸入'], ['请先', '請先'], ['请继续', '請繼續'],
+    ['当前', '目前'], ['没有', '沒有'], ['这个', '這個'], ['自动', '自動'],
+    ['返回主选单', '返回主選單'], ['开始执行', '開始執行'], ['操作失败', '操作失敗'],
+  ]);
+  const traditionalChars = new Map(Object.entries({
+    '这':'這','个':'個','为':'為','么':'麼','吗':'嗎','们':'們','会':'會','让':'讓',
+    '词':'詞','气':'氣','说':'說','问':'問','题':'題','觉':'覺','从':'從','刚':'剛',
+    '后':'後','云':'雲','机':'機','号':'號','设':'設','体':'體','发':'發','传':'傳',
+    '导':'導','数':'數','据':'據','热':'熱','总':'總','览':'覽','暂':'暫','预':'預',
+    '态':'態','绑':'綁','选':'選','择':'擇','认':'認','图':'圖','视':'視','频':'頻',
+    '务':'務','时':'時','来':'來','录':'錄','删':'刪','读':'讀','载':'載','调':'調',
+    '运':'運','执':'執','样':'樣','显':'顯','复':'複','详':'詳','寻':'尋','错':'錯',
+    '误':'誤','请':'請','输':'輸','记':'記','忆':'憶','标':'標','齐':'齊','余':'餘',
+    '补':'補','内':'內','骤':'驟','种':'種','动':'動','阵':'陣','强':'強','当':'當',
+    '没':'沒','无':'無','见':'見','观':'觀','点':'點','讲':'講','盘':'盤','签':'籤',
+    '语':'語','节':'節','稳':'穩','场':'場','讨':'討','论':'論','间':'間','实':'實',
+    '细':'細','广':'廣','师':'師','货':'貨','换':'換','项':'項','单':'單','辑':'輯',
+    '脸':'臉','张':'張','条':'條','与':'與','过':'過','还':'還','进':'進','钟':'鐘',
+    '边':'邊','习':'習','惯':'慣','联':'聯','结':'結','够':'夠','满':'滿','优':'優',
+    '质':'質','区':'區','权':'權','应':'應','审':'審','历':'歷','写':'寫','对':'對',
+    '规':'規','则':'則','测':'測','试':'試','开':'開','关':'關','驱':'驅','页':'頁',
+    '顶':'頂','层':'層','弹':'彈','窗':'窗','独':'獨','话':'話','击':'擊','浏':'瀏',
+    '赞':'讚','评':'評','转':'轉','扫':'掃','码':'碼','库':'庫','须':'須','称':'稱',
+    '带':'帶','组':'組','别':'別','简':'簡','类':'類','证':'證','检':'檢','备':'備',
+    '档':'檔','买':'買','卖':'賣','财':'財','资':'資','产':'產','创':'創','业':'業',
+    '经':'經','营':'營','爱':'愛','启':'啟','闭':'閉','锁':'鎖','屏':'螢'
+  }));
+
+  function toTraditionalText(value) {
+    let text = String(value == null ? '' : value);
+    traditionalPhrases.forEach((traditional, simplified) => {
+      text = text.split(simplified).join(traditional);
+    });
+    return Array.from(text, char => traditionalChars.get(char) || char).join('');
+  }
+
+  function traditionalizeBotHistory() {
+    log.querySelectorAll(':scope > .msg-group.bot').forEach(group => {
+      const walker = document.createTreeWalker(group, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) walker.currentNode.nodeValue = toTraditionalText(walker.currentNode.nodeValue);
+    });
+  }
 
   function openHistoryDb() {
     if (!('indexedDB' in window)) return Promise.resolve(null);
@@ -512,6 +563,7 @@
 
   function applyHistorySnapshot(saved) {
     if (!saved || typeof saved.html !== 'string' || !saved.html.trim()) return false;
+    if (userRequestInFlight) return false;
     const incomingUpdatedAt = Number(saved.updatedAt) || 0;
     if (incomingUpdatedAt && incomingUpdatedAt < historyUpdatedAt) return false;
     historyUpdatedAt = Math.max(historyUpdatedAt, incomingUpdatedAt);
@@ -536,6 +588,7 @@
       sourcePollTimer = null;
     }
     log.innerHTML = saved.html;
+    traditionalizeBotHistory();
     trimHistory();
     log.querySelectorAll('button:disabled').forEach(button => { button.disabled = false; });
     state = saved.state && typeof saved.state === 'object' ? saved.state : {};
@@ -554,7 +607,7 @@
       const saved = event.data;
       if (!saved || saved.clientId === historyClientId || saved.id !== historyKey) return;
       applyHistorySnapshot(saved);
-      subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
+      subtitle.textContent = state.flow ? '機器人 · ' + state.flow : '機器人';
     });
   }
 
@@ -603,33 +656,45 @@
       || action.startsWith('shp_');
   }
 
-  function refreshActivePersonaPanel() {
-    if (!isPersonaPanelAction(activePanelAction) || userRequestInFlight) return;
-    return send(
-      { action: activePanelAction },
-      '',
-      { replacePanel: true, showUser: false, isFollowup: true, targetGroup: activeBotGroup }
-    );
+  let panelRefreshInFlight = false;
+  async function refreshActivePersonaPanel(forceSource = false) {
+    if (!isPersonaPanelAction(activePanelAction) || userRequestInFlight || panelRefreshInFlight) return;
+    panelRefreshInFlight = true;
+    try {
+      return await send(
+        { action: activePanelAction, refresh_persona_source: forceSource },
+        '',
+        { replacePanel: true, showUser: false, isFollowup: true, silentFailure: true, targetGroup: activeBotGroup }
+      );
+    } finally {
+      panelRefreshInFlight = false;
+    }
   }
 
   if (dataChannel) {
     dataChannel.addEventListener('message', event => {
       const data = event.data;
       if (!data || data.type !== 'workflow:persona-changed') return;
-      refreshActivePersonaPanel();
+      refreshActivePersonaPanel(true);
     });
   }
 
   let sourcePersonaRevision = '';
   let sourceRevisionPollInFlight = false;
   async function pollSourcePersonaRevision() {
-    if (document.hidden || userRequestInFlight || sourceRevisionPollInFlight) return;
+    if (document.hidden || userRequestInFlight || sourceRevisionPollInFlight || !isPersonaPanelAction(activePanelAction)) return;
     sourceRevisionPollInFlight = true;
     try {
       const sourceRevisionUrl = window.location.protocol + '//' + window.location.host + '/api/persona_dashboard/revision';
-      const response = await fetch(sourceRevisionUrl, { cache: 'no-store' });
-      if (!response.ok) return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch(sourceRevisionUrl, { cache: 'no-store', signal: controller.signal });
+      if (!response.ok) {
+        clearTimeout(timeout);
+        return;
+      }
       const data = await response.json();
+      clearTimeout(timeout);
       const next = String(data && data.revision || '');
       if (!next) return;
       if (!sourcePersonaRevision) {
@@ -639,7 +704,7 @@
       if (next === sourcePersonaRevision) return;
       const event = { type: 'workflow:persona-changed', revision: 'source:' + next };
       if (dataChannel) dataChannel.postMessage(event);
-      await refreshActivePersonaPanel();
+      await refreshActivePersonaPanel(true);
       sourcePersonaRevision = next;
     } catch (_) {
       // Keep the console usable while the source service is temporarily unavailable.
@@ -647,7 +712,7 @@
       sourceRevisionPollInFlight = false;
     }
   }
-  setInterval(pollSourcePersonaRevision, 3000);
+  setInterval(pollSourcePersonaRevision, 10000);
   void pollSourcePersonaRevision();
 
   function scheduleSourcePoll(poll, targetGroup) {
@@ -786,7 +851,7 @@
       <strong>${escapeHtml(card.title || '')}</strong>
       <div>${escapeHtml(card.subtitle || '')}</div>
       <div>${metrics}</div>
-      ${card.url ? `<div><a href="${escapeHtml(card.url)}" target="_blank" rel="noreferrer">打开链接</a></div>` : ''}
+      ${card.url ? `<div><a href="${escapeHtml(card.url)}" target="_blank" rel="noreferrer">開啟連結</a></div>` : ''}
       ${card.image ? `<img src="${escapeHtml(card.image)}" alt="preview">` : ''}
       ${card.video ? `<video src="${escapeHtml(card.video)}" controls preload="metadata"></video>` : ''}
     `;
@@ -802,11 +867,11 @@
     const url = String(image.currentSrc || image.src || '').trim();
     if (!url) return;
     if (window.parent !== window) {
-      window.parent.postMessage({ type: 'workflow:media-preview', url, alt: image.alt || '智能体图片预览' }, window.location.origin);
+      window.parent.postMessage({ type: 'workflow:media-preview', url, alt: image.alt || '智能體圖片預覽' }, window.location.origin);
       return;
     }
     mediaPreviewImage.src = url;
-    mediaPreviewImage.alt = image.alt || '智能体图片预览';
+    mediaPreviewImage.alt = image.alt || '智能體圖片預覽';
     mediaPreview.hidden = false;
     mediaPreviewClose.focus();
   }
@@ -823,7 +888,10 @@
         btn.type = 'button';
         btn.className = 'key ' + (item.style || '');
         btn.dataset.botAction = item.action || '';
-        btn.textContent = item.label || item.action || '';
+        const rawLabel = item.label || item.action || '';
+        btn.textContent = String(item.action || '').startsWith('acctautoreplyhot_threads_')
+          ? '▶️ 開始執行'
+          : toTraditionalText(rawLabel);
         line.appendChild(btn);
       });
       keys.appendChild(line);
@@ -836,7 +904,7 @@
     const bubble = document.createElement('div');
     bubble.className = 'bubble' + (message.kind === 'status' ? ' typing' : '');
     const text = document.createElement('div');
-    text.textContent = message.text || '';
+    text.textContent = toTraditionalText(message.text || '');
     bubble.appendChild(text);
     if (message.image) {
       const img = document.createElement('img');
@@ -873,6 +941,7 @@
     const showUser = options.showUser !== false;
     const isPoll = options.isPoll === true;
     const isFollowup = options.isFollowup === true;
+    const silentFailure = options.silentFailure === true;
     const targetGroup = options.targetGroup || (replacePanel ? activeBotGroup : null);
     const isInteractive = !isPoll && !isFollowup;
     if (isInteractive && userRequestInFlight) return;
@@ -890,12 +959,15 @@
       clearSourcePoll();
       appendUser(visibleText, options.visibleMedia || null);
     }
-    subtitle.textContent = '正在输入...';
+    if (isInteractive) subtitle.textContent = '正在輸入...';
+    const requestController = new AbortController();
+    const requestTimeout = setTimeout(() => requestController.abort(), isInteractive ? 20000 : 8000);
     try {
       const res = await fetch(webBotEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...payload, state }),
+        signal: requestController.signal,
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
@@ -918,21 +990,23 @@
       }
     } catch (err) {
       if (generation !== requestGeneration) return;
+      if (silentFailure) return;
       if (isPoll && payload.action) {
         scheduleSourcePoll({ action: payload.action, interval_ms: 3000 }, targetGroup);
         return;
       }
       appendBot({
-        text: '操作失败：' + err,
-        keyboard: [[{ label: '返回主选单', action: 'menu' }]]
+        text: err && err.name === 'AbortError' ? '操作逾時，請重新點擊。' : '操作失敗：' + err,
+        keyboard: [[{ label: '返回主選單', action: 'menu' }]]
       }, replacePanel ? targetGroup : null);
     } finally {
+      clearTimeout(requestTimeout);
       if (isInteractive && generation === requestGeneration) {
         userRequestInFlight = false;
         pendingButtons.forEach(button => { if (button.isConnected) button.disabled = false; });
       }
       if (generation === requestGeneration) {
-        subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
+        subtitle.textContent = state.flow ? '機器人 · ' + state.flow : '機器人';
         input.focus();
       }
     }
@@ -987,24 +1061,24 @@
     if (!file) return;
     const type = file.type.startsWith('video/') ? 'video' : file.type.startsWith('image/') ? 'image' : '';
     if (!type) {
-      appendBot({ text: '请发送图片或视频。', keyboard: [] });
+      appendBot({ text: '請發送圖片或影片。', keyboard: [] });
       return;
     }
     if (file.size > 25 * 1024 * 1024) {
-      appendBot({ text: '媒体文件不能超过 25 MB。', keyboard: [] });
+      appendBot({ text: '媒體檔案不能超過 25 MB。', keyboard: [] });
       return;
     }
     const formData = new FormData();
     formData.append('file', file, file.name);
-    subtitle.textContent = '正在上传...';
+    subtitle.textContent = '正在上傳...';
     let uploaded;
     try {
       const response = await fetch(webBotUploadEndpoint, { method: 'POST', body: formData });
       uploaded = await response.json();
-      if (!response.ok || !uploaded.ok) throw new Error(uploaded.detail || uploaded.err || '上传失败');
+      if (!response.ok || !uploaded.ok) throw new Error(uploaded.detail || uploaded.err || '上傳失敗');
     } catch (err) {
-      appendBot({ text: '上传媒体失败：' + err, keyboard: [] });
-      subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
+      appendBot({ text: '上傳媒體失敗：' + err, keyboard: [] });
+      subtitle.textContent = state.flow ? '機器人 · ' + state.flow : '機器人';
       return;
     }
     const caption = input.value.trim();
@@ -1086,7 +1160,7 @@
   async function initialize() {
     const restored = await restoreHistory();
     historyReady = true;
-    subtitle.textContent = state.flow ? '机器人 · ' + state.flow : '机器人';
+    subtitle.textContent = state.flow ? '機器人 · ' + state.flow : '機器人';
     if (restored && pendingSourcePoll && pendingSourcePoll.poll) {
       resumeSourcePoll(pendingSourcePoll);
       queueHistoryPersist();

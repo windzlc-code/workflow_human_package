@@ -2,7 +2,7 @@ import "@/runtime/node/browser-shim";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadPersonaArchive } from "@/lib/persona-archives";
-import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates } from "@/lib/sentiment-hot-importer";
+import { cleanSentimentCandidateContent, downloadCandidateMedia, fetchSentimentHotCandidates, preheatSentimentHotCandidates } from "@/lib/sentiment-hot-importer";
 import {
   rememberSentimentHotImported,
   rememberSentimentHotSelected,
@@ -22,7 +22,7 @@ import {
 installNodePersonaArchiveBridge();
 
 type Input = {
-  action: "fetch" | "import";
+  action: "fetch" | "preheat" | "import";
   archiveId: string;
   contentBranch?: "nonr18" | "r18";
   limit?: number;
@@ -84,6 +84,22 @@ export async function fetchCandidates(value: Input) {
     cookieStatuses: result.cookieStatuses,
     cookieLines: result.cookieStatuses.map(formatSentimentCookieLine),
     warnings: result.warnings,
+  };
+}
+
+export async function preheatCandidates(value: Input) {
+  const archive = await loadPersonaArchive(value.archiveId);
+  if (!archive) throw new Error(`persona archive not found: ${value.archiveId}`);
+  const result = await preheatSentimentHotCandidates({
+    archive,
+    limit: Math.min(Math.max(Number(value.limit || 10), 1), 10),
+    refresh: value.refresh !== false,
+  });
+  return {
+    ...result,
+    action: "preheat" as const,
+    archiveId: archive.id,
+    archiveName: archive.name,
   };
 }
 
@@ -191,6 +207,8 @@ async function main() {
   const value = input();
   const result = await (value.action === "fetch"
     ? fetchCandidates(value)
+    : value.action === "preheat"
+      ? preheatCandidates(value)
     : value.action === "import"
       ? importCandidates(value)
       : Promise.reject(new Error("invalid action")));

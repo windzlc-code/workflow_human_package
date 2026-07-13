@@ -80,6 +80,7 @@ function resolveActiveLinkEndingPreset(setup: any): { linkUrl: string; endingTex
     const endingText = String(active.endingText || "").trim();
     return linkUrl || endingText ? { linkUrl, endingText } : null;
   }
+  if (presets.length > 0) return null;
   const legacyLinkUrl = String(setup?.tweetStyleLinkUrl || "").trim();
   const legacyEndingText = String(setup?.tweetStyleLinkText || "").trim();
   return legacyLinkUrl || legacyEndingText ? { linkUrl: legacyLinkUrl, endingText: legacyEndingText } : null;
@@ -149,11 +150,46 @@ function applyLinkEndingPresetToContent(content: string, preset: { linkUrl: stri
   return next.trim();
 }
 
+export function stripInactiveLinkEndings(content: string, setup: any): string {
+  const active = resolveActiveLinkEndingPreset(setup);
+  const activeFragments = new Set([active?.endingText, active?.linkUrl].map((value) => String(value || "").trim()).filter(Boolean));
+  const presets = Array.isArray(setup?.linkEndingPresets) ? setup.linkEndingPresets : [];
+  const inactiveFragments: string[] = presets
+    .flatMap((preset: any) => [preset?.endingText, preset?.linkUrl])
+    .map((value: any) => String(value || "").trim())
+    .filter((value: string) => value && !activeFragments.has(value));
+
+  const trailingPatterns = [...new Set(inactiveFragments)].map((fragment) => {
+    let source: string;
+    if (/^https?:\/\//i.test(fragment)) {
+      const withoutScheme = fragment.replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
+      source = `(?:https?:\\/\\/)?(?:www\\.)?${escapeRegExpText(withoutScheme)}\\/?`;
+    } else {
+      source = escapeRegExpText(fragment);
+    }
+    return new RegExp(`(?:^|\\r?\\n)[\\t ]*${source}[\\t ]*$`, "i");
+  });
+
+  let next = String(content || "").trimEnd();
+  while (true) {
+    let removed = false;
+    for (const pattern of trailingPatterns) {
+      const cleaned = next.replace(pattern, "").trimEnd();
+      if (cleaned !== next) {
+        next = cleaned;
+        removed = true;
+      }
+    }
+    if (!removed) break;
+  }
+  return next.trim();
+}
+
 function ensurePostsContainLinkEndingPreset(posts: EpisodeScript[], setup: any): EpisodeScript[] {
   const preset = resolveActiveLinkEndingPreset(setup);
-  if (!preset) return posts;
   return posts.map((post) => {
-    const nextContent = applyLinkEndingPresetToContent(String(post.content || ""), preset);
+    const cleanedContent = stripInactiveLinkEndings(String(post.content || ""), setup);
+    const nextContent = preset ? applyLinkEndingPresetToContent(cleanedContent, preset) : cleanedContent;
     return {
       ...post,
       content: nextContent,
@@ -350,7 +386,7 @@ export type PersonaWorkflowInput =
   | { action: "update"; archiveId: string; name?: string; content?: string; setup?: Partial<DramaSetup> }
   | { action: "delete"; archiveId: string }
   | { action: "generate-posts"; archiveId: string; count?: number; customInstruction?: string; selectedMemoryEntryIds?: string[]; selectedMemorySummaries?: string[]; textModelBranch?: PersonaTextModelBranch }
-  | { action: "enqueue-posts"; archiveId: string; postIds?: string[]; padCode?: string; platform?: string; telegramChatId?: string }
+  | { action: "enqueue-posts"; archiveId: string; postIds?: string[]; padCode?: string; platform?: string; scheduledAt?: string; idempotencyKey?: string; telegramChatId?: string }
   | { action: "finalize-published"; archiveId: string; postIds: string[]; publishedContentById?: Record<string, string>; publishedMetaById?: Record<string, any> };
 
 export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
@@ -545,7 +581,7 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
 
       for (const post of selectedPosts) {
         const dedupeKey = `${post.id}::${platform}::${padCode}`;
-        if (existingKeys.has(dedupeKey)) {
+        if (!input.scheduledAt && existingKeys.has(dedupeKey)) {
           skipped.push({ postId: post.id, reason: "already-enqueued" });
           continue;
         }
@@ -560,19 +596,24 @@ export async function runPersonaWorkflow(input: PersonaWorkflowInput) {
         const finalCaption = activeLinkEndingPreset
           ? applyLinkEndingPresetToContent(post.content, activeLinkEndingPreset)
           : post.content;
-        const task = repo.enqueueTask({
+        const enqueueInput = {
           archive_id: archive.id,
           archive_post_id: post.id,
           pad_code: padCode,
           platform,
           caption: finalCaption,
           media_url: post.imageUrl,
+          scheduled_at: input.scheduledAt,
+          idempotency_key: input.idempotencyKey
+            ? `${input.idempotencyKey}:${post.id}:${platform}:${padCode}`
+            : undefined,
           telegram_chat_id: input.telegramChatId,
           telegram_target_chat_id: telegramTargetChatId,
           telegram_target_group_name: telegramTargetGroupName,
           telegram_group_content_type: platform === "telegram" ? telegramGroupType : undefined,
-        });
-        existingKeys.add(dedupeKey);
+        } as Parameters<typeof repo.enqueueTask>[0] & { idempotency_key?: string };
+        const task = repo.enqueueTask(enqueueInput);
+        if (!input.scheduledAt) existingKeys.add(dedupeKey);
         enqueued.push({ taskId: task.id, postId: post.id });
       }
 

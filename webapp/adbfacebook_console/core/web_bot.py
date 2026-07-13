@@ -19,9 +19,10 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from core import vmos_client
 from core import persona_dashboard as persona_dashboard_module
@@ -32,8 +33,12 @@ from db.repo import AccountRepo, Device, DeviceRepo, Persona, PersonaRepo, PostM
 
 
 SOURCE_ROOT = r"D:\workflow_delivery_package_source"
-SOURCE_WEB_BOT_CHAT_ID = int(os.getenv("SOURCE_WEB_BOT_CHAT_ID", "8080001"))
+SOURCE_WEB_BOT_CHAT_ID = int(os.getenv("SOURCE_WEB_BOT_CHAT_ID", "8100401093"))
 SOURCE_API_TIMEOUT = 18
+try:
+    SCHEDULE_TIME_ZONE = ZoneInfo(os.getenv("TOOL_R18_SCHEDULE_TIME_ZONE", "Asia/Shanghai"))
+except Exception:
+    SCHEDULE_TIME_ZONE = timezone(timedelta(hours=8))
 PERSONA_MENU_CACHE_TTL_SECONDS = 30.0
 CREATE_PERSONA_MAX_SELECTED_KEYWORDS = 2
 STORED_POSTS_PAGE_SIZE = 5
@@ -336,7 +341,7 @@ def _allowed_publish_platforms() -> list[str]:
 
 def _publish_platform_buttons(prefix: str) -> list[list[dict[str, str]]]:
     labels = {"threads": "🧵 Threads", "telegram": "📣 Telegram 群組"}
-    return [[_btn(labels[platform], f"{prefix}{platform}")] for platform in _allowed_publish_platforms()]
+    return _chunk_buttons([_btn(labels[platform], f"{prefix}{platform}") for platform in _allowed_publish_platforms()], 2)
 
 
 def _valid_publish_platform(platform: str) -> bool:
@@ -365,6 +370,78 @@ def _source_submit_task(task_type: str, params: dict[str, Any]) -> tuple[str, di
         timeout=45,
         candidate_bases=worker_candidates,
     )
+
+
+def _source_pad_lock_owner(action: str, pad_code: str) -> str:
+    safe_action = re.sub(r"[^a-zA-Z0-9_-]", "_", str(action or "webbot"))
+    safe_pad = str(pad_code or "").strip()
+    return f"webbot:{safe_action}:{safe_pad}:{int(time.time() * 1000)}"
+
+
+def _source_acquire_pad_lock(pad_code: str, owner: str) -> tuple[bool, str]:
+    _base, data = _source_http_request(
+        "POST",
+        "/api/internal/tg/pad_lock/acquire",
+        payload={"pad_code": str(pad_code or "").strip(), "owner": str(owner or "").strip()},
+        timeout=5,
+    )
+    return bool(data.get("acquired")), str(data.get("current_owner") or data.get("owner") or "").strip()
+
+
+def _source_release_pad_lock(pad_code: str, owner: str) -> None:
+    try:
+        _source_http_request(
+            "POST",
+            "/api/internal/tg/pad_lock/release",
+            payload={"pad_code": str(pad_code or "").strip(), "owner": str(owner or "").strip()},
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def _source_publish_queue_data(
+    *,
+    status: str = "",
+    archive_id: str = "",
+    platform: str = "",
+    scheduled_only: bool = False,
+) -> dict[str, Any]:
+    _base, data = _source_http_request(
+        "GET",
+        "/api/internal/tg/publish_queue",
+        query={
+            "tg_chat_id": SOURCE_WEB_BOT_CHAT_ID,
+            "status": status,
+            "archive_id": archive_id,
+            "platform": platform,
+            "scheduled_only": "true" if scheduled_only else "false",
+        },
+        timeout=8,
+    )
+    return data
+
+
+def _source_publish_queue_action(
+    action: str,
+    *,
+    task_id: str = "",
+    archive_id: str = "",
+    scheduled_at: str = "",
+) -> dict[str, Any]:
+    _base, data = _source_http_request(
+        "POST",
+        "/api/internal/tg/publish_queue/action",
+        payload={
+            "action": action,
+            "tg_chat_id": SOURCE_WEB_BOT_CHAT_ID,
+            "task_id": task_id,
+            "archive_id": archive_id,
+            "scheduled_at": scheduled_at,
+        },
+        timeout=60,
+    )
+    return data
 
 
 def _submit_source_task_job(job_id: str, task_type: str, params: dict[str, Any]) -> None:
@@ -2847,7 +2924,7 @@ def _dt(ts: Any) -> str:
 
 
 def _btn(label: str, action: str, style: str = "tg") -> dict[str, str]:
-    return {"label": str(label), "action": action, "style": style}
+    return {"label": to_traditional(label), "action": action, "style": style}
 
 
 def _rows(*rows: list[dict[str, str]]) -> list[list[dict[str, str]]]:
@@ -2856,6 +2933,19 @@ def _rows(*rows: list[dict[str, str]]) -> list[list[dict[str, str]]]:
 
 def _chunk_buttons(buttons: list[dict[str, str]], size: int = 2) -> list[list[dict[str, str]]]:
     return [buttons[index : index + size] for index in range(0, len(buttons), size)]
+
+
+def _tg_pagination_rows(page: int, total_pages: int, callback_for_page: Any) -> list[list[dict[str, str]]]:
+    if total_pages <= 1:
+        return []
+    safe_page = min(max(0, page), total_pages - 1)
+    rows: list[list[dict[str, str]]] = []
+    if safe_page > 0:
+        rows.append([_btn("⏮ 首頁", callback_for_page(0)), _btn("◀️ 上一頁", callback_for_page(safe_page - 1))])
+    rows.append([_btn(f"{safe_page + 1}/{total_pages}", callback_for_page(safe_page))])
+    if safe_page < total_pages - 1:
+        rows.append([_btn("下一頁 ▶️", callback_for_page(safe_page + 1)), _btn("尾頁 ⏭", callback_for_page(total_pages - 1))])
+    return rows
 
 
 def _message(
@@ -2870,7 +2960,7 @@ def _message(
     actions = [button for row in keyboard for button in row]
     payload: dict[str, Any] = {
         "role": "bot",
-        "text": str(text),
+        "text": to_traditional(text),
         "keyboard": keyboard,
         "actions": actions,
         "cards": _traditionalize_cards(cards or []),
@@ -4565,7 +4655,18 @@ def _device_preview(pad_code: str) -> dict[str, Any]:
     device = DeviceRepo.get(pad_code)
     if not device:
         return _response(_message("没有找到这台智能体手机。", [[_btn("◀️ 返回列表", "pad_mgmt")]]))
+    lock_owner = _source_pad_lock_owner("device_preview", pad_code)
+    lock_acquired = False
     try:
+        lock_acquired, current_owner = _source_acquire_pad_lock(pad_code, lock_owner)
+        if not lock_acquired:
+            return _response(
+                _message(
+                    f"云机 {pad_code} 正在被 {current_owner or '其他任务'} 使用，请稍后再预览。",
+                    _rows([_btn("馃攧 閲嶈瘯", f"device_preview:{pad_code}"), _btn("鈼€锔?杩斿洖鎵嬫満璇︽儏", f"pad_detail:{pad_code}")]),
+                ),
+                state={"flow": ""},
+            )
         shot = vmos_client.screenshot(pad_code)
         image_url = str(
             shot.get("accessUrl")
@@ -4594,28 +4695,241 @@ def _device_preview(pad_code: str) -> dict[str, Any]:
             ),
             state={"flow": ""},
         )
+    finally:
+        if lock_acquired:
+            _source_release_pad_lock(pad_code, lock_owner)
 
 
 def _status_menu() -> dict[str, Any]:
-    tasks = _task_counts(_visible_tasks(limit=10000))
+    error = ""
+    try:
+        queue = _source_publish_queue_data()
+    except Exception as exc:
+        queue = {"by_status": {}, "tasks": []}
+        error = str(exc)
+    tasks = queue.get("by_status") if isinstance(queue.get("by_status"), dict) else {}
+    queue_rows = queue.get("tasks") if isinstance(queue.get("tasks"), list) else []
+    pending_rows = [row for row in queue_rows if str(row.get("status") or "") == "pending"]
+    scheduled_rows = [row for row in pending_rows if _schedule_queue_task_is_scheduled(row)]
     lines = [
-        "📊 排程状态",
+        "📊 排程狀態",
         "",
-        f"待发布：{tasks.get('pending', 0)}",
-        f"发布中：{tasks.get('publishing', 0)}",
-        f"完成：{tasks.get('done', 0) + tasks.get('success', 0)}",
-        f"失败：{tasks.get('failed', 0)}",
-        f"取消：{tasks.get('cancelled', 0)}",
-        "",
-        "目前 Web Bot 与本地排程器联动，发布任务会进入发帖任务列表。",
+        f"⏳ 待發佈: {len(pending_rows)}",
+        f"⏰ 定時任務: {len(scheduled_rows)}",
+        f"⚡ 立即任務: {len(pending_rows) - len(scheduled_rows)}",
+        f"🔄 執行中: {tasks.get('publishing', 0)}",
+        f"❌ 失敗: {tasks.get('failed', 0)}",
     ]
+    if scheduled_rows:
+        lines.extend(["", "最近定時任務："])
+        for task in scheduled_rows[:3]:
+            lines.append(f"• {str(task.get('id') or '')[:8]} · {task.get('platform') or '-'} · {_format_schedule_time(task.get('scheduled_at'))}")
+    if error:
+        lines.extend(["", f"⚠️ 读取 Tool R18 排程队列失败：{error}"])
     return _response(
         _message(
             "\n".join(lines),
-            _rows([_btn("📋 查看发帖任务", "open:/tasks"), _btn("🔄 刷新状态", "status")], [_btn("返回主选单", "menu")]),
+            _rows(
+                [_btn("📋 查看待發佈", "queueview_pending_all_all_all_0"), _btn("❌ 查看失敗", "queueview_failed_all_all_all_0")],
+                [_btn("⏰ 僅看定時任務", "queueview_pending_all_scheduled_all_0")],
+                [_btn("🧵 按平台篩選", "queue_filter_platform"), _btn("👤 按人設篩選", "queue_filter_persona")],
+                *([[_btn("🔄 重試失敗", "retry_failed")]] if tasks.get("failed", 0) else []),
+            ),
         ),
         state={"flow": ""},
     )
+
+
+def _schedule_queue_task_is_scheduled(task: dict[str, Any]) -> bool:
+    try:
+        scheduled = datetime.fromisoformat(str(task.get("scheduled_at") or "").replace("Z", "+00:00"))
+        created = datetime.fromisoformat(str(task.get("created_at") or "").replace("Z", "+00:00"))
+        return (scheduled - created).total_seconds() > 60
+    except (TypeError, ValueError):
+        return False
+
+
+def _format_schedule_time(value: Any) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(SCHEDULE_TIME_ZONE).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return str(value or "-")
+
+
+def _schedule_queue_callback(draft: dict[str, Any], *, page: int | None = None, platform: str | None = None) -> str:
+    status = "failed" if str(draft.get("status") or "") == "failed" else "pending"
+    archive_id = str(draft.get("archive_id") or "all")
+    scheduled = "scheduled" if draft.get("scheduled_only") else "all"
+    selected_platform = str(draft.get("platform") or "all") if platform is None else str(platform or "all")
+    selected_page = max(0, _num(draft.get("page"))) if page is None else max(0, page)
+    return f"queueview_{status}_{archive_id}_{scheduled}_{selected_platform}_{selected_page}"
+
+
+def _parse_schedule_queue_callback(action: str) -> dict[str, Any] | None:
+    if not action.startswith("queueview_"):
+        return None
+    parts = action[len("queueview_") :].split("_")
+    if len(parts) < 5:
+        return None
+    page = max(0, _num(parts[-1]))
+    platform = "" if parts[-2] == "all" else parts[-2]
+    scheduled_only = parts[-3] == "scheduled"
+    status = "failed" if parts[0] == "failed" else "pending"
+    archive_value = "_".join(parts[1:-3])
+    archive_id = "" if archive_value in {"", "all"} else archive_value
+    return {"status": status, "archive_id": archive_id, "scheduled_only": scheduled_only, "platform": platform, "page": page}
+
+
+def _schedule_queue_view(action: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    draft = dict((state or {}).get("draft") if isinstance((state or {}).get("draft"), dict) else {})
+    parsed_callback = _parse_schedule_queue_callback(action)
+    if parsed_callback is not None:
+        draft = parsed_callback
+    elif action == "queue_pending":
+        draft = {"status": "pending", "page": 0, "scheduled_only": False}
+    elif action == "queue_failed":
+        draft = {"status": "failed", "page": 0, "scheduled_only": False}
+    elif action == "queue_scheduled":
+        draft = {"status": "pending", "page": 0, "scheduled_only": True}
+    elif action.startswith("queuepage_"):
+        draft["page"] = max(0, _num(action[len("queuepage_") :]))
+    elif action.startswith("queueplatform_"):
+        draft["platform"] = action[len("queueplatform_") :]
+        draft["page"] = 0
+    elif action.startswith("queuepersona:"):
+        draft["archive_id"] = action.split(":", 1)[1]
+        draft["page"] = 0
+    status = str(draft.get("status") or "pending")
+    archive_id = str(draft.get("archive_id") or "")
+    platform = str(draft.get("platform") or "")
+    scheduled_only = bool(draft.get("scheduled_only"))
+    try:
+        data = _source_publish_queue_data(status=status, archive_id=archive_id, platform=platform, scheduled_only=scheduled_only)
+        tasks = data.get("tasks") if isinstance(data.get("tasks"), list) else []
+    except Exception as exc:
+        return _response(_message(f"❌ 读取 Tool R18 排程队列失败：{exc}", [[_btn("◀️ 返回状态页", "menu_status")]]), state={"flow": ""})
+    page_size = 5
+    total_pages = max(1, (len(tasks) + page_size - 1) // page_size)
+    page = min(max(0, _num(draft.get("page"))), total_pages - 1)
+    visible = tasks[page * page_size : (page + 1) * page_size]
+    title = "❌ 失败任务" if status == "failed" else "⏰ 定时待发布任务" if scheduled_only else "📋 待发布任务"
+    lines = [title, "", f"第 {page + 1}/{total_pages} 页｜共 {len(tasks)} 条"]
+    if platform:
+        lines.append(f"平台筛选：{platform}")
+    if archive_id:
+        lines.append(f"人设 ID：{archive_id}")
+    rows: list[list[dict[str, str]]] = []
+    for index, task in enumerate(visible, start=page * page_size + 1):
+        task_id = str(task.get("id") or "")
+        task_kind = "[定時]" if _schedule_queue_task_is_scheduled(task) else "[立即]"
+        lines.extend([
+            "",
+            f"{index}. {task_kind} {str(task.get('platform') or '-')}｜{str(task.get('pad_code') or '-')}",
+            f"时间：{_format_schedule_time(task.get('scheduled_at'))}",
+            f"内容：{_memory_excerpt(task.get('caption'), 62)}",
+        ])
+        if task.get("last_error"):
+            lines.append(f"错误：{_memory_excerpt(task.get('last_error'), 70)}")
+        if status == "failed":
+            rows.append([_btn(f"🔄 重試 {task_id[:6]}", f"retrytask_{task_id}"), _btn(f"✏️ 改時間 {task_id[:6]}", f"edittasktime_{task_id}")])
+        else:
+            rows.append([_btn(f"✏️ 改時間 {task_id[:6]}", f"edittasktime_{task_id}")])
+        rows.append([_btn(f"🗑 取消 {task_id[:6]}", f"canceltask_{task_id}", "danger")])
+    if not visible:
+        lines.extend(["", "目前没有符合条件的任务。"])
+    if total_pages > 1:
+        rows.extend(_tg_pagination_rows(page, total_pages, lambda target: _schedule_queue_callback(draft, page=target)))
+    if archive_id and status == "pending" and scheduled_only:
+        rows.append([_btn("🕒 批量改时间", f"batchreschedule_{archive_id}"), _btn("🗑 批量取消", f"batchcancel_{archive_id}", "danger")])
+    platform_buttons = []
+    for selected_platform in _allowed_publish_platforms():
+        label = "🧵 Threads" if selected_platform == "threads" else "📣 Telegram 群組"
+        platform_buttons.append(_btn(label, _schedule_queue_callback(draft, platform=selected_platform)))
+    rows.extend(_chunk_buttons(platform_buttons, 2))
+    rows.append([_btn("👤 按人设筛选", "queue_filter_persona"), _btn("◀️ 返回状态页", "menu_status")])
+    draft.update({"status": status, "archive_id": archive_id, "platform": platform, "scheduled_only": scheduled_only, "page": page})
+    return _response(_message("\n".join(lines), rows), state={"flow": "schedule_queue", "draft": draft})
+
+
+def _schedule_queue_filter_platform(state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    draft.setdefault("status", "pending")
+    draft["scheduled_only"] = False
+    buttons = []
+    for platform in _allowed_publish_platforms():
+        label = "🧵 Threads" if platform == "threads" else "📣 Telegram 群組"
+        buttons.append(_btn(label, _schedule_queue_callback(draft, page=0, platform=platform)))
+    rows = _chunk_buttons(buttons, 2)
+    rows.append([_btn("◀️ 返回状态页", "menu_status")])
+    return _response(_message("🧵 请选择要查看的平台：", rows), state={"flow": "schedule_queue", "draft": draft})
+
+
+def _schedule_queue_filter_persona(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    page = max(0, _num(action.rsplit("_p", 1)[1])) if "_p" in action else 0
+    candidates: list[tuple[str, str]] = []
+    for persona, row in _matrix_persona_rows():
+        archive_id, _persona, _row, _posts = _matrix_real_posts(persona.id)
+        if archive_id:
+            candidates.append((archive_id, _persona_action_label(row)))
+    page_size = 8
+    total_pages = max(1, (len(candidates) + page_size - 1) // page_size)
+    page = min(page, total_pages - 1)
+    visible = candidates[page * page_size : (page + 1) * page_size]
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    draft.setdefault("status", "pending")
+    draft["scheduled_only"] = True
+    rows = [[_btn(label[:24], _schedule_queue_callback({**draft, "archive_id": archive_id}, page=0))] for archive_id, label in visible]
+    if total_pages > 1:
+        rows.extend(_tg_pagination_rows(page, total_pages, lambda target: "queue_filter_persona" if target == 0 else f"queue_filter_persona_p{target}"))
+    rows.append([_btn("◀️ 返回状态页", "menu_status")])
+    return _response(_message("👤 请选择要查看的人设：", rows), state={"flow": "schedule_queue", "draft": draft})
+
+
+def _schedule_queue_action(action: str, state: dict[str, Any]) -> dict[str, Any]:
+    draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    try:
+        if action.startswith("edittasktime_"):
+            task_id = action[len("edittasktime_") :]
+            task_rows = _source_publish_queue_data(status="pending,failed").get("tasks", [])
+            task = next((item for item in task_rows if str(item.get("id") or "") == task_id), {})
+            picker = {
+                "schedule_mode": "edit_task",
+                "task_id": task_id,
+                "archive_id": str(task.get("archive_id") or ""),
+                "platform": str(task.get("platform") or ""),
+                "pad_code": str(task.get("pad_code") or ""),
+                "post_text": str(task.get("caption") or ""),
+                "current_scheduled_at": str(task.get("scheduled_at") or ""),
+                "queue_state": draft,
+            }
+            return _schedule_time_picker({"draft": picker})
+        if action.startswith("batchreschedule_"):
+            archive_id = action[len("batchreschedule_") :]
+            picker = {"schedule_mode": "batch_edit", "archive_id": archive_id, "queue_state": draft}
+            return _schedule_time_picker({"draft": picker})
+        if action.startswith("batchcancel_confirm_"):
+            archive_id = action[len("batchcancel_confirm_") :]
+            result = _source_publish_queue_action("batch-cancel", archive_id=archive_id)
+            return _response(_message(f"🗑 已批量取消 {int(result.get('count') or 0)} 条定时任务", [[_btn("◀️ 返回人設佇列", _schedule_queue_callback({**draft, "status": "pending", "archive_id": archive_id, "scheduled_only": True}, page=0))]]), state={"flow": ""})
+        if action.startswith("batchcancel_"):
+            archive_id = action[len("batchcancel_") :]
+            return _response(_message("🗑 批量取消\n\n确认取消这个人设下所有定时待发布任务？", [[_btn("✅ 确认全部取消", f"batchcancel_confirm_{archive_id}", "danger")], [_btn("◀️ 返回", _schedule_queue_callback({**draft, "status": "pending", "archive_id": archive_id, "scheduled_only": True}, page=0))]]), state=state)
+        if action.startswith("retrytask_"):
+            _source_publish_queue_action("retry", task_id=action[len("retrytask_") :])
+            return _schedule_queue_view(_schedule_queue_callback(draft), {"draft": draft})
+        if action.startswith("canceltask_"):
+            _source_publish_queue_action("cancel", task_id=action[len("canceltask_") :])
+            return _schedule_queue_view(_schedule_queue_callback(draft), {"draft": draft})
+        if action == "retry_failed":
+            result = _source_publish_queue_action("batch-retry")
+            retried = int(result.get("count") or 0)
+            return _response(_message(f"🔄 已重新排入 {retried} 条失败任务", [[_btn("◀️ 返回排程状态", "menu_status")]]), state={"flow": ""})
+    except Exception as exc:
+        return _response(_message(f"❌ 排程操作失败：{exc}", [[_btn("◀️ 返回排程状态", "menu_status")]]), state={"flow": ""})
+    return _status_menu()
 
 
 def _dashboard_menu(force: bool = False) -> dict[str, Any]:
@@ -5168,6 +5482,21 @@ def _sentiment_hot_source_task_response(task_id: str, task: dict[str, Any], task
     return _response(_message("\n".join(lines), rows), state={"flow": "sentiment_hot_select", "draft": draft})
 
 
+def _threads_own_reply_execution_error(result: dict[str, Any]) -> str:
+    error = str(result.get("error") or "").strip()
+    if result.get("dryRun") is True or _num(result.get("replied")) > 0 or not error:
+        return ""
+    no_match_errors = {
+        "沒有成功回覆任何推文",
+        "没有成功回复任何推文",
+        "沒有找到未回覆且有真實發布連結的 Threads 推文",
+        "没有找到未回复且有真实发布链接的 Threads 推文",
+    }
+    if _num(result.get("matched")) <= 0 and error in no_match_errors:
+        return ""
+    return error
+
+
 def _source_task_detail(task_id: str) -> dict[str, Any]:
     try:
         _base, data = _source_task_detail_data(task_id)
@@ -5182,6 +5511,9 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
     post_id = str(result.get("postId") or result.get("post_id") or task_input.get("postId") or task_input.get("post_id") or "").strip()
     task_type = str(task.get("type") or "").strip()
     status = str(task.get("status") or "").lower()
+    own_reply_error = _threads_own_reply_execution_error(result) if task_type == "threads_own_post_reply" else ""
+    if task_type == "threads_own_post_reply" and status == "success" and own_reply_error:
+        status = "failed"
     publish_progress = [
         item
         for item in (task.get("progress_logs") if isinstance(task.get("progress_logs"), list) else [])
@@ -5289,7 +5621,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
                         f"瀏覽量條件：大於等於 {_compact(task_input.get('minViews'))}",
                         f"查看天數：{max(1, _num(task_input.get('maxAgeDays')))} 天內",
                         "",
-                        "可能原因：沒有真實發布連結、瀏覽量不足、超出天數、或已回覆過。",
+                        "可能原因：沒有真實發布連結、瀏覽量不足或超出查看天數。",
                     ]
                 else:
                     lines.extend([
@@ -5309,7 +5641,7 @@ def _source_task_detail(task_id: str) -> dict[str, Any]:
                 "threads_auto_reply": "❌ Threads 自動回覆失敗",
                 "threads_own_post_reply": "❌ Threads 自動回覆熱點推文失敗",
             }
-            failure_detail = str(task.get("error") or "").strip()
+            failure_detail = str(task.get("error") or own_reply_error or "").strip()
             lines = [
                 failure_titles[task_type],
                 "",
@@ -9202,6 +9534,7 @@ def _source_bulk_publish_execute(state: dict[str, Any]) -> dict[str, Any]:
 
 def _source_post_pad_menu(state: dict[str, Any]) -> dict[str, Any]:
     draft, archive_id, post_id, source, content_type, page = _source_post_action_context(state)
+    is_schedule = draft.get("publish_origin") == "schedule"
     devices = _active_devices()
     selected = {str(item) for item in draft.get("selected_pad_codes", []) if str(item)}
     pad_page = max(0, _num(draft.get("pad_page")))
@@ -9209,29 +9542,36 @@ def _source_post_pad_menu(state: dict[str, Any]) -> dict[str, Any]:
     total_pages = max(1, (len(devices) + page_size - 1) // page_size)
     pad_page = min(pad_page, total_pages - 1)
     visible = devices[pad_page * page_size : (pad_page + 1) * page_size]
-    rows = [
-        [_btn(f"{'☑️' if device.pad_code in selected else '⬜'} {device.alias or device.pad_code}", f"sppad:{device.pad_code}")]
-        for device in visible
-    ]
-    rows.extend(_rows(
-        [_btn("☑️ 全選本頁", "sppad_all"), _btn("⬜ 清空本頁", "sppad_clear")],
-        [_btn("☑️ 全選全部", "sppad_all_pages"), _btn("⬜ 清空全部", "sppad_clear_all")],
-        [_btn(f"✅ 確認發布智能體手機（{len(selected)}）", "sppad_confirm")],
-    ))
-    if total_pages > 1:
-        rows.insert(-1, [_btn("◀️ 上一頁", f"sppad_page:{max(0, pad_page - 1)}"), _btn(f"{pad_page + 1}/{total_pages}", f"sppad_page:{pad_page}"), _btn("下一頁 ▶️", f"sppad_page:{min(total_pages - 1, pad_page + 1)}")])
+    if is_schedule:
+        rows = [[_btn(f"{'✅' if device.pad_code in selected else '☐'} {device.alias or device.pad_code}", f"pubpad_toggle_{index}")] for index, device in enumerate(visible)]
+        if visible:
+            rows.append([_btn("☑️ 全选本页", "pubpad_select_page"), _btn("⬜ 清空本页", "pubpad_clear_page")])
+        if len(devices) > page_size:
+            rows.append([_btn("☑️ 全选全部", "pubpad_select_all"), _btn("⬜ 清空全部", "pubpad_clear_all")])
+        if total_pages > 1:
+            rows.extend(_tg_pagination_rows(pad_page, total_pages, lambda target: f"pubpad_page_{target}"))
+        rows.append([_btn(f"✅ 确认发布到 {len(selected)} 台智能體手機", "pubpad_confirm")])
+    else:
+        rows = [[_btn(f"{'☑️' if device.pad_code in selected else '⬜'} {device.alias or device.pad_code}", f"sppad:{device.pad_code}")] for device in visible]
+        rows.extend(_rows(
+            [_btn("☑️ 全選本頁", "sppad_all"), _btn("⬜ 清空本頁", "sppad_clear")],
+            [_btn("☑️ 全選全部", "sppad_all_pages"), _btn("⬜ 清空全部", "sppad_clear_all")],
+            [_btn(f"✅ 確認發布智能體手機（{len(selected)}）", "sppad_confirm")],
+        ))
+        if total_pages > 1:
+            rows.insert(-1, [_btn("◀️ 上一頁", f"sppad_page:{max(0, pad_page - 1)}"), _btn(f"{pad_page + 1}/{total_pages}", f"sppad_page:{pad_page}"), _btn("下一頁 ▶️", f"sppad_page:{min(total_pages - 1, pad_page + 1)}")])
     back_action = str(draft.get("pad_back_action") or "")
     if not back_action:
         back_action = f"pa_pp_{draft.get('post_action_key')}_{draft.get('platform') or 'threads'}" if post_id else "publish_confirm_back"
-    rows.append([_btn("◀️ 返回發布確認", back_action)])
-    if post_id and len([item for item in draft.get("selected_post_ids", []) if str(item)]) <= 1 and draft.get("publish_origin") != "custom":
+    rows.append([_btn("◀️ 返回" if is_schedule else "◀️ 返回發布確認", "pubpad_back" if is_schedule else back_action)])
+    if post_id and not is_schedule and len([item for item in draft.get("selected_post_ids", []) if str(item)]) <= 1 and draft.get("publish_origin") != "custom":
         rows.append([_btn("◀️ 返回查看推文", _source_post_detail_callback(archive_id, post_id, source=source, content_type=content_type, page=page))])
     draft.update({"selected_pad_codes": sorted(selected), "pad_page": pad_page})
     note = str(draft.pop("pad_notice", "") or "")
-    text = f"📱 選擇多智能體手機發布\n\n已選：{len(selected)} / {len(devices)} 台"
+    text = f"📱 選擇多智能體手機{'定時發布' if is_schedule else '發布'}\n\n已選：{len(selected)} / {len(devices)} 台"
     if note:
         text += f"\n\n⚠️ {note}"
-    return _response(_message(text, rows), state={"flow": "source_post_publish_pads", "draft": draft})
+    return _response(_message(text, rows), state={"flow": "schedule_pads" if is_schedule else "source_post_publish_pads", "draft": draft})
 
 
 def _source_post_pad_action(action: str, state: dict[str, Any]) -> dict[str, Any]:
@@ -9240,7 +9580,23 @@ def _source_post_pad_action(action: str, state: dict[str, Any]) -> dict[str, Any
     devices = _active_devices()
     page = max(0, _num(draft.get("pad_page")))
     visible = devices[page * 10 : (page + 1) * 10]
-    if action.startswith("sppad:"):
+    if action.startswith("pubpad_toggle_"):
+        index = max(0, _num(action[len("pubpad_toggle_") :]))
+        pad_code = visible[index].pad_code if index < len(visible) else ""
+        if pad_code in selected:
+            selected.remove(pad_code)
+        elif pad_code:
+            selected.add(pad_code)
+    elif action.startswith("pubpad_page_"):
+        draft["pad_page"] = max(0, _num(action[len("pubpad_page_") :]))
+    elif action in {"pubpad_select_page", "pubpad_clear_page", "pubpad_select_all", "pubpad_clear_all"}:
+        target = devices if action.endswith("_all") else visible
+        for device in target:
+            if "clear" in action:
+                selected.discard(device.pad_code)
+            else:
+                selected.add(device.pad_code)
+    elif action.startswith("sppad:"):
         pad_code = action.split(":", 1)[1]
         valid_codes = {device.pad_code for device in devices}
         if pad_code in selected:
@@ -10504,7 +10860,7 @@ def _own_reply_confirmation(draft: dict[str, Any]) -> dict[str, Any]:
     persona = PersonaRepo.get(persona_id)
     reply_mode = "manual" if draft.get("reply_mode") == "manual" else "ai"
     reply_text = _compose_own_reply_content(draft) if reply_mode == "manual" else ""
-    rows = [[_btn("💬 Threads 内部评论", f"acctautoreplyhot_threads_{persona_id}")]]
+    rows = [[_btn("▶️ 开始执行", f"acctautoreplyhot_threads_{persona_id}")]]
     if reply_mode == "manual":
         rows.append([_btn("✏️ 修改回复内容", f"ownreply_content_{persona_id}")])
     else:
@@ -12091,7 +12447,7 @@ def _continue_state_text(message: str, state: dict[str, Any]) -> dict[str, Any]:
     if flow == "threads_login_password" and persona:
         username = str(draft.get("username") or "").strip()
         return _threads_login_submit(persona_id, username, text)
-    if flow == "schedule_time":
+    if flow in {"schedule_time", "schedule_time_manual"}:
         return _schedule_submit_at(_parse_schedule_time_input(text), state)
     if flow == "source_workflow_collect":
         return _continue_source_workflow(text, state)
@@ -12505,66 +12861,118 @@ def _matrix_run(state: dict[str, Any]) -> dict[str, Any]:
     return _response(_message("\n".join(lines), _rows([_btn("📊 來源任務", "source_tasks"), _btn("📊 排程狀態", "menu_status")], [_btn("返回主選單", "menu")])), state={"flow": ""})
 
 
-def _schedule_publish_start() -> dict[str, Any]:
+def _schedule_publish_start(action: str = "schedule_publish") -> dict[str, Any]:
     rows = [(persona, row) for persona, row in _matrix_persona_rows() if _matrix_real_posts(persona.id)[3]]
     if not rows:
         return _response(_message("目前沒有可定時發布的人設，請先建立並生成推文。", [[_btn("➕ 建立人設", "create_persona_entry")], [_btn("◀️ 返回主選單", "menu")]]))
-    lines = ["⏰ 定時發布", "", "請選擇要定時發布的人設："]
-    keyboard = _chunk_buttons([_btn(_persona_action_label(row)[:18], f"sched_persona_{persona.id}") for persona, row in rows], 1)
+    page = max(0, _num(action.rsplit("_p", 1)[1])) if action.startswith("schedule_publish_p") else 0
+    page_size = 8
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = min(page, total_pages - 1)
+    visible = rows[page * page_size : (page + 1) * page_size]
+    lines = ["⏰ 定時發布", "", "請選擇要定時發布的人設：", "", *[f"{page * page_size + index + 1}. {_persona_action_label(row)}" for index, (_persona, row) in enumerate(visible)]]
+    keyboard = [[_btn(_persona_action_label(row)[:24], f"sched_persona_{persona.id}")] for persona, row in visible]
+    if total_pages > 1:
+        keyboard.extend(_tg_pagination_rows(page, total_pages, lambda target: "schedule_publish" if target == 0 else f"schedule_publish_p{target}"))
     keyboard.append([_btn("◀️ 返回主選單", "menu")])
     return _response(_message("\n".join(lines), keyboard), state={"flow": "schedule_select_persona", "draft": {}})
 
 
 def _schedule_persona_posts(action: str) -> dict[str, Any]:
     persona_id = action[len("sched_persona_") :]
-    _archive_id, persona, _row, posts = _matrix_real_posts(persona_id)
+    archive_id, persona, _row, posts = _matrix_real_posts(persona_id)
     if not persona or not posts:
         return _response(_message("這個人設目前沒有待發布推文，請先生成推文。", [[_btn("◀️ 返回", "schedule_publish")]]))
-    lines = ["⏰ 定時發布", "", f"已選擇人設：{_local_persona_display_name(persona)}", "", "請選擇要定時發布的推文："]
-    keyboard = []
-    for index, post in enumerate(posts[:8]):
-        lines.extend(["", f"{index + 1}. {_memory_excerpt(post.get('content'), 80)}"])
-        keyboard.append([_btn(f"第 {index + 1} 篇", f"sched_post_{persona_id}_{index}")])
+    post = posts[0]
+    draft = {
+        "persona_id": persona_id,
+        "archive_id": archive_id,
+        "post_id": str(post.get("id") or ""),
+        "post_text": str(post.get("content") or ""),
+        "pad_code": persona.pad_code,
+        "selected_pad_codes": [persona.pad_code] if persona.pad_code else [],
+        "publish_origin": "schedule",
+    }
+    _ensure_publish_request_id(draft)
+    lines = ["⏰ 定時發布", "", f"已選擇人設：{_local_persona_display_name(persona)}", f"推文：{_memory_excerpt(post.get('content'), 100)}", "", "請選擇發布平台："]
+    keyboard = _publish_platform_buttons("sched_platform_")
+    labels = {"threads": "Threads", "telegram": "Telegram 群組"}
+    for platform in _allowed_publish_platforms():
+        keyboard.append([_btn(f"📱 多智能體手機定時發 {labels.get(platform, platform)}", f"sched_multi_platform_{platform}")])
     keyboard.append([_btn("◀️ 返回", "schedule_publish")])
-    return _response(_message("\n".join(lines), keyboard), state={"flow": "schedule_select_post", "draft": {"persona_id": persona_id}})
+    return _response(_message("\n".join(lines), keyboard), state={"flow": "schedule_platform", "draft": draft})
 
 
 def _schedule_platform(action: str) -> dict[str, Any]:
-    payload = action[len("sched_post_") :] if action.startswith("sched_post_") else ""
-    if "_" not in payload:
-        return _schedule_publish_start()
-    persona_id, index_text = payload.rsplit("_", 1)
-    if not index_text.isdigit():
-        return _schedule_publish_start()
-    archive_id, persona, _row, posts = _matrix_real_posts(persona_id)
-    index = int(index_text)
-    if not persona or not (0 <= index < len(posts)):
-        return _response(_message("沒有找到要定時發布的推文。", [[_btn("◀️ 返回", "schedule_publish")]]))
-    post = posts[index]
-    draft = {"persona_id": persona_id, "archive_id": archive_id, "post_id": str(post.get("id") or ""), "post_index": index, "post_text": str(post.get("content") or ""), "pad_code": persona.pad_code, "platform": "threads"}
-    text = "\n".join(["⏰ 定時發布", "", f"人設：{_local_persona_display_name(persona)}", f"推文：{_memory_excerpt(post.get('content'), 100)}", "", "請選擇發布平台："])
-    return _response(_message(text, _rows([_btn("Threads", "sched_platform_threads")], [_btn("◀️ 返回", f"sched_persona_{persona_id}")])) , state={"flow": "schedule_platform", "draft": draft})
+    persona_id = action[len("sched_persona_") :] if action.startswith("sched_persona_") else ""
+    return _schedule_persona_posts(f"sched_persona_{persona_id}") if persona_id else _schedule_publish_start()
 
 
 def _schedule_time_picker(state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
-    now = datetime.now()
-    options = [
-        ("今天 21:00", now.replace(hour=21, minute=0, second=0, microsecond=0)),
-        ("明天 09:00", (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)),
-        ("明天 21:00", (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)),
+    selected_date = str(draft.get("selected_date") or "")
+    selected_hour = draft.get("selected_hour")
+    selected_minute = draft.get("selected_minute")
+    rows: list[list[dict[str, str]]] = []
+    now = datetime.now(SCHEDULE_TIME_ZONE)
+    if not selected_date:
+        weekdays = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+        for offset in range(7):
+            value = now + timedelta(days=offset)
+            prefix = "今天" if offset == 0 else "明天" if offset == 1 else weekdays[value.weekday()]
+            rows.append([_btn(f"{prefix} {value.strftime('%m/%d')}", f"schedpick_date_{value.date().isoformat()}")])
+        step = "請選擇日期："
+    elif selected_hour is None:
+        rows.extend(_chunk_buttons([_btn(f"{hour:02d}點", f"schedpick_hour_{hour}") for hour in range(24)], 4))
+        rows.append([_btn("◀️ 重選日期", "schedpick_reset_date")])
+        step = "請選擇小時："
+    elif selected_minute is None:
+        rows.extend(_chunk_buttons([_btn(f"{minute:02d}分", f"schedpick_minute_{minute}") for minute in range(0, 60, 5)], 4))
+        rows.append([_btn("◀️ 重選小時", "schedpick_reset_hour")])
+        step = "請選擇分鐘："
+    else:
+        rows.append([_btn("✅ 確認時間", "schedpick_confirm")])
+        rows.append([_btn("◀️ 重選分鐘", "schedpick_reset_minute")])
+        step = "請確認發佈時間："
+    rows.append([_btn("✍️ 手動輸入時間", "schedtime_manual")])
+    queue_state = draft.get("queue_state") if isinstance(draft.get("queue_state"), dict) else {}
+    back = _schedule_queue_callback(queue_state) if draft.get("schedule_mode") in {"edit_task", "batch_edit"} else f"sched_persona_{draft.get('persona_id')}" if draft.get("persona_id") else "schedule_publish"
+    rows.append([_btn("◀️ 返回", back)])
+    mode = str(draft.get("schedule_mode") or "create")
+    title = "🕒 批量改時間" if mode == "batch_edit" else "✏️ 修改定時任務時間" if mode == "edit_task" else "⏰ 定時發佈"
+    persona = PersonaRepo.get(str(draft.get("persona_id") or "")) if draft.get("persona_id") else None
+    pad_codes = [str(item) for item in draft.get("selected_pad_codes", []) if str(item)]
+    summary = [
+        f"人設：{_local_persona_display_name(persona) if persona else str(draft.get('archive_name') or draft.get('archive_id') or '-')}",
+        f"平台：{draft.get('platform') or '-'}",
+        f"智能體手機：{', '.join(pad_codes) or draft.get('pad_code') or '-'}",
     ]
-    rows = [[_btn(label, f"schedpick_ts_{int(value.timestamp())}")] for label, value in options if value.timestamp() > time.time() + 60]
-    rows.append([_btn("◀️ 返回平台", "sched_back_platform")])
-    text = "\n".join(["⏰ 定時發布", "", "請選擇發布時間，或直接輸入：", "例如：明天 09:00 / 2026-05-18 21:30"])
-    return _response(_message(text, rows), state={"flow": "schedule_time", "draft": draft})
+    if draft.get("current_scheduled_at"):
+        summary.append(f"目前時間：{_format_schedule_time(draft.get('current_scheduled_at'))}")
+    if draft.get("post_text"):
+        summary.append(f"推文：{_memory_excerpt(draft.get('post_text'), 60)}")
+    selected_lines = []
+    if selected_date:
+        selected_lines.append(f"日期：{selected_date}")
+    if selected_hour is not None:
+        selected_lines.append(f"小時：{int(selected_hour):02d}")
+    if selected_minute is not None:
+        selected_lines.append(f"分鐘：{int(selected_minute):02d}")
+        selected_lines.append(f"將設定為：{selected_date} {int(selected_hour):02d}:{int(selected_minute):02d}")
+    text = "\n".join([title, "", *summary, *( [""] + selected_lines if selected_lines else []), "", step])
+    return _response(_message(text, rows), state={"flow": "schedule_picker", "draft": draft})
 
 
 def _parse_schedule_time_input(text: str) -> float:
     raw = str(text or "").strip()
-    now = datetime.now()
+    now = datetime.now(SCHEDULE_TIME_ZONE)
     if not raw:
         return 0
+    relative = re.search(r"(\d+)\s*(分鐘|分钟|小時|小时)[後后]?", raw)
+    if relative:
+        amount = max(1, int(relative.group(1)))
+        seconds = amount * (3600 if "時" in relative.group(2) or "时" in relative.group(2) else 60)
+        return time.time() + seconds
     if raw.startswith("今天"):
         date = now.date()
         hm = raw.replace("今天", "", 1).strip()
@@ -12582,6 +12990,8 @@ def _parse_schedule_time_input(text: str) -> float:
                 parsed = now.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
                 if parsed.timestamp() <= time.time() + 60:
                     parsed += timedelta(days=1)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=SCHEDULE_TIME_ZONE)
             return parsed.timestamp()
         except ValueError:
             continue
@@ -12590,29 +13000,47 @@ def _parse_schedule_time_input(text: str) -> float:
 
 def _schedule_submit_at(timestamp: float, state: dict[str, Any]) -> dict[str, Any]:
     draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+    if timestamp <= time.time() + 60:
+        return _response(_message("❌ 這個時間已經過去，請重新選擇。", [[_btn("◀️ 重新選擇", "schedpick_reset_date")]]), state=state)
+    scheduled_at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+    schedule_mode = str(draft.get("schedule_mode") or "create")
+    try:
+        if schedule_mode == "edit_task":
+            task_id = str(draft.get("task_id") or "")
+            _source_publish_queue_action("reschedule", task_id=task_id, scheduled_at=scheduled_at)
+            return _response(_message("✅ 已更新定時任務時間", [[_btn("◀️ 返回排程狀態", "menu_status")]]), state={"flow": ""})
+        if schedule_mode == "batch_edit":
+            archive_id = str(draft.get("archive_id") or "")
+            result = _source_publish_queue_action("batch-reschedule", archive_id=archive_id, scheduled_at=scheduled_at)
+            return _response(_message(f"✅ 已批量更新 {int(result.get('count') or 0)} 条定時任務", [[_btn("◀️ 返回排程狀態", "menu_status")]]), state={"flow": ""})
+    except Exception as exc:
+        return _response(_message(f"❌ 更新定時任務失敗：{exc}", [[_btn("◀️ 返回排程狀態", "menu_status")]]), state={"flow": ""})
     persona_id = str(draft.get("persona_id") or "")
     persona = PersonaRepo.get(persona_id)
     text = str(draft.get("post_text") or "").strip()
     if not persona or not text:
         return _response(_message("❌ 定時發布狀態已失效，請重新選擇。", [[_btn("◀️ 返回", "schedule_publish")]]), state={"flow": ""})
-    if timestamp <= time.time() + 60:
-        return _response(_message("❌ 沒識別到有效發布時間，請用例如「明天 09:00」或「2026-05-18 21:30」。", [[_btn("◀️ 返回", "schedule_publish")]]), state=state)
     archive_id = str(draft.get("archive_id") or "")
     post_id = str(draft.get("post_id") or "")
-    pad_code = str(draft.get("pad_code") or persona.pad_code or "")
-    if not archive_id or not post_id or not pad_code:
+    selected_pad_codes = [str(item) for item in draft.get("selected_pad_codes", []) if str(item)]
+    if not selected_pad_codes:
+        selected_pad_codes = [str(draft.get("pad_code") or persona.pad_code or "")]
+    selected_pad_codes = list(dict.fromkeys(item for item in selected_pad_codes if item))
+    if not archive_id or not post_id or not selected_pad_codes:
         return _response(_message("❌ 定時發布來源資料已失效，請重新選擇。", [[_btn("◀️ 返回", "schedule_publish")]]), state={"flow": ""})
-    when = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-    params = {
-        "archiveId": archive_id,
-        "postIds": [post_id],
-        "padCode": pad_code,
-        "platform": str(draft.get("platform") or "threads"),
-        "scheduledAt": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
-    }
-    job = SourceWorkflowJobRepo.create("persona_enqueue_posts", f"定時發布：{persona.name} / {when}", params, status="submitting")
-    _submit_source_task_job_async(job.id, "persona_enqueue_posts", params)
-    return _response(_message(f"✅ 已提交 Tool R18 定時發布佇列\n\n人設：{_local_persona_display_name(persona)}\n平台：{draft.get('platform') or 'threads'}\n時間：{when}\n來源任務：提交中", _rows([_btn("📊 來源任務", "source_tasks"), _btn("📊 排程狀態", "menu_status")], [_btn("◀️ 返回主選單", "menu")])) , state={"flow": ""})
+    when = datetime.fromtimestamp(timestamp, SCHEDULE_TIME_ZONE).strftime("%Y-%m-%d %H:%M")
+    for pad_code in selected_pad_codes:
+        params = {
+            "archiveId": archive_id,
+            "postIds": [post_id],
+            "padCode": pad_code,
+            "platform": str(draft.get("platform") or "threads"),
+            "scheduledAt": scheduled_at,
+            "idempotencyKey": f"{_ensure_publish_request_id(draft)}-{pad_code}",
+        }
+        job = SourceWorkflowJobRepo.create("persona_enqueue_posts", f"定時發布：{persona.name} / {when} / {pad_code}", params, status="submitting")
+        _submit_source_task_job_async(job.id, "persona_enqueue_posts", params)
+    return _response(_message(f"✅ 已提交 Tool R18 定時發布任務\n\n人設：{_local_persona_display_name(persona)}\n平台：{draft.get('platform') or 'threads'}\n時間：{when}\n智能體手機：{len(selected_pad_codes)} 台\n來源任務：提交中", _rows([_btn("📊 來源任務", "source_tasks"), _btn("📊 排程狀態", "menu_status")], [_btn("◀️ 返回主選單", "menu")])) , state={"flow": ""})
 
 
 def _route_text(message: str) -> str:
@@ -13123,9 +13551,30 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
             draft["selected_pad_codes"] = [bound]
         draft["pad_back_action"] = "publish_confirm_back"
         return _source_post_pad_menu({"draft": draft})
-    if action.startswith(("sppad:", "sppad_page:")) or action in {"sppad_all", "sppad_clear", "sppad_all_pages", "sppad_clear_all"}:
+    shared_pubpad_actions = {"pubpad_select_page", "pubpad_clear_page", "pubpad_select_all", "pubpad_clear_all"}
+    if action in shared_pubpad_actions:
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        publish_origin = str(draft.get("publish_origin") or "")
+        if state.get("flow") == "matrix_pads" and publish_origin != "schedule":
+            return _matrix_update_pads(action, state)
         return _source_post_pad_action(action, state)
-    if action == "sppad_confirm":
+    if action.startswith(("sppad:", "sppad_page:", "pubpad_toggle_", "pubpad_page_")) or action in {"sppad_all", "sppad_clear", "sppad_all_pages", "sppad_clear_all"}:
+        return _source_post_pad_action(action, state)
+    if action == "pubpad_back":
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        persona_id = str(draft.get("persona_id") or "")
+        return _schedule_persona_posts(f"sched_persona_{persona_id}") if persona_id else _schedule_publish_start()
+    if action in {"sppad_confirm", "pubpad_confirm"}:
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        publish_origin = str(draft.get("publish_origin") or "")
+        if action == "pubpad_confirm" and state.get("flow") == "matrix_pads" and publish_origin != "schedule":
+            return _enqueue_matrix_posts(state)
+        if action == "pubpad_confirm" and (state.get("flow") == "schedule_pads" or publish_origin == "schedule"):
+            selected = [str(item) for item in draft.get("selected_pad_codes", []) if str(item)]
+            if not selected:
+                draft["pad_notice"] = "請至少選擇一台智能體手機。"
+                return _source_post_pad_menu({"draft": draft})
+            return _schedule_time_picker({"draft": draft})
         return _source_post_multi_publish_execute(state)
     if action.startswith("bulkpub_"):
         return _source_bulk_start(action, "publish")
@@ -13460,23 +13909,67 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
 
     if action in {"status", "menu_status"}:
         return _status_menu()
-    if action in {"schedule", "schedule_publish"}:
-        return _schedule_publish_start()
+    if action in {"schedule", "schedule_publish"} or action.startswith("schedule_publish_p"):
+        return _schedule_publish_start(action)
     if action.startswith("sched_persona_"):
         return _schedule_persona_posts(action)
     if action.startswith("sched_post_"):
         return _schedule_platform(action)
-    if action == "sched_platform_threads":
+    if action.startswith("sched_multi_platform_"):
+        platform = action[len("sched_multi_platform_") :]
+        if not _valid_publish_platform(platform):
+            return _schedule_publish_start()
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
-        draft["platform"] = "threads"
+        draft.update({"platform": platform, "publish_origin": "schedule", "pad_back_action": f"sched_persona_{draft.get('persona_id')}"})
+        return _source_post_pad_menu({"draft": draft})
+    if action.startswith("sched_platform_"):
+        platform = action[len("sched_platform_") :]
+        if not _valid_publish_platform(platform):
+            return _schedule_publish_start()
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        draft["platform"] = platform
+        if not draft.get("selected_pad_codes") and draft.get("pad_code"):
+            draft["selected_pad_codes"] = [draft.get("pad_code")]
         return _schedule_time_picker({"draft": draft})
     if action == "sched_back_platform":
         draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
         persona_id = str(draft.get("persona_id") or "")
-        index = _num(draft.get("post_index"))
-        return _schedule_platform(f"sched_post_{persona_id}_{index}") if persona_id else _schedule_publish_start()
-    if action.startswith("schedpick_ts_"):
-        return _schedule_submit_at(float(action[len("schedpick_ts_") :] or 0), state)
+        return _schedule_persona_posts(f"sched_persona_{persona_id}") if persona_id else _schedule_publish_start()
+    if action.startswith("schedpick_"):
+        choice = action[len("schedpick_") :]
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        if choice.startswith("date_"):
+            draft.update({"selected_date": choice[len("date_") :], "selected_hour": None, "selected_minute": None})
+        elif choice.startswith("hour_"):
+            draft.update({"selected_hour": max(0, min(23, _num(choice[len("hour_") :]))), "selected_minute": None})
+        elif choice.startswith("minute_"):
+            draft["selected_minute"] = max(0, min(59, _num(choice[len("minute_") :])))
+        elif choice == "reset_date":
+            draft.update({"selected_date": "", "selected_hour": None, "selected_minute": None})
+        elif choice == "reset_hour":
+            draft.update({"selected_hour": None, "selected_minute": None})
+        elif choice == "reset_minute":
+            draft["selected_minute"] = None
+        elif choice == "confirm":
+            try:
+                selected = datetime.fromisoformat(str(draft.get("selected_date") or "")).replace(
+                    hour=int(draft.get("selected_hour")), minute=int(draft.get("selected_minute")), second=0, microsecond=0, tzinfo=SCHEDULE_TIME_ZONE,
+                )
+            except (TypeError, ValueError):
+                selected = datetime.fromtimestamp(0, SCHEDULE_TIME_ZONE)
+            return _schedule_submit_at(selected.timestamp(), {"draft": draft})
+        return _schedule_time_picker({"draft": draft})
+    if action == "schedtime_manual":
+        draft = dict(state.get("draft") if isinstance(state.get("draft"), dict) else {})
+        return _response(_message("⭐ 請輸入發布時間 ⭐\n\n支持格式：\n- 2026-05-18 21:30\n- 今天 21:30\n- 明天 09:00\n- 21:30", [[_btn("◀️ 返回選擇器", "schedpick_reset_date")]]), state={"flow": "schedule_time_manual", "draft": draft})
+    if action in {"queue_pending", "queue_failed", "queue_scheduled"} or action.startswith(("queueview_", "queuepage_", "queueplatform_", "queuepersona:")):
+        return _schedule_queue_view(action, state)
+    if action == "queue_filter_platform":
+        return _schedule_queue_filter_platform(state)
+    if action.startswith("queue_filter_persona"):
+        return _schedule_queue_filter_persona(action, state)
+    if action == "retry_failed" or action.startswith(("retrytask_", "canceltask_", "edittasktime_", "batchreschedule_", "batchcancel_")):
+        return _schedule_queue_action(action, state)
     if action == "dashboard":
         return _dashboard_menu()
     if action == "dashboard_refresh":
@@ -13707,9 +14200,7 @@ def handle(payload: dict[str, Any]) -> dict[str, Any]:
         return _matrix_confirm(action, state)
     if action == "mxrun":
         return _matrix_run(state)
-    if action in {"pubpad_select_page", "pubpad_clear_page", "pubpad_select_all", "pubpad_clear_all"} or action.startswith(("pubpad_toggle:", "pubpad_page:")):
+    if action.startswith(("pubpad_toggle:", "pubpad_page:")):
         return _matrix_update_pads(action, state)
-    if action == "pubpad_confirm":
-        return _enqueue_matrix_posts(state)
 
     return _response(_message("这个操作已收到，请选择下一步。", _main_keyboard()), state={"flow": ""})

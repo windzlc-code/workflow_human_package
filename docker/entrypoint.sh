@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export TZ="Asia/Shanghai"
+export TOOL_R18_SCHEDULE_TIME_ZONE="Asia/Shanghai"
+
 mkdir -p "${WEBAPP_DATA_DIR:-/data/webapp_data}" "${TOOL_R18_RUNTIME_DIR:-/data/tool_r18_runtime}"
 export TOOL_R18_UPLOAD_HOST_DIR="${TOOL_R18_UPLOAD_HOST_DIR:-${WEBAPP_DATA_DIR:-/data/webapp_data}/tool_r18_uploads}"
 export VMOS_MEDIA_STAGING_DIR="${VMOS_MEDIA_STAGING_DIR:-$TOOL_R18_UPLOAD_HOST_DIR}"

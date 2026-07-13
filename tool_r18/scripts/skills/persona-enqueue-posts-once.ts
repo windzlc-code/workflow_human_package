@@ -1,8 +1,8 @@
 import "@/runtime/node/browser-shim";
 import fs from "node:fs";
 import { runPersonaWorkflow, type PersonaWorkflowInput } from "@/core/persona/persona-workflow-service";
-import { createNodePublishQueueRepository } from "@/runtime/node/publish-queue-repository";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
+import { parseScheduledDate } from "@/core/publish/schedule-time";
 
 type EnqueuePostsWorkflowInput = Extract<PersonaWorkflowInput, { action: "enqueue-posts" }>;
 
@@ -12,6 +12,8 @@ type Input = {
   platform: string;
   padCode: string;
   scheduledAt?: string;
+  idempotencyKey?: string;
+  telegramChatId?: string;
 };
 
 type EnqueuePostsResult = {
@@ -36,9 +38,11 @@ function readInput(): Input {
 function normalizeScheduledAt(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !value.trim()) throw new Error("scheduledAt must be a valid date-time string");
-  const time = new Date(value).getTime();
-  if (!Number.isFinite(time)) throw new Error("scheduledAt must be a valid date-time string");
-  return new Date(time).toISOString();
+  try {
+    return parseScheduledDate(value).toISOString();
+  } catch {
+    throw new Error("scheduledAt must be a valid date-time string");
+  }
 }
 
 async function main() {
@@ -53,6 +57,10 @@ async function main() {
   if (!padCode) throw new Error("missing padCode");
   if (platform !== "threads" && platform !== "telegram") throw new Error("platform must be threads or telegram");
   const scheduledAt = normalizeScheduledAt(input.scheduledAt);
+  if (input.idempotencyKey !== undefined && (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim())) {
+    throw new Error("idempotencyKey must be a non-empty string");
+  }
+  const idempotencyKey = input.idempotencyKey?.trim();
 
   const workflowInput: EnqueuePostsWorkflowInput = {
     action: "enqueue-posts",
@@ -60,15 +68,11 @@ async function main() {
     postIds,
     platform,
     padCode,
+    scheduledAt,
+    idempotencyKey,
+    telegramChatId: String(input.telegramChatId || "").trim() || undefined,
   };
   const result = await runPersonaWorkflow(workflowInput) as EnqueuePostsResult;
-
-  if (scheduledAt && result.enqueued.length) {
-    const repo = createNodePublishQueueRepository();
-    for (const item of result.enqueued) {
-      repo.updateTaskStatus(item.taskId, "pending", { scheduled_at: scheduledAt });
-    }
-  }
 
   printJson({
     archiveId: result.archiveId,

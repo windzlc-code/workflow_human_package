@@ -11,6 +11,9 @@ vi.mock("@/lib/gemini-client", () => ({
   callGemini: vi.fn(async (_model: string, contents: any[]) => {
     const prompt = contents?.[0]?.parts?.[0]?.text || "";
     prompts.push(prompt);
+    if (prompt.includes("DISABLED_LINK_REGRESSION")) {
+      return { text: "Fresh post body\nDisabled ending\nexample.test/disabled" };
+    }
     if (prompt.includes("壓縮成人設長期記憶")) {
       const sequence = prompt.match(/本篇序號：第\s*(\d+)\s*篇/)?.[1] || "1";
       return { text: `第${sequence}篇：主角上週去日本旅行，在東京便利店遇到一位老同學，留下下次再見的伏筆` };
@@ -23,6 +26,9 @@ vi.mock("@/lib/gemini-client", () => ({
   callTextUnderstandingModelWithFallback: vi.fn(async (_model: string, contents: any[]) => {
     const prompt = contents?.[0]?.parts?.[0]?.text || "";
     prompts.push(prompt);
+    if (prompt.includes("DISABLED_LINK_REGRESSION")) {
+      return { model: "gemini-3.1-pro-preview", data: { text: "Fresh post body\nDisabled ending\nexample.test/disabled" } };
+    }
     if (prompt.includes("壓縮成人設長期記憶")) {
       const sequence = prompt.match(/本篇序號：第\s*(\d+)\s*篇/)?.[1] || "1";
       return { model: "gemini-3.1-pro-preview", data: { text: `第${sequence}篇：主角上週去日本旅行，在東京便利店遇到一位老同學，留下下次再見的伏筆` } };
@@ -225,6 +231,53 @@ describe("persona generation memory", () => {
     expect(generationPrompt).toContain("禁止复述案例里的具体事件");
     expect(result.posts?.[0].content).toContain("想看更多整理，我放这里");
     expect(result.posts?.[0].content).toContain("https://example.com/more");
+  });
+
+  it("removes disabled link endings from generation context and model output", async () => {
+    const disabledLink = "https://example.test/disabled";
+    const created = await runPersonaWorkflow({
+      action: "create",
+      name: "Disabled link persona",
+      content: "Regression fixture",
+      setup: {
+        totalEpisodes: 50,
+        linkEndingPresets: [{
+          id: "disabled-link",
+          name: "Disabled link",
+          endingText: "Disabled ending",
+          linkUrl: disabledLink,
+          enabled: false,
+        }],
+        activeLinkEndingPresetId: "",
+      },
+    } as any);
+    const archive = await loadPersonaArchive(created.archiveId);
+    await savePersonaArchive({
+      ...archive!,
+      posts: [{
+        id: "old-linked-post",
+        title: "Old linked post",
+        content: `Historical body\nDisabled ending\n${disabledLink}`,
+        wordCount: 60,
+        orderIndex: 0,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z",
+      }],
+    } as any);
+
+    const result = await runPersonaWorkflow({
+      action: "generate-posts",
+      archiveId: created.archiveId,
+      count: 1,
+      customInstruction: "DISABLED_LINK_REGRESSION",
+    });
+    const generationPrompt = prompts.find((prompt) => prompt.includes("DISABLED_LINK_REGRESSION")) || "";
+
+    expect(generationPrompt).not.toContain(disabledLink);
+    expect(generationPrompt).not.toContain("Disabled ending");
+    expect(result.posts?.[0].content).not.toContain(disabledLink);
+    expect(result.posts?.[0].content).not.toContain("example.test/disabled");
+    expect(result.posts?.[0].content).not.toContain("Disabled ending");
   });
 
   it("splits long multi-post generation into smaller batches", () => {

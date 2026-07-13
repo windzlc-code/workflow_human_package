@@ -22,6 +22,8 @@ GENERATE_IMAGE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona
 GENERATE_POST_IMAGE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-generate-post-image-once.ts"
 PUBLISH_POST_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-publish-post-once.ts"
 ENQUEUE_POSTS_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-enqueue-posts-once.ts"
+PUBLISH_QUEUE_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "publish-queue-worker.ts"
+PERSONA_WORKFLOW_SERVICE_PATH = ROOT / "tool_r18" / "src" / "core" / "persona" / "persona-workflow-service.ts"
 OWN_POST_REPLY_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "threads-own-post-reply-once.ts"
 SET_LINK_ENDING_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-set-link-ending-once.ts"
 POST_ACTION_SCRIPT_PATH = ROOT / "tool_r18" / "scripts" / "skills" / "persona-post-action-once.ts"
@@ -266,9 +268,55 @@ def test_threads_own_post_reply_keeps_web_persona_metadata() -> None:
 def test_own_post_reply_cli_reports_semantic_failure_and_progress_screenshots() -> None:
     source = OWN_POST_REPLY_SCRIPT_PATH.read_text(encoding="utf-8")
 
-    assert "result.replied <= 0 && result.matched > 0" in source
+    assert "isThreadsOwnPostReplyExecutionFailure(result)" in source
+    assert "result.replied <= 0 && result.matched > 0" not in source
     assert "replyScreenshots: progress.replyScreenshots" in source
+    assert "error: semanticFailure" in source
     assert "if (semanticFailure) process.exitCode = 1" in source
+
+
+def test_own_post_reply_semantic_failure_distinguishes_execution_errors_from_no_match() -> None:
+    code = """
+import { isThreadsOwnPostReplyExecutionFailure as failed } from './src/telegram-bot.ts';
+console.log(JSON.stringify({
+  timeout: failed({ matched: 0, replied: 0, error: 'threadsOwnPostReply open latest profile post timeout' }),
+  execution: failed({ matched: 0, replied: 0, error: 'VMOS ADB execution failed' }),
+  matchedFailure: failed({ matched: 2, replied: 0, error: 'reply failed' }),
+  noMatch: failed({ matched: 0, replied: 0, error: '沒有成功回覆任何推文' }),
+  dryRun: failed({ dryRun: true, matched: 0, replied: 0, error: 'no locally recorded Threads post URLs for this PAD' }),
+}));
+"""
+    completed = subprocess.run(
+        ["node", "--import", "tsx", "--input-type=module", "-e", code],
+        cwd=ROOT / "tool_r18",
+        text=True,
+        encoding="utf-8",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    result = server._extract_last_json_object(completed.stdout)
+    assert result == {
+        "timeout": True,
+        "execution": True,
+        "matchedFailure": True,
+        "noMatch": False,
+        "dryRun": False,
+    }
+
+
+def test_tg_own_post_reply_shows_execution_error_before_no_match() -> None:
+    source = TELEGRAM_BOT_PATH.read_text(encoding="utf-8")
+    assert '▶️ 開始執行' in source
+    start = source.index("const result = await runThreadsOwnPostReplyOnce(", source.index('if (data.startsWith("acctautoreplyhot_threads_"))'))
+    end = source.index("pendingThreadsOwnPostReplyRuns.delete(chatId);", start)
+    completion = source[start:end]
+
+    error_guard = completion.index("if (isThreadsOwnPostReplyExecutionFailure(result))")
+    no_match_guard = completion.index("if (!result.matched)")
+    assert error_guard < no_match_guard
+    assert "或已回覆過" not in completion
 
 
 def test_api_sidecar_can_enable_task_workers_without_other_background_workers() -> None:
@@ -1001,12 +1049,234 @@ def test_persona_skill_tasks_invalidate_dashboard_cache() -> None:
 
 def test_schedule_and_own_post_reply_scripts_use_tool_r18_sources() -> None:
     enqueue = ENQUEUE_POSTS_SCRIPT_PATH.read_text(encoding="utf-8")
+    workflow = PERSONA_WORKFLOW_SERVICE_PATH.read_text(encoding="utf-8")
+    queue = PUBLISH_QUEUE_SCRIPT_PATH.read_text(encoding="utf-8")
     own_reply = OWN_POST_REPLY_SCRIPT_PATH.read_text(encoding="utf-8")
 
     assert 'action: "enqueue-posts"' in enqueue
-    assert "scheduled_at: scheduledAt" in enqueue
+    assert "scheduledAt," in enqueue
+    assert "scheduled_at: input.scheduledAt" in workflow
+    assert "telegramChatId" in enqueue
+    assert "updateTaskStatus" not in enqueue
+    assert 'input.action === "reschedule"' in queue
+    assert 'input.action === "batch-reschedule" || input.action === "batch-cancel"' in queue
     assert "runThreadsOwnPostReplyOnce" in own_reply
     assert "dryRun: input.dryRun === true" in own_reply
+
+
+def test_web_schedule_submit_preserves_queue_owner() -> None:
+    payload = server._build_internal_tg_task_payload(
+        "task-schedule-owner",
+        "persona_enqueue_posts",
+        {
+            "archiveId": "archive-1",
+            "postIds": ["post-1"],
+            "padCode": "PAD-1",
+            "platform": "threads",
+            "scheduledAt": "2026-08-01T09:00:00.000Z",
+            "_requestTgChatId": 8080001,
+            "idempotencyKey": "schedule-request-PAD-1",
+        },
+    )
+
+    assert payload["telegramChatId"] == "8080001"
+    assert payload["idempotencyKey"] == "schedule-request-PAD-1"
+
+
+def test_publish_queue_api_reader_filters_in_sql(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    db_path = runtime_dir / "publish_queue.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""CREATE TABLE publish_tasks (
+            id TEXT, archive_id TEXT, archive_post_id TEXT, pad_code TEXT, platform TEXT,
+            caption TEXT, media_url TEXT, status TEXT, attempts INTEGER, last_error TEXT,
+            failure_step TEXT, manual_intervention_required INTEGER, scheduled_at TEXT,
+            created_at TEXT, started_at TEXT, finished_at TEXT, telegram_chat_id TEXT
+        )""")
+        conn.executemany(
+            "INSERT INTO publish_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("owned", "a1", "p1", "PAD-1", "threads", "owned caption", None, "pending", 0, None, None, 0, "2026-08-01T09:00:00Z", "2026-07-01T09:00:00Z", None, None, "8080001"),
+                ("other", "a2", "p2", "PAD-2", "telegram", "other caption", None, "failed", 1, "x", None, 0, "2026-08-01T09:00:00Z", "2026-07-01T09:00:00Z", None, None, "999"),
+            ],
+        )
+    monkeypatch.setattr(server, "TOOL_R18_RUNTIME_DIR", runtime_dir)
+
+    data = server._read_tool_r18_publish_queue_rows(8080001, status="pending", scheduled_only=True)
+
+    assert [row["id"] for row in data["tasks"]] == ["owned"]
+    assert data["by_status"] == {"pending": 1}
+    assert data["truncated"] is False
+
+
+def test_persona_enqueue_writes_schedule_and_owner_atomically(tmp_path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "persona_archives.json").write_text(json.dumps([{
+        "id": "archive-scheduled",
+        "name": "Scheduled Persona",
+        "content": "Profile",
+        "createdAt": "2026-07-10T00:00:00Z",
+        "updatedAt": "2026-07-10T00:00:00Z",
+        "setup": {},
+        "boundPadCode": "PAD-1",
+        "posts": [{
+            "id": "post-scheduled",
+            "title": "Post",
+            "content": "scheduled content",
+            "wordCount": 17,
+            "orderIndex": 0,
+            "createdAt": "2026-07-10T00:00:00Z",
+            "updatedAt": "2026-07-10T00:00:00Z",
+        }],
+        "favoritePosts": [],
+    }]), encoding="utf-8")
+
+    result = _run_tool_r18_cli(
+        ENQUEUE_POSTS_SCRIPT_PATH,
+        {
+            "archiveId": "archive-scheduled",
+            "postIds": ["post-scheduled"],
+            "padCode": "PAD-1",
+            "platform": "threads",
+            "scheduledAt": "2026-08-01T09:00:00.000Z",
+            "telegramChatId": "8080001",
+        },
+        runtime_dir,
+    )
+    second = _run_tool_r18_cli(
+        ENQUEUE_POSTS_SCRIPT_PATH,
+        {
+            "archiveId": "archive-scheduled",
+            "postIds": ["post-scheduled"],
+            "padCode": "PAD-1",
+            "platform": "threads",
+            "scheduledAt": "2026-08-02T09:00:00.000Z",
+            "telegramChatId": "8080001",
+        },
+        runtime_dir,
+    )
+
+    assert len(result["enqueued"]) == 1
+    assert len(second["enqueued"]) == 1
+    with sqlite3.connect(runtime_dir / "publish_queue.db") as conn:
+        rows = conn.execute("SELECT scheduled_at, telegram_chat_id, status FROM publish_tasks ORDER BY scheduled_at").fetchall()
+    assert rows == [
+        ("2026-08-01T09:00:00.000Z", "8080001", "pending"),
+        ("2026-08-02T09:00:00.000Z", "8080001", "pending"),
+    ]
+
+
+def test_persona_enqueue_idempotency_keeps_all_posts_without_duplicates(tmp_path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    now = "2026-07-10T00:00:00Z"
+    (runtime_dir / "persona_archives.json").write_text(json.dumps([{
+        "id": "archive-idempotent",
+        "name": "Idempotent Persona",
+        "content": "Profile",
+        "createdAt": now,
+        "updatedAt": now,
+        "setup": {},
+        "boundPadCode": "PAD-1",
+        "posts": [
+            {"id": "post-1", "title": "One", "content": "first", "wordCount": 5, "orderIndex": 0, "createdAt": now, "updatedAt": now},
+            {"id": "post-2", "title": "Two", "content": "second", "wordCount": 6, "orderIndex": 1, "createdAt": now, "updatedAt": now},
+        ],
+        "favoritePosts": [],
+    }]), encoding="utf-8")
+    payload = {
+        "archiveId": "archive-idempotent",
+        "postIds": ["post-1", "post-2"],
+        "padCode": "PAD-1",
+        "platform": "threads",
+        "scheduledAt": "2026-08-01T09:00:00.000Z",
+        "telegramChatId": "8080001",
+        "idempotencyKey": "web-request-1",
+    }
+
+    first = _run_tool_r18_cli(ENQUEUE_POSTS_SCRIPT_PATH, payload, runtime_dir)
+    repeated = _run_tool_r18_cli(ENQUEUE_POSTS_SCRIPT_PATH, payload, runtime_dir)
+
+    assert [item["taskId"] for item in repeated["enqueued"]] == [item["taskId"] for item in first["enqueued"]]
+    with sqlite3.connect(runtime_dir / "publish_queue.db") as conn:
+        rows = conn.execute("SELECT archive_post_id, idempotency_key FROM publish_tasks ORDER BY archive_post_id").fetchall()
+    assert rows == [
+        ("post-1", "web-request-1:post-1:threads:PAD-1"),
+        ("post-2", "web-request-1:post-2:threads:PAD-1"),
+    ]
+
+
+def test_publish_queue_worker_reuses_real_queue_for_reschedule_and_cancel(tmp_path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    created = _run_tool_r18_cli(
+        PUBLISH_QUEUE_SCRIPT_PATH,
+        {
+            "action": "enqueue",
+            "task": {
+                "archive_id": "archive-1",
+                "archive_post_id": "post-1",
+                "pad_code": "PAD-1",
+                "platform": "threads",
+                "caption": "scheduled post",
+                "scheduled_at": "2026-08-01T09:00:00.000Z",
+                "telegram_chat_id": "8080001",
+            },
+        },
+        runtime_dir,
+    )
+    task_id = created["task"]["id"]
+
+    changed = _run_tool_r18_cli(
+        PUBLISH_QUEUE_SCRIPT_PATH,
+        {
+            "action": "reschedule",
+            "taskId": task_id,
+            "scheduledAt": "2026-08-02T10:30:00.000Z",
+            "telegramChatId": "8080001",
+        },
+        runtime_dir,
+    )
+    assert changed["task"]["scheduled_at"] == "2026-08-02T10:30:00.000Z"
+
+    cancelled = _run_tool_r18_cli(
+        PUBLISH_QUEUE_SCRIPT_PATH,
+        {"action": "cancel", "taskId": task_id, "telegramChatId": "8080001"},
+        runtime_dir,
+    )
+    assert cancelled["task"]["status"] == "cancelled"
+    assert cancelled["task"]["last_error"] == "已手动取消"
+    retried = _run_tool_r18_cli(
+        PUBLISH_QUEUE_SCRIPT_PATH,
+        {"action": "batch-retry", "status": "failed", "telegramChatId": "8080001"},
+        runtime_dir,
+    )
+    assert retried["count"] == 0
+    assert retried["tasks"] == []
+    with sqlite3.connect(runtime_dir / "publish_queue.db") as conn:
+        conn.execute("UPDATE publish_tasks SET status = 'publishing' WHERE id = ?", (task_id,))
+    env = os.environ.copy()
+    env["TOOL_R18_RUNTIME_DIR"] = str(runtime_dir)
+    raced = subprocess.run(
+        ["node", "--import", "tsx", str(PUBLISH_QUEUE_SCRIPT_PATH), json.dumps({
+            "action": "cancel",
+            "taskId": task_id,
+            "telegramChatId": "8080001",
+        })],
+        cwd=ROOT / "tool_r18",
+        env=env,
+        text=True,
+        encoding="utf-8",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    assert raced.returncode != 0
+    assert "state changed" in raced.stdout
+    with sqlite3.connect(runtime_dir / "publish_queue.db") as conn:
+        assert conn.execute("SELECT status FROM publish_tasks WHERE id = ?", (task_id,)).fetchone()[0] == "publishing"
 
 
 def test_persona_post_action_cli_writes_the_real_archive_store(tmp_path) -> None:

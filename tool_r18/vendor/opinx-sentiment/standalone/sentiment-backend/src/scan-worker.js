@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { closeDb, initDb } from "../../../plugins/sentiment/db/db.js";
 import {
@@ -42,6 +43,46 @@ function writeStatus(job = {}, patch = {}) {
   fs.writeFileSync(statusPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 }
 
+function acquireScanWorkerLock(dataDir, job = {}) {
+  const scope = ["continuous-collection", "collection-jobs-execute-due"].includes(String(job.type || ""))
+    ? String(job.type)
+    : "scan";
+  const lockPath = path.join(dataDir, `.scan-worker-${scope}.lock`);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, `${process.pid}\n`, "utf8");
+      return { fd, lockPath };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let ownerPid = 0;
+      try {
+        ownerPid = Number(fs.readFileSync(lockPath, "utf8").trim()) || 0;
+        if (ownerPid <= 0) {
+          try { fs.unlinkSync(lockPath); } catch {}
+          continue;
+        }
+        process.kill(ownerPid, 0);
+      } catch (ownerError) {
+        if (ownerError?.code !== "ESRCH" && ownerPid > 0) throw ownerError;
+        try { fs.unlinkSync(lockPath); } catch {}
+        continue;
+      }
+      throw new Error(`sentiment scan worker already running (pid=${ownerPid})`);
+    }
+  }
+  throw new Error("unable to acquire sentiment scan worker lock");
+}
+
+function releaseScanWorkerLock(lock) {
+  if (!lock) return;
+  try { fs.closeSync(lock.fd); } catch {}
+  try {
+    const ownerPid = Number(fs.readFileSync(lock.lockPath, "utf8").trim()) || 0;
+    if (ownerPid === process.pid) fs.unlinkSync(lock.lockPath);
+  } catch {}
+}
+
 const log = {
   info: (...args) => console.log("[sentiment-scan-worker]", ...args),
   warn: (...args) => console.warn("[sentiment-scan-worker]", ...args),
@@ -59,6 +100,13 @@ async function main() {
   const configPath = process.env.SENTIMENT_CONFIG_PATH;
   if (!dataDir || !configPath) throw new Error("SENTIMENT_DATA_DIR and SENTIMENT_CONFIG_PATH are required");
 
+  try {
+    os.setPriority(0, 15);
+  } catch {}
+
+  const job = parseJob();
+  const scanLock = acquireScanWorkerLock(dataDir, job);
+  process.once("exit", () => releaseScanWorkerLock(scanLock));
   initDb(dataDir);
   ensureSentimentOperationalDefaults();
   const config = new JsonConfigStore(configPath);
@@ -70,7 +118,6 @@ async function main() {
     searchSettings: () => readSentimentSearchSettings(config),
   });
 
-  const job = parseJob();
   const startedAt = Date.now();
   writeStatus(job, {
     id: job.runId || job.run_id || null,
@@ -152,6 +199,7 @@ async function main() {
     throw error;
   } finally {
     clearInterval(heartbeat);
+    releaseScanWorkerLock(scanLock);
   }
 }
 

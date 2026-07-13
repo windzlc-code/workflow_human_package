@@ -251,6 +251,16 @@ _COMFY_GPU_SEMAPHORE = threading.BoundedSemaphore(int(COMFY_GPU_LOCAL_SEMAPHORE_
 _COMFY_GPU_LOCK = threading.Lock()
 _COMFY_GPU_WAITING = 0
 _COMFY_GPU_RUNNING = 0
+PAD_CONTROL_LOCK_STALE_SECONDS = max(_env_int("PAD_CONTROL_LOCK_STALE_SECONDS", 2 * 60 * 60), 60)
+PAD_CONTROL_TASK_TYPES = {
+    "persona_publish_post",
+    "threads_warmup",
+    "threads_auto_reply",
+    "threads_own_post_reply",
+    "threads_profile_update",
+    "threads_login",
+    "threads_account_query",
+}
 
 
 class RuntimeConfigFileError(RuntimeError):
@@ -275,6 +285,117 @@ def _is_admin(user: dict[str, Any]) -> bool:
 def _public_register_enabled() -> bool:
     value = str(os.getenv("ALLOW_PUBLIC_REGISTER", "") or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _pad_control_lock_db_path() -> Path:
+    return (TOOL_R18_RUNTIME_DIR / "publish_queue.db").resolve()
+
+
+def _ensure_pad_control_lock_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pad_locks (
+          pad_code          TEXT PRIMARY KEY,
+          locked_by_task_id TEXT,
+          locked_at         TEXT
+        )
+        """
+    )
+
+
+def _cleanup_stale_pad_control_locks(conn: sqlite3.Connection) -> None:
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=PAD_CONTROL_LOCK_STALE_SECONDS)
+    conn.execute(
+        "UPDATE pad_locks SET locked_by_task_id = NULL, locked_at = NULL WHERE locked_at IS NOT NULL AND locked_at <= ?",
+        (cutoff.isoformat().replace("+00:00", "Z"),),
+    )
+
+
+def _pad_control_lock_owner(row: sqlite3.Row | None) -> str:
+    return str(row["locked_by_task_id"] or "").strip() if row is not None else ""
+
+
+def _acquire_pad_control_lock(pad_code: str, owner: str) -> tuple[bool, str]:
+    pad = str(pad_code or "").strip()
+    lock_owner = str(owner or "").strip()
+    if not pad or not lock_owner:
+        return False, ""
+    db_path = _pad_control_lock_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(db_path), timeout=5) as conn:
+        conn.row_factory = sqlite3.Row
+        _ensure_pad_control_lock_schema(conn)
+        _cleanup_stale_pad_control_locks(conn)
+        row = conn.execute("SELECT locked_by_task_id FROM pad_locks WHERE pad_code = ?", (pad,)).fetchone()
+        current_owner = _pad_control_lock_owner(row)
+        if current_owner and current_owner != lock_owner:
+            return False, current_owner
+        conn.execute(
+            """
+            INSERT INTO pad_locks (pad_code, locked_by_task_id, locked_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(pad_code) DO UPDATE SET
+              locked_by_task_id = excluded.locked_by_task_id,
+              locked_at = excluded.locked_at
+            """,
+            (pad, lock_owner, datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")),
+        )
+        return True, lock_owner
+
+
+def _release_pad_control_lock(pad_code: str, owner: str) -> None:
+    pad = str(pad_code or "").strip()
+    lock_owner = str(owner or "").strip()
+    if not pad or not lock_owner:
+        return
+    db_path = _pad_control_lock_db_path()
+    if not db_path.exists():
+        return
+    with sqlite3.connect(str(db_path), timeout=5) as conn:
+        _ensure_pad_control_lock_schema(conn)
+        conn.execute(
+            "UPDATE pad_locks SET locked_by_task_id = NULL, locked_at = NULL WHERE pad_code = ? AND locked_by_task_id = ?",
+            (pad, lock_owner),
+        )
+
+
+def _pad_control_lock_status(pad_code: str) -> dict[str, Any]:
+    pad = str(pad_code or "").strip()
+    if not pad:
+        return {"pad_code": "", "locked": False, "owner": ""}
+    db_path = _pad_control_lock_db_path()
+    if not db_path.exists():
+        return {"pad_code": pad, "locked": False, "owner": ""}
+    with sqlite3.connect(str(db_path), timeout=5) as conn:
+        conn.row_factory = sqlite3.Row
+        _ensure_pad_control_lock_schema(conn)
+        _cleanup_stale_pad_control_locks(conn)
+        row = conn.execute("SELECT locked_by_task_id, locked_at FROM pad_locks WHERE pad_code = ?", (pad,)).fetchone()
+    owner = _pad_control_lock_owner(row)
+    return {
+        "pad_code": pad,
+        "locked": bool(owner),
+        "owner": owner,
+        "locked_at": str(row["locked_at"] or "") if row is not None else "",
+    }
+
+
+def _pad_codes_for_control_task(task_type: str, payload: dict[str, Any]) -> list[str]:
+    if str(task_type or "").strip() not in PAD_CONTROL_TASK_TYPES:
+        return []
+    values: list[str] = []
+    for key in ("padCode", "pad_code"):
+        value = str((payload or {}).get(key) or "").strip()
+        if value:
+            values.append(value)
+    raw_many = (payload or {}).get("padCodes")
+    if isinstance(raw_many, list):
+        values.extend(str(item).strip() for item in raw_many if str(item).strip())
+    return list(dict.fromkeys(values))
+
+
+def _pad_control_busy_message(pad_code: str, owner: str) -> str:
+    return f"云机 {pad_code} 正在被 {owner or '其他任务'} 使用，请稍后再操作。"
 
 
 def _require_positive_balance(user: dict[str, Any]) -> None:
@@ -611,6 +732,8 @@ def _is_secret_key(key: str) -> bool:
 
 def _mask_secret(value: Any) -> str:
     text = str(value or "")
+    if re.search(r"•{8,}", text):
+        return text
     if len(text) <= 8:
         return "***"
     visible = 6 if len(text) >= 16 else 4
@@ -15834,6 +15957,7 @@ def _run_tool_r18_skill_task(
     input_path.write_text(json.dumps(input_payload, ensure_ascii=False), encoding="utf-8")
     env = os.environ.copy()
     env.setdefault("TOOL_R18_RUNTIME_DIR", str(TOOL_R18_RUNTIME_DIR))
+    env.setdefault("TSX_TSCONFIG_PATH", str(tool_dir / "tsconfig.json"))
     if task_type == "persona_publish_post":
         progress_path = workdir / "publish-progress.jsonl"
         progress_path.unlink(missing_ok=True)
@@ -16181,7 +16305,15 @@ def _task_worker(task_id: str, user_id: int, task_type: str, payload: dict[str, 
     _emit_stage(effective_payload, stage="start", status="running", message="任务开始")
     _emit_stage(effective_payload, stage="running", status="running", message="任务进行中")
 
+    pad_lock_owner = f"webapp-task:{task_type}:{task_id}"
+    pad_lock_codes = _pad_codes_for_control_task(task_type, effective_payload)
+    acquired_pad_locks: list[str] = []
     try:
+        for pad_code in pad_lock_codes:
+            acquired, current_owner = _acquire_pad_control_lock(pad_code, pad_lock_owner)
+            if not acquired:
+                raise RuntimeError(_pad_control_busy_message(pad_code, current_owner))
+            acquired_pad_locks.append(pad_code)
         runner = TASK_RUNNERS.get(task_type)
         if runner is None:
             raise RuntimeError(f"未知任务类型: {task_type}")
@@ -16216,6 +16348,10 @@ def _task_worker(task_id: str, user_id: int, task_type: str, payload: dict[str, 
             "nano_images": max(_to_int(effective_payload.get("nano_images"), 0), 0),
         }
         _emit_stage(effective_payload, stage="finished", status="failed", message="生成失败", data={"error": str(task_error)})
+
+    finally:
+        for pad_code in acquired_pad_locks:
+            _release_pad_control_lock(pad_code, pad_lock_owner)
 
     with db() as conn:
         current_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (str(task_id),)).fetchone()
@@ -17480,7 +17616,14 @@ def _build_internal_tg_task_payload(task_id: str, task_type: str, params: dict[s
             raise HTTPException(status_code=400, detail="persona_enqueue_posts platform must be threads or telegram")
         if not scheduled_at:
             raise HTTPException(status_code=400, detail="persona_enqueue_posts requires scheduledAt")
-        return {"archiveId": archive_id, "postIds": [str(item).strip() for item in post_ids], "padCode": pad_code, "platform": platform, "scheduledAt": scheduled_at}
+        request_chat_id = _to_int(payload.get("_requestTgChatId") or payload.get("telegramChatId"), 0)
+        normalized = {"archiveId": archive_id, "postIds": [str(item).strip() for item in post_ids], "padCode": pad_code, "platform": platform, "scheduledAt": scheduled_at}
+        if request_chat_id > 0:
+            normalized["telegramChatId"] = str(request_chat_id)
+        idempotency_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(payload.get("idempotencyKey") or ""))[:80]
+        if idempotency_key:
+            normalized["idempotencyKey"] = idempotency_key
+        return normalized
 
     if typ == "threads_warmup":
         pad_code = str(payload.get("padCode") or payload.get("pad_code") or "").strip()
@@ -18032,6 +18175,20 @@ class InternalTgSubmitPayload(BaseModel):
     task_type: str
     tg_chat_id: int
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class InternalTgPublishQueueActionPayload(BaseModel):
+    action: str
+    tg_chat_id: int
+    task_id: str = ""
+    archive_id: str = ""
+    scheduled_at: str = ""
+    scheduled_only: bool = False
+
+
+class InternalTgPadLockPayload(BaseModel):
+    pad_code: str
+    owner: str = ""
 
 
 class InternalTgPersonaMemoryPayload(BaseModel):
@@ -18824,33 +18981,57 @@ def _read_tool_r18_publish_queue_stats() -> dict[str, Any]:
     try:
         with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
             conn.row_factory = sqlite3.Row
-            rows = [dict(row) for row in conn.execute("SELECT * FROM publish_tasks").fetchall()]
+            total = int(conn.execute("SELECT COUNT(*) FROM publish_tasks").fetchone()[0])
+            by_status = {
+                str(row[0] or "unknown"): int(row[1])
+                for row in conn.execute("SELECT status, COUNT(*) FROM publish_tasks GROUP BY status")
+            }
+            by_platform = {
+                str(row[0] or "unknown"): int(row[1])
+                for row in conn.execute("SELECT platform, COUNT(*) FROM publish_tasks GROUP BY platform")
+            }
+            by_pad = {
+                str(row[0] or "unknown"): int(row[1])
+                for row in conn.execute("SELECT pad_code, COUNT(*) FROM publish_tasks GROUP BY pad_code")
+            }
+            unbound = int(conn.execute(
+                "SELECT COUNT(*) FROM publish_tasks WHERE COALESCE(TRIM(archive_id), '') = ''"
+            ).fetchone()[0])
+            by_archive: dict[str, dict[str, Any]] = {}
+            for archive_id, status, platform, count in conn.execute("""
+                SELECT archive_id, status, platform, COUNT(*)
+                FROM publish_tasks
+                WHERE COALESCE(TRIM(archive_id), '') <> ''
+                GROUP BY archive_id, status, platform
+            """):
+                clean_archive_id = str(archive_id or "").strip()
+                clean_status = str(status or "unknown").strip() or "unknown"
+                clean_platform = str(platform or "unknown").strip() or "unknown"
+                item = by_archive.setdefault(clean_archive_id, {"total": 0, "by_status": {}, "by_platform": {}, "latest": ""})
+                item["total"] += int(count)
+                item["by_status"][clean_status] = item["by_status"].get(clean_status, 0) + int(count)
+                item["by_platform"][clean_platform] = item["by_platform"].get(clean_platform, 0) + int(count)
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(publish_tasks)")}
+            timestamp_columns = [name for name in ("finished_at", "started_at", "scheduled_at", "created_at") if name in columns]
+            if timestamp_columns:
+                latest_expr = "COALESCE(" + ", ".join(timestamp_columns + ["''"]) + ")"
+                for archive_id, latest in conn.execute(f"""
+                    SELECT archive_id, MAX({latest_expr})
+                    FROM publish_tasks
+                    WHERE COALESCE(TRIM(archive_id), '') <> ''
+                    GROUP BY archive_id
+                """):
+                    clean_archive_id = str(archive_id or "").strip()
+                    if clean_archive_id in by_archive:
+                        by_archive[clean_archive_id]["latest"] = str(latest or "")
+            rows = [dict(row) for row in conn.execute("SELECT * FROM publish_tasks ORDER BY rowid DESC LIMIT 500").fetchall()]
     except Exception as exc:
         return {**empty, "error": str(exc)}
-    by_status: dict[str, int] = {}
-    by_platform: dict[str, int] = {}
-    by_pad: dict[str, int] = {}
-    by_archive: dict[str, dict[str, Any]] = {}
-    unbound = 0
     compact_rows: list[dict[str, Any]] = []
     for row in rows:
         status = str(row.get("status") or "unknown").strip() or "unknown"
         platform = str(row.get("platform") or "unknown").strip() or "unknown"
-        pad = str(row.get("pad_code") or "unknown").strip() or "unknown"
         archive_id = str(row.get("archive_id") or "").strip()
-        by_status[status] = by_status.get(status, 0) + 1
-        by_platform[platform] = by_platform.get(platform, 0) + 1
-        by_pad[pad] = by_pad.get(pad, 0) + 1
-        if archive_id:
-            item = by_archive.setdefault(archive_id, {"total": 0, "by_status": {}, "by_platform": {}, "latest": ""})
-            item["total"] += 1
-            item["by_status"][status] = item["by_status"].get(status, 0) + 1
-            item["by_platform"][platform] = item["by_platform"].get(platform, 0) + 1
-            latest = str(row.get("finished_at") or row.get("started_at") or row.get("scheduled_at") or row.get("created_at") or "")
-            if latest and latest > str(item.get("latest") or ""):
-                item["latest"] = latest
-        else:
-            unbound += 1
         compact_rows.append({
             "id": row.get("id"),
             "archive_id": archive_id,
@@ -18858,19 +19039,106 @@ def _read_tool_r18_publish_queue_stats() -> dict[str, Any]:
             "pad_code": row.get("pad_code"),
             "platform": platform,
             "status": status,
+            "caption": row.get("caption"),
+            "media_url": row.get("media_url"),
             "scheduled_at": row.get("scheduled_at"),
+            "created_at": row.get("created_at"),
+            "started_at": row.get("started_at"),
             "finished_at": row.get("finished_at"),
+            "attempts": row.get("attempts"),
+            "last_error": row.get("last_error"),
+            "failure_step": row.get("failure_step"),
+            "manual_intervention_required": row.get("manual_intervention_required"),
+            "telegram_chat_id": row.get("telegram_chat_id"),
         })
     return {
         **empty,
-        "total": len(rows),
+        "total": total,
         "by_status": by_status,
         "by_platform": by_platform,
         "by_pad": by_pad,
         "by_archive": by_archive,
         "unbound": unbound,
-        "rows": compact_rows[:500],
+        "rows": compact_rows,
     }
+
+
+def _read_tool_r18_publish_queue_rows(
+    tg_chat_id: int,
+    *,
+    status: str = "",
+    archive_id: str = "",
+    platform: str = "",
+    scheduled_only: bool = False,
+    limit: int = 500,
+) -> dict[str, Any]:
+    db_path = TOOL_R18_RUNTIME_DIR / "publish_queue.db"
+    if not db_path.exists():
+        return {"tasks": [], "by_status": {}, "total": 0, "truncated": False}
+    conditions = ["telegram_chat_id = ?"]
+    params: list[Any] = [str(tg_chat_id)]
+    statuses = [item for item in str(status or "").split(",") if item]
+    if statuses:
+        conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
+        params.extend(statuses)
+    if archive_id:
+        conditions.append("archive_id = ?")
+        params.append(archive_id)
+    if platform:
+        conditions.append("platform = ?")
+        params.append(platform)
+    if scheduled_only:
+        conditions.append("(julianday(scheduled_at) - julianday(created_at)) * 86400 > 60")
+    where = " AND ".join(conditions)
+    selected_columns = "id, archive_id, archive_post_id, pad_code, platform, caption, media_url, status, attempts, last_error, failure_step, manual_intervention_required, scheduled_at, created_at, started_at, finished_at, telegram_chat_id"
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    try:
+        with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = [dict(row) for row in conn.execute(
+                f"SELECT {selected_columns} FROM publish_tasks WHERE {where} ORDER BY scheduled_at ASC LIMIT ?",
+                [*params, safe_limit + 1],
+            ).fetchall()]
+            count_rows = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM publish_tasks WHERE telegram_chat_id = ? GROUP BY status",
+                (str(tg_chat_id),),
+            ).fetchall()
+    except Exception as exc:
+        raise RuntimeError(f"读取 Tool R18 排程队列失败：{exc}") from exc
+    by_status = {str(row[0]): int(row[1]) for row in count_rows}
+    return {
+        "tasks": rows[:safe_limit],
+        "by_status": by_status,
+        "total": sum(by_status.values()),
+        "truncated": len(rows) > safe_limit,
+    }
+
+
+def _run_tool_r18_publish_queue_action(payload: dict[str, Any]) -> dict[str, Any]:
+    tool_dir = ROOT_DIR / "tool_r18"
+    script = tool_dir / "scripts" / "skills" / "publish-queue-worker.ts"
+    if not script.exists():
+        raise RuntimeError(f"publish queue script not found: {script}")
+    with tempfile.TemporaryDirectory(prefix="publish-queue-") as temp_dir:
+        input_path = Path(temp_dir) / "input.json"
+        input_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        env = os.environ.copy()
+        env.setdefault("TOOL_R18_RUNTIME_DIR", str(TOOL_R18_RUNTIME_DIR))
+        env.setdefault("TSX_TSCONFIG_PATH", str(tool_dir / "tsconfig.json"))
+        completed = subprocess.run(
+            ["node", "--import", "tsx", str(script), f"@{input_path}"],
+            cwd=str(tool_dir),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+    raw_output = (completed.stdout or "").strip()
+    parsed = _extract_last_json_object(raw_output)
+    if completed.returncode != 0 or parsed.get("ok") is False:
+        raise RuntimeError(str(parsed.get("error") or completed.stderr or raw_output or "publish queue action failed"))
+    return parsed
 
 
 def _read_tool_r18_sentiment_hot_stats() -> dict[str, Any]:
@@ -20812,7 +21080,7 @@ def create_app() -> FastAPI:
                 pass
             except Exception:
                 pass
-        return RedirectResponse(url="/login.html", status_code=302)
+        return RedirectResponse(url="/admin.html#admin-overview", status_code=302)
 
     @app.get("/login.html", include_in_schema=False)
     def page_login() -> FileResponse:
@@ -21303,6 +21571,17 @@ def create_app() -> FastAPI:
             "created_at": int(user.get("created_at") or 0),
         }
 
+    @app.get("/api/admin/me")
+    def api_admin_me(user: dict[str, Any] = Depends(require_admin)):
+        return {
+            "id": int(user.get("id") or 0),
+            "username": str(user.get("username") or ""),
+            "is_admin": True,
+            "is_disabled": bool(int(user.get("is_disabled") or 0)),
+            "balance_cents": int(user.get("balance_cents") or 0),
+            "created_at": int(user.get("created_at") or 0),
+        }
+
     @app.get("/api/auth/me")
     def api_auth_me(user: dict[str, Any] = Depends(get_current_user)):
         return api_me(user)
@@ -21388,7 +21667,7 @@ def create_app() -> FastAPI:
         params = dict(payload.params) if isinstance(payload.params, dict) else {}
         idempotency_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(params.get("idempotencyKey") or ""))[:80]
         with _INTERNAL_TG_SUBMIT_LOCK:
-            if typ == "persona_publish_post" and idempotency_key:
+            if typ in {"persona_publish_post", "persona_enqueue_posts"} and idempotency_key:
                 with db() as conn:
                     rows = conn.execute(
                         "SELECT id, status, input_json FROM tasks WHERE type = ? ORDER BY created_at DESC LIMIT 200",
@@ -21412,6 +21691,79 @@ def create_app() -> FastAPI:
             user_id = _internal_tg_submit_user_id()
             _enqueue_task(task_id, user_id, typ, task_payload)
             return {"ok": True, "id": task_id, "task_type": typ, "prompt_preview": _tg_prompt_preview(task_payload)}
+
+    @app.get("/api/internal/tg/publish_queue")
+    def api_internal_tg_publish_queue(
+        request: Request,
+        tg_chat_id: int,
+        status: str = "",
+        archive_id: str = "",
+        platform: str = "",
+        scheduled_only: bool = False,
+    ):
+        _require_internal_tg_request(request)
+        if int(tg_chat_id or 0) <= 0:
+            raise HTTPException(status_code=400, detail="tg_chat_id 必须为正整数")
+        data = _read_tool_r18_publish_queue_rows(
+            tg_chat_id,
+            status=status,
+            archive_id=archive_id,
+            platform=platform,
+            scheduled_only=scheduled_only,
+        )
+        return {"ok": True, **data}
+
+    @app.post("/api/internal/tg/publish_queue/action")
+    def api_internal_tg_publish_queue_action(payload: InternalTgPublishQueueActionPayload, request: Request):
+        _require_internal_tg_request(request)
+        if int(payload.tg_chat_id or 0) <= 0:
+            raise HTTPException(status_code=400, detail="tg_chat_id 必须为正整数")
+        action = str(payload.action or "").strip()
+        if action not in {"retry", "cancel", "reschedule", "batch-retry", "batch-reschedule", "batch-cancel"}:
+            raise HTTPException(status_code=400, detail="不支持的排程操作")
+        worker_payload: dict[str, Any] = {
+            "action": action,
+            "telegramChatId": str(payload.tg_chat_id),
+        }
+        if payload.task_id:
+            worker_payload["taskId"] = payload.task_id
+        if payload.archive_id:
+            worker_payload["archiveId"] = payload.archive_id
+        if payload.scheduled_at:
+            worker_payload["scheduledAt"] = payload.scheduled_at
+        if action.startswith("batch-"):
+            worker_payload.update({"status": "failed" if action == "batch-retry" else "pending", "scheduledOnly": action != "batch-retry", "limit": 100000})
+        try:
+            return _run_tool_r18_publish_queue_action(worker_payload)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/internal/tg/pad_lock/status")
+    def api_internal_tg_pad_lock_status(request: Request, pad_code: str):
+        _require_internal_tg_request(request)
+        return {"ok": True, **_pad_control_lock_status(pad_code)}
+
+    @app.post("/api/internal/tg/pad_lock/acquire")
+    def api_internal_tg_pad_lock_acquire(payload: InternalTgPadLockPayload, request: Request):
+        _require_internal_tg_request(request)
+        pad_code = str(payload.pad_code or "").strip()
+        owner = str(payload.owner or "").strip() or f"internal:{_new_id('padlock')}"
+        if not pad_code:
+            raise HTTPException(status_code=400, detail="pad_code is required")
+        acquired, current_owner = _acquire_pad_control_lock(pad_code, owner)
+        return {
+            "ok": True,
+            "acquired": acquired,
+            "pad_code": pad_code,
+            "owner": owner,
+            "current_owner": current_owner,
+        }
+
+    @app.post("/api/internal/tg/pad_lock/release")
+    def api_internal_tg_pad_lock_release(payload: InternalTgPadLockPayload, request: Request):
+        _require_internal_tg_request(request)
+        _release_pad_control_lock(payload.pad_code, payload.owner)
+        return {"ok": True}
 
     @app.get("/api/internal/tg/runtime_config")
     def api_internal_tg_runtime_config(request: Request):

@@ -37,6 +37,13 @@ describe("workflow persona seed classification", () => {
     }
   });
 
+  it("does not force a legacy link ending into Jin Junya posts", () => {
+    const jinjunya = WORKFLOW_PERSONA_SEEDS.find((seed) => seed.id === "workflow-persona-jinjunya");
+
+    expect(jinjunya?.setup.tweetStyleLinkUrl).toBe("");
+    expect(jinjunya?.setup.tweetStyleLinkText).toBe("");
+  });
+
   it("does not force Jin Junya bunny ears or harsh flash selfie as the default style", () => {
     const jinjunya = WORKFLOW_PERSONA_SEEDS.find((seed) => seed.id === "workflow-persona-jinjunya");
     const workflow = jinjunya?.setup.imageWorkflow;

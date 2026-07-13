@@ -3,6 +3,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import type { PersonaArchive } from "@/core/archives/persona-archive-domain";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
+import { withSentimentHotExecutionLock } from "@/lib/sentiment-hot-execution-lock";
 import { callTextUnderstandingModelWithFallback, extractText } from "@/lib/gemini-client";
 import {
   buildSentimentCandidateId,
@@ -1501,7 +1502,7 @@ async function waitForMoreSentimentHotCandidates(args: {
   return candidates;
 }
 
-export async function fetchSentimentHotCandidates(args: {
+async function fetchSentimentHotCandidatesUnlocked(args: {
   archive?: PersonaArchive;
   prompt?: string;
   memorySummaries?: string[];
@@ -1823,6 +1824,19 @@ export async function fetchSentimentHotCandidates(args: {
   }
   scheduleSentimentRuntimeShutdown();
   return { candidates, keywords, cookieStatuses, warnings };
+}
+
+export async function fetchSentimentHotCandidates(args: {
+  archive?: PersonaArchive;
+  prompt?: string;
+  memorySummaries?: string[];
+  limit?: number;
+  refresh?: boolean;
+  preheat?: boolean;
+}): Promise<FetchSentimentHotCandidatesResult> {
+  const archiveId = cleanText(args.archive?.id) || "default";
+  const mode = args.preheat === true ? "preheat" : args.refresh === true ? "refresh" : "fetch";
+  return withSentimentHotExecutionLock(`${mode}:${archiveId}`, () => fetchSentimentHotCandidatesUnlocked(args));
 }
 
 export async function preheatSentimentHotCandidates(args: {
@@ -4660,7 +4674,9 @@ function writeThreadsSearchCandidateCache(archiveId: string, keywords: string[],
     };
   }
   fs.mkdirSync(path.dirname(THREADS_SEARCH_CACHE_FILE), { recursive: true });
-  fs.writeFileSync(THREADS_SEARCH_CACHE_FILE, JSON.stringify(state, null, 2), "utf8");
+  const tempFile = `${THREADS_SEARCH_CACHE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tempFile, JSON.stringify(state, null, 2), "utf8");
+  fs.renameSync(tempFile, THREADS_SEARCH_CACHE_FILE);
 }
 
 function readThreadsSearchCandidateCache(archiveId: string, keywords: string[], limit: number, excludeShown = false): SentimentHotCandidate[] {

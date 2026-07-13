@@ -2641,7 +2641,7 @@ function toggleSensitiveInput(button) {
 }
 
 async function ensureAdmin() {
-  const me = await api("/api/me");
+  const me = await api("/api/admin/me");
   if (!me.is_admin) {
     location.href = "/index.html";
     return null;
@@ -3808,7 +3808,7 @@ function bindActions() {
         });
         el("accUsernamePassword").value = "";
         el("accNewUsername").value = "";
-        const me = await api("/api/me");
+        const me = await api("/api/admin/me");
         el("adminName").textContent = me.username;
         if (el("accCurrentUsername")) el("accCurrentUsername").value = me.username || "";
         setMsg("accountUsernameMsg", "用户名已修改", true);
@@ -3820,7 +3820,7 @@ function bindActions() {
 
   el("btnLogout").addEventListener("click", async () => {
     await api("/api/auth/logout", { method: "POST" });
-    location.href = "/login.html";
+    location.href = "/admin.html#admin-overview";
   });
 
   el("btnToUser").addEventListener("click", () => {

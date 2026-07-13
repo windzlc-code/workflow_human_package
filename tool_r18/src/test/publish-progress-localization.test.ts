@@ -1,7 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { formatPublishStepForTelegram } from "@/telegram-bot";
+import { buildTaskActionRows, formatPublishStepForTelegram } from "@/telegram-bot";
 
 describe("publish progress localization", () => {
+  it("shows a useful short task ID on queue action buttons", () => {
+    const taskId = "task-1783924608060-8ulkex";
+    const rows = buildTaskActionRows(taskId, "failed");
+
+    expect(rows.flat().map((button) => button.text)).toEqual([
+      "🔄 重試 task-178",
+      "✏️ 改時間 task-178",
+      "🗑 取消 task-178",
+    ]);
+    expect(rows.flat().map((button) => button.callback_data)).toEqual([
+      `retrytask_${taskId}`,
+      `edittasktime_${taskId}`,
+      `canceltask_${taskId}`,
+    ]);
+  });
+
   it("translates Telegram cold-start progress into Chinese", () => {
     expect(formatPublishStepForTelegram("Telegram cold start: reset to desktop and clear the previous screen"))
       .toBe("冷启动 Telegram：返回智能体手机桌面并清理上一画面");

@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   appendSentimentHotCandidatePost: vi.fn(),
   fetchSentimentHotCandidates: vi.fn(),
+  preheatSentimentHotCandidates: vi.fn(),
   loadPersonaArchive: vi.fn(),
   rememberSentimentHotImported: vi.fn(),
   rememberSentimentHotSelected: vi.fn(),
@@ -19,7 +20,9 @@ vi.mock("@/lib/persona-archives", () => ({
 }));
 vi.mock("@/lib/sentiment-hot-importer", () => ({
   cleanSentimentCandidateContent: (value: string) => String(value || "").trim(),
+  downloadCandidateMedia: vi.fn(async (value) => value.media || []),
   fetchSentimentHotCandidates: mocks.fetchSentimentHotCandidates,
+  preheatSentimentHotCandidates: mocks.preheatSentimentHotCandidates,
 }));
 vi.mock("@/lib/sentiment-candidate-store", () => ({
   rememberSentimentHotImported: mocks.rememberSentimentHotImported,
@@ -34,7 +37,7 @@ vi.mock("@/telegram-bot", () => ({
   loadSelectablePersonaMemories: vi.fn(async () => []),
 }));
 
-import { fetchCandidates, importCandidates } from "../../scripts/skills/persona-sentiment-hot-once";
+import { fetchCandidates, importCandidates, preheatCandidates } from "../../scripts/skills/persona-sentiment-hot-once";
 
 const archive = {
   id: "archive-hot",
@@ -81,6 +84,21 @@ describe("persona sentiment hot one-shot adapter", () => {
 
     expect(result.candidates[0].media).toEqual([media]);
     expect(result.candidates[0].media[0]).not.toBe(media);
+  });
+
+  it("runs preheat without using the interactive fetch adapter", async () => {
+    mocks.preheatSentimentHotCandidates.mockResolvedValue({
+      ok: true,
+      count: 8,
+      keywords: ["keyword"],
+      warnings: [],
+    });
+
+    const result = await preheatCandidates({ action: "preheat", archiveId: archive.id, limit: 10, refresh: true });
+
+    expect(mocks.preheatSentimentHotCandidates).toHaveBeenCalledWith({ archive, limit: 10, refresh: true });
+    expect(mocks.fetchSentimentHotCandidates).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, action: "preheat", archiveId: archive.id, count: 8 });
   });
 
   it("returns failure semantics and reports the original sourceIndex when every import fails", async () => {

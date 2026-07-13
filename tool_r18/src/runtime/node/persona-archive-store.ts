@@ -23,6 +23,27 @@ function getStorePath() {
   return resolveRuntimeFile("persona_archives.json");
 }
 
+function getDeletedIdsPath() {
+  return resolveRuntimeFile("persona_dashboard_deleted_personas.json");
+}
+
+function readDeletedIds(): Set<string> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(getDeletedIdsPath(), "utf-8"));
+    return new Set(Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeDeletedIds(ids: Set<string>): void {
+  const filePath = getDeletedIdsPath();
+  ensureParentDir(filePath);
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify([...ids].sort(), null, 2), "utf-8");
+  fs.renameSync(tempPath, filePath);
+}
+
 function ensureParentDir(filePath: string) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
@@ -67,6 +88,7 @@ function withArchiveFileLock<T>(fn: () => T): T {
 // ─── 内存缓存 ─────────────────────────────────────────────────────────────────
 let _cache: PersonaArchiveRecord[] | null = null;
 let _cacheFileMtime = 0;
+let _cacheDeletedIdsMtime = 0;
 const _loadedSnapshots = new Map<string, PersonaArchiveRecord>();
 
 function snapshotKey(id: string, updatedAt: string | undefined): string {
@@ -150,7 +172,9 @@ function isCacheStale(): boolean {
   if (_cache === null) return true;
   try {
     const stat = fs.statSync(getStorePath());
-    return stat.mtimeMs !== _cacheFileMtime;
+    let deletedIdsMtime = 0;
+    try { deletedIdsMtime = fs.statSync(getDeletedIdsPath()).mtimeMs; } catch {}
+    return stat.mtimeMs !== _cacheFileMtime || deletedIdsMtime !== _cacheDeletedIdsMtime;
   } catch {
     // 文件不存在或无法访问 → 缓存一定过期
     return true;
@@ -163,13 +187,16 @@ function readAll(): PersonaArchiveRecord[] {
   if (!fs.existsSync(filePath)) {
     _cache = [];
     _cacheFileMtime = 0;
+    try { _cacheDeletedIdsMtime = fs.statSync(getDeletedIdsPath()).mtimeMs; } catch { _cacheDeletedIdsMtime = 0; }
     return _cache;
   }
   try {
     const raw = fs.readFileSync(filePath, "utf-8");
     const parsed = JSON.parse(raw);
-    _cache = Array.isArray(parsed) ? parsed : [];
+    const deletedIds = readDeletedIds();
+    _cache = (Array.isArray(parsed) ? parsed : []).filter((item) => !deletedIds.has(String(item?.id || "")));
     try { _cacheFileMtime = fs.statSync(filePath).mtimeMs; } catch {}
+    try { _cacheDeletedIdsMtime = fs.statSync(getDeletedIdsPath()).mtimeMs; } catch { _cacheDeletedIdsMtime = 0; }
     return _cache;
   } catch {
     _cache = [];
@@ -183,6 +210,7 @@ function writeAllUnlocked(items: PersonaArchiveRecord[]) {
   fs.writeFileSync(filePath, JSON.stringify(items, null, 2), "utf-8");
   _cache = items;
   try { _cacheFileMtime = fs.statSync(filePath).mtimeMs; } catch {}
+  try { _cacheDeletedIdsMtime = fs.statSync(getDeletedIdsPath()).mtimeMs; } catch { _cacheDeletedIdsMtime = 0; }
 }
 
 export function installNodePersonaArchiveBridge() {
@@ -195,6 +223,9 @@ export function installNodePersonaArchiveBridge() {
     async save(archive: PersonaArchiveRecord, options?: { baseUpdatedAt?: string }) {
       let savedArchive = archive;
       withArchiveFileLock(() => {
+        if (readDeletedIds().has(archive.id)) {
+          throw new Error("persona archive was deleted on the server");
+        }
         const items = readAll();
         const idx = items.findIndex((item) => item.id === archive.id);
         const base = _loadedSnapshots.get(snapshotKey(archive.id, options?.baseUpdatedAt));
@@ -230,6 +261,10 @@ export function installNodePersonaArchiveBridge() {
       withArchiveFileLock(() => {
         const items = readAll().filter((item) => item.id !== id);
         writeAllUnlocked(items);
+        const deletedIds = readDeletedIds();
+        deletedIds.add(id);
+        writeDeletedIds(deletedIds);
+        try { _cacheDeletedIdsMtime = fs.statSync(getDeletedIdsPath()).mtimeMs; } catch { _cacheDeletedIdsMtime = 0; }
         for (const key of _loadedSnapshots.keys()) {
           if (key.startsWith(`${id}|`)) _loadedSnapshots.delete(key);
         }
