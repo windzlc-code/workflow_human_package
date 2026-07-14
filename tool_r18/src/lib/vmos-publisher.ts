@@ -28608,10 +28608,10 @@ async function openThreadsLatestProfilePostByMode(
 ): Promise<{ ok: true; screenshotUrl: string; postPreview?: string } | { ok: false; error: string; screenshotUrl?: string }> {
   const requireCommentBadge = selectionMode === "commented_post";
   const locateTimeoutMs = requireCommentBadge ? 18_000 : 6_000;
-  let initialShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
-  let profile = initialShotUrl && await detectThreadsProfilePageLocally(initialShotUrl).catch(() => false)
-    ? { ok: true as const, screenshotUrl: initialShotUrl }
-    : await openThreadsProfileForAccountQuery(config, padCode);
+  // A previous auto-reply run can leave the device in a reply composer.  Do
+  // not treat that foreground state as a profile start: explicitly restore
+  // the account profile before any timeline scan or reset swipe.
+  let profile = await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
   if (profile.ok !== true) return profile as { ok: false; error: string; screenshotUrl?: string };
   await delay(1200);
   let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(async () => (
