@@ -26389,6 +26389,9 @@ type ThreadsAutoReplyCandidate = {
   score: number;
   key?: string;
   replyPoint?: { x: number; y: number };
+  // A vision-provided coordinate refers to this exact comment action row;
+  // row-only mappings are less reliable after nested replies reflow.
+  replyPointEvidence?: "vision_coordinate" | "row_mapping" | "local_fallback";
   sourceScreenshotUrl?: string;
   debugReason?: string;
 };
@@ -27394,6 +27397,11 @@ Rules:
               || (rowIndex > 0 ? replyPoints[rowIndex - 1] : null)
               || replyPoints[index]
               || undefined;
+            const replyPointEvidence = explicitReplyPoint
+              ? "vision_coordinate" as const
+              : replyPoint
+                ? "row_mapping" as const
+                : undefined;
             return {
               author: normalizeSingleLine(String(
                 record.author
@@ -27420,6 +27428,7 @@ Rules:
                 || "",
               )),
               replyPoint,
+              replyPointEvidence,
               rowIndex,
             };
           }
@@ -27447,6 +27456,7 @@ Rules:
           author: normalizeThreadsAutoReplyAuthor(item.author) || undefined,
           score: 0,
           replyPoint: item.replyPoint,
+          replyPointEvidence: item.replyPointEvidence,
           sourceScreenshotUrl: screenshotUrl,
           debugReason: `${debugReason}${item.rowIndex ? `:row_${item.rowIndex}` : ""}`,
         }));
@@ -31204,8 +31214,10 @@ async function openThreadsCommentReplyComposerAtPoint(
   padCode: string,
   point: { x: number; y: number },
   expectedAuthor?: string,
+  options: { allowVisualCoordinateTargetFallback?: boolean } = {},
 ): Promise<{ ok: true; screenshotUrl: string; debugReason: string } | { ok: false; error: string; screenshotUrl?: string }> {
   const expectedNormalizedAuthor = normalizeThreadsAutoReplyAuthor(expectedAuthor);
+  let usedVisualCoordinateTargetFallback = false;
   const isExpectedReplyTarget = async (xml: string, screenshotUrl: string) => {
     if (!expectedNormalizedAuthor) return false;
     const xmlLine = normalizeSingleLine(decodeXmlAttr(xml)).toLowerCase();
@@ -31225,6 +31237,14 @@ async function openThreadsCommentReplyComposerAtPoint(
       expectedNormalizedAuthor,
     ).catch(() => null);
     if (isThreadsAutoReplyExpectedAuthorMatch(expectedNormalizedAuthor, visualAuthor)) return null;
+    // The direct vision collector supplied an exact reply-icon coordinate and
+    // the composer was already classified as a comment reply (not Add Thread).
+    // Keep a detected mismatch as a hard stop, but do not discard that verified
+    // target merely because the second OCR pass timed out on the placeholder.
+    if (!visualAuthor && options.allowVisualCoordinateTargetFallback) {
+      usedVisualCoordinateTargetFallback = true;
+      return null;
+    }
     await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
     return {
       ok: false as const,
@@ -31377,7 +31397,7 @@ async function openThreadsCommentReplyComposerAtPoint(
         return {
           ok: true,
           screenshotUrl: retryShotUrl,
-          debugReason: "thread_reply_detail_visual:auto_reply_comment_target",
+          debugReason: `thread_reply_detail_visual:auto_reply_comment_target${usedVisualCoordinateTargetFallback ? " | exact_visual_coordinate" : ""}`,
         };
       }
     }
@@ -31392,7 +31412,7 @@ async function openThreadsCommentReplyComposerAtPoint(
   return {
     ok: true,
     screenshotUrl: shotUrl,
-    debugReason: "thread_detail_visual:auto_reply_comment_target",
+    debugReason: `thread_detail_visual:auto_reply_comment_target${usedVisualCoordinateTargetFallback ? " | exact_visual_coordinate" : ""}`,
   };
 }
 
@@ -32924,6 +32944,7 @@ export async function autoReplyThreadsAccount(
             padCode,
             commentTarget,
             decision.candidate.author,
+            { allowVisualCoordinateTargetFallback: decision.candidate.replyPointEvidence === "vision_coordinate" },
           );
           if (!openedReply.ok) {
             throw new Error(openedReply.error);
