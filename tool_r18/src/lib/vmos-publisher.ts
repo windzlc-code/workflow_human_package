@@ -28945,7 +28945,10 @@ async function openThreadsLatestProfilePostByMode(
     }
     const profileShotUrlBeforeTap = shotUrl;
     const profileUiXmlBeforeTap = profileUiXml;
-    await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, target, 2800).catch(async () => {
+    const postOpenTarget = requireCommentBadge
+      ? await resolveThreadsCommentedPostOpenPoint(shotUrl, target)
+      : target;
+    await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, postOpenTarget, 2800).catch(async () => {
       const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
       const image = await getImageDimensions(shotUrl).catch(() => null);
       const imageWidth = image?.width || BASE_SCREEN.width;
@@ -28953,8 +28956,8 @@ async function openThreadsLatestProfilePostByMode(
       await tapViaAdbAbsolute(
         config,
         padCode,
-        Math.round(target.x * (screen.width / imageWidth)),
-        Math.round(target.y * (screen.height / imageHeight)),
+        Math.round(postOpenTarget.x * (screen.width / imageWidth)),
+        Math.round(postOpenTarget.y * (screen.height / imageHeight)),
         2800,
       );
     });
@@ -28964,7 +28967,7 @@ async function openThreadsLatestProfilePostByMode(
       padCode,
       step: "profile-comment-badge-after-tap",
       screenshotUrl: shotUrl,
-      meta: { target, openAttempt },
+      meta: { target, postOpenTarget, openAttempt },
     });
     if (await detectThreadsInAppBrowserLocally(shotUrl).catch(() => false)) {
       saveThreadsAutoReplySampleStep({
@@ -29312,7 +29315,10 @@ async function openThreadsNextProfilePostByMode(
   }
   const profileShotUrlBeforeTap = shotUrl;
   const profileUiXmlBeforeTap = profileUiXml;
-  await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, target, 2600).catch(async () => {
+  const postOpenTarget = requireCommentBadge
+    ? await resolveThreadsCommentedPostOpenPoint(shotUrl, target)
+    : target;
+  await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, postOpenTarget, 2600).catch(async () => {
     const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
     const image = await getImageDimensions(shotUrl).catch(() => null);
     const imageWidth = image?.width || BASE_SCREEN.width;
@@ -29320,8 +29326,8 @@ async function openThreadsNextProfilePostByMode(
     await tapViaAdbAbsolute(
       config,
       padCode,
-      Math.round(target.x * (screen.width / imageWidth)),
-      Math.round(target.y * (screen.height / imageHeight)),
+      Math.round(postOpenTarget.x * (screen.width / imageWidth)),
+      Math.round(postOpenTarget.y * (screen.height / imageHeight)),
       2600,
     );
   });
@@ -29331,8 +29337,22 @@ async function openThreadsNextProfilePostByMode(
     padCode,
     step: "profile-next-comment-badge-after-tap",
     screenshotUrl: shotUrl,
-    meta: { target },
+    meta: { target, postOpenTarget },
   });
+  if (await detectThreadsInAppBrowserLocally(shotUrl).catch(() => false)) {
+    saveThreadsAutoReplySampleStep({
+      padCode,
+      step: "profile-next-comment-badge-opened-inapp-browser",
+      screenshotUrl: shotUrl,
+      meta: { target, postOpenTarget, reason: "LOCAL_THREADS_INAPP_BROWSER" },
+    });
+    const restored = await restoreThreadsAutoReplyProfileForNextScan(config, padCode);
+    return {
+      ok: false,
+      error: "点击本人帖后进入 Threads 内置网页，已返回个人页并跳过当前帖",
+      screenshotUrl: restored.screenshotUrl || shotUrl,
+    };
+  }
   const stillSuggestionAfterTap = await detectThreadsProfileSuggestionOverlayLocally(shotUrl).catch(() => false);
   if (stillSuggestionAfterTap) {
     shotUrl = await dismissThreadsProfileSuggestionOverlay(config, padCode, shotUrl).catch(() => shotUrl);
@@ -29388,17 +29408,14 @@ async function openThreadsNextProfilePostByMode(
         maxAgeDays,
       }).catch(() => null)
       : null;
+    const currentPostOpenPoint = currentTarget && currentProfileShotUrl
+      ? await resolveThreadsCommentedPostOpenPoint(currentProfileShotUrl, currentTarget)
+      : null;
     const retryPoints = [
-      ...(currentTarget ? [
+      ...(currentPostOpenPoint ? [
         {
-          x: currentTarget.x,
-          y: currentTarget.y,
-          debugReason: "profile_next_retry_current_comment_icon",
-        },
-        {
-          x: currentTarget.x + Math.round(imageWidth * 0.06),
-          y: currentTarget.y,
-          debugReason: "profile_next_retry_current_comment_count",
+          ...currentPostOpenPoint,
+          debugReason: "profile_next_retry_current_post_body",
         },
       ] : []),
       {
@@ -29413,7 +29430,7 @@ async function openThreadsNextProfilePostByMode(
       },
     ];
     for (const [retryIndex, retryPoint] of retryPoints.entries()) {
-      const retryBaseShotUrl = retryPoint.debugReason?.includes("current_comment")
+      const retryBaseShotUrl = retryPoint.debugReason?.includes("current_")
         ? (currentProfileShotUrl || profileShotUrlBeforeTap)
         : profileShotUrlBeforeTap;
       await tapScreenshotPointViaAdbNoWait(config, padCode, retryBaseShotUrl, retryPoint, 2200).catch(async () => {
@@ -29784,6 +29801,25 @@ function findThreadsOwnProfilePostBodyTargetFromUiXml(
     .sort((a, b) => b.score - a.score || a.y - b.y);
   const best = candidates[0];
   return best ? { x: best.x, y: best.y, text: best.text } : null;
+}
+
+async function resolveThreadsCommentedPostOpenPoint(
+  screenshotUrl: string,
+  commentBadgeTarget: { x: number; y: number },
+): Promise<{ x: number; y: number }> {
+  const image = await getImageDimensions(screenshotUrl).catch(() => null);
+  const width = image?.width || BASE_SCREEN.width;
+  const height = image?.height || BASE_SCREEN.height;
+  // The comment-count control on the profile timeline can open an l.threads.com
+  // web view. Use the same post's readable body area to enter native detail;
+  // the counted badge remains only the eligibility signal.
+  return {
+    x: Math.round(width * 0.50),
+    y: Math.max(
+      Math.round(height * 0.30),
+      Math.min(Math.round(height * 0.78), Math.round(commentBadgeTarget.y - height * 0.22)),
+    ),
+  };
 }
 
 export async function locateThreadsVisibleOwnPostContentTarget(
