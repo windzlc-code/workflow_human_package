@@ -27167,15 +27167,17 @@ Rules:
 - Do not return the signed-in account from the bottom composer avatar, navigation, or unrelated nested replies.
 - If the target author is not clearly visible, return {"username":""}.`;
   for (const inlineData of inlineCandidates) {
-    // The target name is small and rendered in the composer placeholder. Give
-    // the configured visual model enough time to read it rather than guessing.
-    const request = createTimeoutSignal(42_000);
+    // Use the same configured vision route that already reads visible comment
+    // authors during collection. The generic direct-multimodal route can time
+    // out on this narrow composer crop even when the comment collector has
+    // already proved the model can read the same account name.
+    const request = createTimeoutSignal(20_000);
     try {
-      const raw = await callThreadsAutoReplyDirectMultimodalModel(
+      const raw = await callThreadsAutoReplyVisionOcrModel(
         prompt,
         inlineData,
         request.signal,
-        { maxTokens: 80, perModelTimeoutMs: 40_000 },
+        { maxTokens: 80, perModelTimeoutMs: 12_000 },
       );
       const text = extractText(raw);
       const jsonText = text.match(/\{[\s\S]*\}/)?.[0] || "";
