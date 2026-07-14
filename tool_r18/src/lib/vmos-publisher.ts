@@ -29579,9 +29579,36 @@ async function restoreThreadsAutoReplyProfileForNextScan(
         screenshotUrl: shotUrl || undefined,
         meta: { attempt },
       });
+      // Android back first closes the IME on this screen.  A second back is
+      // not consistently delivered to Threads, so follow it with the visible
+      // composer close affordance before trying to scan the profile again.
       await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 5_000, 450).catch(() => "");
       await delay(800);
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+      const afterBackUiXml = await dumpUiXmlQuick(config, padCode, 1_500).catch(() => "");
+      const composerStillOpen = Boolean(
+        findThreadsReplyComposerInputTarget(afterBackUiXml)
+        || looksLikeThreadsReplyComposerUiXml(afterBackUiXml)
+        || await detectThreadsReplyComposerLocally(shotUrl).catch(() => false),
+      );
+      if (composerStillOpen) {
+        const screen = await getScreenSize(config, padCode).catch(() => THREADS_TALL_REFERENCE_SCREEN);
+        await tapViaAdbAbsoluteQuick(
+          config,
+          padCode,
+          Math.round(screen.width * 0.09),
+          Math.round(screen.height * 0.075),
+          1_200,
+        ).catch(() => undefined);
+        await delay(900);
+        shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+        saveThreadsAutoReplySampleStep({
+          padCode,
+          step: "profile-restore-tapped-reply-editor-close",
+          screenshotUrl: shotUrl || undefined,
+          meta: { attempt },
+        });
+      }
       continue;
     }
     if (shotUrl && await detectThreadsProfilePageLocally(shotUrl).catch(() => false)) {
