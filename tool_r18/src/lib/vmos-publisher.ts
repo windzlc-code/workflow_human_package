@@ -28948,7 +28948,7 @@ async function openThreadsLatestProfilePostByMode(
     const profileShotUrlBeforeTap = shotUrl;
     const profileUiXmlBeforeTap = profileUiXml;
     const postOpenTarget = requireCommentBadge
-      ? await resolveThreadsCommentedPostOpenPoint(shotUrl, target)
+      ? await resolveThreadsCommentedPostOpenPoint(shotUrl, target, profileUiXml)
       : target;
     await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, postOpenTarget, 2800).catch(async () => {
       const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
@@ -29318,7 +29318,7 @@ async function openThreadsNextProfilePostByMode(
   const profileShotUrlBeforeTap = shotUrl;
   const profileUiXmlBeforeTap = profileUiXml;
   const postOpenTarget = requireCommentBadge
-    ? await resolveThreadsCommentedPostOpenPoint(shotUrl, target)
+    ? await resolveThreadsCommentedPostOpenPoint(shotUrl, target, profileUiXml)
     : target;
   await tapScreenshotPointViaAdbNoWait(config, padCode, shotUrl, postOpenTarget, 2600).catch(async () => {
     const screen = await getScreenSize(config, padCode).catch(() => BASE_SCREEN);
@@ -29411,7 +29411,7 @@ async function openThreadsNextProfilePostByMode(
       }).catch(() => null)
       : null;
     const currentPostOpenPoint = currentTarget && currentProfileShotUrl
-      ? await resolveThreadsCommentedPostOpenPoint(currentProfileShotUrl, currentTarget)
+      ? await resolveThreadsCommentedPostOpenPoint(currentProfileShotUrl, currentTarget, currentProfileUiXml)
       : null;
     const retryPoints = [
       ...(currentPostOpenPoint ? [
@@ -29835,10 +29835,22 @@ function findThreadsOwnProfilePostBodyTargetFromUiXml(
 async function resolveThreadsCommentedPostOpenPoint(
   screenshotUrl: string,
   commentBadgeTarget: { x: number; y: number },
+  uiXml = "",
 ): Promise<{ x: number; y: number }> {
   const image = await getImageDimensions(screenshotUrl).catch(() => null);
   const width = image?.width || BASE_SCREEN.width;
   const height = image?.height || BASE_SCREEN.height;
+  const uiPostBody = findThreadsOwnProfilePostBodyTargetFromUiXml(uiXml);
+  if (
+    uiPostBody
+    && uiPostBody.y < commentBadgeTarget.y - 48
+    && commentBadgeTarget.y - uiPostBody.y <= Math.round(height * 0.42)
+  ) {
+    return {
+      x: Math.max(Math.round(width * 0.18), Math.min(Math.round(width * 0.82), uiPostBody.x)),
+      y: Math.max(Math.round(height * 0.25), Math.min(Math.round(height * 0.78), uiPostBody.y)),
+    };
+  }
   // The comment-count control on the profile timeline can open an l.threads.com
   // web view. Use the same post's readable body area to enter native detail;
   // the counted badge remains only the eligibility signal.
