@@ -13,6 +13,7 @@ import {
   buildThreadsShareIntentCommand,
   detectAndroidCameraFromUiXml,
   detectThreadsBlockedScreenFromUiXml,
+  detectThreadsVisibleCommentReplyPointsLocally,
   detectThreadsComposerLocally,
   detectThreadsFullscreenMediaViewerLocally,
   detectThreadsGalleryPickerLocally,
@@ -42,11 +43,14 @@ import {
   findAcpReplySendButtonPointFromScreenshot,
   findThreadsProfileVideoTabTarget,
   finalizeThreadsAutoReplyCandidates,
+  isThreadsAutoReplyExpectedAuthorMatch,
   finalizeWarmupComment,
   locateThreadsVisibleOwnPostContentTarget,
   loadThreadsAutoReplyRepliedSets,
+  looksLikeThreadsBlankReplyRatingUiXml,
   rememberThreadsAutoReplyComment,
   resolveThreadsAutoReplyVisionModelsForTest,
+  threadsAutoReplyVisionOutputHasVisibleCommentsForTest,
   chooseThreadsGalleryMarkerToKeep,
   getLocalVisualVerificationSupport,
   getThreadsProfileReferenceImageBestMatchForTest,
@@ -72,8 +76,43 @@ import {
   scalePointBetweenScreens,
   scalePointFromReferenceScreen,
   scaleScreenshotPointToAdbPointForSizes,
+  shouldTreatThreadsReplyPageAsRating,
   shouldUseThreadsShareIntentPath,
 } from "@/lib/vmos-publisher";
+
+describe("Threads reply page classification", () => {
+  it("does not treat a normal Threads reply composer as a rating prompt", () => {
+    expect(looksLikeThreadsBlankReplyRatingUiXml(
+      '<node text="Threads"/><node text="Add to thread"/><node text="Reply liliacvuiy575"/>',
+    )).toBe(false);
+  });
+
+  it("recognizes explicit Threads rating copy", () => {
+    expect(looksLikeThreadsBlankReplyRatingUiXml('<node text="喜歡 Threads 嗎？"/>')).toBe(true);
+    expect(looksLikeThreadsBlankReplyRatingUiXml('<node text="Rate this app"/>')).toBe(true);
+  });
+
+  it("keeps a visually blank reply page when the expected author is confirmed", () => {
+    expect(shouldTreatThreadsReplyPageAsRating({
+      xmlLooksLikeRating: false,
+      visualLooksLikeRating: true,
+      expectedTargetConfirmed: true,
+    })).toBe(false);
+  });
+
+  it("rejects explicit rating XML and unconfirmed visually blank pages", () => {
+    expect(shouldTreatThreadsReplyPageAsRating({
+      xmlLooksLikeRating: true,
+      visualLooksLikeRating: false,
+      expectedTargetConfirmed: true,
+    })).toBe(true);
+    expect(shouldTreatThreadsReplyPageAsRating({
+      xmlLooksLikeRating: false,
+      visualLooksLikeRating: true,
+      expectedTargetConfirmed: false,
+    })).toBe(true);
+  });
+});
 
 describe("Threads auto-reply vision model order", () => {
   it("keeps backend configuration order and only appends missing fallbacks", () => {
@@ -85,6 +124,18 @@ describe("Threads auto-reply vision model order", () => {
       "xai/grok-4.3",
       "google/gemini-3-flash-preview",
     ]);
+  });
+
+  it("rejects a semantic empty result when visible reply rows prove comments are on screen", () => {
+    expect(threadsAutoReplyVisionOutputHasVisibleCommentsForTest('{"comments":[]}', true)).toBe(false);
+    expect(threadsAutoReplyVisionOutputHasVisibleCommentsForTest(
+      '{"comments":[{"author":"liliacvuiy575","text":"好的，收到"}]}',
+      true,
+    )).toBe(true);
+  });
+
+  it("accepts an empty result when the screenshot has no local reply-row evidence", () => {
+    expect(threadsAutoReplyVisionOutputHasVisibleCommentsForTest('{"comments":[]}', false)).toBe(true);
   });
 });
 
@@ -176,6 +227,72 @@ async function makePngDataUrl(
     .toBuffer();
   return `data:image/png;base64,${buffer.toString("base64")}`;
 }
+
+describe("Threads comment reply point binding", () => {
+  it("accepts a one-character terminal truncation from reply-target vision only", () => {
+    expect(isThreadsAutoReplyExpectedAuthorMatch("liliacvuiy575", "liliacvuiy57")).toBe(true);
+    expect(isThreadsAutoReplyExpectedAuthorMatch("lliacvuiy575", "liliacvuiy57")).toBe(true);
+    expect(isThreadsAutoReplyExpectedAuthorMatch("liliacvuiy575", "liliacvuiy576")).toBe(false);
+    expect(isThreadsAutoReplyExpectedAuthorMatch("liliacvuiy575", "liliacvui")).toBe(false);
+  });
+
+  it("ignores link-card glyph rows between real comment action rows", async () => {
+    const sharp = (await import("sharp")).default;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1600">
+      <rect width="720" height="1600" fill="#fff"/>
+      <rect x="119" y="512" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="214" y="512" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="404" y="512" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="175" y="932" width="30" height="30" fill="#111"/>
+      <rect x="269" y="932" width="30" height="30" fill="#111"/>
+      <rect x="327" y="932" width="30" height="30" fill="#111"/>
+    </svg>`;
+    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+    const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+
+    await expect(detectThreadsVisibleCommentReplyPointsLocally(dataUrl)).resolves.toEqual([
+      { x: 232, y: 530 },
+    ]);
+  });
+
+  it("keeps rows whose counted reply icon is smaller than the other action icons", async () => {
+    const sharp = (await import("sharp")).default;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1600">
+      <rect width="720" height="1600" fill="#fff"/>
+      <rect x="119" y="612" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="214" y="611" width="37" height="37" rx="18" fill="#111"/>
+      <rect x="309" y="612" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="404" y="612" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="175" y="932" width="30" height="30" fill="#111"/>
+      <rect x="269" y="932" width="30" height="30" fill="#111"/>
+      <rect x="327" y="932" width="30" height="30" fill="#111"/>
+    </svg>`;
+    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+    const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+
+    await expect(detectThreadsVisibleCommentReplyPointsLocally(dataUrl)).resolves.toEqual([
+      { x: 232, y: 629 },
+    ]);
+  });
+
+  it("keeps a visible bottom comment action row above the composer", async () => {
+    const sharp = (await import("sharp")).default;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1600">
+      <rect width="720" height="1600" fill="#fff"/>
+      <rect x="119" y="1410" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="214" y="1410" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="309" y="1410" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="404" y="1410" width="36" height="34" rx="10" fill="none" stroke="#111" stroke-width="5"/>
+      <rect x="32" y="1518" width="656" height="72" rx="36" fill="#eee"/>
+    </svg>`;
+    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+    const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+
+    await expect(detectThreadsVisibleCommentReplyPointsLocally(dataUrl)).resolves.toEqual([
+      { x: 232, y: 1427 },
+    ]);
+  });
+});
 
 type PromotedSampleAssertion = {
   detector: string;
@@ -473,6 +590,28 @@ describe("Threads publish verification", () => {
     if (!fs.existsSync(samplePath)) return;
     const dataUrl = `data:image/jpeg;base64,${fs.readFileSync(samplePath).toString("base64")}`;
     expect(await detectThreadsProfilePageLocally(dataUrl)).toBe(true);
+  });
+
+  it("recognizes a scrolled empty own profile without mistaking it for a detail page", async () => {
+    const sharp = (await import("sharp")).default;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1600">
+      <rect width="720" height="1600" fill="#fff"/>
+      <rect x="42" y="92" width="45" height="45" rx="8" fill="none" stroke="#111" stroke-width="7"/>
+      <circle cx="438" cy="114" r="27" fill="none" stroke="#111" stroke-width="7"/>
+      <rect x="538" y="90" width="48" height="48" rx="10" fill="none" stroke="#111" stroke-width="7"/>
+      <rect x="637" y="96" width="48" height="10" rx="5" fill="#111"/>
+      <rect x="637" y="121" width="48" height="10" rx="5" fill="#111"/>
+      <rect x="40" y="252" width="112" height="23" fill="#111"/>
+      <rect x="210" y="252" width="92" height="23" fill="#aaa"/>
+      <rect x="375" y="252" width="128" height="23" fill="#aaa"/>
+      <rect x="566" y="252" width="94" height="23" fill="#aaa"/>
+      <rect x="155" y="880" width="410" height="28" rx="14" fill="#777"/>
+      <circle cx="622" cy="1534" r="24" fill="#111"/>
+    </svg>`;
+    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+    const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
+
+    await expect(detectThreadsProfilePageLocally(dataUrl)).resolves.toBe(true);
   });
 
   it("recognizes public news profile pages during warmup", async () => {
