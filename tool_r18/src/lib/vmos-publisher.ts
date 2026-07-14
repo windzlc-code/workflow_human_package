@@ -27180,9 +27180,9 @@ export async function detectThreadsCommentReplyTargetAuthorByVision(
       screenshotUrl,
       {
         x: 0,
-        y: Math.max(0, Math.floor(image.height * 0.84)),
+        y: Math.max(0, Math.floor(image.height * 0.76)),
         width: image.width,
-        height: Math.max(1, Math.ceil(image.height * 0.16)),
+        height: Math.max(1, Math.ceil(image.height * 0.24)),
       },
       1080,
     ).catch(() => null)
@@ -27200,13 +27200,15 @@ Rules:
 - Do not return the signed-in account from the bottom composer avatar, navigation, or unrelated nested replies.
 - If the target author is not clearly visible, return {"username":""}.`;
   for (const inlineData of inlineCandidates) {
-    const request = createTimeoutSignal(14_000);
+    // The target name is small and rendered in the composer placeholder. Give
+    // the configured visual model enough time to read it rather than guessing.
+    const request = createTimeoutSignal(42_000);
     try {
       const raw = await callThreadsAutoReplyDirectMultimodalModel(
         prompt,
         inlineData,
         request.signal,
-        { maxTokens: 80 },
+        { maxTokens: 80, perModelTimeoutMs: 40_000 },
       );
       const text = extractText(raw);
       const jsonText = text.match(/\{[\s\S]*\}/)?.[0] || "";
@@ -27304,7 +27306,7 @@ Task:
       : `Read this Threads comment screenshot. Extract visible comments first; do not decide reply quality in this step. Return compact JSON only, with no markdown and no explanation.
 
 Schema:
-{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
+{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2,"replyX":232,"replyY":960}]}
 
 Rules:
 - Only read currently visible comment rows under the Hot/熱門 header and above the bottom composer.
@@ -27319,10 +27321,17 @@ Rules:
 - Copy author and text exactly as shown; do not translate, rewrite, or invent missing text.
 - Ignore post text, Hot/熱門 label, buttons, reply/like/share UI labels, counts, and the bottom composer.
 - If there are no readable visible comments, return {"comments":[]}.`;
-    const acceptVisibleCommentOutput = (raw: string) => threadsAutoReplyVisionOutputHasVisibleCommentsForTest(
-      raw,
-      replyPoints.length > 0,
-    );
+    const acceptVisibleCommentOutput = (raw: string) => {
+      if (!threadsAutoReplyVisionOutputHasVisibleCommentsForTest(raw, replyPoints.length > 0)) return false;
+      if (!forceVisibleValidation) return true;
+      try {
+        const parsed = JSON.parse(extractText(raw).match(/\{[\s\S]*\}/)?.[0] || "{}");
+        const comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
+        return comments.some((item: any) => Number(item?.replyX || item?.reply_x || 0) > 0 && Number(item?.replyY || item?.reply_y || 0) > 0);
+      } catch {
+        return false;
+      }
+    };
     let providerResponseCount = 0;
     let parsedResponseCount = 0;
     let lastProviderError = "";
@@ -27439,7 +27448,11 @@ Rules:
             rowIndex: 0,
           };
         })
-        .filter((item) => !isThreadsAutoReplyIgnoredText(item.text));
+        .filter((item) => !isThreadsAutoReplyIgnoredText(item.text))
+        // In the visible-comment auto-reply flow, row numbers and detected
+        // action rows can diverge after nested replies or partial scrolling.
+        // Only a model-supplied coordinate tied to that author's row is safe.
+        .filter((item) => !forceVisibleValidation || item.replyPointEvidence === "vision_coordinate");
       // Keep own-author rows as extraction evidence. The shared finalizer below
       // filters them before selection, while still allowing the collector to
       // distinguish "comments loaded but all are mine" from vision failure.
@@ -27523,6 +27536,7 @@ Task:
 - Include readable short, generic, repetitive, numeric-only, or low-quality comments for extraction; filtering happens later.
 - Include the main author's own visible comments too when counting rows and in comments; filtering happens later.
 - Count visible comment rows under Hot/熱門 from top to bottom starting at 1, including the main author's rows, and set row to each returned comment's actual visible row.
+- Set replyX and replyY to the center of that same row's visible speech-bubble reply icon. Omit a comment if its exact reply icon is not visible.
 - Copy only the username into author, without the trailing date/time such as 06/19, 7天, or 1小時.
 - Copy text exactly as shown; do not translate, rewrite, or invent missing text.
 - Ignore post text, Hot/熱門 label, buttons, counts, "部分其他回覆無法顯示", and the bottom composer.
@@ -27557,13 +27571,14 @@ Task:
       const allVisiblePrompt = `Read this Threads comment screenshot. Extract visible comments first; do not decide reply quality in this step. Return compact JSON only, with no markdown and no explanation.
 
 Schema:
-{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
+{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2,"replyX":232,"replyY":960}]}
 
 Task:
 - List every readable visible comment row under Hot/熱門 from top to bottom.
 - Include readable short, generic, repetitive, numeric-only, or low-quality comments for extraction; filtering happens later.
 - Include comments that are partly low on the screen if the author and text are readable.
 - A Threads comment row usually has an author line such as "windzlc123 7天" followed by the comment text on the next line; pair that author with the next readable text line.
+- Set replyX and replyY to the center of that exact row's visible speech-bubble reply icon. Omit comments whose reply icon is not visible.
 - Copy only the username into author, without the trailing date/time such as 06/19, 7天, or 1小時.
 - Copy text exactly as shown; do not translate, rewrite, or invent.
 - Skip only the main post text, buttons, counts, composer placeholder, and UI labels.
@@ -31214,14 +31229,10 @@ async function openThreadsCommentReplyComposerAtPoint(
   padCode: string,
   point: { x: number; y: number },
   expectedAuthor?: string,
-  options: { allowVerifiedReplyComposerTargetFallback?: boolean } = {},
 ): Promise<{ ok: true; screenshotUrl: string; debugReason: string } | { ok: false; error: string; screenshotUrl?: string }> {
   const expectedNormalizedAuthor = normalizeThreadsAutoReplyAuthor(expectedAuthor);
-  let usedVisualCoordinateTargetFallback = false;
   const isExpectedReplyTarget = async (xml: string, screenshotUrl: string) => {
     if (!expectedNormalizedAuthor) return false;
-    const xmlLine = normalizeSingleLine(decodeXmlAttr(xml)).toLowerCase();
-    if (xmlLine.includes(expectedNormalizedAuthor.toLowerCase())) return true;
     const visualAuthor = await detectThreadsCommentReplyTargetAuthorByVision(
       screenshotUrl,
       expectedNormalizedAuthor,
@@ -31230,21 +31241,11 @@ async function openThreadsCommentReplyComposerAtPoint(
   };
   const validateExpectedAuthor = async (xml: string, screenshotUrl: string) => {
     if (!expectedNormalizedAuthor) return null;
-    const xmlLine = normalizeSingleLine(decodeXmlAttr(xml)).toLowerCase();
-    if (xmlLine.includes(expectedNormalizedAuthor.toLowerCase())) return null;
     const visualAuthor = await detectThreadsCommentReplyTargetAuthorByVision(
       screenshotUrl,
       expectedNormalizedAuthor,
     ).catch(() => null);
     if (isThreadsAutoReplyExpectedAuthorMatch(expectedNormalizedAuthor, visualAuthor)) return null;
-    // The caller reached this point only after the page was classified as a
-    // comment-reply composer (not Add Thread). Keep a detected mismatch as a
-    // hard stop, but do not discard that verified composer solely because the
-    // second visual read timed out on its small placeholder text.
-    if (!visualAuthor && options.allowVerifiedReplyComposerTargetFallback) {
-      usedVisualCoordinateTargetFallback = true;
-      return null;
-    }
     await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
     return {
       ok: false as const,
@@ -31397,7 +31398,7 @@ async function openThreadsCommentReplyComposerAtPoint(
         return {
           ok: true,
           screenshotUrl: retryShotUrl,
-          debugReason: `thread_reply_detail_visual:auto_reply_comment_target${usedVisualCoordinateTargetFallback ? " | exact_visual_coordinate" : ""}`,
+          debugReason: "thread_reply_detail_visual:auto_reply_comment_target",
         };
       }
     }
@@ -31412,7 +31413,7 @@ async function openThreadsCommentReplyComposerAtPoint(
   return {
     ok: true,
     screenshotUrl: shotUrl,
-    debugReason: `thread_detail_visual:auto_reply_comment_target${usedVisualCoordinateTargetFallback ? " | exact_visual_coordinate" : ""}`,
+    debugReason: "thread_detail_visual:auto_reply_comment_target",
   };
 }
 
@@ -32944,7 +32945,6 @@ export async function autoReplyThreadsAccount(
             padCode,
             commentTarget,
             decision.candidate.author,
-            { allowVerifiedReplyComposerTargetFallback: true },
           );
           if (!openedReply.ok) {
             throw new Error(openedReply.error);
