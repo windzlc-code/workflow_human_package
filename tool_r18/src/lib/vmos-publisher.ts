@@ -31364,7 +31364,12 @@ async function collectThreadsAutoReplyPostContext(
   repliedCommentIdentityKeys: Set<string>,
   repliedCommentTextKeys: Set<string>,
   ownIdentifiers: string[] = [],
-  options: { deadlineAt?: number; stopAfterCandidateCount?: number; scanToBottom?: boolean } = {},
+  options: {
+    deadlineAt?: number;
+    stopAfterCandidateCount?: number;
+    scanToBottom?: boolean;
+    preferVisual?: boolean;
+  } = {},
 ): Promise<{
   postPreview: string;
   postHash: string;
@@ -31375,6 +31380,9 @@ async function collectThreadsAutoReplyPostContext(
   const deadlineAt = options.deadlineAt;
   const stopAfterCandidateCount = Math.max(1, Math.min(3, Math.floor(options.stopAfterCandidateCount || 1)));
   const scanToBottom = options.scanToBottom !== false;
+  // Threads comment pages on this device often expose empty/stale XML. The
+  // visual collector is the reliable path and avoids serial XML retry delays.
+  const preferVisual = options.preferVisual === true;
   const canSpendBudget = (neededMs: number, reserveMs = 1_000) => {
     const remaining = remainingDeadlineMs(deadlineAt, reserveMs);
     return remaining === null || remaining >= neededMs;
@@ -31418,12 +31426,16 @@ async function collectThreadsAutoReplyPostContext(
       meta: { reason: "avoid_back_from_thread_detail_before_comment_collect" },
     });
   }
-  let firstUiXml = await dumpUiXmlQuick(config, padCode, budgetedTimeout(2_400, 1_200, 1_200)).catch(() => "");
+  let firstUiXml = preferVisual
+    ? ""
+    : await dumpUiXmlQuick(config, padCode, budgetedTimeout(2_400, 1_200, 1_200)).catch(() => "");
   throwIfDeadlineExceeded(deadlineAt);
   if (await dismissThreadsRatingPromptIfVisible(config, padCode, firstShotUrl, firstUiXml).catch(() => false)) {
     firstShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => firstShotUrl);
     throwIfDeadlineExceeded(deadlineAt);
-    firstUiXml = await dumpUiXmlQuick(config, padCode, budgetedTimeout(2_400, 1_200, 1_200)).catch(() => "");
+    firstUiXml = preferVisual
+      ? ""
+      : await dumpUiXmlQuick(config, padCode, budgetedTimeout(2_400, 1_200, 1_200)).catch(() => "");
     throwIfDeadlineExceeded(deadlineAt);
   }
   saveThreadsAutoReplySampleStep({
@@ -31480,7 +31492,9 @@ async function collectThreadsAutoReplyPostContext(
     "input swipe 360 1120 360 560 600",
     "input swipe 360 1120 360 560 600",
   ];
-  const initialUiXml = firstUiXml || await dumpUiXmlQuick(config, padCode, budgetedTimeout(1_800, 1_000, 1_200)).catch(() => "");
+  const initialUiXml = preferVisual
+    ? ""
+    : firstUiXml || await dumpUiXmlQuick(config, padCode, budgetedTimeout(1_800, 1_000, 1_200)).catch(() => "");
   throwIfDeadlineExceeded(deadlineAt);
   const initialUiText = /<node\b|<hierarchy\b|<\?xml/.test(initialUiXml)
     ? normalizeSingleLine(decodeXmlAttr(initialUiXml))
@@ -31775,7 +31789,7 @@ async function collectThreadsAutoReplyPostContext(
           },
         )
         : [];
-      const retryUiXml = !retryVisualCandidates.length
+      const retryUiXml = !preferVisual && !retryVisualCandidates.length
         ? await dumpUiXmlQuick(config, padCode, budgetedTimeout(1_800, 900, 900)).catch(() => "")
         : "";
       const retryUiCandidates = retryUiXml && retryShotUrl
@@ -31852,7 +31866,7 @@ async function collectThreadsAutoReplyPostContext(
           )
           : [];
         addVisualCandidates(pageVisualCandidates);
-        const pageUiXml = canSpendBudget(1_800, 900)
+        const pageUiXml = !preferVisual && canSpendBudget(1_800, 900)
           ? await dumpUiXmlQuick(config, padCode, budgetedTimeout(1_800, 900, 900)).catch(() => "")
           : "";
         const pageUiCandidates = pageUiXml && pageShotUrl
@@ -31950,7 +31964,7 @@ async function collectThreadsAutoReplyPostContext(
             },
           )
           : [];
-        const backtrackUiXml = !backtrackVisualCandidates.length
+        const backtrackUiXml = !preferVisual && !backtrackVisualCandidates.length
           ? await dumpUiXmlQuick(config, padCode, budgetedTimeout(1_800, 900, 900)).catch(() => "")
           : "";
         const backtrackUiCandidates = backtrackUiXml && latestNoUiShotUrl
@@ -32674,7 +32688,10 @@ export async function autoReplyThreadsAccount(
         {
           deadlineAt: collectDeadlineAt,
           stopAfterCandidateCount: 1,
-          scanToBottom: process.env.THREADS_AUTO_REPLY_SCAN_TO_BOTTOM !== "0",
+          // A verified visible candidate is enough for the next reply. Scanning
+          // every page before acting only adds latency and can lose that target.
+          scanToBottom: process.env.THREADS_AUTO_REPLY_SCAN_TO_BOTTOM === "1",
+          preferVisual: process.env.THREADS_AUTO_REPLY_USE_XML !== "1",
         },
       ).catch(async (error) => {
       const currentShotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
