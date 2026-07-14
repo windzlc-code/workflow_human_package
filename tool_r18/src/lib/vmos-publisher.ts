@@ -27284,8 +27284,8 @@ export async function extractThreadsAutoReplyVisibleCommentsByVision(
     const prompt = forceVisibleValidation
       ? `Read this Threads comment screenshot. Return compact JSON only, with no markdown and no explanation.
 
-Schema:
-{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2}]}
+  Schema:
+{"postAuthor":"main post author","comments":[{"author":"account","text":"comment text","row":2,"replyX":232,"replyY":960}]}
 
 Task:
 - Return up to 8 currently visible readable comment rows, ordered from top to bottom; do not decide reply quality in this step.
@@ -27293,6 +27293,7 @@ Task:
 - Include every readable external comment even if it is short, generic, repetitive, numeric-only, or low quality; filtering happens later.
 - Do not skip an external comment only because a separate main-author comment is visually above or below it; filtering happens later.
 - Count visible comment rows under Hot/熱門 from top to bottom starting at 1, including the main author's rows, and set row to each returned comment's actual visible row.
+- For each readable comment whose action row is visible, set replyX and replyY to the center of that same comment's speech-bubble reply icon (the second action icon). Coordinates are native screenshot pixels. Use 0 only when that exact reply icon is not visible.
 - Copy only the username into author, without the trailing date/time such as 06/19, 7天, or 1小時.
 - Copy text exactly as shown; do not translate, rewrite, or invent missing text.
 - Ignore post text, Hot/熱門 label, buttons, counts, and the bottom composer.
@@ -27371,7 +27372,7 @@ Rules:
             )));
             const explicitReplyX = Number(record.replyX || record.reply_x || record.commentX || record.comment_x || record["回覆X"] || record["回复X"] || 0);
             const explicitReplyY = Number(record.replyY || record.reply_y || record.commentY || record.comment_y || record["回覆Y"] || record["回复Y"] || 0);
-            const explicitReplyPoint = image
+            const rawExplicitReplyPoint = image
               && Number.isFinite(explicitReplyX)
               && Number.isFinite(explicitReplyY)
               && explicitReplyX > 0
@@ -27380,6 +27381,15 @@ Rules:
               && explicitReplyY <= (image.height || BASE_SCREEN.height)
               ? { x: Math.round(explicitReplyX), y: Math.round(explicitReplyY) }
               : null;
+            const nearestDetectedReplyPoint = rawExplicitReplyPoint
+              ? replyPoints.reduce<{ point: { x: number; y: number }; distance: number } | null>((nearest, point) => {
+                const distance = Math.hypot(point.x - rawExplicitReplyPoint.x, point.y - rawExplicitReplyPoint.y);
+                return !nearest || distance < nearest.distance ? { point, distance } : nearest;
+              }, null)
+              : null;
+            const explicitReplyPoint = nearestDetectedReplyPoint && nearestDetectedReplyPoint.distance <= Math.max(72, (image?.height || BASE_SCREEN.height) * 0.07)
+              ? nearestDetectedReplyPoint.point
+              : rawExplicitReplyPoint;
             const replyPoint = explicitReplyPoint
               || (rowIndex > 0 ? replyPoints[rowIndex - 1] : null)
               || replyPoints[index]
