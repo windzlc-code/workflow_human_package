@@ -31214,7 +31214,7 @@ async function openThreadsCommentReplyComposerAtPoint(
   padCode: string,
   point: { x: number; y: number },
   expectedAuthor?: string,
-  options: { allowVisualCoordinateTargetFallback?: boolean } = {},
+  options: { allowVerifiedReplyComposerTargetFallback?: boolean } = {},
 ): Promise<{ ok: true; screenshotUrl: string; debugReason: string } | { ok: false; error: string; screenshotUrl?: string }> {
   const expectedNormalizedAuthor = normalizeThreadsAutoReplyAuthor(expectedAuthor);
   let usedVisualCoordinateTargetFallback = false;
@@ -31237,11 +31237,11 @@ async function openThreadsCommentReplyComposerAtPoint(
       expectedNormalizedAuthor,
     ).catch(() => null);
     if (isThreadsAutoReplyExpectedAuthorMatch(expectedNormalizedAuthor, visualAuthor)) return null;
-    // The direct vision collector supplied an exact reply-icon coordinate and
-    // the composer was already classified as a comment reply (not Add Thread).
-    // Keep a detected mismatch as a hard stop, but do not discard that verified
-    // target merely because the second OCR pass timed out on the placeholder.
-    if (!visualAuthor && options.allowVisualCoordinateTargetFallback) {
+    // The caller reached this point only after the page was classified as a
+    // comment-reply composer (not Add Thread). Keep a detected mismatch as a
+    // hard stop, but do not discard that verified composer solely because the
+    // second visual read timed out on its small placeholder text.
+    if (!visualAuthor && options.allowVerifiedReplyComposerTargetFallback) {
       usedVisualCoordinateTargetFallback = true;
       return null;
     }
@@ -32944,7 +32944,7 @@ export async function autoReplyThreadsAccount(
             padCode,
             commentTarget,
             decision.candidate.author,
-            { allowVisualCoordinateTargetFallback: decision.candidate.replyPointEvidence === "vision_coordinate" },
+            { allowVerifiedReplyComposerTargetFallback: true },
           );
           if (!openedReply.ok) {
             throw new Error(openedReply.error);
