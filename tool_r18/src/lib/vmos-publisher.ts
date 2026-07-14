@@ -27501,8 +27501,13 @@ Rules:
       }
       if (parsedByDirect && (forceVisibleValidation || mergedCandidates.length >= 4)) break;
       if (parsedByDirect) continue;
+      // The direct request has its own timeout and may outlive the outer scan
+      // budget. Never pass that already-aborted scan signal to the configured
+      // OCR fallback, otherwise a healthy fallback is cancelled before it
+      // reaches the first model.
+      const fallbackRequest = createTimeoutSignal(Math.max(12_000, Math.min(22_000, totalTimeoutMs)));
       try {
-        const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, request.signal, {
+        const raw = await callThreadsAutoReplyVisionOcrModel(prompt, inlineData, fallbackRequest.signal, {
           maxTokens: 1_200,
           perModelTimeoutMs: Math.max(12_000, Math.min(30_000, totalTimeoutMs - 1_000)),
           acceptOutput: acceptVisibleCommentOutput,
@@ -27513,6 +27518,8 @@ Rules:
       } catch (error) {
         lastProviderError = error instanceof Error ? error.message : String(error);
         // Try the next crop.
+      } finally {
+        fallbackRequest.cleanup();
       }
     }
     if (forceVisibleValidation && !mergedCandidates.length && fullScreenshotInline) {
@@ -31349,6 +31356,20 @@ async function openThreadsCommentReplyComposerAtPoint(
 
   let uiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
   let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  saveThreadsAutoReplySampleStep({
+    padCode,
+    step: "auto-reply-comment-reply-first-tap",
+    screenshotUrl: shotUrl || undefined,
+    meta: { expectedAuthor: expectedNormalizedAuthor || "", point },
+  });
+  if (shotUrl && await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+    return {
+      ok: false,
+      error: "点击评论回复入口后进入媒体查看器，已返回并停止重试以避免误点",
+      screenshotUrl: shotUrl,
+    };
+  }
   if (shotUrl && await detectThreadsInAppBrowserLocally(shotUrl).catch(() => false)) {
     await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
     return {
@@ -31414,7 +31435,7 @@ async function openThreadsCommentReplyComposerAtPoint(
     return true;
   };
   let hasReplyComposer = await hasReplyComposerState(uiXml, shotUrl, line);
-  if (!hasReplyComposer && (isAddThreadOnlyLine(line) || expectedNormalizedAuthor)) {
+  if (!hasReplyComposer && isAddThreadOnlyLine(line)) {
     for (const retryPoint of [
       { x: point.x, y: point.y + 14 },
       { x: point.x, y: point.y - 10 },
@@ -31433,6 +31454,14 @@ async function openThreadsCommentReplyComposerAtPoint(
       await delay(900);
       uiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
       shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => shotUrl);
+      if (shotUrl && await detectThreadsFullscreenMediaViewerLocally(shotUrl).catch(() => false)) {
+        await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+        return {
+          ok: false,
+          error: "重试评论回复入口时进入媒体查看器，已返回并停止误点",
+          screenshotUrl: shotUrl,
+        };
+      }
       line = normalizeSingleLine(decodeXmlAttr(uiXml));
       hasReplyComposer = await hasReplyComposerState(uiXml, shotUrl, line);
       if (hasReplyComposer) break;
@@ -31463,7 +31492,7 @@ async function openThreadsCommentReplyComposerAtPoint(
   if (
     !hasReplyComposer
   ) {
-    if (/(回覆|回复)\s*\d*次瀏覽|回覆|回复/.test(line) || await isExpectedReplyTarget(uiXml, shotUrl)) {
+    if (!expectedNormalizedAuthor && (/(回覆|回复)\s*\d*次瀏覽|回覆|回复/.test(line) || await isExpectedReplyTarget(uiXml, shotUrl))) {
       const image = await getImageDimensions(shotUrl).catch(() => null);
       const imageWidth = image?.width || BASE_SCREEN.width;
       const imageHeight = image?.height || BASE_SCREEN.height;
@@ -33028,11 +33057,44 @@ export async function autoReplyThreadsAccount(
           continue;
         }
         try {
+          // The selection model can take long enough for Threads to move the
+          // comment list. Re-resolve the local speech-bubble icon immediately
+          // before tapping so a stale visual coordinate cannot open media.
+          const preTapScreenshotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+          if (preTapScreenshotUrl && await detectThreadsFullscreenMediaViewerLocally(preTapScreenshotUrl).catch(() => false)) {
+            await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+            throw new Error("打开评论回复前已进入媒体查看器，已返回并重新扫描当前帖子");
+          }
+          const liveReplyPoints = preTapScreenshotUrl
+            ? await detectThreadsVisibleCommentReplyPointsLocally(preTapScreenshotUrl).catch(() => [])
+            : [];
+          const resolvedCommentTarget = liveReplyPoints.reduce<{ point: { x: number; y: number }; distance: number } | null>((nearest, point) => {
+            const distance = Math.hypot(point.x - commentTarget.x, point.y - commentTarget.y);
+            return !nearest || distance < nearest.distance ? { point, distance } : nearest;
+          }, null);
+          // A 40px tolerance permits a small layout shift while refusing a
+          // different action row. Retrying from a fresh scan is safer than a
+          // blind tap when the comment list has moved further than this.
+          if (!resolvedCommentTarget || resolvedCommentTarget.distance > 40) {
+            throw new Error("候选评论的回复入口已变动，已停止旧坐标点击并重新扫描当前帖子");
+          }
+          saveThreadsAutoReplySampleStep({
+            padCode,
+            step: "auto-reply-reply-target-preflight",
+            screenshotUrl: preTapScreenshotUrl || undefined,
+            meta: {
+              postIndex: postIndex + 1,
+              candidateAuthor: decision.candidate.author,
+              sourceReplyPoint: commentTarget,
+              resolvedReplyPoint: resolvedCommentTarget.point,
+              coordinateDistance: Math.round(resolvedCommentTarget.distance),
+            },
+          });
           report({ step: `第 ${postIndex + 1} 条已选中第 ${decisionIndex + 1}/${decisions.length} 条优质评论，正在打开回复框` });
           const openedReply = await openThreadsCommentReplyComposerAtPoint(
             config,
             padCode,
-            commentTarget,
+            resolvedCommentTarget.point,
             decision.candidate.author,
           );
           if (!openedReply.ok) {
