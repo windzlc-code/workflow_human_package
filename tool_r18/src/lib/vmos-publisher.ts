@@ -27289,11 +27289,23 @@ Rules:
 - Ignore post text, Hot/熱門 label, buttons, reply/like/share UI labels, counts, and the bottom composer.
 - If there are no readable visible comments, return {"comments":[]}.`;
     const acceptVisibleCommentOutput = (raw: string) => {
-      if (!threadsAutoReplyVisionOutputHasVisibleCommentsForTest(raw, replyPoints.length > 0)) return false;
-      if (!forceVisibleValidation) return true;
       try {
         const parsed = JSON.parse(extractText(raw).match(/\{[\s\S]*\}/)?.[0] || "{}");
-        const comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
+        const comments = [
+          parsed?.comments,
+          parsed?.visibleComments,
+          parsed?.visible_comments,
+          parsed?.留言,
+          parsed?.評論,
+          parsed?.评论,
+        ].find((value) => Array.isArray(value));
+        if (!Array.isArray(comments)) return false;
+        // `comments: []` is a valid, safe answer for a post that has no
+        // visible external reply. Do not turn it into a provider failure and
+        // spend the rest of the scan retrying unrelated models.
+        if (!comments.length) return true;
+        if (!threadsAutoReplyVisionOutputHasVisibleCommentsForTest(raw, replyPoints.length > 0)) return false;
+        if (!forceVisibleValidation) return true;
         return comments.some((item: any) => Number(item?.replyX || item?.reply_x || 0) > 0 && Number(item?.replyY || item?.reply_y || 0) > 0);
       } catch {
         return false;
@@ -32447,6 +32459,7 @@ export async function autoReplyThreadsAccount(
   let scannedComments = 0;
   let replied = 0;
   let skipped = 0;
+  let scanInterrupted = false;
   const replyScreenshots: string[] = [];
   const errors: string[] = [];
   const { repliedKeys, repliedCommentIdentityKeys, repliedCommentTextKeys } = loadThreadsAutoReplyRepliedSets(padCode);
@@ -33051,6 +33064,7 @@ export async function autoReplyThreadsAccount(
       }
     }
     if (!nextOpened.ok) {
+      scanInterrupted = true;
       errors.push(nextOpened.error);
       await rememberEvidenceScreenshot("auto-reply-open-next-post-failed", {
         postIndex: postIndex + 1,
@@ -33062,7 +33076,7 @@ export async function autoReplyThreadsAccount(
   }
 
   const finalErrors = errors.filter(Boolean);
-  const hardFailure = replied <= 0 && finalErrors.some((item) => /模型筛选超时|回复失败|仍停留在编辑器|账号状态阻断|reached retry limit|发送|发布/i.test(item));
+  const hardFailure = scanInterrupted || (replied <= 0 && finalErrors.some((item) => /模型筛选超时|回复失败|仍停留在编辑器|账号状态阻断|reached retry limit|发送|发布/i.test(item)));
   const completionStatus: ThreadsAutoReplyProgress["completionStatus"] = replied >= targetReplies
     ? "target_reached"
     : replied > 0
