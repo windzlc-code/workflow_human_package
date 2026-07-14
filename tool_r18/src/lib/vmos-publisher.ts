@@ -27248,9 +27248,11 @@ export async function extractThreadsAutoReplyVisibleCommentsByVision(
   }
 
   const requestedTimeoutMs = Math.max(4_500, Math.min(90_000, Math.round(options.timeoutMs || 45_000)));
-  const totalTimeoutMs = forceVisibleValidation
-    ? Math.max(45_000, requestedTimeoutMs)
-    : requestedTimeoutMs;
+  // Visible-only comment collection happens once per scroll page.  Do not
+  // inflate its caller budget to 45 seconds: an empty/own-comment page must
+  // advance to the next post promptly while preserving the configured model
+  // order for the bounded request.
+  const totalTimeoutMs = requestedTimeoutMs;
   const request = createTimeoutSignal(totalTimeoutMs);
   try {
     const prompt = forceVisibleValidation
@@ -31972,13 +31974,13 @@ async function collectThreadsAutoReplyPostContext(
           screenshotUrl: pageShotUrl || firstShotUrl || undefined,
           meta: { swipe: scrollCommand },
         });
-        const pageVisualCandidates = canSpendBudget(4_500, 1_200) && pageShotUrl
+        const pageVisualCandidates = canSpendBudget(6_500, 1_200) && pageShotUrl
           ? await extractThreadsAutoReplyVisibleCommentsByVision(
             pageShotUrl,
             persona,
             postOwnIdentifiers,
             {
-              timeoutMs: budgetedTimeout(7_500, 1_200, 4_800),
+              timeoutMs: budgetedTimeout(12_000, 1_200, 7_500),
               forceVisibleValidation: true,
               throwOnProviderFailure: true,
             },
