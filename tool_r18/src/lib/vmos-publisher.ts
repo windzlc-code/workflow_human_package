@@ -27167,40 +27167,63 @@ Rules:
 
 export async function detectThreadsCommentReplyTargetAuthorByVision(
   screenshotUrl: string | undefined,
+  expectedAuthor?: string,
 ): Promise<string | null> {
   if (!screenshotUrl) return null;
-  const inlineData = await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null);
-  if (!inlineData) return null;
+  const expectedNormalizedAuthor = normalizeThreadsAutoReplyAuthor(expectedAuthor);
+  const image = await getImageDimensions(screenshotUrl).catch(() => null);
+  const composerInline = image
+    ? await cropImageToInlineData(
+      screenshotUrl,
+      {
+        x: 0,
+        y: Math.max(0, Math.floor(image.height * 0.84)),
+        width: image.width,
+        height: Math.max(1, Math.ceil(image.height * 0.16)),
+      },
+      1080,
+    ).catch(() => null)
+    : null;
+  const fullInline = await getInlineDataFromUrlOrLocalFile(screenshotUrl).catch(() => null);
+  const inlineCandidates = [composerInline, fullInline]
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  if (!inlineCandidates.length) return null;
   const prompt = `Read this Threads reply-target screenshot and return JSON only: {"username":"target comment author username"}.
 
 Rules:
 - The authoritative target is the username embedded in the bottom composer placeholder, such as "Reply to <username>" or "回覆 <username>". Return that username when it is visible.
+- The candidate currently being verified is "${expectedNormalizedAuthor || "unknown"}". On the bottom-composer crop, only return that candidate when the placeholder explicitly names it; otherwise return the different placeholder username or an empty string.
 - Otherwise extract the username of the visible post or comment currently opened as the reply target near the top of the page.
 - Do not return the signed-in account from the bottom composer avatar, navigation, or unrelated nested replies.
 - If the target author is not clearly visible, return {"username":""}.`;
-  const request = createTimeoutSignal(14_000);
-  try {
-    const raw = await callThreadsAutoReplyDirectMultimodalModel(
-      prompt,
-      inlineData,
-      request.signal,
-      { maxTokens: 80 },
-    );
-    const text = extractText(raw);
-    const jsonText = text.match(/\{[\s\S]*\}/)?.[0] || "";
-    if (jsonText) {
-      try {
-        return normalizeThreadsProfileUsername(String(JSON.parse(jsonText)?.username || "")) || null;
-      } catch {
-        // Fall through to strict loose parsing below.
+  for (const inlineData of inlineCandidates) {
+    const request = createTimeoutSignal(14_000);
+    try {
+      const raw = await callThreadsAutoReplyDirectMultimodalModel(
+        prompt,
+        inlineData,
+        request.signal,
+        { maxTokens: 80 },
+      );
+      const text = extractText(raw);
+      const jsonText = text.match(/\{[\s\S]*\}/)?.[0] || "";
+      if (jsonText) {
+        try {
+          const username = normalizeThreadsProfileUsername(String(JSON.parse(jsonText)?.username || "")) || null;
+          if (username) return username;
+        } catch {
+          // Fall through to strict loose parsing below.
+        }
       }
+      const username = normalizeThreadsProfileUsername(normalizeSingleLine(text)) || null;
+      if (username) return username;
+    } catch {
+      // Try the full screenshot if the composer crop is not readable.
+    } finally {
+      request.cleanup();
     }
-    return normalizeThreadsProfileUsername(normalizeSingleLine(text)) || null;
-  } catch {
-    return null;
-  } finally {
-    request.cleanup();
   }
+  return null;
 }
 
 export async function extractThreadsAutoReplyVisibleCommentsByVision(
@@ -31177,14 +31200,20 @@ async function openThreadsCommentReplyComposerAtPoint(
     if (!expectedNormalizedAuthor) return false;
     const xmlLine = normalizeSingleLine(decodeXmlAttr(xml)).toLowerCase();
     if (xmlLine.includes(expectedNormalizedAuthor.toLowerCase())) return true;
-    const visualAuthor = await detectThreadsCommentReplyTargetAuthorByVision(screenshotUrl).catch(() => null);
+    const visualAuthor = await detectThreadsCommentReplyTargetAuthorByVision(
+      screenshotUrl,
+      expectedNormalizedAuthor,
+    ).catch(() => null);
     return isThreadsAutoReplyExpectedAuthorMatch(expectedNormalizedAuthor, visualAuthor);
   };
   const validateExpectedAuthor = async (xml: string, screenshotUrl: string) => {
     if (!expectedNormalizedAuthor) return null;
     const xmlLine = normalizeSingleLine(decodeXmlAttr(xml)).toLowerCase();
     if (xmlLine.includes(expectedNormalizedAuthor.toLowerCase())) return null;
-    const visualAuthor = await detectThreadsCommentReplyTargetAuthorByVision(screenshotUrl).catch(() => null);
+    const visualAuthor = await detectThreadsCommentReplyTargetAuthorByVision(
+      screenshotUrl,
+      expectedNormalizedAuthor,
+    ).catch(() => null);
     if (isThreadsAutoReplyExpectedAuthorMatch(expectedNormalizedAuthor, visualAuthor)) return null;
     await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8000, 500).catch(() => "");
     return {
