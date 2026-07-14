@@ -229,9 +229,10 @@ async function makePngDataUrl(
 }
 
 describe("Threads comment reply point binding", () => {
-  it("accepts a one-character terminal truncation from reply-target vision only", () => {
-    expect(isThreadsAutoReplyExpectedAuthorMatch("liliacvuiy575", "liliacvuiy57")).toBe(true);
-    expect(isThreadsAutoReplyExpectedAuthorMatch("lliacvuiy575", "liliacvuiy57")).toBe(true);
+  it("requires an exact external author at the reply composer", () => {
+    expect(isThreadsAutoReplyExpectedAuthorMatch("liliacvuiy575", "liliacvuiy575")).toBe(true);
+    expect(isThreadsAutoReplyExpectedAuthorMatch("liliacvuiy575", "liliacvuiy57")).toBe(false);
+    expect(isThreadsAutoReplyExpectedAuthorMatch("lliacvuiy575", "liliacvuiy57")).toBe(false);
     expect(isThreadsAutoReplyExpectedAuthorMatch("liliacvuiy575", "liliacvuiy576")).toBe(false);
     expect(isThreadsAutoReplyExpectedAuthorMatch("liliacvuiy575", "liliacvui")).toBe(false);
   });

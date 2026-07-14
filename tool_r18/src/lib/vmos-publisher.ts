@@ -26389,9 +26389,9 @@ type ThreadsAutoReplyCandidate = {
   score: number;
   key?: string;
   replyPoint?: { x: number; y: number };
-  // A vision-provided coordinate refers to this exact comment action row;
-  // row-only mappings are less reliable after nested replies reflow.
-  replyPointEvidence?: "vision_coordinate" | "row_mapping" | "local_fallback";
+  // Never tap a raw model coordinate. A candidate point must resolve to a
+  // locally detected speech-bubble action before it is eligible to send.
+  replyPointEvidence?: "vision_coordinate" | "local_reply_icon" | "row_mapping" | "local_fallback";
   sourceScreenshotUrl?: string;
   debugReason?: string;
 };
@@ -26529,42 +26529,9 @@ export function isThreadsAutoReplyExpectedAuthorMatch(
   const expected = normalizeThreadsAutoReplyAuthor(expectedAuthor);
   const detected = normalizeThreadsAutoReplyAuthor(detectedAuthor);
   if (!expected || !detected) return false;
-  if (expected === detected) return true;
-
-  // A reply-target screenshot can crop the final one or two glyphs of a long
-  // account name. Keep the guard narrow: this is only a terminal truncation,
-  // on a sufficiently long identifier, never a general fuzzy match.
-  const shorter = expected.length <= detected.length ? expected : detected;
-  const longer = expected.length <= detected.length ? detected : expected;
-  if (shorter.length >= 8
-    && longer.length - shorter.length <= 2
-    && longer.startsWith(shorter)) return true;
-
-  // OCR can also drop or duplicate one glyph near the start of a long handle.
-  // Permit that only when the reply-target read is the candidate with its
-  // final glyph removed. This keeps a genuinely different account such as
-  // `...575` vs `...576` rejected.
-  if (expected.length < 10 || detected.length < 10) return false;
-  const expectedWithoutTerminalGlyph = expected.slice(0, -1);
-  if (!expectedWithoutTerminalGlyph.endsWith(detected.slice(-3))) return false;
-  const previous = Array.from({ length: detected.length + 1 }, (_, index) => index);
-  for (let expectedIndex = 1; expectedIndex <= expected.length; expectedIndex += 1) {
-    const current = [expectedIndex];
-    let rowMinimum = current[0];
-    for (let detectedIndex = 1; detectedIndex <= detected.length; detectedIndex += 1) {
-      const cost = expected[expectedIndex - 1] === detected[detectedIndex - 1] ? 0 : 1;
-      const value = Math.min(
-        previous[detectedIndex] + 1,
-        current[detectedIndex - 1] + 1,
-        previous[detectedIndex - 1] + cost,
-      );
-      current.push(value);
-      rowMinimum = Math.min(rowMinimum, value);
-    }
-    if (rowMinimum > 2) return false;
-    previous.splice(0, previous.length, ...current);
-  }
-  return previous[detected.length] <= 2;
+  // The composer is the last safety gate before typing. Do not accept OCR
+  // truncations or fuzzy prefixes here: they can be a different account.
+  return expected === detected;
 }
 
 function mergeThreadsAutoReplyOwnIdentifiers(...groups: Array<Array<string | undefined | null> | undefined>): string[] {
@@ -27399,17 +27366,22 @@ Rules:
                 return !nearest || distance < nearest.distance ? { point, distance } : nearest;
               }, null)
               : null;
-            const explicitReplyPoint = nearestDetectedReplyPoint && nearestDetectedReplyPoint.distance <= Math.max(72, (image?.height || BASE_SCREEN.height) * 0.07)
+            // Coordinates from the vision model are approximate. Resolve them
+            // to a local speech-bubble icon only when they are genuinely close;
+            // never fall back to the raw coordinate because it can land on a
+            // link card or repost action.
+            const explicitReplyPoint = nearestDetectedReplyPoint
+              && nearestDetectedReplyPoint.distance <= Math.max(44, Math.round((image?.width || BASE_SCREEN.width) * 0.075))
               ? nearestDetectedReplyPoint.point
-              : rawExplicitReplyPoint;
-            const replyPoint = explicitReplyPoint
-              || (rowIndex > 0 ? replyPoints[rowIndex - 1] : null)
-              || replyPoints[index]
-              || undefined;
+              : null;
+            const rowReplyPoint = !explicitReplyPoint && rowIndex > 0
+              ? replyPoints[rowIndex - 1] || null
+              : null;
+            const replyPoint = explicitReplyPoint || rowReplyPoint || undefined;
             const replyPointEvidence = explicitReplyPoint
               ? "vision_coordinate" as const
-              : replyPoint
-                ? "row_mapping" as const
+              : rowReplyPoint
+                ? "local_reply_icon" as const
                 : undefined;
             return {
               author: normalizeSingleLine(String(
@@ -27449,10 +27421,13 @@ Rules:
           };
         })
         .filter((item) => !isThreadsAutoReplyIgnoredText(item.text))
-        // In the visible-comment auto-reply flow, row numbers and detected
-        // action rows can diverge after nested replies or partial scrolling.
-        // Only a model-supplied coordinate tied to that author's row is safe.
-        .filter((item) => !forceVisibleValidation || item.replyPointEvidence === "vision_coordinate");
+        // The action must be a locally detected speech-bubble icon. A model
+        // coordinate is accepted only after resolving to that icon; the
+        // subsequent composer author check remains the final send gate.
+        .filter((item) => !forceVisibleValidation || (
+          item.replyPointEvidence === "vision_coordinate"
+          || item.replyPointEvidence === "local_reply_icon"
+        ));
       // Keep own-author rows as extraction evidence. The shared finalizer below
       // filters them before selection, while still allowing the collector to
       // distinguish "comments loaded but all are mine" from vision failure.
@@ -31269,6 +31244,14 @@ async function openThreadsCommentReplyComposerAtPoint(
 
   let uiXml = await dumpUiXmlQuick(config, padCode, 4_000).catch(() => "");
   let shotUrl = await freezeScreenshotUrl(await screenshot(config, padCode)).catch(() => "");
+  if (shotUrl && await detectThreadsInAppBrowserLocally(shotUrl).catch(() => false)) {
+    await execAdbForText(config, padCode, "input keyevent KEYCODE_BACK", 8_000, 500).catch(() => "");
+    return {
+      ok: false,
+      error: "点击后进入 Threads 内置网页，已返回并跳过以避免误点外链",
+      screenshotUrl: shotUrl,
+    };
+  }
   let line = normalizeSingleLine(decodeXmlAttr(uiXml));
   if (looksLikeThreadsBlankReplyRatingUiXml(uiXml)) {
     const dismissed = await dismissThreadsRatingPromptIfVisible(config, padCode, shotUrl, uiXml).catch(() => false);
