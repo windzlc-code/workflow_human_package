@@ -2014,6 +2014,58 @@ describe("Threads publish verification", () => {
     }
   });
 
+  it("suppresses a Traditional Chinese visual candidate recorded as Simplified Chinese history", () => {
+    const originalHistoryFile = process.env.THREADS_AUTO_REPLY_HISTORY_FILE;
+    const file = path.join(
+      process.cwd(),
+      ".runtime",
+      "automatic-script-test",
+      `threads-auto-reply-history-variant-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+    );
+    const padCode = "TEST_REPLY_VARIANT_PAD";
+    const postHash = "post-hash-variant";
+    const simplifiedComment = "\u6211\u4e5f\u662f\u534a\u7cd6\u5fae\u51b0\u6d3e\uff0c\u8fd9\u6837\u559d\u8d77\u6765\u771f\u7684\u4e0d\u9519\u561b\u3002";
+    const traditionalComment = "\u6211\u4e5f\u662f\u534a\u7cd6\u5fae\u51b0\u6d3e\uff0c\u9019\u6a23\u559d\u8d77\u4f86\u771f\u7684\u4e0d\u932f\u561b\u3002";
+    try {
+      process.env.THREADS_AUTO_REPLY_HISTORY_FILE = file;
+      rememberThreadsAutoReplyComment({
+        padCode,
+        postHash,
+        commentAuthor: "liliacvuiy575",
+        commentText: simplifiedComment,
+        replyText: "\u5c0d\u554a\uff0c\u534a\u7cd6\u5fae\u51b0\u771f\u7684\u525b\u597d",
+      });
+
+      const { repliedKeys, repliedCommentIdentityKeys, repliedCommentTextKeys } = loadThreadsAutoReplyRepliedSets(padCode);
+      const candidates = finalizeThreadsAutoReplyCandidates({
+        padCode,
+        postHash,
+        postPreview: "\u534a\u7cd6\u5fae\u51b0\u98f2\u54c1\u504f\u597d",
+        repliedKeys,
+        repliedCommentIdentityKeys,
+        repliedCommentTextKeys,
+        ownIdentifiers: ["sen54_088"],
+        candidates: [
+          {
+            author: "liliacvuiy575",
+            text: traditionalComment,
+            score: 10,
+            replyPoint: { x: 232, y: 1383 },
+          },
+        ],
+      });
+
+      expect(candidates).toEqual([]);
+    } finally {
+      if (originalHistoryFile === undefined) {
+        delete process.env.THREADS_AUTO_REPLY_HISTORY_FILE;
+      } else {
+        process.env.THREADS_AUTO_REPLY_HISTORY_FILE = originalHistoryFile;
+      }
+      fs.rmSync(file, { force: true });
+    }
+  });
+
   it("filters low-information auto-reply comments before ranking", () => {
     const candidates = finalizeThreadsAutoReplyCandidates({
       padCode: "TEST_REPLY_QUALITY_PAD",

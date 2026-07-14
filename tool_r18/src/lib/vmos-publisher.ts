@@ -26461,6 +26461,8 @@ function normalizeThreadsAutoReplyCommentIdentityText(commentText: string) {
     "個": "个",
     "們": "们",
     "這": "这",
+    "樣": "样",
+    "來": "来",
     "錯": "错",
     "讚": "赞",
     "麼": "么",
