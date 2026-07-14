@@ -31283,8 +31283,21 @@ async function openThreadsCommentReplyComposerAtPoint(
   expectedAuthor?: string,
 ): Promise<{ ok: true; screenshotUrl: string; debugReason: string } | { ok: false; error: string; screenshotUrl?: string }> {
   const expectedNormalizedAuthor = normalizeThreadsAutoReplyAuthor(expectedAuthor);
+  const hasExactComposerTargetInUi = (xml: string) => {
+    if (!expectedNormalizedAuthor) return false;
+    const compact = normalizeSingleLine(decodeXmlAttr(xml)).toLowerCase();
+    const targetIndex = compact.indexOf(expectedNormalizedAuthor);
+    if (targetIndex < 0) return false;
+    // This accepts only the complete expected username directly following the
+    // native reply-composer label. It is stronger than top-row OCR, which can
+    // clip a username, and does not reintroduce prefix matching.
+    return /(?:回覆|回复|reply)(?:\s+to)?\s*$/i.test(
+      compact.slice(Math.max(0, targetIndex - 28), targetIndex),
+    );
+  };
   const isExpectedReplyTarget = async (xml: string, screenshotUrl: string) => {
     if (!expectedNormalizedAuthor) return false;
+    if (hasExactComposerTargetInUi(xml)) return true;
     const visualAuthor = await detectThreadsCommentReplyTargetAuthorByVision(
       screenshotUrl,
       expectedNormalizedAuthor,
@@ -31293,6 +31306,7 @@ async function openThreadsCommentReplyComposerAtPoint(
   };
   const validateExpectedAuthor = async (xml: string, screenshotUrl: string) => {
     if (!expectedNormalizedAuthor) return null;
+    if (hasExactComposerTargetInUi(xml)) return null;
     const visualAuthor = await detectThreadsCommentReplyTargetAuthorByVision(
       screenshotUrl,
       expectedNormalizedAuthor,
