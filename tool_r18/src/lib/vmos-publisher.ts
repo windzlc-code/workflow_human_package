@@ -27174,7 +27174,8 @@ export async function detectThreadsCommentReplyTargetAuthorByVision(
   const prompt = `Read this Threads reply-target screenshot and return JSON only: {"username":"target comment author username"}.
 
 Rules:
-- Extract the username of the visible post or comment currently opened as the reply target near the top of the page.
+- The authoritative target is the username embedded in the bottom composer placeholder, such as "Reply to <username>" or "回覆 <username>". Return that username when it is visible.
+- Otherwise extract the username of the visible post or comment currently opened as the reply target near the top of the page.
 - Do not return the signed-in account from the bottom composer avatar, navigation, or unrelated nested replies.
 - If the target author is not clearly visible, return {"username":""}.`;
   const request = createTimeoutSignal(14_000);
