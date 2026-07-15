@@ -28764,10 +28764,23 @@ async function openThreadsLatestProfilePostByMode(
   if (initialPreflight.ok !== true) return initialPreflight;
   shotUrl = initialPreflight.screenshotUrl;
 
-  // Threads keeps the profile feed scroll position between runs. Reset toward the
-  // newest posts first, otherwise a run may start from older visible posts and
-  // incorrectly report "no comments" while newer posts above have replies.
-  for (let resetAttempt = 0; resetAttempt < 5; resetAttempt += 1) {
+  // Threads keeps the profile feed scroll position between runs. The old path
+  // always pulled toward newest five times here, which can visually look like
+  // repeatedly jumping back to the top and can trigger a profile refresh when
+  // the feed is already near the newest posts. Only reset when the visible
+  // timeline is outside the requested window or the timeline has not stabilized.
+  const beforeResetUiXml = await dumpUiXmlQuick(config, padCode, 2_500, true).catch(() => "");
+  const beforeResetUiText = normalizeSingleLine(decodeXmlAttr(beforeResetUiXml));
+  const beforeResetHasTimeline = /(?:\d+\s*(?:秒|分鐘|分钟|小時|小时|天|週|周)|剛剛|刚刚|Yesterday|hours?\s+ago|minutes?\s+ago|\d+\s*(?:則|条|個|个)?\s*(?:回覆|回复|讚|赞|like|likes|轉發|转发|repost|reposts))/i.test(beforeResetUiText);
+  const beforeResetOlderThanWindow = beforeResetUiXml
+    ? isThreadsProfileVisibleTimelineOlderThanAutoReplyWindow(beforeResetUiXml, maxAgeDays)
+    : false;
+  const resetSwipeCount = beforeResetOlderThanWindow
+    ? 2
+    : beforeResetHasTimeline
+      ? 0
+      : 1;
+  for (let resetAttempt = 0; resetAttempt < resetSwipeCount; resetAttempt += 1) {
     await threadsAdbInputNoWait(config, padCode, "input swipe 360 520 360 1320 520", 900).catch(() => undefined);
     await delay(450);
   }
@@ -28787,7 +28800,13 @@ async function openThreadsLatestProfilePostByMode(
     padCode,
     step: "profile-top-reset",
     screenshotUrl: shotUrl,
-    meta: { resetSwipes: 5, mode: "newest_posts_first" },
+    meta: {
+      resetSwipes: resetSwipeCount,
+      mode: "newest_posts_first_if_needed",
+      visibleTimelineBeforeReset: beforeResetHasTimeline,
+      olderThanWindowBeforeReset: beforeResetOlderThanWindow,
+      selectionMode,
+    },
   });
 
   let lastOpenError: { ok: false; error: string; screenshotUrl?: string } | null = null;
