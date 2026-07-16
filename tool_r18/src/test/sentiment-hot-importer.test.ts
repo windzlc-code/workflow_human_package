@@ -39,9 +39,9 @@ describe("sentiment hot importer", () => {
   });
 
   it("limits Threads browser pages when host memory is low", () => {
-    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        900000 kB\n")).toBe(2);
-    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        800000 kB\n")).toBe(1);
-    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        600000 kB\n")).toBe(1);
+    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:       1400000 kB\n")).toBe(2);
+    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:       1000000 kB\n")).toBe(2);
+    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        700000 kB\n")).toBe(2);
     expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        500000 kB\n")).toBe(1);
     expect(resolveThreadsBrowserPageConcurrency("")).toBe(1);
   });

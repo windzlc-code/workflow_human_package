@@ -31,10 +31,12 @@ const MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT = 60;
 const SENTIMENT_HOT_CANDIDATE_POOL_TARGET = 400;
 const THREADS_SEARCH_CACHE_CANDIDATE_LIMIT = 2000;
 const THREADS_BROWSER_QUERY_LIMIT = 16;
-const THREADS_BROWSER_PAGE_CONCURRENCY = 2;
+const THREADS_BROWSER_MAX_PAGE_CONCURRENCY = 2;
+const THREADS_BROWSER_RESULT_BUFFER = 4;
 const THREADS_BROWSER_QUERY_TIMEOUT_MS = 14_000;
-const THREADS_BROWSER_DUAL_PAGE_MIN_AVAILABLE_BYTES = 850 * 1024 * 1024;
-const THREADS_BROWSER_SECONDARY_PAGE_STOP_AVAILABLE_BYTES = 320 * 1024 * 1024;
+const THREADS_BROWSER_TWO_PAGE_MIN_AVAILABLE_BYTES = 500 * 1024 * 1024;
+const THREADS_BROWSER_WORKER_STAGGER_MS = 750;
+const THREADS_BROWSER_SECOND_PAGE_ADMISSION_BYTES = 400 * 1024 * 1024;
 const SENTIMENT_MODEL_KEYWORD_TARGET = 20;
 const SENTIMENT_HOT_KEYWORD_MODEL = "xai/grok-4.3";
 const SENTIMENT_HOT_KEYWORD_FALLBACK_MODEL = "xai/grok-4.3";
@@ -55,9 +57,9 @@ const SENTIMENT_HOT_TIMEOUT_WARNING = "\u71b1\u9ede\u6293\u53d6\u5df2\u8d85\u664
 
 export function resolveThreadsBrowserPageConcurrency(memInfo: string): number {
   const availableKb = Number(String(memInfo || "").match(/^MemAvailable:\s+(\d+)\s+kB$/mi)?.[1] || 0);
-  return availableKb * 1024 >= THREADS_BROWSER_DUAL_PAGE_MIN_AVAILABLE_BYTES
-    ? THREADS_BROWSER_PAGE_CONCURRENCY
-    : 1;
+  const availableBytes = availableKb * 1024;
+  if (availableBytes >= THREADS_BROWSER_TWO_PAGE_MIN_AVAILABLE_BYTES) return 2;
+  return 1;
 }
 
 function readThreadsBrowserAvailableBytes(): number {
@@ -70,8 +72,16 @@ function readThreadsBrowserAvailableBytes(): number {
 }
 
 function readThreadsBrowserPageConcurrency(): number {
-  const availableBytes = readThreadsBrowserAvailableBytes();
-  return availableBytes >= THREADS_BROWSER_DUAL_PAGE_MIN_AVAILABLE_BYTES ? THREADS_BROWSER_PAGE_CONCURRENCY : 1;
+  try {
+    return resolveThreadsBrowserPageConcurrency(fs.readFileSync("/proc/meminfo", "utf8"));
+  } catch {
+    return 1;
+  }
+}
+
+function threadsBrowserWorkerStopAvailableBytes(workerIndex: number): number {
+  if (workerIndex >= 1) return 280 * 1024 * 1024;
+  return 0;
 }
 
 function resolveSentimentHotKeywordModel(): string {
@@ -1862,7 +1872,28 @@ async function fetchSentimentHotCandidatesUnlocked(args: {
     pushSentimentHotWarning(warnings, SENTIMENT_HOT_TIMEOUT_WARNING);
   }
 
-  candidates = finalizeSentimentHotCandidatesForDisplay(candidates, limit, { archiveId, keywords, excludeShown: excludeShownCandidates });
+  const candidatePool = candidates;
+  candidates = finalizeSentimentHotCandidatesForDisplay(candidatePool, limit, { archiveId, keywords, excludeShown: excludeShownCandidates });
+  if (hasSearchKeywords && candidates.length === limit - 1) {
+    const permanentlyExcluded = getSentimentHotExcludedIds(archiveId);
+    const currentIds = new Set(candidates.map((candidate) => candidate.id));
+    const softFallbackPool = sortSentimentHotCandidatePool([
+      ...candidatePool,
+      ...readThreadsSearchCandidateCache(archiveId, keywords, poolLimit, false),
+      ...readArchiveScopedThreadsCandidateBackfill(archiveId, keywords, poolLimit, false),
+    ], keywords, poolLimit);
+    const fallback = softFallbackPool.find((candidate) => !currentIds.has(candidate.id) && !permanentlyExcluded.has(candidate.id));
+    if (fallback) {
+      candidates.push({
+        ...fallback,
+        warnings: uniqueSentimentWarnings([
+          ...(fallback.warnings || []),
+          "嚴格候選不足 1 篇，已使用同人設候選池低優先級補位。",
+        ]),
+      });
+      warnings.push("嚴格候選為 9/10，最後 1 篇已由同人設候選池補位。");
+    }
+  }
   const channelSummary = [
     `快取初始 ${initialCacheCount}`,
     ...channelStats,
@@ -2314,8 +2345,10 @@ async function fetchThreadsSearchPageCandidates(args: {
     ? getSentimentHotRefreshExcludedIds(args.archiveId)
     : getSentimentHotExcludedIds(args.archiveId);
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
-  const desiredReturnLimit = args.refresh ? Math.min(args.limit, 10) : Math.min(args.limit, 2);
-  const fastReturnTarget = desiredReturnLimit;
+  const fastReturnTarget = args.refresh ? Math.min(args.limit, 10) : Math.min(args.limit, 2);
+  const desiredReturnLimit = args.refresh
+    ? Math.min(args.limit, fastReturnTarget + THREADS_BROWSER_RESULT_BUFFER)
+    : fastReturnTarget;
   const results: SentimentHotCandidate[] = [];
   if (queries.length === 0) return results;
 
@@ -2336,8 +2369,18 @@ async function fetchThreadsSearchPageCandidates(args: {
     excludeIds: primaryExcluded,
     deadlineAt: Math.min(args.deadlineAt || Number.MAX_SAFE_INTEGER, Date.now() + SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS),
   }).catch(() => []);
+  let readerResults = await initialReaderPromise;
 
-  if (browserResults.length > 0) {
+  if (browserResults.length > 0 || readerResults.length > 0) {
+    const byId = new Map(browserResults.map((candidate) => [candidate.id, candidate]));
+    const byKey = new Set(browserResults.map((candidate) => sentimentCandidateDedupeKey(candidate)));
+    for (const candidate of readerResults) {
+      const dedupeKey = sentimentCandidateDedupeKey(candidate);
+      if (byId.has(candidate.id) || byKey.has(dedupeKey)) continue;
+      byId.set(candidate.id, candidate);
+      byKey.add(dedupeKey);
+    }
+    browserResults = sortSentimentHotCandidatePool([...byId.values()], args.keywords, args.limit);
     writeThreadsSearchCandidateCache(args.archiveId, args.keywords, browserResults);
     if (browserResults.length >= fastReturnTarget) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
   }
@@ -2359,17 +2402,7 @@ async function fetchThreadsSearchPageCandidates(args: {
     if (browserResults.length >= fastReturnTarget) return sortSentimentHotCandidatePool(browserResults, args.keywords, args.limit);
   }
 
-  let readerResults = await initialReaderPromise;
-  if (browserResults.length > 0) {
-    const merged = sortSentimentHotCandidatePool(
-      [...new Map([...browserResults, ...readerResults].map((candidate) => [candidate.id, candidate])).values()],
-      args.keywords,
-      args.limit,
-    );
-    writeThreadsSearchCandidateCache(args.archiveId, args.keywords, merged);
-    if (merged.length >= fastReturnTarget || remainingSentimentDeadlineMs(args.deadlineAt, 0) < 15_000) return merged;
-    browserResults = merged;
-  }
+  if (browserResults.length > 0 && remainingSentimentDeadlineMs(args.deadlineAt, 0) < 15_000) return browserResults;
   if (readerResults.length >= fastReturnTarget) {
     const merged = sortSentimentHotCandidatePool([...new Map([...browserResults, ...readerResults].map((candidate) => [candidate.id, candidate])).values()], args.keywords, args.limit);
     writeThreadsSearchCandidateCache(args.archiveId, args.keywords, merged);
@@ -2456,7 +2489,8 @@ async function fetchThreadsBrowserSearchCandidates(args: {
   const excluded = args.excludeIds || getSentimentHotRefreshExcludedIds(args.archiveId);
   const results: SentimentHotCandidate[] = [];
   const resultKeys = new Set<string>();
-  const workerCount = Math.min(readThreadsBrowserPageConcurrency(), args.queries.length);
+  const availableBytesAtStart = readThreadsBrowserAvailableBytes();
+  const workerCount = Math.min(readThreadsBrowserPageConcurrency(), THREADS_BROWSER_MAX_PAGE_CONCURRENCY, args.queries.length);
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch(buildLocalChromiumLaunchOptions());
@@ -2476,15 +2510,24 @@ async function fetchThreadsBrowserSearchCandidates(args: {
         await route.continue().catch(() => undefined);
       });
       let queryIndex = 0;
-      console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} pages=${workerCount} status=workers_start`);
+      console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} pages=${workerCount} availableBytes=${availableBytesAtStart} status=workers_start`);
       await Promise.all(Array.from({ length: workerCount }, async (_, workerIndex) => {
+        if (workerIndex > 0) {
+          await new Promise((resolve) => setTimeout(resolve, workerIndex * THREADS_BROWSER_WORKER_STAGGER_MS));
+          const admissionBytes = readThreadsBrowserAvailableBytes();
+          if (admissionBytes > 0 && admissionBytes < THREADS_BROWSER_SECOND_PAGE_ADMISSION_BYTES) {
+            console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} worker=${workerIndex + 1} status=skip_low_memory availableBytes=${admissionBytes} threshold=${THREADS_BROWSER_SECOND_PAGE_ADMISSION_BYTES} total=${results.length}`);
+            return;
+          }
+        }
         const page = await context.newPage();
         let emptyShellCount = 0;
         try {
           while (results.length < args.limit) {
             const availableBytes = readThreadsBrowserAvailableBytes();
-            if (workerIndex > 0 && availableBytes > 0 && availableBytes < THREADS_BROWSER_SECONDARY_PAGE_STOP_AVAILABLE_BYTES) {
-              console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} worker=${workerIndex + 1} status=stop_low_memory availableBytes=${availableBytes} total=${results.length}`);
+            const stopThreshold = threadsBrowserWorkerStopAvailableBytes(workerIndex);
+            if (stopThreshold > 0 && availableBytes > 0 && availableBytes < stopThreshold) {
+              console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} worker=${workerIndex + 1} status=stop_low_memory availableBytes=${availableBytes} threshold=${stopThreshold} total=${results.length}`);
               break;
             }
             if (args.deadlineAt && Date.now() >= args.deadlineAt) break;
