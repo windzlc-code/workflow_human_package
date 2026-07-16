@@ -23,6 +23,7 @@ import {
   parseThreadsDetailMediaMarkdown,
   parseThreadsSearchTextCandidates,
   refreshSentimentSourceMetrics,
+  resolveThreadsBrowserPageConcurrency,
   shouldTreatThreadsProfileAsLoginWall,
 } from "@/lib/sentiment-hot-importer";
 
@@ -35,6 +36,14 @@ describe("sentiment hot importer", () => {
     const target = "https://www.threads.com/search?q=%E9%9B%BB%E7%AB%B6";
     expect(buildSentimentReaderUrl(target)).toBe(`https://r.jina.ai/${target}`);
     expect(buildSentimentReaderUrl(target)).not.toContain("http://https://");
+  });
+
+  it("limits Threads browser pages when host memory is low", () => {
+    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        900000 kB\n")).toBe(2);
+    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        800000 kB\n")).toBe(1);
+    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        600000 kB\n")).toBe(1);
+    expect(resolveThreadsBrowserPageConcurrency("MemAvailable:        500000 kB\n")).toBe(1);
+    expect(resolveThreadsBrowserPageConcurrency("")).toBe(1);
   });
 
   it("builds persona-specific search keywords", () => {

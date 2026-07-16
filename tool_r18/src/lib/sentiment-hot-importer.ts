@@ -31,6 +31,10 @@ const MIN_SENTIMENT_HOT_QUALITY_HAN_COUNT = 60;
 const SENTIMENT_HOT_CANDIDATE_POOL_TARGET = 400;
 const THREADS_SEARCH_CACHE_CANDIDATE_LIMIT = 2000;
 const THREADS_BROWSER_QUERY_LIMIT = 16;
+const THREADS_BROWSER_PAGE_CONCURRENCY = 2;
+const THREADS_BROWSER_QUERY_TIMEOUT_MS = 14_000;
+const THREADS_BROWSER_DUAL_PAGE_MIN_AVAILABLE_BYTES = 850 * 1024 * 1024;
+const THREADS_BROWSER_SECONDARY_PAGE_STOP_AVAILABLE_BYTES = 320 * 1024 * 1024;
 const SENTIMENT_MODEL_KEYWORD_TARGET = 20;
 const SENTIMENT_HOT_KEYWORD_MODEL = "xai/grok-4.3";
 const SENTIMENT_HOT_KEYWORD_FALLBACK_MODEL = "xai/grok-4.3";
@@ -41,13 +45,34 @@ const THREADS_READER_TOTAL_QUERY_LIMIT = 96;
 const THREADS_READER_QUERY_BATCH_SIZE = 16;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
-const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 24_000;
+const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 38_000;
 const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 105_000;
 const SENTIMENT_HOT_FAST_RETURN_COUNT = 10;
 const SENTIMENT_HOT_SUPPLEMENT_MIN_REMAINING_MS = 15_000;
 const SENTIMENT_HOT_ARCHIVE_BACKFILL_MAX_AGE_MS = 72 * 60 * 60 * 1000;
 const THREADS_BROWSER_EMPTY_SHELL_LIMIT = 3;
 const SENTIMENT_HOT_TIMEOUT_WARNING = "\u71b1\u9ede\u6293\u53d6\u5df2\u8d85\u6642\uff0c\u5df2\u505c\u6b62\u5f8c\u7e8c\u8017\u6642\u6b65\u9a5f\uff1b\u8acb\u7a0d\u5f8c\u5237\u65b0\u6216\u6aa2\u67e5 Cookie / sessionid\u3002";
+
+export function resolveThreadsBrowserPageConcurrency(memInfo: string): number {
+  const availableKb = Number(String(memInfo || "").match(/^MemAvailable:\s+(\d+)\s+kB$/mi)?.[1] || 0);
+  return availableKb * 1024 >= THREADS_BROWSER_DUAL_PAGE_MIN_AVAILABLE_BYTES
+    ? THREADS_BROWSER_PAGE_CONCURRENCY
+    : 1;
+}
+
+function readThreadsBrowserAvailableBytes(): number {
+  try {
+    const availableKb = Number(fs.readFileSync("/proc/meminfo", "utf8").match(/^MemAvailable:\s+(\d+)\s+kB$/mi)?.[1] || 0);
+    return availableKb * 1024;
+  } catch {
+    return 0;
+  }
+}
+
+function readThreadsBrowserPageConcurrency(): number {
+  const availableBytes = readThreadsBrowserAvailableBytes();
+  return availableBytes >= THREADS_BROWSER_DUAL_PAGE_MIN_AVAILABLE_BYTES ? THREADS_BROWSER_PAGE_CONCURRENCY : 1;
+}
 
 function resolveSentimentHotKeywordModel(): string {
   const config = readRuntimeApiConfig();
@@ -1613,6 +1638,7 @@ async function fetchSentimentHotCandidatesUnlocked(args: {
   }
   if (shouldFetchLiveCandidates) {
     const beforeThreadsCount = candidates.length;
+    const threadsStageTimeoutMs = Math.min(48_000, remainingSentimentHotTotalBudgetMs(startedAt, 8_000));
     const threadsCandidates = await measureSentimentStage(
       warnings,
       "threads-search",
@@ -1622,8 +1648,9 @@ async function fetchSentimentHotCandidatesUnlocked(args: {
           keywords,
           limit: poolLimit,
           refresh: args.refresh === true,
+          deadlineAt: Date.now() + Math.max(6_000, threadsStageTimeoutMs - 2_000),
         }),
-        Math.min(42_000, remainingSentimentHotTotalBudgetMs(startedAt, 8_000)),
+        threadsStageTimeoutMs,
         [],
       ),
     ).catch((error) => {
@@ -2279,6 +2306,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   keywords: string[];
   limit: number;
   refresh?: boolean;
+  deadlineAt?: number;
 }): Promise<SentimentHotCandidate[]> {
   const baseQueries = buildThreadsSearchQueries(args.keywords);
   const shownIds = getSentimentHotShownIds(args.archiveId);
@@ -2306,7 +2334,7 @@ async function fetchThreadsSearchPageCandidates(args: {
     queries: queries.slice(0, THREADS_BROWSER_QUERY_LIMIT),
     limit: desiredReturnLimit,
     excludeIds: primaryExcluded,
-    deadlineAt: Date.now() + SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS,
+    deadlineAt: Math.min(args.deadlineAt || Number.MAX_SAFE_INTEGER, Date.now() + SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS),
   }).catch(() => []);
 
   if (browserResults.length > 0) {
@@ -2332,6 +2360,16 @@ async function fetchThreadsSearchPageCandidates(args: {
   }
 
   let readerResults = await initialReaderPromise;
+  if (browserResults.length > 0) {
+    const merged = sortSentimentHotCandidatePool(
+      [...new Map([...browserResults, ...readerResults].map((candidate) => [candidate.id, candidate])).values()],
+      args.keywords,
+      args.limit,
+    );
+    writeThreadsSearchCandidateCache(args.archiveId, args.keywords, merged);
+    if (merged.length >= fastReturnTarget || remainingSentimentDeadlineMs(args.deadlineAt, 0) < 15_000) return merged;
+    browserResults = merged;
+  }
   if (readerResults.length >= fastReturnTarget) {
     const merged = sortSentimentHotCandidatePool([...new Map([...browserResults, ...readerResults].map((candidate) => [candidate.id, candidate])).values()], args.keywords, args.limit);
     writeThreadsSearchCandidateCache(args.archiveId, args.keywords, merged);
@@ -2343,6 +2381,7 @@ async function fetchThreadsSearchPageCandidates(args: {
     const existingKeys = new Set(readerResults.map((candidate) => sentimentCandidateDedupeKey(candidate)));
     const remainingQueries = queries.slice(THREADS_READER_INITIAL_QUERY_LIMIT, THREADS_READER_TOTAL_QUERY_LIMIT);
     for (let offset = 0; offset < remainingQueries.length && existing.size < args.limit; offset += THREADS_READER_QUERY_BATCH_SIZE) {
+      if (remainingSentimentDeadlineMs(args.deadlineAt, 0) < 15_000) break;
       const extraResults = await fetchThreadsReaderSearchCandidates({
           archiveId: args.archiveId,
           keywords: args.keywords,
@@ -2417,7 +2456,7 @@ async function fetchThreadsBrowserSearchCandidates(args: {
   const excluded = args.excludeIds || getSentimentHotRefreshExcludedIds(args.archiveId);
   const results: SentimentHotCandidate[] = [];
   const resultKeys = new Set<string>();
-  let emptyShellCount = 0;
+  const workerCount = Math.min(readThreadsBrowserPageConcurrency(), args.queries.length);
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch(buildLocalChromiumLaunchOptions());
@@ -2428,62 +2467,98 @@ async function fetchThreadsBrowserSearchCandidates(args: {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       });
       await context.addCookies(cookies as any[]).catch(() => undefined);
-      const page = await context.newPage();
-      for (const query of args.queries) {
-        if (results.length >= args.limit) break;
-        if (args.deadlineAt && Date.now() >= args.deadlineAt) break;
-        if (args.deadlineAt && remainingSentimentDeadlineMs(args.deadlineAt, 0) < 3_000) {
-          console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} status=stop_deadline_remaining total=${results.length}`);
-          break;
+      await context.route("**/*", async (route: any) => {
+        const resourceType = route.request().resourceType();
+        if (resourceType === "image" || resourceType === "media" || resourceType === "font") {
+          await route.abort().catch(() => undefined);
+          return;
         }
-        const search = await readThreadsSearchPageText(page, query, args.deadlineAt);
-        if (detectThreadsProfileLoginWall(search.text)) break;
-        const parsed = parseThreadsSearchTextCandidates({
-          text: search.text,
-          query,
-          keywords: args.keywords,
-          limit: args.limit - results.length,
-          sourceUrl: search.url,
-        });
-        let acceptedCount = 0;
-        let excludedCount = 0;
-        let keywordMissCount = 0;
-        let shortCount = 0;
-        let duplicateCount = 0;
-        for (const candidate of parsed) {
-          if (excluded.has(candidate.id)) {
-            excludedCount += 1;
-            continue;
+        await route.continue().catch(() => undefined);
+      });
+      let queryIndex = 0;
+      console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} pages=${workerCount} status=workers_start`);
+      await Promise.all(Array.from({ length: workerCount }, async (_, workerIndex) => {
+        const page = await context.newPage();
+        let emptyShellCount = 0;
+        try {
+          while (results.length < args.limit) {
+            const availableBytes = readThreadsBrowserAvailableBytes();
+            if (workerIndex > 0 && availableBytes > 0 && availableBytes < THREADS_BROWSER_SECONDARY_PAGE_STOP_AVAILABLE_BYTES) {
+              console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} worker=${workerIndex + 1} status=stop_low_memory availableBytes=${availableBytes} total=${results.length}`);
+              break;
+            }
+            if (args.deadlineAt && Date.now() >= args.deadlineAt) break;
+            if (args.deadlineAt && remainingSentimentDeadlineMs(args.deadlineAt, 0) < 3_000) {
+              console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} worker=${workerIndex + 1} status=stop_deadline_remaining total=${results.length}`);
+              break;
+            }
+            const currentQueryIndex = queryIndex++;
+            if (currentQueryIndex >= args.queries.length) break;
+            const query = args.queries[currentQueryIndex];
+            const queryDeadlineAt = Math.min(args.deadlineAt || Number.MAX_SAFE_INTEGER, Date.now() + THREADS_BROWSER_QUERY_TIMEOUT_MS);
+            const search = await readThreadsSearchPageText(page, query, queryDeadlineAt);
+            if (detectThreadsProfileLoginWall(search.text)) break;
+            const parsedById = new Map<string, SentimentHotCandidate>();
+            const parsedKeys = new Set<string>();
+            for (const snapshotText of search.snapshots || [search.text]) {
+              const snapshotCandidates = parseThreadsSearchTextCandidates({
+                text: snapshotText,
+                query,
+                keywords: args.keywords,
+                limit: Math.max(1, args.limit - results.length),
+                sourceUrl: search.url,
+              });
+              for (const candidate of snapshotCandidates) {
+                const dedupeKey = sentimentCandidateDedupeKey(candidate);
+                if (parsedById.has(candidate.id) || parsedKeys.has(dedupeKey)) continue;
+                parsedById.set(candidate.id, candidate);
+                parsedKeys.add(dedupeKey);
+              }
+            }
+            const parsed = [...parsedById.values()];
+            let acceptedCount = 0;
+            let excludedCount = 0;
+            let keywordMissCount = 0;
+            let shortCount = 0;
+            let duplicateCount = 0;
+            for (const candidate of parsed) {
+              if (excluded.has(candidate.id)) {
+                excludedCount += 1;
+                continue;
+              }
+              if (!hasMinimumSentimentHotContentLength(candidate)) {
+                shortCount += 1;
+                continue;
+              }
+              if (!candidateTouchesCurrentKeywords(candidate, args.keywords)) {
+                keywordMissCount += 1;
+                continue;
+              }
+              const dedupeKey = sentimentCandidateDedupeKey(candidate);
+              if (results.some((item) => item.id === candidate.id) || resultKeys.has(dedupeKey)) {
+                duplicateCount += 1;
+                continue;
+              }
+              results.push(candidate);
+              resultKeys.add(dedupeKey);
+              acceptedCount += 1;
+              if (results.length >= args.limit) break;
+            }
+            console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} worker=${workerIndex + 1} query=${JSON.stringify(query)} textLen=${search.text.length} parsed=${parsed.length} accepted=${acceptedCount} total=${results.length} excluded=${excludedCount} short=${shortCount} keywordMiss=${keywordMissCount} duplicate=${duplicateCount} url=${search.url}`);
+            if (parsed.length === 0 && search.text.trim().length <= 180) {
+              emptyShellCount += 1;
+              if (emptyShellCount >= THREADS_BROWSER_EMPTY_SHELL_LIMIT) {
+                console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} worker=${workerIndex + 1} status=stop_empty_shell count=${emptyShellCount} total=${results.length}`);
+                break;
+              }
+            } else {
+              emptyShellCount = 0;
+            }
           }
-          if (!hasMinimumSentimentHotContentLength(candidate)) {
-            shortCount += 1;
-            continue;
-          }
-          if (!candidateTouchesCurrentKeywords(candidate, args.keywords)) {
-            keywordMissCount += 1;
-            continue;
-          }
-          const dedupeKey = sentimentCandidateDedupeKey(candidate);
-          if (results.some((item) => item.id === candidate.id) || resultKeys.has(dedupeKey)) {
-            duplicateCount += 1;
-            continue;
-          }
-          results.push(candidate);
-          resultKeys.add(dedupeKey);
-          acceptedCount += 1;
-          if (results.length >= args.limit) break;
+        } finally {
+          await page.close().catch(() => undefined);
         }
-        console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} query=${JSON.stringify(query)} textLen=${search.text.length} parsed=${parsed.length} accepted=${acceptedCount} total=${results.length} excluded=${excludedCount} short=${shortCount} keywordMiss=${keywordMissCount} duplicate=${duplicateCount} url=${search.url}`);
-        if (parsed.length === 0 && search.text.trim().length <= 180) {
-          emptyShellCount += 1;
-          if (emptyShellCount >= THREADS_BROWSER_EMPTY_SHELL_LIMIT) {
-            console.info(`[sentiment_hot_browser_search] archiveId=${args.archiveId} status=stop_empty_shell count=${emptyShellCount} total=${results.length}`);
-            break;
-          }
-        } else {
-          emptyShellCount = 0;
-        }
-      }
+      }));
       await context.close();
     } finally {
       await browser.close().catch(() => undefined);
@@ -4581,23 +4656,74 @@ function isLikelyInstagramAuthor(value: string) {
   return Boolean(text && /^[A-Za-z0-9._]{2,30}$/.test(text) && !/^(?:p|reel|tv|explore|accounts|direct|stories|about|developer|legal|privacy)$/i.test(text));
 }
 
-async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: number): Promise<{ text: string; url: string }> {
+async function collectThreadsSearchTextSnapshots(page: any, initialText: string, deadlineAt?: number): Promise<string[]> {
+  const snapshots: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string) => {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    snapshots.push(text);
+  };
+  add(initialText);
+  for (let pass = 0; pass < 4; pass += 1) {
+    if (remainingSentimentDeadlineMs(deadlineAt, 0) < 700) break;
+    await page.evaluate(() => {
+      window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));
+    }).catch(() => undefined);
+    await page.waitForTimeout(Math.min(550, remainingSentimentDeadlineMs(deadlineAt, 550)));
+    const text = await page.locator("body").innerText({ timeout: Math.min(500, remainingSentimentDeadlineMs(deadlineAt, 500)) }).catch(() => "");
+    add(text);
+  }
+  return snapshots;
+}
+
+async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: number): Promise<{ text: string; url: string; snapshots?: string[] }> {
   const encodedQuery = encodeURIComponent(query);
-  const primarySearchUrl = `https://www.threads.net/search?q=${encodedQuery}`;
+  const primarySearchUrl = `https://www.threads.com/search?q=${encodedQuery}`;
+  const secondarySearchUrl = `https://www.threads.net/search?q=${encodedQuery}`;
   const searchUrl = "https://www.threads.net/search";
   const directSearchUrl = `https://www.threads.net/search?q=${encodedQuery}&serp_type=default`;
-  const fallbackSearchUrl = `https://www.threads.com/search?q=${encodedQuery}`;
-  await page.goto(primarySearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(8_000, remainingSentimentDeadlineMs(deadlineAt, 8_000)) }).catch(() => undefined);
-  await page.waitForTimeout(Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)));
+  await page.goto(primarySearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(6_000, remainingSentimentDeadlineMs(deadlineAt, 6_000)) }).catch(() => undefined);
+  const primaryReady = await page.waitForFunction(
+    () => {
+      const text = String(document.body?.innerText || "").trim();
+      return Boolean(document.querySelector('a[href*="/post/"]'))
+        || (text.length > 400 && /(?:最相關|最相关|Most relevant|Recent|最近)/i.test(text));
+    },
+    undefined,
+    { timeout: Math.min(10_000, remainingSentimentDeadlineMs(deadlineAt, 10_000)) },
+  ).then(() => true).catch(() => false);
   if (deadlineAt && Date.now() >= deadlineAt) return { text: "", url: page.url() || primarySearchUrl };
-  const primaryText = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
-  if (primaryText && primaryText.trim().length > 120 && !detectThreadsProfileLoginWall(primaryText)) {
-    return { text: primaryText, url: page.url() || primarySearchUrl };
+  const primaryText = await page.locator("body").innerText({ timeout: Math.min(1_000, remainingSentimentDeadlineMs(deadlineAt, 1_000)) }).catch(() => "");
+  if (primaryReady && primaryText && primaryText.trim().length > 120 && !detectThreadsProfileLoginWall(primaryText)) {
+    const snapshots = await collectThreadsSearchTextSnapshots(page, primaryText, deadlineAt);
+    return {
+      text: snapshots.join("\n\n"),
+      url: page.url() || primarySearchUrl,
+      snapshots,
+    };
   }
-  await page.goto(fallbackSearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(6_000, remainingSentimentDeadlineMs(deadlineAt, 6_000)) }).catch(() => undefined);
-  const fallbackDomainText = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
-  if (fallbackDomainText && fallbackDomainText.trim().length > 120 && !detectThreadsProfileLoginWall(fallbackDomainText)) {
-    return { text: fallbackDomainText, url: page.url() || fallbackSearchUrl };
+  if (remainingSentimentDeadlineMs(deadlineAt, 0) >= 2_000) {
+    await page.goto(secondarySearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(3_000, remainingSentimentDeadlineMs(deadlineAt, 3_000)) }).catch(() => undefined);
+  }
+  const secondaryText = await page.locator("body").innerText({ timeout: Math.min(800, remainingSentimentDeadlineMs(deadlineAt, 800)) }).catch(() => "");
+  const secondaryReady = await page.evaluate(() => {
+    const text = String(document.body?.innerText || "").trim();
+    return Boolean(document.querySelector('a[href*="/post/"]'))
+      || (text.length > 400 && /(?:最相關|最相关|Most relevant|Recent|最近)/i.test(text));
+  }).catch(() => false);
+  if (secondaryReady && secondaryText && secondaryText.trim().length > 120 && !detectThreadsProfileLoginWall(secondaryText)) {
+    const snapshots = await collectThreadsSearchTextSnapshots(page, secondaryText, deadlineAt);
+    return {
+      text: snapshots.join("\n\n"),
+      url: page.url() || secondarySearchUrl,
+      snapshots,
+    };
+  }
+  if (remainingSentimentDeadlineMs(deadlineAt, 0) < 3_000) {
+    const text = secondaryText && secondaryText.trim().length > primaryText.trim().length ? secondaryText : primaryText;
+    return { text, url: page.url() || secondarySearchUrl };
   }
   await page.goto(directSearchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(6_000, remainingSentimentDeadlineMs(deadlineAt, 6_000)) }).catch(async () => {
     await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: Math.min(4_000, remainingSentimentDeadlineMs(deadlineAt, 4_000)) }).catch(() => undefined);
@@ -4612,7 +4738,8 @@ async function readThreadsSearchPageText(page: any, query: string, deadlineAt?: 
   await page.waitForTimeout(Math.min(1_200, remainingSentimentDeadlineMs(deadlineAt, 1_200)));
   if (deadlineAt && Date.now() >= deadlineAt) return { text: primaryText || "", url: page.url() || searchUrl };
   const fallbackText = await page.locator("body").innerText({ timeout: Math.min(1_500, remainingSentimentDeadlineMs(deadlineAt, 1_500)) }).catch(() => "");
-  const text = fallbackText && fallbackText.trim().length > primaryText.trim().length ? fallbackText : primaryText;
+  const bestInitialText = secondaryText && secondaryText.trim().length > primaryText.trim().length ? secondaryText : primaryText;
+  const text = fallbackText && fallbackText.trim().length > bestInitialText.trim().length ? fallbackText : bestInitialText;
   return { text, url: page.url() || directSearchUrl };
 }
 
