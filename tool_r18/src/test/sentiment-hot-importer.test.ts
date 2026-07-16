@@ -3,6 +3,7 @@ import { buildSentimentCandidateId, rememberSentimentHotShown } from "@/lib/sent
 import {
   analyzeThreadsProfileVisibleSignals,
   buildOrderedSentimentQueries,
+  buildSentimentReaderUrl,
   buildSentimentHotKeywords,
   candidateMatchesCurrentKeywords,
   cleanSentimentCandidateContent,
@@ -30,6 +31,12 @@ afterEach(() => {
 });
 
 describe("sentiment hot importer", () => {
+  it("builds reader URLs without a duplicated protocol", () => {
+    const target = "https://www.threads.com/search?q=%E9%9B%BB%E7%AB%B6";
+    expect(buildSentimentReaderUrl(target)).toBe(`https://r.jina.ai/${target}`);
+    expect(buildSentimentReaderUrl(target)).not.toContain("http://https://");
+  });
+
   it("builds persona-specific search keywords", () => {
     const beautyKeywords = buildSentimentHotKeywords({
       archive: {

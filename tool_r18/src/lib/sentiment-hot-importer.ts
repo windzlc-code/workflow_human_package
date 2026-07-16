@@ -41,8 +41,8 @@ const THREADS_READER_TOTAL_QUERY_LIMIT = 96;
 const THREADS_READER_QUERY_BATCH_SIZE = 16;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
-const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 12_000;
-const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 90_000;
+const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 24_000;
+const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 105_000;
 const SENTIMENT_HOT_FAST_RETURN_COUNT = 10;
 const SENTIMENT_HOT_SUPPLEMENT_MIN_REMAINING_MS = 15_000;
 const SENTIMENT_HOT_ARCHIVE_BACKFILL_MAX_AGE_MS = 72 * 60 * 60 * 1000;
@@ -1460,14 +1460,20 @@ async function refreshSentimentBrowserCookies(statuses: SentimentCookieStatus[],
   return nextStatuses;
 }
 
-async function triggerRealtimeSentimentScan(platforms: SentimentHotPlatform[], warnings: string[]) {
+async function triggerRealtimeSentimentScan(platforms: SentimentHotPlatform[], keywords: string[], warnings: string[]) {
   const sources = [...new Set(platforms)].filter((platform) => platform === "threads" || platform === "instagram");
   if (!sources.length) return;
   try {
     const response = await fetch(`${resolveSentimentBackendUrl()}/api/sentiment/scan-start`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ reason: "manual", mode: "fast", sources, days: 2 }),
+      body: JSON.stringify({
+        reason: "manual",
+        mode: "fast",
+        sources,
+        keywords: meaningfulNeedles(keywords).slice(0, 12),
+        days: 2,
+      }),
       signal: AbortSignal.timeout(5000),
     });
     if (!response.ok) {
@@ -1475,6 +1481,7 @@ async function triggerRealtimeSentimentScan(platforms: SentimentHotPlatform[], w
       return;
     }
     const json = await response.json().catch(() => ({}));
+    console.info(`[sentiment_hot_realtime_scan] sources=${sources.join(",")} keywords=${Array.isArray(json?.keywords) ? json.keywords.length : 0} started=${json?.started === true} alreadyRunning=${json?.alreadyRunning === true}`);
     warnings.push(json?.alreadyRunning ? "舆情后端已有实时扫描在运行，已复用当前任务。" : "已触发舆情后端实时扫描，结果会持续进入候选库。");
   } catch (error) {
     warnings.push("实时扫描触发失败：" + (error instanceof Error ? error.message : String(error)));
@@ -1754,8 +1761,17 @@ async function fetchSentimentHotCandidatesUnlocked(args: {
   const usableSources = cookieStatuses
     .filter(sentimentCookieStatusHasUsableCookies)
     .map((status) => status.platform);
-  if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok && usableSources.length > 0 && hasSentimentHotTotalBudget(startedAt, 4_000)) {
-    await measureSentimentStage(warnings, "realtime-scan", () => withSentimentTimeout(triggerRealtimeSentimentScan(usableSources, warnings), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 3_000)), undefined));
+  let realtimeKeywordsReady = false;
+  if (shouldFetchLiveCandidates && !hasFastReturnCandidates && runtime.ok && usableSources.length > 0 && hasSentimentHotTotalBudget(startedAt, 5_000)) {
+    realtimeKeywordsReady = await measureSentimentStage(warnings, "keyword-sync", () => withSentimentTimeout(
+      syncSentimentKeywords(keywords).then(() => true),
+      Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 4_000)),
+      false,
+    ));
+    if (!realtimeKeywordsReady) warnings.push("舆情關鍵詞同步超時，已跳過本次實時掃描，避免無關鍵詞空轉。");
+  }
+  if (realtimeKeywordsReady && hasSentimentHotTotalBudget(startedAt, 4_000)) {
+    await measureSentimentStage(warnings, "realtime-scan", () => withSentimentTimeout(triggerRealtimeSentimentScan(usableSources, keywords, warnings), Math.min(6_000, remainingSentimentHotTotalBudgetMs(startedAt, 3_000)), undefined));
   }
 
   if (hasSearchKeywords && candidates.length < limit) {
@@ -1806,7 +1822,6 @@ async function fetchSentimentHotCandidatesUnlocked(args: {
     candidates = sortSentimentHotCandidatePool(candidates, keywords, Math.max(limit * 40, SENTIMENT_HOT_CANDIDATE_POOL_TARGET));
   }
   if (runtime.ok && usableSources.length > 0) {
-    void syncSentimentKeywords(keywords).catch(() => undefined);
     const missingSources = cookieStatuses
       .filter((status) => !sentimentCookieStatusHasUsableCookies(status))
       .map((status) => sentimentCookiePlatformLabel(status.platform));
@@ -2481,7 +2496,11 @@ async function fetchThreadsBrowserSearchCandidates(args: {
   return sortSentimentHotCandidatePool(results, args.keywords, args.limit);
 }
 
-const JINA_READER_PREFIX = "https://r.jina.ai/http://";
+const JINA_READER_PREFIX = "https://r.jina.ai/";
+
+export function buildSentimentReaderUrl(targetUrl: string): string {
+  return `${JINA_READER_PREFIX}${targetUrl}`;
+}
 
 async function fetchThreadsReaderSearchCandidates(args: {
   archiveId: string;
@@ -2500,7 +2519,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
       const targetUrl = `https://www.threads.com/search?q=${encodeURIComponent(query)}`;
       const readerTargetUrl = args.refresh ? `${targetUrl}&__r=${Date.now().toString(36)}${index}` : targetUrl;
       try {
-        const response = await fetch(`${JINA_READER_PREFIX}${readerTargetUrl}`, {
+        const response = await fetch(buildSentimentReaderUrl(readerTargetUrl), {
           headers: {
             "user-agent": "Mozilla/5.0",
             accept: "text/plain, text/markdown, */*",
@@ -2516,6 +2535,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
       }
     }),
   );
+  let parsedCount = 0;
   for (const search of searches) {
     const parsed = parseThreadsReaderSearchMarkdownCandidates({
       text: search.text,
@@ -2524,6 +2544,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
       sourceUrl: search.targetUrl,
       limit: rawCandidateLimit,
     });
+    parsedCount += parsed.length;
     for (const candidate of parsed) {
       if (excluded.has(candidate.id)) continue;
       if (!candidateTouchesCurrentKeywords(candidate, args.keywords)) continue;
@@ -2535,6 +2556,7 @@ async function fetchThreadsReaderSearchCandidates(args: {
     }
     if (all.length >= rawCandidateLimit) break;
   }
+  console.info(`[sentiment_hot_threads_reader] archiveId=${args.archiveId} queries=${searches.length} responses=${searches.filter((item) => item.text.trim()).length} chars=${searches.reduce((total, item) => total + item.text.length, 0)} parsed=${parsedCount} accepted=${all.length}`);
   return sortSentimentHotCandidatePool(await enrichThreadsCandidateDetails(all), args.keywords, args.limit);
 }
 
@@ -2560,7 +2582,7 @@ async function fetchInstagramReaderSearchCandidates(args: {
       for (const targetUrl of targets) {
         const readerTargetUrl = args.refresh ? `${targetUrl}${targetUrl.includes("?") ? "&" : "?"}__r=${Date.now().toString(36)}${index}` : targetUrl;
         try {
-          const response = await fetch(`${JINA_READER_PREFIX}${readerTargetUrl}`, {
+          const response = await fetch(buildSentimentReaderUrl(readerTargetUrl), {
             headers: {
               "user-agent": "Mozilla/5.0",
               accept: "text/plain, text/markdown, */*",
@@ -2577,7 +2599,9 @@ async function fetchInstagramReaderSearchCandidates(args: {
       return texts;
     }),
   );
-  for (const search of searches.flat()) {
+  const flatSearches = searches.flat();
+  let parsedCount = 0;
+  for (const search of flatSearches) {
     const parsed = parseInstagramReaderSearchMarkdownCandidates({
       text: search.text,
       query: search.query,
@@ -2585,6 +2609,7 @@ async function fetchInstagramReaderSearchCandidates(args: {
       sourceUrl: search.targetUrl,
       limit: args.limit,
     });
+    parsedCount += parsed.length;
     for (const candidate of parsed) {
       if (excluded.has(candidate.id)) continue;
       if (!candidateTouchesCurrentKeywords(candidate, args.keywords)) continue;
@@ -2596,6 +2621,7 @@ async function fetchInstagramReaderSearchCandidates(args: {
     }
     if (all.length >= args.limit) break;
   }
+  console.info(`[sentiment_hot_instagram_reader] archiveId=${args.archiveId} queries=${args.queries.length} responses=${flatSearches.length} chars=${flatSearches.reduce((total, item) => total + item.text.length, 0)} parsed=${parsedCount} accepted=${all.length}`);
   return sortUsefulHotCandidates(all, args.limit);
 }
 
