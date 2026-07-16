@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildSentimentCandidateId, rememberSentimentHotShown } from "@/lib/sentiment-candidate-store";
 import {
   analyzeThreadsProfileVisibleSignals,
+  buildOrderedSentimentQueries,
   buildSentimentHotKeywords,
   candidateMatchesCurrentKeywords,
   cleanSentimentCandidateContent,
@@ -402,7 +403,7 @@ describe("sentiment hot importer", () => {
     expect(candidates.map((candidate) => candidate.hotScore)).toEqual([30000, 18000, 5000]);
   });
 
-  it("keeps already shown hot candidates ordered by heat in display", () => {
+  it("excludes already shown hot candidates during refresh", () => {
     const archiveId = `test-refresh-exclude-shown-${Date.now()}`;
     const base = {
       platform: "threads",
@@ -433,14 +434,25 @@ describe("sentiment hot importer", () => {
       excludeShown: true,
     });
 
-    expect(candidates.map((candidate) => candidate.id)).toEqual(["shown-hot", "fresh-hot"]);
-    expect(candidates.map((candidate) => candidate.hotScore)).toEqual([90000, 30000]);
+    expect(candidates.map((candidate) => candidate.id)).toEqual(["fresh-hot"]);
+    expect(candidates.map((candidate) => candidate.hotScore)).toEqual([30000]);
     const limitedCandidates = finalizeSentimentHotCandidatesForDisplay([shown, fresh] as any, 1, {
       archiveId,
       keywords: ["海外信貸", "銀行貸款", "信用卡"],
       excludeShown: true,
     });
-    expect(limitedCandidates.map((candidate) => candidate.id)).toEqual(["shown-hot"]);
+    expect(limitedCandidates.map((candidate) => candidate.id)).toEqual(["fresh-hot"]);
+  });
+
+  it("rotates the full search query pool during refresh", () => {
+    const baseQueries = ["\u904a\u6232", "\u96fb\u7af6"];
+    const normal = buildOrderedSentimentQueries(baseQueries, 1, false);
+    const refreshA = buildOrderedSentimentQueries(baseQueries, 0, true);
+    const refreshB = buildOrderedSentimentQueries(baseQueries, 1, true);
+
+    expect(normal.slice(0, 2)).toEqual(baseQueries);
+    expect(refreshA[0]).not.toBe(refreshB[0]);
+    expect(new Set(refreshA)).toEqual(new Set(refreshB));
   });
 
   it("does not display hot candidates shorter than 60 Chinese characters", () => {

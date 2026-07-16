@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import type { PersonaArchive } from "@/core/archives/persona-archive-domain";
+import { readRuntimeApiConfig } from "@/runtime/node/config";
 import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 import { withSentimentHotExecutionLock } from "@/lib/sentiment-hot-execution-lock";
 import { callTextUnderstandingModelWithFallback, extractText } from "@/lib/gemini-client";
@@ -31,20 +32,35 @@ const SENTIMENT_HOT_CANDIDATE_POOL_TARGET = 400;
 const THREADS_SEARCH_CACHE_CANDIDATE_LIMIT = 2000;
 const THREADS_BROWSER_QUERY_LIMIT = 16;
 const SENTIMENT_MODEL_KEYWORD_TARGET = 20;
-const SENTIMENT_HOT_KEYWORD_MODEL = "gemini-3.1-pro-preview";
+const SENTIMENT_HOT_KEYWORD_MODEL = "xai/grok-4.3";
 const SENTIMENT_HOT_KEYWORD_FALLBACK_MODEL = "xai/grok-4.3";
+const SENTIMENT_HOT_KEYWORD_MODEL_ATTEMPT_TIMEOUT_MS = 15_000;
+const SENTIMENT_HOT_KEYWORD_STAGE_TIMEOUT_MS = 32_000;
 const THREADS_READER_INITIAL_QUERY_LIMIT = 32;
 const THREADS_READER_TOTAL_QUERY_LIMIT = 96;
 const THREADS_READER_QUERY_BATCH_SIZE = 16;
 const INSTAGRAM_READER_QUERY_LIMIT = 48;
 const SENTIMENT_HOT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 const SENTIMENT_HOT_STAGE_BROWSER_TIMEOUT_MS = 12_000;
-const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 60_000;
+const SENTIMENT_HOT_TOTAL_TIMEOUT_MS = 90_000;
 const SENTIMENT_HOT_FAST_RETURN_COUNT = 10;
 const SENTIMENT_HOT_SUPPLEMENT_MIN_REMAINING_MS = 15_000;
 const SENTIMENT_HOT_ARCHIVE_BACKFILL_MAX_AGE_MS = 72 * 60 * 60 * 1000;
 const THREADS_BROWSER_EMPTY_SHELL_LIMIT = 3;
 const SENTIMENT_HOT_TIMEOUT_WARNING = "\u71b1\u9ede\u6293\u53d6\u5df2\u8d85\u6642\uff0c\u5df2\u505c\u6b62\u5f8c\u7e8c\u8017\u6642\u6b65\u9a5f\uff1b\u8acb\u7a0d\u5f8c\u5237\u65b0\u6216\u6aa2\u67e5 Cookie / sessionid\u3002";
+
+function resolveSentimentHotKeywordModel(): string {
+  const config = readRuntimeApiConfig();
+  const priority = config.llmModelPriorityOrder
+    || config.llm_model_priority_order
+    || config.llmDefaultModelGpt
+    || config.llm_default_model_gpt
+    || config.llmDefaultModel
+    || config.llm_default_model
+    || "";
+  return String(priority).split(/[,\n]/).map((model) => model.trim()).find(Boolean)
+    || SENTIMENT_HOT_KEYWORD_MODEL;
+}
 const THREADS_SEARCH_CACHE_WARNING = "当前 Threads 搜索被限流，已使用 24 小时内缓存热点。";
 const SENTIMENT_HOT_GENERIC_QUERY_INTENTS = [
   "經驗",
@@ -1170,19 +1186,18 @@ async function buildSentimentHotKeywordsWithModel(args: {
     let result: Awaited<ReturnType<typeof callTextUnderstandingModelWithFallback>>;
     try {
       result = await callTextUnderstandingModelWithFallback(
-        SENTIMENT_HOT_KEYWORD_MODEL,
+        resolveSentimentHotKeywordModel(),
         keywordContents,
-        { temperature: 0.15, maxOutputTokens: 768 },
-        AbortSignal.timeout(10_000),
+        { temperature: 0.15, maxOutputTokens: 384 },
+        AbortSignal.timeout(SENTIMENT_HOT_KEYWORD_MODEL_ATTEMPT_TIMEOUT_MS),
         modelOptions,
       );
     } catch (primaryError) {
-      args.warnings.push(`Gemini 熱點關鍵詞模型不可用，已改用人設核心領域詞補齊：${primaryError instanceof Error ? primaryError.message : String(primaryError)}`);
       result = await callTextUnderstandingModelWithFallback(
         SENTIMENT_HOT_KEYWORD_FALLBACK_MODEL,
         keywordContents,
-        { temperature: 0.15, maxOutputTokens: 768 },
-        AbortSignal.timeout(7_000),
+        { temperature: 0.15, maxOutputTokens: 384 },
+        AbortSignal.timeout(SENTIMENT_HOT_KEYWORD_MODEL_ATTEMPT_TIMEOUT_MS),
         modelOptions,
       );
     }
@@ -1524,7 +1539,7 @@ async function fetchSentimentHotCandidatesUnlocked(args: {
     "keywords",
     () => withSentimentTimeout(
       buildSentimentHotKeywordsWithModel({ archive, prompt: args.prompt, memorySummaries: args.memorySummaries, warnings }),
-      Math.min(personaSeedKeywords.length > 0 ? 8_000 : 18_000, remainingSentimentHotTotalBudgetMs(startedAt, 12_000)),
+      Math.min(SENTIMENT_HOT_KEYWORD_STAGE_TIMEOUT_MS, remainingSentimentHotTotalBudgetMs(startedAt, 12_000)),
       undefined,
     ),
   );
@@ -1918,34 +1933,9 @@ async function fillSentimentHotCandidatesToLimit(args: {
     }
   }
 
-  if (args.refresh === true && out.length < args.limit) {
-    const beforeSoftBackfillCount = out.length;
-    const softBackfillCandidates = [
-      ...readThreadsSearchCandidateCache(args.archiveId, args.keywords, Math.max(args.limit * 30, SENTIMENT_HOT_CANDIDATE_POOL_TARGET), false),
-      ...readArchiveScopedThreadsCandidateBackfill(
-        args.archiveId,
-        args.keywords,
-        Math.max(args.limit * 30, SENTIMENT_HOT_CANDIDATE_POOL_TARGET),
-        false,
-      ),
-      ...(await readCandidatesFromDatabase({
-        archiveId: args.archiveId,
-        keywords: args.keywords,
-        limit: Math.max(args.limit * 30, SENTIMENT_HOT_CANDIDATE_POOL_TARGET),
-        excludeShown: false,
-      }).catch(() => [])),
-    ];
-    for (const candidate of softBackfillCandidates) {
-      add(candidate);
-    }
-    if (out.length > beforeSoftBackfillCount) {
-      args.warnings.push("\u672a\u5c55\u793a\u5019\u9078\u4e0d\u8db3\uff0c\u5df2\u4f7f\u7528\u8fd1\u671f\u5c55\u793a\u904e\u4f46\u672a\u767c\u4f48/\u672a\u5c0e\u5165\u7684\u5019\u9078\u4f4e\u512a\u5148\u7d1a\u56de\u88dc\u3002");
-    }
-  }
-
   if (out.length >= args.limit) {
     if (args.refresh === true) {
-      args.warnings.push("即時新結果不足 " + args.limit + " 篇，已按未展示優先、近期展示低優先級的策略補足候選。");
+      args.warnings.push("即時新結果不足 " + args.limit + " 篇，已用同人設未展示的高熱度歷史候選補足。");
     } else {
       args.warnings.push("\u5373\u6642\u65b0\u7d50\u679c\u4e0d\u8db3\u0020" + args.limit + "\u0020\u7bc7\uff0c\u5df2\u7528\u540c\u4eba\u8a2d\u95dc\u9375\u8a5e\u7684\u9ad8\u71b1\u5ea6\u6b77\u53f2\u5019\u9078\u88dc\u9f4a\u3002");
     }
@@ -2053,10 +2043,19 @@ function rotateSentimentQueries(queries: string[], seed: number): string[] {
   return [...queries.slice(offset), ...queries.slice(0, offset)];
 }
 
-function buildOrderedSentimentQueries(baseQueries: string[], seed: number, refresh = false): string[] {
+export function buildOrderedSentimentQueries(baseQueries: string[], seed: number, refresh = false): string[] {
   const pool = buildSentimentRefreshQueryPool(baseQueries);
   const baseSet = new Set(baseQueries);
   const supplemental = pool.filter((query) => !baseSet.has(query));
+  if (refresh) {
+    const primaryQueries = baseQueries.slice(0, Math.min(12, baseQueries.length));
+    const secondaryQueries = baseQueries.slice(primaryQueries.length);
+    return [
+      ...rotateSentimentQueries(primaryQueries, seed),
+      ...rotateSentimentQueries(secondaryQueries, seed),
+      ...rotateSentimentQueries(supplemental, seed),
+    ];
+  }
   return [...baseQueries, ...rotateSentimentQueries(supplemental, seed)];
 }
 
@@ -2193,6 +2192,7 @@ export function finalizeSentimentHotCandidatesForDisplay(candidates: SentimentHo
   const keywords = options?.keywords || [];
   const sorted = candidates
     .filter((candidate) => isUsefulHotCandidate(candidate) && hasMinimumSentimentHotContentLength(candidate))
+    .filter((candidate) => options?.excludeShown !== true || !shownIds.has(candidate.id))
     .filter((candidate) => keywords.length === 0 || candidateMatchesCurrentKeywords(candidate, keywords) || candidateTouchesCurrentKeywords(candidate, keywords))
     .sort((a, b) => {
       const heatDelta = Number(b.hotScore || 0) - Number(a.hotScore || 0);
@@ -2268,7 +2268,7 @@ async function fetchThreadsSearchPageCandidates(args: {
   const baseQueries = buildThreadsSearchQueries(args.keywords);
   const shownIds = getSentimentHotShownIds(args.archiveId);
   const primaryExcluded = args.refresh
-    ? new Set<string>()
+    ? getSentimentHotRefreshExcludedIds(args.archiveId)
     : getSentimentHotExcludedIds(args.archiveId);
   const queries = buildOrderedSentimentQueries(baseQueries, args.refresh ? Date.now() + shownIds.size : shownIds.size, args.refresh === true);
   const desiredReturnLimit = args.refresh ? Math.min(args.limit, 10) : Math.min(args.limit, 2);

@@ -212,13 +212,14 @@ async function main() {
     : value.action === "import"
       ? importCandidates(value)
       : Promise.reject(new Error("invalid action")));
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-  if (!result.ok) process.exitCode = 1;
+  process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(result.ok ? 0 : 1));
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   main().catch((error) => {
-    process.stdout.write(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);
-    process.exitCode = 1;
+    process.stdout.write(
+      `${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`,
+      () => process.exit(1),
+    );
   });
 }
