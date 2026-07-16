@@ -1,4 +1,5 @@
 import { fetchThreadsProfileHotMetrics, getLiveSentimentBrowserAuthProfileBinding, refreshSentimentBrowserCookiesForPlatform } from "@/lib/sentiment-hot-importer";
+import { withSentimentHotExecutionLock } from "@/lib/sentiment-hot-execution-lock";
 import { listPersonaArchives, updatePersonaArchiveProfile } from "@/lib/persona-archives";
 import { installNodePersonaArchiveBridge } from "@/runtime/node/persona-archive-store";
 
@@ -434,7 +435,7 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
+withSentimentHotExecutionLock("persona-dashboard-refresh", main).catch((error) => {
   console.error(JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error || "refresh failed") }));
   process.exit(1);
 });

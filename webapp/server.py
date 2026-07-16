@@ -229,7 +229,7 @@ def _env_bool(name: str, default: bool) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-RH_MAX_CONCURRENCY = max(_env_int("RH_MAX_CONCURRENCY", 20), 1)
+RH_MAX_CONCURRENCY = max(_env_int("RH_MAX_CONCURRENCY", 1), 1)
 TASK_QUEUE_MAXSIZE = max(_env_int("TASK_QUEUE_MAXSIZE", 0), 0)
 COMFY_GPU_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_MAX_CONCURRENCY", 4), 1)
 COMFY_GPU_CONFIG_MAX_CONCURRENCY = max(_env_int("COMFY_GPU_CONFIG_MAX_CONCURRENCY", 4), 1)
@@ -19905,9 +19905,7 @@ def _start_persona_dashboard_refresh(archive_id: str = "", source: str = "", tri
     with PERSONA_DASHBOARD_REFRESH_LOCK:
         existing = next((
             task for task in PERSONA_DASHBOARD_REFRESH_TASKS.values()
-            if str(task.get("archive_id") or "").strip() == clean_archive_id
-            and (bool(clean_archive_id) or str(task.get("source") or "").lower() == refresh_source)
-            and str(task.get("status") or "").lower() in {"queued", "running"}
+            if str(task.get("status") or "").lower() in {"queued", "running"}
         ), None)
         if existing:
             return dict(existing)
@@ -21667,6 +21665,28 @@ def create_app() -> FastAPI:
         params = dict(payload.params) if isinstance(payload.params, dict) else {}
         idempotency_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(params.get("idempotencyKey") or ""))[:80]
         with _INTERNAL_TG_SUBMIT_LOCK:
+            if typ == "persona_sentiment_hot" and str(params.get("action") or "").strip().lower() == "fetch":
+                archive_id = str(params.get("archiveId") or "").strip()
+                content_branch = str(params.get("contentBranch") or "").strip().lower()
+                with db() as conn:
+                    rows = conn.execute(
+                        "SELECT id, status, input_json FROM tasks WHERE type = ? ORDER BY created_at DESC LIMIT 100",
+                        (typ,),
+                    ).fetchall()
+                active_hot_fetch = None
+                for row in rows:
+                    previous = _json_loads(row["input_json"], {}) or {}
+                    if (
+                        str(row["status"] or "").lower() in {"queued", "running"}
+                        and str(previous.get("action") or "").strip().lower() == "fetch"
+                        and str(previous.get("archiveId") or "").strip() == archive_id
+                        and str(previous.get("contentBranch") or "").strip().lower() == content_branch
+                        and _get_tg_chat_id_from_payload(previous) == int(payload.tg_chat_id)
+                    ):
+                        active_hot_fetch = row
+                        break
+                if active_hot_fetch:
+                    return {"ok": True, "id": active_hot_fetch["id"], "task_type": typ, "deduplicated": True}
             if typ in {"persona_publish_post", "persona_enqueue_posts"} and idempotency_key:
                 with db() as conn:
                     rows = conn.execute(

@@ -5,7 +5,7 @@ import { resolveRuntimeFile } from "@/runtime/node/data-dir";
 
 const LOCK_FILE = resolveRuntimeFile("sentiment-hot-execution.lock");
 const LOCK_WAIT_MS = Math.max(Number(process.env.SENTIMENT_HOT_LOCK_WAIT_MS || 90_000), 1_000);
-const LOCK_STALE_MS = Math.max(Number(process.env.SENTIMENT_HOT_LOCK_STALE_MS || 15 * 60_000), 60_000);
+const LOCK_STALE_MS = Math.max(Number(process.env.SENTIMENT_HOT_LOCK_STALE_MS || 20 * 60_000), 60_000);
 const LOCK_POLL_MS = Math.max(Number(process.env.SENTIMENT_HOT_LOCK_POLL_MS || 500), 100);
 
 type LockRecord = {

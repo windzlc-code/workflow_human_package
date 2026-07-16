@@ -210,14 +210,14 @@ def test_dashboard_refresh_status_survives_service_restart() -> None:
     assert server.count("_persist_persona_dashboard_refresh_tasks_unlocked()") >= 4
 
 
-def test_dashboard_refresh_deduplicates_active_persona_jobs() -> None:
+def test_dashboard_refresh_serializes_all_active_persona_jobs() -> None:
     server = SERVER_PATH.read_text(encoding="utf-8")
     start = server.index("def _start_persona_dashboard_refresh(")
     end = server.index("\ndef ", start + 5)
     source = server[start:end]
 
-    assert 'str(task.get("archive_id") or "").strip() == clean_archive_id' in source
-    assert 'bool(clean_archive_id)' in source
+    assert "task for task in PERSONA_DASHBOARD_REFRESH_TASKS.values()" in source
+    assert 'str(task.get("archive_id") or "").strip() == clean_archive_id' not in source
     assert 'in {"queued", "running"}' in source
     assert "return dict(existing)" in source
 
@@ -1189,6 +1189,8 @@ def test_console_guards_duplicate_and_stale_publish_requests() -> None:
     assert "button.disabled = true" in html
     assert "_INTERNAL_TG_SUBMIT_LOCK" in server
     assert 'previous.get("idempotencyKey")' in server
+    assert 'typ == "persona_sentiment_hot"' in server
+    assert 'active_hot_fetch' in server
     assert '"deduplicated": True' in server
 
 

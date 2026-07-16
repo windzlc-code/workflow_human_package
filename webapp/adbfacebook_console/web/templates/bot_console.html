@@ -718,7 +718,7 @@
   function scheduleSourcePoll(poll, targetGroup) {
     clearSourcePoll();
     if (!poll || !poll.action) return;
-    const delay = Math.max(500, Math.min(10000, Number(poll.interval_ms) || 2000));
+    const delay = Math.max(2000, Math.min(10000, Number(poll.interval_ms) || 2000));
     const groups = Array.from(log.querySelectorAll(':scope > .msg-group'));
     const targetIndex = Math.max(0, groups.indexOf(targetGroup));
     pendingSourcePoll = {
@@ -1173,7 +1173,7 @@
     if (document.visibilityState === 'hidden') void persistHistory();
   });
   void initialize();
-  setInterval(pollServerCallbackJobs, 1500);
+  setInterval(pollServerCallbackJobs, 5000);
   void pollServerCallbackJobs();
 })();
 </script>
